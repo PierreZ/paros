@@ -16,7 +16,8 @@ use crate::types::{Ballot, Slot};
 /// [`Storage`] the core boots from. A driver persists each `Ready`'s writes
 /// with [`MemStorage::apply`], in order, before it sends the batch's
 /// messages; a restart is a new deployment built from the same store.
-/// Nothing here is ever lost, so it models a disk that never fails.
+/// Nothing here is lost unless the caller rots a record
+/// ([`MemStorage::rot`]): the disk faults of a test or a simulation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemStorage {
     pub(crate) config: Config,
@@ -81,6 +82,9 @@ impl MemStorage {
                 ballot,
                 command,
             } => {
+                // A write at a slot replaces a damaged copy there: the
+                // record is whole again.
+                self.faulty.retain(|(at, _)| at != slot);
                 self.accepted.insert(*slot, (*ballot, command.clone()));
             }
             WriteOp::SetChosenIndex(slot) => self.hard_state.chosen_index = Some(*slot),
@@ -127,6 +131,27 @@ impl MemStorage {
                 .is_none_or(|slot| *slot >= floor),
             "a raised floor drops every record below it"
         );
+    }
+
+    /// Rot the accepted record at `slot`: its value is lost and its
+    /// identity `(slot, ballot)` survives, the record a boot scan classifies
+    /// as recoverable faulty ([`Storage::faulty_entries`]). Returns the
+    /// ballot of the rotted record. A later write at `slot` makes it whole.
+    ///
+    /// # Panics
+    ///
+    /// If the store holds no readable record at `slot`.
+    pub fn rot(&mut self, slot: Slot) -> Ballot {
+        let (ballot, _) = self
+            .accepted
+            .remove(&slot)
+            .expect("rot targets a persisted record");
+        assert!(
+            self.faulty.iter().all(|(at, _)| *at != slot),
+            "a readable record is not also faulty"
+        );
+        self.faulty.push((slot, ballot));
+        ballot
     }
 
     /// The configuration this store boots its deployment under.

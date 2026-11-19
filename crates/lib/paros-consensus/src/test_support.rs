@@ -1,12 +1,12 @@
 //! The builders the unit tests share (#730 (paros-consensus rework)): a fresh
 //! [`MemStorage`] for a node of a plain cluster, a snapshot of a live
-//! node's disk, and a rotted record.
+//! node's disk.
 
 use crate::contract::config::Config;
 use crate::contract::mem_storage::MemStorage;
 use crate::membership::QuorumSystem;
 use crate::node::ColocatedNode;
-use crate::types::{NodeId, Slot};
+use crate::types::NodeId;
 
 impl MemStorage {
     /// A fresh store for node `id` of a plain Multi-Paxos cluster over
@@ -37,15 +37,5 @@ impl MemStorage {
             registration_fence: n.registration_fence(),
             retire_mark: n.retire_mark(),
         }
-    }
-
-    /// Rot the accepted record at `slot`: the value is lost, the identity
-    /// `(slot, ballot)` survives — the boot scan's recoverable classification.
-    pub(crate) fn rot(&mut self, slot: Slot) {
-        let (ballot, _) = self
-            .accepted
-            .remove(&slot)
-            .expect("rot targets a persisted record");
-        self.faulty.push((slot, ballot));
     }
 }

@@ -256,7 +256,7 @@ fn tlc_refuses_a_disk_that_forgets_its_votes() {
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
         Mutant::ForgetVotes,
-        1..=30,
+        30..=40,
         40,
     )
     .expect("TLC refuses a seed of the mutant");
@@ -302,7 +302,7 @@ fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
         Spec::ProxyLeader,
         &Flavor::proxies(),
         Mutant::KeepProxyRounds,
-        25..=35,
+        10..=20,
         200,
     )
     .expect("TLC refuses a seed of the mutant");

@@ -35,7 +35,10 @@ fn multi_paxos() {
 
 #[test]
 fn multi_paxos_on_five_with_truncation() {
-    walk(Flavor::multi_paxos_five(), &[reach::COMPACTED]);
+    walk(
+        Flavor::multi_paxos_five(),
+        &[reach::COMPACTED, reach::RETRY],
+    );
 }
 
 #[test]
@@ -50,7 +53,10 @@ fn grid_quorums() {
 
 #[test]
 fn grid_partitions() {
-    walk(Flavor::partitions(), &[reach::NAMED_COLUMN]);
+    walk(
+        Flavor::partitions(),
+        &[reach::NAMED_COLUMN, reach::MOVED_ROUND],
+    );
 }
 
 #[test]
@@ -159,5 +165,35 @@ fn reconfigured_compartments() {
             reach::REPLICA_APPLIED,
             reach::NODE_READ,
         ],
+    );
+}
+
+#[test]
+fn disk_faults() {
+    walk(
+        Flavor::disk_faults(),
+        &[reach::ROT_CHOSEN, reach::SCRUBBED, reach::COMPACTED],
+    );
+}
+
+#[test]
+fn retirement_and_rejoin() {
+    walk(
+        Flavor::retirement(),
+        &[
+            reach::RECONFIGURED,
+            reach::GC_ACKED,
+            reach::RETIRED,
+            reach::REBOOKED,
+            reach::ADMITTED,
+        ],
+    );
+}
+
+#[test]
+fn matchmaker_set_handover() {
+    walk(
+        Flavor::handover(),
+        &[reach::RECONFIGURED, reach::GC_ACKED, reach::HANDED_OVER],
     );
 }

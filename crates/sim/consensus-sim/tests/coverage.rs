@@ -26,85 +26,32 @@ const SEEDS: u64 = 10;
 /// The runs each root seed may add by branching.
 const EXPLORE: u64 = 5;
 
-/// The probes no walk reaches yet, each group with the move of the walk it
-/// waits for. The follow-up is #1225 (consensus-sim: walk moves for the
-/// unreached probes).
+/// The probes no walk reaches yet at this budget, each group with what it
+/// waits for (#1225 (walk moves for the unreached probes)).
 const GAPS: &[(&str, &[&str])] = &[
     (
-        "disk faults: no walk rots a record on a disk (faulty entries, holes, scrub, repair)",
+        "rare schedules: reached at MOONPOOL_WALK_SEEDS=150 MOONPOOL_WALK_EXPLORE=10, not at this budget",
         &[
-            "scrub: a damaged record is written again from the node's own copy",
-            "acceptor: an Accept inside the chosen prefix heals a faulty chosen record",
-            "phase1: a full promise page mixes readable and faulty entries",
-            "boot: the fold stops at a hole under the chosen prefix",
             "catch-up: a replay stops at the server's own faulty chosen record",
-            "catch-up: a trim-point jump resolves a repair probe's blocked slot",
-            "repair: a leader's probe pages a straggler's late Promise",
-        ],
-    ),
-    (
-        "retirement and rejoin: no walk retires a node or books it again",
-        &[
-            "matchmaker: a registration naming a retired node is refused",
-            "matchmaker: a rejoin clears a retired node",
-            "matchmaker: a retirement check of an earlier incarnation is refused",
-            "matchmaker: a retirement check records the node as retired",
-            "gc: a retirement asks the matchmakers which registrations name the node",
-            "rejoin: a retirement check takes a rejoin's place",
-            "gc: a retirement check asks the matchmakers that did not agree",
-            "gc: every matchmaker agreed the node may retire",
-            "matchmaking: a campaign meets a matchmaker that refuses a retired node",
-            "matchmaking: a reconfiguration naming a retired node is abandoned",
-            "rejoin: a rejoin asks the matchmakers that did not take it",
-            "rejoin: a running journal booked again rejoins",
-            "rejoin: every matchmaker took the rejoin",
-        ],
-    ),
-    (
-        "matchmaker set handover: no walk runs MatchmakerReconfigurer",
-        &[
-            "handover: a bootstrap continues on a later page",
-            "handover: a frozen registry spans several pages",
-            "handover: a finish thins an even count of answerers to an odd successor",
-            "handover: a reconfigurer reads a frozen registry over several pages",
-            "handover: a reconfigurer sends a bootstrap over several pages",
-            "gc: a refused ack meets a frozen generation",
-            "gc: a refused ack teaches the successor",
-            "node: a campaign asks the pool outside its set",
-            "node: a campaign learns a later set from outside its set",
-            "node: a late refusal moves the matchmaker belief",
-            "node: a probe asks the pool outside its set",
-            "node: a probe learns a later set from outside its set",
-        ],
-    ),
-    (
-        "configurations outside the pool: a reconfiguration of the walk names only nodes of the pool",
-        &[
-            "learning: a configuration outside the pool is ignored",
-            "matchmaking: a campaign meets a configuration outside the pool",
-            "matchmaking: a membership probe meets a configuration outside the pool",
-        ],
-    ),
-    (
-        "not explained yet: the cell makes these moves, but no run reached the branch",
-        &[
-            "propose: a leadership a higher ballot passed refuses a proposal",
+            "phase1: a fresh leader heals a faulty chosen slot from its promise quorum",
+            "phase2: a leader whose promise moved past its ballot opens a round it cannot record",
             "matchmaking: a campaign adopts a reconfiguration its won leadership ran",
-            "matchmaking: a campaign keeps its belief over a reconfiguration below a won leadership",
+            "matchmaking: a campaign meets a configuration outside the pool",
             "matchmaking: a campaign refutes a reconfiguration a late probe answer named",
             "matchmaking: a late probe answer names a refuted reconfiguration",
-            "phase2: a leader moves a stuck round to another column",
-            "phase2: a leader whose promise moved past its ballot opens a round it cannot record",
-            "phase2: a stuck round whose slot is chosen elsewhere is not moved",
-            "phase2: a moved round is chosen",
-            "quorum read: a read waits on its basis fence above the row's watermark",
-            "compaction: a retained retry holds the floor down",
+            "node: a campaign learns a later set from outside its set",
+            "propose: a leadership a higher ballot passed refuses a proposal",
         ],
+    ),
+    (
+        "not reached at 150 seeds either: a decided Truncate whose trim-point jump lands while a leader's repair probe is blocked below it",
+        &["catch-up: a trim-point jump resolves a repair probe's blocked slot"],
     ),
 ];
 
-/// Every flavor of the cell, with full pages and with the smallest pages.
-fn flavors() -> Vec<Flavor> {
+/// Every flavor of the cell, with its own pages and with the smallest
+/// pages, each with the name its report prints.
+fn flavors() -> Vec<(String, Flavor)> {
     let full = vec![
         Flavor::multi_paxos(),
         Flavor::multi_paxos_five(),
@@ -118,15 +65,25 @@ fn flavors() -> Vec<Flavor> {
         Flavor::compartments(),
         Flavor::matchmakers(),
         Flavor::reconfigured_compartments(),
+        Flavor::disk_faults(),
+        Flavor::retirement(),
+        Flavor::handover(),
     ];
     let paged = [
         Flavor::multi_paxos_five(),
         Flavor::compartments(),
         Flavor::matchmakers(),
         Flavor::reconfigured_compartments(),
+        Flavor::disk_faults(),
+        Flavor::retirement(),
+        Flavor::handover(),
     ]
     .map(Flavor::paged);
-    full.into_iter().chain(paged).collect()
+    let full = full.into_iter().map(|f| (f.name.to_owned(), f));
+    let paged = paged
+        .into_iter()
+        .map(|f| (format!("{} (paged)", f.name), f));
+    full.chain(paged).collect()
 }
 
 /// An exploring walk: probes and, when instrumented, the core's edges.
@@ -186,12 +143,7 @@ fn run<M: Model>(union: &mut Union, name: &str, walk: &Walk<M>, allowed: &dyn Fn
 #[test]
 fn every_core_probe_is_reached_or_named() {
     let mut union = Union::default();
-    for flavor in flavors() {
-        let name = if flavor.limits == paros_consensus::Limits::DEFAULT {
-            flavor.name.to_owned()
-        } else {
-            format!("{} (paged)", flavor.name)
-        };
+    for (name, flavor) in flavors() {
         let allows = flavor.clone();
         let allowed = move |index: usize| {
             <Cell as Model>::actions()

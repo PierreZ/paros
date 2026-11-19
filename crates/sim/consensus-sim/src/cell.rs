@@ -21,22 +21,28 @@
 //! reaches a disk, each message that leaves a party, each slot a party
 //! applies, each read it answers. They share no code with the core.
 
+mod faults;
 mod flavor;
+mod handover;
+mod retire;
 mod sites;
 pub mod trace;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use moonpool_walk::{Cx, Model, Phase, sometimes};
 use paros_consensus::contract::message::Audience;
 use paros_consensus::contract::write::AcceptorWrite;
 use paros_consensus::journal::{Command, Control, Entry, LeaderUuid, Seq, command_fingerprint};
-use paros_consensus::matchmaker::{GcAck, GcRequest, MatchReply, MatchRequest};
+use paros_consensus::matchmaker::{
+    GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
+};
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::node::{Delegation, ProposeResult, ReconfigureResult};
 use paros_consensus::{
-    ColocatedNode, Config, Message, NodeId, ProxyLeader, ReplicaNode, Slot, Value, WriteOp,
+    Ballot, ColocatedNode, Config, MatchmakerReconfigurer, Message, NodeId, ProxyLeader,
+    ReplicaNode, Slot, Value, WriteOp,
 };
 
 use crate::cell::sites::{MatchmakerSite, NodeSite, ProxySite, ReplicaSite};
@@ -90,6 +96,22 @@ pub mod reach {
     pub const GC_ACKED: &str = "cell: a matchmaker raised its GC watermark";
     /// A round ran on a grid column the driver named.
     pub const NAMED_COLUMN: &str = "cell: a round ran on a column the driver named";
+    /// A leader moved a stuck round to another column.
+    pub const MOVED_ROUND: &str = "cell: a leader moved a stuck round to another column";
+    /// A client sent a write again at a position it wrote before.
+    pub const RETRY: &str = "cell: a client retried a write";
+    /// A disk lost the value of a chosen record.
+    pub const ROT_CHOSEN: &str = "cell: a disk rotted a chosen record";
+    /// A scrub found a rotted record and wrote it again.
+    pub const SCRUBBED: &str = "cell: a scrub wrote a rotted record again";
+    /// The operator retired a node.
+    pub const RETIRED: &str = "cell: the operator retired a node";
+    /// The operator booked a retired node again.
+    pub const REBOOKED: &str = "cell: the operator booked a retired node again";
+    /// A node admitted a late node to its pool.
+    pub const ADMITTED: &str = "cell: a node admitted a late node to its pool";
+    /// A handover chose a new matchmaker set.
+    pub const HANDED_OVER: &str = "cell: a handover chose a new matchmaker set";
 }
 
 /// How long a node waits for its leader, in ticks: drawn per election.
@@ -141,6 +163,10 @@ pub enum Wire {
     Gc(GcRequest),
     /// A matchmaker's answer to it.
     GcAck(GcAck),
+    /// A handover's request, to a matchmaker.
+    Reconfigure(ReconfigureRequest),
+    /// A matchmaker's answer to it, to the node whose reconfigurer asked.
+    ReconfigureReply(ReconfigureReply),
 }
 
 /// The cell's own moves.
@@ -162,6 +188,19 @@ pub enum Action {
     Handoff,
     /// A leader moves the journal to another acceptor configuration.
     Reconfigure,
+    /// A leader moves a stuck round to another column of its grid.
+    MoveRound,
+    /// A disk loses the value of one record and keeps its identity; a
+    /// scrub may find it while the node runs.
+    Rot,
+    /// The operator retires a node the effective GC floor released.
+    Retire,
+    /// The operator books a retired node again.
+    Rejoin,
+    /// A node admits a late node to its pool.
+    Admit,
+    /// A node replaces the matchmaker set (`MatchmakerReconfigurer`).
+    Handover,
 }
 
 const ACTIONS: &[Action] = &[
@@ -173,6 +212,12 @@ const ACTIONS: &[Action] = &[
     Action::Read,
     Action::StepDown,
     Action::Handoff,
+    Action::MoveRound,
+    Action::Rot,
+    Action::Retire,
+    Action::Rejoin,
+    Action::Admit,
+    Action::Handover,
 ];
 
 /// The cell under walk. See the module documentation.
@@ -202,6 +247,16 @@ pub struct Cell {
     early_gc: BTreeSet<paros_consensus::Ballot>,
     /// The steps recorded for the trace check so far.
     tracer: trace::Tracer,
+    /// Each node's handover driver, by node id.
+    reconfigurers: Vec<MatchmakerReconfigurer>,
+    /// The nodes the operator retired: down until it books them again.
+    retired: BTreeSet<NodeId>,
+    /// The reconfigurations the operator asked for: each ballot and the
+    /// members it names.
+    asked: Vec<(Ballot, Vec<NodeId>)>,
+    /// The late nodes each node admitted to its pool. The deployment's
+    /// registry is durable: a node that boots admits them again.
+    admitted: BTreeMap<NodeId, BTreeSet<NodeId>>,
 }
 
 impl Model for Cell {
@@ -226,8 +281,18 @@ impl Model for Cell {
             Action::Propose => [17, 4, 0],
             Action::Read => [4, 3, 0],
             Action::Handoff => [3, 0, 0],
-            Action::Claim | Action::Truncate | Action::Reconfigure => [2, 1, 0],
-            Action::StepDown => [2, 0, 0],
+            Action::Claim
+            | Action::Truncate
+            | Action::Reconfigure
+            | Action::MoveRound
+            | Action::Retire
+            | Action::Rejoin
+            | Action::Handover => [2, 1, 0],
+            Action::StepDown | Action::Rot => [2, 0, 0],
+            // A late node stays outside most pools for a while: a pool
+            // catches up slowly, and every pool admits it once the faults
+            // stop (`Cell::calm`).
+            Action::Admit => [1, 0, 0],
         };
         match phase {
             Phase::Chaos => chaos,
@@ -237,25 +302,40 @@ impl Model for Cell {
     }
 
     fn act(&mut self, action: Action, cx: &mut Cx<'_, Self>) {
+        if !self.flavor.allows(action) {
+            return;
+        }
         match action {
             Action::Tick => self.tick_all(cx),
             Action::Propose => self.propose(cx),
             Action::Claim => self.claim(cx),
-            Action::Truncate if self.flavor.allows(Action::Truncate) => self.truncate(cx),
-            Action::Read if self.flavor.allows(Action::Read) => self.read(cx),
             Action::StepDown => self.step_down(cx),
-            Action::Handoff if self.flavor.allows(Action::Handoff) => self.handoff(cx),
-            Action::Reconfigure if self.flavor.allows(Action::Reconfigure) => self.reconfigure(cx),
-            Action::Truncate | Action::Read | Action::Handoff | Action::Reconfigure => {}
+            Action::Truncate => self.truncate(cx),
+            Action::Read => self.read(cx),
+            Action::Handoff => self.handoff(cx),
+            Action::Reconfigure => self.reconfigure(cx),
+            Action::MoveRound => self.move_round(cx),
+            Action::Rot => self.rot(cx),
+            Action::Retire => self.retire(cx),
+            Action::Rejoin => self.rejoin(cx),
+            Action::Admit => self.admit(cx),
+            Action::Handover => self.handover(cx),
         }
     }
 
     fn deliver(&mut self, envelope: Envelope, cx: &mut Cx<'_, Self>) {
         match (envelope.to, envelope.msg) {
+            (Party::Node(id), Wire::ReconfigureReply(reply)) => {
+                self.reconfigure_reply(id, reply, cx);
+            }
             (Party::Node(id), wire) => {
-                let Some(node) = self.node_mut(id).live.as_mut() else {
+                if self.node(id).live.is_none() {
                     return;
-                };
+                }
+                if let Wire::MatchReply(reply) = &wire {
+                    self.discover(id, reply, cx);
+                }
+                let node = self.node_mut(id).live.as_mut().expect("a live node");
                 match wire {
                     Wire::Paxos(msg) => node.step(msg),
                     Wire::MatchReply(reply) => {
@@ -264,7 +344,10 @@ impl Model for Cell {
                     Wire::GcAck(ack) => {
                         let _ = node.on_gc_ack(&ack);
                     }
-                    Wire::Match(_) | Wire::Gc(_) => {
+                    Wire::Match(_)
+                    | Wire::Gc(_)
+                    | Wire::Reconfigure(_)
+                    | Wire::ReconfigureReply(_) => {
                         unreachable!("a node gets no matchmaker request")
                     }
                 }
@@ -286,6 +369,9 @@ impl Model for Cell {
             }
             (Party::Matchmaker(id), Wire::Match(request)) => self.match_request(id, request, cx),
             (Party::Matchmaker(id), Wire::Gc(request)) => self.gc_request(id, &request, cx),
+            (Party::Matchmaker(id), Wire::Reconfigure(request)) => {
+                self.reconfigure_request(id, request, cx);
+            }
             (to, wire) => unreachable!("no party sends {wire:?} to {to:?}"),
         }
     }
@@ -331,7 +417,8 @@ impl Model for Cell {
     fn restart(&mut self, party: &Party, cx: &mut Cx<'_, Self>) {
         match *party {
             Party::Node(id) => {
-                if self.node(id).live.is_none() {
+                // A retired node stays down until the operator books it.
+                if self.node(id).live.is_none() && !self.retired.contains(&id) {
                     self.boot_node(id, true, cx);
                 }
             }
@@ -355,6 +442,10 @@ impl Model for Cell {
     }
 
     fn calm(&mut self, cx: &mut Cx<'_, Self>) {
+        // The deployment's registry reaches every node: each pool admits
+        // the late nodes, as #189 needs for liveness. Until then a late
+        // node hears no beat from a node that does not know it.
+        self.admit_all();
         // Some proxies stay dead for the tail: a leader's take-back is the
         // only way their rounds decide.
         for site in &mut self.proxies {
@@ -403,7 +494,7 @@ impl Model for Cell {
                 return Err(format!("proxy {} holds open rounds", site.id.0));
             }
         }
-        for site in &self.nodes {
+        for site in self.nodes.iter().filter(|s| !self.retired.contains(&s.id)) {
             let reached = site.live.as_ref().map(|n| n.replica().first_unchosen());
             if reached.is_none_or(|r| r < frontier) {
                 return Err(format!(
@@ -506,9 +597,14 @@ impl Cell {
             leader_ballot: None,
             early_gc: BTreeSet::new(),
             tracer: trace::Tracer::default(),
+            reconfigurers: Vec::new(),
+            retired: BTreeSet::new(),
+            asked: Vec::new(),
+            admitted: BTreeMap::new(),
             pool,
             flavor,
         };
+        cell.reconfigurers = cell.pool.iter().map(|id| cell.reconfigurer(*id)).collect();
         cell.nodes = cell
             .pool
             .iter()
@@ -520,11 +616,15 @@ impl Cell {
                 ReplicaSite::new(id, cell.party_config(id), cell.flavor.limits)
             })
             .collect();
-        let bootstrap = cell.matchmaker_ids();
-        cell.matchmakers = bootstrap
+        let bootstrap = cell.bootstrap_matchmakers();
+        cell.matchmakers = cell
+            .matchmaker_ids()
             .iter()
             .map(|id| MatchmakerSite::new(*id, bootstrap.clone(), cell.flavor.limits))
             .collect();
+        if cell.flavor.matchmaker_spares > 0 {
+            cell.register_sibling();
+        }
         cell.proxies = (0..cell.flavor.proxies)
             .map(|i| ProxySite::new(ProxyId(i), cell.config.clone()))
             .collect();
@@ -555,21 +655,75 @@ impl Cell {
         &self.reads
     }
 
+    /// The matchmaker pool: the bootstrap set and the spares.
     fn matchmaker_ids(&self) -> Vec<MatchmakerId> {
+        (0..self.flavor.matchmakers + self.flavor.matchmaker_spares)
+            .map(MatchmakerId)
+            .collect()
+    }
+
+    /// The matchmaker set of generation 0.
+    fn bootstrap_matchmakers(&self) -> Vec<MatchmakerId> {
         (0..self.flavor.matchmakers).map(MatchmakerId).collect()
     }
 
+    /// The nodes that join the pool late: the last spares.
+    fn late_ids(&self) -> Vec<NodeId> {
+        let all = self.flavor.acceptors + self.flavor.spares;
+        (all - self.flavor.late..all).map(NodeId).collect()
+    }
+
+    /// The late nodes node `id` admitted to its pool.
+    fn admitted(&self, id: NodeId) -> BTreeSet<NodeId> {
+        self.admitted.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// A sibling journal of the same matchmaker set (#190): one belief
+    /// registered at every bootstrap matchmaker, so a handover's freeze and
+    /// bootstrap carry two journals, and page them when a page holds one.
+    fn register_sibling(&mut self) {
+        let journal = paros_consensus::journal::JournalId(
+            paros_consensus::journal::JournalIdentifier::UNSET.journal.0 + 1,
+        );
+        let request = MatchRequest::new(
+            journal,
+            NodeId(0),
+            Ballot {
+                round: 1,
+                node: NodeId(0),
+            },
+            self.config.clone(),
+            paros_consensus::membership::MatchmakerGeneration(0),
+        );
+        for id in self.bootstrap_matchmakers() {
+            let site = self.matchmaker_mut(id);
+            site.live
+                .as_mut()
+                .expect("a matchmaker boots up")
+                .step(request.clone());
+            site.persist();
+            let _ = site.take_replies();
+        }
+    }
+
     fn party_config(&self, id: NodeId) -> Config {
-        let matchmakers = self.matchmaker_ids();
+        let matchmakers = self.bootstrap_matchmakers();
+        let late = self.late_ids();
         Config {
             peers: self.config.members().to_vec(),
             quorum_system: self.flavor.quorum,
             nodes: if matchmakers.is_empty() {
                 Vec::new()
             } else {
-                self.pool.clone()
+                // A late node knows the whole pool; no other node boots
+                // knowing a late node.
+                self.pool
+                    .iter()
+                    .copied()
+                    .filter(|n| *n == id || !late.contains(n))
+                    .collect()
             },
-            matchmaker_pool: matchmakers.clone(),
+            matchmaker_pool: self.matchmaker_ids(),
             matchmakers,
             proxy_count: usize::try_from(self.flavor.proxies).expect("a few proxies"),
             replica_count: usize::try_from(self.flavor.replicas).expect("a few replicas"),
@@ -630,6 +784,8 @@ impl Cell {
     fn crash_node(&mut self, id: NodeId) {
         let mutant = self.flavor.mutant;
         self.node_mut(id).crash(mutant);
+        // The reconfigurer holds no durable state: the crash loses it.
+        self.reconfigurers[Self::index(id.0)] = self.reconfigurer(id);
         // What the crash left on the disk is what the restart reads.
         let index = self.node(id).disk.hard_state().chosen_index;
         self.ledger.disk_chosen(&format!("node {}", id.0), index);
@@ -648,6 +804,11 @@ impl Cell {
         );
         let mut node = ColocatedNode::new(&site.disk, limits);
         node.set_election_timeout(TIMEOUT_MIN + cx.rng().below(TIMEOUT_SPREAD));
+        let admitted: Vec<NodeId> = self.admitted(id).into_iter().collect();
+        if !admitted.is_empty() {
+            let _ = node.extend_pool(&admitted);
+        }
+        let site = self.node_mut(id);
         // A party never boots below its disk: the disk is the floor.
         let disk = site.disk.hard_state().chosen_index;
         assert!(
@@ -672,12 +833,14 @@ impl Cell {
             let chaos = cx.phase() == Phase::Chaos;
             let crash_before = chaos && cx.rng().chance(1, CRASH_ODDS);
             let crash_between = chaos && cx.rng().chance(1, CRASH_ODDS);
-            let pool = self.pool.clone();
             let mutant = self.flavor.mutant;
             let site = self.node_mut(id);
             let Some(node) = site.live.as_mut() else {
                 return;
             };
+            // A node sends to the pool it knows, which a late node may not
+            // be in yet.
+            let pool = node.pool().to_vec();
             let seen = Seen::of(node);
             let ready = node.ready();
             let writes = ready.writes().to_vec();
@@ -1018,6 +1181,7 @@ impl Cell {
             let taken = node.take_back_delegated(after);
             sometimes!(!taken.is_empty(), reach::TAKE_BACK);
             self.drain_node(id, cx);
+            self.tick_reconfigurer(id, cx);
         }
         for id in self.replica_ids() {
             if let Some(replica) = self.replica_mut(id).live.as_mut() {
@@ -1037,18 +1201,30 @@ impl Cell {
         let Some(leader) = self.pick_leader(cx) else {
             return;
         };
-        let journal = self
-            .node(leader)
-            .live
-            .as_ref()
-            .expect("a leader is up")
-            .replica()
-            .journal();
+        let node = self.node(leader).live.as_ref().expect("a leader is up");
+        let journal = node.replica().journal();
+        // The writes the leader still has in flight: each may take the
+        // next position before this one applies.
+        let in_flight = (node.proposer().rounds().len() + node.delegated_rounds().len()) as u64;
         // A client writes under the uuid it believes leads, at the next
-        // position it believes free; a wrong belief is refused at apply.
+        // position it believes free; a wrong belief is refused at apply. A
+        // refusal names the next position, and the client learns it: a
+        // belief ahead of the view by more than the writes in flight is
+        // one the refusals corrected.
+        if self.next_seq > journal.next_seq.0 + in_flight {
+            self.next_seq = journal.next_seq.0;
+        }
         self.next_seq = self.next_seq.max(journal.next_seq.0);
-        let seq = self.next_seq;
-        self.next_seq += 1;
+        // A client that heard no answer sends a write again, with the same
+        // records at the same position.
+        let retry = self.next_seq > 0 && cx.rng().chance(1, 8);
+        sometimes!(retry, reach::RETRY);
+        let seq = if retry {
+            self.next_seq - 1 - cx.rng().below(self.next_seq.min(3))
+        } else {
+            self.next_seq += 1;
+            self.next_seq - 1
+        };
         let uuid = journal.leader.unwrap_or(LeaderUuid(1));
         let delegation = match cx.rng().below(10) {
             0..=5 => Delegation::Auto,
@@ -1181,10 +1357,26 @@ impl Cell {
             return;
         };
         let size = Self::index(self.flavor.acceptors);
-        let mut members = self.pool.clone();
+        // The leader draws from the pool it knows.
+        let node = self.node(leader).live.as_ref().expect("a leader is up");
+        let mut members = node.pool().to_vec();
+        // A late node the leader admitted is a new machine: the operator
+        // moves the journal onto it half of the time.
+        let late: Vec<NodeId> = self
+            .late_ids()
+            .into_iter()
+            .filter(|l| members.contains(l))
+            .collect();
+        let onto = cx
+            .rng()
+            .pick(&late)
+            .copied()
+            .filter(|_| cx.rng().chance(1, 2));
         while members.len() > size {
             let out = Self::index(cx.rng().below(members.len() as u64));
-            members.remove(out);
+            if Some(members[out]) != onto {
+                members.remove(out);
+            }
         }
         let config = AcceptorConfig::new(members, self.flavor.quorum).with_counts(
             Self::index(self.flavor.proxies),
@@ -1196,6 +1388,9 @@ impl Cell {
             matches!(result, ReconfigureResult::Started(_)),
             reach::RECONFIGURED
         );
+        if let ReconfigureResult::Started(ballot) = result {
+            self.asked.push((ballot, config.members().to_vec()));
+        }
         self.drain_node(leader, cx);
     }
 
@@ -1249,9 +1444,11 @@ impl Cell {
         let Some(matchmaker) = self.matchmaker(id).live.as_ref() else {
             return;
         };
+        // Only this journal's ballots: a sibling journal's are its own.
+        let journal = paros_consensus::journal::JournalIdentifier::UNSET.journal;
         let bound: Vec<(paros_consensus::Ballot, Phase2Rule)> = matchmaker
-            .journals()
-            .flat_map(|journal| matchmaker.registry(journal).iter())
+            .registry(journal)
+            .iter()
             .map(|(ballot, registration)| {
                 let config = &registration.config;
                 (
@@ -1263,6 +1460,36 @@ impl Cell {
         for (ballot, rule) in bound {
             self.ledger.bind(ballot, &rule);
         }
+    }
+
+    /// A leader moves one of its stuck rounds (open for at least one
+    /// re-send, not delegated) to another column of its grid.
+    fn move_round(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(leader) = self.pick_leader(cx) else {
+            return;
+        };
+        let node = self.node(leader).live.as_ref().expect("a leader is up");
+        let QuorumSystem::Grid { cols, .. } = node.acceptors().quorum_system() else {
+            return;
+        };
+        let stuck: Vec<(Slot, Option<usize>)> = node
+            .proposer()
+            .rounds()
+            .iter()
+            .filter(|(_, round)| round.proxy().is_none() && round.resends() > 0)
+            .map(|(slot, round)| (*slot, round.column()))
+            .collect();
+        let Some(&(slot, from)) = cx.rng().pick(&stuck) else {
+            return;
+        };
+        let column = Self::index(cx.rng().below(cols as u64));
+        if Some(column) == from {
+            return;
+        }
+        let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
+        let moved = node.move_round(slot, column);
+        sometimes!(moved, reach::MOVED_ROUND);
+        self.drain_node(leader, cx);
     }
 
     fn handoff(&mut self, cx: &mut Cx<'_, Self>) {

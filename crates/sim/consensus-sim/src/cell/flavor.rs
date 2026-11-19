@@ -22,16 +22,22 @@ pub struct Flavor {
     pub proxies: u64,
     /// Replicas that learn and serve reads but never vote (§3.3).
     pub replicas: u64,
-    /// The optional moves that are on: [`Action::Handoff`] (the `DPaxos`
-    /// handoff), [`Action::Read`] (leaderless quorum reads),
-    /// [`Action::Truncate`] and [`Action::Reconfigure`]. Every other move
-    /// is always on.
+    /// The optional moves that are on (see [`Flavor::allows`]). The clock,
+    /// the writes, the claims and the step-down are always on.
     pub options: &'static [Action],
     /// Matchmakers (Matchmaker Paxos). Zero is plain Multi-Paxos.
     pub matchmakers: u64,
     /// Nodes in the pool outside the bootstrap configuration, that a
     /// reconfiguration may name.
     pub spares: u64,
+    /// How many of the spares (the last ones) join the pool late: no other
+    /// node boots knowing them, and [`Action::Admit`] admits them one node
+    /// at a time (`ColocatedNode::extend_pool`). Until then, a
+    /// configuration that names one is outside that node's pool.
+    pub late: u64,
+    /// Matchmakers in the matchmaker pool outside the bootstrap set, that a
+    /// handover ([`Action::Handover`]) may name.
+    pub matchmaker_spares: u64,
     /// The page sizes and the read window of every party.
     /// [`Limits::DEFAULT`] runs each page at its ceiling;
     /// [`paged`](Flavor::paged) makes every page as small as it can be.
@@ -53,6 +59,8 @@ impl Flavor {
             options: &[],
             matchmakers: 0,
             spares: 0,
+            late: 0,
+            matchmaker_spares: 0,
             limits: Limits::DEFAULT,
             mutant: None,
         }
@@ -103,6 +111,7 @@ impl Flavor {
                 cols: 2,
                 acks: 2,
             },
+            options: &[Action::MoveRound],
             ..Self::multi_paxos()
         }
     }
@@ -189,8 +198,59 @@ impl Flavor {
                 Action::Read,
                 Action::Truncate,
                 Action::Reconfigure,
+                Action::MoveRound,
             ],
             ..Self::compartments()
+        }
+    }
+
+    /// Disk faults over Multi-Paxos on five acceptors with truncation: a
+    /// disk loses the value of a record and keeps its identity (CTRL's
+    /// faulty entry), and a scrub may find the damage while the node runs.
+    /// A promise page holds two entries, so one page can mix a readable
+    /// record with a faulty one and still carry a continuation.
+    #[must_use]
+    pub fn disk_faults() -> Self {
+        Self {
+            name: "disk-faults",
+            options: &[Action::Truncate, Action::Rot],
+            limits: Limits {
+                promise_page: 2,
+                ..Limits::DEFAULT
+            },
+            ..Self::multi_paxos_five()
+        }
+    }
+
+    /// Matchmakers with reconfiguration, retirement and rejoin: the
+    /// operator retires a node the effective GC floor released, and books
+    /// a retired node again. The last spare joins the pool late, so a
+    /// configuration can name a node outside a pool.
+    #[must_use]
+    pub fn retirement() -> Self {
+        Self {
+            name: "retirement",
+            spares: 3,
+            late: 1,
+            options: &[
+                Action::Reconfigure,
+                Action::Retire,
+                Action::Rejoin,
+                Action::Admit,
+            ],
+            ..Self::matchmakers()
+        }
+    }
+
+    /// Matchmakers with reconfiguration and the matchmaker set handover
+    /// (`MatchmakerReconfigurer`) over a matchmaker pool of five.
+    #[must_use]
+    pub fn handover() -> Self {
+        Self {
+            name: "handover",
+            matchmaker_spares: 2,
+            options: &[Action::Reconfigure, Action::Handover],
+            ..Self::matchmakers()
         }
     }
 
@@ -217,10 +277,17 @@ impl Flavor {
     #[must_use]
     pub fn allows(&self, action: Action) -> bool {
         match action {
-            Action::Handoff | Action::Read | Action::Truncate | Action::Reconfigure => {
-                self.options.contains(&action)
-            }
             Action::Tick | Action::Propose | Action::Claim | Action::StepDown => true,
+            Action::Handoff
+            | Action::Read
+            | Action::Truncate
+            | Action::Reconfigure
+            | Action::MoveRound
+            | Action::Rot
+            | Action::Retire
+            | Action::Rejoin
+            | Action::Admit
+            | Action::Handover => self.options.contains(&action),
         }
     }
 
