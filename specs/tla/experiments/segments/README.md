@@ -4,6 +4,9 @@
 not a model of the plan: it changes no model of `specs/tla/`, and no rule of `paros-consensus`
 comes from it until Pierre decides. The report below goes to Pierre.
 
+**Decision**: Pierre chose design A on 2026-11-19. The rules are recorded in
+`docs/architecture/02-data-plane.md` section 2.10.
+
 ## Result in short
 
 Design A (the matchmakers hold the segment table) passes all seven checks with five rules, each

@@ -300,3 +300,29 @@ batch ambiguous. There is no durability mode for a journal: the batched store, i
 its create word (`--store-durability`) and its simulation coin are deleted. The batched store
 can come back later as a measured change, if the benchmark shows the cost of the second sync
 (section 11).
+
+### 2.10 Segments
+
+**The matchmakers of a journal hold its segment table** (decided by Pierre on 2026-11-19, with
+the TLA+ experiment of #1213 (segments in the protocol or in storage),
+`specs/tla/experiments/segments/`). A segment is the run of slots that one configuration (one
+grid) holds. Only a reshape or a roll opens a segment; a leader change opens none. The
+matchmakers keep one record for each segment until trim: its start slot, its end slot, its grid
+and its state (open, sealed, retired, offloaded, trimmed). A segment whose only copy is in the
+object store is still in the table, so the grid controller, placement, the offload policy and
+the readers see where each slot range lives as decided state. The rules that the experiment
+checked, each with a control that TLC breaks:
+
+- The first leader of the next configuration writes the end slot once, by compare-and-set, after
+  its Phase 1. The end is **one above the highest slot where its Phase 1 saw a vote in the old
+  grid**, not the first uncommitted slot: with that end, a Phase 1 that reads the old grid only
+  below the end chooses two values for one slot. The sealing leader proposes again, in its own
+  grid, each vote below the end that the replicas did not apply.
+- A later Phase 1 reads a sealed configuration only below its end.
+- A leader's writes are fenced by its promise quorum, never by the table version, so a change of
+  a sealed segment (retire, offload, trim) never stops the tail (as in Delos).
+- A replica drops its copy of a segment only after the record says offloaded. The object key is
+  the journal and the segment, so the record stores no location.
+
+The rejected design is in section 11 (alternatives). The code follows once the journal state
+model (#1189) includes these rules.
