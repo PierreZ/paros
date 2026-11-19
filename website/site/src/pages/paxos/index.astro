@@ -4,6 +4,19 @@
 // each flavor solves, and the words that every flavor page links to.
 import Doc from "../../layouts/Doc.astro";
 import { url } from "../../nav";
+import { LESSONS } from "../../course";
+
+const traces = import.meta.glob("../../traces/*.json", { eager: true, import: "default" }) as Record<string, { scenarios: { id: string; beats?: unknown[] }[] }>;
+const traceOf = (page: string) => Object.entries(traces).find(([p]) => p.endsWith(`/${page}.json`))![1];
+const PAGE_NAMES: Record<string, string> = {
+  "single-decree": "Single-decree Paxos", "quorums": "Quorums", "multi-paxos": "Multi-Paxos",
+  "compartmentalized": "Compartmentalized Paxos", "matchmaker": "Matchmaker Paxos",
+};
+const lessons = LESSONS.map((l, i) => {
+  const story = traceOf(l.page).scenarios.some((s) => s.beats?.length);
+  return { ...l, n: i + 1, story, pageName: PAGE_NAMES[l.page] ?? l.page,
+    href: url(`paxos/${l.page}/`) + `#run=${l.runs[0]}&${story ? "beat" : "step"}=0` };
+});
 
 const FLAVORS = [
   { n: 1, name: "Single-decree Paxos", path: "paxos/single-decree/",
@@ -43,8 +56,8 @@ const WORDS = [
 ];
 const f = (n: number) => FLAVORS[n - 1];
 ---
-<Doc title="The Paxos flavors" kicker="Paxos" section="paxos/" siblings={[]}
-  description="paros is made of five Paxos flavors. Each one solves one problem of the flavor before it. Each page gives the problem, a step-through diagram of a real run, the rule that keeps it safe and where it is in the code.">
+<Doc title="The Paxos course" kicker="Paxos" section="paxos/" siblings={[]}
+  description="A course in seven lessons, from one value to a journal that changes its acceptors. Every run on these pages is recorded from the real paros-consensus.">
 
   <h2 id="map">The map</h2>
   <p>One journal of a cell, from a write to the log. Each tag names the flavor that does the
@@ -88,20 +101,78 @@ const f = (n: number) => FLAVORS[n - 1];
     </div>
   </div>
 
-  <h2 id="order">Reading order</h2>
-  <p>Read the pages in this order. Each flavor solves the problem in its line.</p>
+  <h2 id="course">The course</h2>
+  <p>Seven lessons, in order. Each lesson is a group of recorded runs on one page. A run tells
+  one idea per screen, and before some screens it asks what will happen. At the end of a run,
+  the page offers the next run of the lesson.</p>
+  <p class="course-resume" data-course-resume hidden></p>
+  <ol class="course">
+    {lessons.map((l) => (
+      <li class="lesson" data-lesson={l.id} data-page={l.page} data-runs={l.runs.join(" ")}>
+        <span class="lesson-n label tnum">{String(l.n).padStart(2, "0")}</span>
+        <span class="lesson-body">
+          <a class="lesson-title" href={l.href}>{l.title}</a>
+          <span class="lesson-goal">After it, you can {l.goal}</span>
+          <span class="lesson-meta label">
+            <span>{l.pageName}</span>
+            <span class="tnum">{l.runs.length} runs</span>
+            {l.story
+              ? <span class="lesson-progress tnum" data-progress />
+              : <span class="chip-status">step-through only</span>}
+          </span>
+        </span>
+      </li>
+    ))}
+  </ol>
+  <p class="aside">Your progress stays in this browser only.
+  <button type="button" class="linkish" data-course-forget hidden>Forget my progress</button></p>
+  <p>Then the <a href={url("paxos/concepts/")}>concepts</a>: one short entry for each idea that
+  paros uses, such as catch-up, the writer fence and boot safety.</p>
+
+  <h2 id="order">The flavors</h2>
+  <p>Each flavor solves the problem in its line.</p>
   <ol class="index-list flavor-order">
     {FLAVORS.map((x) => (
       <li><a href={url(x.path)}>{x.name}</a>
         <span class="desc"><b>Problem:</b> {x.problem} <b>Flavor:</b> {x.flavor}</span></li>
     ))}
   </ol>
-  <p>Then the <a href={url("paxos/concepts/")}>concepts</a>: one short entry for each idea that
-  paros uses, such as catch-up, the writer fence and boot safety.</p>
 
   <h2 id="words">Words</h2>
   <p>Each flavor page links here the first time it uses one of these words.</p>
   <dl class="words">
     {WORDS.map((w) => (<><dt id={w.id}>{w.word}</dt><dd>{w.text}</dd></>))}
   </dl>
+  <script is:inline src={url("course.js")}></script>
+  <script is:inline set:html={`(function () {
+    var c = window.paxosCourse;
+    if (!c) return;
+    var st = c.load();
+    var any = false;
+    document.querySelectorAll("[data-lesson]").forEach(function (li) {
+      var page = li.dataset.page, runs = li.dataset.runs.split(" ");
+      var seen = runs.filter(function (r) { return st.seen[page + "/" + r]; }).length;
+      var out = li.querySelector("[data-progress]");
+      if (!out) return;
+      if (seen) any = true;
+      out.textContent = seen === runs.length ? "done" : seen ? seen + " of " + runs.length + " seen" : "";
+      out.className = "lesson-progress tnum" + (seen === runs.length ? " chip-status done" : "");
+      li.classList.toggle("is-done", seen === runs.length);
+    });
+    var last = st.last;
+    if (last) {
+      var p = document.querySelector("[data-course-resume]");
+      var a = document.createElement("a");
+      a.href = ${JSON.stringify(url("paxos/"))} + last.page + "/#run=" + encodeURIComponent(last.run) + "&beat=" + (last.beat | 0);
+      a.className = "btn primary";
+      a.textContent = "Continue where you stopped";
+      p.appendChild(a);
+      p.hidden = false;
+    }
+    var f = document.querySelector("[data-course-forget]");
+    if (any || last) {
+      f.hidden = false;
+      f.addEventListener("click", function () { c.forget(); location.reload(); });
+    }
+  })();`} />
 </Doc>

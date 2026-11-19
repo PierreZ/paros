@@ -17,7 +17,7 @@ in the repository; the old service is named only as "at the tag". No long book p
 | Path | Source | Job |
 |---|---|---|
 | `/` | `src/pages/index.astro` | what paros is now: the flavors to learn, the core, the journal to come |
-| `/paxos/` | `src/pages/paxos/*.md`, `index.astro` | the map of the flavors, the reading order and the words (#949); one page per flavor: the problem, a step-through diagram, the rule, where in paros |
+| `/paxos/` | `src/pages/paxos/*.md`, `index.astro` | the course map (`src/course.ts`), the map of the flavors and the words (#949); one page per flavor: the problem, a story and a step-through diagram, the rule, where in paros |
 | `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
 | `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | one short page per technique, each with a live widget on `paros-consensus` |
 | `/journal/` | `src/pages/journal/index.astro` | the journal service: what it is, the rewrite, and the tag of the version before it |
@@ -91,8 +91,30 @@ its reply leaves. The end of a beat shows its `choices`. Back, Continue (Skip wh
 plays), the arrow keys, and the address `#run=<id>&beat=<n>`. "Show each message" opens the
 step-through at the last step of the beat (`window.paxosSteps.show`), and the step-through
 has "Back to the story" (`window.paxosStory.show`). With reduced motion a screen appears
-complete. A page with no beats keeps the step-through alone. The story draws the recorded
+complete. A beat with a `question` asks it before it plays: the screen shows the state before
+the beat, the question in place of the sentence (the sentence gives the answer away), and two
+to four answers (buttons, or the keys 1 to 4). Any answer, or "Show me", plays the beat; then
+the screen marks the right answer, the reader's answer and the reason (`why`). The answers live
+in the page only (`window.paxosStory.answers()`), and each one fires `paxos:answer` on the
+document. A page with no beats keeps the step-through alone. The story draws the recorded
 trace only; the step-through switches to the live wasm run.
+
+## The course (`src/course.ts`)
+
+The Paxos pages are one course of seven lessons. A lesson is a group of recorded runs of one
+page, in order, with one goal ("After it, you can ..."); a page can hold more than one lesson
+(Multi-Paxos holds the log and the reads, Quorums holds the majority and the grids). The map
+is on `/paxos/#course`. `src/layouts/Doc.astro` gives a page its lessons (`<script
+id="course">`), and `public/story.js` names the lesson and the run on each screen and offers
+"Next in this lesson" at the end of a run, then "Next lesson" at the end of a lesson. The
+build fails when a lesson names a run that does not exist, or when a run with beats is in no
+lesson or in two (`check` in `src/course.ts`): a new run needs its place in a lesson.
+
+Progress lives in the reader's browser only (`public/course.js`, `localStorage` key
+`paros-course-v1`): the runs seen to their last screen, the answers to the questions, and
+the last screen opened. No account, no server, no score. The map shows "k of n seen" per
+lesson and "Continue where you stopped", and has a button to forget the progress. Every page
+works the same when the storage is blocked.
 
 ## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))
 

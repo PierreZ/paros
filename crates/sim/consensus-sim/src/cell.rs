@@ -448,9 +448,13 @@ impl Model for Cell {
     }
 
     fn calm(&mut self, cx: &mut Cx<'_, Self>) {
-        // The deployment's registry reaches every node: each pool admits
-        // the late nodes, as #189 needs for liveness. Until then a late
-        // node hears no beat from a node that does not know it. A
+        // A pool that lags the deployment's registry is a fault of the
+        // walk, and it stops with the other faults. The contract of the
+        // core: the driver admits to the pool (`extend_pool`) every node
+        // that its registry, a replicated log, registers, so each fold
+        // reaches every registration once the network is calm. Until then
+        // a node refuses a late node's messages: that costs liveness, never
+        // safety, and the walk judges safety through the whole lag. A
         // lagging-reader walk keeps the pools lagging through the quiet
         // phase, where leaders stand and reconfigure, and admits them when
         // the settle rounds start (`Cell::tick_all`).

@@ -14,7 +14,7 @@
 
 use consensus_sim::cell::{Cell, CellEvent, Flavor, Mutant, Spec};
 use consensus_sim::decree::{self, DecreeEvent, DecreeModel, DecreeMutant};
-use consensus_sim::trace::{Verdict, spec, tlc_or_skip};
+use consensus_sim::trace::{Verdict, require_tlc, spec};
 use moonpool_walk::Walk;
 use paros_consensus::decree::Phase1Rule;
 
@@ -46,9 +46,7 @@ fn decree_walk(rule: Phase1Rule, mutant: DecreeMutant) -> Walk<DecreeModel> {
 #[test]
 fn tlc_accepts_the_decree_walks() {
     let check = spec("decree", "DecreeTrace");
-    if !tlc_or_skip(&check) {
-        return;
-    }
+    require_tlc(&check);
     for rule in [Phase1Rule::Quorum, Phase1Rule::EveryAcceptor] {
         let (mut chosen, mut reported) = (false, false);
         for seed in 1..=DECREE_SEEDS {
@@ -89,9 +87,7 @@ fn first_refused(mutant: DecreeMutant, seeds: u64) -> Option<(u64, DecreeEvent, 
 /// when a second value is chosen; TLC refuses the promise itself.
 #[test]
 fn tlc_refuses_a_promise_that_hides_its_vote() {
-    if !tlc_or_skip(&spec("decree", "DecreeTrace")) {
-        return;
-    }
+    require_tlc(&spec("decree", "DecreeTrace"));
     let (seed, event, state) =
         first_refused(DecreeMutant::HideVote, 20).expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
@@ -104,9 +100,7 @@ fn tlc_refuses_a_promise_that_hides_its_vote() {
 /// seeds; TLC refuses the first step below the lost promise.
 #[test]
 fn tlc_refuses_an_acceptor_that_forgot_its_promise() {
-    if !tlc_or_skip(&spec("decree", "DecreeTrace")) {
-        return;
-    }
+    require_tlc(&spec("decree", "DecreeTrace"));
     let (seed, event, state) =
         first_refused(DecreeMutant::ForgetPromise, 40).expect("TLC refuses a seed of the mutant");
     assert!(
@@ -145,9 +139,7 @@ fn kept(spec: Spec, run: &moonpool_walk::Run<Cell>) -> Vec<CellEvent> {
 /// that rule never judged.
 fn accepts(spec: Spec, flavor: &Flavor) {
     let check = spec.check();
-    if !tlc_or_skip(&check) {
-        return;
-    }
+    require_tlc(&check);
     let rules = spec.rules();
     let mut unmet: Vec<_> = rules.iter().collect();
     let first = knob("TRACE_FROM", 1);
@@ -296,9 +288,7 @@ fn first_refused_cell(
 /// promise that under-reports, or the vote that the lost one hid.
 #[test]
 fn tlc_refuses_a_disk_that_forgets_its_votes() {
-    if !tlc_or_skip(&Spec::MultiPaxos.check()) {
-        return;
-    }
+    require_tlc(&Spec::MultiPaxos.check());
     let (seed, event, state) = first_refused_cell(
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
@@ -318,9 +308,7 @@ fn tlc_refuses_a_disk_that_forgets_its_votes() {
 /// promise whose report is not the acceptor's votes.
 #[test]
 fn tlc_refuses_a_promise_that_hides_its_votes() {
-    if !tlc_or_skip(&Spec::MultiPaxos.check()) {
-        return;
-    }
+    require_tlc(&Spec::MultiPaxos.check());
     let (seed, event, state) = first_refused_cell(
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
@@ -342,9 +330,7 @@ fn tlc_refuses_a_promise_that_hides_its_votes() {
 /// proxy sends the round again: long walks, and a few seeds.
 #[test]
 fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
-    if !tlc_or_skip(&Spec::ProxyLeader.check()) {
-        return;
-    }
+    require_tlc(&Spec::ProxyLeader.check());
     let (seed, event, state) = first_refused_cell(
         Spec::ProxyLeader,
         &Flavor::proxies(),
@@ -365,9 +351,7 @@ fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
 /// (`Relinquish`).
 #[test]
 fn tlc_refuses_a_handoff_that_drops_its_tail() {
-    if !tlc_or_skip(&Spec::LeaderHandoff.check()) {
-        return;
-    }
+    require_tlc(&Spec::LeaderHandoff.check());
     let (seed, event, state) = first_refused_cell(
         Spec::LeaderHandoff,
         &Flavor::handoff(),
@@ -388,9 +372,7 @@ fn tlc_refuses_a_handoff_that_drops_its_tail() {
 /// frontier (`node/gc.rs`).
 #[test]
 fn tlc_refuses_an_early_gc() {
-    if !tlc_or_skip(&Spec::Matchmaker.check()) {
-        return;
-    }
+    require_tlc(&Spec::Matchmaker.check());
     let (seed, event, state) = first_refused_cell(
         Spec::Matchmaker,
         &Flavor::matchmakers(),

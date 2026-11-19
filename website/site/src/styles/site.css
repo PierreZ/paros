@@ -503,6 +503,23 @@ pre {
 .story-msg.now .story-msg-arrow path { transform: scale(1.25); }
 .story-msg-label { font-family: var(--font-mono); font-size: 9.5px; text-anchor: middle; fill: currentColor; font-weight: 600; }
 .story-says { margin: 0; padding: 12px 12px 4px; font-family: var(--font-sans); font-size: 16px; line-height: 1.45; color: var(--fg); min-height: 3.2em; }
+.story-says.asks { font-weight: 600; }
+.story-quiz { padding: 0 12px 10px; }
+.story-quiz-head { margin: 0 0 6px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; text-transform: none; letter-spacing: 0; font-family: var(--font-sans); font-size: 14px; }
+.story-quiz-head .chip-status { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: var(--tracking); }
+.story-answers { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.story .story-answers { margin: 0; padding: 0; }
+.story-answers li::before { content: none !important; }
+.story-answer { display: flex; align-items: baseline; gap: 8px; min-height: 44px; padding: 10px 12px; border: 1px solid var(--rule-strong); background: transparent; color: var(--fg); font-family: var(--font-sans); font-size: 15px; line-height: 1.35; text-align: left; }
+button.story-answer { cursor: pointer; width: 100%; }
+button.story-answer:hover, button.story-answer:focus-visible { border-color: var(--accent); background: var(--accent-tint); }
+.story-answers.done .story-answer { min-height: 0; padding: 6px 10px; border-color: var(--rule); color: var(--muted); }
+.story-answers.done .story-answer.right { border-color: var(--done); background: var(--done-tint); color: var(--fg); }
+.story-answers.done .story-answer.wrong { border-color: var(--gap); color: var(--fg); }
+.story-answer-key { flex: 0 0 auto; min-width: 1.2em; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.story-answer.right .story-answer-key { color: var(--done); }
+.story-answer.wrong .story-answer-key { color: var(--gap); }
+.story .story-why { margin: 10px 0 0; font-family: var(--font-sans); font-size: 15px; line-height: 1.45; }
 .story-chosen { margin: 0; padding: 4px 12px 10px; font-size: 12px; color: var(--muted); }
 .story-chosen.broken { color: var(--gap); }
 .story-end { font-family: var(--font-sans); color: var(--fg); }
@@ -517,3 +534,23 @@ pre {
 .story-others .now { border-color: var(--accent); color: var(--accent); }
 .story-foot { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rule); }
 @media (prefers-reduced-motion: reduce) { .story-msg { transition: none; } }
+
+/* The course (src/course.ts): the next run of a lesson at the end of a run. */
+.story-next { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 4px; }
+.story-next-btn { text-align: left; text-decoration: none; }
+.story-next-done { margin: 0; flex: 1 1 100%; font-size: 15px; }
+.story-next-map { font-size: 14px; }
+
+/* The course map of /paxos/. */
+.course, .prose .course { list-style: none; margin: 10px 0 1em; padding: 0; border-top: 1px solid var(--rule); }
+.prose .course > li::before { content: none; }
+.lesson { display: grid; grid-template-columns: 3ch 1fr; gap: 0 12px; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+.lesson-n { color: var(--muted); padding-top: 3px; }
+.lesson.is-done .lesson-n { color: var(--done); }
+.lesson-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.lesson-title { font-weight: 600; font-size: 16px; }
+.lesson-goal { font-size: 14px; color: var(--fg); }
+.lesson-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--muted); }
+.course-resume { margin: 0 0 1em; }
+.course-resume .btn { text-decoration: none; }
+.linkish { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }

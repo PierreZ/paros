@@ -106,7 +106,7 @@ Test only: `publish = false`, never a dependency of another crate.
   and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
   `specs/tla/decree/DecreeTrace.tla`.
 - `trace.rs` → what every trace check shares: `spec` (a trace spec of `specs/tla/`),
-  `tlc_or_skip`, `Ranks` (the code's ballots as the model's `1..NB`), the names of nodes.
+  `require_tlc`, `Ranks` (the code's ballots as the model's `1..NB`), the names of nodes.
 - `batcher.rs` → `BatchModel`: the batcher and the unbatcher (Compartmentalized Paxos §3.5).
 
 ## Tests and seeds
@@ -144,7 +144,7 @@ Test only: `publish = false`, never a dependency of another crate.
   the first seed and each seed that meets a rule of the spec that no checked seed met before; a
   walk of more than 200 kept events is skipped (TLC grows faster than the trace). The test fails
   when a rule stays unmet. About four minutes in debug on four CPUs. TLC (`tlc`) is in the nix
-  dev shell; outside it the tests skip, and in CI a missing TLC fails. CI runs the trace checks
+  dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
   in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
   a change of `specs/tla/` alone. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
   `TRACE_CHAOS`, `TRACE_MAX_EVENTS`, `TRACE_DUMP`.
