@@ -816,6 +816,9 @@ impl ColocatedNode {
     /// on the next boot, so a restart folds the retained log from the same
     /// state a node that never restarted holds.
     ///
+    /// The clamp is `FloorChosen` of `specs/tla/truncation/`: a node that
+    /// compacts past its chosen prefix drops a slot that is not chosen.
+    ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an

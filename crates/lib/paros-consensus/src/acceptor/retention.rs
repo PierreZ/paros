@@ -22,7 +22,9 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// it, and emit the durable [`WriteOp::Truncate`] carrying `sealed` (the
     /// journal state the dropped slots folded to, #204). A decided
     /// truncation: the caller has already established that the prefix is
-    /// chosen and applied.
+    /// chosen and applied. The TLA+ model `specs/tla/truncation/` checks
+    /// this as `FloorChosen` and `FloorTruncated`: each slot below a floor
+    /// is chosen, and at or below a chosen `Truncate`.
     ///
     /// # Panics
     ///
@@ -46,7 +48,10 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// trimmed cluster-wide), raise the floor to it, and emit the durable
     /// [`WriteOp::TrimmedTo`]. The promise does not move. The caller owns
     /// everything outside the acceptor — the replica's prefix jump, the
-    /// proposer's blocked work.
+    /// proposer's blocked work. A jump that took the promise of the peer
+    /// could lower it below a ballot this acceptor already promised, and
+    /// two values get chosen at one slot (`Agreement`, control
+    /// `trim_promise` of `specs/tla/truncation/`).
     ///
     /// # Panics
     ///

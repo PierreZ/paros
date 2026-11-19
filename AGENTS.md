@@ -31,7 +31,10 @@ Phase-2 quorum of the configuration that the round's `Accept` carried, a round t
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
 promise with the old belief fence as a control, a lagging pool, a restart and the refusal of a
-rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)), truncation on plain
+Multi-Paxos (`specs/tla/truncation/`: the decided `Truncate`, the floor guard of Phase 1, the
+trim-point jump that keeps the promise, the vote watermark over the floor; #1017 (truncation
+model)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
