@@ -96,7 +96,7 @@ Test only: `publish = false`, never a dependency of another crate.
   and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
   `specs/tla/decree/DecreeTrace.tla`.
 - `trace.rs` → what every trace check shares: `spec` (a trace spec of `specs/tla/`),
-  `tlc_or_skip`, `Ranks` (the code's ballots as the model's `1..NB`), the names of nodes.
+  `require_tlc`, `Ranks` (the code's ballots as the model's `1..NB`), the names of nodes.
 - `batcher.rs` → `BatchModel`: the batcher and the unbatcher (Compartmentalized Paxos §3.5).
 
 ## Tests and seeds
