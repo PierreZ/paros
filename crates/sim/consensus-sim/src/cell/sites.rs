@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, Matchmaker, MatchmakerConfig, MatchmakerHardState, MemRegistry,
+    ReconfigureReply, ReconfigureRequest,
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId};
 use paros_consensus::{ColocatedNode, Config, Limits, NodeId, ProxyLeader, ReplicaNode, WriteOp};
@@ -38,6 +39,13 @@ impl NodeSite {
     pub(super) fn persist(&mut self, op: &WriteOp) {
         self.disk.apply(std::slice::from_ref(op));
         self.history.push(op.clone());
+    }
+
+    /// The disk loses the value of the record at `slot` and keeps its
+    /// identity. The history keeps the write: a mutant that rebuilds the
+    /// disk rebuilds it whole.
+    pub(super) fn rot(&mut self, slot: paros_consensus::Slot) {
+        let _ = self.disk.rot(slot);
     }
 
     /// The node crashes: its memory is gone, its disk stays, unless a
@@ -175,6 +183,24 @@ impl MatchmakerSite {
         let replies = ready.replies().to_vec();
         ready.advance();
         replies
+    }
+
+    /// Answer a handover's request: step, persist, then the replies.
+    /// `None` when the matchmaker is down.
+    pub(super) fn reconfigure(
+        &mut self,
+        request: ReconfigureRequest,
+    ) -> Option<Vec<ReconfigureReply>> {
+        self.live.as_mut()?.step_reconfigure(request);
+        self.persist();
+        let ready = self.live.as_mut()?.ready();
+        let replies = ready.reconfigure_replies().to_vec();
+        assert!(
+            ready.replies().is_empty(),
+            "a handover's request gets no matchmaking answer"
+        );
+        ready.advance();
+        Some(replies)
     }
 
     /// Raise the GC watermark, persist it, and build the ack.

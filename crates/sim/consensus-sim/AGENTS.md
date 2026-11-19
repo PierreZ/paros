@@ -29,8 +29,8 @@ Test only: `publish = false`, never a dependency of another crate.
 - **Every `probe!` of the core is reached, or named in `GAPS`** (#1199 (coverage-driven DST)).
   `tests/coverage.rs` walks every flavor with exploration on and judges the union against the
   probes that `probes::core_probes` reads from the source of `paros-consensus`. `GAPS` names each
-  probe that no walk reaches yet, grouped by the walk move it waits for (#1225 (walk moves for the
-  unreached probes)). A new probe in the core is reached by a walk or named there in the same
+  probe that no walk reaches yet at the default budget, grouped by what it waits for: a rarer
+  schedule (a larger `MOONPOOL_WALK_SEEDS` reaches it) or a move the cell does not make yet. A new probe in the core is reached by a walk or named there in the same
   PR. A named probe that a plain run reaches fails the gate: take it out of `GAPS`. Each flavor
   also makes every move it allows.
 - The moonpool rev of `moonpool-walk`, `moonpool-assertions` and `moonpool-tla` here is the rev
@@ -56,11 +56,28 @@ Test only: `publish = false`, never a dependency of another crate.
     before it started.
 - `cell.rs` + `cell/` → `Cell`, the model of a deployment of `ColocatedNode`s, and its driver
   loop. `Flavor` (`cell/flavor.rs`) says what the cell holds (acceptors, quorum system, proxy
-  leaders, replicas, matchmakers, spares), which optional moves are on (handoff, reads,
-  truncation, reconfiguration) and the `Limits` of every party (`Flavor::paged` puts every page
+  leaders, replicas, matchmakers, spares, late spares, matchmaker spares), which optional moves
+  are on (`Flavor::allows`) and the `Limits` of every party (`Flavor::paged` puts every page
   at its floor, so the paging branches run). `Mutant` is the bug of a control run: a planted driver bug that
   an oracle or a trace check catches. `cell/sites.rs` holds each party with its disk. The liveness judge (`Cell::converged`): once the faults stop, one leader
-  stands with no open round, and every node and replica learned its log.
+  stands with no open round, and every node and replica that is not retired learned its log.
+  The moves beyond the clients and the clock (#1225 (walk moves for the unreached probes)):
+  - `cell/faults.rs` → `Action::Rot`: a disk loses the value of one record and keeps its
+    identity (`MemStorage::rot`, CTRL's faulty entry), at most one faulty copy of a slot at a
+    time; a scrub may find it while the node runs (`ColocatedNode::repair_record`).
+  - `cell/retire.rs` → `Action::Retire` (the operator retires a node on an effective GC floor or
+    on the floor a beat carried, and never one that a reconfiguration it asked for above the
+    floor names), `Action::Rejoin` (a retired node boots again, or a running non-member
+    rejoins), `Action::Admit` (a node admits a late spare to its pool; until then a
+    configuration that names the spare is outside that node's pool).
+  - `cell/handover.rs` → `Action::Handover`: each node's driver holds a
+    `MatchmakerReconfigurer`, starts a handover to a target from the matchmaker pool, finishes
+    a frozen generation it meets, adopts a chosen set, and republishes it to a matchmaker left
+    behind. A sibling journal on the bootstrap set makes a freeze and a bootstrap carry two
+    journals, so a small page pages them.
+  - `cell.rs` → `Action::MoveRound` (a leader moves a stuck round to another column,
+    `ColocatedNode::move_round`), and a client retry inside `Action::Propose` (the same records
+    at a position written before).
 - `cell/trace.rs` + `cell/trace/` → `Tracer`, `CellEvent`, `Spec`: the steps of a cell walk as
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs` and `matchmaker.rs` each say which
@@ -77,9 +94,10 @@ Test only: `publish = false`, never a dependency of another crate.
 - `tests/flavors.rs` → one walk for each flavor: single decree, Multi-Paxos on three and on five
   (with truncation), the handoff, grid quorums, acceptor partitions, proxy leaders (on a majority
   and on a grid), replicas, leaderless reads, every compartment, the batcher, matchmakers with
-  reconfiguration, and matchmakers with every compartment. 60 seeds each in CI.
+  reconfiguration, matchmakers with every compartment, disk faults, retirement and rejoin, and
+  the matchmaker set handover. 60 seeds each in CI.
 - `tests/mutants.rs` → each oracle catches its mutant.
-- `tests/coverage.rs` → coverage-driven simulation (#1199): every flavor, and four of them with
+- `tests/coverage.rs` → coverage-driven simulation (#1199): every flavor, and seven of them with
   small pages, walk with exploration on (moonpool-walk's `Walk::explore`): a run that passes a
   site for the first time, or covers a new edge of the core, is branched, and its children
   replay it up to that step and then draw a new schedule. The gate is the union over all walks:
@@ -102,12 +120,10 @@ Test only: `publish = false`, never a dependency of another crate.
 - A red seed is a finding. Reproduce it alone, find the cause, and fix the core with a red unit
   test first, or fix the oracle with the reason in the commit message.
 
-## Not walked yet
+## Not reached yet
 
-The matchmaker set handover (`MatchmakerReconfigurer`) is judged by
-`paros-consensus/src/models/handover.rs` only. The probes no walk reaches, and the move each
-waits for (disk faults, retirement and rejoin, the handover, configurations outside the pool),
-are `GAPS` in `tests/coverage.rs` and #1225 (walk moves for the unreached probes).
+The probes no walk reaches are `GAPS` in `tests/coverage.rs`, each group with what it waits
+for.
 
 Not traced yet (#1198 (trace checking)):
 
@@ -118,6 +134,7 @@ Not traced yet (#1198 (trace checking)):
 - The batcher and the replica of `compartments/`.
 - `reconfigured-compartments`: matchmakers with a grid for each configuration, proxies and the
   handoff in one trace spec.
-- The matchmaker set handover, which no walk runs.
+- The flavors `disk-faults`, `retirement` and `handover`: no model has faulty entries, the
+  retirement check or the matchmaker set handover.
 
 Those walks are checked against `multi-paxos/` only, or not at all.
