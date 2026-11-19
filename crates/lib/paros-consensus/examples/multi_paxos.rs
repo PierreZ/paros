@@ -166,9 +166,7 @@ use paros_consensus::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy,
 use paros_consensus::types::Fingerprint;
 use paros_consensus::{Ballot, NodeId, Slot};
 
-use common::{
-    Node, assert_same_log, ballot, command, commit, node, noop, show, show_ballot, show_records,
-};
+use common::{Node, assert_same_log, ballot, command, commit, node, noop, show, show_records};
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
@@ -210,9 +208,7 @@ fn phase1(cluster: &mut [Node], leader: NodeId, ballot: Ballot) -> BTreeMap<Slot
     );
     println!(
         "ballot {0}: node {2} campaigns: \"promise me every slot from {1} on\" (one Phase 1 for all future slots)",
-        show_ballot(ballot),
-        from_slot.0,
-        leader.0
+        ballot, from_slot.0, leader.0
     );
     let own: BTreeMap<Slot, (Ballot, Command)> = me
         .acceptor
@@ -249,8 +245,7 @@ fn phase1(cluster: &mut [Node], leader: NodeId, ballot: Ballot) -> BTreeMap<Slot
             }
             Err(promised) => println!(
                 "  node {} -> refuses: it already promised the higher ballot {}",
-                peer.0,
-                show_ballot(promised)
+                peer.0, promised
             ),
         }
     }
@@ -260,8 +255,7 @@ fn phase1(cluster: &mut [Node], leader: NodeId, ballot: Ballot) -> BTreeMap<Slot
         "the campaign holds a quorum"
     );
     println!(
-        "  a majority promised: ballot {} leads, and no lower ballot can choose anything in these slots from now on",
-        show_ballot(ballot)
+        "  a majority promised: ballot {ballot} leads, and no lower ballot can choose anything in these slots from now on"
     );
 
     // ---- P2c, once per slot ---------------------------------------------
@@ -321,7 +315,7 @@ fn accept_round(
         .open_round(slot, ballot, command.clone(), Some(leader), None);
     println!(
         "ballot {}: Phase 2 only, slot {} = {}: the leader asks the acceptors to accept",
-        show_ballot(ballot),
+        ballot,
         slot.0,
         show(command)
     );
@@ -349,8 +343,7 @@ fn accept_round(
             }
             Err(promised) => println!(
                 "  node {} -> refuses: it promised the higher ballot {}",
-                peer.0,
-                show_ballot(promised)
+                peer.0, promised
             ),
         }
     }
@@ -368,8 +361,7 @@ fn accept_round(
     me.learn_chosen(slot, at, &decided);
     println!(
         "  slot {} chosen at ballot {}: a majority accepted, so this value is permanent",
-        slot.0,
-        show_ballot(at)
+        slot.0, at
     );
     true
 }

@@ -18,6 +18,19 @@ use crate::types::{Ballot, Slot};
 /// messages; a restart is a new deployment built from the same store.
 /// Nothing here is lost unless the caller rots a record
 /// ([`MemStorage::rot`]): the disk faults of a test or a simulation.
+///
+/// ```
+/// use paros_consensus::contract::{AcceptorWrite, MemStorage};
+/// use paros_consensus::journal::JournalIdentifier;
+/// use paros_consensus::{Ballot, Config, NodeId, WriteOp};
+///
+/// let config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([NodeId(1)]);
+/// let mut disk = MemStorage::new(config);
+/// let ballot = Ballot { round: 3, node: NodeId(1) };
+/// // A driver passes `ready.writes()` here; this is one write by hand.
+/// disk.apply(&[WriteOp::Acceptor(AcceptorWrite::SetPromise(ballot))]);
+/// assert_eq!(disk.hard_state().max_promised_ballot, ballot);
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemStorage {
     pub(crate) config: Config,

@@ -1467,7 +1467,7 @@ impl ColocatedNode {
         let adopted = (self.acceptors_since != Ballot::zero()).then_some(self.acceptors_since);
         let member = self.acceptors.contains(me);
         if member {
-            self.campaign(RegistrationKind::Belief, self.acceptors.clone());
+            self.open_campaign(RegistrationKind::Belief, self.acceptors.clone());
         }
         if self.next_campaign_round().is_some() {
             assert!(

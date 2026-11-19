@@ -111,6 +111,24 @@ impl Audience {
     /// A proxy audience names **no node**: a proxy lives in its own
     /// namespace, and the driver's deployment map resolves it through
     /// [`Audience::proxy`] instead.
+    ///
+    /// ```
+    /// use paros_consensus::contract::Audience;
+    /// use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+    /// use paros_consensus::NodeId;
+    ///
+    /// let pool = [NodeId(0), NodeId(1), NodeId(2), NodeId(3)];
+    /// let me = NodeId(0);
+    /// // A reply goes to one node. A beat goes to each other node of the pool.
+    /// assert_eq!(Audience::Node(NodeId(2)).resolve(&pool, me), [NodeId(2)]);
+    /// assert_eq!(Audience::Learners.resolve(&pool, me), [NodeId(1), NodeId(2), NodeId(3)]);
+    ///
+    /// // An `Accept` goes to the acceptors of its round. On a 2 x 2 grid that
+    /// // is one column: slots of column 1 never reach nodes 0 and 2.
+    /// let config = AcceptorConfig::new(pool.to_vec(), QuorumSystem::grid(2, 2));
+    /// let column = Audience::AcceptorsOf { config, column: Some(1) };
+    /// assert_eq!(column.resolve(&pool, me), [NodeId(1), NodeId(3)]);
+    /// ```
     #[must_use]
     pub fn resolve(&self, pool: &[NodeId], me: NodeId) -> Vec<NodeId> {
         self.resolve_excluding(pool, Some(me))
@@ -573,6 +591,38 @@ pub enum Message {
         #[cfg_attr(feature = "serde", serde(default))]
         chosen: Option<Slot>,
     },
+}
+
+impl Message {
+    /// The name of the variant, for a trace, a log line or a metric label:
+    /// `"Prepare"`, `"Accept"`, `"Commit"`, and so on. One name for each
+    /// variant, and the name never changes with the fields.
+    ///
+    /// ```
+    /// use paros_consensus::{Message, NodeId};
+    ///
+    /// let message = Message::PreRead { reply_to: NodeId(1), ctx: 7 };
+    /// assert_eq!(message.kind(), "PreRead");
+    /// ```
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Message::Prepare { .. } => "Prepare",
+            Message::Promise { .. } => "Promise",
+            Message::Accept { .. } => "Accept",
+            Message::Accepted { .. } => "Accepted",
+            Message::Nack { .. } => "Nack",
+            Message::Commit { .. } => "Commit",
+            Message::CatchUpRequest { .. } => "CatchUpRequest",
+            Message::CatchUpResponse { .. } => "CatchUpResponse",
+            Message::TrimmedTo { .. } => "TrimmedTo",
+            Message::Relinquish { .. } => "Relinquish",
+            Message::Heartbeat { .. } => "Heartbeat",
+            Message::PreRead { .. } => "PreRead",
+            Message::PreReadAck { .. } => "PreReadAck",
+            Message::HeartbeatAck { .. } => "HeartbeatAck",
+        }
+    }
 }
 
 #[cfg(test)]

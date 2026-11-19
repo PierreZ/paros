@@ -106,3 +106,15 @@ fn the_recorded_configuration_drops_only_the_counts() {
     other.replica_count = 0;
     assert_eq!(other.recorded(), recorded);
 }
+
+/// `with_peers` sorts and deduplicates, and changes no other field.
+#[test]
+fn with_peers_sorts_and_deduplicates() {
+    let mut expected = Config::new(NodeId(1), JournalIdentifier::UNSET);
+    expected.peers = nodes([1, 2, 3]);
+    let config =
+        Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers(nodes([3, 1, 2, 3, 1]));
+    assert_eq!(config, expected);
+    // A second call replaces the membership.
+    assert_eq!(config.with_peers(nodes([9])).peers, nodes([9]));
+}

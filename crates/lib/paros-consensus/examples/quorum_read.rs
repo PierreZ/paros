@@ -65,10 +65,12 @@
 //! Throughout, the leader broadcast no beat for either read and could have
 //! been dead for step 3 onward.
 //!
+//! This example is about slots, so no client becomes the writer of the
+//! journal: Paxos chooses each write, and the journal refuses it at apply.
+//! `journal_calls` shows the calls that a journal accepts.
+//!
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
 //! with Compartmentalization* (2021), §3.4–3.5.
-
-mod common;
 
 use std::collections::BTreeMap;
 
@@ -77,8 +79,6 @@ use paros_consensus::journal::{Command, Entry, LeaderUuid, Seq};
 use paros_consensus::membership::QuorumSystem;
 use paros_consensus::quorum_read::ReadState;
 use paros_consensus::{ColocatedNode, Config, Message, NodeId, Slot, Value};
-
-use common::{NO_CHECK_QUORUM, kind};
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
 /// `{1, 4}` and `{2, 5}`.
@@ -146,7 +146,7 @@ impl Cluster {
         node.advance_recovery();
         if id == leader {
             for (_, m) in &out {
-                *self.sent_by_leader.entry(kind(m)).or_default() += 1;
+                *self.sent_by_leader.entry(m.kind()).or_default() += 1;
             }
         }
         self.wire.extend(out);
@@ -221,12 +221,10 @@ fn main() {
 fn elect_and_stream(cluster: &mut Cluster, leader: NodeId) {
     // ---- 1. node 5 leads and streams three commands ------------------------
     println!("-- 1. node 5 campaigns and streams three commands");
-    cluster.node(leader).set_election_timeout(1);
-    cluster.node(leader).tick();
+    cluster.node(leader).campaign();
     cluster.drain(leader);
     cluster.deliver_all();
     assert!(cluster.node(leader).is_leader(), "node 5 wins its election");
-    cluster.node(leader).set_election_timeout(NO_CHECK_QUORUM);
     cluster.node(leader).tick(); // one beat, so every follower adopts the leader
     cluster.drain(leader);
     cluster.deliver_all();

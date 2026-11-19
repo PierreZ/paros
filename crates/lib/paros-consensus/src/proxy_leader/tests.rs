@@ -272,3 +272,20 @@ fn a_delegation_teaches_the_proxy_its_configuration() {
         "the fan-out carries no configuration"
     );
 }
+
+/// A proxy batch is empty until a delegation queues a fan-out, and empty
+/// again after `advance`.
+#[test]
+fn a_proxy_batch_is_empty_until_a_delegation() {
+    let mut proxy = ProxyLeader::new(ProxyId(1), majority(&[0, 1, 2]));
+    let ready = proxy.ready();
+    assert!(ready.is_empty(), "a fresh proxy owes nothing");
+    ready.advance();
+    proxy.step(delegation(1, 0, ballot(3, 0), 7, cmd(7)));
+    let ready = proxy.ready();
+    assert!(!ready.is_empty(), "the fan-out is queued");
+    ready.advance();
+    let ready = proxy.ready();
+    assert!(ready.is_empty(), "an advanced batch is gone");
+    ready.advance();
+}

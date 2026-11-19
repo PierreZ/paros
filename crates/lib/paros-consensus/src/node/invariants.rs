@@ -435,7 +435,7 @@ impl ColocatedNode {
                     self.ballot.node == self.config.id,
                     "an operating ballot names its own node"
                 );
-                // A live campaign's promise sits at its ballot: `campaign`
+                // A live campaign's promise sits at its ballot: `open_campaign`
                 // promises the ballot it opens at, and every path that
                 // raises the promise past it closes the campaign (a higher
                 // `Prepare`, an `Accept` from another leader, a handoff

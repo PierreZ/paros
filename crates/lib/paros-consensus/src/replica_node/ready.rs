@@ -71,6 +71,21 @@ impl ReplicaReady<'_> {
         self.node.replica.committed()
     }
 
+    /// Whether the batch holds no work: nothing to persist, send, answer or
+    /// report. The replica's [`crate::Ready::is_empty`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion of a bucket fails: a programmer error, never an
+    /// operating condition.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.writes().is_empty()
+            && self.messages().is_empty()
+            && self.read_states().is_empty()
+            && self.committed().is_empty()
+    }
+
     /// Acknowledge the batch: clears every bucket and releases the borrow.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(replica = self.node.config.id.0)))]
     pub fn advance(self) {

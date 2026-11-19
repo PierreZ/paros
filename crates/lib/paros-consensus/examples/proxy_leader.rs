@@ -51,11 +51,13 @@
 //!    still holds the round — refreshes the leader hint and completes it
 //!    under the same ballot.
 //!
+//! This example is about slots, so no client becomes the writer of the
+//! journal: Paxos chooses each write, and the journal refuses it at apply.
+//! `journal_calls` shows the calls that a journal accepts.
+//!
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
 //! with Compartmentalization* (2021), §3.1; the frankenpaxos `ProxyLeader`
 //! analysis in `docs/references/frankenpaxos/04-compartmentalization.md`.
-
-mod common;
 
 use std::collections::BTreeMap;
 
@@ -65,8 +67,6 @@ use paros_consensus::journal::{Entry, LeaderUuid, Seq};
 use paros_consensus::membership::{ProxyId, QuorumSystem};
 use paros_consensus::node::Delegation;
 use paros_consensus::{ColocatedNode, Config, Message, NodeId, ProxyLeader, Slot, Value};
-
-use common::{NO_CHECK_QUORUM, kind};
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
 /// `{1, 4}` and `{2, 5}`.
@@ -299,12 +299,10 @@ fn main() {
 fn elect(cluster: &mut Cluster) {
     println!("-- 1. node 1 campaigns; six nodes in a 2 × 3 grid, two proxies");
     let leader = cluster.leader;
-    cluster.node(leader).set_election_timeout(1);
-    cluster.node(leader).tick();
+    cluster.node(leader).campaign();
     cluster.drain(leader);
     cluster.deliver_all();
     assert!(cluster.node(leader).is_leader(), "node 1 wins its election");
-    cluster.node(leader).set_election_timeout(NO_CHECK_QUORUM);
     cluster.node(leader).tick();
     cluster.drain(leader);
     cluster.deliver_all();
@@ -479,7 +477,7 @@ fn a_handoff_mid_round(cluster: &mut Cluster) {
 fn summary(cluster: &Cluster) -> (BTreeMap<&'static str, usize>, usize) {
     let mut kinds = BTreeMap::new();
     for (_, m) in &cluster.wire {
-        *kinds.entry(kind(m)).or_default() += 1;
+        *kinds.entry(m.kind()).or_default() += 1;
     }
     (kinds, cluster.wire.len())
 }

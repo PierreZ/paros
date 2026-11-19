@@ -100,7 +100,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`
 - `scripts/check-module-style.sh` and `scripts/check-core-layers.sh`
-- the seven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
+- the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
+- the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
 - the `coverage` job: the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with
   `paros-consensus` instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
   `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`)
@@ -429,8 +430,9 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-consensus` — the sans-IO Paxos roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe. Its optional, default-on `assertions` feature (#317)
   adds `moonpool-assertions` for coverage probes only. Its tests, the model checkers
-  (`src/models/`), the driver contract (`src/contract/`) and the seven teaching examples
-  (`examples/`) live in the crate.
+  (`src/models/`), the driver contract (`src/contract/`) and the eleven examples
+  (`examples/`: seven lessons, and four that drive `ColocatedNode` as a driver does, from
+  `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus` today). A program
   depends on `paros` alone. Wasm-safe and provider-free.
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles

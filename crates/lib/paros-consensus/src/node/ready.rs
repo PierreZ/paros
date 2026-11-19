@@ -259,6 +259,47 @@ impl<'a> Ready<'a> {
         requests
     }
 
+    /// Whether the batch holds no work: nothing to persist, send, learn or
+    /// answer. A driver loop drains a node until its batch is empty:
+    ///
+    /// ```
+    /// use paros_consensus::contract::MemStorage;
+    /// use paros_consensus::journal::JournalIdentifier;
+    /// use paros_consensus::{ColocatedNode, Config, Limits, NodeId};
+    ///
+    /// let config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([NodeId(1)]);
+    /// let mut disk = MemStorage::new(config);
+    /// let mut node = ColocatedNode::new(&disk, Limits::DEFAULT);
+    /// node.campaign();
+    /// loop {
+    ///     let ready = node.ready();
+    ///     if ready.is_empty() {
+    ///         ready.advance();
+    ///         break;
+    ///     }
+    ///     disk.apply(ready.writes());
+    ///     // A node alone has no peer: a real driver sends `ready.messages()` here.
+    ///     ready.advance();
+    ///     node.advance_recovery();
+    /// }
+    /// assert!(node.is_leader());
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If an assertion of a bucket fails: a programmer error, never an
+    /// operating condition.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.writes().is_empty()
+            && self.messages().is_empty()
+            && self.committed().is_empty()
+            && self.read_states().is_empty()
+            && self.recovery_batch().is_none()
+            && self.match_requests().is_empty()
+            && self.gc_requests().is_empty()
+    }
+
     /// Acknowledge the batch: clears the pending buckets and releases the unique
     /// borrow, so the next [`ColocatedNode::ready`] is allowed. Consumes `self` — the
     /// guard cannot be reused.

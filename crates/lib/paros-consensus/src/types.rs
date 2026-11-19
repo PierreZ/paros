@@ -8,10 +8,24 @@ use core::cmp::Ordering;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NodeId(pub u64);
 
+impl core::fmt::Display for NodeId {
+    /// The bare number: `NodeId(3)` prints as `3`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A replicated-log slot index. Multi-Paxos chooses one [`Value`] per slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Slot(pub u64);
+
+impl core::fmt::Display for Slot {
+    /// The bare number: `Slot(4)` prints as `4`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// An opaque value proposed into / chosen for a slot. The core never interprets
 /// the bytes; the application owns their meaning.
@@ -86,6 +100,24 @@ impl Ballot {
 const _: () = assert!(Ballot::zero().round == 0);
 const _: () = assert!(Ballot::zero().node.0 == 0);
 
+impl core::fmt::Display for Ballot {
+    /// `round.node`, the form of the traces and the examples: round 7 of
+    /// node 2 prints as `7.2`.
+    ///
+    /// ```
+    /// use paros_consensus::{Ballot, NodeId};
+    ///
+    /// let ballot = Ballot { round: 7, node: NodeId(2) };
+    /// assert_eq!(ballot.to_string(), "7.2");
+    /// // A higher round wins, and the node breaks a tie.
+    /// assert!(ballot > Ballot { round: 6, node: NodeId(9) });
+    /// assert!(ballot > Ballot { round: 7, node: NodeId(1) });
+    /// ```
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}.{}", self.round, self.node)
+    }
+}
+
 impl Default for Ballot {
     /// [`Ballot::zero`]: the smallest ballot, the sentinel of nothing
     /// promised — an order's minimum, not an identity.
@@ -139,6 +171,15 @@ mod tests {
     fn equal_round_is_broken_by_node_id() {
         assert!(ballot(1, 2) > ballot(1, 1));
         assert_eq!(ballot(1, 1), ballot(1, 1));
+    }
+
+    #[test]
+    fn the_scalars_print_as_the_traces_write_them() {
+        use super::Slot;
+        assert_eq!(NodeId(3).to_string(), "3");
+        assert_eq!(Slot(4).to_string(), "4");
+        assert_eq!(ballot(7, 2).to_string(), "7.2");
+        assert_eq!(Ballot::zero().to_string(), "0.0");
     }
 
     #[test]
