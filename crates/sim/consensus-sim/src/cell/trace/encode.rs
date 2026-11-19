@@ -52,6 +52,9 @@ pub(super) fn write(
     let (name, fields) = leader(&bal, ranks, shift, sizes, event)
         .or_else(|| round(&bal, sizes, event))
         .or_else(|| membership(&bal, event))
+        .or_else(|| read(&bal, sizes, event))
+        .or_else(|| floor(sizes, event))
+        .or_else(|| replica(&bal, sizes, event))
         .expect("every event has an encoding");
     trace.event(name, fields);
 }
@@ -278,6 +281,196 @@ fn membership(bal: &impl Fn(Ballot) -> Value, event: &CellEvent) -> Option<(&'st
             matchmaker: m,
             ballot,
         } => ("gcack", vec![("mm", matchmaker(*m)), ("bal", bal(*ballot))]),
+        _ => return None,
+    })
+}
+
+/// A slot that may be none: `-1` for none.
+fn maybe_slot(sizes: &mut Sizes, s: Option<Slot>) -> Value {
+    s.map_or(Value::Int(-1), |s| {
+        sizes.bound(Slot(s.0 + 1));
+        slot(s)
+    })
+}
+
+/// The steps of a leaderless read, and the writes that completed.
+fn read(
+    bal: &impl Fn(Ballot) -> Value,
+    sizes: &mut Sizes,
+    event: &CellEvent,
+) -> Option<(&'static str, Fields)> {
+    Some(match event {
+        CellEvent::Basis {
+            node: id,
+            ballot,
+            fence,
+        } => (
+            "basis",
+            vec![
+                ("node", node(*id)),
+                ("bal", bal(*ballot)),
+                ("fence", maybe_slot(sizes, *fence)),
+            ],
+        ),
+        CellEvent::ReadStart {
+            node: id,
+            ctx,
+            ballot,
+            fence,
+            own,
+        } => {
+            let mut fields = vec![
+                ("node", node(*id)),
+                ("ctx", Value::Int(i64::try_from(*ctx).expect("a token"))),
+                ("bal", bal(*ballot)),
+                ("fence", maybe_slot(sizes, *fence)),
+            ];
+            if let Some(own) = own {
+                fields.push(("own", maybe_slot(sizes, own.watermark)));
+            }
+            ("readstart", fields)
+        }
+        CellEvent::ReadAck {
+            acceptor,
+            ctx,
+            watermark,
+            fence,
+        } => (
+            "readack",
+            vec![
+                ("acc", node(*acceptor)),
+                ("ctx", Value::Int(i64::try_from(*ctx).expect("a token"))),
+                ("wm", maybe_slot(sizes, *watermark)),
+                ("fence", fence.map_or(Value::Int(-1), bal)),
+            ],
+        ),
+        CellEvent::ReadFold {
+            node: id,
+            acceptor,
+            ctx,
+        } => (
+            "readfold",
+            vec![
+                ("node", node(*id)),
+                ("acc", node(*acceptor)),
+                ("ctx", Value::Int(i64::try_from(*ctx).expect("a token"))),
+            ],
+        ),
+        CellEvent::ReadServe {
+            node: id,
+            ctx,
+            index,
+        } => (
+            "readserve",
+            vec![
+                ("node", node(*id)),
+                ("ctx", Value::Int(i64::try_from(*ctx).expect("a token"))),
+                ("index", maybe_slot(sizes, *index)),
+            ],
+        ),
+        CellEvent::Applied { slot: s } => ("applied", vec![("slot", maybe_slot(sizes, Some(*s)))]),
+        _ => return None,
+    })
+}
+
+/// A journal position.
+fn seq(position: u64) -> Value {
+    Value::Int(i64::try_from(position).expect("a position"))
+}
+
+/// The steps of the compaction floor: the fold, a compaction and a jump.
+fn floor(sizes: &mut Sizes, event: &CellEvent) -> Option<(&'static str, Fields)> {
+    Some(match event {
+        CellEvent::Fold {
+            slot: s,
+            high,
+            first,
+        } => {
+            sizes.bound(Slot(s.0 + 1));
+            (
+                "fold",
+                vec![
+                    ("slot", slot(*s)),
+                    ("high", seq(*high)),
+                    ("first", seq(*first)),
+                ],
+            )
+        }
+        CellEvent::Compact { node: id, floor } | CellEvent::Trim { node: id, floor } => {
+            sizes.bound(*floor);
+            let name = if matches!(event, CellEvent::Compact { .. }) {
+                "compact"
+            } else {
+                "trim"
+            };
+            (name, vec![("node", node(*id)), ("floor", slot(*floor))])
+        }
+        _ => return None,
+    })
+}
+
+/// The steps of a read replica.
+fn replica(
+    bal: &impl Fn(Ballot) -> Value,
+    sizes: &mut Sizes,
+    event: &CellEvent,
+) -> Option<(&'static str, Fields)> {
+    let token = |ctx: u64| Value::Int(i64::try_from(ctx).expect("a token"));
+    Some(match event {
+        CellEvent::ReplicaLearn {
+            replica,
+            slot: s,
+            ballot,
+            cmd,
+        } => {
+            sizes.at(*s, *cmd);
+            (
+                "rlearn",
+                vec![
+                    ("rep", node(*replica)),
+                    ("slot", slot(*s)),
+                    ("bal", bal(*ballot)),
+                    ("val", cmd.value()),
+                ],
+            )
+        }
+        CellEvent::ReplicaApply { replica, slot: s } => {
+            sizes.bound(Slot(s.0 + 1));
+            ("rapply", vec![("rep", node(*replica)), ("slot", slot(*s))])
+        }
+        CellEvent::ReplicaFloor {
+            replica,
+            floor,
+            jump,
+        } => {
+            sizes.bound(*floor);
+            (
+                if *jump { "rtrim" } else { "rcompact" },
+                vec![("rep", node(*replica)), ("floor", slot(*floor))],
+            )
+        }
+        CellEvent::ReplicaBoot { replica, from } => {
+            sizes.bound(*from);
+            (
+                "rboot",
+                vec![("rep", node(*replica)), ("from", slot(*from))],
+            )
+        }
+        CellEvent::ReplicaRead { replica, ctx } => {
+            ("rread", vec![("rep", node(*replica)), ("ctx", token(*ctx))])
+        }
+        CellEvent::ReplicaServe {
+            replica,
+            ctx,
+            index,
+        } => (
+            "rserve",
+            vec![
+                ("rep", node(*replica)),
+                ("ctx", token(*ctx)),
+                ("index", maybe_slot(sizes, *index)),
+            ],
+        ),
         _ => return None,
     })
 }

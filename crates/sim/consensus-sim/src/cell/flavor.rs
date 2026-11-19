@@ -390,4 +390,23 @@ pub enum Mutant {
     /// alone; the trace check refuses the request
     /// (`MatchmakerTrace.tla`).
     EarlyGc,
+    /// The driver writes the sender's belief ballot as the read fence of
+    /// each `PreReadAck`, and not the higher of its promise and its belief
+    /// (the fence before PR #1074, `Fence = "belief"` of `reads/`). A read
+    /// goes stale only when a lagging acceptor promised a newer campaign
+    /// that chose a write; the trace check refuses the answer itself
+    /// (`ReadsTrace.tla`).
+    BeliefFence,
+    /// The driver drops the vote watermark from each `PreReadAck`: the
+    /// sender says it never voted. A read goes stale only when every
+    /// answer that holds a completed write is hidden and the fence is
+    /// below it; the trace check refuses the first answer whose watermark
+    /// is not its sender's (`ReadsTrace.tla`).
+    HideWatermark,
+    /// The disk compacts each `WriteOp::Truncate` to the end of the chosen
+    /// prefix, past the slots that still hold records at or above
+    /// `first_seq` (`FloorRule = "slot"` of `truncation/`). A reader loses
+    /// a record only when it asks that disk for it; the trace check
+    /// refuses the compaction itself (`TruncationTrace.tla`).
+    CompactPastFold,
 }

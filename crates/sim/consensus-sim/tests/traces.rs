@@ -256,6 +256,21 @@ fn tlc_accepts_the_matchmaker_walks() {
     accepts(Spec::Matchmaker, &Flavor::matchmakers());
 }
 
+#[test]
+fn tlc_accepts_the_lagging_read_walks() {
+    accepts(Spec::Reads, &Flavor::lagging_reads());
+}
+
+#[test]
+fn tlc_accepts_the_truncation_walks() {
+    accepts(Spec::Truncation, &Flavor::multi_paxos_five());
+}
+
+#[test]
+fn tlc_accepts_the_read_replica_walks() {
+    accepts(Spec::Compartments, &Flavor::compartments());
+}
+
 /// The first seed in `seeds` of `flavor` with `mutant` whose walk of
 /// `chaos` chaos steps the oracles pass and `spec` refuses, with the event
 /// TLC names.
@@ -385,5 +400,101 @@ fn tlc_refuses_an_early_gc() {
     assert!(
         matches!(event, CellEvent::GcAsk { .. }),
         "seed {seed}: TLC refused {event:?}, not a GC request"
+    );
+}
+
+/// An acceptor answers a read with its belief ballot as its read fence,
+/// not the higher of its promise and its belief. The oracle sees a stale
+/// read only when a lagging acceptor promised a campaign that chose a
+/// write; TLC refuses the answer whose fence is below its promise. The
+/// promise passes the belief only on an acceptor whose pool lags: rare,
+/// so the window starts at the first seed that has one.
+#[test]
+fn tlc_refuses_a_read_fence_below_the_promise() {
+    require_tlc(&Spec::Reads.check());
+    let (seed, event, state) = first_refused_cell(
+        Spec::Reads,
+        &Flavor::lagging_reads(),
+        Mutant::BeliefFence,
+        50..=70,
+        150,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, CellEvent::ReadAck { .. }),
+        "seed {seed}: TLC refused {event:?}, not a read answer"
+    );
+}
+
+/// An acceptor answers a read as if it never voted. The oracle sees a
+/// stale read only when the hidden watermarks held a completed write above
+/// the fence; TLC refuses the first answer that hides a vote.
+#[test]
+fn tlc_refuses_a_read_answer_that_hides_its_watermark() {
+    require_tlc(&Spec::Reads.check());
+    let (seed, event, state) = first_refused_cell(
+        Spec::Reads,
+        &Flavor::lagging_reads(),
+        Mutant::HideWatermark,
+        1..=40,
+        150,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(
+            event,
+            CellEvent::ReadAck {
+                watermark: None,
+                ..
+            }
+        ),
+        "seed {seed}: TLC refused {event:?}, not an answer that hid its watermark"
+    );
+}
+
+/// The disk compacts each truncation to the end of the chosen prefix,
+/// past the records at or above `first_seq`. The oracle sees a bug only
+/// when a reader asks that disk for a lost record; TLC refuses the
+/// compaction itself. A compaction needs a claim, accepted writes and a
+/// truncation that a node applied: rare in a walk of 150 steps, so the
+/// window starts near the first seed that compacts (77).
+#[test]
+fn tlc_refuses_a_compaction_past_the_fold() {
+    require_tlc(&Spec::Truncation.check());
+    let (seed, event, state) = first_refused_cell(
+        Spec::Truncation,
+        &Flavor::multi_paxos_five(),
+        Mutant::CompactPastFold,
+        70..=80,
+        150,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, CellEvent::Compact { .. }),
+        "seed {seed}: TLC refused {event:?}, not a compaction"
+    );
+}
+
+/// A read replica serves a read from its own prefix, with no quorum of
+/// answers. The oracle sees a stale read only when a write completed
+/// beyond that prefix; TLC refuses the serve itself.
+#[test]
+fn tlc_refuses_a_replica_read_with_no_quorum() {
+    require_tlc(&Spec::Compartments.check());
+    let (seed, event, state) = first_refused_cell(
+        Spec::Compartments,
+        &Flavor::compartments(),
+        Mutant::LocalRead,
+        1..=30,
+        150,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, CellEvent::ReplicaServe { .. }),
+        "seed {seed}: TLC refused {event:?}, not a served read"
     );
 }

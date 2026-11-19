@@ -43,7 +43,13 @@ fn ballots(events: &[CellEvent]) -> BTreeSet<Ballot> {
             | CellEvent::Register { ballot, .. }
             | CellEvent::Prepare { ballot, .. }
             | CellEvent::GcAsk { ballot }
-            | CellEvent::GcAck { ballot, .. } => Some(*ballot),
+            | CellEvent::GcAck { ballot, .. }
+            | CellEvent::Basis { ballot, .. }
+            | CellEvent::ReadStart { ballot, .. }
+            | CellEvent::ReadAck {
+                fence: Some(ballot),
+                ..
+            } => Some(*ballot),
             _ => None,
         })
         .collect()

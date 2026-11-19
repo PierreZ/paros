@@ -51,7 +51,7 @@ use crate::oracle::quorum::Phase2Rule;
 use crate::oracle::reads::Reads;
 
 pub use flavor::{Flavor, Mutant};
-pub use trace::{CellEvent, Cmd, Rule, Spec};
+pub use trace::{CellEvent, Cmd, OwnAnswer, Rule, Spec};
 
 /// The coverage sites of the cell. A walk names the ones its flavor must
 /// reach with [`moonpool_walk::Walk::expect_sometimes`].
@@ -341,6 +341,11 @@ impl Model for Cell {
                 if let Wire::MatchReply(reply) = &wire {
                     self.discover(id, reply, cx);
                 }
+                if let Wire::Paxos(msg) = &wire
+                    && let Some(event) = self.read_fold(id, msg)
+                {
+                    cx.record(event);
+                }
                 let node = self.node_mut(id).live.as_mut().expect("a live node");
                 match wire {
                     Wire::Paxos(msg) => node.step(msg),
@@ -439,7 +444,10 @@ impl Model for Cell {
                 if self.replica(id).live.is_none() {
                     let limits = self.flavor.limits;
                     let site = self.replica_mut(id);
-                    site.live = Some(ReplicaNode::new(&site.disk, limits));
+                    let replica = ReplicaNode::new(&site.disk, limits);
+                    let from = replica.replica().folded();
+                    site.live = Some(replica);
+                    cx.record(CellEvent::ReplicaBoot { replica: id, from });
                     self.drain_replica(id, cx);
                 }
             }
@@ -933,10 +941,14 @@ impl Cell {
             // be in yet.
             let pool = node.pool().to_vec();
             let seen = Seen::of(node);
+            let belief = node.acceptors_since();
             let ready = node.ready();
             let writes = ready.writes().to_vec();
             let mut batch: Vec<(Audience, Message)> = ready.messages().to_vec();
             plant(mutant, &mut batch);
+            if mutant == Some(Mutant::BeliefFence) {
+                belief_fences(belief, &mut batch);
+            }
             let mut out = route(&batch, &pool, Some(id), &replicas);
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
@@ -975,6 +987,7 @@ impl Cell {
                 cx.crashed(&Party::Node(id));
                 return;
             }
+            let writes = self.fold_batch(id, writes, &committed, cx);
             let before = self.node(id).disk.hard_state().chosen_index;
             if mutant != Some(Mutant::SkipPersist) {
                 self.persist_node(id, &writes);
@@ -1002,10 +1015,15 @@ impl Cell {
             }
             self.send_from(id, out, cx);
             for (slot, _, command, outcome) in &committed {
-                self.applied(&format!("node {}", id.0), *slot, command, outcome);
+                self.applied(&format!("node {}", id.0), *slot, command, outcome, cx);
             }
             for state in &read_states {
                 sometimes!(true, reach::NODE_READ);
+                cx.record(CellEvent::ReadServe {
+                    node: id,
+                    ctx: state.ctx,
+                    index: state.index,
+                });
                 self.reads
                     .answered(&format!("node {}", id.0), state.ctx, state.index);
             }
@@ -1063,6 +1081,27 @@ impl Cell {
         true
     }
 
+    /// Before node `id` persists `writes`: record the fold of the slots the
+    /// batch applies, which comes before the floor it writes, and plant
+    /// [`Mutant::CompactPastFold`].
+    fn fold_batch(
+        &mut self,
+        id: NodeId,
+        mut writes: Vec<WriteOp>,
+        committed: &[(Slot, Ballot, Command, paros_consensus::journal::Outcome)],
+        cx: &mut Cx<'_, Self>,
+    ) -> Vec<WriteOp> {
+        for (slot, _, _, outcome) in committed {
+            if let Some(event) = self.tracer.fold(*slot, outcome) {
+                cx.record(event);
+            }
+        }
+        if self.flavor.mutant == Some(Mutant::CompactPastFold) {
+            compact_past_fold(self.node(id).disk.hard_state().chosen_index, &mut writes);
+        }
+        writes
+    }
+
     /// Record the steps of a batch of node `id` that reached its disk
     /// ([`trace`]); `before` is the disk's chosen index before the batch
     /// (`None`: nothing chosen).
@@ -1084,6 +1123,14 @@ impl Cell {
                 Some((Slot(s), Cmd::of(command)))
             })
             .collect();
+        // The basis of a plain node is its static configuration, bound to
+        // no won ballot: only a deployment with matchmakers learns one.
+        let basis = site
+            .live
+            .as_ref()
+            .filter(|_| self.flavor.matchmakers > 0)
+            .and_then(ColocatedNode::read_basis)
+            .map(|basis| (basis.since, basis.fence));
         let events = self.tracer.batch(&trace::Batch {
             id,
             leading: traced.seen.leading,
@@ -1094,6 +1141,7 @@ impl Cell {
             prior: traced.seen.prior,
             matchmaking: traced.matchmaking,
             gc: traced.gc,
+            basis,
         });
         for event in events {
             cx.record(event);
@@ -1159,15 +1207,58 @@ impl Cell {
         }
     }
 
+    /// The fold of an answer that node `id` is about to step: a
+    /// `PreReadAck` from a member of the row of a read it holds open, the
+    /// first from that member (`QuorumReads::fold` ignores the others).
+    fn read_fold(&self, id: NodeId, msg: &Message) -> Option<CellEvent> {
+        let Message::PreReadAck {
+            from,
+            ctx,
+            config_since,
+            ..
+        } = msg
+        else {
+            return None;
+        };
+        let node = self.node(id).live.as_ref()?;
+        let read = node
+            .quorum_reads()
+            .pending()
+            .iter()
+            .find(|r| r.ctx() == *ctx)?;
+        // An answer above the basis ends the read whatever its stage; any
+        // other counts only while the read tallies, once per member.
+        let supersedes = config_since
+            .zip(self.tracer.read_basis(*ctx))
+            .is_some_and(|(fence, basis)| fence > basis);
+        let counts = supersedes
+            || (read.confirmed_index().is_none() && !read.watermarks().contains_key(from));
+        let folds = node.pool().contains(from)
+            && read.config().phase1_addressees(read.row()).contains(from)
+            && counts;
+        folds.then_some(CellEvent::ReadFold {
+            node: id,
+            acceptor: *from,
+            ctx: *ctx,
+        })
+    }
+
     fn applied(
         &mut self,
         who: &str,
         slot: Slot,
         command: &Command,
         outcome: &paros_consensus::journal::Outcome,
+        cx: &mut Cx<'_, Self>,
     ) {
         self.ledger.applied(who, slot, command, outcome);
         self.reads.applied(slot);
+        if let Some(event) = self.tracer.fold(slot, outcome) {
+            cx.record(event);
+        }
+        if let Some(event) = self.tracer.applied(slot) {
+            cx.record(event);
+        }
         sometimes!(
             matches!(command, Command::Write(_))
                 && matches!(outcome, paros_consensus::journal::Outcome::Accepted { .. }),
@@ -1230,6 +1321,9 @@ impl Cell {
                 );
                 site.disk.apply(std::slice::from_ref(op));
             }
+            for event in trace::replica_writes(id, &writes, true) {
+                cx.record(event);
+            }
             let index = site.disk.hard_state().chosen_index;
             self.ledger.disk_chosen(&who, index);
             for envelope in out {
@@ -1237,10 +1331,22 @@ impl Cell {
             }
             for (slot, _, command, outcome) in &committed {
                 sometimes!(true, reach::REPLICA_APPLIED);
-                self.applied(&who, *slot, command, outcome);
+                cx.record(CellEvent::ReplicaApply {
+                    replica: id,
+                    slot: *slot,
+                });
+                self.applied(&who, *slot, command, outcome, cx);
+            }
+            for event in trace::replica_writes(id, &writes, false) {
+                cx.record(event);
             }
             for state in &read_states {
                 sometimes!(true, reach::REPLICA_READ);
+                cx.record(CellEvent::ReplicaServe {
+                    replica: id,
+                    ctx: state.ctx,
+                    index: state.index,
+                });
                 self.reads.answered(&who, state.ctx, state.index);
             }
             if let Some(replica) = self.replica_mut(id).live.as_mut() {
@@ -1450,7 +1556,21 @@ impl Cell {
                     self.reads.answered(&format!("node {}", id.0), ctx, index);
                     return;
                 }
+                let basis = node.read_basis().map(|basis| (basis.since, basis.fence));
                 node.quorum_read(ctx);
+                if let Some(basis) = basis
+                    && let Some(read) = node
+                        .quorum_reads()
+                        .pending()
+                        .iter()
+                        .find(|r| r.ctx() == ctx)
+                {
+                    let own = read
+                        .watermarks()
+                        .get(&id)
+                        .map(|&watermark| OwnAnswer { watermark });
+                    cx.record(self.tracer.read_start(id, ctx, basis, own));
+                }
                 self.drain_node(id, cx);
             }
             Party::Replica(id) => {
@@ -1461,8 +1581,14 @@ impl Cell {
                     return;
                 };
                 self.reads.started(ctx);
+                cx.record(CellEvent::ReplicaRead { replica: id, ctx });
                 if local {
                     let index = replica.replica().chosen_index();
+                    cx.record(CellEvent::ReplicaServe {
+                        replica: id,
+                        ctx,
+                        index,
+                    });
                     self.reads
                         .answered(&format!("replica {}", id.0), ctx, index);
                     return;
@@ -1747,6 +1873,7 @@ fn plant(mutant: Option<Mutant>, batch: &mut [(Audience, Message)]) {
     match mutant {
         Some(Mutant::HideVotes) => hide_votes(batch),
         Some(Mutant::RewindHandoff) => rewind_handoffs(batch),
+        Some(Mutant::HideWatermark) => hide_watermarks(batch),
         _ => {}
     }
 }
@@ -1822,6 +1949,50 @@ fn hide_votes(batch: &mut [(Audience, Message)]) {
     for (_, message) in batch {
         if let Message::Promise { accepted, .. } = message {
             accepted.clear();
+        }
+    }
+}
+
+/// The [`Mutant::HideWatermark`] bug: every `PreReadAck` says that its
+/// sender never voted.
+fn hide_watermarks(batch: &mut [(Audience, Message)]) {
+    for (_, message) in batch {
+        if let Message::PreReadAck { watermark, .. } = message {
+            *watermark = None;
+        }
+    }
+}
+
+/// The [`Mutant::CompactPastFold`] bug: every compaction drops the whole
+/// chosen prefix, the slots that still hold records above `first_seq`
+/// too. `chosen` is the disk's chosen index before the batch.
+fn compact_past_fold(chosen: Option<Slot>, writes: &mut [WriteOp]) {
+    let top = writes
+        .iter()
+        .filter_map(|op| match op {
+            WriteOp::SetChosenIndex(slot) => Some(*slot),
+            _ => None,
+        })
+        .chain(chosen)
+        .max();
+    for op in writes {
+        if let (WriteOp::Truncate { first, .. }, Some(top)) = (op, top) {
+            *first = (*first).max(Slot(top.0 + 1));
+        }
+    }
+}
+
+/// The [`Mutant::BeliefFence`] bug: every `PreReadAck` carries the
+/// ballot of the sender's belief, `belief`, as its read fence, and not the
+/// higher of its promise and its belief.
+fn belief_fences(belief: Ballot, batch: &mut [(Audience, Message)]) {
+    for (_, message) in batch {
+        if let Message::PreReadAck {
+            config_since: Some(fence),
+            ..
+        } = message
+        {
+            *fence = belief;
         }
     }
 }

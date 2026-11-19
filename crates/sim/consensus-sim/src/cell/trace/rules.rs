@@ -183,6 +183,181 @@ const MATCHMAKER: &[Rule] = &[
     },
 ];
 
+/// `ReadsTrace`: the read basis of a beat, its fence, the reader's own
+/// answer, a read that must see a completed write, and an answer whose
+/// read fence ends the read.
+const READS: &[Rule] = &[
+    Rule {
+        name: "a node learns its read basis from a beat",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::Basis { node, ballot, .. } if *node != ballot.node))
+        },
+    },
+    Rule {
+        name: "a read basis carries a fence",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::Basis { fence: Some(_), .. }))
+        },
+    },
+    Rule {
+        name: "a reader answers its own read",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::ReadStart { own: Some(_), .. }))
+        },
+    },
+    Rule {
+        name: "a read after a completed write is served",
+        met: |events| {
+            let mut applied = false;
+            let mut after = BTreeSet::new();
+            events.iter().any(|e| match e {
+                CellEvent::Applied { .. } => {
+                    applied = true;
+                    false
+                }
+                CellEvent::ReadStart { ctx, .. } if applied => {
+                    after.insert(*ctx);
+                    false
+                }
+                CellEvent::ReadServe { ctx, .. } => after.contains(ctx),
+                _ => false,
+            })
+        },
+    },
+    Rule {
+        name: "an answer above the read basis ends the read",
+        met: |events| {
+            let mut basis = BTreeMap::new();
+            let mut fences = BTreeMap::new();
+            events.iter().any(|e| match e {
+                CellEvent::ReadStart { ctx, ballot, .. } => {
+                    basis.insert(*ctx, *ballot);
+                    false
+                }
+                CellEvent::ReadAck {
+                    acceptor,
+                    ctx,
+                    fence: Some(fence),
+                    ..
+                } => {
+                    fences.insert((*acceptor, *ctx), *fence);
+                    false
+                }
+                CellEvent::ReadFold { acceptor, ctx, .. } => fences
+                    .get(&(*acceptor, *ctx))
+                    .zip(basis.get(ctx))
+                    .is_some_and(|(fence, basis)| fence > basis),
+                _ => false,
+            })
+        },
+    },
+];
+
+/// The rules of the compaction floor of `truncation/`.
+const TRUNCATION: &[Rule] = &[
+    Rule {
+        name: "a node compacts its log",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::Compact { .. }))
+        },
+    },
+    Rule {
+        name: "a compaction keeps a record at or above first_seq",
+        met: |events| {
+            events.iter().enumerate().any(|(i, e)| {
+                let CellEvent::Compact { floor, .. } = e else {
+                    return false;
+                };
+                let folds = events[..i].iter().filter_map(|e| match e {
+                    CellEvent::Fold { slot, high, first } => Some((*slot, *high, *first)),
+                    _ => None,
+                });
+                let first = folds.clone().next_back().map_or(0, |(_, _, first)| first);
+                folds
+                    .into_iter()
+                    .any(|(slot, high, _)| slot >= *floor && high > first)
+            })
+        },
+    },
+    Rule {
+        name: "a node jumps to the trim point of a peer",
+        met: |events| events.iter().any(|e| matches!(e, CellEvent::Trim { .. })),
+    },
+    Rule {
+        name: "an acceptor promises after it compacted",
+        met: |events| {
+            events.iter().enumerate().any(|(i, e)| {
+                let CellEvent::Compact { node, .. } = e else {
+                    return false;
+                };
+                events[i..]
+                    .iter()
+                    .any(|e| matches!(e, CellEvent::Promise { acceptor, .. } if acceptor == node))
+            })
+        },
+    },
+];
+
+/// The rules of the read replica of `compartments/`.
+const COMPARTMENTS: &[Rule] = &[
+    Rule {
+        name: "a replica learns a slot",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::ReplicaLearn { .. }))
+        },
+    },
+    Rule {
+        name: "a replica folds a slot",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::ReplicaApply { .. }))
+        },
+    },
+    Rule {
+        name: "a replica boots again and folds its prefix again",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::ReplicaBoot { from, .. } if from.0 > 0))
+        },
+    },
+    Rule {
+        name: "a replica moves its floor",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::ReplicaFloor { .. }))
+        },
+    },
+    Rule {
+        name: "a replica serves a read opened after a completed write",
+        met: |events| {
+            events.iter().enumerate().any(|(i, e)| {
+                let CellEvent::ReplicaRead { ctx, .. } = e else {
+                    return false;
+                };
+                events[..i]
+                    .iter()
+                    .any(|e| matches!(e, CellEvent::Applied { .. }))
+                    && events[i..]
+                        .iter()
+                        .any(|e| matches!(e, CellEvent::ReplicaServe { ctx: c, .. } if c == ctx))
+            })
+        },
+    },
+];
+
 impl Spec {
     /// The steps of this spec that some checked walk must take.
     #[must_use]
@@ -198,6 +373,19 @@ impl Spec {
             Self::Matchmaker => {
                 rules.push(RESTART);
                 rules.extend_from_slice(MATCHMAKER);
+            }
+            Self::Reads => {
+                rules.push(RESTART);
+                rules.extend_from_slice(MATCHMAKER);
+                rules.extend_from_slice(READS);
+            }
+            Self::Truncation => {
+                rules.push(RESTART);
+                rules.extend_from_slice(TRUNCATION);
+            }
+            Self::Compartments => {
+                rules.push(RESTART);
+                rules.extend_from_slice(COMPARTMENTS);
             }
         }
         rules
@@ -215,6 +403,9 @@ mod tests {
             Spec::LeaderHandoff,
             Spec::ProxyLeader,
             Spec::Matchmaker,
+            Spec::Reads,
+            Spec::Truncation,
+            Spec::Compartments,
         ] {
             assert!(spec.rules().iter().all(|rule| !rule.met(&[])), "{spec:?}");
         }

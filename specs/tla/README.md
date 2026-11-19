@@ -39,6 +39,16 @@ of `consensus-sim`. The trace specs today are:
 - `matchmaker/MatchmakerTrace`: matchmaking, Phase 1 over every configuration of `H_b`, Phase 2
   in `C_b` and the GC, on the flavor with matchmakers. The model decides one value; the trace
   spec takes its matchmaking and GC, and writes the log as its own steps.
+- `reads/ReadsTrace`: `MatchmakerTrace` and the leaderless reads (the read basis of a won
+  leadership, the read fence of each answer, the served index), on the lagging-reads flavor.
+- `truncation/TruncationTrace`: `MultiPaxosTrace` and the compaction floor (the journal fold,
+  each compaction against `first_seq`, the trim jump, the floor guards), on Multi-Paxos on five
+  with truncation.
+- `compartments/CompartmentsTrace`: `MultiPaxosTrace` and the read replica (its learns, its walk
+  in slot order, its floors, its boot and its leaderless read), on the every-compartment flavor.
+
+A trace spec that extends the trace spec of another model links that model's modules into its
+folder, as `reads/` links `matchmaker/`.
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take

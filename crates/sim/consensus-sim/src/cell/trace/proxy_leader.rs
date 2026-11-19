@@ -28,6 +28,21 @@ pub(super) fn keeps(event: &CellEvent) -> bool {
             | CellEvent::Register { .. }
             | CellEvent::GcAsk { .. }
             | CellEvent::GcAck { .. }
+            | CellEvent::Basis { .. }
+            | CellEvent::ReadStart { .. }
+            | CellEvent::ReadAck { .. }
+            | CellEvent::ReadFold { .. }
+            | CellEvent::ReadServe { .. }
+            | CellEvent::Applied { .. }
+            | CellEvent::Fold { .. }
+            | CellEvent::Compact { .. }
+            | CellEvent::Trim { .. }
+            | CellEvent::ReplicaLearn { .. }
+            | CellEvent::ReplicaApply { .. }
+            | CellEvent::ReplicaFloor { .. }
+            | CellEvent::ReplicaBoot { .. }
+            | CellEvent::ReplicaRead { .. }
+            | CellEvent::ReplicaServe { .. }
     )
 }
 
