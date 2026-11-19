@@ -1485,8 +1485,8 @@ workers):
 | `gc_won_fill` | ci | the GC at the win; two slots, no node catches up | `NoFillChosen` violation (1.4 million states, 73 s) |
 | `safety` | ci | the rules of the code; two ballots, one slot | pass (302 thousand states, 20 s) |
 | `cover_joined_fill` | long | the new member counts with no record; two slots, `a3` alone catches up | `NoFillChosen` violation (4.8 million states, 4.5 min) |
-| `three_ballots` | long | the rules of the code; one slot | THREE_BALLOTS |
-| `two_slots` | long | the rules of the code; two ballots | TWO_SLOTS |
+| `three_ballots` | long | the rules of the code; one slot | pass (41.5 million states, 54 min) |
+| `two_slots` | long | the rules of the code; two ballots | no violation in 43.8 million distinct states (bounded: stopped after 63 min, 21.2 million states left on the queue) |
 
 The long checks ran once on 2026-11-19 (#1218 (truncation model, part 3)) with 4 workers.
 
@@ -1504,11 +1504,12 @@ The traces of the controls:
   slot 0. Ballot 3 of `a2` matches with `C2` alone and wins on `{a2, a4}`. It hears slot 1 only
   (the vote of `a2`), its frontier is 2, and it fills slot 0 with a `Noop`. `a3`, the one member
   of `C2` that holds slot 0, is not in the quorum.
-- `cover_joined_fill`: `{a1, a3}` choose `trunc` at slot 0 at ballot 1, and `a3` learns it by a
-  catch-up from `a1`. Ballot 2 of `a3` campaigns from slot 1, so its fence covers slot 0, which
-  `a3` holds. With `Cover = "joined"`, `{a3, a4}` cover the fence although `a4` holds nothing,
-  and the GC forgets `C1`. Ballot 3 of `a2` wins on `{a2, a4}` and fills slot 0 with a `Noop`, as
-  in `gc_won_fill`.
+- `cover_joined_fill`: ballot 1 wins on `{a1, a2}`, and `{a1, a3}` choose `trunc` at slot 0.
+  Ballot 2 of `a3` wins on `{a2, a3}`, proposes `trunc` again at slot 0, and allocates slot 1,
+  which `a2` votes at ballot 2. Its fence covers slot 0. `a1` learns slot 0, and `a3` learns it
+  by a catch-up from `a1`. With `Cover = "joined"`, `{a3, a4}` cover the fence although `a4`
+  holds nothing, and the GC forgets `C1`. Ballot 3 of `a2` wins on `{a2, a4}`, hears slot 1
+  only, and fills slot 0 with a `Noop`, as in `gc_won_fill`.
 
 The answer to #1218: with the rule of the code, `Recoverable` holds over the Phase-1 quorums of
 `C2` once `C1` is gone. A member of `C2` counts toward the fence only when it holds each slot
