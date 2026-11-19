@@ -47,7 +47,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/` | #1190 (rework 6.10), done |
-| Leaderless reads | `quorum_read.rs` | `reads/` | #1099 (rework 1.10) |
+| Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
@@ -580,7 +580,10 @@ Constants select the rule:
 | Constant | Values |
 |---|---|
 | `Basis` | `won`: a node learns its read basis only from a leadership that won its ballot (#260). `belief`: the basis is the configuration of the ballot that the node promised. |
-| `AckBallot` | `TRUE`: a `PreReadAck` carries the ballot of the acceptor, and an answer above the basis ends the read. |
+| `Fence` | What a `PreReadAck` carries; an answer above the basis ends the read (#1099 (rework 1.10)). `promise`: the higher of the promise and the belief ballot of the acceptor (`wire_read_fence`, the code since PR #1074 (fence a leaderless read on the promise)). `belief`: the belief ballot alone (`acceptors_since`, the code before PR #1074), a control. `none`: no ballot, a control. |
+| `Laggers` | The acceptors whose pool can lag: such an acceptor can ignore the configuration of a ballot that it promises or accepts (`learn_config`), and its belief ballot stays where it was. Its promise moves all the same. |
+| `Restarters` | The acceptors that can restart. The promise and the votes are durable. The belief goes back to the bootstrap, bound to no ballot, and the node did not hear what is in force until its membership probe answers. A reader also forgets its read basis and its open read. |
+| `Refuse` | `TRUE`: an acceptor that did not hear answers no `PreRead` (`on_pre_read`, the code). |
 | `Hold` | `TRUE`: the decision hold of #579 (zero-stall reconfiguration). `zero-stall/` holds the full checks of the hold. |
 | `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis (`main` today). `own`: option (b), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
 | `Q1s`, `Q2s`, `Targets` | The quorum system, for each configuration (#1102 (rework 1.13)): the Phase-1 quorums, the Phase-2 quorums, and the sets of acceptors that a reader asks. A majority asks the whole membership. A grid takes them from `grid/Grid.tla`: the partitions ask the whole membership, the full grid asks one row (`row_of`). |
@@ -604,6 +607,11 @@ Results (`reads/checks.txt`):
 |---|---|
 | The basis is the belief of the node | violation |
 | A `PreReadAck` carries no ballot | violation |
+| `fence_belief_lag`: the ack carries the belief ballot, `a2` can lag | violation (190 thousand states, 4 seconds) |
+| `reboot_belief_open`: the ack carries the belief ballot, `a2` can restart, no refusal | violation (620 thousand states, 11 seconds) |
+| `reboot_belief_refuse`: the ack carries the belief ballot, `a1` and `a2` can restart, the refusal (`long`) | pass (2.5 million states, 1 minute) |
+| `reboot_promise_open`: the ack carries the promise, `a2` can lag and restart, no refusal | pass (2.6 million states, 1 minute) |
+| `reboot_promise_open_reader`: the same, and the reader `a1` can restart too (`long`) | pass (4.7 million states, 2 minutes) |
 | The bypass of #579 with no decision hold | violation |
 | The rules of `main` | pass |
 | The bypass of #579 with the decision hold | pass |
@@ -635,6 +643,32 @@ refuses a change of members (`grid_full_static`), and a seal that reaches each r
 in `docs/architecture/02-data-plane.md` section 2.5); the code is #1209 (seal each row of a full
 grid).
 
+The fence of the `PreReadAck` (#1099 (rework 1.10), findings 1 and 11 of the review of
+`paros-consensus` of 2026-11-16). The trace of `fence_belief_lag` is finding 1:
+
+1. Ballot 2 registers `{a3, a4}`. Its history holds `{a1, a2, a3}`, the configuration of
+   ballot 1.
+2. `a2` promises ballot 2, but its pool lags, so it ignores the configuration of ballot 2. Its
+   belief ballot stays 0. `a3` promises ballot 2 too. That is a Phase-1 quorum of
+   `{a1, a2, a3}`, the one configuration of the history, and ballot 2 leads.
+3. `a3` and `a4` accept slot 1 at ballot 2. The leader acks it.
+4. The reader `a1` hears a late beat of ballot 1 and takes `{a1, a2, a3}` as its read basis.
+5. `a1` and `a2` answer with the belief ballot 0 and the watermark 0. That is a Phase-1 quorum
+   of the basis. The read is served at index 0 and misses slot 1.
+
+With the promise in the ack (the code since PR #1074), the answer of `a2` carries ballot 2 and
+ends the read: `reboot_promise_open` passes with the same lagger.
+
+The refusal of a rebooted node, examined again. `on_pre_read` answers no `PreRead` until the
+node heard what is in force. Under the old fence, the refusal is necessary:
+`reboot_belief_open` finds the same stale read, where `a2` restarts after its promise of ballot
+2, in place of a lag, and its belief goes back to ballot 0. Under the fence of the code, the
+refusal is not necessary for safety: `reboot_promise_open` and `reboot_promise_open_reader` pass
+with no refusal, because the promise is durable and the ack of a rebooted node carries it. The
+refusal only costs availability: a rebooted acceptor does not help a read until its membership
+probe answers. The code keeps it today. To remove it is a change of `on_pre_read` with this
+check as its model; it is not part of this step.
+
 Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
 leader and a reader outside its configuration whose own abandoned campaign is above it.
 `learner_own_serves` finds a read that option (b) serves and that `strict` refuses.
@@ -646,7 +680,9 @@ because an acceptor of the basis configuration always reports a later ballot. It
 recommendation: the learner checks have only majority quorums.
 
 Not in the model: GC watermarks, matchmaker generations, the replica tier, a read that expires,
-the registration of the abandoned campaign, more than one slot (so a slot's column is any
+an acceptor that loses its disk (its promise is durable here), the `StaleConfiguration` path
+that binds the belief below the promise (the fence of the code covers it, because it takes the
+higher of the two), the registration of the abandoned campaign, more than one slot (so a slot's column is any
 column), and a move between a grid and a majority.
 
 ### `campaign-discovery/`: how a campaign learns the matchmaker set in force, for #1034 (campaign asks the pool)

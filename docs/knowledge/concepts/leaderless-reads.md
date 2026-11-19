@@ -79,7 +79,9 @@ sequenceDiagram
   new leadership's beat arrives: "reads are unavailable during a campaign, never stale"
   (`quorum_read.rs` module doc).
 - **A rebooted acceptor** on a matchmaker deployment answers no `PreRead` until it has heard what
-  configuration is in force.
+  configuration is in force. The reads model shows that this refusal is not necessary for safety
+  under the promise fence (`specs/tla/reads/`, `reboot_promise_open`, #1099 (rework 1.10)): it
+  only costs availability. It was necessary under the old belief fence (`reboot_belief_open`).
 - **A floor ahead of the fold.** A server that jumped to a trim point but has not applied the
   `Truncate` answers unserved, never `Truncated` (02 §2.5).
 
@@ -97,6 +99,12 @@ campaign's `Prepare` believes a configuration that may never win, and older conf
 still hold slots its quorums never voted. So the basis comes only from a leadership that **won**,
 with its fence: everything an earlier configuration chose sits at or below the fence (#260,
 "option A").
+
+A `PreReadAck` carries the read fence of the acceptor: the higher of its durable promise and its
+belief ballot (`wire_read_fence`). An answer above the basis ends the read. The promise is the
+fence that the reads model checks (`specs/tla/reads/`, `Fence = "promise"`): an acceptor that
+promised a later campaign may have helped it win, whether or not it adopted that campaign's
+configuration.
 
 ## 7. Liveness
 
@@ -153,6 +161,11 @@ with its fence: everything an earlier configuration chose sits at or below the f
 
 ## 10. Pitfalls
 
+- **A fence on the belief ballot (finding 1 of the review of 2026-11-16).** A `PreReadAck` once
+  carried only `acceptors_since`. An acceptor whose pool lagged promised a campaign with a new
+  configuration, ignored that configuration, and answered with its old belief ballot, so a read
+  completed below a write that the new leadership chose. Fixed by PR #1074 (fence a leaderless
+  read on the promise); the TLA+ control is `specs/tla/reads/fence_belief_lag`.
 - **A read over a campaign's configuration (#260).** A leader under `{0,1,3}` with `q2 = 1` chose a
   `SetLeader` with its own vote, campaigned with `{0,2,3}` and died; an acceptor that promised the
   campaign served reads from a majority of the new configuration and missed the slot for a second
