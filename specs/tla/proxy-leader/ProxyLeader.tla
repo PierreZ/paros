@@ -32,7 +32,9 @@
 (*   - The leader delegates a slot to a proxy (`Message::Accept` with      *)
 (*     `reply_to = Party::Proxy`). It may delegate it again to another     *)
 (*     proxy (`ColocatedNode::move_round`) while no `Commit` of the slot   *)
-(*     reached it.                                                         *)
+(*     reached it. A `Commit` can be late or lost, so the leader may move  *)
+(*     a slot that a proxy already committed: the model lets it move a     *)
+(*     slot at any time.                                                   *)
 (*   - A proxy works for the highest ballot it was handed: a higher one    *)
 (*     closes every lower round (`close_below`), a lower one is ignored.   *)
 (*     It learns the configuration from the delegation (`learn_config`:    *)
@@ -206,11 +208,11 @@ Propose(b, s, v) ==
 
 \* The leader of ballot b delegates slot s to proxy p: the first time to
 \* `ProxyOf[s]` (`ProxyId::of`), and again to any proxy while no `Commit`
-\* of the slot reached it (`move_round`).
+\* of the slot reached it (`move_round`). The leader has no state of its
+\* own here, and a `Commit` can be late, so a move needs no condition.
 Delegate(b, s, p) ==
   /\ phase[b] = "p2"
   /\ prop[b][s] # None
-  /\ ~Committed(s)
   /\ p = ProxyOf[s] \/ Move
   /\ Send([type |-> "del", bal |-> b, slot |-> s, val |-> prop[b][s], proxy |-> p])
   /\ UNCHANGED <<prom, vote, phase, safe, prop, pbal, pcfg, round, done, crashes>>

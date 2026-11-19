@@ -45,7 +45,7 @@ use crate::oracle::quorum::Phase2Rule;
 use crate::oracle::reads::Reads;
 
 pub use flavor::{Flavor, Mutant};
-pub use trace::{CellEvent, Cmd};
+pub use trace::{CellEvent, Cmd, Spec};
 
 /// The coverage sites of the cell. A walk names the ones its flavor must
 /// reach with [`moonpool_walk::Walk::expect_sometimes`].
@@ -305,7 +305,7 @@ impl Model for Cell {
         }
     }
 
-    fn crash(&mut self, party: &Party, _cx: &mut Cx<'_, Self>) {
+    fn crash(&mut self, party: &Party, cx: &mut Cx<'_, Self>) {
         match *party {
             Party::Node(id) => self.crash_node(id),
             Party::Proxy(id) => {
@@ -315,6 +315,8 @@ impl Model for Cell {
                     reach::PROXY_CRASH
                 );
                 site.live = None;
+                let event = self.tracer.proxy_crash(id);
+                cx.record(event);
             }
             Party::Replica(id) => self.replica_mut(id).live = None,
             Party::Matchmaker(id) => self.matchmaker_mut(id).live = None,
@@ -352,7 +354,9 @@ impl Model for Cell {
         for site in &mut self.proxies {
             if cx.rng().chance(1, 3) {
                 site.dead_for_good = true;
-                site.live = None;
+                if site.live.take().is_some() {
+                    cx.record(self.tracer.proxy_crash(site.id));
+                }
             }
         }
     }
@@ -627,7 +631,7 @@ impl Cell {
     /// Boot node `id` from its disk; `again` when it ran before.
     fn boot_node(&mut self, id: NodeId, again: bool, cx: &mut Cx<'_, Self>) {
         if again {
-            cx.record(CellEvent::Restart { node: id });
+            cx.record(self.tracer.restart(id));
         }
         let site = self.node_mut(id);
         sometimes!(
@@ -670,7 +674,11 @@ impl Cell {
             // authority at (`try_become_leader`), before any allocation.
             let leading = node.is_leader().then(|| {
                 let frontier = node.proposer().fence().map_or(0, |s| s.0 + 1);
-                (node.ballot(), Slot(frontier))
+                let handoff = matches!(
+                    node.leadership_origin(),
+                    paros_consensus::node::LeadershipOrigin::Handoff { .. }
+                );
+                (node.ballot(), Slot(frontier), handoff)
             });
             let ready = node.ready();
             let writes = ready.writes().to_vec();
@@ -678,7 +686,6 @@ impl Cell {
             if mutant == Some(Mutant::HideVotes) {
                 hide_votes(&mut batch);
             }
-            let messages: Vec<Message> = batch.iter().map(|(_, m)| m.clone()).collect();
             let mut out = route(&batch, &pool, Some(id), &replicas);
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
@@ -698,6 +705,10 @@ impl Cell {
                 && read_states.is_empty()
                 && !more
             {
+                // An empty batch can still follow a change of leadership
+                // (a win with nothing to recover): the tracer records it.
+                let before = self.node(id).disk.hard_state().chosen_index;
+                self.trace_batch(id, leading, &[], &[], before, cx);
                 return;
             }
             if mutant == Some(Mutant::EarlyCommit) {
@@ -713,7 +724,7 @@ impl Cell {
             if mutant != Some(Mutant::SkipPersist) {
                 self.persist_node(id, &writes);
             }
-            self.trace_batch(id, leading, &writes, &messages, before, cx);
+            self.trace_batch(id, leading, &writes, &batch, before, cx);
             if crash_between {
                 sometimes!(true, reach::CRASH_BEFORE_SEND);
                 self.crash_node(id);
@@ -756,9 +767,9 @@ impl Cell {
     fn trace_batch(
         &mut self,
         id: NodeId,
-        leading: Option<(paros_consensus::Ballot, Slot)>,
+        leading: Option<(paros_consensus::Ballot, Slot, bool)>,
         writes: &[WriteOp],
-        messages: &[Message],
+        messages: &[(Audience, Message)],
         before: Option<Slot>,
         cx: &mut Cx<'_, Self>,
     ) {
@@ -872,7 +883,12 @@ impl Cell {
         };
         let ready = proxy.ready();
         let out = route(ready.messages(), &pool, None, &replicas);
+        let messages = ready.messages().to_vec();
         ready.advance();
+        let events = self.tracer.proxy_batch(id, &messages);
+        for event in events {
+            cx.record(event);
+        }
         let who = format!("proxy {}", id.0);
         for envelope in &out {
             if matches!(envelope.msg, Wire::Paxos(Message::Commit { .. })) {
