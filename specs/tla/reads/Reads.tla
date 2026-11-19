@@ -14,8 +14,24 @@
 (*                    that won its ballot (#260).                            *)
 (*         "belief" = the basis is the configuration of the ballot that the  *)
 (*                    node promised, with no fence (the bug that #260 fixed).*)
-(* AckBallot : TRUE = a `PreReadAck` carries the ballot of the acceptor, and *)
-(*                    an answer above the basis ends the read.               *)
+(* Fence : what a `PreReadAck` carries; an answer above the basis ends the  *)
+(*         read (#1099 (rework 1.10)).                                       *)
+(*   "promise" = the higher of the promise and the belief ballot of the      *)
+(*               acceptor (`wire_read_fence`, the code since PR #1074).      *)
+(*   "belief"  = the belief ballot alone (`acceptors_since`, the code before *)
+(*               PR #1074): a control.                                       *)
+(*   "none"    = no ballot: a control.                                       *)
+(* Laggers : the acceptors that can ignore the configuration of a ballot    *)
+(*         that they promise or accept, because their pool does not hold     *)
+(*         each node of it yet (`learn_config`). The promise moves all the   *)
+(*         same.                                                             *)
+(* Restarters : the acceptors that can restart. The promise and the votes   *)
+(*         of an acceptor are durable. Its belief is volatile: it goes back  *)
+(*         to the bootstrap, bound to no ballot, and the node did not hear   *)
+(*         what is in force. A membership probe tells it again. A reader     *)
+(*         also forgets its read basis and its open read.                    *)
+(* Refuse : TRUE = an acceptor that did not hear answers no `PreRead`        *)
+(*         (`on_pre_read`, the code).                                        *)
 (* Hold  : TRUE  = the decision hold of #579 (rule 4): a leader acks a slot  *)
 (*                 only when each prior configuration has a Phase-1 quorum   *)
 (*                 of promises for its ballot.                               *)
@@ -45,13 +61,17 @@
 (*                    configuration, so each row hears of the campaign.      *)
 (*                                                                           *)
 (* Not in the model: GC watermarks, matchmaker generations, the replica      *)
-(* tier, a read that expires.                                                *)
+(* tier, a read that expires, an acceptor that loses its disk.               *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
-          Readers, Basis, AckBallot, Hold, Learner, Q1s, Q2s, Targets, Seal
+          Readers, Basis, Fence, Laggers, Restarters, Refuse, Hold, Learner, Q1s, Q2s,
+          Targets, Seal
 
 ASSUME Seal \in {"quorum", "reads"}
+ASSUME Fence \in {"promise", "belief", "none"}
+ASSUME Laggers \cup Restarters \subseteq Acceptors
+ASSUME Refuse \in BOOLEAN
 \* Paxos safety rests on this: every Phase-1 quorum meets every Phase-2 quorum.
 ASSUME \A c \in Configs : \A P \in Q1s[c], C \in Q2s[c] : P \cap C # {}
 \* A reader asks a set that can hold a Phase-1 quorum.
@@ -74,10 +94,12 @@ VARIABLES status,    \* ballot -> "matching" | "matched" | "leading" | "switched
           acked,     \* slots that a leader reported as decided to a client
           basis,     \* reader -> <<ballot, fence>> of its read basis (ballot 0: none)
           rd,        \* the one read of the model
-          own        \* reader -> the ballot of its own abandoned campaign (0: none)
+          own,       \* reader -> the ballot of its own abandoned campaign (0: none)
+          since,     \* acceptor -> the ballot of the configuration it believes
+          heard      \* acceptor -> TRUE when its belief is one it heard
 
 vars == <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals,
-          acked, basis, rd, own>>
+          acked, basis, rd, own, since, heard>>
 
 NoRead == [state |-> "none", node |-> CHOOSE n \in Readers : TRUE, b |-> 0, fence |-> 0,
            snap |-> {}, to |-> {}, answers |-> {}, index |-> 0]
@@ -99,6 +121,9 @@ Init == /\ status = [b \in Ballots |-> "matching"]
         /\ basis = [n \in Readers |-> <<0, 0>>]
         /\ rd = NoRead
         /\ own = [n \in Readers |-> 0]
+        \* The model starts after each acceptor heard the first configuration.
+        /\ since = [a \in Acceptors |-> 0]
+        /\ heard = [a \in Acceptors |-> TRUE]
 
 \* Matchmaker m registers b if it holds no ballot at or above b, and answers
 \* with what it held.
@@ -109,17 +134,28 @@ Register(b, m) ==
     /\ reg' = [reg EXCEPT ![m] = @ \cup {<<b, cfgOf[b]>>}]
     /\ replied' = [replied EXCEPT ![b] = @ \cup {m}]
     /\ hist' = [hist EXCEPT ![b] = @ \cup reg[m]]
-    /\ UNCHANGED <<status, cfgOf, promised, votes, promises, safe, proposals, acked, basis, rd, own>>
+    /\ UNCHANGED <<status, cfgOf, promised, votes, promises, safe, proposals, acked, basis, rd, own, since, heard>>
 
 MatchDone(b) ==
     /\ status[b] = "matching"
     /\ 2 * Cardinality(replied[b]) > Cardinality(Matchmakers)
     /\ status' = [status EXCEPT ![b] = "matched"]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals, acked, basis, rd, own>>
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals, acked, basis, rd, own, since, heard>>
 
 PriorCfgs(b) == {r[2] : r \in hist[b]}
 
 HasPending(b) == \E s \in Slots : safe[b][s] = Pending
+
+\* Acceptor a follows ballot b (a Prepare that it promised, an Accept that it
+\* took): it learns the configuration of b when b is above its belief
+\* (`learn_config`). A lagger can ignore that configuration, and its belief
+\* stays where it was.
+Learn(a, b) ==
+    \/ /\ b > since[a]
+       /\ since' = [since EXCEPT ![a] = b]
+       /\ heard' = [heard EXCEPT ![a] = TRUE]
+    \/ /\ b <= since[a] \/ a \in Laggers
+       /\ UNCHANGED <<since, heard>>
 
 \* Acceptor a promises b and reports its votes. The owner of b sends a
 \* Prepare in a normal campaign, and after a bypass (the fence Phase 1 of #579).
@@ -131,6 +167,7 @@ Promise(a, b) ==
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ promises' = promises \cup
           {<<a, b, {<<w[2], w[3], w[4]>> : w \in {x \in votes : x[1] = a}}>>}
+    /\ Learn(a, b)
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, votes, safe, proposals, acked, basis, rd, own>>
 
 PromisedAt(b) == {p[1] : p \in {q \in promises : q[2] = b}}
@@ -156,14 +193,14 @@ Phase1Done(b) ==
     /\ Covered(b)
     /\ status' = [status EXCEPT ![b] = "leading"]
     /\ safe' = [safe EXCEPT ![b] = [s \in Slots |-> SafeAt(b, s)]]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, acked, basis, rd, own>>
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, acked, basis, rd, own, since, heard>>
 
 Propose(b, s, v) ==
     /\ status[b] = "leading"
     /\ ~ \E p \in proposals : p[1] = b /\ p[2] = s
     /\ safe[b][s] = Free \/ safe[b][s] = v
     /\ proposals' = proposals \cup {<<b, s, v>>}
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, acked, basis, rd, own>>
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, acked, basis, rd, own, since, heard>>
 
 Accept(a, b, s, v) ==
     /\ <<b, s, v>> \in proposals
@@ -172,6 +209,7 @@ Accept(a, b, s, v) ==
     /\ <<a, s, b, v>> \notin votes
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ votes' = votes \cup {<<a, s, b, v>>}
+    /\ Learn(a, b)
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promises, safe, proposals, acked, basis, rd, own>>
 
 ProposedAt(b) == {p[2] : p \in {q \in proposals : q[1] = b}}
@@ -202,7 +240,7 @@ Bypass(b, b2) ==
               IF s \in ProposedAt(b)
               THEN (IF Mode = "carry" THEN ValAt(b, s) ELSE Pending)
               ELSE Free]]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, acked, basis, rd, own>>
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, acked, basis, rd, own, since, heard>>
 
 \* "p212" only: the Phase 1 at the new ballot for the slots below the frontier.
 Phase1Low(b) ==
@@ -211,7 +249,7 @@ Phase1Low(b) ==
     /\ Covered(b)
     /\ safe' = [safe EXCEPT ![b] =
           [s \in Slots |-> IF safe[b][s] = Pending THEN SafeAt(b, s) ELSE safe[b][s]]]
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, acked, basis, rd, own>>
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, acked, basis, rd, own, since, heard>>
 
 \* ---------------------------------------------------------------------------
 \* The acks and the read.
@@ -229,7 +267,7 @@ OwnCampaign(n, b) ==
     /\ promised' = [promised EXCEPT ![n] = b]
     /\ own' = [own EXCEPT ![n] = b]
     /\ UNCHANGED <<cfgOf, reg, replied, hist, votes, promises, safe, proposals, acked,
-                   basis, rd>>
+                   basis, rd, since, heard>>
 
 \* The promise of reader n does not stop a read basis at ballot b.
 Below(n, b) ==
@@ -245,7 +283,7 @@ Ack(b, s) ==
     /\ Hold => Covered(b)
     /\ acked' = acked \cup {s}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
-                   proposals, basis, rd, own>>
+                   proposals, basis, rd, own, since, heard>>
 
 \* Everything that an earlier configuration chose is at or below the fence of
 \* b: the slots that the Phase 1 of b recovered, or that a bypass carried.
@@ -260,7 +298,7 @@ LearnBasis(n, b) ==
     /\ b > basis[n][1]
     /\ basis' = [basis EXCEPT ![n] = <<b, FenceOf(b)>>]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
-                   proposals, acked, rd, own>>
+                   proposals, acked, rd, own, since, heard>>
 
 BasisOf(n) == IF Basis = "won" THEN basis[n] ELSE <<promised[n], 0>>
 
@@ -274,21 +312,29 @@ ReadStart(n) ==
           rd' = [state |-> "open", node |-> n, b |-> BasisOf(n)[1], fence |-> BasisOf(n)[2],
                  snap |-> acked, to |-> T, answers |-> {}, index |-> 0]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
-                   proposals, acked, basis, own>>
+                   proposals, acked, basis, own, since, heard>>
 
 Watermark(a) == Max({w[2] : w \in {x \in votes : x[1] = a}} \cup {0})
 
-\* Acceptor a answers the PreRead with its vote watermark and its ballot. An
-\* answer above the basis ends the read.
+\* The ballot that the answer of acceptor a carries (`wire_read_fence`).
+AckFence(a) ==
+    CASE Fence = "promise" -> IF promised[a] > since[a] THEN promised[a] ELSE since[a]
+      [] Fence = "belief"  -> since[a]
+      [] Fence = "none"    -> 0
+
+\* Acceptor a answers the PreRead with its vote watermark and its fence. An
+\* answer above the basis ends the read. With Refuse, an acceptor that did
+\* not hear answers nothing.
 PreReadAck(a) ==
     /\ rd.state = "open"
     /\ a \in rd.to
     /\ ~ \E x \in rd.answers : x[1] = a
-    /\ rd' = IF AckBallot /\ promised[a] > rd.b
+    /\ Refuse => heard[a]
+    /\ rd' = IF AckFence(a) > rd.b
              THEN NoRead
              ELSE [rd EXCEPT !.answers = @ \cup {<<a, Watermark(a)>>}]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
-                   proposals, acked, basis, own>>
+                   proposals, acked, basis, own, since, heard>>
 
 \* The reader learns a newer configuration: it ends its open read.
 ReadAbandon ==
@@ -296,7 +342,7 @@ ReadAbandon ==
     /\ BasisOf(rd.node)[1] # rd.b \/ ~ Below(rd.node, rd.b)
     /\ rd' = NoRead
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
-                   proposals, acked, basis, own>>
+                   proposals, acked, basis, own, since, heard>>
 
 \* The answers are a Phase-1 quorum of the basis configuration, and the
 \* prefix of the reader covers the index.
@@ -311,7 +357,32 @@ ReadServe ==
                       \A a \in Q : <<a, s, b, v>> \in votes
            /\ rd' = [rd EXCEPT !.state = "done", !.index = i]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
-                   proposals, acked, basis, own>>
+                   proposals, acked, basis, own, since, heard>>
+
+\* Acceptor a restarts. The promise and the votes are durable; the belief,
+\* the read basis and the open read of a reader are not.
+Restart(a) ==
+    /\ a \in Restarters
+    /\ since' = [since EXCEPT ![a] = 0]
+    /\ heard' = [heard EXCEPT ![a] = FALSE]
+    /\ basis' = IF a \in Readers THEN [basis EXCEPT ![a] = <<0, 0>>] ELSE basis
+    /\ rd' = IF rd.state # "none" /\ rd.node = a THEN NoRead ELSE rd
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
+                   proposals, acked, own>>
+
+\* The membership probe of a node that did not hear: a matchmaker majority
+\* answers, and the node adopts the configuration of the highest ballot that
+\* the answers hold. Each ballot that an acceptor promised or accepted was
+\* registered at a matchmaker majority first, thus the probe binds the belief
+\* at or above it.
+Probe(a) ==
+    /\ ~ heard[a]
+    /\ \E M \in SUBSET Matchmakers :
+          /\ 2 * Cardinality(M) > Cardinality(Matchmakers)
+          /\ since' = [since EXCEPT ![a] = Max({r[1] : r \in UNION {reg[m] : m \in M}} \cup {0})]
+    /\ heard' = [heard EXCEPT ![a] = TRUE]
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
+                   proposals, acked, basis, rd, own>>
 
 Next ==
     \/ \E b \in Ballots, m \in Matchmakers : Register(b, m)
@@ -325,6 +396,7 @@ Next ==
     \/ \E n \in Readers : ReadStart(n)
     \/ \E n \in Readers, b \in Ballots : OwnCampaign(n, b)
     \/ \E a \in Acceptors : PreReadAck(a)
+    \/ \E a \in Acceptors : Restart(a) \/ Probe(a)
     \/ ReadAbandon \/ ReadServe
 
 Spec == Init /\ [][Next]_vars
