@@ -196,6 +196,13 @@ Each entry names the decision that rejected it.
   trace of step 1.13 showed the stale row read; both rules pass the model. Pierre chose on
   2026-11-19 a seal that reaches each row (section 2.5), so a full grid can still change its
   members and an automated grid can reshape it.
+- **Segments local to each replica, with plain Matchmaker Paxos** (#1213 (segments in the
+  protocol or in storage), Pierre 2026-11-19). Each replica cuts its own chunks and the
+  matchmakers know none. TLC showed that a range whose only copy is in the object store is then
+  declared nowhere in decided state, and two objects can hold one slot. A variant that writes
+  each offload as a claim in the log gives a decided view back, at the cost of a log entry and a
+  leader for each offload and a fold of the log for each client. Pierre chose the segment table
+  in the matchmakers (section 2.10).
 - **The bound on memory of the retained log inside the rework, or no memory work** (decision 32).
   The shared bytes and the one map are in step 1.12; the bound is one issue after the rework.
 

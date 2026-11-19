@@ -68,6 +68,7 @@ stays valid: find its file in the section map.
 | §2.7 | Limits | [02-data-plane.md](02-data-plane.md) |
 | §2.8 | Underneath | [02-data-plane.md](02-data-plane.md) |
 | §2.9 | Store durability | [02-data-plane.md](02-data-plane.md) |
+| §2.10 | Segments | [02-data-plane.md](02-data-plane.md) |
 | §3 | The control plane | [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md) |
 | §3.1 | The cell tenant and bootstrap | [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md) |
 | §3.2 | Machines | [03-2-machines.md](03-2-machines.md) |
