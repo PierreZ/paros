@@ -118,9 +118,9 @@ pub(super) struct ReplicaSite {
 }
 
 impl ReplicaSite {
-    pub(super) fn new(id: NodeId, config: Config) -> Self {
+    pub(super) fn new(id: NodeId, config: Config, limits: Limits) -> Self {
         let disk = MemStorage::new(config);
-        let live = Some(ReplicaNode::new(&disk, Limits::DEFAULT));
+        let live = Some(ReplicaNode::new(&disk, limits));
         Self { id, disk, live }
     }
 }
@@ -129,15 +129,17 @@ impl ReplicaSite {
 pub(super) struct MatchmakerSite {
     pub(super) id: MatchmakerId,
     config: MatchmakerConfig,
+    limits: Limits,
     disk: MemRegistry,
     pub(super) live: Option<Matchmaker>,
 }
 
 impl MatchmakerSite {
-    pub(super) fn new(id: MatchmakerId, bootstrap: Vec<MatchmakerId>) -> Self {
+    pub(super) fn new(id: MatchmakerId, bootstrap: Vec<MatchmakerId>, limits: Limits) -> Self {
         let mut site = Self {
             id,
             config: MatchmakerConfig { id, bootstrap },
+            limits,
             disk: MemRegistry::new(MatchmakerHardState::default(), BTreeMap::new()),
             live: None,
         };
@@ -148,7 +150,7 @@ impl MatchmakerSite {
     /// Boot from the registry on disk, when down.
     pub(super) fn boot(&mut self) {
         if self.live.is_none() {
-            self.live = Some(Matchmaker::new(&self.config, &self.disk, Limits::DEFAULT));
+            self.live = Some(Matchmaker::new(&self.config, &self.disk, self.limits));
         }
     }
 

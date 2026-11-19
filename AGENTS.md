@@ -55,7 +55,10 @@ crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (c
 walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
 `leader-handoff/` and `matchmaker/` (#1198 (trace checking), `tests/traces.rs`); the read fence
 of `reads/`, the floor of `truncation/` and the walk with every compartment and matchmakers are
-not traced yet. Coverage-driven simulation (#1199) comes next.
+not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
+branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
+`probe!` of the core over all the walks. 31 of the 77 probes are reached; most of the others
+wait for walk moves the cell does not make yet (#1225 (walk moves for the unreached probes)).
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
@@ -96,6 +99,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`
 - `scripts/check-module-style.sh` and `scripts/check-core-layers.sh`
 - the seven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
+- the `coverage` job: the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with
+  `paros-consensus` instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
+  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`)
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
@@ -428,7 +434,9 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
   the core and a planted mutant that each oracle catches, and the trace check of the walks
-  against the TLA+ models with TLC (moonpool-tla). On `paros-consensus` only.
+  against the TLA+ models with TLC (moonpool-tla), and the coverage gate over every core probe
+  (exploration with moonpool-walk, branch coverage with moonpool-explorer's sancov reader). On
+  `paros-consensus` only.
 - `crates/support/paros-wasm` — the site's wasm tool (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only.
 
@@ -440,5 +448,5 @@ wasm and stages it for the site), `docs/architecture/` (the target design), `doc
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-tla.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-tla.sh`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.
