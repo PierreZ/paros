@@ -113,12 +113,21 @@ pub mod reach {
     /// the flavors with matchmakers, or of proxies on a grid, reached it in
     /// 60 seeds.
     pub const LOST_UNSYNCED: &str = "cell: a crash lost a write no fsync covered";
+    /// A node campaigned while a leader stood.
+    pub const USURPED: &str = "cell: a node campaigned while a leader stood";
+    /// A leader missed a message that would depose it.
+    pub const DEAF_LEADER: &str = "cell: a leader missed a message that would depose it";
+    /// A leader move met a leadership that a higher ballot passed.
+    pub const PASSED_LEADER: &str = "cell: a move met a leader that a higher ballot passed";
     /// A leader moved a stuck round to another column.
     pub const MOVED_ROUND: &str = "cell: a leader moved a stuck round to another column";
     /// A client sent a write again at a position it wrote before.
     pub const RETRY: &str = "cell: a client retried a write";
     /// A disk lost the value of a chosen record.
     pub const ROT_CHOSEN: &str = "cell: a disk rotted a chosen record";
+    /// A disk lost the value of a record that a peer already trimmed and
+    /// that a third node lacks.
+    pub const ROT_SPLIT_FLOOR: &str = "cell: a disk rotted a record below a peer's floor";
     /// A scrub found a rotted record and wrote it again.
     pub const SCRUBBED: &str = "cell: a scrub wrote a rotted record again";
     /// The operator retired a node.
@@ -220,6 +229,9 @@ pub enum Action {
     Admit,
     /// A node replaces the matchmaker set (`MatchmakerReconfigurer`).
     Handover,
+    /// A node that does not lead campaigns while a leader stands, as if its
+    /// election clock ran out early (`ColocatedNode::campaign`).
+    Usurp,
 }
 
 const ACTIONS: &[Action] = &[
@@ -237,6 +249,7 @@ const ACTIONS: &[Action] = &[
     Action::Rejoin,
     Action::Admit,
     Action::Handover,
+    Action::Usurp,
 ];
 
 /// The cell under walk. See the module documentation.
@@ -254,6 +267,8 @@ pub struct Cell {
     next_ctx: u64,
     /// The writing client of the journal.
     client: Client,
+    /// The faults stopped (`Model::calm`): no steer drops a message.
+    calmed: bool,
     /// The highest leader uuid a client used.
     next_uuid: u128,
     /// The rounds a proxy may swallow before its leader takes them back.
@@ -307,7 +322,7 @@ impl Model for Cell {
             | Action::Retire
             | Action::Rejoin
             | Action::Handover => [2, 1, 0],
-            Action::StepDown | Action::Rot => [2, 0, 0],
+            Action::StepDown | Action::Rot | Action::Usurp => [2, 0, 0],
             // A late node stays outside most pools for a while: a pool
             // catches up slowly, and every pool admits it once the faults
             // stop (`Cell::calm`).
@@ -329,6 +344,7 @@ impl Model for Cell {
             Action::Propose => self.propose(cx),
             Action::Claim => self.claim(cx),
             Action::StepDown => self.step_down(cx),
+            Action::Usurp => self.usurp(cx),
             Action::Truncate => self.truncate(cx),
             Action::Read => self.read(cx),
             Action::Handoff => self.handoff(cx),
@@ -354,6 +370,11 @@ impl Model for Cell {
                 }
                 if let Wire::MatchReply(reply) = &wire {
                     self.discover(id, reply, cx);
+                }
+                if let Wire::Paxos(msg) = &wire
+                    && self.deafens(id, msg)
+                {
+                    return;
                 }
                 let node = self.node_mut(id).live.as_mut().expect("a live node");
                 match wire {
@@ -466,6 +487,7 @@ impl Model for Cell {
     }
 
     fn calm(&mut self, cx: &mut Cx<'_, Self>) {
+        self.calmed = true;
         // The deployment's registry reaches every node: each pool admits
         // the late nodes, as #189 needs for liveness. Until then a late
         // node hears no beat from a node that does not know it.
@@ -615,6 +637,7 @@ impl Cell {
             reads: Reads::default(),
             next_ctx: 1,
             client: Client::default(),
+            calmed: false,
             next_uuid: 0,
             take_back_after,
             expire_after,
@@ -805,16 +828,14 @@ impl Cell {
 
     // ---- lifecycle --------------------------------------------------------
 
-    /// Crash node `id`. Half the crashes lose a suffix of the writes that
-    /// no fsync covers yet: the contract lets a relaxed batch
+    /// Crash node `id`. When writes wait for an fsync, half the crashes
+    /// lose a suffix of them: the contract lets a relaxed batch
     /// (`MustSync::Relaxed`) wait for the next fsync.
     fn crash_node(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
         let mutant = self.flavor.mutant;
         let unsynced = self.node(id).unsynced();
-        let keep = cx
-            .rng()
-            .chance(1, 2)
-            .then(|| Self::index(cx.rng().below(unsynced as u64 + 1)));
+        let keep = (unsynced > 0 && cx.rng().chance(1, 2))
+            .then(|| Self::index(cx.rng().below(unsynced as u64)));
         sometimes!(keep.is_some_and(|k| k < unsynced), reach::LOST_UNSYNCED);
         self.node_mut(id).crash(mutant, keep);
         // The reconfigurer holds no durable state: the crash loses it.
@@ -935,6 +956,10 @@ impl Cell {
                 gc: &gc,
             };
             self.trace_batch(id, traced, before, cx);
+            if !self.rot_at_compaction(id, &writes, cx) {
+                // A fault stopped it between the persist and the send.
+                return;
+            }
             if crash_between {
                 sometimes!(true, reach::CRASH_BEFORE_SEND);
                 self.crash_node(id, cx);
@@ -955,18 +980,8 @@ impl Cell {
                 self.reads
                     .answered(&format!("node {}", id.0), state.ctx, state.index);
             }
-            let site = self.node_mut(id);
-            let Some(node) = site.live.as_mut() else {
+            if !self.after_batch(id) {
                 return;
-            };
-            node.advance_recovery();
-            if node.is_leader() {
-                let ballot = node.ballot();
-                sometimes!(
-                    self.leader_ballot.is_some_and(|b| b < ballot),
-                    reach::NEW_LEADER
-                );
-                self.leader_ballot = self.leader_ballot.max(Some(ballot));
             }
         }
     }
@@ -999,6 +1014,24 @@ impl Cell {
                 msg: Wire::Gc(request),
             });
         }
+    }
+
+    /// After a batch of node `id`: advance its recovery and note the
+    /// ballot of a leader. Returns whether the node still runs.
+    fn after_batch(&mut self, id: NodeId) -> bool {
+        let Some(node) = self.node_mut(id).live.as_mut() else {
+            return false;
+        };
+        node.advance_recovery();
+        if node.is_leader() {
+            let ballot = node.ballot();
+            sometimes!(
+                self.leader_ballot.is_some_and(|b| b < ballot),
+                reach::NEW_LEADER
+            );
+            self.leader_ballot = self.leader_ballot.max(Some(ballot));
+        }
+        true
     }
 
     /// Record the steps of a batch of node `id` that reached its disk
@@ -1248,9 +1281,56 @@ impl Cell {
     }
 
     /// A leader the client reaches, and the journal as that leader folds it.
+    /// Whether the network loses `msg` on its way to node `id`, a steer of
+    /// the chaos: a leader misses every message that would depose it
+    /// (a `Prepare`, an `Accept`, a `Heartbeat`, a `Nack` or a `Relinquish`
+    /// above its ballot), but hears every `Commit`. So a leader learns a
+    /// slot chosen above its ballot while it still leads, the window that
+    /// [`Cell::pick_leader`] meets. A lost message is a fault the contract
+    /// allows; once the faults stop, nothing is lost.
+    fn deafens(&self, id: NodeId, msg: &Message) -> bool {
+        if self.calmed {
+            return false;
+        }
+        let Some(node) = self.node(id).live.as_ref() else {
+            return false;
+        };
+        if !node.is_leader() {
+            return false;
+        }
+        let ballot = match msg {
+            Message::Prepare { ballot, .. }
+            | Message::Accept { ballot, .. }
+            | Message::Heartbeat { ballot, .. }
+            | Message::Nack { ballot, .. }
+            | Message::Relinquish { ballot, .. } => *ballot,
+            _ => return false,
+        };
+        let deaf = ballot > node.ballot();
+        sometimes!(deaf, reach::DEAF_LEADER);
+        deaf
+    }
+
+    /// The leader a leader move acts on. A leadership that a higher ballot
+    /// passed (it learned a `Commit` above its ballot, and no beat or nack
+    /// demoted it yet) is a rare window that a move almost never meets by
+    /// chance, so the move takes such a leader first: the core must refuse
+    /// its proposals and record none of its rounds.
     fn pick_leader(&self, cx: &mut Cx<'_, Self>) -> Option<NodeId> {
         let leaders = self.leaders();
-        cx.rng().pick(&leaders).copied()
+        let passed: Vec<NodeId> = leaders
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.node(id)
+                    .live
+                    .as_ref()
+                    .is_some_and(|node| node.ballot() < node.hard_state().max_promised_ballot)
+            })
+            .collect();
+        sometimes!(!passed.is_empty(), reach::PASSED_LEADER);
+        let pool = if passed.is_empty() { &leaders } else { &passed };
+        cx.rng().pick(pool).copied()
     }
 
     fn propose(&mut self, cx: &mut Cx<'_, Self>) {
@@ -1379,6 +1459,31 @@ impl Cell {
             .expect("a leader is up")
             .step_down();
         self.drain_node(leader, cx);
+    }
+
+    /// A node that does not lead campaigns while a leader stands. With
+    /// [`Cell::deafens`], the leader it deposes may go on leading for a
+    /// while and learn the new leader's decisions.
+    fn usurp(&mut self, cx: &mut Cx<'_, Self>) {
+        if self.leaders().is_empty() {
+            return;
+        }
+        let others: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|s| s.live.as_ref().is_some_and(|node| !node.is_leader()))
+            .map(|s| s.id)
+            .collect();
+        let Some(&id) = cx.rng().pick(&others) else {
+            return;
+        };
+        sometimes!(true, reach::USURPED);
+        self.node_mut(id)
+            .live
+            .as_mut()
+            .expect("a live node")
+            .campaign();
+        self.drain_node(id, cx);
     }
 
     /// A leader moves the journal to a configuration drawn from the

@@ -202,6 +202,19 @@ fn disk_faults() {
 }
 
 #[test]
+fn disk_faults_on_three() {
+    walk(
+        Flavor::disk_faults_three(),
+        &[
+            reach::ROT_CHOSEN,
+            reach::ROT_SPLIT_FLOOR,
+            reach::SCRUBBED,
+            reach::COMPACTED,
+        ],
+    );
+}
+
+#[test]
 fn retirement_and_rejoin() {
     walk(
         Flavor::retirement(),

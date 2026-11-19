@@ -85,7 +85,7 @@ impl ColocatedNode {
             self.probe_membership();
             return;
         }
-        self.campaign(RegistrationKind::Belief, self.acceptors.clone());
+        self.open_campaign(RegistrationKind::Belief, self.acceptors.clone());
         // A campaign only ever ratchets forward: a fresh ballot above
         // everything this node promised or led — or, with the round space
         // exhausted, nothing at all.
@@ -140,7 +140,7 @@ impl ColocatedNode {
     /// double duty, where `None` silently meant both "the belief" and "not a
     /// reconfiguration".
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, reconfiguration = kind.is_reconfiguration())))]
-    pub(super) fn campaign(&mut self, kind: RegistrationKind, config: AcceptorConfig) {
+    pub(super) fn open_campaign(&mut self, kind: RegistrationKind, config: AcceptorConfig) {
         let me = self.config.id;
         let Some(round) = self.next_campaign_round() else {
             // The wire/domain round space is exhausted. There is no strictly

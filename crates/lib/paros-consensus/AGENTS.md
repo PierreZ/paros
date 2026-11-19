@@ -68,7 +68,7 @@ Deployments (each wires roles and owns one `Ready`):
 
 - `node.rs` → `ColocatedNode`, `Delegation` → the protocol entry points (`new`, `step`, `tick`, `propose*`, `compact`, `repair_record`, `ready`). Its plain Multi-Paxos path (Phase 1 recovery, the allocator frontier, the `Noop` gap fill, commit and catch-up, restarts, the majority and the grid) has its TLA+ model in `specs/tla/multi-paxos/` (#1185 (rework 1.14)).
 - `node/ready.rs` → `Ready<'a>` (second `ready()` before `advance()` is a compile error).
-- `node/policy.rs` → the driver-policy methods (`resend_pending`, `take_back_delegated`, `move_round`, `step_down`, `campaign_above`, `advance_recovery`, `set_election_timeout`, `extend_pool`).
+- `node/policy.rs` → the driver-policy methods (`resend_pending`, `take_back_delegated`, `move_round`, `step_down`, `campaign`, `campaign_above`, `advance_recovery`, `set_election_timeout`, `extend_pool`).
 - `node/view.rs` → the read-only accessors (`config`, `limits`, `pool`, `acceptors`, `read_basis`, `hard_state`, `role`, `leader`, `read_log`, …).
 - `node/counters.rs` → the private `Counters`, `RepairCounters`, `MembershipCounters` and the `NodeCounters` snapshot (`ColocatedNode::counters`).
 - `node/{election,phase2,learn,replication,catch_up}.rs` → campaign (a paging campaign re-sends its `Prepare` to the peers that answered on every tick, #428 (paging livelock), asked from one past the highest slot the tally merged (`Election::keep_alive_from`), so an answered peer re-affirms with an empty page, never its whole suffix again), Phase-2 open/delegate/decide (`record_own_round`), learner, catch-up + trim-point jump; a follower pulls a gap from the beat's sender, and from the whole pool once its pulls at one chosen index outlast an election timeout (`PULL_FALLBACK_BEATS` at least, #349: a dead lane to a renamed leader).
@@ -93,9 +93,32 @@ re-exports only what a driver loop needs: the deployments (`ColocatedNode`, `Rea
 `HardState`, `Limits`, `Message`, `Storage`, `WriteOp`) and the scalars (`Ballot`, `NodeId`,
 `Slot`, `Value`). A deployment takes its `Limits` at construction (`ColocatedNode::new(storage,
 limits)`), and reads them back with `limits()`; `set_election_timeout` stays a method, because a
-driver draws a new timeout per election. Examples:
-`examples/{single_decree,multi_paxos,matchmaker,acceptor_grid,
-quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teaches.
+driver draws a new timeout per election.
+
+## Developer experience
+
+A new user reads `README.md`, then the crate root's rustdoc (`src/lib.rs`: a quick start that
+is a doc test), then `examples/quickstart.rs`. Keep the three in step with the API.
+
+- Examples: `examples/{single_decree,multi_paxos,matchmaker,acceptor_grid,quorum_read,
+  proxy_leader,replica_tier}.rs` are the lessons, and `examples/{quickstart,journal_calls,
+  leader_handoff,reconfiguration}.rs` drive `ColocatedNode` as a driver does. Each one asserts
+  the property that it shows. A new example gets a step in the CI `examples` job, a row in
+  `README.md` and in the table of `src/lib.rs`, and an item in the root `README.md`.
+- `examples/common/cluster.rs` → `Cluster`, the toy cell of the four driver examples: the
+  nodes, one `MemStorage` for each node, optional `Matchmaker`s with a `MemRegistry` each, and a
+  wire. `Cluster::pump` is the reference driver loop (persist, send, learn, advance). A new
+  example that drives `ColocatedNode` uses it and does not write a network of its own.
+  `quorum_read`, `proxy_leader` and `replica_tier` are older and still have their own.
+- The small helpers of a driver, each with a doc example: `Ready::is_empty` (and the same on
+  `ReplicaReady` and `ProxyReady`) ends a drain loop; `ColocatedNode::campaign` opens an election
+  with no clock; `Config::with_peers` sorts and deduplicates a membership; `Message::kind`
+  names a variant for a trace or a metric; `NodeId`, `Slot` and `Ballot` (`round.node`) have
+  `Display`.
+- A doc example is a test: `cargo test --doc -p paros-consensus` (CI `examples` job). A new
+  public entry point of a driver gets one.
+- A boot assertion on `Config` names the field that is wrong (`node/boot.rs`,
+  `assert_config_shape`).
 
 ## Local rules
 
@@ -121,7 +144,8 @@ quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teach
 - Model-checker env vars (the only ones this crate reads): `HANDOVER_MODEL_SEEDS`,
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` (`models/support.rs`, `env_or`).
-- `cargo run -p paros-consensus --example <name>` for each of the seven examples (CI `examples` job).
+- `cargo run -p paros-consensus --example <name>` for each of the eleven examples, and
+  `cargo test --doc -p paros-consensus` for the doc examples (CI `examples` job).
 - `cargo check --target wasm32-unknown-unknown -p paros-consensus` with and without
   `--no-default-features`; `cargo check -p paros-consensus --features serde` (CI `portability`).
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps` (CI `clippy` job).

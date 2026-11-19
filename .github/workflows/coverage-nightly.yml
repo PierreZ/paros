@@ -1,0 +1,42 @@
+# The coverage gate of consensus-sim (`tests/coverage.rs`) every night, on
+# new seeds. The `coverage` job of `rust.yml` runs the same root seeds on
+# every push. Here the first seed moves with the date, and each walk runs
+# three times as many root seeds, so the gate also says whether a probe is
+# reached on seeds it was never steered for. A red night is a finding: a
+# probe that only the CI seeds reach needs a better steer, and a failed walk
+# prints the seed or the timeline that replays it.
+name: Coverage nightly
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sancov
+          workspaces: ". -> target/sancov"
+          cache-on-failure: true
+      # The day since the epoch, times a million: no two nights share a seed.
+      - name: Pick the first seed of the night
+        run: echo "MOONPOOL_WALK_FROM=$(( $(date +%s) / 86400 * 1000000 ))" >> "$GITHUB_ENV"
+      - name: Run the coverage gate on new seeds
+        env:
+          SANCOV_CRATES: paros_consensus
+          MOONPOOL_WALK_SEEDS: '900'
+        run: >-
+          echo "first seed: $MOONPOOL_WALK_FROM" &&
+          RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
+          nix develop --command cargo nextest run --profile ci --release
+          --target-dir target/sancov -p consensus-sim --test coverage --no-capture

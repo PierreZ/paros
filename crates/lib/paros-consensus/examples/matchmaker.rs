@@ -239,7 +239,7 @@ use paros_consensus::proposer::{Campaign, PromiseFold, Proposer};
 use paros_consensus::types::Fingerprint;
 use paros_consensus::{Ballot, Limits, Matchmaker, MatchmakerReconfigurer, NodeId, Slot};
 
-use common::{ballot, command, show_ballot};
+use common::{ballot, command};
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
@@ -526,7 +526,7 @@ fn matchmake(
     };
     println!(
         "ballot {}: register C_b = {} ({}) with generation {} = {}",
-        show_ballot(request.ballot),
+        request.ballot,
         show_config(&request.config),
         kind,
         set.generation.0,
@@ -553,7 +553,7 @@ fn matchmake(
                 let known: Vec<String> = page
                     .history
                     .iter()
-                    .map(|(b, r)| format!("{} @{}", show_config(&r.config), show_ballot(*b)))
+                    .map(|(b, r)| format!("{} @{}", show_config(&r.config), *b))
                     .collect();
                 let fold = phase.fold(from, page);
                 assert_eq!(fold, MatchFold::Registered, "a complete answer counts once");
@@ -616,7 +616,7 @@ fn phase1(
     let targets = proposer.open_phase1(campaign, &own, &BTreeMap::new());
     println!(
         "ballot {}: prepare from slot {} -> nodes {:?}{}",
-        show_ballot(ballot),
+        ballot,
         from_slot.0,
         targets.iter().map(|n| n.0).collect::<Vec<_>>(),
         if proposer.phase1_won(ballot) {
@@ -675,7 +675,7 @@ fn phase2(
         .collect();
     println!(
         "ballot {}: accept slot {} -> C_b's acceptors {:?} only",
-        show_ballot(ballot),
+        ballot,
         slot.0,
         addressees.iter().map(|n| n.0).collect::<Vec<_>>()
     );
@@ -969,7 +969,7 @@ fn decree_by_hand() {
     println!(
         "  m0 accepted {} at ballot {} from a reconfigurer that then died; nobody knows whether that set was chosen",
         show_set(&earlier_value),
-        show_ballot(earlier)
+        earlier
     );
 
     // Node 7 at ballot 2.7 wants {m0, m1, m3}.
@@ -1012,7 +1012,7 @@ fn decree_phase1(
     );
     println!(
         "  ballot {}: prepare (the set I want is {})",
-        show_ballot(b),
+        b,
         show_set(mine)
     );
     for (id, voter) in voters.iter_mut() {
@@ -1028,7 +1028,7 @@ fn decree_phase1(
                 .map_or("nothing accepted".to_string(), |(at, v)| format!(
                     "had accepted {} at ballot {}",
                     show_set(v),
-                    show_ballot(*at)
+                    *at
                 ))
         );
         let accepted = vote.map_or_default(|record| BTreeMap::from([(DECREE, record)]));
@@ -1076,7 +1076,7 @@ fn decree_phase2(
     println!(
         "  chosen {} at ballot {}: the same set, whichever proposer finished the job",
         show_set(&value),
-        show_ballot(b)
+        b
     );
 }
 
@@ -1116,15 +1116,11 @@ fn describe_request(request: &ReconfigureRequest) -> String {
                 .sum::<usize>()
         ),
         ReconfigureRequest::DecreePrepare { ballot, .. } => {
-            format!("DecreePrepare(ballot {})", show_ballot(*ballot))
+            format!("DecreePrepare(ballot {})", *ballot)
         }
         ReconfigureRequest::DecreeAccept {
             ballot, members, ..
-        } => format!(
-            "DecreeAccept(ballot {}, {})",
-            show_ballot(*ballot),
-            show_set(members)
-        ),
+        } => format!("DecreeAccept(ballot {}, {})", *ballot, show_set(members)),
         ReconfigureRequest::Chosen { successor, .. } => format!(
             "Chosen(g{} = {})",
             successor.generation.0,
@@ -1142,7 +1138,7 @@ fn describe_reply(reply: &ReconfigureReply) -> String {
         } => format!(
             "Stopped: frozen for good, handing over its {} registration(s); its decree promise so far is {}",
             registries.values().map(|r| r.history.len()).sum::<usize>(),
-            show_ballot(*decree_promised)
+            *decree_promised
         ),
         ReconfigureReply::Bootstrapped { .. } => "Bootstrapped: held pending, not live".to_string(),
         ReconfigureReply::Promised { vote, .. } => format!(
@@ -1150,12 +1146,12 @@ fn describe_reply(reply: &ReconfigureReply) -> String {
             vote.as_ref().map_or("none".to_string(), |(at, v)| format!(
                 "{} @{}",
                 show_set(v),
-                show_ballot(*at)
+                *at
             ))
         ),
         ReconfigureReply::Accepted { .. } => "Accepted: durable vote for the successor".to_string(),
         ReconfigureReply::Nacked { promised, .. } => {
-            format!("Nacked, promised {}", show_ballot(*promised))
+            format!("Nacked, promised {}", *promised)
         }
         ReconfigureReply::Learned { activated, at, .. } => format!(
             "Learned{} (now at generation {})",
@@ -1180,7 +1176,7 @@ fn describe_step(step: &ReconfigurerStep) -> String {
         ReconfigurerStep::Deciding { ballot } => {
             format!(
                 "every member holds the bootstrap: the decree opens at ballot {}",
-                show_ballot(*ballot)
+                *ballot
             )
         }
         ReconfigurerStep::Promised { remaining } => {
@@ -1212,7 +1208,7 @@ fn describe_step(step: &ReconfigurerStep) -> String {
         }
         ReconfigurerStep::Done { .. } => "published to a quorum of both sets: done".to_string(),
         ReconfigurerStep::Preempted { promised, .. } => {
-            format!("preempted by promise {}", show_ballot(*promised))
+            format!("preempted by promise {}", *promised)
         }
         ReconfigurerStep::Superseded { successor } => {
             format!("superseded by {}", show_set(successor.members()))
@@ -1253,13 +1249,11 @@ fn beat(
                 .registries
                 .get(&J)
                 .map_or(0, |r| r.history.len()),
-            show_ballot(
-                reconstruction
-                    .bootstrap
-                    .registries
-                    .get(&J)
-                    .map_or(Ballot::zero(), |r| r.gc_watermark)
-            )
+            reconstruction
+                .bootstrap
+                .registries
+                .get(&J)
+                .map_or(Ballot::zero(), |r| r.gc_watermark)
         );
     }
     if let ReconfigurerPhase::Deciding { decree, .. } = reconfigurer.phase() {
@@ -1267,7 +1261,7 @@ fn beat(
         // Phase 1 closed, the value P2c selected for Phase 2.
         println!(
             "  decree at ballot {}: {}",
-            show_ballot(decree.ballot()),
+            decree.ballot(),
             decree
                 .value()
                 .map_or("phase 1 open".to_string(), |v| format!(
@@ -1398,9 +1392,9 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
     println!(
         "  what the old set's disks say: {} promised {} and voted {} @{} — a majority of M_0 chose M_1, the same way example 1 chose a value",
         show_set(&voted),
-        show_ballot(decree_ballot),
+        decree_ballot,
         show_set(m_1.members()),
-        show_ballot(decree_ballot)
+        decree_ballot
     );
 
     // Where everyone ended up.

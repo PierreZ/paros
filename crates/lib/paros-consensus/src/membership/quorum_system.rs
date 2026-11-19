@@ -178,6 +178,28 @@ pub(super) fn all_voted<'a, I: Ord + 'a>(
 impl QuorumSystem {
     /// The full-column grid of `rows × cols`: a slot is chosen once every
     /// acceptor of its column accepted it (`acks = rows`).
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    ///
+    /// use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+    /// use paros_consensus::{NodeId, Slot};
+    ///
+    /// // Two rows of three: rows {0, 1, 2} and {3, 4, 5}, columns {0, 3},
+    /// // {1, 4} and {2, 5}.
+    /// let members = (0..6).map(NodeId).collect();
+    /// let grid = AcceptorConfig::new(members, QuorumSystem::grid(2, 3));
+    ///
+    /// // Phase 2: slot 4 belongs to column 1, and that whole column decides.
+    /// assert_eq!(grid.column_of(Slot(4)), Some(1));
+    /// let column: BTreeSet<NodeId> = [NodeId(1), NodeId(4)].into();
+    /// assert!(grid.has_phase2_quorum_in(&column, Some(1)));
+    ///
+    /// // Phase 1: one acceptor of each column elects, for example one row.
+    /// let row: BTreeSet<NodeId> = [NodeId(3), NodeId(4), NodeId(5)].into();
+    /// assert!(grid.has_phase1_quorum(&row));
+    /// assert!(!grid.has_phase1_quorum(&column));
+    /// ```
     #[must_use]
     pub const fn grid(rows: usize, cols: usize) -> Self {
         QuorumSystem::Grid {

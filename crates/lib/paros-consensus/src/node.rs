@@ -96,6 +96,23 @@ pub enum NodeRole {
 /// client: redirect on `NotLeader`, or hold the reply for `Accepted` until the
 /// slot is applied and answer from its [`crate::journal::Outcome`] (#204) — a proposal
 /// is never judged here, only at apply.
+///
+/// ```
+/// use paros_consensus::contract::MemStorage;
+/// use paros_consensus::journal::{Control, JournalIdentifier};
+/// use paros_consensus::node::ProposeResult;
+/// use paros_consensus::{ColocatedNode, Config, Limits, NodeId, Slot};
+///
+/// let config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([NodeId(1)]);
+/// let mut node = ColocatedNode::new(&MemStorage::new(config), Limits::DEFAULT);
+///
+/// // A follower admits nothing, and this one knows no leader yet.
+/// assert_eq!(node.propose_control(Control::Noop), ProposeResult::NotLeader(None));
+///
+/// // A leader gives the command the next slot.
+/// node.campaign();
+/// assert_eq!(node.propose_control(Control::Noop), ProposeResult::Accepted(Slot(0)));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProposeResult {
     /// This node is not the leader; the client should retry the hinted node
@@ -265,7 +282,7 @@ pub struct ColocatedNode {
     /// this node inside `acceptors` (boot, `learn_config`,
     /// `try_become_leader`, a handoff install, an adopted effective
     /// configuration), and the ballot of every campaign this node opened
-    /// with a configuration naming it ([`ColocatedNode::campaign`]: the
+    /// with a configuration naming it (`open_campaign`: the
     /// registration stays in the matchmakers' histories whether or not the
     /// campaign went on, and every later Phase 1 covers it). Monotone,
     /// volatile, and the whole of what [`ColocatedNode::may_retire`] needs: a

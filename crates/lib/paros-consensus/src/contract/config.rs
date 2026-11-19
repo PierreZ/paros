@@ -147,6 +147,36 @@ impl Config {
         config
     }
 
+    /// This configuration with `peers` as its bootstrap membership, sorted
+    /// and deduplicated: the order a boot needs
+    /// ([`crate::ColocatedNode::new`] refuses another one). The caller can
+    /// name the members in any order.
+    ///
+    /// ```
+    /// use paros_consensus::journal::JournalIdentifier;
+    /// use paros_consensus::{Config, NodeId};
+    ///
+    /// let config = Config::new(NodeId(2), JournalIdentifier::UNSET)
+    ///     .with_peers([NodeId(3), NodeId(1), NodeId(2), NodeId(1)]);
+    /// assert_eq!(config.peers, [NodeId(1), NodeId(2), NodeId(3)]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If the result is not sorted and deduplicated: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn with_peers(mut self, peers: impl IntoIterator<Item = NodeId>) -> Self {
+        self.peers = peers.into_iter().collect();
+        self.peers.sort_unstable();
+        self.peers.dedup();
+        assert!(
+            self.peers.windows(2).all(|w| w[0] < w[1]),
+            "a bootstrap membership is sorted and deduplicated"
+        );
+        self
+    }
+
     /// The bootstrap acceptor configuration: `peers` under `quorum_system`,
     /// each labeled with its failure domain when `peer_domains` names them,
     /// owned by `cell_id` (#215 (zones)).

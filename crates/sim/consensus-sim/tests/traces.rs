@@ -308,7 +308,7 @@ fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
         Spec::ProxyLeader,
         &Flavor::proxies(),
         Mutant::KeepProxyRounds,
-        1..=10,
+        50..=60,
         200,
     )
     .expect("TLC refuses a seed of the mutant");

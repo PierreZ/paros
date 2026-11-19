@@ -6,44 +6,41 @@
 //! covered edges of the core when `scripts/sancov-rustc.sh` instruments it)
 //! is branched: its children replay it up to that step and draw a new
 //! schedule (moonpool-walk's `Walk::explore`). The judge is over all the
-//! walks of this one test, not over one flavor: a probe that no flavor
-//! reaches fails, unless [`GAPS`] names it with the walk move it waits for.
-//! A named probe that the default campaign reaches fails too, so the list
-//! only shrinks. A campaign with another budget (`MOONPOOL_WALK_SEEDS`,
-//! `MOONPOOL_WALK_EXPLORE`) or with edge coverage on branches differently:
-//! there, a named probe that is reached is only reported.
+//! walks of this one test, not over one flavor: a probe that no walk
+//! reaches fails the gate. There is no list of excused probes: a probe that
+//! no walk reaches gets a walk move or a steer in the same PR.
+//!
+//! Each walk runs in its own process (this test binary again, with the
+//! ignored test [`one_walk`]), several at a time. A process has its own
+//! `SanitizerCoverage` counters, so the edges that steer a walk are the
+//! edges of that walk alone, and a walk branches the same way however many
+//! walks run beside it.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 
 use consensus_sim::campaign::{Coverage, try_campaign};
 use consensus_sim::cell::{Cell, Flavor};
+use consensus_sim::decree::{DecreeModel, DecreeMutant};
 use consensus_sim::probes::core_probes;
 use moonpool_walk::{Model, Walk};
+use paros_consensus::decree::Phase1Rule;
 
-/// Root seeds of each walk.
-const SEEDS: u64 = 10;
-/// The runs each root seed may add by branching.
-const EXPLORE: u64 = 5;
+/// Root seeds of each walk. `MOONPOOL_WALK_SEEDS` overrides it.
+const SEEDS: u64 = 300;
+/// The runs each root seed may add by branching. `MOONPOOL_WALK_EXPLORE`
+/// overrides it.
+const EXPLORE: u64 = 10;
 
-/// The probes no walk reaches yet at this budget, each group with what it
-/// waits for (#1225 (walk moves for the unreached probes)).
-const GAPS: &[(&str, &[&str])] = &[
-    (
-        "rare schedules: reached at MOONPOOL_WALK_SEEDS=150 MOONPOOL_WALK_EXPLORE=10, not at this budget",
-        &[
-            "phase1: a fresh leader heals a faulty chosen slot from its promise quorum",
-            "phase2: a leader whose promise moved past its ballot opens a round it cannot record",
-            "matchmaking: a campaign meets a configuration outside the pool",
-            "matchmaking: a late probe answer names a refuted reconfiguration",
-            "propose: a leadership a higher ballot passed refuses a proposal",
-        ],
-    ),
-    (
-        "not reached at 150 seeds either: a decided Truncate whose trim-point jump lands while a leader's repair probe is blocked below it",
-        &["catch-up: a trim-point jump resolves a repair probe's blocked slot"],
-    ),
-];
+/// The walk that [`one_walk`] runs, by its name in [`walks`].
+const WALK_VAR: &str = "COVERAGE_WALK";
+/// The file where [`one_walk`] writes what its walk reached.
+const OUT_VAR: &str = "COVERAGE_OUT";
+/// How many walk processes run at once. The default is the number of
+/// CPUs.
+const JOBS_VAR: &str = "COVERAGE_JOBS";
 
 /// Every flavor of the cell, with its own pages and with the smallest
 /// pages, each with the name its report prints.
@@ -62,6 +59,7 @@ fn flavors() -> Vec<(String, Flavor)> {
         Flavor::matchmakers(),
         Flavor::reconfigured_compartments(),
         Flavor::disk_faults(),
+        Flavor::disk_faults_three(),
         Flavor::retirement(),
         Flavor::handover(),
     ];
@@ -71,6 +69,7 @@ fn flavors() -> Vec<(String, Flavor)> {
         Flavor::matchmakers(),
         Flavor::reconfigured_compartments(),
         Flavor::disk_faults(),
+        Flavor::disk_faults_three(),
         Flavor::retirement(),
         Flavor::handover(),
     ]
@@ -82,6 +81,18 @@ fn flavors() -> Vec<(String, Flavor)> {
     full.chain(paged).collect()
 }
 
+/// The decree walks, one for each `Phase1Rule`, and the batcher.
+const OTHER_WALKS: &[&str] = &["decree Quorum", "decree EveryAcceptor", "batcher"];
+
+/// The name of every walk of the campaign.
+fn walks() -> Vec<String> {
+    flavors()
+        .into_iter()
+        .map(|(name, _)| name)
+        .chain(OTHER_WALKS.iter().map(|name| (*name).to_owned()))
+        .collect()
+}
+
 /// An exploring walk: probes and, when instrumented, the core's edges.
 fn explore<M: Model>(walk: Walk<M>) -> Walk<M> {
     walk.seeds(SEEDS)
@@ -89,21 +100,19 @@ fn explore<M: Model>(walk: Walk<M>) -> Walk<M> {
         .edge_coverage(moonpool_explorer::sancov_edges_covered_live)
 }
 
-/// What every walk of the campaign reached.
+/// What one walk reached: each site with its passes, each move the walk
+/// may make and never made, and its line of the report.
 #[derive(Default)]
-struct Union {
-    hits: BTreeMap<String, u64>,
-    report: String,
+struct Reached {
+    sites: Vec<(String, u64)>,
     unused: Vec<String>,
+    report: String,
 }
 
-impl Union {
-    /// Take what one walk reached. `allowed` says whether the walk may make
-    /// its action of that index: a move the flavor switched off is not a gap.
-    fn absorb(&mut self, name: &str, coverage: &Coverage, allowed: &dyn Fn(usize) -> bool) {
-        for (site, hits) in &coverage.sites {
-            *self.hits.entry(site.clone()).or_default() += hits;
-        }
+impl Reached {
+    /// `allowed` says whether the walk may make its action of that index:
+    /// a move the flavor switched off is not a gap.
+    fn new(name: &str, coverage: &Coverage, allowed: &dyn Fn(usize) -> bool) -> Self {
         let explored = coverage
             .report
             .to_string()
@@ -112,104 +121,17 @@ impl Union {
             .unwrap_or("not explored")
             .to_owned();
         let reached = coverage.sites.iter().filter(|(_, hits)| *hits > 0).count();
-        let _ = writeln!(self.report, "{name}: {reached} sites; {explored}");
-        // Every move the walk may make, it made.
         let counts = coverage
             .report
             .actions
             .iter()
             .zip(&coverage.report.stats.actions);
-        for (index, (action, count)) in counts.enumerate() {
-            if *count == 0 && allowed(index) {
-                self.unused.push(format!("{name}: {action}"));
-            }
-        }
-    }
-
-    fn hits(&self, site: &str) -> u64 {
-        self.hits.get(site).copied().unwrap_or(0)
-    }
-}
-
-fn run<M: Model>(union: &mut Union, name: &str, walk: &Walk<M>, allowed: &dyn Fn(usize) -> bool) {
-    let coverage = try_campaign(walk, &[]).unwrap_or_else(|failure| panic!("{name}: {failure}"));
-    union.absorb(name, &coverage, allowed);
-}
-
-#[test]
-fn every_core_probe_is_reached_or_named() {
-    let mut union = Union::default();
-    for (name, flavor) in flavors() {
-        let allows = flavor.clone();
-        let allowed = move |index: usize| {
-            <Cell as Model>::actions()
-                .get(index)
-                .is_some_and(|action| allows.allows(*action))
-        };
-        let walk = explore(Walk::<Cell>::new()).model(move |cx| Cell::build(flavor.clone(), cx));
-        run(&mut union, &name, &walk, &allowed);
-    }
-    {
-        use consensus_sim::decree::{DecreeModel, DecreeMutant};
-        use paros_consensus::decree::Phase1Rule;
-        for rule in [Phase1Rule::Quorum, Phase1Rule::EveryAcceptor] {
-            let walk = explore(Walk::<DecreeModel>::new())
-                .model(move |_| DecreeModel::build(rule, DecreeMutant::None));
-            run(&mut union, &format!("decree {rule:?}"), &walk, &|_| true);
-        }
-        let walk = explore(Walk::<consensus_sim::batcher::BatchModel>::new());
-        run(&mut union, "batcher", &walk, &|_| true);
-    }
-
-    let edges = moonpool_explorer::sancov_is_available();
-    let default_budget = ["MOONPOOL_WALK_SEEDS", "MOONPOOL_WALK_EXPLORE"]
-        .iter()
-        .all(|name| std::env::var_os(name).is_none());
-    let strict = default_budget && !edges;
-    let mut notes = Vec::new();
-    let named: BTreeMap<&str, &str> = GAPS
-        .iter()
-        .flat_map(|(why, probes)| probes.iter().map(move |probe| (*probe, *why)))
-        .collect();
-    let probes = core_probes();
-    let mut errors = Vec::new();
-    let mut gaps: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for probe in &probes {
-        let reached = union.hits(probe.key()) > 0;
-        match (reached, named.get(probe.message.as_str())) {
-            (true, Some(_)) => {
-                let line = format!(
-                    "reached, but GAPS still names it: {} ({})",
-                    probe.message, probe.file
-                );
-                if strict {
-                    errors.push(line);
-                } else {
-                    notes.push(line);
-                }
-            }
-            (true, None) => {}
-            (false, Some(why)) => gaps.entry(why).or_default().push(&probe.message),
-            (false, None) => errors.push(format!(
-                "no walk reached it: {} ({})",
-                probe.message, probe.file
-            )),
-        }
-    }
-    for name in named.keys() {
-        if !probes.iter().any(|probe| probe.message == *name) {
-            errors.push(format!("GAPS names a probe the core does not have: {name}"));
-        }
-    }
-    for unused in &union.unused {
-        errors.push(format!("a walk never made the move {unused}"));
-    }
-
-    let reached = probes.iter().filter(|p| union.hits(p.key()) > 0).count();
-    let mut report = format!(
-        "{reached} of {} core probes reached{}\n{}",
-        probes.len(),
-        if edges {
+        let unused = counts
+            .enumerate()
+            .filter(|(index, (_, count))| **count == 0 && allowed(*index))
+            .map(|(_, (action, _))| action.clone())
+            .collect();
+        let edges = if moonpool_explorer::sancov_is_available() {
             format!(
                 "; {} of {} core edges covered",
                 moonpool_explorer::sancov_edges_covered_live(),
@@ -217,18 +139,221 @@ fn every_core_probe_is_reached_or_named() {
             )
         } else {
             String::new()
-        },
-        union.report
-    );
-    for (why, list) in &gaps {
-        let _ = writeln!(report, "unreached, {why}:");
-        for probe in list {
-            let _ = writeln!(report, "  {probe}");
+        };
+        Self {
+            sites: coverage.sites.clone(),
+            unused,
+            report: format!("{name}: {reached} sites; {explored}{edges}"),
         }
     }
-    for note in &notes {
-        let _ = writeln!(report, "{note}");
+
+    /// One line for each item, with a tab after its kind. A site name
+    /// holds no tab or line break: the assertion table keeps a
+    /// `probe!` message, which is one line of prose.
+    fn encode(&self) -> String {
+        let mut text = format!("report\t{}\n", self.report);
+        for (site, hits) in &self.sites {
+            assert!(
+                !site.contains(['\t', '\n']),
+                "a site name is one line: {site:?}"
+            );
+            let _ = writeln!(text, "site\t{hits}\t{site}");
+        }
+        for action in &self.unused {
+            let _ = writeln!(text, "unused\t{action}");
+        }
+        text
     }
+
+    fn decode(text: &str) -> Self {
+        let mut reached = Self::default();
+        for line in text.lines() {
+            let (kind, rest) = line.split_once('\t').expect("a kind, then a tab");
+            match kind {
+                "report" => rest.clone_into(&mut reached.report),
+                "site" => {
+                    let (hits, site) = rest.split_once('\t').expect("hits, then the site");
+                    let hits = hits.parse().expect("a count of passes");
+                    reached.sites.push((site.to_owned(), hits));
+                }
+                "unused" => reached.unused.push(rest.to_owned()),
+                other => panic!("an unknown line kind {other:?}"),
+            }
+        }
+        reached
+    }
+}
+
+/// Run the walk called `name` in this process.
+fn run(name: &str) -> Reached {
+    let walk_result = |result: Result<Coverage, String>| {
+        result.unwrap_or_else(|failure| panic!("{name}: {failure}"))
+    };
+    if let Some((_, flavor)) = flavors().into_iter().find(|(n, _)| n == name) {
+        let allows = flavor.clone();
+        let allowed = move |index: usize| {
+            <Cell as Model>::actions()
+                .get(index)
+                .is_some_and(|action| allows.allows(*action))
+        };
+        let walk = explore(Walk::<Cell>::new()).model(move |cx| Cell::build(flavor.clone(), cx));
+        return Reached::new(name, &walk_result(try_campaign(&walk, &[])), &allowed);
+    }
+    let coverage = match name {
+        "decree Quorum" | "decree EveryAcceptor" => {
+            let rule = if name == "decree Quorum" {
+                Phase1Rule::Quorum
+            } else {
+                Phase1Rule::EveryAcceptor
+            };
+            let walk = explore(Walk::<DecreeModel>::new())
+                .model(move |_| DecreeModel::build(rule, DecreeMutant::None));
+            try_campaign(&walk, &[])
+        }
+        "batcher" => try_campaign(
+            &explore(Walk::<consensus_sim::batcher::BatchModel>::new()),
+            &[],
+        ),
+        other => panic!("no walk is called {other:?}"),
+    };
+    Reached::new(name, &walk_result(coverage), &|_| true)
+}
+
+/// One walk of the campaign, in a process of its own: the walk that
+/// `COVERAGE_WALK` names, with what it reached written to `COVERAGE_OUT`.
+/// [`every_core_probe_is_reached`] runs it; alone, it does nothing.
+#[test]
+#[ignore = "one walk of the coverage gate, run by every_core_probe_is_reached"]
+fn one_walk() {
+    let (Some(name), Some(out)) = (std::env::var_os(WALK_VAR), std::env::var_os(OUT_VAR)) else {
+        return;
+    };
+    let name = name.into_string().expect("a walk name is UTF-8");
+    let reached = run(&name);
+    std::fs::write(&out, reached.encode()).expect("write what the walk reached");
+}
+
+/// A walk process that runs.
+struct Running {
+    name: String,
+    child: Child,
+    out: PathBuf,
+    log: PathBuf,
+}
+
+/// Start the walk `name` in a new process of this test binary.
+fn start(name: &str, index: usize, dir: &Path) -> Running {
+    let out = dir.join(format!("{index}.reached"));
+    let log = dir.join(format!("{index}.log"));
+    let log_file = std::fs::File::create(&log).expect("create the walk's log");
+    let child = Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--ignored",
+            "--exact",
+            "one_walk",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(WALK_VAR, name)
+        .env(OUT_VAR, &out)
+        .stdout(Stdio::from(log_file.try_clone().expect("share the log")))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .expect("start a walk process");
+    Running {
+        name: name.to_owned(),
+        child,
+        out,
+        log,
+    }
+}
+
+/// Wait for `running`, and read what it reached.
+fn finish(mut running: Running) -> Reached {
+    let status = running.child.wait().expect("wait for a walk process");
+    let log = std::fs::read_to_string(&running.log).unwrap_or_default();
+    assert!(
+        status.success(),
+        "the walk {} failed ({status}):\n{log}",
+        running.name
+    );
+    let text = std::fs::read_to_string(&running.out).unwrap_or_else(|error| {
+        panic!("the walk {} wrote nothing ({error}):\n{log}", running.name)
+    });
+    Reached::decode(&text)
+}
+
+/// Run every walk, `jobs` processes at a time, in the order of [`walks`].
+fn run_all(jobs: usize) -> Vec<Reached> {
+    let dir = std::env::temp_dir().join(format!("paros-coverage-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the campaign's directory");
+    let names = walks();
+    let mut done: Vec<Option<Reached>> = names.iter().map(|_| None).collect();
+    let mut running: Vec<(usize, Running)> = Vec::new();
+    let mut next = 0;
+    while next < names.len() || !running.is_empty() {
+        while next < names.len() && running.len() < jobs {
+            running.push((next, start(&names[next], next, &dir)));
+            next += 1;
+        }
+        // Wait for the oldest: the walks are not of one length, but the
+        // pool stays full while the oldest runs.
+        let (index, oldest) = running.remove(0);
+        done[index] = Some(finish(oldest));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    done.into_iter()
+        .map(|reached| reached.expect("every walk ran"))
+        .collect()
+}
+
+#[test]
+fn every_core_probe_is_reached() {
+    let jobs = std::env::var(JOBS_VAR).map_or_else(
+        |_| std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        |jobs| jobs.parse().expect("COVERAGE_JOBS is a count"),
+    );
+    assert!(jobs > 0, "at least one walk runs at a time");
+    let walked = run_all(jobs);
+    assert_eq!(walked.len(), walks().len(), "every walk reported");
+
+    let mut hits: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut errors = Vec::new();
+    let mut report = String::new();
+    for (name, reached) in walks().iter().zip(&walked) {
+        for (site, count) in &reached.sites {
+            *hits.entry(site.as_str()).or_default() += count;
+        }
+        for action in &reached.unused {
+            errors.push(format!("a walk never made the move {name}: {action}"));
+        }
+        let _ = writeln!(report, "{}", reached.report);
+    }
+    let probes = core_probes();
+    let hits_of = |key: &str| hits.get(key).copied().unwrap_or(0);
+    for probe in &probes {
+        if hits_of(probe.key()) == 0 {
+            errors.push(format!(
+                "no walk reached it: {} ({})",
+                probe.message, probe.file
+            ));
+        }
+    }
+    let reached = probes.iter().filter(|p| hits_of(p.key()) > 0).count();
+    // The rarest probes reached: the margin the gate has left.
+    let mut rarest: Vec<(u64, &str)> = probes
+        .iter()
+        .map(|p| (hits_of(p.key()), p.message.as_str()))
+        .filter(|(count, _)| *count > 0)
+        .collect();
+    rarest.sort_unstable();
+    for (count, message) in rarest.iter().take(5) {
+        let _ = writeln!(report, "rare: {count} passes: {message}");
+    }
+    let report = format!(
+        "{reached} of {} core probes reached\n{report}",
+        probes.len()
+    );
     eprintln!("{report}");
     assert!(errors.is_empty(), "{}\n{report}", errors.join("\n"));
 }

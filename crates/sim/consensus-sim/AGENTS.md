@@ -30,13 +30,15 @@ Test only: `publish = false`, never a dependency of another crate.
   sometimes site it sees, the core's `probe!`s too. The campaign installs the table itself, so
   the walk judges no coverage, and the campaign judges only the sites of the flavor. The core's
   probes are judged once, over every walk, by `tests/coverage.rs`.
-- **Every `probe!` of the core is reached, or named in `GAPS`** (#1199 (coverage-driven DST)).
-  `tests/coverage.rs` walks every flavor with exploration on and judges the union against the
-  probes that `probes::core_probes` reads from the source of `paros-consensus`. `GAPS` names each
-  probe that no walk reaches yet at the default budget, grouped by what it waits for: a rarer
-  schedule (a larger `MOONPOOL_WALK_SEEDS` reaches it) or a move the cell does not make yet. A new probe in the core is reached by a walk or named there in the same
-  PR. A named probe that a plain run reaches fails the gate: take it out of `GAPS`. Each flavor
-  also makes every move it allows.
+- **Every `probe!` of the core is reached** (#1199 (coverage-driven DST)). `tests/coverage.rs`
+  walks every flavor with exploration on and judges the union against the probes that
+  `probes::core_probes` reads from the source of `paros-consensus`. There is no list of excused
+  probes (Pierre, 2026-11-19: no excuses in simulation, no allow lists). A new probe in the core
+  is reached by a walk in the same PR: add the walk move, the flavor or the steer that bends the
+  cell to it, never a larger budget alone. Each flavor also makes every move it allows.
+- **A steer bends the walk, never the core.** A steer is a choice of the driver that makes a
+  rare state likely: an aimed fault (`cell/faults.rs` strikes the split floor), a
+  flavor with a small quorum or small pages. It stays a legal move of a real deployment.
 - The moonpool rev of `moonpool-walk`, `moonpool-assertions` and `moonpool-tla` here is the rev
   of the `moonpool-assertions` line of `paros-consensus`: one copy of the assertion table.
 - **A trace records only the steps that change the model's state** (#1198 (trace checking)). A
@@ -77,8 +79,16 @@ Test only: `publish = false`, never a dependency of another crate.
   stands with no open round, and every node and replica that is not retired learned its log.
   The moves beyond the clients and the clock (#1225 (walk moves for the unreached probes)):
   - `cell/faults.rs` → `Action::Rot`: a disk loses the value of one record and keeps its
-    identity (`MemStorage::rot`, CTRL's faulty entry), at most one faulty copy of a slot at a
-    time; a scrub may find it while the node runs (`ColocatedNode::repair_record`).
+    identity (`MemStorage::rot`, CTRL's faulty entry), at most one faulty copy of a slot that no
+    node trimmed; a scrub may find it while the node runs (`ColocatedNode::repair_record`). The split
+    floor (`Cell::split_floor`): a slot that one node trimmed, that a second node still holds,
+    and that a node which did not trim it has not learned chosen. Half the rots, and half the
+    compactions of a flavor with rots, strike there: every copy left below the trim point rots,
+    and the nodes that hold a copy or trimmed the slot stop. The walk restarts them; a lagging
+    node can then win with a promise quorum of faulty copies, its repair blocks, and the trim
+    point resolves it. Below a trim point a fault on every copy loses nothing: the trim point
+    carries the journal state. Flavor `disk-faults-3` has three acceptors, so a promise quorum
+    holds one peer beside the candidate.
   - `cell/retire.rs` → `Action::Retire` (the operator retires a node on an effective GC floor or
     on the floor a beat carried, and never one that a reconfiguration it asked for above the
     floor names), `Action::Rejoin` (a retired node boots again, or a running non-member
@@ -92,6 +102,12 @@ Test only: `publish = false`, never a dependency of another crate.
   - `cell.rs` → `Action::MoveRound` (a leader moves a stuck round to another column,
     `ColocatedNode::move_round`), and a client retry inside `Action::Propose` (the same records
     at a position written before).
+  - `cell.rs` → `Action::Usurp` (a node that does not lead campaigns while a leader stands,
+    `ColocatedNode::campaign`) and two steers for the leadership that a higher ballot passed:
+    before the faults stop, a leader misses every message that would depose it (`deafens`) but
+    hears each `Commit`, and a leader move takes such a leader first (`pick_leader`).
+  - `cell.rs` → a crash loses a suffix of the writes that no fsync covers yet, in half of the
+    crashes that have one (`LOST_UNSYNCED`).
 - `cell/trace.rs` + `cell/trace/` → `Tracer`, `CellEvent`, `Spec`: the steps of a cell walk as
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs` and `matchmaker.rs` each say which
@@ -108,18 +124,23 @@ Test only: `publish = false`, never a dependency of another crate.
 - `tests/flavors.rs` → one walk for each flavor: single decree, Multi-Paxos on three and on five
   (with truncation), the handoff, grid quorums, acceptor partitions, proxy leaders (on a majority
   and on a grid), replicas, leaderless reads, every compartment, the batcher, matchmakers with
-  reconfiguration, matchmakers with every compartment, disk faults, retirement and rejoin, and
-  the matchmaker set handover. 60 seeds each in CI.
+  reconfiguration, matchmakers with every compartment, disk faults (on five and on three), retirement
+  and rejoin, and the matchmaker set handover. 60 seeds each in CI.
 - `tests/mutants.rs` → each oracle catches its mutant.
-- `tests/coverage.rs` → coverage-driven simulation (#1199): every flavor, and seven of them with
+- `tests/coverage.rs` → coverage-driven simulation (#1199): every flavor, and eight of them with
   small pages, walk with exploration on (moonpool-walk's `Walk::explore`): a run that passes a
   site for the first time, or covers a new edge of the core, is branched, and its children
   replay it up to that step and then draw a new schedule. The gate is the union over all walks:
-  every core probe reached or named in `GAPS`, every allowed move made. Branch coverage needs
-  the instrumented build that CI's `coverage` job runs:
+  every core probe reached, every allowed move made. Its budget is its own (`SEEDS` = 300 root
+  seeds, `EXPLORE` = 10), and CI runs it as it is. Each walk runs in a process of its own (the
+  ignored test `one_walk`, started again from the same binary), one per CPU (`COVERAGE_JOBS`):
+  a process has its own branch counters, so a walk branches the same way whatever runs beside
+  it. Branch coverage needs the instrumented build that CI's `coverage` job runs:
   `RUSTC_WRAPPER=$PWD/scripts/sancov-rustc.sh SANCOV_CRATES=paros_consensus cargo nextest run
   --release --target-dir target/sancov -p consensus-sim --test coverage --no-capture`. Without
-  it, `moonpool_explorer::sancov_edges_covered_live` returns 0 and only the probes steer.
+  it, `moonpool_explorer::sancov_edges_covered_live` returns 0 and only the probes steer. The
+  `test` job of CI leaves the gate out (it is too long in debug). The `Coverage nightly`
+  workflow runs it with 900 root seeds from a first seed that moves with the date.
 - `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): four
   short walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of
   each control that the oracles pass. Single decree against `decree/`; every cell flavor without
@@ -134,10 +155,7 @@ Test only: `publish = false`, never a dependency of another crate.
 - A red seed is a finding. Reproduce it alone, find the cause, and fix the core with a red unit
   test first, or fix the oracle with the reason in the commit message.
 
-## Not reached yet
-
-The probes no walk reaches are `GAPS` in `tests/coverage.rs`, each group with what it waits
-for.
+## Not traced yet
 
 Not traced yet (#1198 (trace checking)):
 
@@ -148,7 +166,7 @@ Not traced yet (#1198 (trace checking)):
 - The batcher and the replica of `compartments/`.
 - `reconfigured-compartments`: matchmakers with a grid for each configuration, proxies and the
   handoff in one trace spec.
-- The flavors `disk-faults`, `retirement` and `handover`: no model has faulty entries, the
+- The flavors `disk-faults`, `disk-faults-3`, `retirement` and `handover`: no model has faulty entries, the
   retirement check or the matchmaker set handover.
 
 Those walks are checked against `multi-paxos/` only, or not at all.

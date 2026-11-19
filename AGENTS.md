@@ -59,8 +59,8 @@ not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`)
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
-unreached probes)): 67 of the 77 probes are reached at the CI budget, and 76 with
-`MOONPOOL_WALK_SEEDS=150 MOONPOOL_WALK_EXPLORE=10`.
+unreached probes)). Every one of the 77 probes is reached in CI, with no list of excused probes
+(Pierre, 2026-11-19: no excuses in simulation, no allow lists; the gate has 20 minutes of CI).
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
@@ -100,10 +100,13 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`
 - `scripts/check-module-style.sh` and `scripts/check-core-layers.sh`
-- the seven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
+- the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
+- the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
 - the `coverage` job: the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with
   `paros-consensus` instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
-  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`)
+  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`), at most 20 minutes. The `test`
+  job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
+  seeds (`MOONPOOL_WALK_FROM` moves with the date).
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
@@ -435,8 +438,9 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-consensus` — the sans-IO Paxos roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe. Its optional, default-on `assertions` feature (#317)
   adds `moonpool-assertions` for coverage probes only. Its tests, the model checkers
-  (`src/models/`), the driver contract (`src/contract/`) and the seven teaching examples
-  (`examples/`) live in the crate.
+  (`src/models/`), the driver contract (`src/contract/`) and the eleven examples
+  (`examples/`: seven lessons, and four that drive `ColocatedNode` as a driver does, from
+  `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus` today). A program
   depends on `paros` alone. Wasm-safe and provider-free.
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles

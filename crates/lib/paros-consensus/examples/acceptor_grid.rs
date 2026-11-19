@@ -91,9 +91,7 @@ use paros_consensus::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy,
 use paros_consensus::types::Fingerprint;
 use paros_consensus::{Ballot, NodeId, Slot};
 
-use common::{
-    Node, assert_same_log, ballot, command, commit, node, noop, show, show_ballot, show_records,
-};
+use common::{Node, assert_same_log, ballot, command, commit, node, noop, show, show_records};
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
@@ -141,9 +139,7 @@ fn open_phase1(cluster: &mut [Node], leader: NodeId, ballot: Ballot) -> Slot {
     assert_eq!(targets.len(), 5, "Phase 1 is addressed to every peer");
     println!(
         "ballot {}: node {} campaigns, prepare from slot {} (needs a promise from every column, itself included)",
-        show_ballot(ballot),
-        leader.0,
-        from_slot.0
+        ballot, leader.0, from_slot.0
     );
     let own: BTreeMap<Slot, (Ballot, Command)> = me
         .acceptor
@@ -181,11 +177,7 @@ fn promise_from(
             );
             assert_eq!(fold, PromiseFold::Answered);
         }
-        Err(promised) => println!(
-            "  node {} -> nack, already promised {}",
-            peer.0,
-            show_ballot(promised)
-        ),
+        Err(promised) => println!("  node {} -> nack, already promised {}", peer.0, promised),
     }
     let me = node(cluster, leader);
     let promised: Vec<NodeId> = me
@@ -268,7 +260,7 @@ fn accept_round(
         .open_round(slot, ballot, command.clone(), own_vote, column);
     println!(
         "ballot {}: accept slot {} = {} -> column {} = {}{}",
-        show_ballot(ballot),
+        ballot,
         slot.0,
         show(command),
         column.expect("a grid names a column"),
@@ -310,11 +302,7 @@ fn accept_round(
                     );
                 }
             }
-            Err(promised) => println!(
-                "  node {} -> nack, already promised {}",
-                peer.0,
-                show_ballot(promised)
-            ),
+            Err(promised) => println!("  node {} -> nack, already promised {}", peer.0, promised),
         }
     }
     let me = node(cluster, leader);
@@ -328,8 +316,7 @@ fn accept_round(
     me.learn_chosen(slot, at, &decided);
     println!(
         "  slot {} chosen at ballot {}: the full column accepted",
-        slot.0,
-        show_ballot(at)
+        slot.0, at
     );
     true
 }
@@ -577,8 +564,7 @@ fn part_column_cost(cluster: &mut [Node], b11: Ballot, chosen_by_column: &[(Slot
         me.learn_chosen(slot, at, &decided);
         println!(
             "  node 1 -> accepted; slot {} chosen at ballot {}",
-            slot.0,
-            show_ballot(at)
+            slot.0, at
         );
         commit(cluster, slot, at, &cmd, &everyone());
     }
