@@ -9,7 +9,7 @@ use super::{any, decree_outcome, kind};
 use crate::paxos::action::{Action, Phase};
 use crate::paxos::level::common::open;
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
-use crate::paxos::view::{MessageView, WorldView};
+use crate::paxos::view::{MessageView, NodeFlavour, WorldView};
 
 /// The setup: acceptors 1, 2 and 3, proposers 5 and 8.
 const LEVEL: &str = "act1/the-duel";
@@ -38,12 +38,14 @@ fn nothing_chosen(world: &WorldView) -> bool {
 }
 
 /// At least two of the three acceptors, a majority, voted for `value`. The
-/// value is chosen then, before any proposer learns it.
+/// value is chosen then, before any proposer learns it. A proposer's card
+/// also lists the value it proposes, which is not a vote.
 fn majority_voted(value: &'static str) -> impl Fn(&WorldView) -> bool {
     move |world| {
         let voters = world
             .nodes
             .iter()
+            .filter(|node| node.flavour == NodeFlavour::Acceptor)
             .filter(|node| node.accepted.iter().any(|vote| vote.value == value))
             .count();
         voters >= 2
