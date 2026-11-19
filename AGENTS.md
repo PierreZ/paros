@@ -2,6 +2,34 @@
 
 Learning project: the Paxos consensus algorithm in Rust. WIP, not for production.
 
+## ABSOLUTE RULE: no exception in simulation
+
+This rule has no exception. It is more important than every other rule in this file (Pierre,
+2026-11-19).
+
+**The goal of simulation is to bend the software enough to trigger its rough edge cases,
+without breaking it, so that the work makes progress.**
+
+- **No excuse.** A failure in a simulation run is a finding. Find its cause and fix the code,
+  or fix the walk if the walk does a thing that the contract of the code does not permit. Never
+  accept the failure.
+- **No allow list.** Do not write a list of failures, seeds, messages, probes, oracles, flavors
+  or faults that a run may ignore. Do not write a list of probes that a run need not reach.
+- **No skip.** An oracle judges every case. Do not skip a case because it is rare, hard or
+  "not possible". A case that is not possible fails the oracle. A simulation test never skips
+  itself because a tool is missing: it fails. Do not add `#[ignore]` to a simulation test,
+  except to a helper that another test runs.
+- **No weaker check.** Do not make an oracle less strict, a budget larger, or a fault less
+  frequent to make a red run green. Do not turn off a fault because the code does not survive
+  it. A probe that a walk does not reach gets a walk move, a flavor or a steer. Only an oracle
+  that asks for more than the contract of the code may change, and only to match that contract,
+  with Pierre's agreement.
+- **No retry.** Do not run a red seed again until it is green.
+- **Bend, do not break.** A fault stays inside the contract of the code (for example, the disk
+  keeps what an fsync covered). A fault that breaks the contract tests nothing.
+
+If you think that a case needs an exception, stop and ask Pierre. Do not add the exception.
+
 **Where paros is now (2026-11-19).** The repository holds the consensus core and its proofs
 only: `paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
 models of `specs/tla/`, the Paxos pages of the website and their wasm engine. The journal
@@ -30,7 +58,7 @@ read; #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Comm
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
-promise with the old belief fence as a control, a lagging pool, a restart and the refusal of a
+promise with the old belief fence as a control, a lagging pool, a lagging reader gated on its promise (#1228 (stale read by a lagging reader)), a restart and the refusal of a
 rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)), truncation on plain
 Multi-Paxos (`specs/tla/truncation/`: the decided `Truncate` and the floor as a fold of the
 journal, the floor guard of Phase 1 and the retry of a refused laggard, the trim-point jump that
@@ -59,7 +87,7 @@ not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`)
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
-unreached probes)). Every one of the 77 probes is reached in CI, with no list of excused probes
+unreached probes)). Every one of the 79 probes is reached in CI, with no list of excused probes
 (Pierre, 2026-11-19: no excuses in simulation, no allow lists; the gate has 20 minutes of CI).
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data

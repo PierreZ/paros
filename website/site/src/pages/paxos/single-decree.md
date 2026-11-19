@@ -18,8 +18,9 @@ A [proposer](../#leader) picks a **[ballot](../#ballot)**. Phase 1 (`Prepare`, [
 what the [acceptors](../#acceptor) already voted for. Phase 2 (`Accept`, `Accepted`) asks for a vote. A
 majority of votes at one ballot [chooses](../#chosen) the value.
 
-The story shows one idea per screen, recorded from the real `paros-consensus`. At the end,
-choose what goes wrong. "Show each message" opens the same run one message at a time.
+The story shows one idea per screen, recorded from the real `paros-consensus`. Before some
+screens play, the story asks what will happen: answer, then watch. At the end, choose what
+goes wrong. "Show each message" opens the same run one message at a time.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
 

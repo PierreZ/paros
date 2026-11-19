@@ -32,24 +32,18 @@ pub fn spec(folder: &str, module: &str) -> TraceCheck {
     TraceCheck::new(specs_dir().join(folder), module)
 }
 
-/// Whether TLC can run here. TLC (`tlc`) is in the nix dev shell, and CI
-/// runs every test in it, so a missing TLC fails in CI and skips only on a
-/// machine outside the shell.
+/// TLC must run here. TLC (`tlc`) is in the nix dev shell, and every test
+/// runs in it. A trace test never skips: a missing TLC fails the test, in CI
+/// and on a workstation (no excuse in simulation, `AGENTS.md`).
 ///
 /// # Panics
 ///
-/// When TLC is missing and the variable `CI` is set.
-#[must_use]
-pub fn tlc_or_skip(check: &TraceCheck) -> bool {
-    if check.tlc_available() {
-        return true;
-    }
+/// When TLC is missing.
+pub fn require_tlc(check: &TraceCheck) {
     assert!(
-        std::env::var_os("CI").is_none(),
-        "TLC is missing in CI: run the tests in the nix dev shell"
+        check.tlc_available(),
+        "TLC (`tlc`) is missing: run the tests in the nix dev shell (`nix develop`)"
     );
-    eprintln!("skipped: TLC (`tlc`) is not installed; run in `nix develop`");
-    false
 }
 
 /// The ballots of one run, ranked from 1 in the order of the code. A model

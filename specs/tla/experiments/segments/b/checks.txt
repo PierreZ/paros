@@ -17,8 +17,11 @@ reach_trim         violation  ci
 retire_early       violation  ci
 trim_nocheck       violation  ci
 reads              pass       ci
+reads_fence        pass       ci
+reach_read_old     violation  ci
 read_nofence       violation  ci
 reads_view         violation  ci
 reads_long         pass       long
+reads_fence_long   pass       long
 plain_long         pass       long
 claims_long        pass       long

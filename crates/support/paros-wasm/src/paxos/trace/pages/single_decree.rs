@@ -9,7 +9,7 @@ use super::{any, decree_outcome, kind};
 use crate::paxos::action::{Action, Phase};
 use crate::paxos::level::common::open;
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
-use crate::paxos::view::MessageView;
+use crate::paxos::view::{MessageView, NodeFlavour, WorldView};
 
 /// The setup: acceptors 1, 2 and 3, proposers 5 and 8.
 const LEVEL: &str = "act1/the-duel";
@@ -20,6 +20,52 @@ const TURN: usize = 7;
 /// Every message to or from proposer `id`.
 fn of(id: u64) -> impl Fn(&MessageView) -> bool {
     move |message| message.from == id || message.to == id
+}
+
+/// `value` is chosen.
+fn chosen(value: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world
+            .chosen
+            .as_ref()
+            .is_some_and(|chosen| chosen.value == value)
+    }
+}
+
+/// No value is chosen.
+fn nothing_chosen(world: &WorldView) -> bool {
+    world.chosen.is_none()
+}
+
+/// At least two of the three acceptors, a majority, voted for `value`. The
+/// value is chosen then, before any proposer learns it. A proposer's card
+/// also lists the value it proposes, which is not a vote.
+fn majority_voted(value: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        let voters = world
+            .nodes
+            .iter()
+            .filter(|node| node.flavour == NodeFlavour::Acceptor)
+            .filter(|node| node.accepted.iter().any(|vote| vote.value == value))
+            .count();
+        voters >= 2
+    }
+}
+
+/// The value that acceptor `id` voted for is `value`.
+fn voted(id: u64, value: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .is_some_and(|node| node.accepted.iter().any(|vote| vote.value == value))
+    }
+}
+
+/// A message of kind `kind` is on the wire.
+fn on_wire(kind: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| world.wire.iter().any(|message| message.kind == kind)
 }
 
 /// A message of Phase 1.
@@ -88,12 +134,36 @@ fn base() -> Scenario {
         "Two promises of three are a majority. Proposer 5 now holds ballot 1.5, and it asks \
          every acceptor to vote for alpha.",
     )
+    .ask(
+        "Three promises are on the wire. How many must proposer 5 get before it asks for a \
+         vote?",
+        &["One", "Two", "All three"],
+        1,
+        "Two of three is a majority. Any two majorities share an acceptor, so a later ballot \
+         always meets an acceptor of this one.",
+    )
     .settle(kind("Promise"))
+    .holds(on_wire("Accept"), "proposer 5 asks for votes")
     .beat("Each acceptor writes its vote to disk, then answers Accepted.")
     .settle(kind("Accept"))
+    .holds(
+        majority_voted("alpha"),
+        "a majority voted for alpha before an Accepted arrives",
+    )
     .beat(
         "Two votes for alpha at ballot 1.5 are a majority: alpha is chosen. No later ballot \
          can change it.",
+    )
+    .ask(
+        "Every acceptor wrote its vote. The Accepted messages are still on the wire. Is alpha \
+         chosen now?",
+        &[
+            "Yes: a majority voted for it at one ballot",
+            "No: proposer 5 must count the votes first",
+        ],
+        0,
+        "A value is chosen when a majority votes for it at one ballot. The proposer only \
+         learns it.",
     )
     .settle(kind("Accepted"))
     .beat(
@@ -169,11 +239,36 @@ fn second_proposer() -> Scenario {
         "Proposer 8 must propose the value of the highest vote that it heard of. So it asks \
          for alpha, not bravo.",
     )
-    .settle(move |message| of(8)(message) && message.kind == "Accept");
+    .ask(
+        "Proposer 8 wants bravo. One promise reports a vote for alpha at ballot 1.5. Which \
+         value does proposer 8 ask the acceptors to vote for?",
+        &[
+            "bravo, its own value",
+            "alpha, the value that it heard of",
+            "No value: it stops",
+        ],
+        1,
+        "A majority can have chosen alpha already. Proposer 8 cannot know, so it keeps alpha.",
+    )
+    .settle(move |message| of(8)(message) && message.kind == "Accept")
+    .holds(
+        voted(2, "alpha"),
+        "acceptor 2 voted for alpha at ballot 1.8",
+    );
     run.beat(
         "The slow Accepts of ballot 1.5 arrive. Acceptors 2 and 3 promised 1.8, so they refuse \
          them.",
     )
+    .ask(
+        "Acceptors 2 and 3 promised ballot 1.8. The slow Accepts of ballot 1.5 arrive now. \
+         What do acceptors 2 and 3 do?",
+        &["They vote at ballot 1.5", "They refuse the Accepts"],
+        1,
+        "A promise for ballot 1.8 refuses every lower ballot.",
+    )
+    .holds(on_wire("Accept"), "the slow Accepts are on the wire")
+    .settle(|message| message.kind == "Accept")
+    .holds(on_wire("Nack"), "acceptors 2 and 3 refuse")
     .settle(|message| message.kind == "Accept" || message.kind == "Nack");
     back(
         &mut run,
@@ -208,7 +303,20 @@ fn duel() -> Scenario {
         .play(open(5, "alpha"), "proposer 5 opens a higher ballot again")
         .settle(move |message| of(5)(message) && phase1(message));
     run.beat("Now the Accepts of proposer 8 are refused. The two proposers can do this forever.")
-        .settle(of(8));
+        .ask(
+            "Every acceptor now holds a promise above ballot 1.8. The Accepts of proposer 8 \
+             arrive. What happens?",
+            &[
+                "bravo is chosen",
+                "Every acceptor refuses",
+                "alpha is chosen",
+            ],
+            1,
+            "Each proposer raised the promises above the ballot of the other one. No vote was \
+             given, so no value is chosen.",
+        )
+        .settle(of(8))
+        .holds(nothing_chosen, "the duel chooses no value");
     run.beat(
         "Proposer 8 does not try again at once: a refused proposer waits. Proposer 5 is alone, \
          and alpha is chosen.",
@@ -241,14 +349,34 @@ fn acceptor_restart() -> Scenario {
         "Acceptor 1 restarts. It reads its promise and its vote back from its disk, so it \
          forgets nothing that it said.",
     )
-    .play(Action::Restart { node: 1 }, "acceptor 1 restarts");
+    .ask(
+        "Acceptor 1 voted for alpha, then crashed. It restarts now. Does it still hold its \
+         vote?",
+        &["Yes: the vote is on its disk", "No: a crash loses the vote"],
+        0,
+        "The acceptor wrote the vote to disk before it answered. A restart reads it back.",
+    )
+    .play(Action::Restart { node: 1 }, "acceptor 1 restarts")
+    .holds(
+        voted(1, "alpha"),
+        "acceptor 1 holds its vote after a restart",
+    );
     run.beat("Proposer 8 opens ballot 1.8 for bravo.")
         .play(open(8, "bravo"), "proposer 8 opens a ballot for bravo");
     run.beat(
         "Acceptor 1 reports its vote in its promise. Proposer 8 must propose alpha, and alpha \
          is chosen.",
     )
-    .settle(any);
+    .ask(
+        "Only acceptor 1 voted for alpha, and no value is chosen. Proposer 8 wants bravo and \
+         reaches all three acceptors. Which value is chosen?",
+        &["bravo", "alpha", "Both"],
+        1,
+        "One vote is enough to bind proposer 8: it cannot know that alpha is not chosen, so \
+         it proposes alpha.",
+    )
+    .settle(any)
+    .holds(chosen("alpha"), "alpha is chosen at ballot 1.8");
     back(
         &mut run,
         "This is why an acceptor writes to disk before it answers: a vote that it gave must \
@@ -266,7 +394,22 @@ fn lost_votes() -> Scenario {
     run.beat("Proposer 5 gets promises for ballot 1.5, and every acceptor votes for alpha.")
         .play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
         .settle(|message| message.phase != "accepted" && message.phase != "commit");
+    run.holds(
+        majority_voted("alpha"),
+        "a majority voted for alpha before the answers are lost",
+    );
     run.beat("Every Accepted is lost. alpha is chosen, but proposer 5 does not know it.")
+        .ask(
+            "Every acceptor voted for alpha. Every Accepted is lost on the way to proposer 5. \
+             Is alpha chosen?",
+            &[
+                "Yes: the votes are on the disks",
+                "No: the proposer got no answer",
+            ],
+            0,
+            "The votes of a majority choose the value. A lost answer only hides the choice \
+             from the proposer.",
+        )
         .drop_all(kind("Accepted"));
     run.beat("Proposer 5 tries again at a higher ballot.")
         .play(
@@ -309,7 +452,16 @@ fn fenced_out() -> Scenario {
     )
     .settle(move |message| of(8)(message) && phase1(message));
     run.beat("Acceptors 2 and 3 vote for bravo: bravo is chosen.")
-        .settle(move |message| of(8)(message) && message.phase != "commit");
+        .ask(
+            "Acceptor 1 voted for alpha. Proposer 8 got two promises, and neither reports a \
+             vote. Which value does proposer 8 ask for?",
+            &["alpha", "bravo, its own value"],
+            1,
+            "One vote of three is not a majority, so alpha is not chosen. A proposer that \
+             hears of no vote is free.",
+        )
+        .settle(move |message| of(8)(message) && message.phase != "commit")
+        .holds(chosen("bravo"), "bravo is chosen at ballot 1.8");
     run.beat(
         "The slow Accepts of ballot 1.5 arrive. Acceptors 2 and 3 promised 1.8, so they \
          refuse them. alpha can never get a second vote.",
@@ -353,7 +505,21 @@ fn repeated_answers() -> Scenario {
         "Proposer 5 gets both copies. It counts acceptor 1 once: one promise from one \
          acceptor is not a majority.",
     )
-    .settle(|message| message.kind == "Promise" && message.from == 1);
+    .ask(
+        "Proposer 5 gets the promise of acceptor 1 two times, and no other promise. Does it \
+         ask for votes now?",
+        &[
+            "Yes: two promises are a majority",
+            "No: it counts acceptor 1 once",
+        ],
+        1,
+        "A quorum is a set of acceptors, not a count of messages.",
+    )
+    .settle(|message| message.kind == "Promise" && message.from == 1)
+    .holds(
+        |world| !on_wire("Accept")(world),
+        "one acceptor is not a majority",
+    );
     run.beat(
         "Proposer 5 waits no more for this ballot and opens a higher one. The promises of \
          ballot 1.5 are still on the wire.",
@@ -433,6 +599,17 @@ fn break_the_rule() -> Scenario {
     run.beat("Proposer 8 can reach only acceptors 2 and 3.");
     reach(&mut run, &[2, 3]);
     run.beat("Proposer 8 opens ballot 1.8. Neither acceptor reports a vote, so it proposes bravo.")
+        .ask(
+            "alpha is chosen. Acceptor 2 lost its disk. Proposer 8 asks acceptors 2 and 3 for \
+             a promise. Does a promise report the vote for alpha?",
+            &[
+                "Yes: acceptor 2 voted for alpha",
+                "No: the vote was only on the lost disk",
+            ],
+            1,
+            "Acceptor 3 never voted, and acceptor 2 forgot. The majority that chose alpha and \
+             the majority that promises now share only an acceptor with no memory.",
+        )
         .play(open(8, "bravo"), "proposer 8 opens a ballot for bravo")
         .settle(phase1);
     run.beat("Acceptors 2 and 3 vote for bravo. Now two values are chosen.")

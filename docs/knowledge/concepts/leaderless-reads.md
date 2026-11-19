@@ -75,9 +75,11 @@ sequenceDiagram
   client **unserved** (ambiguous), and the client asks another server.
 - **A newer configuration.** A node abandons every open read when it learns one
   (`QuorumReads::abandon_superseded`): the row it asked need not meet the successor's columns.
-- **A campaign in progress.** A server whose belief moved above its basis opens no read until the
-  new leadership's beat arrives: "reads are unavailable during a campaign, never stale"
-  (`quorum_read.rs` module doc).
+- **A campaign in progress.** A server whose read fence (the higher of its promise and its belief
+  ballot) moved above its basis opens no read until the new leadership's beat arrives, and ends
+  the reads it holds: "reads are unavailable during a campaign, never stale" (`quorum_read.rs`
+  module doc). The gate is the promise, not the belief: a server whose pool lags ignores the
+  configuration of a campaign it promised (#1228 (stale read by a lagging reader)).
 - **A rebooted acceptor** on a matchmaker deployment answers no `PreRead` until it has heard what
   configuration is in force. The reads model shows that this refusal is not necessary for safety
   under the promise fence (`specs/tla/reads/`, `reboot_promise_open`, #1099 (rework 1.10)): it
@@ -104,7 +106,9 @@ A `PreReadAck` carries the read fence of the acceptor: the higher of its durable
 belief ballot (`wire_read_fence`). An answer above the basis ends the read. The promise is the
 fence that the reads model checks (`specs/tla/reads/`, `Fence = "promise"`): an acceptor that
 promised a later campaign may have helped it win, whether or not it adopted that campaign's
-configuration.
+configuration. The reader gates itself on the same fence: it counts its own watermark with no
+ack, so a reader that promised above its basis opens no read and ends the reads it holds
+(`read_basis`, `fence_quorum_reads`; `specs/tla/reads/`, `reads_lag_reader`).
 
 ## 7. Liveness
 
@@ -166,6 +170,12 @@ configuration.
   configuration, ignored that configuration, and answered with its old belief ballot, so a read
   completed below a write that the new leadership chose. Fixed by PR #1074 (fence a leaderless
   read on the promise); the TLA+ control is `specs/tla/reads/fence_belief_lag`.
+- **A reader gated on its belief ballot (#1228 (stale read by a lagging reader)).** After PR #1074
+  the answers of the peers carried the promise, but the reader still gated its own read on its
+  belief ballot and counted its own watermark with no fence. A reader whose pool lagged promised
+  a newer campaign and served a read below a write that campaign chose. Fixed by the gate on the
+  read fence; the TLA+ control is `specs/tla/reads/reads_lag_reader_belief`, and the unit test is
+  `a_lagging_reader_that_promised_above_its_basis_serves_no_read`.
 - **A read over a campaign's configuration (#260).** A leader under `{0,1,3}` with `q2 = 1` chose a
   `SetLeader` with its own vote, campaigned with `{0,2,3}` and died; an acceptor that promised the
   campaign served reads from a majority of the new configuration and missed the slot for a second
