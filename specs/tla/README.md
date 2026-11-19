@@ -56,6 +56,7 @@ Each gave the result that its `checks.txt` expects, except the two bounded runs 
 | `zero-stall/gc_p212_paper` | pass | 2.7 million | 3 min |
 | `zero-stall/gc_carry_paper` | pass | 2.8 million | 3 min |
 | `config-register/*` | see the table of the model | | |
+| `config-register/grid_long`, `reads/grid_partitions` | no violation in two bounded runs of 2 hours (2026-11-19, #1102 (rework 1.13)); see the tables of the models | | |
 | `abandoned-ballot/owner` | no violation in 89 million distinct states (bounded: the disk filled after 50 min) | 89 million | 50 min |
 
 ## Models
@@ -335,7 +336,7 @@ Each control turns off one rule, and each one fails:
 | `partitioned` | the rule, the partitioned layouts, seven acceptors, two ballots | pass (21 million states, 17 minutes, `long`) |
 | `grid_slack` | control: two full grids, Phase 2 takes one acceptor of a column and Phase 1 still one of each column, where it needs two | `Agreement` violation (7 thousand states) |
 | `grid` | the rule, a move between two full grids of 2 x 2, five acceptors, two ballots | pass (453 thousand states, 40 seconds) |
-| `grid_long` | `grid` with three ballots | GRIDLONG |
+| `grid_long` | `grid` with three ballots | no violation in 53.6 million distinct states, to depth 27 (a bounded run of 2 hours, 2 workers; `long`) |
 | `live` | `LiveSpec`: three matchmakers, one crash, no release; the top ballot wins | pass (15.5 million states, 17 minutes, `long`) |
 | `live_release` | `live` with stores released | pass (21 million states, 25 minutes, `long`) |
 | `agree_long` | `agree_mm3` with three ballots | no violation in 181 million distinct states, to depth 23 (a bounded run of 2 hours that filled the disk; `long`) |
@@ -485,7 +486,7 @@ Results (`reads/checks.txt`):
 | `grid_full`: the full grid, a change of members, the row read (the code) | violation (300 thousand states, 15 seconds) |
 | `grid_full_static`: the full grid, no change of members | pass (588 thousand states, 35 seconds) |
 | `grid_full_seal`: the full grid, a change of members, `Seal = "reads"` | pass (1.6 million states, 1.5 minutes) |
-| `grid_partitions`: the partitions, a change of members | GRIDPART |
+| `grid_partitions`: the partitions, a change of members | no violation in 71.2 million distinct states, to depth 23 (a bounded run of 2 hours, 2 workers; `long`) |
 
 The trace of `grid_full` is the stale read that `quorum_read.rs` names (a row "wholly unaware of
 a completed successor"):
