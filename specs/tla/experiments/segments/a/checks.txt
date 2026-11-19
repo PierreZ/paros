@@ -5,11 +5,11 @@
 #             long       only `scripts/check-tla.sh --all` runs it
 # Design A: the segment table in the matchmakers. Report: ../README.md.
 safety                        pass       ci
+gap_off                       violation  ci
 reach_reshape                 violation  ci
 reach_offload                 violation  ci
 reach_drop                    violation  ci
 reach_trim                    violation  ci
-end_voted_below               pass       ci
 end_uncommitted_below         violation  ci
 end_uncommitted_all           pass       ci
 end_uncommitted_frozen        violation  ci

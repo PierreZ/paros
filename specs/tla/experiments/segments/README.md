@@ -5,16 +5,21 @@ not a model of the plan: it changes no model of `specs/tla/`, and no rule of `pa
 comes from it until Pierre decides. The report below goes to Pierre.
 
 **Decision**: Pierre chose design A on 2026-11-19. The rules are recorded in
-`docs/architecture/02-data-plane.md` section 2.10.
+`docs/architecture/02-data-plane.md` section 2.10. The gap review of 2026-11-19 found a missing
+rule of A and three rows of this report that were not fair to B (#1233 (segments gap fill));
+Pierre kept A, and this report includes the corrections.
 
 ## Result in short
 
-Design A (the matchmakers hold the segment table) passes all seven checks with five rules, each
-with a control that TLC breaks. Design B (plain Matchmaker Paxos, chunks local to each replica)
-passes checks 1, 2, 3, 4, 5 and 7, but **fails check 6**: a slot whose only copy is in the
-object store is declared nowhere in decided state. The variant of B that records each offload as
-an entry of the journal's own log passes check 6 too, at the cost of a log entry for each
-offload, a leader to append it, and a fold of the log for each client that wants the view.
+Design A (the matchmakers hold the segment table) passes all seven checks and the stranded-hole
+check with six rules, each with a control that TLC breaks. Design B (plain Matchmaker Paxos,
+chunks local to each replica) with fixed chunks and the read fence of paros passes checks 1, 2,
+3, 4, 5 and 7. Plain B **fails check 6 by definition**: it has no decided record of an offload,
+so a slot whose only copy is in the object store is declared nowhere. TLC only shows that such
+a slot is reached. The variant of B that records each offload as an entry of the journal's own
+log passes check 6, at the cost of a log entry for each offload, a leader to append it, and a
+fold of the log for each client that wants the view. A lighter variant of B (fixed chunks and
+one decided "offloaded up to" mark) is not modelled.
 
 TLC found one rule of the design doc that is wrong as written. The doc says that the end slot of
 a sealed segment is "the first uncommitted slot". With that end, a Phase 1 that reads the old
@@ -22,9 +27,15 @@ grid only below the end chooses a second value for a slot (trace below). The end
 above the highest slot where Phase 1 saw a vote in the old grid, or Phase 1 must keep reading
 the whole old grid until it retires (then the end bounds nothing).
 
-Pierre's lean towards A holds against the bar: A passes every check with less machinery, and
-the upper stack reads the segment table as one decided record. B can reach the same view only
-with the log-claim variant, which moves the table into the log and makes each client fold it.
+That end is complete only with a gap fill (rule 2b): the leader also writes a `Noop` at each
+slot below the start of its segment where Phase 1 saw no vote. Without it, a slot below the end
+with no vote is a hole that no ballot can write, and the journal stops there for ever
+(`gap_off`, 10 states).
+
+Pierre's lean towards A holds against the bar: A passes every check, and the upper stack reads
+the segment table as one decided record. Its cost is the matchmaker writes of each segment
+(cost section). B can reach a decided view with the log-claim variant, which moves the table
+into the log and makes each client fold it.
 
 ## The two designs
 
@@ -32,10 +43,11 @@ with the log-claim variant, which moves the table into the log and makes each cl
 |---|---|---|
 | Matchmakers hold | the configurations and one record for each segment: start, end, state | the configurations only |
 | A segment ends | at seal: the first leader of the next configuration writes the end once, by compare-and-set | nowhere in decided state; each replica cuts its own chunks |
-| Object key | journal + configuration number | journal + first slot + last slot of a chunk |
+| Object key | journal + configuration number | journal + first slot + last slot of a chunk (fixed chunks: a function of the slot) |
 | Phase 1 reads | each sealed configuration below its end, the open one in full | every configuration that still runs, above the replicas' applied prefix |
+| A tail read reads | a quorum of the cached configuration; the start of the cached segment bounds it below | a quorum of the cached configuration; the fence of a leadership that won bounds it below |
 | A replica drops its copy | once the record says `offloaded` | plain B: once its object is in the store; variant: once it also applied the winning claim |
-| Spec size | 495 lines, 304 without comments, 27 operators | 427 lines, 277 without comments, 24 operators |
+| Spec size | 521 lines | 469 lines |
 
 Both models have the same parts: a reshape (a ballot of the successor configuration), a leader
 change (a later ballot of the same configuration), a leader crash (a leader that stops taking
@@ -52,15 +64,20 @@ their state on disk, so a restart changes nothing that the models see.
 | 1. One value for each slot (`Agreement`) | holds | holds | holds |
 | 2. Every slot at or above the floor is readable with the chosen bytes (`Readable`) | holds | holds | holds |
 | 3. An object never changes (`StoreImmutable`); one object for each key | holds | holds | holds |
-| 3+. One object for each slot (`OneHome`, not in the issue) | holds | **fails**: two replicas cut different chunks, so two objects hold one slot | holds: only the winning claim is uploaded |
+| 3+. One object for each slot (`OneHome`, not in the issue) | holds, but **vacuous**: with two configurations only one segment can be sealed, so only one object exists | holds with fixed chunks; fails with free cuts (`plain_onehome`) | holds: only the winning claim is uploaded |
 | 4. Recovery reads a bounded number of slots, safely | holds with the end at the highest vote + 1 | holds: above the replicas' applied prefix, on every configuration that still runs | holds |
-| 5. A tail read is linearizable across a reshape, with a stale cached view (`ReadFresh`) | holds | holds only if the read reads every configuration that still runs | not run (same read as plain B) |
-| 6. One decided view of where each slot lives, offloaded slots included (`Visible`) | holds: the record | **fails** | holds: the winning claim in the log |
+| 5. A tail read is linearizable across a reshape, with a stale cached view (`ReadFresh`) | holds | holds with the read fence of paros: one configuration is read (`reads_fence`) | not run (same read as plain B) |
+| 6. One decided view of where each slot lives, offloaded slots included (`Visible`) | holds: the record | **fails by definition**: `Declared` is `FALSE` with no claims | holds: the winning claim in the log |
 | 7. Offload, retire and trim never stop a leader that can write (`TailNeverBlocked`) | holds | holds | holds |
+| No stranded hole (`NoStrandedHole`, not in the issue) | holds with the gap fill (rule 2b) | holds by construction | holds by construction |
 
-A also passes `EndOnce` (the end is written once), `SealedFrozen` (nothing is chosen in a sealed
-configuration at or above its end), `TableSound` (the sealed records do not overlap the start of
-a later one) and `CursorSafe`.
+`NoStrandedHole` says that each leader of the configuration in force that finished Phase 1 may
+propose at each slot at or above the floor that is not chosen. It is a safety form of the
+liveness property "the chosen prefix can always grow". A also passes `EndOnce` (the end is
+written once), `SealedFrozen` (nothing is chosen in a sealed configuration at or above its
+end), `TableSound` (the sealed records do not overlap the start of a later one) and
+`CursorSafe`. `a/safety.cfg` checks all of A's invariants together, with Phase 1 bounded below
+the end (the rule of check 4).
 
 ## What each design had to add to pass
 
@@ -84,6 +101,17 @@ Design A:
    the leader of grid 2 sees that vote, seals grid 1 at end 2, and gets v1 chosen at slot 1 in
    grid 2. The rule is safe (`end_voted_below_three` passes). The table still says which
    range each segment covers; it does not say which grid holds each vote of the boundary slots.
+
+   **2b. Each leader of the configuration in force writes a `Noop` at each slot above the
+   applied prefix and below the start of its segment where its Phase 1 saw no vote**
+   (`GapFill = TRUE`). It is the election gap fill that the core already has. Control
+   `gap_off` (`NoStrandedHole` fails in 10 states): ballot 2 of grid 1 proposes slots 1 and 2,
+   and a1 votes slot 2 only. Ballot 3 of grid 2 runs Phase 1, sees the vote at slot 2, and seals
+   grid 1 at end 3, so grid 2 starts at slot 3. Slot 1 has no vote and is below the start. The
+   old grid is sealed and no later ballot registers it, so nobody can propose slot 1. The
+   replicas stop at slot 1 for ever, so retire, offload and trim never come, and a tail read
+   answers 2 for a slot that is never chosen. With the gap fill, Phase 1 bounded below the end
+   stays safe (`safety`, `end_voted_below_three`).
 3. **The end is a compare-and-set from "none".** Control `seal_blind`: two sealing leaders both
    write an end (`EndOnce` fails).
 4. **A leader's writes are fenced by its promise quorum, not by the table version.** Control
@@ -96,17 +124,26 @@ Design A:
 
 Design B:
 
-1. **A tail read reads every configuration that still runs**, as Phase 1 does, and asks f+1
-   replicas for their applied prefix. Control `reads_view`: a reader that reads only its cached
-   configuration (as in A) misses a slot that the old grid chose and the replicas did not apply
-   yet. In A the start of the cached segment tells the reader that the slots below it are sealed;
-   B has no such start.
-2. **For check 6, the log-claim variant.** A replica asks the leader to append a claim for its
+1. **A tail read needs a bound below its cached configuration.** B has no segment start, so a
+   reader that reads only its cached configuration with no bound misses a slot that the old grid
+   chose and the replicas did not apply yet (control `reads_view`). Plain Matchmaker Paxos in
+   paros has the bound already: the fence of a leadership that won (`quorum_read.rs`,
+   `specs/tla/reads/`). With that rule (`ReadScope = "fence"`: a quorum of the cached
+   configuration, on the basis of a ballot of it that finished Phase 1 and that no member of the
+   quorum promised past, at least that ballot's fence), B reads one configuration, as A does
+   (`reads_fence` passes; `reach_read_old` shows that the case of `reads_view` is reached).
+   Reading every configuration that still runs, as Phase 1 does (`ReadScope = "live"`), also
+   passes. So check 5 does not separate the designs: A takes the bound from the table, B from
+   the leadership's fence.
+2. **Fixed chunks for one object for each slot.** With one slot for each chunk, the key is a
+   function of the slot, and plain B passes `OneHome` (`plain`). With free cuts, two replicas
+   cut different chunks and two objects hold one slot (`plain_onehome`, the control).
+3. **For check 6, the log-claim variant.** A replica asks the leader to append a claim for its
    next chunk; the first chosen claim that covers a slot wins; a replica uploads only a winning
    claim, and drops its copy only once it applied that claim and the object is in the store.
-   Plain B has no decided record of an offload (`plain_visible`): a client must list the object
-   store, and a listing is not decided state, so two clients that list at different times see
-   different chunks (`plain_onehome`: two objects hold one slot).
+   Plain B has no decided record of an offload: a client must list the object store, and a
+   listing is not decided state. `plain_visible` fails by the definition of `Declared`, not by a
+   race that TLC finds.
 
 Both designs share three rules, each with a control in each folder: retire a configuration only
 when every slot with a vote in it is applied by f+1 replicas or chosen in a later configuration
@@ -114,15 +151,24 @@ when every slot with a vote in it is applied by f+1 replicas or chosen in a late
 later configuration (`read_nofence` fails check 5), and trim stops at the consumer cursor
 (`trim_nocheck`).
 
-## What B costs on Pierre's point
+## What each design costs
 
 Pierre's point: a segment that lives only in S3 must still be declared, so that the grid
 controller, placement, the offload policy and the readers see it as decided state.
 
 - In A, one read of a matchmaker quorum gives the whole table: each segment, its range, its
   state and its object key. Two clients that read the same table version see the same view.
+- A pays for the table with **matchmaker writes**: four for each segment (seal, retire, mark
+  offloaded, trim), each a compare-and-set at a matchmaker quorum. Only the seal is written by a
+  leader; retire, mark and trim come from the offloader and the trim path, on matchmakers that
+  the paper keeps idle under a stable leader. A client view is a matchmaker quorum read. The
+  model hides this cost: its matchmakers are one atomic register.
+- **A trims only at segment ends**: `Trim(p)` moves the floor to the end of a sealed segment, so
+  how much a consumer must keep depends on how often a reshape or a roll seals a segment. B
+  trims at any slot below the consumer cursor (a decided `Truncate`).
 - In plain B, nothing decided declares an offloaded range. A client has to list the object
-  store and ask the replicas. Two clients can disagree, and two objects can hold one slot.
+  store and ask the replicas, and two clients that list at different times see different sets
+  of objects.
 - In B with log claims, the view is decided, and two clients at the same log position agree.
   The costs: each offload takes one log entry and needs a live leader to append it; each client
   must fold the log from its start (or from a fold that a snapshot keeps) to know where a slot
@@ -139,29 +185,36 @@ the values and the replicas. TLC 2.19.
 
 | Configuration | Ballots | A distinct states | B distinct states |
 |---|---|---|---|
-| Every rule on, storage on (A `safety`, B `plain`) | 2 | 9,650 | 227,778 |
-| Every rule on, storage on (A `safety`, B `plain_long`) | 3 | 298,648 (30 s) | 7,628,098 (27 min) |
-| B with log claims (`claims`, `claims_long`) | 2 / 3 | | 96,713 / 3,039,127 (25 min) |
-| Tail reader, storage off (`reads`, `reads_long`) | 2 / 3 | 58,229 / 1,675,784 | 65,074 / 1,950,482 |
-| Bounded Phase 1 with the end at the highest vote + 1 (`end_voted_below`) | 3 | 298,648 | |
-| The same, three acceptors for each grid, no storage (`end_voted_below_three`) | 2 | 1,195,666 (5 min) | |
+| Every rule on, storage on (A `safety`, B `plain` with fixed chunks) | 3 / 2 | 306,812 | 158,422 |
+| Every rule on, storage on (B `plain_long`) | 3 | | LONG_PLAIN |
+| B with log claims, free cuts (`claims`, `claims_long`) | 2 / 3 | | 96,713 / LONG_CLAIMS |
+| Tail reader, storage off (`reads`, `reads_long`) | 2 / 3 | 58,933 / LONG_A_READS | 65,074 / LONG_B_READS |
+| Tail reader with the read fence of paros (B `reads_fence`, `reads_fence_long`) | 2 / 3 | | 63,049 / LONG_B_FENCE |
+| Bounded Phase 1 with the gap fill, three acceptors for each grid, no storage (`end_voted_below_three`) | 2 | LONG_A_THREE | |
 
-B is about 25 times larger than A at the same size, because each replica cuts its chunks where
-it likes and nothing orders the cuts; A has one object for each segment and the seal orders the
-record. Three runs did not finish, and they are not in `checks.txt`: A with three acceptors for
-each grid and three ballots (19.4 million distinct states in 56 minutes, no violation, the queue
-still growing), and B plain and B with claims with three acceptors for each grid (45 minutes on
-one worker each).
+The earlier version of this report said that B is about 25 times larger than A because each
+replica cuts its chunks where it likes. The cuts are not the main cause: with fixed chunks, B
+still has 158,422 states at two ballots (227,778 with free cuts). The gap review reads the cause
+as B offloading at any time while A offloads only after retire; that is a reading, not a
+measurement. Three runs did not finish, and
+they are not in `checks.txt`: A with three acceptors for each grid and three ballots (19.4
+million distinct states in 56 minutes before the gap fill, no violation, the queue still
+growing), and B plain and B with claims with three acceptors for each grid (45 minutes on one
+worker each).
 
-The CI set of both folders runs in about 5 minutes on 2 workers, and in CI each folder is its
-own job of about 2 minutes. The `long` checks run with `scripts/check-tla.sh --all`.
+The CI set of each folder is its own CI job. The `long` checks run with
+`scripts/check-tla.sh --all`.
 
 ## Limits of the experiment
 
 - One acceptor for each configuration in the CI set. The three-acceptor checks of A are `long`,
   with storage off and one reshape; the full A and B with three acceptors do not finish.
 - Two configurations only, so plan rule 1 (one in force plus at most one successor) is never
-  stressed by a third reshape.
+  stressed by a third reshape, and A's `OneHome` cannot fail (one sealed segment).
+- No reader of old data runs while a replica drops its copy, the record is marked or trim runs:
+  `Readable` checks that the bytes are somewhere, not that a reader finds them during the move.
+- `NoStrandedHole` is a safety form of a liveness property; neither model checks liveness under
+  fairness.
 - The matchmakers are one atomic register; their quorum and handover are in other models.
 - The object store is atomic: a put and a delete are single steps. A late upload after trim
   (review problem "offload safety" of the design doc) is not modelled.

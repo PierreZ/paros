@@ -54,28 +54,35 @@
 (*   Storage   TRUE: offload, drop, trim and the consumer run. FALSE: they *)
 (*             do not (fewer states for the checks of the seal and of the  *)
 (*             tail reader, which do not need them).                       *)
+(*   GapFill   TRUE: a leader also proposes a Noop at each slot above the  *)
+(*             applied prefix and below the start of its segment where     *)
+(*             Phase 1 saw no vote (the election gap fill of the core).    *)
+(*             FALSE: below the start it proposes only where Phase 1 saw a *)
+(*             vote, so a slot with no vote below the end stays a hole.    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Acceptors, Replicas, Values, None,
+CONSTANTS Acceptors, Replicas, Values, None, Noop,
           CfgOf,        \* configuration -> its acceptors
           NS, NB, NG, F,
           EndRule, ReadOld, SealCas, Fence, RetireRule, DropRule,
-          TrimCheck, ReadFence, Reader, Storage
+          TrimCheck, ReadFence, Reader, Storage, GapFill
 
 ASSUME EndRule \in {"voted", "uncommitted"}
 ASSUME ReadOld \in {"all", "belowEnd"}
 ASSUME SealCas \in BOOLEAN /\ TrimCheck \in BOOLEAN /\ ReadFence \in BOOLEAN /\ Reader \in BOOLEAN
-ASSUME Storage \in BOOLEAN
+ASSUME Storage \in BOOLEAN /\ GapFill \in BOOLEAN
 ASSUME Fence \in {"config", "table"}
 ASSUME RetireRule \in {"paper", "early"}
 ASSUME DropRule \in {"offloaded", "uploaded"}
-ASSUME None \notin Values
+ASSUME None \notin Values /\ Noop \notin Values /\ Noop # None
 ASSUME F + 1 <= Cardinality(Replicas)
 
 Slots == 1..NS
 Ballots == 1..NB
 Gens == 1..NG
+\* What a slot can hold: a client value, or the Noop of the gap fill.
+Cmds == Values \cup {Noop}
 ASSUME \A g \in Gens : CfgOf[g] # {} /\ CfgOf[g] \subseteq Acceptors
 
 Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
@@ -125,12 +132,12 @@ TypeOK ==
   /\ sstart \in [Gens -> 0..NS + 1]
   /\ send \in [Gens -> 0..NS + 1]
   /\ bst \in [Ballots -> {"new", "p1", "w"}]
-  /\ bsafe \in [Ballots -> [Slots -> Values \cup {None}]]
-  /\ prop \in [Ballots -> [Slots -> Values \cup {None}]]
+  /\ bsafe \in [Ballots -> [Slots -> Cmds \cup {None}]]
+  /\ prop \in [Ballots -> [Slots -> Cmds \cup {None}]]
   /\ prom \in [Acceptors -> 0..NB]
   /\ applied \in [Replicas -> 0..NS]
   /\ hold \in [Replicas -> SUBSET Slots]
-  /\ store \in [Gens -> [Slots -> Values \cup {None}]]
+  /\ store \in [Gens -> [Slots -> Cmds \cup {None}]]
   /\ floor \in 1..NS + 1
   /\ cursor \in 1..NS + 1
 
@@ -177,9 +184,9 @@ Range(g) == IF sstart[g] = 0 \/ send[g] = 0 THEN {} ELSE sstart[g]..(send[g] - 1
 ChosenAtBal(s, v, b) ==
   bgen[b] # 0 /\ \E Q \in Maj(CfgOf[bgen[b]]) : \A a \in Q : <<s, b, v, a>> \in sent2b
 Chosen(s, v) == \E b \in Ballots : ChosenAtBal(s, v, b)
-IsChosen(s) == \E v \in Values : Chosen(s, v)
-ChosenVal(s) == CHOOSE v \in Values : Chosen(s, v)
-ChosenInGen(s, g) == \E b \in Ballots, v \in Values : bgen[b] = g /\ ChosenAtBal(s, v, b)
+IsChosen(s) == \E v \in Cmds : Chosen(s, v)
+ChosenVal(s) == CHOOSE v \in Cmds : Chosen(s, v)
+ChosenInGen(s, g) == \E b \in Ballots, v \in Cmds : bgen[b] = g /\ ChosenAtBal(s, v, b)
 
 MaxApplied == Max({applied[r] : r \in Replicas})
 \* f+1 replicas applied slot s.
@@ -273,10 +280,16 @@ CanWrite(b) ==
   /\ \E Q \in Maj(CfgOf[bgen[b]]) : Q \subseteq Active /\ \A a \in Q : prom[a] <= b
 
 \* The slots that the leader of b proposes at: every slot of its own segment,
-\* and below it each slot that the replicas did not apply where Phase 1
-\* saw a vote. The leader proposes that vote again in its own grid.
+\* and below it each slot that the replicas did not apply. Where Phase 1
+\* saw a vote below the start, the leader proposes that vote again in its
+\* own grid; where it saw none, it proposes a Noop (rule 2b of the report).
+\* Without the Noop, a slot below the end with no vote is a hole that no
+\* ballot can write: the old grid is sealed, and no later ballot registers
+\* it again.
 Writable(b) ==
-  {s \in Slots : s >= floor /\ (s >= sstart[bgen[b]] \/ (s > MaxApplied /\ bsafe[b][s] # None))}
+  {s \in Slots : /\ s >= floor
+                 /\ \/ s >= sstart[bgen[b]]
+                    \/ s > MaxApplied /\ (bsafe[b][s] # None \/ GapFill)}
 
 Propose(b, s, v) ==
   /\ CanWrite(b)
@@ -284,7 +297,9 @@ Propose(b, s, v) ==
   /\ prop[b][s] = None
   \* A leader proposes in slot order (the allocator frontier).
   /\ \A t \in Writable(b) : t < s => prop[b][t] # None
-  /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]} ELSE Values
+  /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]}
+           ELSE IF s < sstart[bgen[b]] THEN {Noop}
+           ELSE Values
   /\ prop' = [prop EXCEPT ![b][s] = v]
   /\ UNCHANGED <<mm, bst, bsafe, bmax, bver, acc, dat, rdr>>
 
@@ -392,7 +407,7 @@ ReadAsk(Q) ==
             /\ UNCHANGED <<rgot, rst>>
        \* The slots below the start of the cached configuration are in sealed
        \* segments, so the tail is at least the start minus one.
-       ELSE /\ rgot' = Max({s \in Slots : \E b \in Ballots, v \in Values :
+       ELSE /\ rgot' = Max({s \in Slots : \E b \in Ballots, v \in Cmds :
                               bgen[b] = rview /\ \A a \in Q : <<s, b, v, a>> \in sent2b}
                            \cup {sstart[rview] - 1})
             /\ rst' = "done"
@@ -407,7 +422,7 @@ ReadAgain ==
 Next ==
   \/ \E b \in Ballots, g \in Gens : Register(b, g)
   \/ \E b \in Ballots : Phase1(b) \/ Seal(b) \/ Open(b) \/ Refresh(b)
-  \/ \E b \in Ballots, s \in Slots, v \in Values : Propose(b, s, v)
+  \/ \E b \in Ballots, s \in Slots, v \in Cmds : Propose(b, s, v)
   \/ \E a \in Acceptors, b \in Ballots, s \in Slots : Accept(a, b, s)
   \/ \E r \in Replicas : Apply(r)
   \/ \E p \in Gens : Retire(p)
@@ -424,14 +439,14 @@ Spec == Init /\ [][Next]_vars
 (***************************************************************************)
 
 \* Check 1: at most one value is chosen for each slot.
-Agreement == \A s \in Slots, v, w \in Values : Chosen(s, v) /\ Chosen(s, w) => v = w
+Agreement == \A s \in Slots, v, w \in Cmds : Chosen(s, v) /\ Chosen(s, w) => v = w
 
 \* Nothing is chosen in a sealed configuration at or above its end.
 SealedFrozen == \A p \in Gens, s \in Slots : send[p] # 0 /\ s >= send[p] => ~ChosenInGen(s, p)
 
 \* A chosen slot is on a live write row: chosen at a ballot whose
 \* configuration still runs.
-OnLiveRow(s) == \E b \in Ballots, v \in Values : bgen[b] \in Live /\ ChosenAtBal(s, v, b)
+OnLiveRow(s) == \E b \in Ballots, v \in Cmds : bgen[b] \in Live /\ ChosenAtBal(s, v, b)
 InStore(s) == \E p \in Gens : store[p][s] # None
 
 \* Check 2: every chosen slot at or above the floor can be read from a
@@ -482,6 +497,16 @@ TailNeverBlocked == [][OffloadStep => \A b \in Ballots : CanWrite(b) => CanWrite
 
 \* The consumer cursor is never below the floor.
 CursorSafe == cursor >= floor
+
+\* No stranded hole: a hole is a slot at or above the floor that is not
+\* chosen. Each leader of the configuration in force that finished Phase 1
+\* may propose at each hole, so the chosen prefix can always grow past it.
+\* A hole that no such leader may propose stays a hole for ever: a later
+\* leader change in the same configuration sees what this one saw, and the
+\* replicas stop at it, so retire, offload and trim never come.
+NoStrandedHole ==
+  \A b \in Ballots, s \in Slots :
+    bst[b] = "w" /\ bgen[b] = InForce /\ s >= floor /\ ~IsChosen(s) => s \in Writable(b)
 
 \* Reachability controls: each must be violated.
 NoOffload == \A p \in Gens : sst[p] # "offloaded"
