@@ -1297,7 +1297,7 @@ minutes):
 | `safety` | ci | the rules of the code | pass (953 thousand states, 1 min with 4 workers) |
 | `restart` | long | one restart | pass (3.8 million states, 5 min) |
 | `full` | long | one command too, and every node catches up | pass (13.0 million states, 25 min) |
-| `three_slots` | long | three slots | TODO_THREE |
+| `three_slots` | long | three slots | no violation in 36.2 million distinct states (bounded: stopped after 58 min, 14.2 million states left on the queue) |
 
 The long checks ran once on 2026-11-19 with 4 workers.
 
