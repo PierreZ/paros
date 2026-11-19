@@ -14,6 +14,8 @@ The knowledge base in [`../knowledge/`](../knowledge/) organizes these sources b
 - Our own design notes (not tied to a specific external source) live one level up in
   [`../analysis/`](../analysis/), e.g. `../analysis/go-raft/`.
 - `talks/<name>.md` — a transcript of a talk or video (no PDF). Head it with the source URL.
+- `articles/<name>.md` — a digest of an engineering blog post or article (no PDF). Head it with
+  the source URL and the date it was read.
 - When adding a paper, keep the `paper.pdf` + `transcript.md` pair and cross-link related entries.
 
 ## Papers
@@ -70,6 +72,30 @@ The knowledge base in [`../knowledge/`](../knowledge/) organizes these sources b
   per Range with fenced leases, replica placement by constraints, data domiciling policies,
   joint consensus for replica moves, and why "follow the workload" was rarely used; read for
   #232 (tenant moves), #687 (rebalance), #714 (residency) and #581 (leader follows its writer).
+
+### Shared logs and segments (prior art for the journal design)
+Read for the paros journal design and #1213 (segments experiment). Each digest ends with a
+"Segments, sealing, offload and ordering" table and a "What this means for the paros journal"
+section.
+- [`papers/delos-virtual-consensus/`](papers/delos-virtual-consensus/): Balakrishnan et al.
+  (Facebook, OSDI 2020). A VirtualLog chains Loglets (segments) through a MetaStore register;
+  reconfiguration is seal, `checkTail`, conditional write of the new chain. A Loglet needs only a
+  fault-tolerant seal, not consensus. Changes to sealed segments (rebuild, move to cold storage,
+  truncate) need no seal. The closest prior art for design A of #1213.
+- [`papers/delos-log-structured-protocols/`](papers/delos-log-structured-protocols/):
+  Balakrishnan et al. (Facebook, SOSP 2021). Stackable replicated state machines above the
+  shared log; trim as the minimum of each engine's floor; backup of log segments coordinated by
+  bids in the log itself (LogBackupEngine); rule changes enabled by a log command.
+- [`articles/linkedin-northguard.md`](articles/linkedin-northguard.md): Karaman, Wu (LinkedIn,
+  2025). Topic, ranges, segments; a segment is the unit of replication and seals on replica
+  failure, 1 GB or 1 hour; log striping; segment metadata in Raft vnodes sharded by range id.
+- [`papers/lazylog/`](papers/lazylog/): Luo et al. (UIUC, SOSP 2024). Acknowledge an append once
+  durable, bind it to a linearizable position in the background, make reads wait for the order;
+  the seal of a view must flush every acknowledged but unordered record.
+- [`papers/speclog/`](papers/speclog/): Bhat et al. (UIUC, OSDI 2025). Deliver records to readers
+  at a predicted position before the global cut; fix-ante ordering (predetermined cuts, per-shard
+  quotas filled with no-ops) makes the prediction almost always right; the slot layout changes
+  only at window boundaries.
 
 ## Code implementation analyses
 
