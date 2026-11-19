@@ -36,7 +36,7 @@ use paros_consensus::matchmaker::{GcAck, GcRequest, MatchReply, MatchRequest};
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::node::{Delegation, ProposeResult, ReconfigureResult};
 use paros_consensus::{
-    ColocatedNode, Config, Limits, Message, NodeId, ProxyLeader, ReplicaNode, Slot, Value, WriteOp,
+    ColocatedNode, Config, Message, NodeId, ProxyLeader, ReplicaNode, Slot, Value, WriteOp,
 };
 
 use crate::cell::sites::{MatchmakerSite, NodeSite, ProxySite, ReplicaSite};
@@ -344,8 +344,9 @@ impl Model for Cell {
             }
             Party::Replica(id) => {
                 if self.replica(id).live.is_none() {
+                    let limits = self.flavor.limits;
                     let site = self.replica_mut(id);
-                    site.live = Some(ReplicaNode::new(&site.disk, Limits::DEFAULT));
+                    site.live = Some(ReplicaNode::new(&site.disk, limits));
                     self.drain_replica(id, cx);
                 }
             }
@@ -516,13 +517,13 @@ impl Cell {
         cell.replicas = (0..cell.flavor.replicas)
             .map(|i| {
                 let id = NodeId(REPLICA_BASE + i);
-                ReplicaSite::new(id, cell.party_config(id))
+                ReplicaSite::new(id, cell.party_config(id), cell.flavor.limits)
             })
             .collect();
         let bootstrap = cell.matchmaker_ids();
         cell.matchmakers = bootstrap
             .iter()
-            .map(|id| MatchmakerSite::new(*id, bootstrap.clone()))
+            .map(|id| MatchmakerSite::new(*id, bootstrap.clone(), cell.flavor.limits))
             .collect();
         cell.proxies = (0..cell.flavor.proxies)
             .map(|i| ProxySite::new(ProxyId(i), cell.config.clone()))
@@ -639,12 +640,13 @@ impl Cell {
         if again {
             cx.record(self.tracer.restart(id));
         }
+        let limits = self.flavor.limits;
         let site = self.node_mut(id);
         sometimes!(
             site.disk.hard_state().max_promised_ballot != paros_consensus::Ballot::zero(),
             reach::REBOOT
         );
-        let mut node = ColocatedNode::new(&site.disk, Limits::DEFAULT);
+        let mut node = ColocatedNode::new(&site.disk, limits);
         node.set_election_timeout(TIMEOUT_MIN + cx.rng().below(TIMEOUT_SPREAD));
         // A party never boots below its disk: the disk is the floor.
         let disk = site.disk.hard_state().chosen_index;

@@ -1,6 +1,7 @@
 //! What a walk deploys: the Paxos flavor of a seed, and the bug planted in
 //! the driver for a control run.
 
+use paros_consensus::Limits;
 use paros_consensus::membership::QuorumSystem;
 
 use super::Action;
@@ -31,6 +32,10 @@ pub struct Flavor {
     /// Nodes in the pool outside the bootstrap configuration, that a
     /// reconfiguration may name.
     pub spares: u64,
+    /// The page sizes and the read window of every party.
+    /// [`Limits::DEFAULT`] runs each page at its ceiling;
+    /// [`paged`](Flavor::paged) makes every page as small as it can be.
+    pub limits: Limits,
     /// The bug planted in the driver, for a control run.
     pub mutant: Option<Mutant>,
 }
@@ -48,6 +53,7 @@ impl Flavor {
             options: &[],
             matchmakers: 0,
             spares: 0,
+            limits: Limits::DEFAULT,
             mutant: None,
         }
     }
@@ -185,6 +191,25 @@ impl Flavor {
                 Action::Reconfigure,
             ],
             ..Self::compartments()
+        }
+    }
+
+    /// The same flavor with every page at its floor: a `Promise`, a
+    /// recovery, a re-send, an apply walk and a registry answer each carry
+    /// one item before a continuation (`paros_consensus::contract::limits`).
+    /// The paging branches of the core run only when a page is full.
+    #[must_use]
+    pub fn paged(self) -> Self {
+        Self {
+            limits: Limits {
+                recovery_page: 1,
+                promise_page: 1,
+                resend_page: 1,
+                apply_page: 1,
+                registry_page: 1,
+                ..Limits::DEFAULT
+            },
+            ..self
         }
     }
 

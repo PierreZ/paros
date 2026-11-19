@@ -100,6 +100,35 @@ jobs:
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run --profile ci
 
+  # Coverage-driven simulation with real branch coverage (#1199): the coverage
+  # gate of consensus-sim, with `paros-consensus` alone instrumented by
+  # SanitizerCoverage, so a run that covers a new edge of the core is
+  # branched too. A separate target directory keeps the instrumented build
+  # apart from the plain one. The report names the probes left and the edges
+  # covered. The `test` job runs the same gate on probes alone.
+  coverage:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sancov
+          workspaces: ". -> target/sancov"
+          cache-on-failure: true
+      - name: Run the coverage gate on instrumented code
+        env:
+          SANCOV_CRATES: paros_consensus
+          MOONPOOL_WALK_SEEDS: '40'
+          MOONPOOL_WALK_EXPLORE: '10'
+        run: >-
+          RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
+          nix develop --command cargo nextest run --profile ci --release
+          --target-dir target/sancov -p consensus-sim --test coverage --no-capture
+
   # The teaching examples (`crates/lib/paros-consensus/examples/`) drive the composable roles
   # by hand and assert the property each one teaches, so running them is a test of
   # the public API's shape as much as of the protocol. They are linted under the

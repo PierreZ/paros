@@ -2,11 +2,11 @@
 //!
 //! A walk that installs the assertion table itself fails on every
 //! `sometimes` site that it evaluates and never passes, the core's coverage
-//! probes included. Each flavor reaches only a part of the core, and the
-//! campaign that steers seeds toward the probes not yet reached is #1199
-//! (coverage-driven DST). So a campaign owns the table: the walk counts in
-//! it, and the campaign judges only the sites its flavor names. The other
-//! sites are in the [`Coverage`] it returns, for a reader and for #1199.
+//! probes included. Each flavor reaches only a part of the core. So a
+//! campaign owns the table: the walk counts in it, and the campaign judges
+//! only the sites its flavor names. The other sites are in the [`Coverage`]
+//! it returns: `tests/coverage.rs` judges the core's probes over the union
+//! of every flavor's coverage.
 
 use moonpool_assertions::AssertKind;
 use moonpool_walk::{Model, Report, Walk};

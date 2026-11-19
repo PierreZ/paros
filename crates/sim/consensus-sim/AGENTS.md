@@ -24,8 +24,15 @@ Test only: `publish = false`, never a dependency of another crate.
   name never matches (`campaign::try_campaign` refuses a longer one).
 - **The campaign owns the assertion table** (`src/campaign.rs`). moonpool-walk judges every
   sometimes site it sees, the core's `probe!`s too. The campaign installs the table itself, so
-  the walk judges no coverage, and the campaign judges only the sites of the flavor. To require
-  the core's probes is #1199 (coverage-driven simulation).
+  the walk judges no coverage, and the campaign judges only the sites of the flavor. The core's
+  probes are judged once, over every walk, by `tests/coverage.rs`.
+- **Every `probe!` of the core is reached, or named in `GAPS`** (#1199 (coverage-driven DST)).
+  `tests/coverage.rs` walks every flavor with exploration on and judges the union against the
+  probes that `probes::core_probes` reads from the source of `paros-consensus`. `GAPS` names each
+  probe that no walk reaches yet, grouped by the walk move it waits for (#1225 (walk moves for the
+  unreached probes)). A new probe in the core is reached by a walk or named there in the same
+  PR. A named probe that a plain run reaches fails the gate: take it out of `GAPS`. Each flavor
+  also makes every move it allows.
 - The moonpool rev of `moonpool-walk`, `moonpool-assertions` and `moonpool-tla` here is the rev
   of the `moonpool-assertions` line of `paros-consensus`: one copy of the assertion table.
 - **A trace records only the steps that change the model's state** (#1198 (trace checking)). A
@@ -39,6 +46,7 @@ Test only: `publish = false`, never a dependency of another crate.
 ## Map
 
 - `campaign.rs` → `try_campaign` / `campaign`: run a `Walk`, then check the expected sites.
+- `probes.rs` → `core_probes`: every `probe!` site of `paros-consensus`, read from its source.
 - `oracle.rs` + `oracle/` → the safety oracles, independent of the core:
   - `quorum.rs` → `Phase2Rule`: a majority, or `acks` votes in one column of a grid.
   - `ledger.rs` → `Ledger`: the durable votes and promises of every node, each ballot bound to
@@ -48,8 +56,9 @@ Test only: `publish = false`, never a dependency of another crate.
     before it started.
 - `cell.rs` + `cell/` → `Cell`, the model of a deployment of `ColocatedNode`s, and its driver
   loop. `Flavor` (`cell/flavor.rs`) says what the cell holds (acceptors, quorum system, proxy
-  leaders, replicas, matchmakers, spares) and which optional moves are on (handoff, reads,
-  truncation, reconfiguration). `Mutant` is the bug of a control run: a planted driver bug that
+  leaders, replicas, matchmakers, spares), which optional moves are on (handoff, reads,
+  truncation, reconfiguration) and the `Limits` of every party (`Flavor::paged` puts every page
+  at its floor, so the paging branches run). `Mutant` is the bug of a control run: a planted driver bug that
   an oracle or a trace check catches. `cell/sites.rs` holds each party with its disk. The liveness judge (`Cell::converged`): once the faults stop, one leader
   stands with no open round, and every node and replica learned its log.
 - `cell/trace.rs` + `cell/trace/` → `Tracer`, `CellEvent`, `Spec`: the steps of a cell walk as
@@ -70,6 +79,15 @@ Test only: `publish = false`, never a dependency of another crate.
   and on a grid), replicas, leaderless reads, every compartment, the batcher, matchmakers with
   reconfiguration, and matchmakers with every compartment. 60 seeds each in CI.
 - `tests/mutants.rs` → each oracle catches its mutant.
+- `tests/coverage.rs` → coverage-driven simulation (#1199): every flavor, and four of them with
+  small pages, walk with exploration on (moonpool-walk's `Walk::explore`): a run that passes a
+  site for the first time, or covers a new edge of the core, is branched, and its children
+  replay it up to that step and then draw a new schedule. The gate is the union over all walks:
+  every core probe reached or named in `GAPS`, every allowed move made. Branch coverage needs
+  the instrumented build that CI's `coverage` job runs:
+  `RUSTC_WRAPPER=$PWD/scripts/sancov-rustc.sh SANCOV_CRATES=paros_consensus cargo nextest run
+  --release --target-dir target/sancov -p consensus-sim --test coverage --no-capture`. Without
+  it, `moonpool_explorer::sancov_edges_covered_live` returns 0 and only the probes steer.
 - `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): four
   short walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of
   each control that the oracles pass. Single decree against `decree/`; every cell flavor without
@@ -78,14 +96,18 @@ Test only: `publish = false`, never a dependency of another crate.
   in the nix dev shell; outside it the tests skip, and in CI a missing TLC fails. Knobs: `TRACE_SEEDS`, `TRACE_FROM`,
   `TRACE_CHAOS`, `TRACE_DUMP`.
 - A long run: `MOONPOOL_WALK_SEEDS=1500 cargo nextest run --release -p consensus-sim`. One seed:
-  `MOONPOOL_WALK_SEED=17`. The other knobs: `MOONPOOL_WALK_FROM`, `_STEPS`, `_TAIL`.
+  `MOONPOOL_WALK_SEED=17`. The other knobs: `MOONPOOL_WALK_FROM`, `_STEPS`, `_TAIL`, and
+  `_EXPLORE` (the runs each root seed may add). A failure in a branched run prints its timeline:
+  `MOONPOOL_WALK_TIMELINE=17@120:9e37…` runs it again alone.
 - A red seed is a finding. Reproduce it alone, find the cause, and fix the core with a red unit
   test first, or fix the oracle with the reason in the commit message.
 
 ## Not walked yet
 
 The matchmaker set handover (`MatchmakerReconfigurer`) is judged by
-`paros-consensus/src/models/handover.rs` only. Coverage-driven simulation is #1199.
+`paros-consensus/src/models/handover.rs` only. The probes no walk reaches, and the move each
+waits for (disk faults, retirement and rejoin, the handover, configurations outside the pool),
+are `GAPS` in `tests/coverage.rs` and #1225 (walk moves for the unreached probes).
 
 Not traced yet (#1198 (trace checking)):
 
