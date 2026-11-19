@@ -21,3 +21,24 @@ read_carry_hold    pass       ci
 gc_early           violation  ci
 gc_p212_paper      pass       long
 gc_carry_paper     pass       long
+# The GC fence (I5): the leader at b' asks for no floor before its fence Phase 1.
+gc_nofence         violation  ci
+# The bypass check with no watermark half (rule 3), GC on. With the watermark
+# half the check only refuses more, so these cover it too. The two runs on four
+# ballots and three proposers are bounded: no violation, no end (README).
+wm_nocheck_small   pass       ci
+wm_nocheck         pass       long
+wm_redundant_small pass       long
+# The cooperative handoff of a ballot (relinquish_to), one hop.
+reach_handoff      violation  ci
+handoff            pass       ci
+handoff_paros      pass       long
+handoff_drop       violation  ci
+relinquish_off     violation  ci
+successor_bypass   violation  ci
+# Two bypasses in a row.
+reach_chain        violation  ci
+chain_small        pass       ci
+chain_open_small   violation  ci
+chain              pass       long
+chain_open         violation  long

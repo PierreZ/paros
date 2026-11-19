@@ -1,0 +1,125 @@
+--------------------------- MODULE MultiPaxosTrace ---------------------------
+(***************************************************************************)
+(* The trace spec of `MultiPaxos`: the model, forced to follow the events  *)
+(* that one walk of the `consensus-sim` cell recorded (#1198 (trace        *)
+(* checking), `crates/sim/consensus-sim/src/cell/trace.rs`). `l` is the    *)
+(* index of the next event.                                                *)
+(*                                                                         *)
+(* The walk records a step when a batch of a node reached its disk, and    *)
+(* only when the step changes the model's state:                           *)
+(*   - "prepare": the owner of a ballot opened Phase 1 (`Prepare`);        *)
+(*   - "promise": an acceptor raised its promise and reported its votes at *)
+(*     or above `from` (`Promise`); the report must be the model's votes;  *)
+(*   - "win": the owner won Phase 1, with the frontier of its allocator    *)
+(*     (`Win`);                                                            *)
+(*   - "propose": the first `Accept` of a (ballot, slot): a fresh command  *)
+(*     at the allocator's next slot (`Allocate`), or a slot of the         *)
+(*     recovery that `Win` already sent. A fresh command may be a `Noop`:  *)
+(*     a settled leader fills its log up to a read's vote watermark with   *)
+(*     `Noop`s (`fill_to_watermark`, `node/quorum_reads.rs`). The model's  *)
+(*     `Next` allocates only `Commands`; any value is safe at a fresh slot, *)
+(*     so the trace spec takes `Allocate` with a `Noop` too;               *)
+(*   - "accept": a new durable vote (`Accept`);                            *)
+(*   - "record": a node wrote a chosen value as its accepted record, at   *)
+(*     the ballot that chose it and below its promise (`mark_chosen`);     *)
+(*   - "learn": a slot entered the chosen prefix on a node's disk;         *)
+(*   - "restart": a node booted again from its disk (`Restart`).           *)
+(*                                                                         *)
+(* "learn" and "record" are the two steps that are not steps of the       *)
+(* model. The code learns a slot from one `Commit`; the model's `CatchUp`  *)
+(* copies every slot of a peer at once, and its `Decide` is the leader's   *)
+(* learn only. So the trace spec learns one slot, and asks only what the   *)
+(* model asks of every learn: the value is chosen (`LearnedChosen`). The   *)
+(* code also keeps a learned value as the slot's accepted record, at the   *)
+(* ballot that chose it (`mark_chosen`), which the model does not do: the  *)
+(* record step asks that a quorum chose the value at that ballot, and the  *)
+(* later promises of the node report it.                                   *)
+(*                                                                         *)
+(* Ballots are the ranks of the code's `(round, node)` ballots in the run, *)
+(* from 1. Nodes and commands are strings; `Noop` is "noop".               *)
+(***************************************************************************)
+EXTENDS MultiPaxos, Trace, Grid, Naturals, Sequences, FiniteSets, TLC
+
+VARIABLE l
+
+e == Trace[l]
+
+\* The quorums of the run: a majority, or the grid of `TraceCols` columns
+\* and `TraceAcks` acks over the acceptors in row-major order. A driver may
+\* name the column of a round (`propose_in`), so a slot's Phase-2 quorum is
+\* `acks` acceptors of any column.
+TraceLayout == [i \in 1..Cardinality(TraceAcceptors) |-> "n" \o ToString(i - 1)]
+TraceQ1 ==
+  IF TraceCols = 0 THEN MajorityQuorums(TraceAcceptors)
+  ELSE GridQ1(TraceLayout, TraceCols, TraceAcks, 0)
+TraceQ2 ==
+  [s \in 0..(TraceNS - 1) |->
+     IF TraceCols = 0 THEN MajorityQuorums(TraceAcceptors)
+     ELSE GridQ2(TraceLayout, TraceCols, TraceAcks)]
+
+TraceInit == Init /\ l = 1
+
+\* A malformed event is a rejection, not a TLC error.
+Has(f) == f \in DOMAIN e
+IsNode(f) == Has(f) /\ e[f] \in Acceptors
+IsBallot == Has("bal") /\ e.bal \in Ballots
+IsSlot == Has("slot") /\ e.slot \in Slots
+IsValue == Has("val") /\ e.val \in Values
+
+\* The vote at slot s that a promise reports.
+Reported(s) ==
+  IF \E r \in e.rep : r.slot = s
+  THEN LET r == CHOOSE r \in e.rep : r.slot = s IN [bal |-> r.bal, val |-> r.val]
+  ELSE NoVote
+
+\* A node learns one slot: the trace spec's own step, see above.
+Learn(n, s, v) ==
+  /\ learned[n][s] = None
+  /\ Chosen(s, v)
+  /\ learned' = [learned EXCEPT ![n][s] = v]
+  /\ UNCHANGED <<prom, vote, dprom, dvote, phase, next, front, wiped, restarts, msgs>>
+
+\* A node keeps the value chosen at ballot b as its record of slot s: the
+\* trace spec's own step, see above. It is no vote: it sends no 2b.
+Record(n, b, s, v) ==
+  /\ ChosenAt(b, s, v)
+  /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
+  /\ dvote' = [dvote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
+  /\ UNCHANGED <<prom, dprom, learned, phase, next, front, wiped, restarts, msgs>>
+
+Step ==
+  \/ /\ e.event = "prepare" /\ IsBallot /\ IsNode("owner") /\ Has("from")
+     /\ Owner[e.bal] = e.owner
+     /\ Prepare(e.bal)
+     /\ [type |-> "1a", bal |-> e.bal, from |-> e.from] \in msgs'
+  \/ /\ e.event = "promise" /\ IsNode("acc") /\ IsBallot /\ Has("from") /\ Has("rep")
+     /\ Promise(e.acc, e.bal)
+     /\ [type |-> "1a", bal |-> e.bal, from |-> e.from] \in msgs
+     /\ \A s \in Slots : s >= e.from => vote[e.acc][s] = Reported(s)
+     /\ \A r \in e.rep : r.slot \in Slots /\ r.slot >= e.from
+  \/ /\ e.event = "win" /\ IsBallot /\ Has("front")
+     /\ Win(e.bal)
+     /\ front'[e.bal] = e.front
+  \/ /\ e.event = "propose" /\ IsBallot /\ IsSlot /\ IsValue
+     /\ \/ /\ next[e.bal] = e.slot
+           /\ Allocate(e.bal, e.val)
+        \/ /\ [type |-> "2a", bal |-> e.bal, slot |-> e.slot, val |-> e.val] \in msgs
+           /\ UNCHANGED vars
+  \/ /\ e.event = "accept" /\ IsNode("acc") /\ IsBallot /\ IsSlot /\ IsValue
+     /\ Accept(e.acc, e.bal, e.slot)
+     /\ vote'[e.acc][e.slot] = [bal |-> e.bal, val |-> e.val]
+  \/ /\ e.event = "record" /\ IsNode("node") /\ IsBallot /\ IsSlot /\ IsValue
+     /\ Record(e.node, e.bal, e.slot, e.val)
+  \/ /\ e.event = "learn" /\ IsNode("node") /\ IsSlot /\ IsValue
+     /\ Learn(e.node, e.slot, e.val)
+  \/ /\ e.event = "restart" /\ IsNode("node")
+     /\ Restart(e.node)
+
+TraceNext == l <= Len(Trace) /\ Step /\ l' = l + 1
+
+TraceSpec == TraceInit /\ [][TraceNext]_<<l, vars>>
+
+\* Violated exactly when a behaviour matched every event: the trace is
+\* accepted.
+TraceUnfinished == l <= Len(Trace)
+=============================================================================

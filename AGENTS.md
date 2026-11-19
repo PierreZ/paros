@@ -39,7 +39,10 @@ tri-state tally and the repair probe; #1017 (truncation model), #1216 (truncatio
 2)), truncation across a reconfiguration onto empty stores (`specs/tla/truncation-reconfig/`: the
 GC of `node/gc.rs` forgets the old configuration only once a Phase-2 quorum of the new one holds
 the prefix up to the election fence, with a control that forgets it at the win and a control
-that counts an empty new member; #1218 (truncation model, part 3)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
+reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the fence
+Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
+more rules)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
@@ -47,7 +50,11 @@ same code: model-based trace checking (each run of the core is checked against i
 model, with moonpool-tla, moonpool #550), deterministic simulation testing (a seed is a run,
 faults on, with moonpool-walk, moonpool #554, a seeded random walk over the sans-IO state
 machines), and coverage-driven simulation (the seeds are steered toward the branches not yet
-reached; model-state coverage is for later, Pierre 2026-11-19). They live in a new `consensus-sim` crate.
+reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
+crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
+walks)). Trace checking is there for the models `decree/` and `multi-paxos/` (#1198 (trace
+checking), `tests/traces.rs`); the matchmaker flavors and the rules of each flavor's own model are
+not traced yet. Coverage-driven simulation (#1199) comes next.
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
@@ -417,6 +424,10 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`examples/`) live in the crate.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus` today). A program
   depends on `paros` alone. Wasm-safe and provider-free.
+- `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
+  (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
+  the core and a planted mutant that each oracle catches, and the trace check of the walks
+  against the TLA+ models with TLC (moonpool-tla). On `paros-consensus` only.
 - `crates/support/paros-wasm` — the site's wasm tool (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only.
 
