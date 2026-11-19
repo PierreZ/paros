@@ -19,6 +19,7 @@ name = "consensus-sim"
 version = "0.2.0"
 dependencies = [
  "moonpool-assertions",
+ "moonpool-tla",
  "moonpool-walk",
  "paros-consensus",
 ]
@@ -52,6 +53,11 @@ source = "git+https://github.com/PierreZ/moonpool?rev=21e306ec0c01074980d4b06738
 
 [[package]]
 name = "moonpool-buggify"
+version = "0.8.0"
+source = "git+https://github.com/PierreZ/moonpool?rev=21e306ec0c01074980d4b067385831bfdaa7b474#21e306ec0c01074980d4b067385831bfdaa7b474"
+
+[[package]]
+name = "moonpool-tla"
 version = "0.8.0"
 source = "git+https://github.com/PierreZ/moonpool?rev=21e306ec0c01074980d4b067385831bfdaa7b474#21e306ec0c01074980d4b067385831bfdaa7b474"
 

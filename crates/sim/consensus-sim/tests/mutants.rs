@@ -77,13 +77,13 @@ fn no_resend_is_caught_by_the_liveness_judge() {
 
 #[test]
 fn a_decree_acceptor_that_forgets_its_promise_is_caught_by_one_value() {
-    use consensus_sim::decree::DecreeModel;
+    use consensus_sim::decree::{DecreeModel, DecreeMutant};
     use paros_consensus::decree::Phase1Rule;
     let walk = Walk::<DecreeModel>::new()
         .seeds(3_000)
         .crash_weights(12, 12)
         .env_prefix(None)
-        .model(|_| DecreeModel::build(Phase1Rule::Quorum, true));
+        .model(|_| DecreeModel::build(Phase1Rule::Quorum, DecreeMutant::ForgetPromise));
     let failure = try_campaign(&walk, &[]).expect_err("the mutant is caught");
     assert!(failure.contains(ONE_VALUE), "{failure}");
 }

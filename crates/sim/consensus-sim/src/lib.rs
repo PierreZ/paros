@@ -14,6 +14,7 @@
 //! | [`decree`] | single-decree Paxos (`Decree`) under the walk |
 //! | [`batcher`] | the batcher's lanes and the unbatcher under the walk |
 //! | [`oracle`] | the safety judges, written again from the papers |
+//! | [`trace`] | model-based trace checking: a walk's steps checked by TLC against the flavor's TLA+ model |
 //!
 //! The walks themselves are the tests of `tests/`: one per flavor, and one
 //! control per oracle that plants a bug in the driver and expects that
@@ -24,3 +25,4 @@ pub mod campaign;
 pub mod cell;
 pub mod decree;
 pub mod oracle;
+pub mod trace;

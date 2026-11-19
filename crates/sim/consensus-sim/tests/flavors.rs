@@ -108,12 +108,12 @@ fn compartments() {
 
 #[test]
 fn single_decree() {
-    use consensus_sim::decree::{DecreeModel, reach as decree};
+    use consensus_sim::decree::{DecreeModel, DecreeMutant, reach as decree};
     use paros_consensus::decree::Phase1Rule;
     for rule in [Phase1Rule::Quorum, Phase1Rule::EveryAcceptor] {
         let walk = Walk::<DecreeModel>::new()
             .seeds(SEEDS * 2)
-            .model(move |_| DecreeModel::build(rule, false));
+            .model(move |_| DecreeModel::build(rule, DecreeMutant::None));
         campaign(
             &walk,
             &[
