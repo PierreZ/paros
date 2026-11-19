@@ -661,3 +661,37 @@ fn a_repair_probe_requery_carries_the_configuration_in_force() {
         vec![(Slot(0), Some(cfg(&[0, 1, 2])))]
     );
 }
+
+/// A trim-point jump resolves a leader's blocked repair: the jump says that
+/// every slot below the point is chosen and trimmed in the cell, so the
+/// probe drops the blocked slot below it, and a probe with no blocked slot
+/// left closes. This is the path of the split floor: the candidate asked
+/// for catch-up as it campaigned, it won before the trimmed peer's answer
+/// came, and a promiser reported the slot faulty.
+#[test]
+fn a_trim_point_jump_resolves_a_blocked_repair_below_it() {
+    let mut n = node(0, &[0, 1, 2]);
+    campaign(&mut n);
+    let _ = drain(&mut n);
+    let mut faulty = BTreeMap::new();
+    faulty.insert(Slot(0), ballot(0, 2));
+    n.step(promise_page(2, n.ballot(), BTreeMap::new(), faulty, None));
+    assert!(n.is_leader());
+    assert_eq!(n.blocked_repairs(), 1, "slot 0 waits for node 1");
+    let promised = n.hard_state().max_promised_ballot;
+
+    n.step(Message::TrimmedTo {
+        from: NodeId(1),
+        point: Slot(1),
+        state: crate::journal::JournalState::default(),
+    });
+    assert_eq!(n.blocked_repairs(), 0, "the jump resolved slot 0");
+    assert!(n.proposer().probe().is_none(), "the probe closed");
+    assert_eq!(n.acceptor().first_slot(), Slot(1));
+    assert!(n.is_leader(), "the jump keeps the leadership");
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        promised,
+        "the promise did not move"
+    );
+}
