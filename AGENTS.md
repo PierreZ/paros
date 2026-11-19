@@ -47,7 +47,9 @@ same code: model-based trace checking (each run of the core is checked against i
 model, with moonpool-tla, moonpool #550), deterministic simulation testing (a seed is a run,
 faults on, with moonpool-walk, moonpool #554, a seeded random walk over the sans-IO state
 machines), and coverage-driven simulation (the seeds are steered toward the branches not yet
-reached; model-state coverage is for later, Pierre 2026-11-19). They live in a new `consensus-sim` crate.
+reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
+crate (`crates/sim/consensus-sim/AGENTS.md`); the random walk is there (#1197 (consensus-sim
+walks)), and trace checking (#1198) and coverage-driven simulation (#1199) come next.
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
@@ -417,6 +419,9 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`examples/`) live in the crate.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus` today). A program
   depends on `paros` alone. Wasm-safe and provider-free.
+- `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
+  (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
+  the core and a planted mutant that each oracle catches. On `paros-consensus` only.
 - `crates/support/paros-wasm` — the site's wasm tool (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only.
 

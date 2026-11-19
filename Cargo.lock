@@ -15,6 +15,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "consensus-sim"
+version = "0.2.0"
+dependencies = [
+ "moonpool-assertions",
+ "moonpool-walk",
+ "paros-consensus",
+]
+
+[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -39,7 +48,21 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 [[package]]
 name = "moonpool-assertions"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=fcfe67433f5c9eebe67a8cf2f95dcd888b682483#fcfe67433f5c9eebe67a8cf2f95dcd888b682483"
+source = "git+https://github.com/PierreZ/moonpool?rev=21e306ec0c01074980d4b067385831bfdaa7b474#21e306ec0c01074980d4b067385831bfdaa7b474"
+
+[[package]]
+name = "moonpool-buggify"
+version = "0.8.0"
+source = "git+https://github.com/PierreZ/moonpool?rev=21e306ec0c01074980d4b067385831bfdaa7b474#21e306ec0c01074980d4b067385831bfdaa7b474"
+
+[[package]]
+name = "moonpool-walk"
+version = "0.8.0"
+source = "git+https://github.com/PierreZ/moonpool?rev=21e306ec0c01074980d4b067385831bfdaa7b474#21e306ec0c01074980d4b067385831bfdaa7b474"
+dependencies = [
+ "moonpool-assertions",
+ "moonpool-buggify",
+]
 
 [[package]]
 name = "once_cell"
