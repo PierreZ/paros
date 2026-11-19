@@ -29,8 +29,19 @@ the rule prevents. A model with no control proves little.
 A model may also have a trace spec, `<Name>Trace.tla` and `<Name>Trace.cfg`: the model, forced
 to follow the events of one run of the code (#1198 (trace checking)). It is not in `checks.txt`:
 `crates/sim/consensus-sim/tests/traces.rs` runs it with TLC, through moonpool-tla, on the walks
-of `consensus-sim`. The trace specs today are `decree/DecreeTrace` (the decree walk) and
-`multi-paxos/MultiPaxosTrace` (every cell flavor but the matchmakers).
+of `consensus-sim`. The trace specs today are:
+
+- `decree/DecreeTrace`: the decree walk.
+- `multi-paxos/MultiPaxosTrace`: the log of every cell flavor without matchmakers.
+- `proxy-leader/ProxyLeaderTrace`: the proxy's `Commit` rule, on the flavors with proxy leaders.
+- `leader-handoff/LeaderHandoffTrace`: the guards of the cooperative handoff, on the handoff
+  flavor.
+- `matchmaker/MatchmakerTrace`: matchmaking, Phase 1 over every configuration of `H_b`, Phase 2
+  in `C_b` and the GC, on the flavor with matchmakers. The model decides one value; the trace
+  spec takes its matchmaking and GC, and writes the log as its own steps.
+
+Each trace spec has a control: a bug planted in the driver that TLC refuses
+(`tests/traces.rs`).
 
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into

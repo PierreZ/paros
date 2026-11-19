@@ -44,6 +44,7 @@
 //! `leader_handoff.rs` for `specs/tla/leader-handoff/`, `matchmaker.rs`
 //! for `specs/tla/matchmaker/`.
 
+mod encode;
 mod leader_handoff;
 mod matchmaker;
 mod multi_paxos;
@@ -306,7 +307,9 @@ impl Tracer {
         // A campaign that needs no promise but its owner's (an empty
         // `H_b`) wins in the batch that prepares it: the `Prepare` comes
         // first.
-        let win = events.iter().position(|e| matches!(e, CellEvent::Win { .. }));
+        let win = events
+            .iter()
+            .position(|e| matches!(e, CellEvent::Win { .. }));
         if let Some(w) = win
             && let CellEvent::Win { ballot, .. } = events[w]
             && let Some(p) = events
@@ -683,11 +686,7 @@ impl Spec {
                     flavor.quorum == QuorumSystem::Majority,
                     "MatchmakerTrace runs on a majority"
                 );
-                matchmaker::trace(
-                    flavor.acceptors + flavor.spares,
-                    flavor.matchmakers,
-                    events,
-                )
+                matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
             }
         }
     }
@@ -882,7 +881,10 @@ mod tests {
         let mut tracer = Tracer::default();
         let open = [accept(Audience::Learners, 2, 0)];
         assert_eq!(tracer.proxy_batch(ProxyId(0), &open).len(), 1);
-        assert!(tracer.proxy_batch(ProxyId(0), &open).is_empty(), "a re-fan-out");
+        assert!(
+            tracer.proxy_batch(ProxyId(0), &open).is_empty(),
+            "a re-fan-out"
+        );
         let commit = [(
             Audience::Learners,
             Message::Commit {
@@ -896,10 +898,20 @@ mod tests {
             tracer.proxy_batch(ProxyId(0), &commit)[..],
             [CellEvent::Commit { .. }]
         ));
-        assert!(tracer.proxy_batch(ProxyId(0), &commit).is_empty(), "sent again");
-        assert!(tracer.proxy_batch(ProxyId(0), &open).is_empty(), "a done round");
+        assert!(
+            tracer.proxy_batch(ProxyId(0), &commit).is_empty(),
+            "sent again"
+        );
+        assert!(
+            tracer.proxy_batch(ProxyId(0), &open).is_empty(),
+            "a done round"
+        );
         let _ = tracer.proxy_crash(ProxyId(0));
-        assert_eq!(tracer.proxy_batch(ProxyId(0), &open).len(), 1, "after a crash");
+        assert_eq!(
+            tracer.proxy_batch(ProxyId(0), &open).len(),
+            1,
+            "after a crash"
+        );
     }
 
     #[test]

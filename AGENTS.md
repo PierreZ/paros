@@ -49,8 +49,9 @@ faults on, with moonpool-walk, moonpool #554, a seeded random walk over the sans
 machines), and coverage-driven simulation (the seeds are steered toward the branches not yet
 reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
 crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
-walks)). Trace checking is there for the models `decree/` and `multi-paxos/` (#1198 (trace
-checking), `tests/traces.rs`); the matchmaker flavors and the rules of each flavor's own model are
+walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
+`leader-handoff/` and `matchmaker/` (#1198 (trace checking), `tests/traces.rs`); the read fence
+of `reads/`, the floor of `truncation/` and the walk with every compartment and matchmakers are
 not traced yet. Coverage-driven simulation (#1199) comes next.
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data

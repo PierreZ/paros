@@ -676,45 +676,11 @@ impl Cell {
             let Some(node) = site.live.as_mut() else {
                 return;
             };
-            // A new leader's frontier: one past the fence it opened its
-            // authority at (`try_become_leader`), before any allocation.
-            let leading = node.is_leader().then(|| {
-                let frontier = node.proposer().fence().map_or(0, |s| s.0 + 1);
-                let handoff = matches!(
-                    node.leadership_origin(),
-                    paros_consensus::node::LeadershipOrigin::Handoff { .. }
-                );
-                (node.ballot(), Slot(frontier), handoff)
-            });
-            // The slots a leader knows chosen below its frontier: its
-            // recovery skips them.
-            let known: Vec<(Slot, Cmd)> = leading
-                .map(|(_, frontier, _)| {
-                    node.replica()
-                        .chosen()
-                        .range(..frontier)
-                        .map(|(s, command)| (*s, Cmd::of(command)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // The configurations of an open campaign (`H_b`), that a
-            // `Prepare` of this batch opens Phase 1 over.
-            let prior: Vec<Vec<NodeId>> = node
-                .proposer()
-                .election()
-                .map(|e| e.prior().iter().map(|c| c.members().to_vec()).collect())
-                .unwrap_or_default();
-            let set = node.matchmaker_set().cloned();
-            let journal = node.config().journal.journal;
+            let seen = Seen::of(node);
             let ready = node.ready();
             let writes = ready.writes().to_vec();
             let mut batch: Vec<(Audience, Message)> = ready.messages().to_vec();
-            if mutant == Some(Mutant::HideVotes) {
-                hide_votes(&mut batch);
-            }
-            if mutant == Some(Mutant::RewindHandoff) {
-                rewind_handoffs(&mut batch);
-            }
+            plant(mutant, &mut batch);
             let mut out = route(&batch, &pool, Some(id), &replicas);
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
@@ -725,32 +691,10 @@ impl Cell {
                 .map(|(_, request)| request.clone())
                 .collect();
             let mut gc: Vec<(MatchmakerId, GcRequest)> = ready.gc_requests().to_vec();
-            out.extend(ready.match_requests().iter().map(|(to, request)| Envelope {
-                to: Party::Matchmaker(*to),
-                msg: Wire::Match(request.clone()),
-            }));
-            out.extend(gc.iter().map(|(to, request)| Envelope {
-                to: Party::Matchmaker(*to),
-                msg: Wire::Gc(*request),
-            }));
+            out.extend(to_matchmakers(ready.match_requests(), &gc));
             ready.advance();
-            if mutant == Some(Mutant::EarlyGc)
-                && let (Some((ballot, _, _)), Some(set)) = (leading, set)
-                && self.early_gc.insert(ballot)
-            {
-                let request = GcRequest {
-                    from: id,
-                    journal,
-                    generation: set.generation,
-                    watermark: ballot,
-                };
-                for m in set.members() {
-                    gc.push((*m, request));
-                    out.push(Envelope {
-                        to: Party::Matchmaker(*m),
-                        msg: Wire::Gc(request),
-                    });
-                }
+            if mutant == Some(Mutant::EarlyGc) {
+                self.early_gc(id, &seen, &mut gc, &mut out);
             }
             let gc: Vec<GcRequest> = gc.into_iter().map(|(_, request)| request).collect();
             if writes.is_empty()
@@ -762,16 +706,8 @@ impl Cell {
                 // An empty batch can still follow a change of leadership
                 // (a win with nothing to recover): the tracer records it.
                 let before = self.node(id).disk.hard_state().chosen_index;
-                let batch = Traced {
-                    leading,
-                    writes: &[],
-                    messages: &[],
-                    known,
-                    prior,
-                    matchmaking: &[],
-                    gc: &[],
-                };
-                self.trace_batch(id, batch, before, cx);
+                let traced = Traced::empty(seen);
+                self.trace_batch(id, traced, before, cx);
                 return;
             }
             if mutant == Some(Mutant::EarlyCommit) {
@@ -788,11 +724,9 @@ impl Cell {
                 self.persist_node(id, &writes);
             }
             let traced = Traced {
-                leading,
+                seen,
                 writes: &writes,
                 messages: &batch,
-                known,
-                prior,
                 matchmaking: &matchmaking,
                 gc: &gc,
             };
@@ -833,6 +767,36 @@ impl Cell {
         }
     }
 
+    /// [`Mutant::EarlyGc`]: node `id` asks every matchmaker for GC at the
+    /// ballot it leads, once, whatever its configuration learned.
+    fn early_gc(
+        &mut self,
+        id: NodeId,
+        seen: &Seen,
+        gc: &mut Vec<(MatchmakerId, GcRequest)>,
+        out: &mut Vec<Envelope>,
+    ) {
+        let (Some((ballot, _, _)), Some(set)) = (seen.leading, seen.set.as_ref()) else {
+            return;
+        };
+        if !self.early_gc.insert(ballot) {
+            return;
+        }
+        let request = GcRequest {
+            from: id,
+            journal: seen.journal,
+            generation: set.generation,
+            watermark: ballot,
+        };
+        for m in set.members() {
+            gc.push((*m, request));
+            out.push(Envelope {
+                to: Party::Matchmaker(*m),
+                msg: Wire::Gc(request),
+            });
+        }
+    }
+
     /// Record the steps of a batch of node `id` that reached its disk
     /// ([`trace`]); `before` is the disk's chosen index before the batch
     /// (`None`: nothing chosen).
@@ -856,12 +820,12 @@ impl Cell {
             .collect();
         let events = self.tracer.batch(&trace::Batch {
             id,
-            leading: traced.leading,
+            leading: traced.seen.leading,
             writes: traced.writes,
             messages: traced.messages,
             learned,
-            known: traced.known,
-            prior: traced.prior,
+            known: traced.seen.known,
+            prior: traced.seen.prior,
             matchmaking: traced.matchmaking,
             gc: traced.gc,
         });
@@ -1315,15 +1279,98 @@ impl Cell {
     }
 }
 
+/// What the driver reads of a node before its batch: the tracer's view of
+/// its leadership and campaign, and where a GC request goes.
+struct Seen {
+    /// The ballot it leads, its frontier, and whether a handoff installed
+    /// it. A new leader's frontier is one past the fence it opened its
+    /// authority at (`try_become_leader`), before any allocation.
+    leading: Option<(paros_consensus::Ballot, Slot, bool)>,
+    /// The slots a leader knows chosen below its frontier: its recovery
+    /// skips them.
+    known: Vec<(Slot, Cmd)>,
+    /// The configurations of an open campaign (`H_b`), that a `Prepare`
+    /// of the batch opens Phase 1 over.
+    prior: Vec<Vec<NodeId>>,
+    set: Option<paros_consensus::membership::MatchmakerSet>,
+    journal: paros_consensus::journal::JournalId,
+}
+
+impl Seen {
+    fn of(node: &ColocatedNode) -> Self {
+        let leading = node.is_leader().then(|| {
+            let frontier = node.proposer().fence().map_or(0, |s| s.0 + 1);
+            let handoff = matches!(
+                node.leadership_origin(),
+                paros_consensus::node::LeadershipOrigin::Handoff { .. }
+            );
+            (node.ballot(), Slot(frontier), handoff)
+        });
+        let known = leading.map_or_else(Vec::new, |(_, frontier, _)| {
+            node.replica()
+                .chosen()
+                .range(..frontier)
+                .map(|(s, command)| (*s, Cmd::of(command)))
+                .collect()
+        });
+        let prior = node.proposer().election().map_or_else(Vec::new, |e| {
+            e.prior().iter().map(|c| c.members().to_vec()).collect()
+        });
+        Self {
+            leading,
+            known,
+            prior,
+            set: node.matchmaker_set().cloned(),
+            journal: node.config().journal.journal,
+        }
+    }
+}
+
 /// What a persisted batch of a node hands the tracer, beside its learns.
 struct Traced<'a> {
-    leading: Option<(paros_consensus::Ballot, Slot, bool)>,
+    seen: Seen,
     writes: &'a [WriteOp],
     messages: &'a [(Audience, Message)],
-    known: Vec<(Slot, Cmd)>,
-    prior: Vec<Vec<NodeId>>,
     matchmaking: &'a [MatchRequest],
     gc: &'a [GcRequest],
+}
+
+impl Traced<'_> {
+    /// A batch that writes and sends nothing.
+    fn empty(seen: Seen) -> Self {
+        Self {
+            seen,
+            writes: &[],
+            messages: &[],
+            matchmaking: &[],
+            gc: &[],
+        }
+    }
+}
+
+/// The bugs of `mutant` that rewrite the messages of a node's batch.
+fn plant(mutant: Option<Mutant>, batch: &mut [(Audience, Message)]) {
+    match mutant {
+        Some(Mutant::HideVotes) => hide_votes(batch),
+        Some(Mutant::RewindHandoff) => rewind_handoffs(batch),
+        _ => {}
+    }
+}
+
+/// The envelopes of a node's requests to the matchmakers.
+fn to_matchmakers<'a>(
+    matches: &'a [(MatchmakerId, MatchRequest)],
+    gc: &'a [(MatchmakerId, GcRequest)],
+) -> impl Iterator<Item = Envelope> + 'a {
+    let matches = matches.iter().map(|(to, request)| Envelope {
+        to: Party::Matchmaker(*to),
+        msg: Wire::Match(request.clone()),
+    });
+    let gc = gc.iter().map(|(to, request)| Envelope {
+        to: Party::Matchmaker(*to),
+        msg: Wire::Gc(*request),
+    });
+    matches.chain(gc)
 }
 
 /// The envelopes of one batch: each audience resolved to parties. A

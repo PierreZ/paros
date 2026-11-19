@@ -136,7 +136,11 @@ fn accepts(spec: Spec, flavor: &Flavor) {
             .unwrap_or_else(|failure| panic!("{failure}"));
         let events = kept(spec, &run);
         let trace = spec.trace(flavor, &events);
-        eprintln!("{spec:?} {} seed {seed}: {} events", flavor.name, trace.len());
+        eprintln!(
+            "{spec:?} {} seed {seed}: {} events",
+            flavor.name,
+            trace.len()
+        );
         if std::env::var_os("TRACE_DUMP").is_some() {
             for (i, event) in events.iter().enumerate() {
                 eprintln!("  {i}: {event:?}");

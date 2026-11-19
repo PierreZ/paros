@@ -49,11 +49,13 @@ Test only: `publish = false`, never a dependency of another crate.
 - `cell.rs` + `cell/` → `Cell`, the model of a deployment of `ColocatedNode`s, and its driver
   loop. `Flavor` (`cell/flavor.rs`) says what the cell holds (acceptors, quorum system, proxy
   leaders, replicas, matchmakers, spares) and which optional moves are on (handoff, reads,
-  truncation, reconfiguration). `Mutant` is the bug of a control run. `cell/sites.rs` holds each
-  party with its disk. The liveness judge (`Cell::converged`): once the faults stop, one leader
+  truncation, reconfiguration). `Mutant` is the bug of a control run: a planted driver bug that
+  an oracle or a trace check catches. `cell/sites.rs` holds each party with its disk. The liveness judge (`Cell::converged`): once the faults stop, one leader
   stands with no open round, and every node and replica learned its log.
-- `cell/trace.rs` → `Tracer`, `CellEvent`, `trace`: the steps of a cell walk as events of
-  `specs/tla/multi-paxos/MultiPaxos.tla`, judged by `MultiPaxosTrace.tla`.
+- `cell/trace.rs` + `cell/trace/` → `Tracer`, `CellEvent`, `Spec`: the steps of a cell walk as
+  events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
+  `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs` and `matchmaker.rs` each say which
+  events their model keeps (`Spec::keeps`) and define its constants.
 - `decree.rs` → `DecreeModel`: single-decree Paxos (`paros_consensus::decree`), three acceptors
   and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
   `specs/tla/decree/DecreeTrace.tla`.
@@ -70,9 +72,10 @@ Test only: `publish = false`, never a dependency of another crate.
 - `tests/mutants.rs` → each oracle catches its mutant.
 - `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): four
   short walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of
-  each control that the oracles pass. Single decree against `decree/`; every cell flavor but
-  the matchmakers against `multi-paxos/`. TLC (`tlc`) is in the nix dev shell; outside it the
-  tests skip, and in CI a missing TLC fails. Knobs: `TRACE_SEEDS`, `TRACE_FROM`,
+  each control that the oracles pass. Single decree against `decree/`; every cell flavor without
+  matchmakers against `multi-paxos/`; the flavors with proxy leaders against `proxy-leader/`;
+  the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`. TLC (`tlc`) is
+  in the nix dev shell; outside it the tests skip, and in CI a missing TLC fails. Knobs: `TRACE_SEEDS`, `TRACE_FROM`,
   `TRACE_CHAOS`, `TRACE_DUMP`.
 - A long run: `MOONPOOL_WALK_SEEDS=1500 cargo nextest run --release -p consensus-sim`. One seed:
   `MOONPOOL_WALK_SEED=17`. The other knobs: `MOONPOOL_WALK_FROM`, `_STEPS`, `_TAIL`.
@@ -84,8 +87,15 @@ Test only: `publish = false`, never a dependency of another crate.
 The matchmaker set handover (`MatchmakerReconfigurer`) is judged by
 `paros-consensus/src/models/handover.rs` only. Coverage-driven simulation is #1199.
 
-Not traced yet (#1198 (trace checking)): the matchmaker flavors (`specs/tla/matchmaker/` is
-single-decree; the cell is a log), and the rules of the flavors' own models (the handoff's
-guards in `leader-handoff/`, the proxy's `Commit` rule in `proxy-leader/`, the batcher and the
-replica in `compartments/`, the read fence in `reads/`, the floor in `truncation/`). Those walks
-are checked against `multi-paxos/` only.
+Not traced yet (#1198 (trace checking)):
+
+- The read fence of `reads/`. Its model is a Matchmaker log with the Phase-1 bypass and one
+  read; the `reads` flavor has no matchmakers and many reads.
+- The floor of `truncation/`. Its fold reads one record for each command, and the trace would
+  need the outcome of each write and each `SetLeader` as the model's values.
+- The batcher and the replica of `compartments/`.
+- `reconfigured-compartments`: matchmakers with a grid for each configuration, proxies and the
+  handoff in one trace spec.
+- The matchmaker set handover, which no walk runs.
+
+Those walks are checked against `multi-paxos/` only, or not at all.
