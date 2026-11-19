@@ -2304,7 +2304,17 @@
         {
           "says": "bravo goes to slot 1 with the same ballot: one round trip for each write.",
           "from": 14,
-          "to": 21
+          "to": 21,
+          "question": {
+            "asks": "Node 0 leads with ballot 1.0, and alpha is chosen at slot 0. The client writes bravo. What does the leader send first?",
+            "answers": [
+              "A Prepare for slot 1",
+              "An Accept for slot 1, at ballot 1.0",
+              "A Commit for slot 0"
+            ],
+            "right": 1,
+            "why": "One Phase 1 covered every slot from slot 0 up. A stable leader skips Phase 1, so each write costs one round trip."
+          }
         },
         {
           "says": "Now choose what goes wrong.",
@@ -5473,7 +5483,17 @@
         {
           "says": "Node 1 holds a vote for bravo at slot 1 itself. A new leader proposes the vote it finds, so bravo is proposed again at ballot 2.1 and chosen.",
           "from": 25,
-          "to": 30
+          "to": 30,
+          "question": {
+            "asks": "Only node 1 voted for bravo at slot 1, then the leader died. Node 1 is elected. What does it put in slot 1?",
+            "answers": [
+              "bravo",
+              "A no-op",
+              "Nothing: slot 1 stays empty"
+            ],
+            "right": 0,
+            "why": "Phase 1 reports every vote. One vote may be part of a choice that the new leader cannot see, so it proposes bravo again."
+          }
         },
         {
           "says": "A vote that a quorum may have chosen is never lost: the next Phase 1 finds it.",
@@ -9592,7 +9612,17 @@
         {
           "says": "Node 1 fills slot 1 with a no-op. Without it, no node could apply past slot 1, because the log applies in order.",
           "from": 31,
-          "to": 36
+          "to": 36,
+          "question": {
+            "asks": "Slot 2 holds charlie, chosen. No promise reports a vote for slot 1. What does the new leader put in slot 1?",
+            "answers": [
+              "bravo, the value that the client sent",
+              "A no-op",
+              "Nothing: it waits for the client"
+            ],
+            "right": 1,
+            "why": "The new leader never heard of bravo. A no-op closes the hole, so every node can apply up to charlie."
+          }
         },
         {
           "says": "bravo is lost: it was never chosen, so the client must write it again.",
@@ -11968,7 +11998,17 @@
         {
           "says": "The leader does not send a Commit again. Its next heartbeat says how far the log is chosen.",
           "from": 14,
-          "to": 17
+          "to": 17,
+          "question": {
+            "asks": "Every Commit for alpha is lost. How do the followers learn that alpha is chosen?",
+            "answers": [
+              "The leader sends the Commit again",
+              "The next heartbeat says how far the log is chosen",
+              "They never learn it"
+            ],
+            "right": 1,
+            "why": "The heartbeat carries the commit index. A follower that sees a gap asks for the slots that it lacks."
+          }
         },
         {
           "says": "Each follower sees that it lacks a chosen slot and asks the leader for it. An answer to a heartbeat also tells the leader that the follower is alive.",
@@ -18416,7 +18456,16 @@
         {
           "says": "Node 1 is elected. Nodes 1 and 2 never heard of bravo, so no promise reports it.",
           "from": 16,
-          "to": 22
+          "to": 22,
+          "question": {
+            "asks": "Node 0 stopped before its disk write. Nodes 1 and 2 elect node 1. Can bravo still be chosen at slot 1?",
+            "answers": [
+              "Yes: the leader accepted it",
+              "No: no promise of the new quorum reports it"
+            ],
+            "right": 1,
+            "why": "The new quorum is nodes 1 and 2, and neither heard of bravo. A vote on one disk, or no vote at all, is not a choice."
+          }
         },
         {
           "says": "The client writes charlie, and node 1 puts it in slot 1.",
@@ -22139,7 +22188,16 @@
         {
           "says": "Node 1 is elected. Nodes 1 and 2 never heard of bravo, so no promise reports it.",
           "from": 16,
-          "to": 22
+          "to": 22,
+          "question": {
+            "asks": "Node 0 wrote its vote for bravo, then stopped before it sent anything. Nodes 1 and 2 elect node 1. Can bravo still be chosen at slot 1?",
+            "answers": [
+              "Yes: the leader accepted it",
+              "No: no promise of the new quorum reports it"
+            ],
+            "right": 1,
+            "why": "The new quorum is nodes 1 and 2, and neither heard of bravo. A vote on one disk, or no vote at all, is not a choice."
+          }
         },
         {
           "says": "The client writes charlie, and node 1 puts it in slot 1.",
@@ -27241,7 +27299,17 @@
         {
           "says": "A client reads from node 1, not from the leader. Node 1 asks each node for the highest slot that it voted in.",
           "from": 14,
-          "to": 17
+          "to": 17,
+          "question": {
+            "asks": "A client reads from node 1, a follower. What does node 1 do first?",
+            "answers": [
+              "It sends the read to the leader",
+              "It answers from its own log at once",
+              "It asks a quorum how far they voted"
+            ],
+            "right": 2,
+            "why": "A read never goes through the leader, and a node alone can be behind. A quorum's answers say how far the node must apply before it answers."
+          }
         },
         {
           "says": "A quorum of answers tells node 1 how far it must apply. It applied slot 0, so it answers the read at once.",
@@ -29854,7 +29922,16 @@
         {
           "says": "Both acceptors promised ballot 2.1, so each one refuses with a Nack. Node 0 learns that it does not lead, and bravo is not chosen.",
           "from": 23,
-          "to": 25
+          "to": 25,
+          "question": {
+            "asks": "Node 0 still thinks that it leads with ballot 1.0. Nodes 1 and 2 promised ballot 2.1. What happens to the Accepts for bravo?",
+            "answers": [
+              "Nodes 1 and 2 vote, and bravo is chosen",
+              "Nodes 1 and 2 refuse, and node 0 stops leading"
+            ],
+            "right": 1,
+            "why": "A promise refuses every lower ballot. The Nack tells node 0 that a higher ballot exists."
+          }
         },
         {
           "says": "A Nack carries no ballot. The old leader steps down, and a value from the wire never picks its next ballot.",
@@ -50987,7 +51064,17 @@
         {
           "says": "No node leads now. The clock of node 1 runs until its election timeout.",
           "from": 16,
-          "to": 25
+          "to": 25,
+          "question": {
+            "asks": "The Relinquish is lost. Node 0 already stopped leading. What happens next?",
+            "answers": [
+              "Node 0 leads again",
+              "No node leads until an election timeout",
+              "Node 1 leads with the old ballot"
+            ],
+            "right": 1,
+            "why": "Node 0 gave up its ballot before it sent the Relinquish, so it cannot take it back. A lost handoff costs one election, never a value."
+          }
         },
         {
           "says": "Node 1 gets its promises and leads with a new ballot.",
@@ -53938,7 +54025,17 @@
         {
           "says": "A client reads from node 1. The answers say that a node voted up to slot 1, and node 1 has not applied slot 1, so the read waits.",
           "from": 17,
-          "to": 22
+          "to": 22,
+          "question": {
+            "asks": "Both followers voted for bravo at slot 1, but no Commit arrived yet. A client reads from node 1. What does node 1 do?",
+            "answers": [
+              "It answers now, without bravo",
+              "It waits until it applies slot 1",
+              "It refuses the read"
+            ],
+            "right": 1,
+            "why": "bravo may be chosen already. A read that skips it could miss a write that finished before the read began."
+          }
         },
         {
           "says": "The votes reach the leader, and its Commit tells node 1. Node 1 answers the read.",
