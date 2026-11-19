@@ -191,12 +191,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   issue; a preference about how to work goes into this file. Amend the section it touches, never
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
-- **No excuse in simulation, and no allow list** (Pierre, 2026-11-19). The goal of simulation
-  is to bend the software enough to trigger its rough edge cases, without breaking it, so that
-  the work makes progress. A walk never excuses a failure: no oracle skips a case because it is
-  hard, no list names the failures, seeds or messages that a run may tolerate, and no fault is
-  turned off because the code does not survive it. When a fault breaks the code, the code is
-  fixed, or the fault is shown to be outside the contract and the walk stops making it.
+- **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
 - **A flaky check is a finding** (decided on 2026-11-17). A check that is red and then green
   with no change teaches you to run it again in place of a fix. Never run a check again until
   it is green, and never add a retry around it. Find the cause: a bug in the code is fixed with
