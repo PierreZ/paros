@@ -40,12 +40,20 @@
 (*           matchmakers refuse the campaign, and it sends no Prepare.       *)
 (*   "off"    = no such campaign.                                            *)
 (*   "strict" = a node whose promise is above a leadership never takes it as *)
-(*              its read basis (`main` today).                               *)
+(*              its read basis, and with ReaderGate = "promise" opens and    *)
+(*              serves no read on it (`main` today).                         *)
 (*   "own"    = option (b): a node takes the basis when the only promise     *)
 (*              above it is its own abandoned campaign.                      *)
 (*   "any"    = a node ignores its promise for the read basis.               *)
 (*   Option (a), the leader campaigns above the promise, adds no rule to the *)
 (*   model: it is one more ordinary campaign.                                *)
+(* ReaderGate : what gates the reader itself, to open and to serve a read   *)
+(*         (#1228 (stale read by a lagging reader)).                         *)
+(*   "promise" = the rule `Below`: the promise of the reader (the code,      *)
+(*               `read_basis` and `fence_quorum_reads` on the read fence).   *)
+(*   "belief"  = the belief ballot of the reader alone, and the reader       *)
+(*               counts its own answer with no fence (the code before the    *)
+(*               fix of #1228): a control.                                   *)
 (*                                                                           *)
 (* Quorums : the quorum system is a parameter (#1102 (rework 1.13)). Each   *)
 (*           configuration c has its Phase-1 quorums Q1s[c], its Phase-2     *)
@@ -66,9 +74,10 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
           Readers, Basis, Fence, Laggers, Restarters, Refuse, Hold, Learner, Q1s, Q2s,
-          Targets, Seal
+          Targets, Seal, ReaderGate
 
 ASSUME Seal \in {"quorum", "reads"}
+ASSUME ReaderGate \in {"promise", "belief"}
 ASSUME Fence \in {"promise", "belief", "none"}
 ASSUME Laggers \cup Restarters \subseteq Acceptors
 ASSUME Refuse \in BOOLEAN
@@ -300,6 +309,9 @@ LearnBasis(n, b) ==
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
                    proposals, acked, rd, own, since, heard>>
 
+\* The gate of reader n to open, keep and serve a read on a basis at b.
+ReadGate(n, b) == IF ReaderGate = "promise" THEN Below(n, b) ELSE since[n] <= b
+
 BasisOf(n) == IF Basis = "won" THEN basis[n] ELSE <<promised[n], 0>>
 
 \* Reader n opens a read and asks one read target of the basis configuration.
@@ -307,7 +319,7 @@ BasisOf(n) == IF Basis = "won" THEN basis[n] ELSE <<promised[n], 0>>
 ReadStart(n) ==
     /\ rd.state = "none"
     /\ BasisOf(n)[1] > 0
-    /\ Below(n, BasisOf(n)[1])
+    /\ ReadGate(n, BasisOf(n)[1])
     /\ \E T \in Targets[cfgOf[BasisOf(n)[1]]] :
           rd' = [state |-> "open", node |-> n, b |-> BasisOf(n)[1], fence |-> BasisOf(n)[2],
                  snap |-> acked, to |-> T, answers |-> {}, index |-> 0]
@@ -324,13 +336,14 @@ AckFence(a) ==
 
 \* Acceptor a answers the PreRead with its vote watermark and its fence. An
 \* answer above the basis ends the read. With Refuse, an acceptor that did
-\* not hear answers nothing.
+\* not hear answers nothing. The reader answers itself too; under
+\* ReaderGate = "belief" its own answer carries no fence.
 PreReadAck(a) ==
     /\ rd.state = "open"
     /\ a \in rd.to
     /\ ~ \E x \in rd.answers : x[1] = a
     /\ Refuse => heard[a]
-    /\ rd' = IF AckFence(a) > rd.b
+    /\ rd' = IF AckFence(a) > rd.b /\ ~ (ReaderGate = "belief" /\ a = rd.node)
              THEN NoRead
              ELSE [rd EXCEPT !.answers = @ \cup {<<a, Watermark(a)>>}]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
@@ -339,7 +352,7 @@ PreReadAck(a) ==
 \* The reader learns a newer configuration: it ends its open read.
 ReadAbandon ==
     /\ rd.state = "open"
-    /\ BasisOf(rd.node)[1] # rd.b \/ ~ Below(rd.node, rd.b)
+    /\ BasisOf(rd.node)[1] # rd.b \/ ~ ReadGate(rd.node, rd.b)
     /\ rd' = NoRead
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
                    proposals, acked, basis, own, since, heard>>
@@ -349,7 +362,7 @@ ReadAbandon ==
 ReadServe ==
     /\ rd.state = "open"
     /\ BasisOf(rd.node)[1] = rd.b
-    /\ Below(rd.node, rd.b)
+    /\ ReadGate(rd.node, rd.b)
     /\ \E Q \in Q1s[cfgOf[rd.b]] : Q \subseteq {x[1] : x \in rd.answers}
     /\ LET i == Max({x[2] : x \in rd.answers} \cup {rd.fence})
        IN  /\ \A s \in Slots : s <= i =>

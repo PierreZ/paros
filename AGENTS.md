@@ -30,7 +30,7 @@ read; #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Comm
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
-promise with the old belief fence as a control, a lagging pool, a restart and the refusal of a
+promise with the old belief fence as a control, a lagging pool, a lagging reader gated on its promise (#1228 (stale read by a lagging reader)), a restart and the refusal of a
 rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)), truncation on plain
 Multi-Paxos (`specs/tla/truncation/`: the decided `Truncate` and the floor as a fold of the
 journal, the floor guard of Phase 1 and the retry of a refused laggard, the trim-point jump that
@@ -59,7 +59,7 @@ not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`)
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
-unreached probes)): 67 of the 77 probes are reached at the CI budget, and 76 with
+unreached probes)): 68 of the 79 probes are reached at the default budget, and 77 with
 `MOONPOOL_WALK_SEEDS=150 MOONPOOL_WALK_EXPLORE=10`.
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data

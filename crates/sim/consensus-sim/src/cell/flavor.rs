@@ -242,6 +242,22 @@ impl Flavor {
         }
     }
 
+    /// Leaderless reads on matchmakers whose pools lag (#1228 (stale read
+    /// by a lagging reader)): the last spare joins the pool late, so a node
+    /// that has not admitted it ignores a configuration that names it while
+    /// it promises that configuration's ballot. Its belief stays below its
+    /// promise, and a read it opens or holds on the older basis must end.
+    #[must_use]
+    pub fn lagging_reads() -> Self {
+        Self {
+            name: "lagging-reads",
+            spares: 2,
+            late: 1,
+            options: &[Action::Reconfigure, Action::Admit, Action::Read],
+            ..Self::matchmakers()
+        }
+    }
+
     /// Matchmakers with reconfiguration and the matchmaker set handover
     /// (`MatchmakerReconfigurer`) over a matchmaker pool of five.
     #[must_use]

@@ -7,12 +7,14 @@ reach               violation  ci
 belief_basis        violation  ci
 ack_no_ballot       violation  ci
 fence_belief_lag    violation  ci
+reads_lag_reader_belief violation ci
 reboot_belief_open  violation  ci
 bypass_no_hold      violation  ci
 learner_stranded    violation  ci
 learner_own_serves  violation  ci
 reads_plain         pass       ci
 reads_bypass_hold   pass       ci
+reads_lag_reader    pass       ci
 reboot_promise_open pass       ci
 reboot_belief_refuse pass      long
 reboot_promise_open_reader pass long

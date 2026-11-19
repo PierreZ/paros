@@ -94,8 +94,10 @@ Test only: `publish = false`, never a dependency of another crate.
 - `tests/flavors.rs` → one walk for each flavor: single decree, Multi-Paxos on three and on five
   (with truncation), the handoff, grid quorums, acceptor partitions, proxy leaders (on a majority
   and on a grid), replicas, leaderless reads, every compartment, the batcher, matchmakers with
-  reconfiguration, matchmakers with every compartment, disk faults, retirement and rejoin, and
-  the matchmaker set handover. 60 seeds each in CI.
+  reconfiguration, matchmakers with every compartment, disk faults, retirement and rejoin, the
+  matchmaker set handover, and leaderless reads on matchmakers whose pools lag (`lagging-reads`,
+  #1228 (stale read by a lagging reader): it reaches the core's refusal of a reader that promised
+  above its basis). 60 seeds each in CI.
 - `tests/mutants.rs` → each oracle catches its mutant.
 - `tests/coverage.rs` → coverage-driven simulation (#1199): every flavor, and seven of them with
   small pages, walk with exploration on (moonpool-walk's `Walk::explore`): a run that passes a

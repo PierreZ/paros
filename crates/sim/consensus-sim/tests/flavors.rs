@@ -197,3 +197,16 @@ fn matchmaker_set_handover() {
         &[reach::RECONFIGURED, reach::GC_ACKED, reach::HANDED_OVER],
     );
 }
+
+#[test]
+fn reads_on_lagging_pools() {
+    walk(
+        Flavor::lagging_reads(),
+        &[
+            reach::RECONFIGURED,
+            reach::ADMITTED,
+            reach::NODE_READ,
+            reach::LAGGING_READER_REFUSED,
+        ],
+    );
+}

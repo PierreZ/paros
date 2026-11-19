@@ -88,6 +88,9 @@ pub mod reach {
     pub const NODE_READ: &str = "cell: a node answered a leaderless read";
     /// A leaderless read was answered at a replica.
     pub const REPLICA_READ: &str = "cell: a replica answered a leaderless read";
+    /// The core's probe: a reader whose promise rose above its read basis
+    /// opened no read (#1228 (stale read by a lagging reader)).
+    pub const LAGGING_READER_REFUSED: &str = "quorum read: a promise above the basis opens no read";
     /// A leader started a reconfiguration.
     pub const RECONFIGURED: &str = "cell: a leader started a reconfiguration";
     /// A slot was chosen under a configuration a reconfiguration named.

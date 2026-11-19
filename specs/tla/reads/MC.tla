@@ -55,6 +55,15 @@ TargetsPart == [c \in ConfigsPart |-> GridReadTargets(SeqPart(c), 2, 2)]
 \* checks small; the stale read of `grid_full` needs only this one.
 ReadersGrid == {"a1"}
 
+\* A lagging reader (#1228 (stale read by a lagging reader)): a1 is in the
+\* old configuration only, and its pool lags, so it ignores the new one while
+\* it promises its ballot. A majority of the new configuration chooses a
+\* slot without a1 and a2.
+ConfigsLag == {{"a1", "a2", "a3"}, {"a3", "a4", "a5"}}
+ReadersLag == {"a1"}
+Q1Lag == [c \in ConfigsLag |-> MajorityQuorums(c)]
+TargetsLag == [c \in ConfigsLag |-> {c}]
+
 \* The learner checks: ballot 3 is only the abandoned campaign of a reader.
 OnlyOwn3 == status[3] \in {"matching", "abandoned"} /\ replied[3] = {}
 

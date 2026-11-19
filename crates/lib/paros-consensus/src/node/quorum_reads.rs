@@ -84,6 +84,15 @@ impl ColocatedNode {
                 reachable,
                 "quorum read: a node without a read basis opens no read"
             );
+            // A basis that the belief ballot alone allows, and that the
+            // promise above it refuses: the lagging reader of the reads model.
+            probe!(
+                sometimes,
+                self.read_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.since >= self.acceptors_since),
+                "quorum read: a promise above the basis opens no read"
+            );
             self.counters.quorum_reads_without_basis += 1;
             assert!(
                 self.config.has_matchmakers(),
@@ -279,6 +288,7 @@ impl ColocatedNode {
     /// folded, the chosen prefix advanced, a tick.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn serve_quorum_reads(&mut self) {
+        self.fence_quorum_reads();
         let replica = &self.replica;
         let served = self.quorum_reads.serve(|index| replica.covers(index));
         // The apply condition: a read surfaces only once the fold covers the
@@ -297,6 +307,37 @@ impl ColocatedNode {
         assert!(
             self.pending_read_states.len() == queued + count,
             "every served read surfaces once"
+        );
+    }
+
+    /// Abandon every open read whose basis sits below this node's read
+    /// fence (the higher of its promise and its belief ballot, rule `Below`
+    /// of `specs/tla/reads/`). A promise that rose above the basis may have
+    /// helped a newer leadership choose a write that the basis's row need
+    /// not meet, and the reader's own watermark entered the tally with no
+    /// fence. A plain deployment has no fence and abandons nothing.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub(super) fn fence_quorum_reads(&mut self) {
+        let Some(fence) = self.wire_read_fence() else {
+            return;
+        };
+        let open = self.quorum_reads.pending().len();
+        self.quorum_reads.abandon_superseded(fence);
+        let left = self.quorum_reads.pending().len();
+        assert!(left <= open, "fencing opens no read");
+        if left < open {
+            probe!(
+                reachable,
+                "quorum read: a promise above the reader's basis ends its read"
+            );
+        }
+        assert!(
+            fence >= self.acceptor.promised(),
+            "the reader's fence covers its own promise"
         );
     }
 
