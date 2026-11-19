@@ -74,7 +74,7 @@ impl ColocatedNode {
     /// matchmaker deployment, nothing on plain Multi-Paxos (see the note
     /// above). It is the higher of this node's durable promise and the
     /// ballot its belief is bound to. The promise is the rule of the reads
-    /// model (`specs/tla/reads/Reads.tla`, `AckBallot`): a node that promised
+    /// model (`specs/tla/reads/Reads.tla`, `Fence`): a node that promised
     /// a ballot above a read's basis may have helped a newer leadership win,
     /// whether or not it adopted that campaign's configuration. A node whose
     /// pool lags ignores a configuration that names nodes outside it

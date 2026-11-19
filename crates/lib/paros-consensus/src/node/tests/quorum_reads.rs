@@ -544,9 +544,10 @@ fn settle_under_c_old(nodes: &mut [ColocatedNode], mms: &mut [Matchmaker]) -> Ba
 
 /// Finding 1 of the paros-consensus review of 2026-11-16 (a `PreReadAck` fences
 /// a read with the belief ballot, not the promise). The reads model fences
-/// on the promise (`specs/tla/reads/Reads.tla:264`, `AckBallot`): an answer
-/// from an acceptor that promised a ballot above the read's basis ends the
-/// read. This test drives the full trace on real nodes.
+/// on the promise (`specs/tla/reads/Reads.tla`, `Fence`; the control
+/// `fence_belief_lag` finds this trace): an answer from an acceptor that
+/// promised a ballot above the read's basis ends the read. This test drives
+/// the full trace on real nodes.
 ///
 /// - `C_old = {0, 1, 2}`, led by node 0 at `b_old`. Every node heard its
 ///   beat, so each one has the read basis `(C_old, b_old)`.

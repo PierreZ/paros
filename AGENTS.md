@@ -26,7 +26,10 @@ matchmaker set handover (`specs/tla/handover/`: a target that the caller names, 
 only a resize record changes, the floor and the register across the handover; #1097 (rework
 1.8)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
-read; #1190 (rework 6.10)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+read; #1190 (rework 6.10)), leaderless reads (`specs/tla/reads/`: the read basis of a
+leadership that won, the fence of a `PreReadAck` on the promise with the old belief fence as a
+control, a lagging pool, a restart and the refusal of a rebooted node; #1016 (model of
+leaderless reads), #1099 (rework 1.10)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
