@@ -133,6 +133,7 @@ quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teach
 
 - Features (`Cargo.toml`): `default = ["tracing", "assertions"]`; deps `serde`, `tracing` and
   `moonpool-assertions` (git rev pinned), all optional. Zero deps with `--no-default-features`.
+  `consensus-sim` pins `moonpool-walk` to the same rev: advance both together.
 - `probe!` observes only and compiles to nothing with the `assertions` feature off. Never
   reword a probe's message (the slot is its hash).
 - Constants: the page ceilings and the read-window floor are in `contract::limits`;

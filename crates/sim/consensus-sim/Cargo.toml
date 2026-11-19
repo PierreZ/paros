@@ -1,0 +1,26 @@
+[package]
+name = "consensus-sim"
+description = "Seeded random walks over the sans-IO roles of paros-consensus, with independent safety and liveness oracles"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Test only: the walks live in `tests/`, the model and the oracles in `src/`.
+# It depends on paros-consensus directly, never on the `paros` facade (rule 3
+# of `crates/lib/paros/AGENTS.md`). `assertions` puts the core's coverage
+# probes in the walk's assertion table.
+[dependencies]
+paros-consensus = { workspace = true, features = ["assertions"] }
+# The seeded walk (moonpool #554). Pinned to the same moonpool rev as the
+# `moonpool-assertions` line of paros-consensus, so the workspace resolves one
+# copy of the assertion table.
+moonpool-walk = { git = "https://github.com/PierreZ/moonpool", rev = "21e306ec0c01074980d4b067385831bfdaa7b474" }
+# The campaign owns the assertion table, so it judges which sites a flavor
+# must reach (`src/campaign.rs`).
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "21e306ec0c01074980d4b067385831bfdaa7b474" }
+
+[lints]
+workspace = true

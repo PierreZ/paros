@@ -11,7 +11,7 @@ Three rules (Pierre, 2026-11-19):
    public API to keep stable.
 2. `paros` holds no code. It only re-exports each layer as a module. Logic lives in a layer
    crate, so each layer is tested and proved alone.
-3. No layer crate depends on `paros`. A test crate (the coming `consensus-sim`) depends on the
+3. No layer crate depends on `paros`. A test crate (`consensus-sim`) depends on the
    layer it judges, never on the facade.
 
 A layer depends only on the layers below it. Put new code in the lowest layer that can hold it.
