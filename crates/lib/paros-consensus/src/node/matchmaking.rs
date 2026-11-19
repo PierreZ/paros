@@ -690,8 +690,12 @@ impl ColocatedNode {
     /// drops an open retirement check, stages the next incarnation (persist
     /// before send) and asks every matchmaker of the set to drop its
     /// record, on a fresh tag; the tick asks again whoever did not take it.
-    /// A rejoin open already stays as it is. Returns whether a rejoin is
-    /// open; plain Multi-Paxos never rejoins.
+    /// A rejoin open already stays as it is, unless a boot opened it and
+    /// no probe staged it yet: it is staged here, at the incarnation the
+    /// boot chose. A node that heard its belief on the wire campaigns with
+    /// no probe, and every matchmaker that holds it retired refuses that
+    /// campaign until the rejoin leaves. Returns whether a rejoin is open;
+    /// plain Multi-Paxos never rejoins.
     ///
     /// # Panics
     ///
@@ -704,13 +708,20 @@ impl ColocatedNode {
             assert!(self.rejoin.is_none(), "plain Multi-Paxos never rejoins");
             return false;
         }
-        if self.rejoin.is_some() {
+        let unstaged = self
+            .rejoin
+            .as_ref()
+            .filter(|rejoin| rejoin.tag() == Ballot::zero())
+            .map(RejoinCheck::incarnation);
+        if self.rejoin.is_some() && unstaged.is_none() {
             return true;
         }
         let Some(round) = self.next_campaign_round() else {
-            return false;
+            return self.rejoin.is_some();
         };
-        probe!(reachable, "rejoin: a running journal booked again rejoins");
+        if unstaged.is_none() {
+            probe!(reachable, "rejoin: a running journal booked again rejoins");
+        }
         let me = self.config.id;
         let tag = Ballot { round, node: me };
         // The tag is a round this node never campaigns at, as a probe's.
@@ -719,7 +730,9 @@ impl ColocatedNode {
         // retire: a matchmaker that takes the rejoin forgets it.
         self.retire_check = None;
         self.registrations_checked = None;
-        let incarnation = self.retire_mark.incarnation + 1;
+        // A boot's rejoin keeps the incarnation the boot chose: one above
+        // a checked mark, or the one a stop left staged.
+        let incarnation = unstaged.unwrap_or(self.retire_mark.incarnation + 1);
         self.persist_incarnation(incarnation);
         let generation = self.deployment_matchmakers().generation;
         self.rejoin = Some(RejoinCheck::new(tag, incarnation, generation));

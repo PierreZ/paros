@@ -23,8 +23,12 @@
 //! 5. **The journal rules** ([`JOURNAL_FOLD`]): every party that applies
 //!    a slot gets the outcome that the journal contract gives the chosen
 //!    log at that slot ([`JournalSpec`]), so every party gets the same one.
-//! 6. **The chosen prefix never shrinks** ([`PREFIX_SHRINKS`]): a disk's
-//!    chosen index never moves back, and a party never boots below its
+//! 6. **The durable chosen prefix never shrinks** ([`PREFIX_SHRINKS`]):
+//!    while a node runs, its disk's chosen index never moves back, and a
+//!    crash keeps every chosen index an fsync covered. A crash may lose a
+//!    chosen index that no fsync covered: `SetChosenIndex` alone is a
+//!    relaxed write (`MustSync::Relaxed`), and the node learns the slots
+//!    again. The driver also checks that a party never boots below its
 //!    disk.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,7 +49,7 @@ pub const PERSIST_BEFORE_SEND: &str = "a vote leaves a node only once its disk h
 /// Oracle 4.
 pub const LEARNED_CHOSEN: &str = "a learned value is the chosen value";
 /// Oracle 6.
-pub const PREFIX_SHRINKS: &str = "the chosen prefix never shrinks";
+pub const PREFIX_SHRINKS: &str = "the durable chosen prefix never shrinks";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -64,8 +68,11 @@ pub struct Ledger {
     chosen: BTreeMap<Slot, (Ballot, u64)>,
     /// Per node, the highest promise its disk ever held.
     promises: BTreeMap<NodeId, Ballot>,
-    /// Per disk (by name), the highest chosen index it ever held.
+    /// Per disk (by name), the highest chosen index it held since its
+    /// node last crashed.
     chosen_index: BTreeMap<String, Slot>,
+    /// Per disk (by name), the highest chosen index an fsync covered.
+    durable: BTreeMap<String, Slot>,
     /// The journal contract, folded over the chosen log.
     journal: JournalSpec,
 }
@@ -82,6 +89,7 @@ impl Ledger {
             chosen: BTreeMap::new(),
             promises: BTreeMap::new(),
             chosen_index: BTreeMap::new(),
+            durable: BTreeMap::new(),
             journal: JournalSpec::default(),
         }
     }
@@ -267,8 +275,39 @@ impl Ledger {
         *before
     }
 
-    /// Oracle 6: the disk named `disk` now holds `index` as its chosen
-    /// index.
+    /// The disk named `disk` took an fsync while it held `index` as its
+    /// chosen index.
+    pub fn synced(&mut self, disk: &str, index: Option<Slot>) {
+        if let Some(index) = index {
+            let known = self.durable.entry(disk.to_owned()).or_insert(index);
+            *known = (*known).max(index);
+        }
+    }
+
+    /// Oracle 6 at a crash: the disk named `disk` holds `index` as its
+    /// chosen index after the crash.
+    ///
+    /// # Panics
+    ///
+    /// If the crash lost a chosen index an fsync covered.
+    pub fn crashed(&mut self, disk: &str, index: Option<Slot>) {
+        let durable = self.durable.get(disk).copied();
+        assert!(
+            index >= durable,
+            "{PREFIX_SHRINKS}: a crash moved {disk}'s chosen index to {index:?}, below the {durable:?} an fsync covered"
+        );
+        match index {
+            Some(index) => {
+                self.chosen_index.insert(disk.to_owned(), index);
+            }
+            None => {
+                self.chosen_index.remove(disk);
+            }
+        }
+    }
+
+    /// Oracle 6 while the disk's node runs: the disk named `disk` now holds
+    /// `index` as its chosen index.
     ///
     /// # Panics
     ///
@@ -396,6 +435,20 @@ mod tests {
             ledger.applied("node 2", Slot(0), &write(1), &other);
         });
         assert!(message.contains(JOURNAL_FOLD), "{message}");
+    }
+
+    #[test]
+    fn a_crash_may_lose_only_what_no_fsync_covered() {
+        let mut ledger = ledger();
+        ledger.disk_chosen("node 0", Some(Slot(2)));
+        ledger.synced("node 0", Some(Slot(2)));
+        ledger.disk_chosen("node 0", Some(Slot(5)));
+        ledger.crashed("node 0", Some(Slot(3)));
+        ledger.disk_chosen("node 0", Some(Slot(3)));
+        let message = panics(|| ledger.crashed("node 0", Some(Slot(1))));
+        assert!(message.contains(PREFIX_SHRINKS), "{message}");
+        let message = panics(|| ledger.crashed("node 0", None));
+        assert!(message.contains(PREFIX_SHRINKS), "{message}");
     }
 
     #[test]

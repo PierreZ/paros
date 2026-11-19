@@ -492,14 +492,17 @@ impl ColocatedNode {
             self.probe_elapsed = 0;
             self.assert_invariants();
         }
-        let open = self.probe.is_some() || self.retire_check.is_some() || rejoining;
-        if open {
+        // A probe or a check runs only on a follower. A rejoin a boot
+        // opened is staged by the first probe, and a node that heard its
+        // belief on the wire may campaign before that probe: such a rejoin
+        // is open on a candidate too.
+        if self.probe.is_some() || self.retire_check.is_some() {
             assert!(
                 self.role == NodeRole::Follower,
                 "a retirement check runs on a follower"
             );
         }
-        open
+        self.probe.is_some() || self.retire_check.is_some() || rejoining
     }
 
     /// [`ColocatedNode::check_retirement`] at the floor a followed

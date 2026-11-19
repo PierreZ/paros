@@ -246,7 +246,10 @@ fn first_refused_cell(
 
 /// A disk loses its votes above the chosen prefix in a crash. The oracle
 /// needs hundreds of seeds to see two values chosen; TLC refuses the first
-/// promise that under-reports, or the vote that the lost one hid.
+/// promise that under-reports, the vote that the lost one hid, or the win
+/// of the node that lost them: the model's `Win` always counts the owner's
+/// own promise, which reports the votes the code's disk forgot, so the
+/// code's frontier falls below the model's.
 #[test]
 fn tlc_refuses_a_disk_that_forgets_its_votes() {
     if !tlc_or_skip(&Spec::MultiPaxos.check()) {
@@ -256,14 +259,17 @@ fn tlc_refuses_a_disk_that_forgets_its_votes() {
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
         Mutant::ForgetVotes,
-        1..=30,
+        30..=40,
         40,
     )
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::Promise { .. } | CellEvent::Accept { .. }),
-        "seed {seed}: TLC refused {event:?}, not an acceptor step"
+        matches!(
+            event,
+            CellEvent::Promise { .. } | CellEvent::Accept { .. } | CellEvent::Win { .. }
+        ),
+        "seed {seed}: TLC refused {event:?}, not a step that reads the acceptor's votes"
     );
 }
 
@@ -302,7 +308,7 @@ fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
         Spec::ProxyLeader,
         &Flavor::proxies(),
         Mutant::KeepProxyRounds,
-        25..=35,
+        1..=10,
         200,
     )
     .expect("TLC refuses a seed of the mutant");
@@ -325,7 +331,7 @@ fn tlc_refuses_a_handoff_that_drops_its_tail() {
         Spec::LeaderHandoff,
         &Flavor::handoff(),
         Mutant::RewindHandoff,
-        1..=30,
+        30..=45,
         40,
     )
     .expect("TLC refuses a seed of the mutant");

@@ -39,7 +39,7 @@ Foundations:
   - `message.rs` → `Message`, `Audience`, `Party`.
   - `write.rs` → `WriteOp`, `AcceptorWrite`, `MustSync`.
   - `storage.rs` → `Storage`, the read-only recovery port.
-  - `mem_storage.rs` → `MemStorage`: the in-memory `Storage` a driver writes with `apply` (tests, examples).
+  - `mem_storage.rs` → `MemStorage`: the in-memory `Storage` a driver writes with `apply` (tests, examples); `rot` damages a record into a faulty entry, and a later write at its slot heals it.
   - `hard_state.rs` → `HardState` (two scalars, `#[non_exhaustive]`); `config.rs` → `Config` (`proxy_count`, `replica_count`, `reply_owner`).
   - `limits.rs` → `Limits` (the page sizes and the read window a deployment takes at construction), the ceilings (`RECOVERY_BATCH`, `PROMISE_BATCH`, `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE`) and the read-window floor `READ_TTL_TICKS` (crate-private: `Limits::kept_read_window` raises the driver's window to it).
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
@@ -81,7 +81,7 @@ Deployments (each wires roles and owns one `Ready`):
 
 Test-only:
 
-- `test_support.rs` → the shared builders (`MemStorage::for_node`, `from_node`, `rot`).
+- `test_support.rs` → the shared builders (`MemStorage::for_node`, `from_node`).
 - `models.rs` + `models/` → the model checkers: `handover.rs` (the matchmaker handover; half its seeds page by one or two journals, #439), `proxy.rs` (the proxy leader), `support.rs` (the seeded RNG and lossy mailbox both share).
 
 ## Public surface

@@ -33,30 +33,45 @@ fn walk(flavor: Flavor, extra: &[&str]) {
 
 #[test]
 fn multi_paxos() {
-    walk(Flavor::multi_paxos(), &[]);
+    walk(Flavor::multi_paxos(), &[reach::LOST_UNSYNCED]);
 }
 
 #[test]
 fn multi_paxos_on_five_with_truncation() {
     walk(
         Flavor::multi_paxos_five(),
-        &[reach::COMPACTED, reach::TRUNCATE_MOVED],
+        &[
+            reach::COMPACTED,
+            reach::TRUNCATE_MOVED,
+            reach::RETRY,
+            reach::LOST_UNSYNCED,
+        ],
     );
 }
 
 #[test]
 fn leader_handoff() {
-    walk(Flavor::handoff(), &[reach::HANDOFF]);
+    walk(Flavor::handoff(), &[reach::HANDOFF, reach::LOST_UNSYNCED]);
 }
 
 #[test]
 fn grid_quorums() {
-    walk(Flavor::grid(2, 2), &[reach::NAMED_COLUMN, reach::NODE_READ]);
+    walk(
+        Flavor::grid(2, 2),
+        &[reach::NAMED_COLUMN, reach::NODE_READ, reach::LOST_UNSYNCED],
+    );
 }
 
 #[test]
 fn grid_partitions() {
-    walk(Flavor::partitions(), &[reach::NAMED_COLUMN]);
+    walk(
+        Flavor::partitions(),
+        &[
+            reach::NAMED_COLUMN,
+            reach::MOVED_ROUND,
+            reach::LOST_UNSYNCED,
+        ],
+    );
 }
 
 #[test]
@@ -68,6 +83,7 @@ fn proxy_leaders() {
             reach::TAKE_BACK,
             reach::PROXY_CRASH,
             reach::HANDOFF,
+            reach::LOST_UNSYNCED,
         ],
     );
 }
@@ -89,13 +105,14 @@ fn replicas() {
             reach::REPLICA_READ,
             reach::COMPACTED,
             reach::TRUNCATE_MOVED,
+            reach::LOST_UNSYNCED,
         ],
     );
 }
 
 #[test]
 fn leaderless_reads() {
-    walk(Flavor::reads(), &[reach::NODE_READ]);
+    walk(Flavor::reads(), &[reach::NODE_READ, reach::LOST_UNSYNCED]);
 }
 
 #[test]
@@ -110,6 +127,7 @@ fn compartments() {
             reach::HANDOFF,
             reach::COMPACTED,
             reach::TRUNCATE_MOVED,
+            reach::LOST_UNSYNCED,
         ],
     );
 }
@@ -167,5 +185,40 @@ fn reconfigured_compartments() {
             reach::REPLICA_APPLIED,
             reach::NODE_READ,
         ],
+    );
+}
+
+#[test]
+fn disk_faults() {
+    walk(
+        Flavor::disk_faults(),
+        &[
+            reach::ROT_CHOSEN,
+            reach::SCRUBBED,
+            reach::COMPACTED,
+            reach::LOST_UNSYNCED,
+        ],
+    );
+}
+
+#[test]
+fn retirement_and_rejoin() {
+    walk(
+        Flavor::retirement(),
+        &[
+            reach::RECONFIGURED,
+            reach::GC_ACKED,
+            reach::RETIRED,
+            reach::REBOOKED,
+            reach::ADMITTED,
+        ],
+    );
+}
+
+#[test]
+fn matchmaker_set_handover() {
+    walk(
+        Flavor::handover(),
+        &[reach::RECONFIGURED, reach::GC_ACKED, reach::HANDED_OVER],
     );
 }

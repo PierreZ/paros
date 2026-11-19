@@ -252,9 +252,9 @@ fn round(
             sizes.crashes += 1;
             ("crash", vec![("proxy", proxy(*p))])
         }
-        CellEvent::Restart { node: id } => {
+        CellEvent::Restart { node: id, upto } => {
             sizes.restarts += 1;
-            ("restart", vec![("node", node(*id))])
+            ("restart", vec![("node", node(*id)), ("upto", slot(*upto))])
         }
         _ => return None,
     })

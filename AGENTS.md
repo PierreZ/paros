@@ -57,8 +57,10 @@ walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `prox
 of `reads/`, the floor of `truncation/` and the walk with every compartment and matchmakers are
 not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
-`probe!` of the core over all the walks. 33 of the 77 probes are reached; most of the others
-wait for walk moves the cell does not make yet (#1225 (walk moves for the unreached probes)).
+`probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
+admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
+unreached probes)): 67 of the 77 probes are reached at the CI budget, and 76 with
+`MOONPOOL_WALK_SEEDS=150 MOONPOOL_WALK_EXPLORE=10`.
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
@@ -158,6 +160,12 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   issue; a preference about how to work goes into this file. Amend the section it touches, never
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
+- **No excuse in simulation, and no allow list** (Pierre, 2026-11-19). The goal of simulation
+  is to bend the software enough to trigger its rough edge cases, without breaking it, so that
+  the work makes progress. A walk never excuses a failure: no oracle skips a case because it is
+  hard, no list names the failures, seeds or messages that a run may tolerate, and no fault is
+  turned off because the code does not survive it. When a fault breaks the code, the code is
+  fixed, or the fault is shown to be outside the contract and the walk stops making it.
 - **A flaky check is a finding** (decided on 2026-11-17). A check that is red and then green
   with no change teaches you to run it again in place of a fix. Never run a check again until
   it is green, and never add a retry around it. Find the cause: a bug in the code is fixed with

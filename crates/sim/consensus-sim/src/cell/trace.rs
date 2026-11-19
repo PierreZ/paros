@@ -180,8 +180,11 @@ pub enum CellEvent {
     },
     /// `node`'s disk holds `cmd` chosen at `slot`.
     Learn { node: NodeId, slot: Slot, cmd: Cmd },
-    /// `node` booted again from its disk (`Restart`).
-    Restart { node: NodeId },
+    /// `node` booted again from its disk (`Restart`). `upto` is the first
+    /// slot past the chosen prefix that the disk holds: a crash may lose a
+    /// `SetChosenIndex` that no fsync covered (`MustSync::Relaxed`), so the
+    /// node may boot knowing a shorter prefix than it learned.
+    Restart { node: NodeId, upto: Slot },
     /// `node` led and stopped leading: a step down, a higher promise, a
     /// beat, or a handoff leader that resigned.
     StepDown { node: NodeId },
@@ -369,10 +372,11 @@ impl Tracer {
         }
     }
 
-    /// Node `id` booted again: it leads nothing.
-    pub(super) fn restart(&mut self, id: NodeId) -> CellEvent {
+    /// Node `id` booted again with the chosen prefix below `upto`: it
+    /// leads nothing.
+    pub(super) fn restart(&mut self, id: NodeId, upto: Slot) -> CellEvent {
         self.leads.remove(&id);
-        CellEvent::Restart { node: id }
+        CellEvent::Restart { node: id, upto }
     }
 
     /// The event of one message a node sends, if it is a step.

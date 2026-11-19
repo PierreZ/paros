@@ -368,3 +368,73 @@ fn a_constructed_configuration_is_well_formed() {
     assert!(cfg(&[0, 1]).is_well_formed());
     assert!(cfg(&[2, 0, 1, 1]).is_well_formed());
 }
+
+/// A node booked again boots on a checked retire mark with its rejoin
+/// unstaged: the first probe stages it (#1037 (rejoin)). A node that heard
+/// its belief from a leader's beat before that probe campaigns with no
+/// probe at all, so its rejoin stays unstaged while it campaigns. A
+/// retirement check asked of it then must not panic, and a matchmaker that
+/// refuses its campaign as naming it retired stages the rejoin: the
+/// incarnation is durable and every matchmaker is asked to drop its
+/// record. Before the fix the check asserted that the node followed, and
+/// the refusal left the rejoin unstaged, so every matchmaker refused the
+/// node for good. Witness: consensus-sim, flavor `retirement`, seed 68.
+#[test]
+fn a_campaign_with_an_unstaged_rejoin_stages_it_on_a_retired_refusal() {
+    use crate::contract::write::{RetireMark, WriteOp};
+    let (mut nodes, _) = deployed_cluster_with(3);
+    // Node 1 restarts on a disk whose retirement every matchmaker took.
+    let mut disk = MemStorage::from_node(&nodes[1]);
+    disk.retire_mark = RetireMark {
+        incarnation: 0,
+        checked: true,
+    };
+    let mut n = ColocatedNode::new(&disk, Limits::DEFAULT);
+    assert_eq!(n.belief_source(), BeliefSource::Bootstrap);
+    // The leader's beat teaches the belief before any probe runs.
+    nodes[0].tick();
+    let beats = drain(&mut nodes[0]);
+    for (to, msg) in beats {
+        if to == NodeId(1) {
+            n.step(msg);
+        }
+    }
+    let _ = drain(&mut n);
+    assert_eq!(n.belief_source(), BeliefSource::Heard);
+    // The leader is gone: node 1 campaigns, with no probe.
+    fire_election(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert!(n.membership_probe().is_none(), "a campaign, not a probe");
+    let requests = drain_match_requests(&mut n);
+    let b = requests.first().expect("the campaign registers").1.ballot;
+    assert_eq!(n.retire_mark().incarnation, 0, "the rejoin is unstaged");
+    // An operator's retirement check on the candidate is no panic.
+    let _ = n.check_retirement(ballot(1, 0));
+    // A matchmaker refuses the campaign: this node is retired there.
+    let set = n.matchmaker_set().cloned().expect("a set");
+    let _ = n.on_match_reply(MatchReply {
+        journal: J,
+        matchmaker: MatchmakerId(0),
+        to: NodeId(1),
+        ballot: b,
+        generation: set.generation,
+        outcome: MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(1) }),
+    });
+    assert_eq!(n.retire_mark().incarnation, 1, "the rejoin is staged");
+    let ready = n.ready();
+    let staged = ready
+        .writes()
+        .iter()
+        .any(|w| matches!(w, WriteOp::RetireMark(m) if m.incarnation == 1 && !m.checked));
+    let rejoins = ready
+        .match_requests()
+        .iter()
+        .filter(|(_, q)| q.purpose == MatchPurpose::Rejoin { incarnation: 1 })
+        .count();
+    ready.advance();
+    assert!(
+        staged,
+        "the incarnation is durable before the rejoin leaves"
+    );
+    assert_eq!(rejoins, 3, "every matchmaker is asked to drop its record");
+}
