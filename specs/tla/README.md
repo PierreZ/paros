@@ -438,7 +438,110 @@ floor 1 is effective, but `Z` and `W` hold the floor 0. This is class 5 of item 
 (matchmaker safety and liveness).
 
 Not in the model: the decree that chooses the successor, lost matchmaker state, the effective
-configuration, the size of the successor set and more than one journal.
+configuration, the size of the successor set and more than one journal. `handover/` (#1097
+(rework 1.8)) extends this model with the target, the size and the register.
+
+### `handover/`: a matchmaker set handover onto a named target, for #1097 (rework 1.8)
+
+The model of rule 2 of the rework at the matchmakers: sets never shrink
+(`docs/architecture/04-roles.md`). It extends `handover-gc/`: the GC floor crosses the
+handover as there (with the `applied` collector, the rule that passed), and the register of
+`config-register/` crosses it too, also while a journal has an open successor. The steps are
+those of `matchmaker/reconfigurer.rs`:
+
+1. The coordinator names a target. The target has the size that the control journal records,
+   and only live members. It names a new target only when a member of the last one is down.
+2. A member of the old set `M0` freezes (`Stop`) and keeps the target durably.
+3. A reconfigurer closes the stop on a majority of frozen members. The successor state is the
+   maximum floor, the maximum read generation and the register of the highest write. The
+   reconfigurer of the coordinator proposes its target; a finish proposes the target that the
+   frozen members keep.
+4. Each member of the proposed set stores the state (`Bootstrap`).
+5. The decree over `M0` chooses one proposal (one step here; the decree is `decree/`).
+6. Each member of the chosen set activates and serves generation 1.
+
+Beside the handover, the clients of generation 0: a candidate reads the register (each
+member of a quorum raises its read generation), then writes it with a compare-and-set. Write 1
+announces a successor (`AB`: `A` in force, `B` open), and write 2 switches (`B`). A leader
+raises the GC floor. Each client step reaches a whole quorum at once. The operator can record
+a new size (3 to 5) before the handover, and a journal can then record a higher survive
+number.
+
+Constants select the rule. The first value of each is the rule of the rework.
+
+| Constant | Values |
+|---|---|
+| `Finish` | `"target"`: a finish proposes the target that the frozen members keep. `"answerers"`: it proposes the members that answered the freeze, thinned to an odd count (`odd_answerers`, the code today). |
+| `FirstWrite` | `"every"`: the decree chooses a proposal only when every member holds the bootstrap. `"majority"`: a majority of the proposed set is enough. |
+| `CloseState` | `"max"`: the maximum floor and read generation, the register of the highest write. `"inforce"`: the register keeps only the configuration in force and drops the open successor. `"noread"`: the read generation does not cross. |
+| `Retarget` | `TRUE`: the coordinator names a new target when a member of the last one is down. |
+| `JournalFirst` | `TRUE`: a journal records a higher survive number before its tenant's set has the size for it (decision 35). |
+
+The invariants:
+
+- `SizeKept`: the chosen set has the size that the control journal records. Only a resize
+  record changes the size.
+- `FirstWriteFull`: every member of the chosen set holds the successor state.
+- `FloorCarried`: an effective floor is held by each serving quorum of generation 1.
+- `ReadCarried`: a completed read stays a fence in each serving quorum of generation 1.
+- `RegisterCarried`: a completed write, or a higher one, is in each serving quorum of
+  generation 1, with its value. The value of write 1 is an open successor.
+- `MatchmakersOutlive`: the journal never records a survive number above the one of its
+  tenant's set in force (decision 35).
+- `Ends` (with `LiveSpec`): the decree chooses a set, and each live member of it serves
+  generation 1. The handover steps are fair, the clients and the crashes are not.
+
+The old set is `{X, Y, Z}`. The targets are `{Y, Z, W}`, `{Z, W, V}` and, for the resize, the
+five machines. One machine can go down for good. The liveness checks have four targets of
+three, so that one target of live machines is left whichever machine is down.
+
+Results (`handover/checks.txt`):
+
+| Check | Rule | Result |
+|---|---|---|
+| `reach` | `NoHandoverWithState`, a reachability control: the handover ends after a write with an open successor, with an effective floor and one machine down | violation (about 1.4 million states) |
+| `answerers` | control: a finish proposes the members that answered | `SizeKept` violation (42 thousand states) |
+| `first_write_majority` | control: the decree chooses a set that a majority holds | `FirstWriteFull` violation (79 thousand states) |
+| `inforce` | control: the reconstruction drops the open successor | `RegisterCarried` violation (550 thousand states) |
+| `noread` | control: the read generation does not cross | `ReadCarried` violation (460 thousand states) |
+| `journal_first` | control: the journal records survive 2 while the set has three members | `MatchmakersOutlive` violation (68 states) |
+| `live_noretarget` | control: the coordinator never names a new target | `Ends` violation (1.7 thousand states) |
+| `handover` | the rules, one crash | pass: every safety invariant (3.7 million states, 1.5 minutes with 4 workers) |
+| `resize` | the rules, a resize from three to five and survive 2 | pass (8.5 thousand states) |
+| `live` | `LiveSpec`, the rules, one crash | pass: `Ends` (33 thousand states) |
+| `live_resize` | `LiveSpec`, the resize, no crash | pass (538 states) |
+| `first_write_majority_safe` | `FirstWrite = "majority"`, every invariant but `FirstWriteFull` | pass (6.9 million states, 3 minutes; `long`) |
+
+The trace of `answerers`: the coordinator names `{Y, Z, W}`. `Y` and `Z` freeze, and a finish
+closes on them. It proposes the members that answered, thinned to an odd count: `{Z}`. `Z`
+stores the bootstrap, and the decree chooses a set of one where the control journal records
+three. This is #846 (finish shrinks a set) and #895 (odd sets). With `Finish = "target"`, the
+finish proposes `{Y, Z, W}`, which the frozen members keep.
+
+The trace of `noread`: a candidate reads at generation 2 at `{X, Y}`. `X` and `Z` freeze, and the
+stop closes on them with no read generation. `Y`, `Z` and `W` activate; `Z` and `W` are a
+serving quorum with read generation 0, so a compare-and-set at generation 1, below the
+completed read, can complete. This is the bug of `config-register/stale` across a handover.
+The trace of `inforce`: write 1 (an open successor) completes at generation 0. `X` and `Y`
+freeze, and the stop closes on them with the configuration in force only. `Z` and `W` activate
+with `A` and no successor, so their quorum reports no open move, and a candidate can start a
+third configuration (the bug of `config-register/abandon`).
+
+`live_noretarget`: `W` goes down after the coordinator named `{Y, Z, W}`. The bootstrap waits
+for `W` for good, because the first write needs every new member. Only a new target of the
+coordinator ends the handover: a frozen set never picks its own successor.
+
+Finding: the rule "the first write needs every new member" is not a safety rule. With
+`FirstWrite = "majority"`, the floor, the read generation and the register still cross
+(`first_write_majority_safe` passes), because each majority of the new set meets the majority
+that holds the bootstrap. The rule is the size rule: a member that holds no state cannot serve,
+so a set chosen at a majority serves with fewer members than its size, and one more loss
+stops it (`first_write_majority` shows the chosen set with a member that holds nothing).
+
+Not in the model: the decree (`decree/`), a client step that reaches a minority
+(`config-register/`), the clients of generation 1, a second handover, lost matchmaker state,
+more than one journal (a handover is paged, #439) and the registrations, which leave with
+rule 1.
 
 ### `reads/`: leaderless reads, for #1016 (model of leaderless reads)
 
@@ -709,7 +812,7 @@ matchmaker acks, and `a1` and `a2` retire. A new ballot that hears the two other
 `A` in its history, and `A` has one live acceptor.
 
 Not in the model: Multi-Paxos (more than one slot), the matchmaker generations and the handover
-(`handover-gc/`, #1097), Phase-1 bypassing (`zero-stall/`), scenario 3 of the GC (the chosen
+(`handover-gc/`, `handover/`), Phase-1 bypassing (`zero-stall/`), scenario 3 of the GC (the chosen
 value on replicas), the effective configuration and the membership probe, lost durable state,
 how a node learns that it may retire (`retire-fence/`), the owner testimony (`abandoned-ballot/`),
 and liveness.
