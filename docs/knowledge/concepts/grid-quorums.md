@@ -179,7 +179,8 @@ because a short row or column would let a predicate answer for a cell that does 
   write the new configuration chose and acked (`specs/tla/reads/`, check `grid_full`). Under a
   majority and on the partitions two Phase-1 quorums meet, and the `PreReadAck` ballot catches
   the read. A static full grid and a Phase 1 that reaches every row of the old grid both pass;
-  which one paros takes is open (#1102 (rework 1.13)).
+  paros takes the second (decision 31, 2026-11-19, #1102 (rework 1.13)): a full grid keeps its
+  change of members.
 - **Columns in one zone.** A column inside one failure domain commits alone, and after its loss
   it blocks every later reconfiguration. The zone rule refuses it per partition.
 

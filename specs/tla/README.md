@@ -630,7 +630,9 @@ ballot. Under a majority, and on the partitions, two Phase-1 quorums of one conf
 meet, so the read finds that acceptor. On the full grid two rows do not meet
 (`grid/grid_full_rows`). Two rules close the gap, and each check passes: a full grid that
 refuses a change of members (`grid_full_static`), and a seal that reaches each row
-(`grid_full_seal`). Which one paros takes is Pierre's choice (#1102); no code changes before it.
+(`grid_full_seal`). Pierre chose the seal that reaches each row on 2026-11-19 (#1102, decision 31
+in `docs/architecture/02-data-plane.md` section 2.5); the code is #1209 (seal each row of a full
+grid).
 
 Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
 leader and a reader outside its configuration whose own abandoned campaign is above it.

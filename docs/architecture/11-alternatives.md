@@ -192,8 +192,10 @@ Each entry names the decision that rejected it.
 - **A refusal with a counter in place of each assertion on a peer message, or no trust rule
   now** (decision 30). The transport proves the sender and the bytes, and a role trusts a correct
   peer (section 3.11).
-- **Refuse a change of members on a full grid now, or delete the row read and the full grid**
-  (decision 31). The grid is proved in TLA+ first (step 1.13), and the choice follows the trace.
+- **Refuse a change of members on a full grid, or keep only the partitions** (decision 31). The
+  trace of step 1.13 showed the stale row read; both rules pass the model. Pierre chose on
+  2026-11-19 a seal that reaches each row (section 2.5), so a full grid can still change its
+  members and an automated grid can reshape it.
 - **The bound on memory of the retained log inside the rework, or no memory work** (decision 32).
   The shared bytes and the one map are in step 1.12; the bound is one issue after the rework.
 
