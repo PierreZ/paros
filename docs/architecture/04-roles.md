@@ -128,7 +128,11 @@ traces stay as controls of `config-register`, and the 2x2 grid of `abandoned-bal
 and 2.1). **Not proved** until the TLA+ gate of phase 2 is green: the model `handover` (extends
 `handover-gc`: only a resize record changes the size; the first write needs every new member;
 the floor and the register cross the handover, also while a journal has an open successor; a
-handover with at most F members down ends), whose control, the answerer rule, fails.
+handover with at most F members down ends), whose control, the answerer rule, fails. The model
+passes and its controls fail (`specs/tla/handover/`, #1097 (rework 1.8)); the code comes with
+step 2.1. The model shows that the first-write rule is the size rule, not a safety rule: with a
+majority, the floor and the register still cross, but the set serves with a member that holds
+nothing.
 
 - A set has a durable size, `2F+1` for each acceptor partition, and a failure never changes it.
   The size is the recorded number of members; a member that is gone does not change it.

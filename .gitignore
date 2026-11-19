@@ -32,3 +32,6 @@ negative.out/
 
 # ub-mode tool output (crapper, dryer, mutator)
 .metrics/
+
+# TLC writes its state files here when it runs without -metadir.
+specs/tla/*/states/
