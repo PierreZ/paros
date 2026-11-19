@@ -534,3 +534,23 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 .story-others .now { border-color: var(--accent); color: var(--accent); }
 .story-foot { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rule); }
 @media (prefers-reduced-motion: reduce) { .story-msg { transition: none; } }
+
+/* The course (src/course.ts): the next run of a lesson at the end of a run. */
+.story-next { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 4px; }
+.story-next-btn { text-align: left; text-decoration: none; }
+.story-next-done { margin: 0; flex: 1 1 100%; font-size: 15px; }
+.story-next-map { font-size: 14px; }
+
+/* The course map of /paxos/. */
+.course, .prose .course { list-style: none; margin: 10px 0 1em; padding: 0; border-top: 1px solid var(--rule); }
+.prose .course > li::before { content: none; }
+.lesson { display: grid; grid-template-columns: 3ch 1fr; gap: 0 12px; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+.lesson-n { color: var(--muted); padding-top: 3px; }
+.lesson.is-done .lesson-n { color: var(--done); }
+.lesson-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.lesson-title { font-weight: 600; font-size: 16px; }
+.lesson-goal { font-size: 14px; color: var(--fg); }
+.lesson-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--muted); }
+.course-resume { margin: 0 0 1em; }
+.course-resume .btn { text-decoration: none; }
+.linkish { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }

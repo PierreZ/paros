@@ -2,6 +2,7 @@
 // A reading page: the title block, the text, and the pages of its section.
 import Base from "./Base.astro";
 import { url } from "../nav";
+import { LESSONS, check, lessonsOf } from "../course";
 
 interface Sibling { title: string; path: string }
 interface Props {
@@ -38,6 +39,21 @@ const PAGES: Record<string, Sibling[]> = {
 const traces = import.meta.glob("../traces/*.json", { eager: true, import: "default" });
 const trace = fm.trace ? traces[`../traces/${fm.trace}.json`] : undefined;
 if (fm.trace && !trace) throw new Error(`no trace src/traces/${fm.trace}.json`);
+type T = { scenarios: { id: string; label: string; beats?: unknown[] }[] };
+const byPage = Object.fromEntries(Object.entries(traces).map(([p, t]) => [p.replace(/^.*\/(.+)\.json$/, "$1"), t as T]));
+check(byPage);
+// The lessons of this page, for public/story.js: each run with its label,
+// and where the reader goes when the lesson ends.
+const course = fm.trace ? lessonsOf(fm.trace).map((l) => {
+  const next = LESSONS[l.n];
+  const story = (p: string) => byPage[p].scenarios.some((s) => s.beats?.length);
+  return {
+    n: l.n, id: l.id, title: l.title, of: LESSONS.length,
+    runs: l.runs.map((id) => ({ id, label: byPage[l.page].scenarios.find((s) => s.id === id)!.label })),
+    next: next && { n: l.n + 1, title: next.title, page: next.page,
+      href: url(`paxos/${next.page}/`) + `#run=${next.runs[0]}&${story(next.page) ? "beat" : "step"}=0` },
+  };
+}) : [];
 const widget = Astro.props.widget ?? Boolean(fm.widget);
 const siblings = Astro.props.siblings ?? PAGES[section] ?? [];
 const here = Astro.url.pathname;
@@ -56,6 +72,8 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
       <slot />
     </article>
     {trace && <script is:inline type="application/json" id="trace" data-wasm={url("paxos/wasm/paros_paxos.js")} set:html={JSON.stringify(trace).replace(/</g, "\\u003c")} />}
+    {trace && <script is:inline type="application/json" id="course" set:html={JSON.stringify({ lessons: course, map: url("paxos/#course") }).replace(/</g, "\\u003c")} />}
+    {trace && <script is:inline src={url("course.js")} />}
     {trace && <script is:inline src={url("story.js")} />}
     {trace && <script is:inline src={url("steps.js")} />}
     {widget && <script is:inline type="module" src={url("engineering.js")} />}

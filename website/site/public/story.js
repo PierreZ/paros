@@ -28,6 +28,9 @@
   var mount = document.querySelector("[data-steps]");
   if (!data || !mount) return;
   var trace = JSON.parse(data.textContent);
+  var courseData = document.getElementById("course");
+  var course = courseData ? JSON.parse(courseData.textContent) : { lessons: [] };
+  var progress = window.paxosCourse || null;
   var stories = trace.scenarios.filter(function (run) { return run.beats && run.beats.length; });
   if (!stories.length) return;
 
@@ -407,7 +410,9 @@
 
   // ---- questions ----
 
-  var asked = {};       // "run:beat" -> the index of the answer, -1 for "Show me"
+  // "run:beat" -> the index of the answer, -1 for "Show me". A question the
+  // reader answered on an earlier visit is not asked again.
+  var asked = progress ? progress.answersOf(trace.page) : {};
   var waiting = false;  // the screen shows a question that has no answer yet
 
   function key() { return run.id + ":" + at; }
@@ -463,12 +468,53 @@
     quiz.appendChild(el("p", "story-why", q.why));
   }
 
+  // ---- the course ----
+
+  // The lesson of run `id`, and its place in it.
+  function lessonOf(id) {
+    var found = null;
+    course.lessons.forEach(function (lesson) {
+      lesson.runs.forEach(function (r, k) { if (r.id === id) found = { lesson: lesson, k: k }; });
+    });
+    return found;
+  }
+
+  // At the end of a run: the next run of its lesson, or the next lesson.
+  function nextInCourse(list) {
+    var place = lessonOf(run.id);
+    if (!place) return;
+    var box = el("div", "story-next");
+    var after = place.lesson.runs[place.k + 1];
+    if (after) {
+      var b = el("button", "btn primary story-next-btn", "Next in this lesson: " + after.label);
+      b.type = "button";
+      b.addEventListener("click", function () {
+        stories.forEach(function (s) { if (s.id === after.id) open(s, 0, true); });
+      });
+      box.appendChild(b);
+    } else {
+      box.appendChild(el("p", "story-next-done", "Lesson " + place.lesson.n + " is done."));
+      if (place.lesson.next) {
+        var a = el("a", "btn primary story-next-btn", "Next lesson: " + place.lesson.next.title);
+        a.href = place.lesson.next.href;
+        box.appendChild(a);
+      }
+      var m = el("a", "story-next-map", "The course map");
+      m.href = course.map;
+      box.appendChild(m);
+    }
+    list.insertBefore(box, list.firstChild);
+  }
+
   // ---- screens ----
 
   function words() {
     var beat = run.beats[at];
     counter.textContent = "screen " + (at + 1) + " / " + run.beats.length;
-    runName.textContent = run.label;
+    var place = lessonOf(run.id);
+    runName.textContent = place
+      ? "Lesson " + place.lesson.n + " · " + place.lesson.title + " · " + (place.k + 1) + " of " + place.lesson.runs.length + ": " + run.label
+      : run.label;
     // A question hides the sentence of its beat: the sentence gives the answer.
     says.textContent = waiting ? beat.question.asks : beat.says;
     says.classList.toggle("asks", waiting);
@@ -507,7 +553,12 @@
       b.addEventListener("click", function () { open(target, choice.beat, true); });
       choices.appendChild(b);
     });
-    choices.hidden = waiting || !beat.choices.length;
+    if (last && !waiting) {
+      nextInCourse(choices);
+      if (progress) progress.seen(trace.page, run.id);
+    }
+    if (progress && touched) progress.at(trace.page, run.id, at);
+    choices.hidden = waiting || !choices.childNodes.length;
     backBtn.disabled = at === 0;
     nextBtn.disabled = last && !waiting;
     nextBtn.textContent = waiting ? "Show me" : "Continue";
