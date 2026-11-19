@@ -22,18 +22,20 @@
 (*   - "accept": a new durable vote (`Accept`);                            *)
 (*   - "record": a node wrote a chosen value as its accepted record, at   *)
 (*     the ballot that chose it and below its promise (`mark_chosen`);     *)
-(*   - "learn": a slot entered the chosen prefix on a node's disk;         *)
+(*   - "learn": a slot entered the chosen prefix on a node's disk, or a    *)
+(*     leader names a slot it decided in the payload of its handoff;       *)
 (*   - "restart": a node booted again from its disk (`Restart`).           *)
 (*                                                                         *)
 (* "learn" and "record" are the two steps that are not steps of the       *)
 (* model. The code learns a slot from one `Commit`; the model's `CatchUp`  *)
 (* copies every slot of a peer at once, and its `Decide` is the leader's   *)
 (* learn only. So the trace spec learns one slot, and asks only what the   *)
-(* model asks of every learn: the value is chosen (`LearnedChosen`). The   *)
-(* code also keeps a learned value as the slot's accepted record, at the   *)
-(* ballot that chose it (`mark_chosen`), which the model does not do: the  *)
-(* record step asks that a quorum chose the value at that ballot, and the  *)
-(* later promises of the node report it.                                   *)
+(* model asks of every learn: the value is chosen (`LearnedChosen`). A     *)
+(* slot learned again (the prefix reaches a slot of the payload) is no     *)
+(* step. The code also keeps a learned value as the slot's accepted        *)
+(* record, at the ballot that chose it (`mark_chosen`), which the model    *)
+(* does not do: the record step asks that a quorum chose the value at that *)
+(* ballot, and the later promises of the node report it.                   *)
 (*                                                                         *)
 (* Ballots are the ranks of the code's `(round, node)` ballots in the run, *)
 (* from 1. Nodes and commands are strings; `Noop` is "noop".               *)
@@ -73,11 +75,14 @@ Reported(s) ==
   ELSE NoVote
 
 \* A node learns one slot: the trace spec's own step, see above.
+\* A slot that a leader learned before its handoff (the payload's decided
+\* slots) is learned again when the prefix reaches it: no step.
 Learn(n, s, v) ==
-  /\ learned[n][s] = None
-  /\ Chosen(s, v)
-  /\ learned' = [learned EXCEPT ![n][s] = v]
-  /\ UNCHANGED <<prom, vote, dprom, dvote, phase, next, front, wiped, restarts, msgs>>
+  IF learned[n][s] = v THEN UNCHANGED vars
+  ELSE /\ learned[n][s] = None
+       /\ Chosen(s, v)
+       /\ learned' = [learned EXCEPT ![n][s] = v]
+       /\ UNCHANGED <<prom, vote, dprom, dvote, phase, next, front, wiped, restarts, msgs>>
 
 \* A node keeps the value chosen at ballot b as its record of slot s: the
 \* trace spec's own step, see above. It is no vote: it sends no 2b.

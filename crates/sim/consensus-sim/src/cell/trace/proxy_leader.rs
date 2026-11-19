@@ -24,6 +24,10 @@ pub(super) fn keeps(event: &CellEvent) -> bool {
             | CellEvent::StepDown { .. }
             | CellEvent::Relinquish { .. }
             | CellEvent::Install { .. }
+            | CellEvent::Select { .. }
+            | CellEvent::Register { .. }
+            | CellEvent::GcAsk { .. }
+            | CellEvent::GcAck { .. }
     )
 }
 
@@ -51,7 +55,7 @@ fn round(
 /// Write one event: its name and its fields, ballots as ranks.
 fn write(trace: &mut Trace, ranks: &Ranks, sizes: &mut Sizes, event: &CellEvent) {
     match event {
-        CellEvent::Prepare { ballot, from } => {
+        CellEvent::Prepare { ballot, from, .. } => {
             sizes.bound(*from);
             trace.event(
                 "prepare",

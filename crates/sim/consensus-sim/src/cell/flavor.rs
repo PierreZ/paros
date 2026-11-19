@@ -240,4 +240,20 @@ pub enum Mutant {
     /// The driver never re-sends a leader's pending `Accept`s. Caught by the
     /// liveness judge ([`Cell::converged`](super::Cell)).
     NoResend,
+    /// A proxy leader crashes and the driver keeps it running with its
+    /// rounds. Its later `Commit`s are backed, so the oracles pass; the
+    /// trace check refuses the `Commit` of a round the crash lost
+    /// (`ProxyLeaderTrace.tla`).
+    KeepProxyRounds,
+    /// The driver empties the payload of each `Relinquish`: its frontier
+    /// falls to its first slot, with no decided or pending slot. The
+    /// successor proposes again from there; the trace check refuses the
+    /// payload (`LeaderHandoffTrace.tla`).
+    RewindHandoff,
+    /// The driver asks the matchmakers for GC as soon as a node leads,
+    /// before a majority of its configuration learned the slots below its
+    /// frontier. Safety breaks only if an old configuration then decides
+    /// alone; the trace check refuses the request
+    /// (`MatchmakerTrace.tla`).
+    EarlyGc,
 }

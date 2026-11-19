@@ -198,6 +198,8 @@ pub struct Cell {
     expire_after: u64,
     /// The highest ballot a leader was seen at.
     leader_ballot: Option<paros_consensus::Ballot>,
+    /// The ballots [`Mutant::EarlyGc`] asked GC at.
+    early_gc: BTreeSet<paros_consensus::Ballot>,
     /// The steps recorded for the trace check so far.
     tracer: trace::Tracer,
 }
@@ -309,12 +311,15 @@ impl Model for Cell {
         match *party {
             Party::Node(id) => self.crash_node(id),
             Party::Proxy(id) => {
+                let keep = self.flavor.mutant == Some(Mutant::KeepProxyRounds);
                 let site = self.proxy_mut(id);
                 sometimes!(
                     site.live.as_ref().is_some_and(|p| !p.rounds().is_empty()),
                     reach::PROXY_CRASH
                 );
-                site.live = None;
+                if !keep {
+                    site.live = None;
+                }
                 let event = self.tracer.proxy_crash(id);
                 cx.record(event);
             }
@@ -498,6 +503,7 @@ impl Cell {
             take_back_after,
             expire_after,
             leader_ballot: None,
+            early_gc: BTreeSet::new(),
             tracer: trace::Tracer::default(),
             pool,
             flavor,
@@ -680,25 +686,73 @@ impl Cell {
                 );
                 (node.ballot(), Slot(frontier), handoff)
             });
+            // The slots a leader knows chosen below its frontier: its
+            // recovery skips them.
+            let known: Vec<(Slot, Cmd)> = leading
+                .map(|(_, frontier, _)| {
+                    node.replica()
+                        .chosen()
+                        .range(..frontier)
+                        .map(|(s, command)| (*s, Cmd::of(command)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // The configurations of an open campaign (`H_b`), that a
+            // `Prepare` of this batch opens Phase 1 over.
+            let prior: Vec<Vec<NodeId>> = node
+                .proposer()
+                .election()
+                .map(|e| e.prior().iter().map(|c| c.members().to_vec()).collect())
+                .unwrap_or_default();
+            let set = node.matchmaker_set().cloned();
+            let journal = node.config().journal.journal;
             let ready = node.ready();
             let writes = ready.writes().to_vec();
             let mut batch: Vec<(Audience, Message)> = ready.messages().to_vec();
             if mutant == Some(Mutant::HideVotes) {
                 hide_votes(&mut batch);
             }
+            if mutant == Some(Mutant::RewindHandoff) {
+                rewind_handoffs(&mut batch);
+            }
             let mut out = route(&batch, &pool, Some(id), &replicas);
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
             let more = ready.recovery_batch().is_some();
+            let matchmaking: Vec<MatchRequest> = ready
+                .match_requests()
+                .iter()
+                .map(|(_, request)| request.clone())
+                .collect();
+            let mut gc: Vec<(MatchmakerId, GcRequest)> = ready.gc_requests().to_vec();
             out.extend(ready.match_requests().iter().map(|(to, request)| Envelope {
                 to: Party::Matchmaker(*to),
                 msg: Wire::Match(request.clone()),
             }));
-            out.extend(ready.gc_requests().iter().map(|(to, request)| Envelope {
+            out.extend(gc.iter().map(|(to, request)| Envelope {
                 to: Party::Matchmaker(*to),
                 msg: Wire::Gc(*request),
             }));
             ready.advance();
+            if mutant == Some(Mutant::EarlyGc)
+                && let (Some((ballot, _, _)), Some(set)) = (leading, set)
+                && self.early_gc.insert(ballot)
+            {
+                let request = GcRequest {
+                    from: id,
+                    journal,
+                    generation: set.generation,
+                    watermark: ballot,
+                };
+                for m in set.members() {
+                    gc.push((*m, request));
+                    out.push(Envelope {
+                        to: Party::Matchmaker(*m),
+                        msg: Wire::Gc(request),
+                    });
+                }
+            }
+            let gc: Vec<GcRequest> = gc.into_iter().map(|(_, request)| request).collect();
             if writes.is_empty()
                 && out.is_empty()
                 && committed.is_empty()
@@ -708,7 +762,16 @@ impl Cell {
                 // An empty batch can still follow a change of leadership
                 // (a win with nothing to recover): the tracer records it.
                 let before = self.node(id).disk.hard_state().chosen_index;
-                self.trace_batch(id, leading, &[], &[], before, cx);
+                let batch = Traced {
+                    leading,
+                    writes: &[],
+                    messages: &[],
+                    known,
+                    prior,
+                    matchmaking: &[],
+                    gc: &[],
+                };
+                self.trace_batch(id, batch, before, cx);
                 return;
             }
             if mutant == Some(Mutant::EarlyCommit) {
@@ -724,7 +787,16 @@ impl Cell {
             if mutant != Some(Mutant::SkipPersist) {
                 self.persist_node(id, &writes);
             }
-            self.trace_batch(id, leading, &writes, &batch, before, cx);
+            let traced = Traced {
+                leading,
+                writes: &writes,
+                messages: &batch,
+                known,
+                prior,
+                matchmaking: &matchmaking,
+                gc: &gc,
+            };
+            self.trace_batch(id, traced, before, cx);
             if crash_between {
                 sometimes!(true, reach::CRASH_BEFORE_SEND);
                 self.crash_node(id);
@@ -767,9 +839,7 @@ impl Cell {
     fn trace_batch(
         &mut self,
         id: NodeId,
-        leading: Option<(paros_consensus::Ballot, Slot, bool)>,
-        writes: &[WriteOp],
-        messages: &[(Audience, Message)],
+        traced: Traced<'_>,
         before: Option<Slot>,
         cx: &mut Cx<'_, Self>,
     ) {
@@ -786,10 +856,14 @@ impl Cell {
             .collect();
         let events = self.tracer.batch(&trace::Batch {
             id,
-            leading,
-            writes,
-            messages,
+            leading: traced.leading,
+            writes: traced.writes,
+            messages: traced.messages,
             learned,
+            known: traced.known,
+            prior: traced.prior,
+            matchmaking: traced.matchmaking,
+            gc: traced.gc,
         });
         for event in events {
             cx.record(event);
@@ -882,9 +956,9 @@ impl Cell {
             return;
         };
         let ready = proxy.ready();
-        let out = route(ready.messages(), &pool, None, &replicas);
         let messages = ready.messages().to_vec();
         ready.advance();
+        let out = route(&messages, &pool, None, &replicas);
         let events = self.tracer.proxy_batch(id, &messages);
         for event in events {
             cx.record(event);
@@ -1165,8 +1239,16 @@ impl Cell {
         let Some(matchmaker) = site.live.as_mut() else {
             return;
         };
+        let (journal, ballot) = (request.journal, request.ballot);
+        let held = matchmaker.registry(journal).contains_key(&ballot);
         matchmaker.step(request);
+        let holds = matchmaker.registry(journal).contains_key(&ballot);
         site.persist();
+        if holds && !held {
+            let event = self.tracer.register(id, ballot);
+            cx.record(event.expect("a new registration is a step"));
+        }
+        let site = self.matchmaker_mut(id);
         let replies = site.take_replies();
         self.bind_registrations(id);
         for reply in replies {
@@ -1184,6 +1266,11 @@ impl Cell {
             return;
         };
         sometimes!(ack.applied, reach::GC_ACKED);
+        if ack.applied
+            && let Some(event) = self.tracer.gc_ack(id, request.watermark)
+        {
+            cx.record(event);
+        }
         cx.send(Envelope {
             to: Party::Node(request.from),
             msg: Wire::GcAck(ack),
@@ -1226,6 +1313,17 @@ impl Cell {
         sometimes!(receipt.is_some_and(|r| r.pending > 0), reach::HANDOFF);
         self.drain_node(leader, cx);
     }
+}
+
+/// What a persisted batch of a node hands the tracer, beside its learns.
+struct Traced<'a> {
+    leading: Option<(paros_consensus::Ballot, Slot, bool)>,
+    writes: &'a [WriteOp],
+    messages: &'a [(Audience, Message)],
+    known: Vec<(Slot, Cmd)>,
+    prior: Vec<Vec<NodeId>>,
+    matchmaking: &'a [MatchRequest],
+    gc: &'a [GcRequest],
 }
 
 /// The envelopes of one batch: each audience resolved to parties. A
@@ -1283,6 +1381,25 @@ fn hide_votes(batch: &mut [(Audience, Message)]) {
     for (_, message) in batch {
         if let Message::Promise { accepted, .. } = message {
             accepted.clear();
+        }
+    }
+}
+
+/// The [`Mutant::RewindHandoff`] bug: every `Relinquish` hands on an
+/// empty tail, its frontier at its first slot.
+fn rewind_handoffs(batch: &mut [(Audience, Message)]) {
+    for (_, message) in batch {
+        if let Message::Relinquish {
+            from_slot,
+            next_slot,
+            decided,
+            pending,
+            ..
+        } = message
+        {
+            *next_slot = *from_slot;
+            decided.clear();
+            pending.clear();
         }
     }
 }

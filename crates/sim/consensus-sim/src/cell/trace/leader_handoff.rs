@@ -45,7 +45,7 @@ fn tail(sizes: &mut Sizes, slots: &[(Slot, Cmd)]) -> Value {
 fn write(trace: &mut Trace, ranks: &Ranks, sizes: &mut Sizes, event: &CellEvent) {
     let bal = |b| rank(ranks, 0, b);
     match event {
-        CellEvent::Prepare { ballot, from } => {
+        CellEvent::Prepare { ballot, from, .. } => {
             sizes.bound(*from);
             trace.event(
                 "prepare",
@@ -73,9 +73,21 @@ fn write(trace: &mut Trace, ranks: &Ranks, sizes: &mut Sizes, event: &CellEvent)
                 ],
             );
         }
-        CellEvent::Win { ballot, frontier } => {
+        CellEvent::Win {
+            ballot,
+            frontier,
+            known,
+        } => {
             sizes.bound(*frontier);
-            trace.event("win", [("bal", bal(*ballot)), ("front", slot(*frontier))]);
+            let known = tail(sizes, known);
+            trace.event(
+                "win",
+                [
+                    ("bal", bal(*ballot)),
+                    ("front", slot(*frontier)),
+                    ("known", known),
+                ],
+            );
         }
         CellEvent::Propose {
             by,

@@ -1,15 +1,17 @@
 //! The steps of a cell walk as events of the TLA+ models of `specs/tla/`
 //! (#1198 (trace checking)).
 //!
-//! The [`Tracer`] watches the driver loop at two seams: a batch of a node
-//! whose writes reached the disk, and a batch that a proxy leader sends. A
+//! The [`Tracer`] watches the driver loop at three seams: a batch of a
+//! node whose writes reached the disk, a batch that a proxy leader sends,
+//! and a matchmaker that persisted its answer. A
 //! batch that a crash lost before its persist took no step. For a persisted
 //! batch of a node, the tracer records, in this order:
 //!
 //! 1. `stepdown`: the node led at a ballot before the batch, and leads no
 //!    more, or leads another ballot;
 //! 2. `win` or `install`: the node became leader of its ballot by Phase 1,
-//!    with its frontier, or by a handoff;
+//!    with its frontier, or by a handoff. A ballot won in the batch that
+//!    prepares it (an empty `H_b`) wins just after its `prepare`;
 //! 3. `learn`: each slot that the disk's chosen prefix grew by;
 //! 4. one event for each message the batch sends that changes a model:
 //!    the first `Prepare` of a ballot, the promise that raised an
@@ -22,9 +24,14 @@
 //!    promise, that only a learn writes (`mark_chosen` keeps the chosen
 //!    value as the slot's accepted record, at the ballot that chose it).
 //!
+//! 6. `select`: the first registration the node sends for a ballot;
+//!    `gcask`: the first GC request at a watermark.
+//!
 //! For a batch of a proxy: `fanout`, the proxy opened a round, and
-//! `commit`, the proxy decided it. `restart` is a node that boots again
-//! from its disk, and `crash` a proxy that lost its rounds.
+//! `commit`, the proxy decided it. For a matchmaker: `register`, a
+//! registration it did not hold before, and `gcack`, a GC request it
+//! applied. `restart` is a node that boots again from its disk, and
+//! `crash` a proxy that lost its rounds.
 //!
 //! The tracer keeps a mirror of what it recorded (the promise and the vote
 //! of each node, the open rounds of each proxy), so that it records a step
@@ -34,9 +41,11 @@
 //! Each model reads the events it has and leaves the others out
 //! ([`Spec::keeps`]): `multi_paxos.rs` writes them for
 //! `specs/tla/multi-paxos/`, `proxy_leader.rs` for `specs/tla/proxy-leader/`,
-//! `leader_handoff.rs` for `specs/tla/leader-handoff/`.
+//! `leader_handoff.rs` for `specs/tla/leader-handoff/`, `matchmaker.rs`
+//! for `specs/tla/matchmaker/`.
 
 mod leader_handoff;
+mod matchmaker;
 mod multi_paxos;
 mod proxy_leader;
 
@@ -46,7 +55,8 @@ use moonpool_tla::Value;
 use paros_consensus::contract::message::Audience;
 use paros_consensus::contract::write::AcceptorWrite;
 use paros_consensus::journal::{Command, Control, command_fingerprint};
-use paros_consensus::membership::{ProxyId, QuorumSystem};
+use paros_consensus::matchmaker::{GcRequest, MatchPurpose, MatchRequest};
+use paros_consensus::membership::{MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::{Ballot, Message, NodeId, Slot, WriteOp};
 
 use super::Flavor;
@@ -83,8 +93,13 @@ impl Cmd {
 /// One step of a cell walk, as the walk took it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CellEvent {
-    /// The owner of `ballot` opened Phase 1 from slot `from` (`Prepare`).
-    Prepare { ballot: Ballot, from: Slot },
+    /// The owner of `ballot` opened Phase 1 from slot `from` (`Prepare`),
+    /// over the configurations `prior` (`H_b`; empty without matchmakers).
+    Prepare {
+        ballot: Ballot,
+        from: Slot,
+        prior: Vec<Vec<NodeId>>,
+    },
     /// `acceptor` raised its promise to `ballot` and reported these votes
     /// at or above `from` (`Promise`).
     Promise {
@@ -94,8 +109,14 @@ pub enum CellEvent {
         votes: Vec<(Slot, Ballot, Cmd)>,
     },
     /// The owner of `ballot` won Phase 1; its allocator starts at
-    /// `frontier` (`Win`).
-    Win { ballot: Ballot, frontier: Slot },
+    /// `frontier` (`Win`). `known`: the slots below the frontier that the
+    /// owner already knows chosen, which its recovery does not propose
+    /// again.
+    Win {
+        ballot: Ballot,
+        frontier: Slot,
+        known: Vec<(Slot, Cmd)>,
+    },
     /// Node `by`, a leader of `ballot`, sent the first `Accept` of `slot`
     /// (`Allocate`, or a slot of the recovery that `Win` or `Install`
     /// opened).
@@ -177,6 +198,23 @@ pub enum CellEvent {
     },
     /// `node` installed the `ballot` a `Relinquish` handed it (`Install`).
     Install { node: NodeId, ballot: Ballot },
+    /// The owner of `ballot` selected the acceptors `config` for it and
+    /// sent its first registration to the matchmakers (`Select`).
+    Select { ballot: Ballot, config: Vec<NodeId> },
+    /// `matchmaker` registered `ballot` (`Register`).
+    Register {
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+    },
+    /// The leader of `ballot` asked the matchmakers to forget the ballots
+    /// below it (`GcAsk`).
+    GcAsk { ballot: Ballot },
+    /// `matchmaker` raised its GC watermark to `ballot` and acked it
+    /// (`GcAck`).
+    GcAck {
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+    },
 }
 
 /// What one persisted batch of a node holds, for the tracer.
@@ -189,6 +227,17 @@ pub(super) struct Batch<'a> {
     pub(super) messages: &'a [(Audience, Message)],
     /// The slots the disk's chosen prefix grew by, with their commands.
     pub(super) learned: Vec<(Slot, Cmd)>,
+    /// The slots that the node knows chosen, below the frontier it leads
+    /// with.
+    pub(super) known: Vec<(Slot, Cmd)>,
+    /// The members of each configuration of the node's open campaign
+    /// (`H_b`), after the batch's step: what its `Prepare` opened Phase 1
+    /// over.
+    pub(super) prior: Vec<Vec<NodeId>>,
+    /// The requests the batch sends to the matchmakers.
+    pub(super) matchmaking: &'a [MatchRequest],
+    /// The GC requests the batch sends to the matchmakers.
+    pub(super) gc: &'a [GcRequest],
 }
 
 /// What the tracer recorded of one proxy: the model's `pbal`, `round` and
@@ -215,6 +264,10 @@ pub(super) struct Tracer {
     /// The ballot each node leads at, as the tracer recorded it.
     leads: BTreeMap<NodeId, Ballot>,
     proxies: BTreeMap<ProxyId, ProxyMirror>,
+    selected: BTreeSet<Ballot>,
+    registered: BTreeSet<(MatchmakerId, Ballot)>,
+    gc_asked: BTreeSet<Ballot>,
+    gc_acked: BTreeSet<(MatchmakerId, Ballot)>,
 }
 
 impl Tracer {
@@ -231,7 +284,38 @@ impl Tracer {
             });
         }
         for (audience, message) in batch.messages {
-            self.message(batch.id, audience, message, &mut events);
+            self.message(batch.id, &batch.prior, audience, message, &mut events);
+        }
+        for request in batch.matchmaking {
+            if matches!(request.purpose, MatchPurpose::Register(_))
+                && self.selected.insert(request.ballot)
+            {
+                events.push(CellEvent::Select {
+                    ballot: request.ballot,
+                    config: request.config.members().to_vec(),
+                });
+            }
+        }
+        for request in batch.gc {
+            if self.gc_asked.insert(request.watermark) {
+                events.push(CellEvent::GcAsk {
+                    ballot: request.watermark,
+                });
+            }
+        }
+        // A campaign that needs no promise but its owner's (an empty
+        // `H_b`) wins in the batch that prepares it: the `Prepare` comes
+        // first.
+        let win = events.iter().position(|e| matches!(e, CellEvent::Win { .. }));
+        if let Some(w) = win
+            && let CellEvent::Win { ballot, .. } = events[w]
+            && let Some(p) = events
+                .iter()
+                .position(|e| matches!(e, CellEvent::Prepare { ballot: b, .. } if *b == ballot))
+            && p > w
+        {
+            let win = events.remove(w);
+            events.insert(p, win);
         }
         let leads = batch.leading.map(|(ballot, _, _)| ballot);
         for write in batch.writes {
@@ -274,7 +358,11 @@ impl Tracer {
             events.push(CellEvent::Install { node: id, ballot });
         } else {
             assert!(self.won.insert(ballot), "a ballot is won once");
-            events.push(CellEvent::Win { ballot, frontier });
+            events.push(CellEvent::Win {
+                ballot,
+                frontier,
+                known: batch.known.clone(),
+            });
         }
     }
 
@@ -288,6 +376,7 @@ impl Tracer {
     fn message(
         &mut self,
         id: NodeId,
+        prior: &[Vec<NodeId>],
         audience: &Audience,
         message: &Message,
         events: &mut Vec<CellEvent>,
@@ -301,6 +390,7 @@ impl Tracer {
                 events.push(CellEvent::Prepare {
                     ballot: *ballot,
                     from: *from_slot,
+                    prior: prior.to_vec(),
                 });
             }
             Message::Promise {
@@ -363,6 +453,15 @@ impl Tracer {
             } => {
                 assert!(*from == id, "a node relinquishes its own leadership");
                 self.leads.remove(&id);
+                // A slot the leader decided above its chosen prefix is a
+                // learn of the leader (the model's `Decide`), made before
+                // the payload that names it. The prefix learns it again
+                // later, and a model reads that second learn as no step.
+                events.extend(decided.iter().map(|(s, (_, command))| CellEvent::Learn {
+                    node: id,
+                    slot: *s,
+                    cmd: Cmd::of(command),
+                }));
                 events.push(CellEvent::Relinquish {
                     from: *from,
                     to: *to,
@@ -460,23 +559,20 @@ impl Tracer {
                     command,
                     ..
                 } => {
-                    let round = (*ballot, Cmd::of(command));
-                    if mirror.rounds.get(slot) == Some(&round) {
-                        mirror.rounds.remove(slot);
-                        mirror.done.insert(*slot, *ballot);
-                        events.push(CellEvent::Commit {
-                            proxy: id,
-                            ballot: *ballot,
-                            slot: *slot,
-                            cmd: round.1,
-                        });
-                    } else {
-                        assert!(
-                            mirror.done.get(slot) == Some(ballot),
-                            "proxy {} commits {slot:?} at {ballot:?}, a round it never opened",
-                            id.0
-                        );
+                    // A `Commit` sent again is no step. Any other is one,
+                    // even of a round the mirror does not hold open: the
+                    // model judges it.
+                    if mirror.done.get(slot) == Some(ballot) {
+                        continue;
                     }
+                    mirror.rounds.remove(slot);
+                    mirror.done.insert(*slot, *ballot);
+                    events.push(CellEvent::Commit {
+                        proxy: id,
+                        ballot: *ballot,
+                        slot: *slot,
+                        cmd: Cmd::of(command),
+                    });
                 }
                 _ => {}
             }
@@ -488,6 +584,28 @@ impl Tracer {
     pub(super) fn proxy_crash(&mut self, id: ProxyId) -> CellEvent {
         self.proxies.insert(id, ProxyMirror::default());
         CellEvent::Crash { proxy: id }
+    }
+
+    /// Matchmaker `id` holds a registration of `ballot` that it did not
+    /// hold before its step: a step the first time only.
+    pub(super) fn register(&mut self, id: MatchmakerId, ballot: Ballot) -> Option<CellEvent> {
+        self.registered
+            .insert((id, ballot))
+            .then_some(CellEvent::Register {
+                matchmaker: id,
+                ballot,
+            })
+    }
+
+    /// Matchmaker `id` applied a GC request at `ballot`: a step the first
+    /// time only.
+    pub(super) fn gc_ack(&mut self, id: MatchmakerId, ballot: Ballot) -> Option<CellEvent> {
+        self.gc_acked
+            .insert((id, ballot))
+            .then_some(CellEvent::GcAck {
+                matchmaker: id,
+                ballot,
+            })
     }
 
     fn raise(&mut self, id: NodeId, ballot: Ballot) {
@@ -508,6 +626,9 @@ pub enum Spec {
     /// `specs/tla/leader-handoff/LeaderHandoffTrace.tla`: the guards of the
     /// cooperative handoff, on a majority.
     LeaderHandoff,
+    /// `specs/tla/matchmaker/MatchmakerTrace.tla`: matchmaking, Phase 1
+    /// over `H_b`, Phase 2 in `C_b` and the GC, on a majority.
+    Matchmaker,
 }
 
 impl Spec {
@@ -518,6 +639,7 @@ impl Spec {
             Self::MultiPaxos => spec("multi-paxos", "MultiPaxosTrace"),
             Self::ProxyLeader => spec("proxy-leader", "ProxyLeaderTrace"),
             Self::LeaderHandoff => spec("leader-handoff", "LeaderHandoffTrace"),
+            Self::Matchmaker => spec("matchmaker", "MatchmakerTrace"),
         }
     }
 
@@ -529,6 +651,7 @@ impl Spec {
             Self::MultiPaxos => multi_paxos::keeps(event),
             Self::ProxyLeader => proxy_leader::keeps(event),
             Self::LeaderHandoff => leader_handoff::keeps(event),
+            Self::Matchmaker => matchmaker::keeps(event),
         }
     }
 
@@ -554,6 +677,17 @@ impl Spec {
                     "LeaderHandoffTrace runs on a majority"
                 );
                 leader_handoff::trace(flavor.acceptors, events)
+            }
+            Self::Matchmaker => {
+                assert!(
+                    flavor.quorum == QuorumSystem::Majority,
+                    "MatchmakerTrace runs on a majority"
+                );
+                matchmaker::trace(
+                    flavor.acceptors + flavor.spares,
+                    flavor.matchmakers,
+                    events,
+                )
             }
         }
     }
@@ -688,6 +822,10 @@ mod tests {
             writes: std::slice::from_ref(&write),
             messages: &[],
             learned: Vec::new(),
+            known: Vec::new(),
+            prior: Vec::new(),
+            matchmaking: &[],
+            gc: &[],
         };
         assert_eq!(tracer.batch(&batch).len(), 1);
         assert!(tracer.batch(&batch).is_empty(), "the same vote again");
@@ -702,6 +840,10 @@ mod tests {
             writes: &[],
             messages: &[],
             learned: vec![(Slot(1), Cmd::Noop)],
+            known: Vec::new(),
+            prior: Vec::new(),
+            matchmaking: &[],
+            gc: &[],
         };
         let events = tracer.batch(&batch);
         assert!(matches!(events[0], CellEvent::Win { .. }));
@@ -723,6 +865,10 @@ mod tests {
             writes: &[],
             messages: &messages,
             learned: Vec::new(),
+            known: Vec::new(),
+            prior: Vec::new(),
+            matchmaking: &[],
+            gc: &[],
         };
         let events = tracer.batch(&batch);
         assert!(matches!(events[0], CellEvent::Propose { .. }));

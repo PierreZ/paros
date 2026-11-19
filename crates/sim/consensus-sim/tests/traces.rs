@@ -106,8 +106,13 @@ fn tlc_refuses_an_acceptor_that_forgot_its_promise() {
 
 /// Short cell walks of `flavor`: a trace of a few hundred events.
 fn cell_walk(flavor: Flavor) -> Walk<Cell> {
+    cell_walk_of(flavor, knob("TRACE_CHAOS", 40))
+}
+
+/// A cell walk of `chaos` chaos steps.
+fn cell_walk_of(flavor: Flavor, chaos: u64) -> Walk<Cell> {
     Walk::<Cell>::new()
-        .chaos_steps(knob("TRACE_CHAOS", 40))
+        .chaos_steps(chaos)
         .quiet_steps(10)
         .env_prefix(None)
         .model(move |cx| Cell::build(flavor.clone(), cx))
@@ -203,18 +208,25 @@ fn tlc_accepts_the_compartment_walks() {
     accepts(Spec::ProxyLeader, &Flavor::compartments());
 }
 
-/// The first seed in `1..=seeds` of `flavor` with `mutant` whose walk the
-/// oracles pass and `spec` refuses, with the event TLC names.
+#[test]
+fn tlc_accepts_the_matchmaker_walks() {
+    accepts(Spec::Matchmaker, &Flavor::matchmakers());
+}
+
+/// The first seed in `seeds` of `flavor` with `mutant` whose walk of
+/// `chaos` chaos steps the oracles pass and `spec` refuses, with the event
+/// TLC names.
 fn first_refused_cell(
     spec: Spec,
     flavor: &Flavor,
     mutant: Mutant,
-    seeds: u64,
+    seeds: std::ops::RangeInclusive<u64>,
+    chaos: u64,
 ) -> Option<(u64, CellEvent, String)> {
     let check = spec.check();
     let flavor = flavor.clone().with(mutant);
-    (1..=seeds).find_map(|seed| {
-        let run = cell_walk(flavor.clone()).replay(seed).ok()?;
+    seeds.into_iter().find_map(|seed| {
+        let run = cell_walk_of(flavor.clone(), chaos).replay(seed).ok()?;
         let events = kept(spec, &run);
         match check
             .check(&spec.trace(&flavor, &events))
@@ -240,7 +252,8 @@ fn tlc_refuses_a_disk_that_forgets_its_votes() {
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
         Mutant::ForgetVotes,
-        30,
+        1..=30,
+        40,
     )
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
@@ -261,12 +274,83 @@ fn tlc_refuses_a_promise_that_hides_its_votes() {
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
         Mutant::HideVotes,
-        30,
+        1..=30,
+        40,
     )
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
         matches!(event, CellEvent::Promise { ref votes, .. } if votes.is_empty()),
         "seed {seed}: TLC refused {event:?}, not a promise that hid its votes"
+    );
+}
+
+/// A proxy leader crashes, and the driver keeps it running with its
+/// rounds. TLC refuses the `Commit` of a round the crash lost. The refusal
+/// needs a crash between a fan-out and its acks, and a commit before the
+/// proxy sends the round again: long walks, and a few seeds.
+#[test]
+fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
+    if !tlc_or_skip(&Spec::ProxyLeader.check()) {
+        return;
+    }
+    let (seed, event, state) = first_refused_cell(
+        Spec::ProxyLeader,
+        &Flavor::proxies(),
+        Mutant::KeepProxyRounds,
+        25..=35,
+        200,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, CellEvent::Commit { .. }),
+        "seed {seed}: TLC refused {event:?}, not a commit"
+    );
+}
+
+/// A leader hands on its ballot with an empty tail. TLC refuses the
+/// payload: it must be the leader's frontier, decided and pending slots
+/// (`Relinquish`).
+#[test]
+fn tlc_refuses_a_handoff_that_drops_its_tail() {
+    if !tlc_or_skip(&Spec::LeaderHandoff.check()) {
+        return;
+    }
+    let (seed, event, state) = first_refused_cell(
+        Spec::LeaderHandoff,
+        &Flavor::handoff(),
+        Mutant::RewindHandoff,
+        1..=30,
+        40,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, CellEvent::Relinquish { .. }),
+        "seed {seed}: TLC refused {event:?}, not a handoff"
+    );
+}
+
+/// A leader asks for GC as soon as it leads. TLC refuses the request of a
+/// leader whose configuration has not learned the slots below its
+/// frontier (`node/gc.rs`).
+#[test]
+fn tlc_refuses_an_early_gc() {
+    if !tlc_or_skip(&Spec::Matchmaker.check()) {
+        return;
+    }
+    let (seed, event, state) = first_refused_cell(
+        Spec::Matchmaker,
+        &Flavor::matchmakers(),
+        Mutant::EarlyGc,
+        1..=30,
+        40,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, CellEvent::GcAsk { .. }),
+        "seed {seed}: TLC refused {event:?}, not a GC request"
     );
 }

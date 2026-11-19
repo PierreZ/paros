@@ -21,8 +21,14 @@
 (* pages (`advance_recovery`). So an "accept" of the leader's own round    *)
 (* that the model already holds is no step.                                *)
 (*                                                                         *)
-(* Three steps of the code are not steps of the model, and the trace spec  *)
+(* Four steps of the code are not steps of the model, and the trace spec   *)
 (* writes each as its own step:                                            *)
+(*   - "win" with `known`: a new leader that already knows a slot of its   *)
+(*     recovery chosen (it decided the slot as an earlier leader, above a  *)
+(*     gap of its chosen prefix) does not propose it again                 *)
+(*     (`close_phase1`). The step is the model's `Win` with no round at    *)
+(*     those slots, and asks that each of their values is chosen. A "win"  *)
+(*     that knows no such slot is the model's `Win`;                       *)
 (*   - "stepdown": a leader stops leading. The code steps down on a beat   *)
 (*     at or above its promise (`OnBeat`), on a fence timeout              *)
 (*     (`FenceResign`), on a higher promise, on `CheckQuorum` and when a   *)
@@ -32,8 +38,10 @@
 (*   - "learn": the code learns one slot from one `Commit`; the model's    *)
 (*     `CatchUp` copies a peer's log at once, and its `Decide` is the      *)
 (*     leader's learn only. The step asks what the model asks of every     *)
-(*     learn: the value is chosen (`LearnedChosen`). A slot that `Install` *)
-(*     already learned is no step;                                         *)
+(*     learn: the value is chosen (`LearnedChosen`). A leader learns each  *)
+(*     slot that its payload names as decided just before the payload     *)
+(*     (the model's `Decide`). A slot learned again (by `Install`, or the  *)
+(*     prefix that reaches a slot of the payload) is no step;              *)
 (*   - "record": a node keeps a chosen value as its record, below its      *)
 (*     promise (`mark_chosen`).                                            *)
 (*                                                                         *)
@@ -72,6 +80,38 @@ Reported(s) ==
 AsRounds(m) ==
   [s \in Slots |-> IF \E r \in m : r.slot = s THEN (CHOOSE r \in m : r.slot = s).val ELSE None]
 
+\* The values that a "win" names as chosen, by slot.
+Known == AsRounds(e.known)
+
+\* The owner of ballot b wins Phase 1, and its recovery skips each slot
+\* that it already knows chosen (`close_phase1` with `is_chosen`): the
+\* trace spec's own step, see above. It is the model's `Win` with no round
+\* at the slots of K, and asks that each value of K is chosen.
+WinKnowing(b, K) ==
+  LET o == Owner[b] IN
+  /\ \A s \in Slots : K[s] # None => Chosen(s, K[s])
+  /\ phase[b] = "p1"
+  /\ prom[o] = b
+  /\ \E S \in SUBSET {m \in Delivered : m.type = "1b" /\ m.bal = b} :
+       /\ \A m, n \in S : m.acc = n.acc => m = n
+       /\ o \in {m.acc : m \in S}
+       /\ \E Q \in Q1 : Q \subseteq {m.acc : m \in S}
+       /\ LET from == (CHOOSE m \in msgs : m.type = "1a" /\ m.bal = b).from
+              f == Frontier(S, from)
+              R == [s \in Slots |->
+                      IF s >= from /\ s < f /\ K[s] = None
+                      THEN (IF Top(S, s).bal > 0 THEN Top(S, s).val ELSE Noop)
+                      ELSE None]
+          IN /\ nxt' = [nxt EXCEPT ![o] = f]
+             /\ pend' = [pend EXCEPT ![o] = R]
+             /\ vote' = [vote EXCEPT ![o] = OwnVotes(o, b, R)]
+             /\ SendAll(RoundMsgs(o, b, R))
+  /\ phase' = [phase EXCEPT ![b] = "won"]
+  /\ role' = [role EXCEPT ![o] = "leader"]
+  /\ bal' = [bal EXCEPT ![o] = b]
+  /\ origin' = [origin EXCEPT ![o] = "elected"]
+  /\ UNCHANGED <<prom, learned, restarts, drops, lost>>
+
 \* Node n stops leading: the trace spec's own step, see above.
 StepDown(n) ==
   /\ role[n] = "leader"
@@ -105,8 +145,12 @@ Step ==
      /\ [type |-> "1a", bal |-> e.bal, from |-> e.from] \in Delivered
      /\ \A s \in Slots : s >= e.from => vote[e.acc][s] = Reported(s)
      /\ \A r \in e.rep : r.slot \in Slots /\ r.slot >= e.from
-  \/ /\ e.event = "win" /\ IsBallot /\ Has("front")
-     /\ Win(e.bal)
+  \/ /\ e.event = "win" /\ IsBallot /\ Has("front") /\ Has("known")
+     /\ \A k \in e.known : k.slot \in Slots /\ k.val \in Values
+     /\ IF LET from == (CHOOSE m \in msgs : m.type = "1a" /\ m.bal = e.bal).from
+           IN \E s \in Slots : Known[s] # None /\ s >= from /\ s < e.front
+        THEN WinKnowing(e.bal, Known)
+        ELSE Win(e.bal)
      /\ nxt'[Owner[e.bal]] = e.front
   \/ /\ e.event = "propose" /\ IsNode("by") /\ IsBallot /\ IsSlot /\ IsValue
      /\ \/ /\ bal[e.by] = e.bal
