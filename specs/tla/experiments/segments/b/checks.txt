@@ -22,5 +22,3 @@ reads_view         violation  ci
 reads_long         pass       long
 plain_long         pass       long
 claims_long        pass       long
-claims_three       pass       long
-plain_three        pass       long

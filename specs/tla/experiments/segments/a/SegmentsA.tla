@@ -489,4 +489,8 @@ NoDropAfterOffload == ~\E s \in Slots : IsChosen(s) /\ s >= floor /\ ~OnLiveRow(
                          /\ \A r \in Replicas : s \notin hold[r]
 NoTrim == floor = 1
 NoReshapeWrite == ~\E s \in Slots : ChosenInGen(s, 2)
+\* A slot below the end of the sealed configuration 1 is chosen in
+\* configuration 2: the sealing leader proposed again a vote that was not
+\* chosen. It needs more than one acceptor in a configuration.
+NoBoundaryReproposal == ~\E s \in Slots : send[1] # 0 /\ s < send[1] /\ ChosenInGen(s, 2)
 =============================================================================

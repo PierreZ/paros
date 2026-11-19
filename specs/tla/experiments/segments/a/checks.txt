@@ -23,6 +23,5 @@ read_nofence                  violation  ci
 reads_uncommitted             violation  ci
 reads_long                    pass       long
 end_voted_below_three         pass       long
+reach_boundary_three          violation  long
 end_uncommitted_below_three   violation  long
-end_uncommitted_all_three     pass       long
-safety_three                  pass       long

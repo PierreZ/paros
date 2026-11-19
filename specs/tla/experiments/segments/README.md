@@ -76,9 +76,10 @@ Design A:
 2. **The sealing leader proposes again, in its own grid, each slot below the end where it saw a
    vote and that the replicas did not apply.** With three acceptors for each grid, a vote that
    Phase 1 sees can be a vote that is not chosen; nobody else would ever propose that slot. So a
-   few slots of the old segment's range are chosen in the new grid. (This item is reasoning;
-   the `long` checks with three acceptors, `end_voted_below_three` and `safety_three`, check
-   it.) The table still says which
+   few slots of the old segment's range are chosen in the new grid. TLC shows it with three
+   acceptors (`reach_boundary_three`): a1 votes v1 at slot 1 in grid 1 and nothing is chosen;
+   the leader of grid 2 sees that vote, seals grid 1 at end 2, and gets v1 chosen at slot 1 in
+   grid 2. The rule is safe (`end_voted_below_three` passes). The table still says which
    range each segment covers; it does not say which grid holds each vote of the boundary slots.
 3. **The end is a compare-and-set from "none".** Control `seal_blind`: two sealing leaders both
    write an end (`EndOnce` fails).
@@ -130,26 +131,32 @@ controller, placement, the offload policy and the readers see it as decided stat
 ## State counts
 
 Two configurations (one reshape), two slots, two values, two replicas with f = 1, one acceptor
-for each configuration (a vote is then a choice). Symmetry over the values and the replicas.
-TLC 2.19 with 2 workers.
+for each configuration (a vote is then a choice) unless the row says otherwise. Symmetry over
+the values and the replicas. TLC 2.19.
 
 | Configuration | Ballots | A distinct states | B distinct states |
 |---|---|---|---|
 | Every rule on, storage on (A `safety`, B `plain`) | 2 | 9,650 | 227,778 |
-| Every rule on, storage on (A `safety`, B `plain_long`) | 3 | 298,648 | see below |
-| B with log claims (`claims`) | 2 | | 96,713 |
-| Tail reader, storage off (`reads`) | 2 | 58,229 | 65,074 |
-| End rule check with the bounded Phase 1 (`end_voted_below`) | 3 | 298,648 | |
+| Every rule on, storage on (A `safety`, B `plain_long`) | 3 | 298,648 (30 s) | 7,628,098 (27 min) |
+| B with log claims (`claims`, `claims_long`) | 2 / 3 | | 96,713 / 3,039,127 (25 min) |
+| Tail reader, storage off (`reads`, `reads_long`) | 2 / 3 | 58,229 / 1,675,784 | 65,074 / 1,950,482 |
+| Bounded Phase 1 with the end at the highest vote + 1 (`end_voted_below`) | 3 | 298,648 | |
+| The same, three acceptors for each grid, no storage (`end_voted_below_three`) | 2 | 1,195,666 (5 min) | |
 
-B is larger at the same size because each replica cuts its chunks where it likes and nothing
-orders the cuts; A has one object for each segment and the seal orders the record.
+B is about 25 times larger than A at the same size, because each replica cuts its chunks where
+it likes and nothing orders the cuts; A has one object for each segment and the seal orders the
+record. Three runs did not finish, and they are not in `checks.txt`: A with three acceptors for
+each grid and three ballots (19.4 million distinct states in 56 minutes, no violation, the queue
+still growing), and B plain and B with claims with three acceptors for each grid (45 minutes on
+one worker each).
 
-The CI set of both folders runs in about 5 minutes on 2 workers. The `long` checks (three
-ballots for B, three acceptors for each grid in A) run with `scripts/check-tla.sh --all`.
+The CI set of both folders runs in about 5 minutes on 2 workers, and in CI each folder is its
+own job of about 2 minutes. The `long` checks run with `scripts/check-tla.sh --all`.
 
 ## Limits of the experiment
 
-- One acceptor for each configuration in the CI set. The three-acceptor checks of A are `long`.
+- One acceptor for each configuration in the CI set. The three-acceptor checks of A are `long`,
+  with storage off and one reshape; the full A and B with three acceptors do not finish.
 - Two configurations only, so plan rule 1 (one in force plus at most one successor) is never
   stressed by a third reshape.
 - The matchmakers are one atomic register; their quorum and handover are in other models.
