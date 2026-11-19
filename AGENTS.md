@@ -420,7 +420,9 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/support/paros-wasm` — the site's wasm tool (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only.
 
-Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`), `website/site/` (the website,
+Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`; `specs/tla/experiments/`
+holds the models that compare candidate designs before Pierre decides, such as the segments
+experiment of #1213 (segments in the protocol or in storage)), `website/site/` (the website,
 Astro, one style for every page; `website/site/AGENTS.md`, the `update-the-site` skill),
 `website/shared/` (the design system: tokens, fonts, logo), `scripts/build-wasm.sh` (builds the
 wasm and stages it for the site), `docs/architecture/` (the target design), `docs/knowledge/`

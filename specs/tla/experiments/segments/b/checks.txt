@@ -1,0 +1,26 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+# Design B: plain Matchmaker Paxos, chunks local to each replica, and the
+# variant with offload claims in the log. Report: ../README.md.
+plain              pass       ci
+plain_visible      violation  ci
+plain_onehome      violation  ci
+claims             pass       ci
+reach_reshape      violation  ci
+reach_drop         violation  ci
+reach_drop_claims  violation  ci
+reach_claim        violation  ci
+reach_trim         violation  ci
+retire_early       violation  ci
+trim_nocheck       violation  ci
+reads              pass       ci
+read_nofence       violation  ci
+reads_view         violation  ci
+reads_long         pass       long
+plain_long         pass       long
+claims_long        pass       long
+claims_three       pass       long
+plain_three        pass       long
