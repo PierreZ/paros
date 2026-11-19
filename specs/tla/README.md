@@ -689,7 +689,7 @@ Results (`matchmaker/checks.txt`):
 | `retire_one_ack` | control: the floor counts as effective at one ack, three matchmakers | `Electable` violation |
 | `matchmaker` | the rules, three matchmakers, two ballots | pass: `Agreement` and `Electable` (1.4 million states, 2.5 minutes) |
 | `matchmaker_one` | the rules, one matchmaker, three ballots | pass (6.2 million states, 6.5 minutes, `long`) |
-| `matchmaker_long` | the rules, three matchmakers, three ballots | `long`; its first run is in progress in PR #1200 work, and its result is written here before the merge |
+| `matchmaker_long` | the rules, three matchmakers, three ballots | no violation in 65.1 million distinct states, to depth 26 (a bounded run of 2 hours, 4 workers; `long`) |
 
 The trace of `phase1_union`: ballot 1 (`A`, empty history) chooses `v1` at `{a2, a3}`. Ballot 2
 registers `B`, so the history of ballot 3 holds `A` and `B`. Ballot 3 takes promises from
