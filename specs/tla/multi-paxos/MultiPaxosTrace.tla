@@ -103,8 +103,12 @@ Record(n, b, s, v) ==
 
 \* Node n boots again from its disk, with the chosen prefix below upto: the
 \* trace spec's own step, see above. It is `Restart`, and it forgets what a
-\* crash lost of the learned prefix.
-TraceRestart(n, upto) ==
+\* crash lost of the learned prefix. The campaigns of n die, and so does
+\* the ballot n led (`led`, 0 for none). The model's `Restart` kills every
+\* ballot n owns, but a leader may have handed its ballot on before the
+\* crash (the walk's handoff, which this model does not have): that ballot
+\* lives on at its successor, and the successor's restart ends it.
+TraceRestart(n, upto, led) ==
   /\ Live(n)
   /\ restarts < Restarts
   /\ restarts' = restarts + 1
@@ -112,7 +116,10 @@ TraceRestart(n, upto) ==
   /\ prom' = [prom EXCEPT ![n] = dprom[n]]
   /\ vote' = [vote EXCEPT ![n] = dvote[n]]
   /\ learned' = [learned EXCEPT ![n] = [s \in Slots |-> IF s >= upto THEN None ELSE @[s]]]
-  /\ phase' = [b \in Ballots |-> IF Owner[b] = n /\ phase[b] \in {"p1", "p2"} THEN "dead" ELSE phase[b]]
+  /\ phase' = [b \in Ballots |->
+                IF \/ Owner[b] = n /\ phase[b] = "p1"
+                   \/ b = led /\ phase[b] = "p2"
+                THEN "dead" ELSE phase[b]]
   /\ UNCHANGED <<dprom, dvote, next, front, wiped, msgs>>
 
 Step ==
@@ -140,8 +147,8 @@ Step ==
      /\ Record(e.node, e.bal, e.slot, e.val)
   \/ /\ e.event = "learn" /\ IsNode("node") /\ IsSlot /\ IsValue
      /\ Learn(e.node, e.slot, e.val)
-  \/ /\ e.event = "restart" /\ IsNode("node") /\ Has("upto")
-     /\ TraceRestart(e.node, e.upto)
+  \/ /\ e.event = "restart" /\ IsNode("node") /\ Has("upto") /\ Has("led")
+     /\ TraceRestart(e.node, e.upto, e.led)
 
 TraceNext == l <= Len(Trace) /\ Step /\ l' = l + 1
 
