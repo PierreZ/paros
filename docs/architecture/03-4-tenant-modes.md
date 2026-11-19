@@ -92,9 +92,10 @@ two acceptor layouts, and the person chooses for each journal with `partitions`:
   service and from `paros-consensus` (decision 27, steps 0.11 and 0.12): the variant
   `QuorumSystem::Flexible`, `QUORUM_SYSTEM_FLEXIBLE` and `reconfigure --quorum flexible`. The
   grid keeps its two quorum shapes (Phase 2 in one column, Phase 1 in every column).
-- **Not proved: the grid in the models** (decision 31, step 1.13). A grid quorum is not a
-  majority, so `config-register` runs its safety also with a full grid, and the reads model takes
-  the grid quorums as a parameter (section 2.5).
+- **The grid in the models** (decision 31, step 1.13, done). A grid quorum is not a majority,
+  so `config-register` runs its safety also with a full grid, and the reads model takes the grid
+  quorums as a parameter. A full grid keeps its change of members, and its Phase 1 reaches each
+  row of the old grid (section 2.5).
 - **Derived numbers are shown, never typed, and the partition count is always shown**:
   `survive 1 machine · 1 partition (any 1) · 3 acceptors`;
   `survive 1 machine · 3 partitions (any 1, up to 3 spread) · 9 acceptors`.
