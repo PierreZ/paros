@@ -47,10 +47,10 @@ Foundations:
 Roles (pure tallies, no deployment knowledge):
 
 - `acceptor.rs` → `Acceptor` → the durable promise, accepted records, compaction floor, CTRL faulty set; emits its own writes.
-- `acceptor/retention.rs` → `Acceptor::truncate` / `trim_to` → the two floor-moving ops (a concern, not a role). Their TLA+ model, with the floor guard of `on_prepare` and the trim-point jump of `node/catch_up.rs`, is `specs/tla/truncation/` (#1017 (truncation model)).
+- `acceptor/retention.rs` → `Acceptor::truncate` / `trim_to` → the two floor-moving ops (a concern, not a role). Their TLA+ model, with the floor guard of `on_prepare` and the trim-point jump of `node/catch_up.rs`, is `specs/tla/truncation/` (#1017 (truncation model)); the floor as a fold of the journal (`Replica::compaction_target`) is in it too (#1216 (truncation model, part 2)).
 - `proposer.rs` → `Proposer` → the leader-side tallies; embeds the next five.
 - `proposer/election.rs` → Phase 1 → per-configuration completion, the P2c merge.
-- `proposer/probe.rs` → the CTRL repair probe (Stage 8) for slots a won election could not decide.
+- `proposer/probe.rs` → the CTRL repair probe (Stage 8) for slots a won election could not decide. The tri-state tally (`slot_decidable`) and the probe have their TLA+ model in `specs/tla/truncation/` (#1216 (truncation model, part 2)).
 - `proposer/recovery.rs` → `RecoveryPolicy::{Phase1Backed, Inherited}` → the bounded recovery a fresh leadership drains.
 - `proposer/rounds.rs` → `proposer::Rounds`, `Custody` → the one Phase-2 tally (#142); a proxy runs it alone.
 - `proposer/authority.rs` → `proposer::Authority` → the leadership fence and the `CheckQuorum` window.
