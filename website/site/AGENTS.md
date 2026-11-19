@@ -118,6 +118,12 @@ the last screen opened. No account, no server, no score. The map shows "k of n s
 lesson and "Continue where you stopped", and has a button to forget the progress. Every page
 works the same when the storage is blocked.
 
+Each lesson names one TLC run of a model of `specs/tla/` (`tlc` in `src/course.ts`), and the
+map shows its count of distinct states with the day of the run (`TLC_RUN`). The figures come
+from TLC's output, never from an estimate. To refresh them, run for each lesson, in
+`specs/tla/<model>/`: `nix develop .#tla --command tlc -workers auto -deadlock -config
+<config>.cfg MC.tla`, copy "distinct states found", and change `TLC_RUN` the same day.
+
 ## Your turn (`public/lab.js`)
 
 A lesson can end with exercises on the live core (`labs` in `src/course.ts`). The page sets

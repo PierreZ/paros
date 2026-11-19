@@ -521,7 +521,7 @@
     } else {
       box.appendChild(el("p", "story-next-done", "Lesson " + place.lesson.n + " is done." + (place.lesson.labs.length ? " Now it is your turn." : "")));
       if (place.lesson.labs.length && document.getElementById("your-turn")) {
-        var turn = el("a", "btn primary story-next-btn", "Your turn: " + place.lesson.labs.length + " exercises");
+        var turn = el("a", "btn primary story-next-btn", "Your turn: " + place.lesson.labs.length + (place.lesson.labs.length === 1 ? " exercise" : " exercises"));
         turn.href = "#lab=" + place.lesson.labs[0];
         box.appendChild(turn);
       } else if (place.lesson.next) {

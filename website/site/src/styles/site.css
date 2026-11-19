@@ -550,6 +550,8 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 .lesson-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .lesson-title { font-weight: 600; font-size: 16px; }
 .lesson-goal { font-size: 14px; color: var(--fg); }
+.lesson-tlc { font-size: 13px; color: var(--muted); }
+.lesson-tlc code { font-size: 12px; }
 .lesson-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--muted); }
 .course-resume { margin: 0 0 1em; }
 .course-resume .btn { text-decoration: none; }
