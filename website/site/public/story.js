@@ -207,9 +207,13 @@
       g.appendChild(svg("circle", { cx: entry.x, cy: entry.y, r: 17 }));
       g.appendChild(svg("text", { x: entry.x, y: entry.y + 4, class: "story-node-id" }, short(entry.lane)));
       var y = entry.y + 32;
+      // A state line keeps to the node's own column: a long one (a
+      // matchmaker's registry) is cut, and the node's title holds it whole.
+      var room = Math.max(8, Math.floor((entry.w - 8) / 6.2));
+      var clip = function (text) { return text.length > room ? text.slice(0, room - 1) + "…" : text; };
       var first = node.alive ? (lines[0] || "") : "down";
-      g.appendChild(svg("text", { x: entry.x, y: y, class: "story-node-line" }, first));
-      if (node.alive && lines[1]) g.appendChild(svg("text", { x: entry.x, y: y + 12, class: "story-node-line" }, lines.slice(1).join(" ")));
+      g.appendChild(svg("text", { x: entry.x, y: y, class: "story-node-line" }, clip(first)));
+      if (node.alive && lines[1]) g.appendChild(svg("text", { x: entry.x, y: y + 12, class: "story-node-line" }, clip(lines.slice(1).join(" "))));
       // The log: one box per slot, a dashed box for a hole.
       var cells = (st.logs && st.logs[entry.i]) || [];
       var holes = node.holes || [];
@@ -242,7 +246,7 @@
           g.appendChild(tag);
         });
       }
-      g.appendChild(svg("title", {}, plain(entry.lane.label)));
+      g.appendChild(svg("title", {}, plain(entry.lane.label) + (node.alive && lines.length ? ": " + lines.join(" ") : "")));
       nodesLayer.appendChild(g);
     });
   }
