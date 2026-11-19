@@ -31,7 +31,10 @@ Phase-2 quorum of the configuration that the round's `Accept` carried, a round t
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
 promise with the old belief fence as a control, a lagging pool, a restart and the refusal of a
-rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)), the Phase-1 bypass of
+a reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the
+fence Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall
+model, more rules)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the

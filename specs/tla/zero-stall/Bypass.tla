@@ -20,6 +20,10 @@
 (*                     ballots below b when each slot that it recovered or   *)
 (*                     carried is chosen at b (Matchmaker Paxos, section     *)
 (*                     3.5), and, if Hold, when its Phase 1 is covered.      *)
+(*          "nofence" = a control: as "chosen", but the leader of b' asks    *)
+(*                     before the Phase 1 at b' (the fence Phase 1) ends:    *)
+(*                     the slots that wait for it do not count, and the hold *)
+(*                     does not count.                                       *)
 (*          "early"  = a control: the leader asks with no condition.         *)
 (* CheckWm: TRUE = bypass only if the highest watermark in the matchmaker    *)
 (*          answers is at most the old ballot.                               *)
@@ -33,14 +37,36 @@
 (* CfgChoices : the configurations that the ballots can have. Each one is a  *)
 (*          function from the ballots to Configs.                            *)
 (*                                                                           *)
-(* Not in the model: matchmaker generations, lost durable state, the         *)
-(* cooperative handoff (it is in `leader-handoff/`).                         *)
+(* Handoff: TRUE = the cooperative handoff of DPaxos. The node that minted   *)
+(*          a ballot can hand it on one time to another node, with its       *)
+(*          proposals at that ballot, while it leads at that ballot.         *)
+(* Relinquish : TRUE = a node that handed its ballot on never bypasses from  *)
+(*          that ballot: it drops its proactive matchmaking. A successor     *)
+(*          never bypasses from a ballot that it did not mint.               *)
+(*          FALSE = a control: the minter can still bypass after it handed   *)
+(*          the ballot on.                                                   *)
+(* SuccessorBypass : FALSE = the rule above. TRUE = a control: the          *)
+(*          successor of a handoff bypasses from the ballot it got, to its   *)
+(*          own next ballot.                                                 *)
+(* HandoffCarry : TRUE = the handoff carries the slots that wait for the     *)
+(*          Phase 1 at the ballot (the fence Phase 1). FALSE = a control:    *)
+(*          the successor takes these slots as free.                         *)
+(* ChainRule : TRUE = a leader bypasses only when each slot that it recovered *)
+(*          or carried is proposed at its ballot: a second bypass waits for  *)
+(*          the fence Phase 1 of the first. FALSE = a control: the slots     *)
+(*          that wait for the fence Phase 1 do not count.                    *)
+(*                                                                           *)
+(* Not in the model: matchmaker generations, lost durable state, a handoff   *)
+(* message that is late or sent two times (`leader-handoff/` has them, and   *)
+(* its control `two_hops`).                                                  *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
-          Gc, CheckWm, Reads, Hold, CfgChoices
+          Gc, CheckWm, Reads, Hold, CfgChoices, Handoff, Relinquish, HandoffCarry,
+          ChainRule, SuccessorBypass
 
 Ballots == 1..NB
+Nodes   == {Owner[b] : b \in Ballots}
 Free    == "free"
 Pending == "pending"
 
@@ -56,10 +82,15 @@ VARIABLES status,    \* ballot -> "matching" | "matched" | "leading" | "switched
           proposals, \* set of <<ballot, slot, value>>
           wm,        \* matchmaker -> its GC watermark
           maxwm,     \* ballot -> the highest watermark in the answers
-          acked      \* slots that a leader acked to a client
+          acked,     \* slots that a leader acked to a client
+          holder,    \* ballot -> the node that leads at it
+          known,     \* node -> the <<ballot, slot, value>> proposals that it knows
+          via        \* ballot -> the ballot that its leader bypassed from, or 0
 
 vars == <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals,
-          wm, maxwm, acked>>
+          wm, maxwm, acked, holder, known, via>>
+
+ext == <<holder, known, via>>
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 
@@ -81,6 +112,9 @@ Init == /\ status = [b \in Ballots |-> "matching"]
         /\ wm = [m \in Matchmakers |-> 0]
         /\ maxwm = [b \in Ballots |-> 0]
         /\ acked = {}
+        /\ holder = [b \in Ballots |-> Owner[b]]
+        /\ known = [n \in Nodes |-> {}]
+        /\ via = [b \in Ballots |-> 0]
 
 \* Matchmaker m registers b if it holds no ballot at or above b and b is not
 \* below its watermark. It answers with what it held and with its watermark.
@@ -93,13 +127,13 @@ Register(b, m) ==
     /\ replied' = [replied EXCEPT ![b] = @ \cup {m}]
     /\ hist' = [hist EXCEPT ![b] = @ \cup reg[m]]
     /\ maxwm' = [maxwm EXCEPT ![b] = Max({@, wm[m]})]
-    /\ UNCHANGED <<status, cfgOf, promised, votes, promises, safe, proposals, wm, acked>>
+    /\ UNCHANGED <<status, cfgOf, promised, votes, promises, safe, proposals, wm, acked, ext>>
 
 MatchDone(b) ==
     /\ status[b] = "matching"
     /\ 2 * Cardinality(replied[b]) > Cardinality(Matchmakers)
     /\ status' = [status EXCEPT ![b] = "matched"]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals, wm, maxwm, acked>>
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals, wm, maxwm, acked, ext>>
 
 \* The prior configurations: the ones at or above the highest watermark.
 PriorCfgs(b) == {r[2] : r \in {h \in hist[b] : h[1] >= maxwm[b]}}
@@ -123,7 +157,7 @@ Promise(a, b) ==
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ promises' = promises \cup
           {<<a, b, {<<w[2], w[3], w[4]>> : w \in {x \in votes : x[1] = a}}>>}
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, votes, safe, proposals, wm, maxwm, acked>>
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, votes, safe, proposals, wm, maxwm, acked, ext>>
 
 Reports(b) == UNION {p[3] : p \in {q \in promises : q[2] = b}}
 
@@ -139,14 +173,18 @@ Phase1Done(b) ==
     /\ Covered(b)
     /\ status' = [status EXCEPT ![b] = "leading"]
     /\ safe' = [safe EXCEPT ![b] = [s \in Slots |-> SafeAt(b, s)]]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked>>
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked, ext>>
 
+\* The holder of b proposes. Only one node holds b at a time: a handoff
+\* moves b with the proposals at b, and the old holder stops at once.
 Propose(b, s, v) ==
     /\ status[b] = "leading"
     /\ ~ \E p \in proposals : p[1] = b /\ p[2] = s
     /\ safe[b][s] = Free \/ safe[b][s] = v
     /\ proposals' = proposals \cup {<<b, s, v>>}
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, wm, maxwm, acked>>
+    /\ known' = [known EXCEPT ![holder[b]] = @ \cup {<<b, s, v>>}]
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, wm, maxwm, acked,
+                   holder, via>>
 
 Accept(a, b, s, v) ==
     /\ <<b, s, v>> \in proposals
@@ -155,38 +193,77 @@ Accept(a, b, s, v) ==
     /\ <<a, s, b, v>> \notin votes
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ votes' = votes \cup {<<a, s, b, v>>}
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promises, safe, proposals, wm, maxwm, acked>>
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promises, safe, proposals, wm, maxwm, acked, ext>>
 
-ProposedAt(b) == {p[2] : p \in {q \in proposals : q[1] = b}}
-ValAt(b, s)   == (CHOOSE p \in proposals : p[1] = b /\ p[2] = s)[3]
+\* What node n knows that b proposed: its own proposals, and the proposals
+\* that a handoff gave it.
+ProposedAt(n, b) == {k[2] : k \in {x \in known[n] : x[1] = b}}
+ValAt(n, b, s)   == (CHOOSE k \in known[n] : k[1] = b /\ k[2] = s)[3]
 
-\* The leader proposed each value that its Phase 1 recovered.
-Settled(b) == \A s \in Slots : safe[b][s] # Free => s \in ProposedAt(b)
+\* The leader proposed each value that its Phase 1 recovered. With
+\* ChainRule, a slot that waits for the fence Phase 1 is not settled: a
+\* leader bypasses again only after the fence Phase 1 of its last bypass.
+Settled(n, b) ==
+    \A s \in Slots :
+        (IF ChainRule THEN safe[b][s] # Free ELSE safe[b][s] \notin {Free, Pending})
+            => s \in ProposedAt(n, b)
 
-\* b2 is the next ballot of the owner of b.
-NextOwn(b, b2) ==
+\* b2 is the next ballot of node n above b.
+NextOf(n, b, b2) ==
     /\ b2 > b
-    /\ Owner[b2] = Owner[b]
-    /\ \A x \in Ballots : (x > b /\ x < b2) => Owner[x] # Owner[b]
+    /\ Owner[b2] = n
+    /\ \A x \in Ballots : (x > b /\ x < b2) => Owner[x] # n
 
-\* The switch: the leader at b moves to b2 with no Phase 1 for the free slots.
+\* The nodes that can bypass from b. The rule: only the minter of b, while it
+\* holds b. A successor never bypasses from a ballot that it did not mint:
+\* on the paper's ballots, a ballot of the minter can be between b and the
+\* next ballot of the successor, and no check sees it. The control
+\* Relinquish = FALSE: the minter can bypass after it handed b on.
+\* The control SuccessorBypass = TRUE: the holder of b can bypass too.
+Bypassers(b) ==
+    (IF Relinquish THEN {holder[b]} \cap {Owner[b]} ELSE {Owner[b]})
+        \cup (IF SuccessorBypass THEN {holder[b]} ELSE {})
+
+\* The switch: node n, which leads at b, moves to its next ballot b2 with
+\* no Phase 1 for the free slots.
 Bypass(b, b2) ==
     /\ Mode # "none"
     /\ status[b] = "leading"
     /\ status[b2] = "matched"
-    /\ NextOwn(b, b2)
-    /\ Settled(b)
-    /\ Check => \A r \in hist[b2] : ~ (r[1] > b /\ r[1] < b2)
-    /\ CheckWm => maxwm[b2] <= b
-    /\ Mode = "p212" =>
-          \A s \in ProposedAt(b) : \A t \in Slots : t < s => t \in ProposedAt(b)
-    /\ status' = [status EXCEPT ![b] = "switched", ![b2] = "leading"]
-    /\ safe' = [safe EXCEPT ![b2] =
-          [s \in Slots |->
-              IF s \in ProposedAt(b)
-              THEN (IF Mode = "carry" THEN ValAt(b, s) ELSE Pending)
-              ELSE Free]]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked>>
+    /\ \E n \in Bypassers(b) :
+          /\ NextOf(n, b, b2)
+          /\ Settled(n, b)
+          /\ Check => \A r \in hist[b2] : ~ (r[1] > b /\ r[1] < b2)
+          /\ CheckWm => maxwm[b2] <= b
+          /\ Mode = "p212" =>
+                \A s \in ProposedAt(n, b) : \A t \in Slots : t < s => t \in ProposedAt(n, b)
+          /\ status' = [status EXCEPT ![b] = "switched", ![b2] = "leading"]
+          /\ safe' = [safe EXCEPT ![b2] =
+                [s \in Slots |->
+                    IF s \in ProposedAt(n, b)
+                    THEN (IF Mode = "carry" THEN ValAt(n, b, s) ELSE Pending)
+                    ELSE Free]]
+    /\ via' = [via EXCEPT ![b2] = b]
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked,
+                   holder, known>>
+
+\* The cooperative handoff (DPaxos, relinquish_to): the minter of b hands b
+\* on to node n, one hop. The successor gets the proposals at b and leads at
+\* b with no Phase 1. With HandoffCarry, it also gets the slots that wait
+\* for the fence Phase 1 of b; with the control, it takes them as free.
+HandOn(b, n) ==
+    /\ Handoff
+    /\ status[b] = "leading"
+    /\ holder[b] = Owner[b]
+    /\ n \in Nodes \ {holder[b]}
+    /\ holder' = [holder EXCEPT ![b] = n]
+    /\ known' = [known EXCEPT ![n] = @ \cup {k \in known[holder[b]] : k[1] = b}]
+    /\ IF HandoffCarry
+       THEN UNCHANGED safe
+       ELSE safe' = [safe EXCEPT ![b] =
+                [s \in Slots |-> IF @[s] = Pending THEN Free ELSE @[s]]]
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm,
+                   acked, via>>
 
 \* "p212" only: the Phase 1 at the new ballot for the slots below the frontier.
 Phase1Low(b) ==
@@ -195,7 +272,7 @@ Phase1Low(b) ==
     /\ Covered(b)
     /\ safe' = [safe EXCEPT ![b] =
           [s \in Slots |-> IF safe[b][s] = Pending THEN SafeAt(b, s) ELSE safe[b][s]]]
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked>>
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked, ext>>
 
 ChosenAt(b, s) ==
     \E v \in Values :
@@ -211,6 +288,8 @@ GcReady(b) ==
           /\ ~ HasPending(b)
           /\ \A s \in Slots : safe[b][s] # Free => ChosenAt(b, s)
           /\ Hold => Covered(b)
+    /\ Gc = "nofence" =>
+          \A s \in Slots : safe[b][s] \notin {Free, Pending} => ChosenAt(b, s)
 
 \* Matchmaker m applies the GC request of b.
 Collect(b, m) ==
@@ -219,7 +298,7 @@ Collect(b, m) ==
     /\ wm' = [wm EXCEPT ![m] = b]
     /\ reg' = [reg EXCEPT ![m] = {r \in @ : r[1] >= b}]
     /\ UNCHANGED <<status, cfgOf, replied, hist, promised, votes, promises, safe,
-                   proposals, maxwm, acked>>
+                   proposals, maxwm, acked, ext>>
 
 \* The leader of b acks slot s to its client. A leader that switched can
 \* still ack a slot that is chosen at its old ballot ("p212": the old rounds
@@ -232,7 +311,7 @@ Ack(b, s) ==
     /\ Hold => Covered(b)
     /\ acked' = acked \cup {s}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
-                   proposals, wm, maxwm>>
+                   proposals, wm, maxwm, ext>>
 
 Next ==
     \/ \E b \in Ballots, m \in Matchmakers : Register(b, m)
@@ -241,6 +320,7 @@ Next ==
     \/ \E b \in Ballots, s \in Slots, v \in Values : Propose(b, s, v)
     \/ \E a \in Acceptors, p \in proposals : Accept(a, p[1], p[2], p[3])
     \/ \E b, b2 \in Ballots : Bypass(b, b2)
+    \/ \E b \in Ballots, n \in Nodes : HandOn(b, n)
     \/ \E b \in Ballots, m \in Matchmakers : Collect(b, m)
     \/ \E b \in Ballots, s \in Slots : Ack(b, s)
 
@@ -275,6 +355,26 @@ ReadSafe ==
 \* value chosen at its new ballot: this shows that the model reaches the case.
 NoBypassChoice ==
     ~ \E b \in Ballots, s \in Slots, v \in Values :
-        /\ \E b0 \in Ballots : status[b0] = "switched" /\ NextOwn(b0, b)
+        /\ via[b] # 0
         /\ \E Q \in Quorums(cfgOf[b]) : \A a \in Q : <<a, s, b, v>> \in votes
+
+\* The watermark half of the bypass check adds nothing to the registration
+\* half: when the answers to b2 show no registration strictly between b and
+\* b2, their highest watermark is at most b. A matchmaker collects at w only
+\* for a leader at w, thus w registered at a matchmaker quorum, and that
+\* quorum meets the quorum of b2 at a matchmaker that holds w or refused w.
+WmRedundant ==
+    \A b, b2 \in Ballots :
+        (/\ status[b] = "leading"
+         /\ status[b2] = "matched"
+         /\ NextOf(holder[b], b, b2)
+         /\ ~ \E r \in hist[b2] : r[1] > b /\ r[1] < b2)
+            => maxwm[b2] <= b
+
+\* Not a real invariant. TLC must find a trace with two bypasses in a row.
+NoChain == ~ \E b \in Ballots : via[b] # 0 /\ via[via[b]] # 0
+
+\* Not a real invariant. TLC must find a trace where a successor of a
+\* handoff leads at a ballot that its minter bypassed to.
+NoHandoffAfterBypass == ~ \E b \in Ballots : via[b] # 0 /\ holder[b] # Owner[b]
 =============================================================================
