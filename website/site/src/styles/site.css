@@ -474,7 +474,8 @@ pre {
 
 /* The story mode of the Paxos pages (#1147): public/story.js tells a run
    with beats one screen at a time. Nodes are circles in a fixed layout, a
-   message is a dot that moves from sender to receiver. */
+   message is an arrow that moves from sender to receiver and points at the
+   receiver. */
 .story { margin: 1.8em 0; font-family: var(--font-mono); }
 .story .panel-head .meta { white-space: nowrap; }
 .story:focus { outline: none; }
@@ -496,9 +497,10 @@ pre {
 .story-slot.control text { font-style: italic; }
 .story-disk rect { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1; }
 .story-disk text { font-size: 9px; fill: var(--accent) !important; }
-.story-path { stroke: var(--rule); stroke-width: 1; stroke-dasharray: 2 3; }
+.story-path { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 2 3; }
 .story-msg { fill: currentColor; }
-.story-msg.now circle { r: 6; }
+.story-msg-arrow path { stroke: var(--bg); stroke-width: 1; stroke-linejoin: round; }
+.story-msg.now .story-msg-arrow path { transform: scale(1.25); }
 .story-msg-label { font-family: var(--font-mono); font-size: 9.5px; text-anchor: middle; fill: currentColor; font-weight: 600; }
 .story-says { margin: 0; padding: 12px 12px 4px; font-family: var(--font-sans); font-size: 16px; line-height: 1.45; color: var(--fg); min-height: 3.2em; }
 .story-chosen { margin: 0; padding: 4px 12px 10px; font-size: 12px; color: var(--muted); }

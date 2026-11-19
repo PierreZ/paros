@@ -660,13 +660,18 @@ Constants select the rule:
 | `Restarters` | The acceptors that can restart. The promise and the votes are durable. The belief goes back to the bootstrap, bound to no ballot, and the node did not hear what is in force until its membership probe answers. A reader also forgets its read basis and its open read. |
 | `Refuse` | `TRUE`: an acceptor that did not hear answers no `PreRead` (`on_pre_read`, the code). |
 | `Hold` | `TRUE`: the decision hold of #579 (zero-stall reconfiguration). `zero-stall/` holds the full checks of the hold. |
-| `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis (`main` today). `own`: option (b), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
+| `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis, and opens or serves no read on it (`main` today). `own`: option (b), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
 | `Q1s`, `Q2s`, `Targets` | The quorum system, for each configuration (#1102 (rework 1.13)): the Phase-1 quorums, the Phase-2 quorums, and the sets of acceptors that a reader asks. A majority asks the whole membership. A grid takes them from `grid/Grid.tla`: the partitions ask the whole membership, the full grid asks one row (`row_of`). |
 | `Seal` | `quorum`: Phase 1 takes a Phase-1 quorum of each prior configuration (the code). `reads`: a candidate rule, not in the code: Phase 1 also takes one promise in each read target of each prior configuration, so each row of an old full grid hears of the campaign. |
+| `ReaderGate` | What gates the reader itself, to open, keep and serve a read (#1228 (stale read by a lagging reader)). `promise`: the rule of `Learner` on the promise of the reader (the code: `read_basis` and `fence_quorum_reads` use the read fence). `belief`: the belief ballot of the reader alone, and the reader counts its own answer with no fence (the code before #1228), a control. |
 
 The majority checks have four acceptors, the configurations `{a1, a2, a3}` and `{a3, a4}`, the
 readers `a1` and `a3`, one matchmaker, one slot and two ballots. The learner checks have a third
 ballot that is only the abandoned campaign of a reader.
+
+The lagging-reader checks (#1228) have five acceptors, the configurations `{a1, a2, a3}` and
+`{a3, a4, a5}`, the reader `a1` whose pool can lag, one matchmaker, one slot and two ballots. They
+check `Agreement` too.
 
 The grid checks (#1102 (rework 1.13)) have a change of members, one matchmaker, one slot, two
 ballots and the reader `a1`, the member that leaves:
@@ -689,6 +694,8 @@ Results (`reads/checks.txt`):
 | `reboot_promise_open_reader`: the same, and the reader `a1` can restart too (`long`) | pass (4.7 million states, 2 minutes) |
 | The bypass of #579 with no decision hold | violation |
 | The rules of `main` | pass |
+| `reads_lag_reader_belief`: the reader `a1` can lag, the reader is gated on its belief ballot | violation (114 thousand states): `a1` and `a2` promise ballot 2 and `a1` ignores its configuration; ballot 2 chooses slot 1 in `{a3, a4, a5}`; `a1` reads on ballot 1 with its own answer and the answer of `a3`, and serves index 0 |
+| `reads_lag_reader`: the same, the reader is gated on its promise (the code) | pass (557 thousand states) |
 | The bypass of #579 with the decision hold | pass |
 | #890, `strict` (`main` today) | pass |
 | #890, option (b) | pass |

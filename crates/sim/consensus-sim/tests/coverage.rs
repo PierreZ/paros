@@ -62,6 +62,7 @@ fn flavors() -> Vec<(String, Flavor)> {
         Flavor::disk_faults_three(),
         Flavor::retirement(),
         Flavor::handover(),
+        Flavor::lagging_reads(),
     ];
     let paged = [
         Flavor::multi_paxos_five(),
@@ -72,6 +73,7 @@ fn flavors() -> Vec<(String, Flavor)> {
         Flavor::disk_faults_three(),
         Flavor::retirement(),
         Flavor::handover(),
+        Flavor::lagging_reads(),
     ]
     .map(Flavor::paged);
     let full = full.into_iter().map(|f| (f.name.to_owned(), f));

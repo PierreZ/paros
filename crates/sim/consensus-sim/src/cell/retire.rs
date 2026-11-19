@@ -103,10 +103,15 @@ impl Cell {
     /// One node admits one late node to its pool.
     pub(super) fn admit(&mut self, cx: &mut Cx<'_, Self>) {
         let late = self.late_ids();
+        // A lagging-reader walk admits the late nodes only at node 0: when
+        // node 0 or a late node leads, it moves onto a late node while every
+        // other pool lags until the settle rounds (`Cell::tick_all`).
+        let steer = self.flavor.lagging_reader;
         let pairs: Vec<(NodeId, NodeId)> = self
             .nodes
             .iter()
             .filter(|site| site.live.is_some())
+            .filter(|site| !steer || site.id == NodeId(0))
             .flat_map(|site| late.iter().map(move |l| (site.id, *l)))
             .filter(|(id, l)| id != l && !self.admitted(*id).contains(l))
             .collect();

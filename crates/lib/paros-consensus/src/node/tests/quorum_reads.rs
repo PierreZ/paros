@@ -667,3 +667,104 @@ fn a_promise_above_the_read_basis_ends_the_read_even_when_the_configuration_was_
         "the read is superseded, not open"
     );
 }
+
+/// A lagging reader that promised above its read basis opens no read, and a
+/// read it opened before the promise rose is abandoned, not served (#1228
+/// (stale read by a lagging reader); `specs/tla/reads/`, check
+/// `reads_lag_reader`).
+///
+/// Five nodes, the setup of the test above, with the roles of nodes 1 and 2
+/// swapped: node 1 is the reader, the lagging node that promised `b_new`
+/// while its belief stayed at `b_old`, and node 2 answers with its promise
+/// `b_old`. `{1, 2}` is a Phase-1 quorum of `C_old`, and `W` is chosen at a
+/// Phase-2 quorum `{0, 3}` of `C_new`. A read over `(C_old, b_old)` counts
+/// the reader's own watermark with no fence, so only the gate of the reader
+/// on its own promise keeps the read from a stale index.
+#[test]
+fn a_lagging_reader_that_promised_above_its_basis_serves_no_read() {
+    let wide = [0, 1, 2, 3, 4];
+    let lagging = [0, 1, 2];
+    let mut nodes = [
+        deployed_node(0, &[0, 1, 2], &wide, 1),
+        deployed_node(1, &[0, 1, 2], &lagging, 1),
+        deployed_node(2, &[0, 1, 2], &lagging, 1),
+        deployed_node(3, &[0, 1, 2], &wide, 1),
+        deployed_node(4, &[0, 1, 2], &wide, 1),
+    ];
+    let mut mms = registries(1);
+    let b_old = settle_under_c_old(&mut nodes, &mut mms);
+
+    // Node 1 opens a read on `(C_old, b_old)` before the reconfiguration:
+    // it is open while its promise rises.
+    assert_eq!(nodes[1].read_basis().map(|b| b.since), Some(b_old));
+    nodes[1].quorum_read(8);
+    let early_asks = drain(&mut nodes[1]);
+    assert_eq!(nodes[1].quorum_reads().pending().len(), 1);
+
+    let c_new = cfg(&[0, 3, 4]);
+    let ReconfigureResult::Started(b_new) = nodes[0].reconfigure(&c_new) else {
+        panic!("the reconfiguration starts");
+    };
+    let requests = drain_match_requests(&mut nodes[0]);
+    for reply in matchmake(&mut mms, requests) {
+        let _ = nodes[0].on_match_reply(reply);
+    }
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
+    assert!(nodes[0].is_leader());
+    // The state under test, at the reader: the promise moved to `b_new`,
+    // the belief stayed at `b_old`.
+    assert_eq!(nodes[1].acceptor().promised(), b_new);
+    assert_eq!(nodes[1].acceptors_since(), b_old);
+    assert!(
+        nodes[1].quorum_reads().is_empty(),
+        "the promise above the basis abandons the read opened before it"
+    );
+
+    let _ = nodes[0].propose(entry(1, 2, 2));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to == NodeId(0) || to == NodeId(3));
+    let w_slot = nodes[0]
+        .hard_state()
+        .chosen_index
+        .expect("W is chosen at the leader");
+    assert!(w_slot > Slot(0));
+    assert_eq!(chosen_at(&nodes[0], w_slot.0), Some(val(2)), "W is chosen");
+
+    // The late answer of node 2 to the read opened before the promise
+    // finds no open read.
+    for (to, m) in early_asks {
+        if to == NodeId(2) {
+            nodes[2].step(m);
+            for (to, ack) in drain(&mut nodes[2]) {
+                if to == NodeId(1) {
+                    nodes[1].step(ack);
+                }
+            }
+        }
+    }
+    let ready = nodes[1].ready();
+    let served = ready.read_states().to_vec();
+    ready.advance();
+    assert!(
+        served.is_empty(),
+        "stale read: served {served:?} below W at {w_slot:?}; the reader promised {b_new:?} above its basis {b_old:?}"
+    );
+
+    // A new read: the reader has no basis while its promise is above it.
+    assert!(
+        nodes[1].read_basis().is_none(),
+        "a promise above the basis leaves the reader no basis"
+    );
+    let without = nodes[1].membership_counters().reads_without_basis;
+    nodes[1].quorum_read(9);
+    assert!(
+        drain(&mut nodes[1]).is_empty(),
+        "a read with no basis asks nobody"
+    );
+    assert!(nodes[1].quorum_reads().is_empty());
+    assert_eq!(
+        nodes[1].membership_counters().reads_without_basis,
+        without + 1
+    );
+}

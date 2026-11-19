@@ -582,6 +582,9 @@ impl ColocatedNode {
                 config_since,
             } => self.on_pre_read_ack(from, ctx, watermark, config_since),
         }
+        // A `Prepare` or an `Accept` can raise the promise above the basis
+        // of an open read: such a read ends here, before anything serves it.
+        self.fence_quorum_reads();
         // A message moves no clock, and lowers no durable watermark.
         assert!(
             self.tick_count == ticks,

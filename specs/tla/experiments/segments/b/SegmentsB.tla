@@ -32,17 +32,26 @@
 (*             configuration. "early": retire once a later configuration   *)
 (*             is in force.                                                *)
 (*   ReadScope "live": a tail read reads every configuration that still    *)
-(*             runs. "view": it reads its cached configuration only.       *)
+(*             runs. "fence": it reads its cached configuration only, on   *)
+(*             the basis of a leadership of that configuration that won,   *)
+(*             and takes the bound below from that leadership's fence (the *)
+(*             read rule of paros, specs/tla/reads/). "view": it reads its *)
+(*             cached configuration only, with no fence (control).         *)
+(*   Cuts      "fixed": a chunk is one slot, so its key is a function of   *)
+(*             the slot (deterministic keys). "free": a replica cuts its   *)
+(*             chunks where it likes.                                      *)
 (*   TrimCheck, ReadFence, Reader, Storage: as in design A.                *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Replicas, Values, None,
           CfgOf, NS, NB, NG, F,
-          Claims, RetireRule, TrimCheck, ReadFence, Reader, ReadScope, Storage
+          Claims, RetireRule, TrimCheck, ReadFence, Reader, ReadScope, Storage,
+          Cuts
 
 ASSUME Claims \in {"log", "none"}
-ASSUME ReadScope \in {"live", "view"}
+ASSUME ReadScope \in {"live", "fence", "view"}
+ASSUME Cuts \in {"fixed", "free"}
 ASSUME Storage \in BOOLEAN
 ASSUME RetireRule \in {"paper", "early"}
 ASSUME TrimCheck \in BOOLEAN /\ ReadFence \in BOOLEAN /\ Reader \in BOOLEAN
@@ -251,11 +260,12 @@ Retire(h) ==
 
 Data(k) == [s \in Slots |-> IF s \in KeyRange(k) THEN ChosenVal(s) ELSE None]
 
-\* Plain B: replica r cuts its next chunk where it likes and uploads it.
+\* Plain B: replica r cuts its next chunk and uploads it.
 CutUpload(r, hi) ==
   LET k == <<cut[r] + 1, hi>>
   IN /\ Claims = "none"
      /\ cut[r] < hi
+     /\ Cuts = "fixed" => hi = cut[r] + 1
      /\ hi <= applied[r]
      /\ k[1] >= floor
      /\ store' = [store EXCEPT ![k] = Data(k)]
@@ -267,6 +277,7 @@ Ask(r, hi) ==
   LET k == <<cut[r] + 1, hi>>
   IN /\ Claims = "log"
      /\ cut[r] < hi
+     /\ Cuts = "fixed" => hi = cut[r] + 1
      /\ hi <= applied[r]
      /\ k[1] >= floor
      /\ want' = want \cup {k}
@@ -328,8 +339,18 @@ SaysSealed(a) == a \notin Active \/ (prom[a] # 0 /\ bgen[prom[a]] > rview)
 \* the reader knows. With ReadScope = "live" the reader reads a quorum of
 \* every configuration that still runs, up to its cached one, as Phase 1
 \* does, and asks f+1 replicas (here: all, F + 1 = 2) for their applied
-\* prefix. With ReadScope = "view" (the control) it reads its cached
-\* configuration only, as design A does.
+\* prefix. With ReadScope = "fence" it reads its cached configuration only,
+\* on the basis of a ballot b of that configuration that finished Phase 1
+\* and that no member of the quorum promised past: the tail is at least
+\* b's fence, the highest slot that b's Phase 1 learned of (a vote it
+\* proposes again, or the chosen prefix it learned). b proposes each slot
+\* below its fence, so the fence gives the bound below that the start of
+\* the cached segment gives in design A. With ReadScope = "view" (the
+\* control) it reads its cached configuration only, with no fence.
+Fence(b) == Max({s \in Slots : bsafe[b][s] # None} \cup {bbase[b] - 1})
+QuorumTop(Q, H) ==
+  {s \in Slots : \E b \in Ballots, v \in Entries :
+     bgen[b] \in H /\ \A a \in Q : <<s, b, v, a>> \in sent2b}
 ReadAsk(Q) ==
   LET H == IF ReadScope = "live" THEN {h \in Live : h <= rview} \cup {rview} ELSE {rview}
   IN /\ Reader
@@ -338,6 +359,14 @@ ReadAsk(Q) ==
      /\ IF ReadFence /\ \E a \in Q : SaysSealed(a)
           THEN /\ rview' = InForce
                /\ UNCHANGED <<rgot, rst>>
+          ELSE IF ReadScope = "fence"
+          THEN /\ \E b \in Ballots :
+                    /\ bst[b] = "w"
+                    /\ bgen[b] = rview
+                    /\ \A a \in Q : prom[a] <= b
+                    /\ rgot' = Max(QuorumTop(Q, {rview}) \cup {Fence(b)})
+               /\ rst' = "done"
+               /\ UNCHANGED rview
           ELSE /\ \E Qs \in [H -> SUBSET Acceptors] :
                     /\ \A h \in H : Qs[h] \in Maj(CfgOf[h])
                     /\ Qs[rview] = Q
@@ -417,10 +446,24 @@ TailNeverBlocked == [][OffloadStep => \A b \in Ballots : CanWrite(b) => CanWrite
 
 CursorSafe == cursor >= floor
 
+\* No stranded hole, the same invariant as design A's: each leader of the
+\* configuration in force that finished Phase 1 may propose at each slot at
+\* or above the floor that is not chosen. It holds here by construction: a
+\* leader writes every slot above the chosen prefix that it learned, and
+\* a slot that is not chosen is above every applied prefix.
+NoStrandedHole ==
+  \A b \in Ballots, s \in Slots :
+    bst[b] = "w" /\ bgen[b] = InForce /\ s >= floor /\ ~IsChosen(s) => s \in Writable(b)
+
 \* Reachability controls: each must be violated.
 NoDropAfterOffload == ~\E s \in Slots : IsChosen(s) /\ s >= floor /\ ~OnLiveRow(s)
                          /\ \A r \in Replicas : s \notin hold[r]
 NoTrim == floor = 1
 NoReshapeWrite == ~\E s \in Slots : ChosenInGen(s, 2)
 NoClaim == ~\E k \in Keys, t \in Slots : Winner(k, t)
+\* A read of the cached configuration 2 ends while the tail it must see is
+\* a slot that configuration 1 chose and that no replica applied: the case
+\* that breaks ReadScope = "view".
+NoOldTailRead ==
+  ~(rst = "done" /\ rview = 2 /\ \E s \in Slots : s = rneed /\ ChosenInGen(s, 1) /\ s > MaxApplied)
 =============================================================================
