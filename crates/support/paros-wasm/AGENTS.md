@@ -81,6 +81,13 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   and `Reconfigure` there gives one proposer its own acceptors with no matchmaker. The core
   is never changed; `DecreeWorld::violation` and `DecreeWorld::decisions` record the two
   values chosen.
+- `src/paxos/lab.rs` → `Exercise`, `Lab`, `Move`, `LabView` (wasm `PaxosLab`) → the "your turn"
+  exercises of the Paxos course: a level's world that the reader drives by hand (deliver or
+  drop each message, plus the few extra moves an exercise lists), and a goal read off the
+  world. A rule that an exercise turns off is a driver move the shipped code refuses
+  (`Wipe`), never a change of the core, and the exercise says so (`rule_off`). Each exercise
+  has a solution that a test plays, so an exercise the core no longer lets a reader solve
+  fails CI. Undo is a replay: the engine draws no randomness.
 - `src/paxos/ready_lab.rs` → `ReadyLab` (wasm `ReadyLab`) → the sans-IO page's `Ready` inspector (#951): three
   `ColocatedNode`s on the game's `Disk`, a wire driven by hand (`timeout`, `tick`, `deliver`,
   `drop`, `write`), and each `Ready` an input gave, bucket by bucket. A driver, no protocol logic.

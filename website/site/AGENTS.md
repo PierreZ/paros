@@ -116,6 +116,18 @@ the last screen opened. No account, no server, no score. The map shows "k of n s
 lesson and "Continue where you stopped", and has a button to forget the progress. Every page
 works the same when the storage is blocked.
 
+## Your turn (`public/lab.js`)
+
+A lesson can end with exercises on the live core (`labs` in `src/course.ts`). The page sets
+`lab: true` in its front matter and puts `<div data-lab="id id id">` under `## Your turn`.
+`public/lab.js` loads the `paxos` wasm bundle and runs `PaxosLab` (`paros-wasm`,
+`src/paxos/lab.rs`): one tab per exercise, the goal, the parties, the wire as a list with
+Deliver and Drop on each message (large buttons, for a phone), the extra moves of the
+exercise, what the core said about the last move, Undo and Start again. When the engine says
+the goal holds, the page shows why it matters and the next exercise. A solved exercise is
+kept in the browser (`public/course.js`) and the map counts it. `#lab=<id>` opens a tab.
+Without the wasm, the section says so.
+
 ## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))
 
 Every Engineering page shows something live. A page sets `widget: true` in its front matter

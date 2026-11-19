@@ -3,6 +3,7 @@ layout: ../../layouts/Doc.astro
 kicker: Paxos
 section: paxos/
 trace: single-decree
+lab: true
 title: Single-decree Paxos
 description: A group of acceptors chooses one value. Once chosen, it never changes, even when proposers race and machines crash.
 ---
@@ -23,6 +24,14 @@ screens play, the story asks what will happen: answer, then watch. At the end, c
 goes wrong. "Show each message" opens the same run one message at a time.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
+
+## Your turn
+
+Now you are the network. Deliver or drop each message, and reach the goal of each exercise.
+`paros-consensus` runs in this page and decides everything else. The second exercise uses a
+build with one rule off, and the page says which one.
+
+<div data-lab="vote-not-chosen two-values duel"><p class="aside">The exercises need JavaScript.</p></div>
 
 ## The rule
 

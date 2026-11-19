@@ -493,8 +493,12 @@
       });
       box.appendChild(b);
     } else {
-      box.appendChild(el("p", "story-next-done", "Lesson " + place.lesson.n + " is done."));
-      if (place.lesson.next) {
+      box.appendChild(el("p", "story-next-done", "Lesson " + place.lesson.n + " is done." + (place.lesson.labs.length ? " Now it is your turn." : "")));
+      if (place.lesson.labs.length && document.getElementById("your-turn")) {
+        var turn = el("a", "btn primary story-next-btn", "Your turn: " + place.lesson.labs.length + " exercises");
+        turn.href = "#your-turn";
+        box.appendChild(turn);
+      } else if (place.lesson.next) {
         var a = el("a", "btn primary story-next-btn", "Next lesson: " + place.lesson.next.title);
         a.href = place.lesson.next.href;
         box.appendChild(a);

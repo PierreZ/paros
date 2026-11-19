@@ -21,6 +21,10 @@ export interface Lesson {
   page: string;
   /** The runs of the page, in the order of the lesson. */
   runs: string[];
+  /** The exercises at the end of the lesson ("your turn"), by their id in
+   * `crates/support/paros-wasm/src/paxos/lab.rs`. The page that holds the
+   * lesson draws them under `## Your turn`. */
+  labs?: string[];
 }
 
 export const LESSONS: Lesson[] = [
@@ -30,6 +34,7 @@ export const LESSONS: Lesson[] = [
     goal: "say why a later proposer must take the value that it finds, and why an acceptor writes to disk before it answers.",
     page: "single-decree",
     runs: ["base", "acceptor-down", "second-proposer", "lost-message", "acceptor-restart", "repeated-answers", "accept-is-a-promise", "fenced-out", "duel", "break-the-rule"],
+    labs: ["vote-not-chosen", "two-values", "duel"],
   },
   {
     id: "majority",
