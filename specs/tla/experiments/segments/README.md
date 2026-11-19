@@ -181,16 +181,16 @@ controller, placement, the offload policy and the readers see it as decided stat
 
 Two configurations (one reshape), two slots, two values, two replicas with f = 1, one acceptor
 for each configuration (a vote is then a choice) unless the row says otherwise. Symmetry over
-the values and the replicas. TLC 2.19.
+the values and the replicas. TLC 2.19; the times are on 2 workers.
 
 | Configuration | Ballots | A distinct states | B distinct states |
 |---|---|---|---|
 | Every rule on, storage on (A `safety`, B `plain` with fixed chunks) | 3 / 2 | 306,812 | 158,422 |
-| Every rule on, storage on (B `plain_long`) | 3 | | LONG_PLAIN |
-| B with log claims, free cuts (`claims`, `claims_long`) | 2 / 3 | | 96,713 / LONG_CLAIMS |
-| Tail reader, storage off (`reads`, `reads_long`) | 2 / 3 | 58,933 / LONG_A_READS | 65,074 / LONG_B_READS |
-| Tail reader with the read fence of paros (B `reads_fence`, `reads_fence_long`) | 2 / 3 | | 63,049 / LONG_B_FENCE |
-| Bounded Phase 1 with the gap fill, three acceptors for each grid, no storage (`end_voted_below_three`) | 2 | LONG_A_THREE | |
+| Every rule on, storage on (B `plain_long`) | 3 | | 5,264,806 (22 min) |
+| B with log claims, free cuts (`claims`, `claims_long`) | 2 / 3 | | 96,713 / 3,039,127 (31 min) |
+| Tail reader, storage off (`reads`, `reads_long`) | 2 / 3 | 58,933 / 1,702,536 | 65,074 / 1,950,482 |
+| Tail reader with the read fence of paros (B `reads_fence`, `reads_fence_long`) | 2 / 3 | | 63,049 / 1,901,777 |
+| Bounded Phase 1 with the gap fill, three acceptors for each grid, no storage (`end_voted_below_three`) | 2 | 1,215,762 (8 min) | |
 
 The earlier version of this report said that B is about 25 times larger than A because each
 replica cuts its chunks where it likes. The cuts are not the main cause: with fixed chunks, B
