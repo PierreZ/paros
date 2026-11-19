@@ -346,7 +346,10 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// that is too low would be the bug — it cannot be, because every vote
     /// this acceptor cast is either retained, faulty, or below the floor.
     /// Monotone across [`Acceptor::record_accepted`] and
-    /// [`Acceptor::truncate`] (asserted at both).
+    /// [`Acceptor::truncate`] (asserted at both). The TLA+ model
+    /// `specs/tla/truncation/` checks this as `WatermarkCovers`: with the
+    /// floor left out, a compacted acceptor reports a watermark below a
+    /// slot that it voted.
     ///
     /// # Panics
     ///

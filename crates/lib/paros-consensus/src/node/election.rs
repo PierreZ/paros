@@ -725,6 +725,8 @@ impl ColocatedNode {
         // reported it (an acceptor that truncated the range Nacks instead of
         // under-reporting — see the floor guard in `on_prepare`). Nothing was
         // reported, so nothing is chosen there and the slot is genuinely free.
+        // `specs/tla/truncation/` checks it, with floors that differ, as
+        // `NoFillChosen`.
         // That licence is the recovery's `RecoveryPolicy::Phase1Backed`.
         //
         // Faulty **chosen** slots — holes below the contiguous prefix — are

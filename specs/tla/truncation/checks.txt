@@ -1,0 +1,32 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+reach_compact    violation  ci
+reach_split      violation  ci
+reach_jump       violation  ci
+floor_ignore     violation  ci
+trim_promise     violation  ci
+compact_early    violation  ci
+watermark_votes  violation  ci
+safety           pass       ci
+reach_faulty     violation  ci
+reach_block      violation  ci
+ctrl_none        violation  ci
+two_rots         violation  ci
+ctrl_one_slot    pass       ci
+ctrl_live        pass       ci
+reach_retry      violation  ci
+laggard_stuck    violation  ci
+laggard          pass       ci
+reach_keep       violation  ci
+fold_slot        violation  ci
+fold_one_leader  pass       ci
+restart          pass       long
+full             pass       long
+three_slots      pass       long
+ctrl             pass       long
+ctrl_all         pass       long
+fold             pass       long
+fold_keep        pass       long

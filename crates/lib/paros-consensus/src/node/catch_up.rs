@@ -163,7 +163,8 @@ impl ColocatedNode {
     /// teaches nothing and is ignored.
     ///
     /// The promise does not move (#180): nothing a trim point says is about
-    /// a ballot. A node that jumps keeps the promise it made, and a
+    /// a ballot (`Agreement` with the control `trim_promise` of
+    /// `specs/tla/truncation/`). A node that jumps keeps the promise it made, and a
     /// candidate campaigning here still collects promises by Phase 1.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, point = point.0)))]
     pub(super) fn on_trimmed_to(&mut self, point: Slot, state: JournalState) {

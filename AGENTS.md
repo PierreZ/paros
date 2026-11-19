@@ -31,10 +31,15 @@ Phase-2 quorum of the configuration that the round's `Accept` carried, a round t
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
 promise with the old belief fence as a control, a lagging pool, a restart and the refusal of a
-rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)), the Phase-1 bypass of
-a reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the
-fence Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall
-model, more rules)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)), truncation on plain
+Multi-Paxos (`specs/tla/truncation/`: the decided `Truncate` and the floor as a fold of the
+journal, the floor guard of Phase 1 and the retry of a refused laggard, the trim-point jump that
+keeps the promise, the vote watermark over the floor, the faulty entries of CTRL with the
+tri-state tally and the repair probe; #1017 (truncation model), #1216 (truncation model, part
+2)), the Phase-1 bypass of a reconfiguration (`specs/tla/zero-stall/`: the bypass check, the
+decision hold, GC after the fence Phase 1, the handoff of a ballot that bypassed, two bypasses in
+a row; #1018 (zero-stall model, more rules)). `specs/tla/README.md` lists every flavor with its
+model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
@@ -420,7 +425,8 @@ Astro, one style for every page; `website/site/AGENTS.md`, the `update-the-site`
 `website/shared/` (the design system: tokens, fonts, logo), `scripts/build-wasm.sh` (builds the
 wasm and stages it for the site), `docs/architecture/` (the target design), `docs/knowledge/`
 (the Paxos knowledge base: one card per concept paros uses, #745), `docs/analysis/` (design
-notes), `docs/references/` (papers and source references), `docs/archive/v0.2.0-alpha.1/` (the
-recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
+notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
+them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
+SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
 `check-core-layers.sh`, `check-tla.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.
