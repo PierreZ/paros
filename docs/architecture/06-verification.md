@@ -191,6 +191,15 @@ cannot show the bug of the one-slot register (section 4.1). Each `long` check of
 one time and its result recorded (step 1.6). The models `retire-fence` and `abandoned-ballot`
 leave CI when phase 2 deletes their rules; their traces stay as controls of `config-register`.
 
+Each Paxos flavor of `paros-consensus` has a model too, written before any code on the flavor
+(decided on 2026-11-18, decision 37; the list is in #1185 (TLA+ model multi-paxos)). Single-decree
+Paxos is `specs/tla/decree/` (#1186 (rework 1.15)): `Agreement` and `Ends` for its two uses, the
+matchmaker handover under a majority and `cell init` with `Phase1Rule::EveryAcceptor`. Its
+controls are a proposer that ignores the highest reported vote and a `cell init` whose Phase 1
+takes a majority while one member was wiped. The model also shows that `EveryAcceptor` alone is
+safe only while fewer than a majority are wiped; past that, the rule that a wiped member never
+votes keeps the decree safe.
+
 ### The checks beside the simulation
 
 Decided on 2026-11-17, from the article "How the Claude Code team thinks about verification"

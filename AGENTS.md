@@ -14,8 +14,8 @@ an idea back.
 **The order of work.** First, a TLA+ model for every Paxos flavor that `paros-consensus` builds
 (single decree, Multi-Paxos, leader handoff, matchmakers, grid quorums, proxy leaders,
 replicas, leaderless reads), and a full understanding of each paper. No code is built on a
-flavor before its model. Then the journal is designed again from the ground up, together with
-Pierre.
+flavor before its model. Done so far: single decree (`specs/tla/decree/`). Then the journal is
+designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
 same code: model-based trace checking (each run of the core is checked against its TLA+

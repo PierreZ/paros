@@ -514,3 +514,65 @@ live member with the believed set.
 
 Not in the model: ballots, votes, Phase 1, the contents of a registration, a matchmaker that
 loses its state, more than one candidate, and a pool that does not hold every set.
+
+### `decree/`: single-decree Paxos, for #1186 (rework 1.15)
+
+The model of `decree.rs` (`Decree<Id, V>`): the shared `Proposer` and `Acceptor` over a log of
+one slot. It is Lamport's message-passing Paxos (`Paxos.tla`): a message can arrive late, two
+times or never, each ballot has one proposer, and a ballot that a `Nack` preempted only stops.
+The caller's retry is a higher ballot.
+
+The two uses of a decree are two sets of constants:
+
+- **The matchmaker handover** (`matchmaker/reconfigurer.rs`): the successor set, over three
+  matchmakers under a majority, with `Phase1 = "quorum"`.
+- **`cell init`** (#277 (cell init as a decree)): the cell plan, over three listed members
+  under a majority, with `Phase1 = "every"` (`Phase1Rule::EveryAcceptor`), and wipes.
+
+| Constant | Values |
+|---|---|
+| `Phase1` | `"quorum"`: Phase 2 opens at a Phase-1 quorum of promises. `"every"`: Phase 2 opens only when every acceptor promised. |
+| `Pick` | `"highest"`: the proposer takes the value of the highest vote that the promises report, else any value (P2c). `"ignore"`: a control, the proposer takes any value. |
+| `Wipes` | How many acceptors can lose their disk, each one time. A wiped acceptor answers Phase 1 as a new acceptor, with no promise and no vote. |
+| `Identity` | `TRUE`: a wiped acceptor never votes again. It answers with a new node id, and the plan names the old one (`not_a_member`, `docs/architecture/03-1-cell-tenant-and-bootstrap.md`). `FALSE`: it votes again as the old acceptor. This is all that `decree.rs` alone can see. |
+| `Down` | The acceptors that never take a step (the liveness checks). |
+
+The safety invariant is `Agreement`: one value is chosen, one time. A value is chosen when a
+quorum sent its `2b` at one ballot, so a wipe cannot unchoose it. The liveness property is
+`Ends` under `LiveSpec`: the last ballot is the retry that no higher ballot preempts, and its
+proposer and each acceptor that is not down keep taking their steps.
+
+Results (`decree/checks.txt`, three ballots, two values, all in CI, 35 seconds together):
+
+| Check | Use | Rule | Result |
+|---|---|---|---|
+| `handover_reach` | handover | `NoChoice`, a reachability control | violation |
+| `handover_ignore` | handover | the proposer ignores the highest reported vote | `Agreement` violation |
+| `handover` | handover | P2c | pass (17 thousand states) |
+| `handover_lost` | handover | two of three matchmakers down | `Ends` violation |
+| `handover_live` | handover | one of three matchmakers down | pass |
+| `init_reach` | cell init | `NoChoiceAfterWipe`, a reachability control: a ballot above the first chooses after a wipe | violation |
+| `init_quorum` | cell init | Phase 1 at a majority, one wipe | `Agreement` violation |
+| `init` | cell init | Phase 1 at every member, one wipe | pass (13 thousand states) |
+| `init_two` | cell init | the same, two wipes of three | pass |
+| `init_revote` | cell init | a wiped member votes again, one wipe | pass |
+| `init_revote_two` | cell init | a wiped member votes again, two wipes of three | `Agreement` violation |
+| `init_down` | cell init | one member down, no wipe | `Ends` violation |
+| `init_live` | cell init | one wipe, no member down | pass |
+
+The trace of `init_quorum`: ballot 1 chooses `v1` at `{a1, a2}`. `a1` is wiped. Ballot 2 hears
+`a1` (no vote) and `a3` (no vote), a majority, and proposes `v2`. `a2` and `a3` accept it, and
+`v2` is chosen too. With `Phase1 = "every"`, ballot 2 waits for `a2`, which reports `v1`.
+
+What the checks show about the two rules of `cell init`. `EveryAcceptor` alone is safe while
+fewer than a majority of the members are wiped (`init_revote`): one member of each chosen
+quorum keeps its vote and reports it. When a majority is wiped, the chosen value can be gone
+from every disk (`init_revote_two`), and the identity rule is what keeps the decree safe: a
+wiped member never votes, so no second quorum forms (`init_two`). The decree then cannot end,
+which is the `cell_lost` refusal of the design. `EveryAcceptor` costs liveness: one member that
+never answers blocks Phase 1 (`init_down`), and a wiped member that answers does not
+(`init_live`).
+
+Not in the model: the ballot floor of a retry (a ballot above every `Nack`), the matchmaker
+generation that fences a handover, the stop quorum that opens the handover's decree, the
+`cell_lost` refusal, and more than three acceptors.
