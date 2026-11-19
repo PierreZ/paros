@@ -19,14 +19,16 @@ flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain
 commit and catch-up, restarts; #1185 (rework 1.14)), the cooperative leader handoff
 (`specs/tla/leader-handoff/`: one hop, the frontier guard, the durable frontier, the pending
 rounds proposed again, and the beat guard that rework 2.7 adds; #1187 (rework 2.8)), grid quorums
-(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/` and `compartments/`; #1102 (rework 1.13)), Matchmaker
+(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
 only a resize record changes, the floor and the register across the handover; #1097 (rework
 1.8)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
-read; #1190 (rework 6.10)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+read; #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
+Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
+another proxy when its proxy is gone; #1188 (rework 2.9)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
