@@ -199,6 +199,14 @@ controls are a proposer that ignores the highest reported vote and a `cell init`
 takes a majority while one member was wiped. The model also shows that `EveryAcceptor` alone is
 safe only while fewer than a majority are wiped; past that, the rule that a wiped member never
 votes keeps the decree safe.
+Plain Multi-Paxos is `specs/tla/multi-paxos/` (#1185 (rework 1.14)): `Agreement`, `LearnedChosen`
+and `OneProposal` (a new leader allocates above each slot that its Phase 1 reported), and `Ends`
+(with at most F acceptors gone, the last leader learns every slot below its frontier), with the
+majority, the partitioned grid and the full grid. Its controls are a leader that allocates from
+its first unlearned slot, an acceptor that answers before its write is on disk, no `Noop` for a
+gap, and a Phase-1 quorum inside one grid column. It also shows that the plain log has no slack
+for a wiped acceptor: one wipe that votes again as the old acceptor breaks `Agreement`. The table
+of every flavor with its model is in `specs/tla/README.md`.
 
 ### The checks beside the simulation
 

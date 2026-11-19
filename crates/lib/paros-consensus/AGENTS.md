@@ -66,7 +66,7 @@ Roles (pure tallies, no deployment knowledge):
 
 Deployments (each wires roles and owns one `Ready`):
 
-- `node.rs` → `ColocatedNode`, `Delegation` → the protocol entry points (`new`, `step`, `tick`, `propose*`, `compact`, `repair_record`, `ready`).
+- `node.rs` → `ColocatedNode`, `Delegation` → the protocol entry points (`new`, `step`, `tick`, `propose*`, `compact`, `repair_record`, `ready`). Its plain Multi-Paxos path (Phase 1 recovery, the allocator frontier, the `Noop` gap fill, commit and catch-up, restarts, the majority and the grid) has its TLA+ model in `specs/tla/multi-paxos/` (#1185 (rework 1.14)).
 - `node/ready.rs` → `Ready<'a>` (second `ready()` before `advance()` is a compile error).
 - `node/policy.rs` → the driver-policy methods (`resend_pending`, `take_back_delegated`, `move_round`, `step_down`, `campaign_above`, `advance_recovery`, `set_election_timeout`, `extend_pool`).
 - `node/view.rs` → the read-only accessors (`config`, `limits`, `pool`, `acceptors`, `read_basis`, `hard_state`, `role`, `leader`, `read_log`, …).

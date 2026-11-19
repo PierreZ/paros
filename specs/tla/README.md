@@ -26,6 +26,29 @@ Each folder is one model:
 A check that must give `violation` is a control. It shows that the model can find the bug that
 the rule prevents. A model with no control proves little.
 
+## The Paxos flavors and their models
+
+Each Paxos flavor that `paros-consensus` builds has a TLA+ model, and a new flavor gets its model
+before its code (decision 37 of the rework, Pierre 2026-11-18; the list is in #1185 (TLA+ model
+multi-paxos)). The index of the models is #1020 (the models of the rework).
+
+| Flavor | Code | Model | Step |
+|---|---|---|---|
+| Single-decree Paxos | `decree.rs` | `decree/` | #1186 (rework 1.15), done |
+| Plain Multi-Paxos, with the majority, the partitioned grid and the full grid | `node.rs`, `proposer/`, `acceptor.rs`, `replica.rs`, `membership/` | `multi-paxos/` | #1185 (rework 1.14), done |
+| The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` (to write) | #1187 (rework 2.8) |
+| Matchmaker Paxos | `matchmaking.rs`, `matchmaker.rs` | to write; `zero-stall/` holds it today, inside the bypass | #1200 |
+| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover-gc/`, extended to `handover` | #1097 (rework 1.8) |
+| Grid quorums across a change of members | `membership/quorum_system.rs` | `config-register/`, `reads/` | #1102 (rework 1.13) |
+| The proxy leader | `proxy_leader.rs` | `proxy-leader/` (to write) | #1188 (rework 2.9) |
+| The batcher, the replica and the read replica | `batcher.rs`, `replica_node.rs` | `compartments/` (to write) | #1190 (rework 6.10) |
+| Leaderless reads | `quorum_read.rs` | `reads/` | #1099 (rework 1.10) |
+| The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
+| CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
+
+`paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
+model.
+
 ## The long checks, run once for rework 1.6
 
 Every `long` check of the tree ran once on 2026-11-17 (#1095 (rework 1.6)), with 4 workers.
@@ -576,3 +599,102 @@ never answers blocks Phase 1 (`init_down`), and a wiped member that answers does
 Not in the model: the ballot floor of a retry (a ballot above every `Nack`), the matchmaker
 generation that fences a handover, the stop quorum that opens the handover's decree, the
 `cell_lost` refusal, and more than three acceptors.
+
+### `multi-paxos/`: plain Multi-Paxos, for #1185 (rework 1.14)
+
+The model of plain Multi-Paxos as `ColocatedNode` runs it with no matchmaker: one static
+configuration, a log of slots, and nodes that are a proposer, an acceptor and a learner at once.
+A message can arrive late, two times or never. Each ballot has one owner, as `(round, node)` in
+the code, and a preempted ballot only stops. The model has:
+
+- **Phase 1 that recovers the suffix** (`node/election.rs`). A campaign asks from its first
+  unlearned slot `from`, and a promise reports each vote at or above `from`
+  (`Acceptor::promise_page`).
+- **The candidate is its own first acceptor**: it promises its ballot when it opens Phase 1,
+  and its promise is in the quorum that it wins on (`Proposer::open_phase1` takes its records).
+- **The allocator frontier** of a new leader (`try_become_leader`): one past the highest slot
+  that its Phase 1 reported, never below `from`.
+- **The recovery** (`RecoveryPolicy::Phase1Backed`): each slot from `from` to the frontier gets
+  the highest reported vote again, or a `Noop` when no promise reported a vote (the election gap
+  fill).
+- **Phase 2** for fresh commands at the frontier (`Proposer::allocate`).
+- **Commit and catch-up.** The leader learns a slot at a Phase-2 quorum of its ballot
+  (`node/learn.rs`). A node learns it from the leader's `Commit`, or catches up from any peer
+  that learned it (`node/catch_up.rs`).
+- **A restart that keeps only durable state**: the promise and the votes on disk, and what the
+  node learned. Every ballot of the node dies with it.
+- **The quorum system as a constant** (`membership/quorum_system.rs`): `Q1`, and `Q2` for each
+  slot. `MC.tla` builds the majority and the grid (`QuorumSystem::Grid`): a slot's Phase 2 goes
+  to column `slot % cols`, `acks` of that column decide, and `rows - acks + 1` of every column
+  elect.
+
+| Constant | Values |
+|---|---|
+| `Alloc` | `"frontier"`: fresh commands start at the frontier. `"prefix"`: a control, fresh commands start at `from`. |
+| `Gap` | `"noop"`: an unreported slot below the frontier gets a `Noop`. `"skip"`: a control, it gets nothing. |
+| `Durable` | `"before"`: an acceptor answers only when its promise or vote is on disk (persist before send, `Ready`). `"after"`: a control, it answers first and writes later. |
+| `Restarts` | How many restarts can happen in the run. |
+| `Wipes`, `Identity` | How many acceptors can lose their disk. With `Identity = TRUE`, a wiped acceptor never takes a step again: it comes back with a new node id, outside the static configuration. With `FALSE`, a control, it answers again as the old acceptor. |
+| `Learners` | The nodes that catch up. The ballot owners always learn what they decide. A node that owns no ballot only adds states when it catches up, so most checks leave it out. |
+| `Down` | The acceptors that never take a step (the liveness checks). |
+
+The safety invariants are `Agreement` (one command for each slot), `LearnedChosen` (what a node
+learned was chosen) and `OneProposal` (one proposal for each slot and ballot: a new leader
+allocates above each slot that its Phase 1 reported, so a fresh command never lands on a slot
+that its recovery proposes). A value is chosen when a Phase-2 quorum of the slot sent its `2b`
+at one ballot, so a restart cannot unchoose it. The liveness property is `Ends` under
+`LiveSpec`: the last ballot is the leader that no higher ballot preempts, and it learns every
+slot below its frontier and every slot that it proposed. `Spreads` adds that each live node
+learns what that leader learned.
+
+Results (`multi-paxos/checks.txt`, three acceptors unless the line says otherwise, two ballots,
+two slots, one command and `Noop`; the CI set runs in about three minutes):
+
+| Check | Where | Rule | Result |
+|---|---|---|---|
+| `reach` | ci | `NoChoice`, a reachability control | violation |
+| `reach_gap` | ci | `NoNoopChosen`, a reachability control: a gap fill is chosen below a chosen command | violation |
+| `majority` | ci | the rules of the code | pass (363 thousand states) |
+| `alloc_prefix` | ci | fresh commands start at `from`, two commands | `Agreement` violation |
+| `durable_after` | ci | an acceptor answers before its write is on disk, one restart | `Agreement` violation |
+| `wipe_revote` | ci | a wiped acceptor votes again as the old one, one wipe | `Agreement` violation |
+| `live` | ci | the rules of the code | `Ends` pass |
+| `live_down` | ci | one of three acceptors down | `Ends` pass |
+| `lost` | ci | two of three acceptors down | `Ends` violation |
+| `gap_skip` | ci | no `Noop` for a gap | `Ends` violation |
+| `full_grid_one_column` | ci | 2 x 2 full grid, a Phase-1 quorum in one column | `Agreement` violation |
+| `full_grid_down` | ci | 2 x 2 full grid, one acceptor down: its column cannot decide | `Ends` violation |
+| `partitions_down` | ci | 3 x 2 partitioned grid (F = 1), one acceptor down in each partition | `Ends` pass |
+| `restart` | long | one restart | pass (1.4 million states, 2 min) |
+| `wipe` | long | one wipe, the identity rule | pass (1.0 million states, 1 min) |
+| `spreads` | long | every node catches up | `Ends` and `Spreads` pass (0.9 million states, 15 min) |
+| `full_grid` | long | 2 x 2 full grid | pass (11.4 million states, 13 min) |
+| `partitions` | long | 3 x 2 partitioned grid | no violation in 33 million distinct states (bounded: stopped after 50 min, 21 million states left on the queue) |
+
+The long checks ran once on 2026-11-19 with 4 workers.
+
+The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s):
+
+- `alloc_prefix`: ballot 1 wins on `{a1, a3}` and proposes `c1` at slot 0; `a1` votes for it.
+  Ballot 2 wins on `{a1, a2}`, hears that vote, and proposes `c1` again at slot 0. With
+  `Alloc = "prefix"` it also allocates slot 0 to a fresh `c2`: two proposals at one slot and
+  ballot. `a3` votes `c1` at ballot 1 and `{a1, a2}` vote `c2` at ballot 2, so both are chosen.
+- `durable_after`: ballot 1 wins on `{a1, a3}` and proposes `c1` at slots 0 and 1. `a1` and `a3`
+  vote for slot 0, so `c1` is chosen there. `a1` restarts before its vote reached the disk.
+  Ballot 2 wins on `{a1, a2}`; `a1` reports only slot 1, so slot 0 gets a `Noop`, and `{a1, a2}`
+  choose it.
+- `wipe_revote`: a wiped acceptor that votes again as the old one breaks `Agreement` the same
+  way, with one wipe of three. Phase 1 takes any majority, so no member of the quorum that chose
+  a value has to answer. This is the result of `decree/` (`init_quorum`) again: plain
+  Multi-Paxos has no `EveryAcceptor`, so the identity rule (a wiped acceptor never votes again as
+  the old one) is what keeps the log safe, from the first wipe.
+- `gap_skip`: ballot 1 proposes `c1` at slots 0 and 1, and only `a3` votes, for slot 1. Ballot 2
+  wins on all three, hears slot 1 only, and its frontier is 2. With `Gap = "skip"` nobody
+  proposes slot 0 again: slot 1 is chosen and slot 0 stays a hole for good.
+- `full_grid_one_column`: a Phase-1 quorum inside one column misses the Phase-2 quorums of the
+  other column, and two values are chosen at one slot.
+
+Not in the model: matchmakers and reconfiguration (`zero-stall/`, `config-register/`), the
+cooperative handoff (`RecoveryPolicy::Inherited`), the CTRL tri-state of a rotted record and the
+repair probe, truncation and the trim-point jump, the paging of a promise, the proxy leader, a
+leader that a restart keeps, and more than two ballots (a check with three ballots does not finish in a CI job).
