@@ -149,7 +149,7 @@ Test only: `publish = false`, never a dependency of another crate.
   seeds, `EXPLORE` = 10), and CI runs it as it is. Each walk runs in a process of its own (the
   ignored test `one_walk`, started again from the same binary), one per CPU (`COVERAGE_JOBS`):
   a process has its own branch counters, so a walk branches the same way whatever runs beside
-  it. CI splits the walks over four shards, each a job of at most 20 minutes: a shard
+  it. CI splits the walks over four shards, each a job of at most 30 minutes: a shard
   (`COVERAGE_SHARD=i/4`) walks the walks whose index is `i` modulo 4 and saves what each
   reached (`COVERAGE_SAVE`), and the `coverage` job judges the union of the saved walks
   (`COVERAGE_FROM`), which fails when a walk is missing. Branch coverage needs the instrumented

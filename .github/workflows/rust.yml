@@ -113,7 +113,7 @@ jobs:
   # at the gate's own budget (`tests/coverage.rs`). The `test` job leaves the
   # gate out.
   #
-  # Each job has 20 minutes (Pierre, 2026-11-19), so the walks are split over
+  # Each job has 30 minutes (Pierre, 2026-11-20), so the walks are split over
   # four shards. A shard walks every fourth walk and saves what each reached
   # (`COVERAGE_SHARD`, `COVERAGE_SAVE`). The `coverage` job judges the union
   # of the four shards (`COVERAGE_FROM`): every probe reached, every allowed
@@ -122,7 +122,7 @@ jobs:
     needs: scope
     if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -155,7 +155,7 @@ jobs:
     needs: [scope, coverage-shard]
     if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main

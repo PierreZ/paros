@@ -90,7 +90,7 @@ branch from the runs that reach a new probe or a new edge of the core, and a gat
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
 unreached probes)). Every one of the 79 probes is reached in CI, with no list of excused probes
-(Pierre, 2026-11-19: no excuses in simulation, no allow lists; the gate has 20 minutes of CI).
+(Pierre, 2026-11-19: no excuses in simulation, no allow lists; each job of the gate has 30 minutes of CI, Pierre 2026-11-20).
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
@@ -134,7 +134,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
 - the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
   instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
-  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`). Each CI job has at most 20
+  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`). Each CI job has at most 30
   minutes, so four `coverage-shard` jobs walk a quarter of the walks each
   (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
