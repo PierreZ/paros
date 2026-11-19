@@ -26,6 +26,10 @@ Each folder is one model:
 A check that must give `violation` is a control. It shows that the model can find the bug that
 the rule prevents. A model with no control proves little.
 
+A module that several models share lives in its own folder and is linked into each folder that
+uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
+`config-register/` and `reads/`.
+
 ## The long checks, run once for rework 1.6
 
 Every `long` check of the tree ran once on 2026-11-17 (#1095 (rework 1.6)), with 4 workers.
@@ -305,9 +309,12 @@ successor, whose configuration does not name the machine. A move never names aga
 same id, a machine that left a configuration in force: a machine that comes back is a new id
 with a new store (rule 5). A crash is allowed while every configuration that a read can return
 keeps a live Phase-1 quorum (FoundationDB's kill policy). The quorum system and the sizes are
-constants: `resize` moves from three acceptors to five (rule 2), and `partitioned` moves between
+constants: `resize` moves from three acceptors to five (rule 2), `partitioned` moves between
 two layouts of two partitions, where Phase 1 needs a majority of every partition and Phase 2 a
-majority of the first one (decision 15).
+majority of the first one (decision 15), and `grid` moves between two full grids of 2 x 2
+(#1102 (rework 1.13)). The grids come from `grid/Grid.tla`: the layout is row-major over the
+sorted members, as in the code, so the move of `grid` (`a5` replaces `a1`) also moves `a2`,
+`a3` and `a4` to other cells. Phase 2 takes a whole column, and any column may take the slot.
 
 Each control turns off one rule, and each one fails:
 
@@ -326,6 +333,9 @@ Each control turns off one rule, and each one fails:
 | `resize` | the rule, a move from three acceptors to five, two ballots | pass (460 thousand states) |
 | `agree_mm3` | the rule, three matchmakers on three machines, one crash, two ballots | pass (26 million states, 20 minutes, `long`) |
 | `partitioned` | the rule, the partitioned layouts, seven acceptors, two ballots | pass (21 million states, 17 minutes, `long`) |
+| `grid_slack` | control: two full grids, Phase 2 takes one acceptor of a column and Phase 1 still one of each column, where it needs two | `Agreement` violation (7 thousand states) |
+| `grid` | the rule, a move between two full grids of 2 x 2, five acceptors, two ballots | pass (453 thousand states, 40 seconds) |
+| `grid_long` | `grid` with three ballots | GRIDLONG |
 | `live` | `LiveSpec`: three matchmakers, one crash, no release; the top ballot wins | pass (15.5 million states, 17 minutes, `long`) |
 | `live_release` | `live` with stores released | pass (21 million states, 25 minutes, `long`) |
 | `agree_long` | `agree_mm3` with three ballots | no violation in 181 million distinct states, to depth 23 (a bounded run of 2 hours that filled the disk; `long`) |
@@ -432,8 +442,9 @@ configuration, the size of the successor set and more than one journal.
 ### `reads/`: leaderless reads, for #1016 (model of leaderless reads)
 
 The model is a copy of `zero-stall/Bypass.tla` with the acks to the clients and one leaderless
-read. A reader asks a Phase-1 quorum of the configuration of its read basis for vote watermarks.
-It serves the read at the maximum of the watermarks and the fence of the basis. The invariant is
+read. A reader asks a read target of the configuration of its read basis for vote watermarks, and
+the read completes on a Phase-1 quorum of the answers. It serves the read at the maximum of the
+watermarks and the fence of the basis. The invariant is
 `ReadSeesAcked`: a served read covers each slot that a leader acked before the read started.
 
 Constants select the rule:
@@ -444,10 +455,20 @@ Constants select the rule:
 | `AckBallot` | `TRUE`: a `PreReadAck` carries the ballot of the acceptor, and an answer above the basis ends the read. |
 | `Hold` | `TRUE`: the decision hold of #579 (zero-stall reconfiguration). `zero-stall/` holds the full checks of the hold. |
 | `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis (`main` today). `own`: option (b), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
+| `Q1s`, `Q2s`, `Targets` | The quorum system, for each configuration (#1102 (rework 1.13)): the Phase-1 quorums, the Phase-2 quorums, and the sets of acceptors that a reader asks. A majority asks the whole membership. A grid takes them from `grid/Grid.tla`: the partitions ask the whole membership, the full grid asks one row (`row_of`). |
+| `Seal` | `quorum`: Phase 1 takes a Phase-1 quorum of each prior configuration (the code). `reads`: a candidate rule, not in the code: Phase 1 also takes one promise in each read target of each prior configuration, so each row of an old full grid hears of the campaign. |
 
-The model has four acceptors, the configurations `{a1, a2, a3}` and `{a3, a4}`, the readers `a1`
-and `a3`, one matchmaker, one slot and two ballots. The learner checks have a third ballot that
-is only the abandoned campaign of a reader.
+The majority checks have four acceptors, the configurations `{a1, a2, a3}` and `{a3, a4}`, the
+readers `a1` and `a3`, one matchmaker, one slot and two ballots. The learner checks have a third
+ballot that is only the abandoned campaign of a reader.
+
+The grid checks (#1102 (rework 1.13)) have a change of members, one matchmaker, one slot, two
+ballots and the reader `a1`, the member that leaves:
+
+- the full grid of 2 x 2: `G` over `a1..a4` (rows `{a1, a2}` and `{a3, a4}`, columns `{a1, a3}`
+  and `{a2, a4}`), then `H` over `a2..a5`, where `a5` replaces `a1`;
+- the partitions with `F = 1` and two partitions (a grid of 3 x 2 with `acks = 2`): `P` over
+  `a1..a6`, then `R` over `a2..a7`.
 
 Results (`reads/checks.txt`):
 
@@ -461,6 +482,28 @@ Results (`reads/checks.txt`):
 | #890, `strict` (`main` today) | pass |
 | #890, option (b) | pass |
 | #890, the node ignores its promise | pass |
+| `grid_full`: the full grid, a change of members, the row read (the code) | violation (300 thousand states, 15 seconds) |
+| `grid_full_static`: the full grid, no change of members | pass (588 thousand states, 35 seconds) |
+| `grid_full_seal`: the full grid, a change of members, `Seal = "reads"` | pass (1.6 million states, 1.5 minutes) |
+| `grid_partitions`: the partitions, a change of members | GRIDPART |
+
+The trace of `grid_full` is the stale read that `quorum_read.rs` names (a row "wholly unaware of
+a completed successor"):
+
+1. Ballot 1 leads in `G`. Ballot 2 registers `H`, and its history holds `G` and `H`.
+2. `a3` and `a4` promise ballot 2. That is the row `{a3, a4}` of `G`, a Phase-1 quorum of `G`
+   (one acceptor of each column), and a Phase-1 quorum of `H` too. Ballot 2 leads.
+3. `a3` and `a5`, the column `{a3, a5}` of `H`, accept slot 1 at ballot 2. The leader acks it.
+4. The reader `a1` hears a late beat of ballot 1 and takes `G` as its read basis.
+5. It asks the row `{a1, a2}` of `G`. Neither heard of ballot 2: their ballot is 1 and their
+   watermark is 0. The read is served at index 0 and misses slot 1.
+
+The `PreReadAck` catch (`AckBallot`) needs one acceptor of the row that promised the later
+ballot. Under a majority, and on the partitions, two Phase-1 quorums of one configuration always
+meet, so the read finds that acceptor. On the full grid two rows do not meet
+(`grid/grid_full_rows`). Two rules close the gap, and each check passes: a full grid that
+refuses a change of members (`grid_full_static`), and a seal that reaches each row
+(`grid_full_seal`). Which one paros takes is Pierre's choice (#1102); no code changes before it.
 
 Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
 leader and a reader outside its configuration whose own abandoned campaign is above it.
@@ -468,12 +511,13 @@ leader and a reader outside its configuration whose own abandoned campaign is ab
 
 Option (a) of #890, where the leader campaigns above the promise, adds no rule to the model: it
 is one more ordinary campaign, and `reads_plain` covers it. Its cost is a leader change for each
-stale campaign of a removed node. The last row passes in this model because an acceptor of the
-basis configuration always reports a later ballot. It is not a recommendation: the model has
-only majority quorums.
+stale campaign of a removed node. The row "the node ignores its promise" passes in this model
+because an acceptor of the basis configuration always reports a later ballot. It is not a
+recommendation: the learner checks have only majority quorums.
 
-Not in the model: flexible and grid quorums, GC watermarks, matchmaker generations, the replica
-tier, a read that expires, the registration of the abandoned campaign.
+Not in the model: GC watermarks, matchmaker generations, the replica tier, a read that expires,
+the registration of the abandoned campaign, more than one slot (so a slot's column is any
+column), and a move between a grid and a majority.
 
 ### `campaign-discovery/`: how a campaign learns the matchmaker set in force, for #1034 (campaign asks the pool)
 
@@ -576,3 +620,33 @@ never answers blocks Phase 1 (`init_down`), and a wiped member that answers does
 Not in the model: the ballot floor of a retry (a ballot above every `Nack`), the matchmaker
 generation that fences a handover, the stop quorum that opens the handover's decree, the
 `cell_lost` refusal, and more than three acceptors.
+
+### `grid/`: the quorums of a grid, for #1102 (rework 1.13)
+
+`Grid.tla` is the quorums of `QuorumSystem::Grid { rows, cols, acks }`
+(`membership/quorum_system.rs`) as sets, so the models that run a grid and the code agree on one
+layout. A configuration is the tuple of its members in sorted order, laid out row-major: member
+`i` sits at row `(i - 1) \div cols` and column `(i - 1) % cols`.
+
+- Phase 2: `acks` acceptors of one column.
+- Phase 1: `rows - acks + 1` acceptors of every column.
+- A read: one row when `acks = rows` (the full grid, `row_of`), the whole membership else. It
+  completes on a Phase-1 quorum of the answers.
+
+The full grid of Compartmentalized Paxos is `acks = rows`. The partitions of #532 (acceptor
+partitions) are `rows = 2F + 1` and `acks = F + 1`. `config-register/` and `reads/` take their
+grids from this module; a later model of the journal's grids can take them too.
+
+`GridCheck.tla` checks the arithmetic of the code on every layout of one to nine members, each
+layout one initial state:
+
+| Check | Rule | Result |
+|---|---|---|
+| `grid` | `CrossIntersect`: every Phase-1 quorum meets every Phase-2 quorum (`cross_intersects`). `ReadsArePhase1`: each read target holds a Phase-1 quorum. `ToleratedIsExact`: `tolerated_failures`, `min(acks - 1, cols * (rows - acks + 1) - 1)`, is the largest number of failures, wherever they are, that leaves a Phase-1 and a Phase-2 quorum | pass (69 layouts) |
+| `grid_slack` | control: Phase 1 takes one acceptor less of each column | `CrossIntersect` violation |
+| `grid_full_rows` | `Phase1Meets` on the full grids with two columns or more: two Phase-1 quorums meet | violation: two rows of a 2 x 2 grid do not meet |
+
+`Phase1Meets` is not a rule of Paxos. It is the fact that the read of `reads/grid_full` needs:
+two Phase-1 quorums of one configuration meet when `2 * (rows - acks + 1) > rows`, which holds
+on the partitions and not on the full grid.
+

@@ -130,7 +130,8 @@ because a short row or column would let a predicate answer for a cell that does 
 | The configuration's view | `paros-consensus/src/membership/acceptor_config.rs`: `has_phase1_quorum_in`, `has_phase2_quorum_in`, `column_of` |
 | Moving a stuck round | `paros-consensus/src/node/policy.rs`: `ColocatedNode::move_round`; `paros-roles/src/node/grid.rs`: `move_stuck_rounds`, `move_budget`, `MOVE_BACKOFF_CAP` |
 | The column choice | `ColocatedNode::propose_in` (a column away from slow members in production, #361 (slow machines)); `paros-roles/src/node/grid.rs`: `phase2_column` (a BUGGIFY site, inert in production) |
-| The sim's draw | `paros-sim/src/shape/quorum.rs`: `QuorumPolicy::Grid`, `grid_layouts` |
+| The sim's draw | `paros-sim/src/shape/quorum.rs`: `QuorumPolicy::Grid`, `grid_layouts` (at the tag `v0.2.0-alpha.1`) |
+| The TLA+ models | `specs/tla/grid/Grid.tla`: the quorums as sets, shared by `config-register/` and `reads/`; `grid/GridCheck.tla`: `cross_intersects` and `tolerated_failures` on every layout up to nine members (#1102 (rework 1.13)) |
 
 **Sim gates and oracles:**
 
@@ -172,6 +173,13 @@ because a short row or column would let a predicate answer for a cell that does 
 - **A grid loses no copy for good.** Every slot's Phase 2 goes to one column, so one acceptor
   lost for good freezes its column's slots for ever. The sim's copy budget is zero on a grid
   (`QuorumPolicy::tolerated_loss`).
+- **A row read across a change of members.** On a full-column grid two rows never meet, so a
+  Phase 1 of a new configuration can take one row of the old grid and leave another row unaware
+  of it. A reader whose basis is still the old grid asks that other row, and its read misses a
+  write the new configuration chose and acked (`specs/tla/reads/`, check `grid_full`). Under a
+  majority and on the partitions two Phase-1 quorums meet, and the `PreReadAck` ballot catches
+  the read. A static full grid and a Phase 1 that reaches every row of the old grid both pass;
+  which one paros takes is open (#1102 (rework 1.13)).
 - **Columns in one zone.** A column inside one failure domain commits alone, and after its loss
   it blocks every later reconfiguration. The zone rule refuses it per partition.
 

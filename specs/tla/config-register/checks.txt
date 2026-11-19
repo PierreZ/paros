@@ -20,3 +20,6 @@ agree_long         pass       long
 resize_long        pass       long
 live               pass       long
 live_release       pass       long
+grid_slack         violation  ci
+grid               pass       ci
+grid_long          pass       long
