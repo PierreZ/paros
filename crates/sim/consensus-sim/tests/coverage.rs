@@ -15,6 +15,14 @@
 //! `SanitizerCoverage` counters, so the edges that steer a walk are the
 //! edges of that walk alone, and a walk branches the same way however many
 //! walks run beside it.
+//!
+//! CI splits the walks over several machines. A shard (`COVERAGE_SHARD=i/n`)
+//! runs the walks whose index in [`walks`] is `i` modulo `n`, and saves what
+//! each reached in `COVERAGE_SAVE`. The judge (`COVERAGE_FROM`) reads the
+//! saved walks of every shard, runs none, and judges their union as one run
+//! of every walk would be judged: it fails when a walk is missing. A walk
+//! runs the same way in a shard as in one run of all, so the union is the
+//! same.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -41,6 +49,12 @@ const OUT_VAR: &str = "COVERAGE_OUT";
 /// How many walk processes run at once. The default is the number of
 /// CPUs.
 const JOBS_VAR: &str = "COVERAGE_JOBS";
+/// The shard of the walks that this run walks, as `i/n`.
+const SHARD_VAR: &str = "COVERAGE_SHARD";
+/// The directory where a shard saves what each of its walks reached.
+const SAVE_VAR: &str = "COVERAGE_SAVE";
+/// The directory that the judge reads the saved walks of every shard from.
+const FROM_VAR: &str = "COVERAGE_FROM";
 
 /// Every flavor of the cell, with its own pages and with the smallest
 /// pages, each with the name its report prints.
@@ -285,27 +299,63 @@ fn finish(mut running: Running) -> Reached {
     Reached::decode(&text)
 }
 
-/// Run every walk, `jobs` processes at a time, in the order of [`walks`].
-fn run_all(jobs: usize) -> Vec<Reached> {
+/// Run the walks of [`walks`] at `indices`, `jobs` processes at a time, in
+/// that order. Each comes back with its index.
+fn run_walks(indices: &[usize], jobs: usize) -> Vec<(usize, Reached)> {
     let dir = std::env::temp_dir().join(format!("paros-coverage-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create the campaign's directory");
     let names = walks();
-    let mut done: Vec<Option<Reached>> = names.iter().map(|_| None).collect();
+    let mut done = Vec::new();
     let mut running: Vec<(usize, Running)> = Vec::new();
-    let mut next = 0;
-    while next < names.len() || !running.is_empty() {
-        while next < names.len() && running.len() < jobs {
-            running.push((next, start(&names[next], next, &dir)));
-            next += 1;
+    let mut next = indices.iter();
+    let mut pending = next.next();
+    while pending.is_some() || !running.is_empty() {
+        while let Some(&index) = pending
+            && running.len() < jobs
+        {
+            running.push((index, start(&names[index], index, &dir)));
+            pending = next.next();
         }
         // Wait for the oldest: the walks are not of one length, but the
         // pool stays full while the oldest runs.
         let (index, oldest) = running.remove(0);
-        done[index] = Some(finish(oldest));
+        done.push((index, finish(oldest)));
     }
     let _ = std::fs::remove_dir_all(&dir);
-    done.into_iter()
-        .map(|reached| reached.expect("every walk ran"))
+    assert_eq!(done.len(), indices.len(), "every walk of the run ran");
+    done
+}
+
+/// The shard `i/n` that `COVERAGE_SHARD` names, if any.
+fn shard() -> Option<(usize, usize)> {
+    let text = std::env::var(SHARD_VAR).ok()?;
+    let (i, n) = text.split_once('/').expect("COVERAGE_SHARD is i/n");
+    let i: usize = i.parse().expect("the shard index is a count");
+    let n: usize = n.parse().expect("the shard count is a count");
+    assert!(n > 0, "at least one shard");
+    assert!(i < n, "the shard index is below the shard count");
+    Some((i, n))
+}
+
+/// The file where a shard saves the walk at `index` of [`walks`].
+fn saved(dir: &Path, index: usize) -> PathBuf {
+    dir.join(format!("walk-{index}.reached"))
+}
+
+/// What every walk of [`walks`] reached, as the shards saved it in `dir`.
+fn load(dir: &Path) -> Vec<Reached> {
+    (0..walks().len())
+        .map(|index| {
+            let path = saved(dir, index);
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!(
+                    "no shard saved the walk {} ({}: {error})",
+                    walks()[index],
+                    path.display()
+                )
+            });
+            Reached::decode(&text)
+        })
         .collect()
 }
 
@@ -316,7 +366,33 @@ fn every_core_probe_is_reached() {
         |jobs| jobs.parse().expect("COVERAGE_JOBS is a count"),
     );
     assert!(jobs > 0, "at least one walk runs at a time");
-    let walked = run_all(jobs);
+    let walked = if let Some(dir) = std::env::var_os(FROM_VAR) {
+        assert!(
+            shard().is_none(),
+            "the judge runs no walk: COVERAGE_FROM takes no COVERAGE_SHARD"
+        );
+        load(Path::new(&dir))
+    } else if let Some((i, n)) = shard() {
+        // A shard walks its part and saves it; the judge of the union is
+        // the run with `COVERAGE_FROM`, once every shard is done.
+        let dir = std::env::var_os(SAVE_VAR).expect("a shard saves its walks in COVERAGE_SAVE");
+        let dir = Path::new(&dir);
+        std::fs::create_dir_all(dir).expect("create the shard's directory");
+        let indices: Vec<usize> = (0..walks().len()).filter(|index| index % n == i).collect();
+        assert!(!indices.is_empty(), "every shard walks at least one walk");
+        for (index, reached) in run_walks(&indices, jobs) {
+            eprintln!("{}", reached.report);
+            std::fs::write(saved(dir, index), reached.encode())
+                .expect("save what the walk reached");
+        }
+        return;
+    } else {
+        let indices: Vec<usize> = (0..walks().len()).collect();
+        run_walks(&indices, jobs)
+            .into_iter()
+            .map(|(_, reached)| reached)
+            .collect()
+    };
     assert_eq!(walked.len(), walks().len(), "every walk reported");
 
     let mut hits: BTreeMap<&str, u64> = BTreeMap::new();

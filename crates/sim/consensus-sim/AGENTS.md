@@ -139,7 +139,11 @@ Test only: `publish = false`, never a dependency of another crate.
   seeds, `EXPLORE` = 10), and CI runs it as it is. Each walk runs in a process of its own (the
   ignored test `one_walk`, started again from the same binary), one per CPU (`COVERAGE_JOBS`):
   a process has its own branch counters, so a walk branches the same way whatever runs beside
-  it. Branch coverage needs the instrumented build that CI's `coverage` job runs:
+  it. CI splits the walks over four shards, each a job of at most 20 minutes: a shard
+  (`COVERAGE_SHARD=i/4`) walks the walks whose index is `i` modulo 4 and saves what each
+  reached (`COVERAGE_SAVE`), and the `coverage` job judges the union of the saved walks
+  (`COVERAGE_FROM`), which fails when a walk is missing. Branch coverage needs the instrumented
+  build that CI's `coverage-shard` jobs run:
   `RUSTC_WRAPPER=$PWD/scripts/sancov-rustc.sh SANCOV_CRATES=paros_consensus cargo nextest run
   --release --target-dir target/sancov -p consensus-sim --test coverage --no-capture`. Without
   it, `moonpool_explorer::sancov_edges_covered_live` returns 0 and only the probes steer. The
