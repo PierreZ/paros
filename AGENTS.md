@@ -14,13 +14,15 @@ an idea back.
 **The order of work.** First, a TLA+ model for every Paxos flavor that `paros-consensus` builds
 (single decree, Multi-Paxos, leader handoff, matchmakers, grid quorums, proxy leaders,
 replicas, leaderless reads), and a full understanding of each paper. No code is built on a
-flavor before its model. Done so far: single decree (`specs/tla/decree/`), grid quorums
-(`specs/tla/grid/`, run by `config-register/` and `reads/`; #1102 (rework 1.13)), Matchmaker
+flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain Multi-Paxos
+(`specs/tla/multi-paxos/`: Phase 1 recovery, the allocator frontier, the `Noop` gap fill,
+commit and catch-up, restarts; #1185 (rework 1.14)), grid quorums
+(`specs/tla/grid/`, run by `config-register/`, `reads/` and `multi-paxos/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
 only a resize record changes, the floor and the register across the handover; #1097 (rework
-1.8)). Then the journal is
+1.8)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
