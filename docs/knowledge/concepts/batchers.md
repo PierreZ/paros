@@ -114,6 +114,7 @@ journal refuse a write it already holds. A single-writer journal merges in its c
 | The pure roles | `paros-consensus/src/batcher.rs`: `Batcher`, `push`, `tick`, `lower_limits`, `BatchLimits`, `Batch`, `Unbatcher::scatter` |
 | The driver | `paros-roles/src/batcher.rs`: `run_batcher`; every machine serves the endpoint over the cell's address book |
 | The decision | `docs/architecture/02-data-plane.md` §2.4 |
+| The TLA+ model | `specs/tla/compartments/` (#1190 (rework 6.10)): one range for each write, also across a `TooLarge` split and a leader change, with the control `resend_ambiguous` (a batcher that sends an ambiguous batch again applies a write two times) |
 
 **Sim gates and oracles:**
 

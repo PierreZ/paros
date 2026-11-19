@@ -233,6 +233,20 @@ of `H_b`, a matchmaker that registers below a ballot it holds, a history from on
 to a configuration the ballot did not register, GC as soon as Phase 1 is done, a removed acceptor
 that shuts down at once, and a floor that counts as effective at one ack.
 
+The other roles of Compartmentalized Paxos are `specs/tla/compartments/` (#1190 (rework 6.10)):
+the batcher and the unbatcher, the walk and the journal fold of the replica, and the read
+replica, over an abstract log that `multi-paxos/` checks. Its safety checks are `OneRange` (each
+write of a batch gets its own `seq` range one time, also when a batch is sent again: a
+`TooLarge` split, an `Accept` sent again, a slot that a new leader recovers), `AnswerAgrees` (the
+unbatcher's range is the range that each replica folds), `InOrder` (a replica folds the chosen
+log in slot order with no gap) and `ReadFresh` (a read that a read replica serves holds each
+write that was complete before the read started). Its liveness check `Ends`: each batch that was
+sent ends in the log and at each replica, also when its batcher stopped. Each rule has a control
+that fails: a batcher that sends an ambiguous batch again (a write applied two times), a walk
+that folds past a gap, a fold state that survives a restart (a slot applied two times), a read
+served from the replica's prefix alone, a read replica that counts as a voter, and a leader that
+does not send lost `Accept`s again.
+
 ### The checks beside the simulation
 
 Decided on 2026-11-17, from the article "How the Claude Code team thinks about verification"
