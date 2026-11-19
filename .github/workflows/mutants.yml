@@ -1,0 +1,102 @@
+# Mutation testing of paros-consensus (`.cargo/mutants.toml`): every mutant of
+# the core, judged by the core's tests and the simulation of consensus-sim.
+#
+# A full run has about 2,900 mutants. A mutant costs an incremental build of a
+# few seconds, then the tests: a few seconds when a test catches it, and about
+# 70 s when it survives (the trace checks with TLC are the longest tests). That
+# is about a day of one runner, so the run is cut into 16 shards and runs each
+# week and on demand. Each pull request runs the mutants of the lines it
+# changes (the `mutants` job of `rust.yml`).
+#
+# A survivor is a finding (AGENTS.md, the absolute rule): the `score` job
+# fails when any mutant survives or times out, and lists them. Each one gets a
+# test, or an issue, or (only when the edit changes nothing) an entry with its
+# reason in the `exclude_re` list of `.cargo/mutants.toml`.
+name: Mutants
+
+on:
+  schedule:
+    - cron: '23 3 * * 0'
+  workflow_dispatch:
+  # TEMPORARY: the first full run, on the branch of the pull request. Removed before merge.
+  push:
+    branches: [claude/project-thread-sy6hb2]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # cargo-mutants exits with 2 when a mutant survives and 3 on a timeout:
+      # the shard still uploads its outcomes, and the `score` job judges them.
+      - name: Run shard ${{ matrix.shard }} of 16
+        run: >-
+          nix develop --command cargo mutants -p paros-consensus
+          --shard ${{ matrix.shard }}/16 --sharding round-robin
+          --no-shuffle -j 2 || { rc=$?; [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; }
+      - name: Show the survivors of the shard
+        if: always()
+        run: |
+          for kind in missed timeout unviable; do
+            echo "== $kind"; cat mutants.out/$kind.txt 2>/dev/null || true
+          done
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: |
+            mutants.out/*.txt
+            mutants.out/outcomes.json
+            mutants.out/diff
+          if-no-files-found: error
+
+  score:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: mutants-shard-*
+          path: shards
+      - name: Score the run
+        run: |
+          set -euo pipefail
+          count() { cat shards/*/"$1".txt 2>/dev/null | wc -l; }
+          caught=$(count caught); missed=$(count missed)
+          timeout=$(count timeout); unviable=$(count unviable)
+          shards=$(ls -d shards/*/ | wc -l)
+          viable=$((caught + missed + timeout))
+          {
+            echo "## Mutants of paros-consensus"
+            echo
+            echo "Shards: $shards of 16. Caught: $caught. Missed: $missed. Timeout: $timeout. Unviable: $unviable."
+            if [ "$viable" -gt 0 ]; then
+              echo
+              echo "Score: $caught of $viable viable mutants caught ($((caught * 1000 / viable / 10)).$((caught * 1000 / viable % 10)) %)."
+            fi
+            echo
+            echo "### Missed"
+            echo '```'
+            cat shards/*/missed.txt 2>/dev/null | sort || true
+            echo '```'
+            echo "### Timeout"
+            echo '```'
+            cat shards/*/timeout.txt 2>/dev/null | sort || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
+          [ "$shards" -eq 16 ] && [ "$missed" -eq 0 ] && [ "$timeout" -eq 0 ]

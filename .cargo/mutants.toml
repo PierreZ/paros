@@ -1,99 +1,42 @@
-# cargo-mutants over paros-consensus, with the simulation as the test (#269).
+# cargo-mutants over paros-consensus.
 #
-# Run it with `cargo xtask mutants` (it sets the seed count and forwards
-# `--shard`, `--list` and the rest); the weekly `mutants` workflow shards it.
-# A mutant is caught when the fixed-seed hunt (`paros-sim-runner`'s `mutants`
-# test target, `paros_sim::chain_mutants`) reports a violation or a panic.
+# A mutant is one small edit of the core (an operator, a return value, a
+# deleted call). The judge is every test that runs the core: the unit tests and
+# model checkers of paros-consensus, and the simulation of consensus-sim (the
+# walks of every flavor with their oracles, the oracle controls, and the trace
+# checks of the walks against the TLA+ models with TLC). A mutant that every
+# test passes is a survivor: a change of behaviour that no test sees.
+#
+# Runs: the `Mutants` workflow (`.github/workflows/mutants.yml`) runs every
+# mutant, in shards, each week and on demand; the `mutants` job of
+# `.github/workflows/rust.yml` runs the mutants of the lines a pull request
+# changes. Locally: `cargo mutants` in the nix dev shell (add `--in-diff` or
+# `-f <file>` to cut the set).
 
-# The safety-critical modules, the first pass's scope (#269).
-examine_globs = [
-  "crates/lib/paros-consensus/src/acceptor.rs",
-  "crates/lib/paros-consensus/src/acceptor/retention.rs",
-  "crates/lib/paros-consensus/src/proposer/election.rs",
-  "crates/lib/paros-consensus/src/proposer/recovery.rs",
-  "crates/lib/paros-consensus/src/proposer/probe.rs",
-  "crates/lib/paros-consensus/src/proposer/rounds.rs",
-  "crates/lib/paros-consensus/src/replica.rs",
-  "crates/lib/paros-consensus/src/journal/state.rs",
-  "crates/lib/paros-consensus/src/matchmaking.rs",
-  "crates/lib/paros-consensus/src/matchmaking/probe.rs",
-  "crates/lib/paros-consensus/src/membership/*.rs",
-  "crates/lib/paros-consensus/src/node/catch_up.rs",
-]
+# The whole core. `#[cfg(test)]` code (the tests, `models/`, `test_support`)
+# is never mutated.
+examine_globs = ["crates/lib/paros-consensus/src/**/*.rs"]
 
-# Equivalent mutants, excluded by construction, one reason each. `#[cfg(test)]`
-# code (the model checkers included) is never mutated.
-exclude_re = [
-  # Formatting is observation only: it changes no decision.
-  "impl (std::fmt::|fmt::|core::fmt::)?(Debug|Display) for",
-  # An invariant check emptied changes nothing while the invariant holds, and
-  # the hunt runs code that keeps it: no test can catch it.
-  "replace .*::assert_(invariants|mode) with \\(\\)",
+# Equivalent mutants: an edit that no test can see because the code does the
+# same thing with it. Each entry names the reason. Nothing else goes here: a
+# survivor that changes behaviour gets a test (or an issue), never an entry
+# (AGENTS.md, the absolute rule: no allow list).
+exclude_re = []
 
-  # The first run's triage (#269, 2026-10-10). Each line names a whole
-  # function, or one kind of edit in a function where every such edit is
-  # equivalent. Edits a regex cannot isolate from a real mutant stay in the
-  # report, listed in `docs/analysis/simulation/mutation-triage.md`.
-  #
-  # Observability only: a metric, or a read view nothing in the shipped code
-  # decides on (examples, the game and test-only checkers read them).
-  "Acceptor<V>::faulty_repaired",
-  "Replica::chosen_gap",
-  "RegisteredPage::from_reply",
-  "Matchmaking::(effective|history)\\b",
-  "Election<Id, V>::(prior|recovered|promised)\\b",
-  "Proposer<Id, V>::(probe_elapsed|round_column)\\b",
-  "Rounds<Id, V>::all_at\\b",
-  "ReplicaId::(of|is_in)\\b",
-  "AcceptorConfig<Id>::(row_of|admits_read_row|is_well_formed)\\b",
-  "MatchmakerSet::is_well_formed\\b",
-  "impl Fingerprint for Vec<MatchmakerId>",
-  # An assertion's own guard: the edit only switches a check off (or on
-  # where it holds), never a decision.
-  "replace > with (==|<|>=) in Matchmaking::(watermark|disagreements)$",
-  "replace Matchmaking::heard_anyone -> bool with true",
-  # No two matchmakers ever disagree on a ballot's configuration (the
-  # write-once ledger, asserted by the audit): the count is always zero, so
-  # zero is the same answer (#343).
-  "replace Matchmaking::disagreements -> u64 with 0",
-  "replace > with (==|<|>=) in majority_of$",
-  "replace == with != in QuorumSystem::phase[12]_quorum_size$",
-  "delete ! in QuorumSystem::(is_majority|is_phase[12]_quorum_in)$",
-  "replace >= with < in QuorumSystem::read_row$",
-  "replace < with (==|>|<=) in MatchmakerGeneration::next$",
-  "delete ! in Proposer<Id, V>::phase1_won$",
-  # Every caller runs `Replica::advance` right after a learn, and it refolds
-  # first: the learn's own refold guard decides nothing the walk does not.
-  "replace (&&|==|<) with .* in Replica::learn$",
-  # Unreachable by construction: a grid of at least two rows and two
-  # columns makes any row or column a valid quorum (only load moves), and
-  # the drivers name only admitted rows.
-  "replace residue -> usize with [01]$",
-  "replace QuorumSystem::admits_read_row -> bool with true",
-  "replace < with <= in QuorumSystem::admits_read_row$",
-  "replace match guard self.admits_read_row\\(Some\\(row\\)\\) with true in QuorumSystem::read_row$",
-  # Wire hygiene (#344): a refusal of input no honest peer sends. The hunt
-  # runs honest peers only and has no bit flips, so it never reaches the
-  # refusal; `paros-consensus/src/node/tests/wire_hygiene.rs` pins every edit
-  # (a registry page's shape and cursor, an `Accept` replying to a proxy
-  # the deployment lacks, a reply from a stranger matchmaker); a
-  # `cargo mutants` run with those tests as the test catches 32 of the 34.
-  # The other two are equivalent: `>` to `>=` in the cursor leg (a page at
-  # the cursor is taken by `at_cursor` already) and in `next > from_ballot`
-  # (a non-empty page whose keys sit at or above its start and whose cursor
-  # sits above its last key has a cursor above its start).
-  "Matchmaking::accepts\\b",
-  "rank_is_in\\b",
-  "ProxyId::is_in\\b",
-  "replace MatchmakerSet::contains -> bool with true",
-]
+# The judge. cargo-mutants builds the mutated package, then runs the tests of
+# both packages. The coverage gate of consensus-sim (`tests/coverage.rs`) is
+# left out: it is a 20-minute run, and it judges that the walks reach every
+# probe, not what the core does once there.
+test_package = ["paros-consensus", "consensus-sim"]
+test_tool = "nextest"
+additional_cargo_test_args = ["-E", "not binary(coverage)"]
 
-# The hunt is the test: only `paros-sim-runner`'s `mutants` target runs, in
-# release (a debug build runs the simulation many times slower). cargo-mutants'
-# own baseline builds the mutated package (paros-consensus) rather than
-# `test_package`, so `cargo xtask mutants` runs the baseline hunt itself and
-# passes `--baseline skip` with a timeout sized from it.
-test_package = ["paros-sim-runner"]
-features = ["mutants"]
-additional_cargo_test_args = ["--test", "mutants"]
-profile = "release"
+# The `mutants` profile of the workspace `Cargo.toml`: release code with an
+# incremental build, so a mutant builds in seconds and the walks run fast.
+profile = "mutants"
+
+# The baseline builds and tests paros-consensus alone, not consensus-sim, so
+# the timeout that cargo-mutants derives from it is too short for the trace
+# checks (about 70 s on four cores). A test run above this bound is a timeout,
+# and a timeout counts as caught: a mutant that loops for ever is a bug.
+minimum_test_timeout = 300

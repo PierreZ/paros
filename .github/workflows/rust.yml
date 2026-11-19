@@ -134,6 +134,40 @@ jobs:
           nix develop --command cargo nextest run --profile ci --release
           --target-dir target/sancov -p consensus-sim --test coverage --no-capture
 
+  # Mutation testing of the lines a pull request changes in paros-consensus
+  # (`.cargo/mutants.toml`): each mutant of a changed line must be caught by
+  # the core's tests or the simulation. A survivor fails the job: add the test
+  # that sees it in the same pull request. The `Mutants` workflow runs every
+  # mutant of the core each week.
+  mutants:
+    needs: scope
+    if: ${{ github.event_name == 'pull_request' && needs.scope.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Run the mutants of the changed lines
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git diff "$BASE"...HEAD -- crates/lib/paros-consensus/src > pr.diff
+          if [ ! -s pr.diff ]; then
+            echo "The pull request changes no line of paros-consensus/src."
+            exit 0
+          fi
+          nix develop --command cargo mutants -p paros-consensus --in-diff pr.diff -j 2
+      - name: Show the survivors
+        if: failure()
+        run: |
+          for kind in missed timeout; do
+            echo "== $kind"; cat mutants.out/$kind.txt 2>/dev/null || true
+          done
+
   # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
   # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
   # them is a test of the public API's shape as much as of the protocol. They are linted under the
