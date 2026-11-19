@@ -49,6 +49,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/` | #1190 (rework 6.10), done |
 | Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
+| Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
@@ -1413,3 +1414,103 @@ check, so it moves to #1218 (truncation model, part 3)), a retained retry that h
 no retry of a write), a scrub racing a boot (`Rot` is the damage that the scrub missed), a
 faulty entry at a slot that a node learned with no vote (in the code a learned slot always has
 its record), wipes (`multi-paxos/` checks the identity rule), and grids.
+
+### `truncation-reconfig/`: truncation across a reconfiguration onto empty stores, for #1218 (truncation model, part 3)
+
+The model is `truncation/` with a second configuration. A member of the new configuration
+starts with an empty store, and the GC of `node/gc.rs` forgets the old configuration. The
+question: once the old configuration is gone, does each chosen slot stay recoverable over the
+Phase-1 quorums of the new one, when some slots are below the floor of a member and a new member
+holds nothing below its own floor?
+
+The model has these rules of `paros-consensus`:
+
+- **A configuration per ballot.** Ballots below `R` use `C1 = {a1, a2, a3}`, and ballots from `R`
+  up use `C2 = {a2, a3, a4}` (`ColocatedNode::reconfigure`: a reconfiguration is a round
+  change). `a4` starts with floor 0, no vote and nothing learned. It promises the new ballot and
+  takes part from its Phase 2, and it heals by catch-up or by the trim-point jump.
+- **Matchmaking** (`matchmaking.rs`). A candidate registers its ballot before its `Prepare`, and
+  a matchmaker refuses a ballot below one that it registered. The candidate gets `H_b`: the
+  configurations of the registered ballots below its own, from the GC watermark up. Phase 1
+  needs a Phase-1 quorum of each configuration of `H_b` and of its own. Phase 2 uses its own
+  configuration only.
+- **Learning writes a record** (`mark_chosen` in `node/learn.rs`). A node that learns a slot
+  records the chosen value as its accepted record, at the choosing ballot, and raises its
+  promise to that ballot. A held record of the same value at a ballot at or above it stays. A
+  catch-up copies the record of the peer. This is what lets a new member answer Phase 1 for
+  slots that it never voted.
+- **The GC** (`node/gc.rs`, `Collector::covered`). The leader of ballot `b` raises the
+  watermark of the matchmakers to `b`, and every later candidate forgets the configurations
+  below `b`. The code raises it only once a Phase-2 quorum of `C_b` reports a chosen index at
+  or past the election fence `F` (the highest slot that a promise of the win reported). The model
+  raises the watermark in one step: a watermark is effective once a matchmaker quorum acked it,
+  and each later matchmaking quorum meets that quorum.
+- **The floor, the floor guard, the trim-point jump and the retry of a refused candidate** are
+  the ones of `truncation/`.
+
+To keep the state space small, the model leaves out what `truncation/` checks on one
+configuration: each truncation releases every record before its slot (a node that compacts at
+slot `t` moves its floor to `t + 1`, so the fold of `first_seq` is not in the model), and there
+is no faulty entry and no restart.
+
+| Constant | Values |
+|---|---|
+| `GcRule` | `"fence"`: the rule of the code, a Phase-2 quorum of `C_b` holds every slot up to `F`. `"won"`: a control, the leader forgets the old configuration as soon as it wins Phase 1. |
+| `Cover` | `"chosen"`: a member counts toward the fence when it holds each slot up to `F` (it learned the slot, or the slot is below its floor). `"joined"`: a control, a new member counts too, with floor 0 and no record. |
+| `Learners` | The nodes that catch up and jump. |
+
+The invariants are `Agreement`, `LearnedChosen`, `NoFillChosen` and `FloorChosen` of
+`truncation/`, and:
+
+- `RecordChosen`: an accepted record at a chosen slot holds the chosen value, or its ballot is
+  below each ballot that chose the slot. A learn never writes a wrong record.
+- `Recoverable`: for each chosen slot, one configuration that the next candidate must cover (a
+  registered ballot at or above the watermark) has, in each of its Phase-1 quorums, a member
+  that holds a record there or whose floor is above the slot. The candidate needs a quorum of
+  each such configuration, so it meets that member. This is the question of #1218.
+
+Results (`truncation-reconfig/checks.txt`: four acceptors, ballot 1 is `a1`'s, ballot 2 (the
+reconfiguration) is `a3`'s, ballot 3 is `a2`'s, the values `trunc` and `Noop`; `a2`, `a3` and
+`a4` catch up, unless the line says otherwise; the CI set runs in about 2 minutes with 4
+workers):
+
+| Check | Where | Rule | Result |
+|---|---|---|---|
+| `reach_gc` | ci | `NoGc`, a reachability control: the GC forgets `C1` after `C1` chose a slot; two ballots, one slot | violation |
+| `reach_jump` | ci | `NoJoinJump`, a reachability control: the new member jumps over a slot that it never voted; two ballots, one slot | violation |
+| `reach_split` | ci | `NoGcSplit`, a reachability control: the GC forgets `C1` while a member of `C2` compacted and the new member holds nothing below that floor; two ballots, one slot | violation |
+| `reach_late_win` | ci | `NoLateWin`, a reachability control: after the GC, ballot 3 wins Phase 1 over `C2` alone; one slot | violation |
+| `gc_won` | ci | the GC at the win; two ballots, one slot | `Recoverable` violation |
+| `cover_joined` | ci | the new member counts with no record; two ballots, one slot | `Recoverable` violation |
+| `gc_won_fill` | ci | the GC at the win; two slots, no node catches up | `NoFillChosen` violation (1.4 million states, 73 s) |
+| `safety` | ci | the rules of the code; two ballots, one slot | pass (302 thousand states, 20 s) |
+| `cover_joined_fill` | long | the new member counts with no record; two slots, `a3` alone catches up | `NoFillChosen` violation (4.8 million states, 4.5 min) |
+| `three_ballots` | long | the rules of the code; one slot | THREE_BALLOTS |
+| `two_slots` | long | the rules of the code; two ballots | TWO_SLOTS |
+
+The long checks ran once on 2026-11-19 (#1218 (truncation model, part 3)) with 4 workers.
+
+With one slot, a `Noop` never lands on a chosen slot: a candidate whose Phase 1 reports nothing
+has its frontier at its first slot and fills nothing. So the two controls that must find the
+`Noop` run with two slots, and the checks with one slot judge `Recoverable`, the property that
+the `Noop` breaks.
+
+The traces of the controls:
+
+- `gc_won_fill`: `{a1, a3}` choose `trunc` at slot 0 at ballot 1. `a3` opens ballot 2 under
+  `C2` and wins on `{a2, a3}`, a quorum of both `C1` and `C2`. It proposes `trunc` again at
+  slot 0 and, with `GcRule = "won"`, raises the watermark at once. Ballot 2 also puts `trunc`
+  at slot 1, and `a4` votes it. Ballot 3 of `a2` matches with `C2` alone, wins on `{a2, a4}`,
+  hears slot 1 only, and fills slot 0 with a `Noop`: neither `a2` nor `a4` holds slot 0, and `a3`,
+  the one member of `C2` that holds it, is not in the quorum.
+- `cover_joined_fill`: `{a1, a3}` choose `trunc` at slot 0 at ballot 1, and `a3` learns it by a
+  catch-up from `a1`. Ballot 2 of `a3` campaigns from slot 1, so its fence covers slot 0, which
+  `a3` holds. With `Cover = "joined"`, `{a3, a4}` cover the fence although `a4` holds nothing,
+  and the GC forgets `C1`. Ballot 3 of `a2` wins on `{a2, a4}` and fills slot 0 with a `Noop`, as
+  in `gc_won_fill`.
+
+The answer to #1218: with the rule of the code, `Recoverable` holds over the Phase-1 quorums of
+`C2` once `C1` is gone. A member of `C2` counts toward the fence only when it holds each slot
+up to `F`: it learned it (and so holds a record, `mark_chosen`) or jumped above it with
+`TrimmedTo` (and so refuses a campaign from below its floor). Each Phase-1 quorum of `C2` meets
+that Phase-2 quorum. No decision is refuted.
