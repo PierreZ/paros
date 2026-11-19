@@ -59,6 +59,10 @@ Each experiment has one folder for each design, with the same layout as a model,
 - `experiments/segments/`: #1213 (segments in the protocol or in storage). Design A, the segment
   table in the matchmakers (`a/`), against design B, plain Matchmaker Paxos with chunks local to
   each replica and a variant with offload claims in the log (`b/`).
+- `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
+  ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
+  the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
+  and a decree round on disk.
 
 ## The Paxos flavors and their models
 
@@ -855,7 +859,8 @@ never answers blocks Phase 1 (`init_down`), and a wiped member that answers does
 (`init_live`).
 
 Not in the model: the ballot floor of a retry (a ballot above every `Nack`), the matchmaker
-generation that fences a handover, the stop quorum that opens the handover's decree, the
+generation that fences a handover, the stop quorum that opens the handover's decree (it is in
+`experiments/stale-stopped/`, #1229 (a stale `Stopped` reply reuses a decree ballot)), the
 `cell_lost` refusal, and more than three acceptors.
 
 ### `multi-paxos/`: plain Multi-Paxos, for #1185 (rework 1.14)
