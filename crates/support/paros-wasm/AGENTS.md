@@ -58,7 +58,11 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
 - `src/paxos/trace/story.rs` → `Beat`, `Choice`, `Flight`, `NodeState` → what the story mode of
   a page reads (#1146 (recorder for the animated chapters)): a script opens beats with
   `Recorder::beat("one sentence.")` (written next to its actions; a beat with no step is an
-  introduction screen) and ends one with `Recorder::choice(label, run, beat)`, which opens
+  introduction screen), may ask a question before it plays with
+  `Recorder::ask(question, answers, right, why)` and pins the right answer to the world with
+  `Recorder::holds(fact, says)` after the beat's steps (a `holds` that fails stops the trace, so
+  a change of the core cannot leave a wrong answer on the site), and ends one with
+  `Recorder::choice(label, run, beat)`, which opens
   another run of the page at one of its beats (checked when the page is assembled). Every step
   carries the id of its message, the messages on the wire after it (a broadcast shares one
   `fan`), and each lane's typed state with what the step wrote on its disk. Both drivers fill

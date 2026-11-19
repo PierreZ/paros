@@ -10,6 +10,10 @@
 //!   script of the run, next to the actions that it describes. A beat holds
 //!   the steps from the beat's call to the next beat's call. A beat with no
 //!   step is an introduction screen.
+//! - a [`Question`]: what the page asks the reader before a beat plays. The
+//!   reader answers, the beat plays, and the page says why. The right answer
+//!   is a fact of the run: the script pins it to the world with
+//!   [`super::Recorder::holds`].
 //! - a [`Choice`]: at the end of a beat, a label that opens another recorded
 //!   run at one of its beats. The reader decides; nothing runs again.
 //! - a [`Flight`]: one message on the wire after a step. Every message of one
@@ -36,9 +40,30 @@ pub struct Beat {
     /// The step after the last step of the beat: `from == to` for a beat
     /// with no message.
     pub to: usize,
+    /// What the page asks the reader before the beat plays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<Question>,
     /// What the reader can do at the end of the beat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<Choice>,
+}
+
+/// The fewest and the most answers of a question: a question with one answer
+/// asks nothing, and five answers do not fit a phone screen.
+const ANSWERS: std::ops::RangeInclusive<usize> = 2..=4;
+
+/// One question before a beat plays. The reader predicts what the beat
+/// shows; a wrong answer costs nothing, and the beat plays after any answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    /// The question.
+    pub asks: String,
+    /// The answers the reader chooses from, in the order of the script.
+    pub answers: Vec<String>,
+    /// The right answer, from 0.
+    pub right: usize,
+    /// Why it is right: one or two sentences, shown after the beat played.
+    pub why: String,
 }
 
 /// One choice at the end of a beat: open another run of the same page at one
@@ -191,7 +216,59 @@ impl Beats {
             says: says.to_string(),
             from: at,
             to: at,
+            question: None,
             choices: Vec::new(),
+        });
+    }
+
+    /// Ask the reader a question before the open beat plays.
+    ///
+    /// # Panics
+    ///
+    /// When no beat is open, when the beat has a question already, when
+    /// `asks` does not end with a question mark, when `why` does not end
+    /// with a full stop, when the answers are fewer than two or more than
+    /// four, when two answers are the same, or when `right` names no answer.
+    pub(super) fn ask(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) {
+        let open = self
+            .beats
+            .last_mut()
+            .expect("a question opens a beat: open one first");
+        assert!(
+            open.question.is_none(),
+            "a beat asks one question: {asks:?}"
+        );
+        assert!(
+            asks.ends_with('?'),
+            "a question ends with a question mark: {asks:?}"
+        );
+        assert!(
+            why.ends_with('.'),
+            "the reason is a plain sentence: {why:?}"
+        );
+        assert!(
+            ANSWERS.contains(&answers.len()),
+            "a question has two to four answers: {asks:?}"
+        );
+        assert!(
+            right < answers.len(),
+            "the right answer is one of the answers: {asks:?}"
+        );
+        let distinct: BTreeSet<&str> = answers.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            answers.len(),
+            "each answer differs: {asks:?}"
+        );
+        assert!(
+            answers.iter().all(|answer| !answer.trim().is_empty()),
+            "an answer says something: {asks:?}"
+        );
+        open.question = Some(Question {
+            asks: asks.to_string(),
+            answers: answers.iter().map(ToString::to_string).collect(),
+            right,
+            why: why.to_string(),
         });
     }
 
@@ -233,6 +310,13 @@ impl Beats {
         for (beat, end) in beats.iter_mut().zip(ends) {
             assert!(beat.from <= end, "beats are in step order");
             beat.to = end;
+            // A question predicts what the beat shows, so the beat shows
+            // something.
+            assert!(
+                beat.question.is_none() || beat.from < beat.to,
+                "a beat with a question has a step: {:?}",
+                beat.says
+            );
         }
         beats
     }
@@ -299,6 +383,57 @@ mod tests {
             "the introduction beat offers no choice"
         );
         assert_eq!(beats[2].choices[0].run, "down");
+    }
+
+    #[test]
+    fn a_question_belongs_to_the_beat_that_is_open() {
+        let mut beats = Beats::default();
+        beats.open(0, "Three acceptors wait.");
+        beats.open(0, "Two promises are a majority.");
+        beats.ask(
+            "How many promises does the proposer need?",
+            &["One", "Two", "Three"],
+            1,
+            "Two of three is a majority.",
+        );
+        let beats = beats.finish(3);
+        assert!(beats[0].question.is_none(), "the first beat asks nothing");
+        let question = beats[1].question.as_ref().expect("the open beat asks");
+        assert_eq!(question.answers[question.right], "Two");
+    }
+
+    #[test]
+    #[should_panic(expected = "a beat with a question has a step")]
+    fn a_question_needs_a_beat_that_plays() {
+        let mut beats = Beats::default();
+        beats.open(0, "Nothing moves here.");
+        beats.ask("Does it move?", &["Yes", "No"], 1, "No message is sent.");
+        let _ = beats.finish(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "the right answer is one of the answers")]
+    fn the_right_answer_is_an_answer() {
+        let mut beats = Beats::default();
+        beats.open(0, "A beat.");
+        beats.ask("Which one?", &["This", "That"], 2, "Neither.");
+    }
+
+    #[test]
+    #[should_panic(expected = "a beat asks one question")]
+    fn a_beat_asks_one_question() {
+        let mut beats = Beats::default();
+        beats.open(0, "A beat.");
+        beats.ask("Which one?", &["This", "That"], 0, "This one.");
+        beats.ask("And then?", &["This", "That"], 0, "This one.");
+    }
+
+    #[test]
+    #[should_panic(expected = "each answer differs")]
+    fn the_answers_differ() {
+        let mut beats = Beats::default();
+        beats.open(0, "A beat.");
+        beats.ask("Which one?", &["This", "This"], 0, "This one.");
     }
 
     #[test]
