@@ -34,7 +34,7 @@
 (*          function from the ballots to Configs.                            *)
 (*                                                                           *)
 (* Not in the model: matchmaker generations, lost durable state, the         *)
-(* cooperative handoff.                                                      *)
+(* cooperative handoff (it is in `leader-handoff/`).                         *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,

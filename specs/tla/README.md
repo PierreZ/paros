@@ -28,7 +28,7 @@ the rule prevents. A model with no control proves little.
 
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
-`config-register/`, `reads/` and `multi-paxos/`.
+`config-register/`, `reads/`, `multi-paxos/` and `leader-handoff/`.
 
 ## The Paxos flavors and their models
 
@@ -40,7 +40,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 |---|---|---|---|
 | Single-decree Paxos | `decree.rs` | `decree/` | #1186 (rework 1.15), done |
 | Plain Multi-Paxos, with the majority, the partitioned grid and the full grid | `node.rs`, `proposer/`, `acceptor.rs`, `replica.rs`, `membership/` | `multi-paxos/` | #1185 (rework 1.14), done |
-| The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` (to write) | #1187 (rework 2.8) |
+| The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` | #1187 (rework 2.8), done |
 | Matchmaker Paxos | `matchmaking.rs`, `matchmaker.rs`, `collector.rs` | `matchmaker/` | #1200 (TLA+ model Matchmaker Paxos), done |
 | The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/` | #1097 (rework 1.8), done |
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/` and `multi-paxos/` | #1102 (rework 1.13), done |
