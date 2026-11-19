@@ -14,3 +14,7 @@ reads_bypass_hold   pass       ci
 learner_own         pass       ci
 learner_strict      pass       long
 learner_any         pass       long
+grid_full           violation  ci
+grid_full_static    pass       ci
+grid_full_seal      pass       ci
+grid_partitions     pass       long

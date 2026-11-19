@@ -208,6 +208,14 @@ gap, and a Phase-1 quorum inside one grid column. It also shows that the plain l
 for a wiped acceptor: one wipe that votes again as the old acceptor breaks `Agreement`. The table
 of every flavor with its model is in `specs/tla/README.md`.
 
+Matchmaker Paxos is `specs/tla/matchmaker/` (#1200 (TLA+ model Matchmaker Paxos)): `Agreement`
+and `Electable` for single-decree Matchmaker Paxos with matchmaking, Phase 1 over every
+configuration of `H_b`, a reconfiguration as a round change, GC and the retirement of a removed
+acceptor. Each rule has a control that fails: Phase 1 in `C_b` alone or at a majority of the union
+of `H_b`, a matchmaker that registers below a ballot it holds, a history from one answer, a Phase 2
+to a configuration the ballot did not register, GC as soon as Phase 1 is done, a removed acceptor
+that shuts down at once, and a floor that counts as effective at one ack.
+
 ### The checks beside the simulation
 
 Decided on 2026-11-17, from the article "How the Claude Code team thinks about verification"

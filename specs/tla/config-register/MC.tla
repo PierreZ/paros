@@ -1,6 +1,6 @@
 --------------------------------- MODULE MC ---------------------------------
 (* The constants that a TLC configuration file cannot write. *)
-EXTENDS ConfigRegister, TLC
+EXTENDS ConfigRegister, Grid, TLC
 
 Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 
@@ -24,6 +24,24 @@ MemPQ == [c \in PA |-> ColsPQ[c][1] \cup ColsPQ[c][2]]
 Q1PQ == [c \in PA |-> {Q \in SUBSET MemPQ[c] :
                          \A i \in 1..2 : 2 * Cardinality(Q \cap ColsPQ[c][i]) > 3}]
 Q2PQ == [c \in PA |-> Maj(ColsPQ[c][1])]
+
+\* A full grid of 2 x 2 (`QuorumSystem::grid(2, 2)`, the full grid of
+\* Compartmentalized Paxos): G over a1..a4, then H, where a5 replaces a1.
+\* The layout is row-major over the sorted members, so the move also moves
+\* a2, a3 and a4 to other cells: G has the columns {a1, a3} and {a2, a4}, H
+\* has {a2, a4} and {a3, a5}. Phase 2 takes a whole column, any column;
+\* Phase 1 one acceptor of every column.
+GH == {"G", "H"}
+SeqGH == [c \in GH |-> IF c = "G" THEN <<"a1", "a2", "a3", "a4">> ELSE <<"a2", "a3", "a4", "a5">>]
+MemGH == [c \in GH |-> GridMembers(SeqGH[c])]
+Q1GH == [c \in GH |-> GridQ1(SeqGH[c], 2, 2, 0)]
+Q2GH == [c \in GH |-> GridQ2(SeqGH[c], 2, 2)]
+
+\* The control of the grid: Phase 2 takes one acceptor of a column
+\* (acks = 1), and Phase 1 still one acceptor of each column, where the
+\* grid needs two (`grid_slack` of `specs/tla/grid/`).
+Q1GHSlack == [c \in GH |-> GridQ1(SeqGH[c], 2, 1, 1)]
+Q2GHOne == [c \in GH |-> GridQ2(SeqGH[c], 2, 1)]
 
 \* Matchmaker hosts.
 HostOne == [m \in {"m1"} |-> "a1"]

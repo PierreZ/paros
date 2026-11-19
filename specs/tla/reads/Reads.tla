@@ -31,12 +31,31 @@
 (*   Option (a), the leader campaigns above the promise, adds no rule to the *)
 (*   model: it is one more ordinary campaign.                                *)
 (*                                                                           *)
-(* Not in the model: flexible and grid quorums (a quorum is a majority), GC  *)
-(* watermarks, matchmaker generations, the replica tier, a read that expires.*)
+(* Quorums : the quorum system is a parameter (#1102 (rework 1.13)). Each   *)
+(*           configuration c has its Phase-1 quorums Q1s[c], its Phase-2     *)
+(*           quorums Q2s[c], and the sets of acceptors that a reader asks,   *)
+(*           Targets[c]: the whole membership under a majority and on the    *)
+(*           partitions, one row on the full grid (`row_of`). A read         *)
+(*           completes on a Phase-1 quorum of the answers. `MC.tla` builds   *)
+(*           the grids with `Grid.tla` (`specs/tla/grid/`).                  *)
+(* Seal  : "quorum" = Phase 1 takes a Phase-1 quorum of each prior           *)
+(*                    configuration (the code).                              *)
+(*         "reads"  = a candidate rule, not in the code: Phase 1 also takes  *)
+(*                    one promise in each read target of each prior          *)
+(*                    configuration, so each row hears of the campaign.      *)
+(*                                                                           *)
+(* Not in the model: GC watermarks, matchmaker generations, the replica      *)
+(* tier, a read that expires.                                                *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
-          Readers, Basis, AckBallot, Hold, Learner
+          Readers, Basis, AckBallot, Hold, Learner, Q1s, Q2s, Targets, Seal
+
+ASSUME Seal \in {"quorum", "reads"}
+\* Paxos safety rests on this: every Phase-1 quorum meets every Phase-2 quorum.
+ASSUME \A c \in Configs : \A P \in Q1s[c], C \in Q2s[c] : P \cap C # {}
+\* A reader asks a set that can hold a Phase-1 quorum.
+ASSUME \A c \in Configs : \A T \in Targets[c] : \E P \in Q1s[c] : P \subseteq T
 
 Ballots == 1..NB
 Free    == "free"
@@ -61,9 +80,7 @@ vars == <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, pr
           acked, basis, rd, own>>
 
 NoRead == [state |-> "none", node |-> CHOOSE n \in Readers : TRUE, b |-> 0, fence |-> 0,
-           snap |-> {}, answers |-> {}, index |-> 0]
-
-Quorums(c) == {Q \in SUBSET c : 2 * Cardinality(Q) > Cardinality(c)}
+           snap |-> {}, to |-> {}, answers |-> {}, index |-> 0]
 
 \* Each ballot has one configuration, selected by its owner. The selection is
 \* local to the owner, thus the model makes it in the initial state. A ballot
@@ -116,10 +133,14 @@ Promise(a, b) ==
           {<<a, b, {<<w[2], w[3], w[4]>> : w \in {x \in votes : x[1] = a}}>>}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, votes, safe, proposals, acked, basis, rd, own>>
 
-\* A promise quorum of EVERY prior configuration.
+PromisedAt(b) == {p[1] : p \in {q \in promises : q[2] = b}}
+
+\* A promise quorum of EVERY prior configuration. With Seal = "reads", also
+\* one promise in each read target of each.
 Covered(b) ==
     \A c \in PriorCfgs(b) :
-        \E Q \in Quorums(c) : \A a \in Q : \E p \in promises : p[1] = a /\ p[2] = b
+        /\ \E Q \in Q1s[c] : Q \subseteq PromisedAt(b)
+        /\ Seal = "reads" => \A T \in Targets[c] : T \cap PromisedAt(b) # {}
 
 Reports(b) == UNION {p[3] : p \in {q \in promises : q[2] = b}}
 
@@ -220,7 +241,7 @@ Below(n, b) ==
 Ack(b, s) ==
     /\ status[b] = "leading"
     /\ s \notin acked
-    /\ \E v \in Values : \E Q \in Quorums(cfgOf[b]) : \A a \in Q : <<a, s, b, v>> \in votes
+    /\ \E v \in Values : \E Q \in Q2s[cfgOf[b]] : \A a \in Q : <<a, s, b, v>> \in votes
     /\ Hold => Covered(b)
     /\ acked' = acked \cup {s}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
@@ -243,13 +264,15 @@ LearnBasis(n, b) ==
 
 BasisOf(n) == IF Basis = "won" THEN basis[n] ELSE <<promised[n], 0>>
 
-\* Reader n opens a read. A node whose promise is above its basis opens none.
+\* Reader n opens a read and asks one read target of the basis configuration.
+\* A node whose promise is above its basis opens none.
 ReadStart(n) ==
     /\ rd.state = "none"
     /\ BasisOf(n)[1] > 0
     /\ Below(n, BasisOf(n)[1])
-    /\ rd' = [state |-> "open", node |-> n, b |-> BasisOf(n)[1], fence |-> BasisOf(n)[2],
-              snap |-> acked, answers |-> {}, index |-> 0]
+    /\ \E T \in Targets[cfgOf[BasisOf(n)[1]]] :
+          rd' = [state |-> "open", node |-> n, b |-> BasisOf(n)[1], fence |-> BasisOf(n)[2],
+                 snap |-> acked, to |-> T, answers |-> {}, index |-> 0]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
                    proposals, acked, basis, own>>
 
@@ -259,7 +282,7 @@ Watermark(a) == Max({w[2] : w \in {x \in votes : x[1] = a}} \cup {0})
 \* answer above the basis ends the read.
 PreReadAck(a) ==
     /\ rd.state = "open"
-    /\ a \in cfgOf[rd.b]
+    /\ a \in rd.to
     /\ ~ \E x \in rd.answers : x[1] = a
     /\ rd' = IF AckBallot /\ promised[a] > rd.b
              THEN NoRead
@@ -281,10 +304,10 @@ ReadServe ==
     /\ rd.state = "open"
     /\ BasisOf(rd.node)[1] = rd.b
     /\ Below(rd.node, rd.b)
-    /\ {x[1] : x \in rd.answers} \in Quorums(cfgOf[rd.b])
+    /\ \E Q \in Q1s[cfgOf[rd.b]] : Q \subseteq {x[1] : x \in rd.answers}
     /\ LET i == Max({x[2] : x \in rd.answers} \cup {rd.fence})
        IN  /\ \A s \in Slots : s <= i =>
-                  \E v \in Values : \E b \in Ballots : \E Q \in Quorums(cfgOf[b]) :
+                  \E v \in Values : \E b \in Ballots : \E Q \in Q2s[cfgOf[b]] :
                       \A a \in Q : <<a, s, b, v>> \in votes
            /\ rd' = [rd EXCEPT !.state = "done", !.index = i]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
@@ -308,7 +331,7 @@ Spec == Init /\ [][Next]_vars
 
 Chosen(s, v) ==
     \E b \in Ballots :
-        \E Q \in Quorums(cfgOf[b]) : \A a \in Q : <<a, s, b, v>> \in votes
+        \E Q \in Q2s[cfgOf[b]] : \A a \in Q : <<a, s, b, v>> \in votes
 
 \* Safety: one value for each slot.
 Agreement == \A s \in Slots : \A v, w \in Values : (Chosen(s, v) /\ Chosen(s, w)) => v = w

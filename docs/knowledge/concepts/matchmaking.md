@@ -115,6 +115,7 @@ Two facts paros asserts make this hold:
 | The registry | `paros-consensus/src/matchmaker.rs`, `matchmaker/state.rs`: `Matchmaker`, `MatchmakerHardState` |
 | The driver | `paros-roles/src/matchmaker.rs`: `run_matchmaker` |
 | The analysis | `docs/analysis/consensus/matchmaker-interaction-verification.md` |
+| The TLA+ model | `specs/tla/matchmaker/` (#1200): the phase, `H_b` above the maximum watermark, Phase 1 over every configuration, each rule with a control |
 
 **Sim gates and oracles** (`paros-sim/src/audit.rs` and `audit/`):
 

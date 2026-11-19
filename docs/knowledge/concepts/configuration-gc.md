@@ -186,6 +186,7 @@ A node that stopped at the release instead left every later campaign short of a 
 | The node's answer | `paros-roles/src/node/operator.rs`: `retire_refusal` |
 | The operator in a cell | `paros-coordinator/src/tenant/moves.rs`: step 3 of a move retires the old member with the watermark as evidence |
 | The analysis | `docs/analysis/consensus/matchmaker-gc-and-generations.md` |
+| The TLA+ model | `specs/tla/matchmaker/` (#1200): scenarios 1 and 2, the effective floor and the retirement above it, with the controls `gc_early`, `retire_one_ack` and `retire_removed` |
 
 **Sim gates and oracles** (`paros-sim/src/audit/matchmaking.rs` unless named):
 
