@@ -41,7 +41,10 @@ jobs:
       - name: List the folders of specs/tla
         id: list
         run: |
-          folders=$(for m in specs/tla/*/checks.txt; do basename "$(dirname "$m")"; done \
+          # The models of the plan, then the experiments (specs/tla/experiments/),
+          # each named by its path under specs/tla/.
+          folders=$(for m in specs/tla/*/checks.txt specs/tla/experiments/*/*/checks.txt; do
+              [ -f "$m" ] && dirname "${m#specs/tla/}"; done \
             | jq -R . | jq -sc .)
           test "$folders" != "[]"
           echo "folders=$folders" >>"$GITHUB_OUTPUT"

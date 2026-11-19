@@ -48,6 +48,18 @@ uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked in
 `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and
 `proxy-leader/`.
 
+## Experiments
+
+`specs/tla/experiments/` holds models that compare candidate designs before a decision. They are
+not models of the plan, and no rule of `paros-consensus` comes from them until Pierre decides.
+Each experiment has one folder for each design, with the same layout as a model, and a
+`README.md` with the report. `scripts/check-tla.sh` runs an experiment only when it is named
+(`scripts/check-tla.sh experiments/segments/a`); CI runs a job for each experiment folder too.
+
+- `experiments/segments/`: #1213 (segments in the protocol or in storage). Design A, the segment
+  table in the matchmakers (`a/`), against design B, plain Matchmaker Paxos with chunks local to
+  each replica and a variant with offload claims in the log (`b/`).
+
 ## The Paxos flavors and their models
 
 Each Paxos flavor that `paros-consensus` builds has a TLA+ model, and a new flavor gets its model

@@ -9,8 +9,12 @@
 #   nix develop .#tla --command scripts/check-tla.sh reads    # one folder
 #
 # Each argument that is not `--all` names a folder of specs/tla/; with no
-# folder, every folder runs. CI runs one job for each folder. A violation in an
-# initial state counts as a violation too (`grid/` checks constants only).
+# folder, every folder of a model of the plan runs. An experiment of
+# specs/tla/experiments/ runs only when it is named, for example
+# `scripts/check-tla.sh experiments/segments/a`. CI runs one job for each
+# folder, the experiments too. A violation in an initial state counts as a
+# violation too (`grid/` checks constants only), and so does a violation of an
+# action property (`[][A]_vars`).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 all=false
@@ -47,7 +51,7 @@ for dir in "${dirs[@]}"; do
       -config "$name.cfg" MC.tla) >"$log" 2>&1 || true
     if grep -q "Model checking completed. No error has been found." "$log"; then
       got=pass
-    elif grep -qE "Error: (Invariant .* is violated(\.| by the initial state)|Temporal properties were violated\.)" "$log"; then
+    elif grep -qE "Error: ((Invariant|Action property) .* is violated(\.| by the initial state)|Temporal properties were violated\.)" "$log"; then
       got=violation
     else
       got=error
