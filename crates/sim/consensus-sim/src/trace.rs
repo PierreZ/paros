@@ -16,8 +16,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-pub use moonpool_tla::{Rejection, Trace, Verdict};
-use moonpool_tla::{TraceCheck, Value};
+use moonpool_tla::Value;
+pub use moonpool_tla::{Rejection, Trace, TraceCheck, Verdict};
 use paros_consensus::Ballot;
 
 /// The folder of the TLA+ models, from the root of the workspace.
