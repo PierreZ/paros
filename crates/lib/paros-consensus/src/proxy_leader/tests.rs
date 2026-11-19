@@ -105,7 +105,10 @@ fn a_delegated_round_is_fanned_out_folded_and_committed() {
     assert_eq!(proxy.counters().decided, 1);
     // The closed round is remembered: a late re-delegation is ignored.
     proxy.step(delegation(1, 0, ballot(3, 0), 7, cmd(7)));
-    assert!(drain(&mut proxy).is_empty());
+    assert!(
+        drain(&mut proxy).is_empty(),
+        "a late re-delegation of a closed round is ignored"
+    );
     assert_eq!(proxy.counters().ignored, 1);
 }
 

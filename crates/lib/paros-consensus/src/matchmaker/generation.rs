@@ -264,8 +264,7 @@ impl Matchmaker {
             .decree
             .vote
             .clone()
-            .map(|vote| BTreeMap::from([(DECREE_SLOT, vote)]))
-            .unwrap_or_default();
+            .map_or_default(|vote| BTreeMap::from([(DECREE_SLOT, vote)]));
         let acceptor = Acceptor::new(
             self.hard_state.decree.promised,
             records,

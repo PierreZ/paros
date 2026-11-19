@@ -20,9 +20,18 @@ fn records(n: usize) -> Vec<Vec<u8>> {
 #[test]
 fn writes_merge_until_a_tick() {
     let mut b = Batcher::new(limits(16, 1024, 16));
-    assert!(b.push(journal(1), 1, records(2)).is_empty());
-    assert!(b.push(journal(1), 2, records(3)).is_empty());
-    assert!(b.push(journal(2), 3, records(1)).is_empty());
+    assert!(
+        b.push(journal(1), 1, records(2)).is_empty(),
+        "a write under the limits waits in its lane"
+    );
+    assert!(
+        b.push(journal(1), 2, records(3)).is_empty(),
+        "a second write under the limits joins its lane"
+    );
+    assert!(
+        b.push(journal(2), 3, records(1)).is_empty(),
+        "a write for another journal opens its own lane"
+    );
     assert_eq!(b.pending(), 3);
     let out = b.tick();
     assert_eq!(out.len(), 2, "one batch per journal, never mixed");
@@ -37,20 +46,29 @@ fn writes_merge_until_a_tick() {
 #[test]
 fn a_full_lane_flushes_and_the_limits_hold() {
     let mut b = Batcher::new(limits(4, 1024, 3));
-    assert!(b.push(journal(1), 1, records(2)).is_empty());
+    assert!(
+        b.push(journal(1), 1, records(2)).is_empty(),
+        "a lane below the flush bound waits"
+    );
     let out = b.push(journal(1), 2, records(2));
     assert_eq!(out.len(), 1, "the flush bound is reached");
     assert_eq!(out[0].records.len(), 4);
     // Past the record limit: the lane goes first, the write starts a new one.
     let mut b = Batcher::new(limits(4, 1024, 4));
-    assert!(b.push(journal(1), 1, records(3)).is_empty());
+    assert!(
+        b.push(journal(1), 1, records(3)).is_empty(),
+        "a lane below the record limit waits"
+    );
     let out = b.push(journal(1), 2, records(2));
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].writes, vec![(1, 3)]);
     assert_eq!(b.pending(), 1);
     // Past the byte limit likewise.
     let mut b = Batcher::new(limits(16, 6, 16));
-    assert!(b.push(journal(1), 1, records(2)).is_empty());
+    assert!(
+        b.push(journal(1), 1, records(2)).is_empty(),
+        "a lane below the byte limit waits"
+    );
     let out = b.push(journal(1), 2, records(2));
     assert_eq!(out[0].writes, vec![(1, 2)]);
 }
@@ -58,7 +76,10 @@ fn a_full_lane_flushes_and_the_limits_hold() {
 #[test]
 fn empty_and_oversized_writes_go_alone_after_their_lane() {
     let mut b = Batcher::new(limits(4, 1024, 4));
-    assert!(b.push(journal(1), 1, records(1)).is_empty());
+    assert!(
+        b.push(journal(1), 1, records(1)).is_empty(),
+        "a small write waits in its lane"
+    );
     let out = b.push(journal(1), 2, Vec::new());
     assert_eq!(out.len(), 2);
     assert_eq!(out[0].writes, vec![(1, 1)]);

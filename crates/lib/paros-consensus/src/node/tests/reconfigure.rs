@@ -165,7 +165,10 @@ fn a_reconfiguration_refused_by_a_quorum_as_naming_a_retired_node_is_abandoned()
         panic!("the reconfiguration starts");
     };
     let requests = drain_match_requests(&mut nodes[0]);
-    assert!(!requests.is_empty());
+    assert!(
+        !requests.is_empty(),
+        "the reconfiguration sends match requests"
+    );
     let set = nodes[0].matchmaker_set().cloned().expect("a set");
     let refuse = |node: &mut ColocatedNode, mm: u64| {
         node.on_match_reply(MatchReply {

@@ -1,4 +1,3 @@
-#[allow(clippy::wildcard_imports)]
 use super::*;
 
 #[test]

@@ -86,7 +86,10 @@ fn the_resend_page_is_fair_and_dies_with_the_tally() {
     assert_eq!(rounds.by_slot().len(), 2);
     rounds.clear();
     assert!(rounds.is_empty());
-    assert!(rounds.resend_page(RESEND_BATCH).is_empty());
+    assert!(
+        rounds.resend_page(RESEND_BATCH).is_empty(),
+        "a cleared tally resends nothing"
+    );
 }
 
 /// A delegated round is remembered, never counted and never decided
@@ -114,13 +117,19 @@ fn a_delegated_round_is_the_proxys_until_taken_back() {
     );
     assert!(rounds.decided(Slot(3), &config).is_none());
     assert!(rounds.is_open_at(Slot(3), ballot(1, 0)));
-    assert!(rounds.stalled_delegations(1).is_empty());
-    assert!(rounds.stalled(1).is_empty());
+    assert!(
+        rounds.stalled_delegations(1).is_empty(),
+        "a fresh delegation is not stalled"
+    );
+    assert!(rounds.stalled(1).is_empty(), "a fresh round is not stalled");
     let page = rounds.resend_page(RESEND_BATCH);
     assert_eq!(page[0].proxy, Some(ProxyId(1)));
     assert_eq!(rounds.by_slot()[&Slot(3)].resends(), 1);
     assert_eq!(rounds.stalled_delegations(1), vec![Slot(3)]);
-    assert!(rounds.stalled_delegations(2).is_empty());
+    assert!(
+        rounds.stalled_delegations(2).is_empty(),
+        "one resend is below a stall of two"
+    );
     assert_eq!(rounds.stalled(1), vec![Slot(3)]);
     assert!(rounds.take_back(Slot(3), Some(NodeId(0))));
     assert!(

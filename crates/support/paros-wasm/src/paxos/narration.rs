@@ -272,11 +272,18 @@ impl NodeSnapshot {
 /// The first line of a delivery: what arrived, and what the node knew when it
 /// did. The rest of the story is the diff.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> NarrationEvent {
+    let text = phase1_receipt(to, message, before)
+        .or_else(|| phase2_receipt(to, message, before))
+        .unwrap_or_else(|| other_receipt(to, message, before));
+    say(NarrationKind::Info, text)
+}
+
+/// The receipt of a Phase-1 message; `None` for every other one.
+fn phase1_receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> Option<String> {
     let node = who(to);
     let p = show_ballot(before.promised);
-    let text = match message {
+    Some(match message {
         Message::Prepare {
             ballot, from_slot, ..
         } => format!(
@@ -298,6 +305,15 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             from.0,
             many(accepted.len(), "accepted value")
         ),
+        _ => return None,
+    })
+}
+
+/// The receipt of a Phase-2 message; `None` for every other one.
+fn phase2_receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> Option<String> {
+    let node = who(to);
+    let p = show_ballot(before.promised);
+    Some(match message {
         Message::Accept {
             ballot,
             slot,
@@ -372,6 +388,15 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
                 show_ballot(*ballot)
             )
         }
+        _ => return None,
+    })
+}
+
+/// The receipt of a heartbeat, catch-up, handoff or read message.
+fn other_receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> String {
+    let node = who(to);
+    let p = show_ballot(before.promised);
+    match message {
         Message::Heartbeat {
             from,
             ballot,
@@ -440,8 +465,7 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             at(*watermark)
         ),
         _ => format!("{node} receives a message."),
-    };
-    say(NarrationKind::Info, text)
+    }
 }
 
 // ---- what the node did about it ---------------------------------------------
@@ -449,102 +473,88 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
 /// Every message a batch put on the wire, as the narration reads them.
 pub(crate) type Sent = [(NodeId, Message)];
 
-/// The story of one call into a node: the diff of its role accessors, plus the
-/// messages its batches sent.
-///
-/// Nothing here is authored per level and nothing is a guess: a sentence is
-/// emitted only when the corresponding accessor actually moved, or the
-/// corresponding message actually left.
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub(crate) fn describe(
-    id: NodeId,
+/// What a change of role means: a candidate, a leader (elected, licensed by
+/// the matchmakers, or handed the ballot), or a follower again.
+fn role_change(
+    node: &str,
     before: &NodeSnapshot,
     after: &NodeSnapshot,
     sent: &Sent,
-    system: QuorumSystem,
-    members: usize,
-) -> Vec<NarrationEvent> {
-    let mut out = Vec::new();
-    let node = who(id);
-
-    if before.alive && !after.alive {
-        out.push(say(
-            NarrationKind::Crash,
-            format!(
-                "{node} stops here, inside the batch. Only the part of the batch that the \
-                 durability seam let through survives."
-            ),
-        ));
-    }
-
-    // ---- role -------------------------------------------------------------
+) -> Option<NarrationEvent> {
     // A Prepare that leaves in the same step the node becomes leader cannot
     // have been answered yet: Phase 1 closed before any Promise, which only
     // the matchmakers can license (an empty history above the watermark).
     let prepared_now = sent
         .iter()
         .any(|(_, m)| matches!(m, Message::Prepare { ballot, .. } if *ballot == after.ballot));
-    if before.role != after.role
-        && let Some(role) = after.role
-    {
-        let b = show_ballot(after.ballot);
-        out.push(match role {
-            NodeRole::Candidate => say(
-                NarrationKind::Election,
-                format!("{node} becomes a candidate at ballot {b}: it wants the whole log suffix."),
+    if before.role == after.role {
+        return None;
+    }
+    let role = after.role?;
+    let b = show_ballot(after.ballot);
+    Some(match role {
+        NodeRole::Candidate => say(
+            NarrationKind::Election,
+            format!("{node} becomes a candidate at ballot {b}: it wants the whole log suffix."),
+        ),
+        NodeRole::Leader => match after.origin {
+            LeadershipOrigin::Handoff { from } => say(
+                NarrationKind::Leader,
+                format!(
+                    "{node} takes ballot {b} over from node {}. It runs no Phase 1 of its \
+                     own. Node {} already holds the promises for {b}, and it told {node} \
+                     where the frontier is and what sits below it. That is the gain: a \
+                     leader change without a round trip.",
+                    from.0, from.0
+                ),
             ),
-            NodeRole::Leader => match after.origin {
-                LeadershipOrigin::Handoff { from } => say(
-                    NarrationKind::Leader,
-                    format!(
-                        "{node} takes ballot {b} over from node {}. It runs no Phase 1 of its \
-                         own. Node {} already holds the promises for {b}, and it told {node} \
-                         where the frontier is and what sits below it. That is the gain: a \
-                         leader change without a round trip.",
-                        from.0, from.0
-                    ),
+            LeadershipOrigin::Elected if prepared_now => say(
+                NarrationKind::Leader,
+                format!(
+                    "{node} is the leader at ballot {b} before any Promise arrives. The \
+                     matchmakers reported no earlier configuration, so no earlier ballot \
+                     could choose a value. Phase 1 has nothing to recover, and {node} may \
+                     run Phase 2 now. Its Prepare still goes out, so the acceptors fence \
+                     out every ballot below {b}."
                 ),
-                LeadershipOrigin::Elected if prepared_now => say(
-                    NarrationKind::Leader,
-                    format!(
-                        "{node} is the leader at ballot {b} before any Promise arrives. The \
-                         matchmakers reported no earlier configuration, so no earlier ballot \
-                         could choose a value. Phase 1 has nothing to recover, and {node} may \
-                         run Phase 2 now. Its Prepare still goes out, so the acceptors fence \
-                         out every ballot below {b}."
-                    ),
+            ),
+            LeadershipOrigin::Elected => say(
+                NarrationKind::Leader,
+                format!(
+                    "{node} is the leader at ballot {b}. A promise quorum answered its \
+                     Prepare. No ballot below {b} can decide anything now, and {node} may \
+                     run Phase 2 alone."
                 ),
-                LeadershipOrigin::Elected => say(
-                    NarrationKind::Leader,
+            ),
+        },
+        NodeRole::Follower => say(
+            NarrationKind::Election,
+            match before.origin {
+                LeadershipOrigin::Handoff { .. } if before.role == Some(NodeRole::Leader) => {
                     format!(
-                        "{node} is the leader at ballot {b}. A promise quorum answered its \
-                         Prepare. No ballot below {b} can decide anything now, and {node} may \
-                         run Phase 2 alone."
-                    ),
+                        "{node} gives up the leadership it was handed. It skipped Phase 1, \
+                         so it never recovered the slots below the frontier it inherited. It \
+                         waited long enough for those slots to arrive by ordinary \
+                         replication. An election runs Phase 1, and that is the fallback."
+                    )
+                }
+                _ => format!(
+                    "{node} becomes a follower again. Its rounds are volatile, so they go \
+                     with the leadership. Nobody re-sends what it had in flight."
                 ),
             },
-            NodeRole::Follower => say(
-                NarrationKind::Election,
-                match before.origin {
-                    LeadershipOrigin::Handoff { .. } if before.role == Some(NodeRole::Leader) => {
-                        format!(
-                            "{node} gives up the leadership it was handed. It skipped Phase 1, \
-                             so it never recovered the slots below the frontier it inherited. It \
-                             waited long enough for those slots to arrive by ordinary \
-                             replication. An election runs Phase 1, and that is the fallback."
-                        )
-                    }
-                    _ => format!(
-                        "{node} becomes a follower again. Its rounds are volatile, so they go \
-                         with the leadership. Nobody re-sends what it had in flight."
-                    ),
-                },
-            ),
-        });
-    }
+        ),
+    })
+}
 
-    // ---- the acceptor's two writes ----------------------------------------
+/// The acceptor's two writes: a raised promise, and each record it wrote.
+fn acceptor_writes(
+    node: &str,
+    before: &NodeSnapshot,
+    after: &NodeSnapshot,
+    sent: &Sent,
+    out: &mut Vec<NarrationEvent>,
+) {
     if after.promised > before.promised {
         let reported = sent.iter().find_map(|(_, m)| match m {
             Message::Promise { accepted, .. } => Some(accepted.len()),
@@ -598,6 +608,38 @@ pub(crate) fn describe(
         };
         out.push(say(NarrationKind::Accept, text));
     }
+}
+
+/// The story of one call into a node: the diff of its role accessors, plus the
+/// messages its batches sent.
+///
+/// Nothing here is authored per level and nothing is a guess: a sentence is
+/// emitted only when the corresponding accessor actually moved, or the
+/// corresponding message actually left.
+#[must_use]
+pub(crate) fn describe(
+    id: NodeId,
+    before: &NodeSnapshot,
+    after: &NodeSnapshot,
+    sent: &Sent,
+    system: QuorumSystem,
+    members: usize,
+) -> Vec<NarrationEvent> {
+    let mut out = Vec::new();
+    let node = who(id);
+
+    if before.alive && !after.alive {
+        out.push(say(
+            NarrationKind::Crash,
+            format!(
+                "{node} stops here, inside the batch. Only the part of the batch that the \
+                 durability seam let through survives."
+            ),
+        ));
+    }
+
+    out.extend(role_change(&node, before, after, sent));
+    acceptor_writes(&node, before, after, sent, &mut out);
 
     // ---- what it sent ------------------------------------------------------
     out.extend(describe_sent(id, after, sent, system));
@@ -688,55 +730,34 @@ pub(crate) fn describe(
     out
 }
 
-/// The messages the batches put on the wire, grouped by what they are.
-#[allow(clippy::too_many_lines)]
-fn describe_sent(
-    id: NodeId,
-    after: &NodeSnapshot,
-    sent: &Sent,
-    system: QuorumSystem,
-) -> Vec<NarrationEvent> {
-    let mut out = Vec::new();
-    let node = who(id);
-
-    if let Some((ballot, from_slot)) = sent.iter().find_map(|(_, m)| match m {
+/// A campaign: the Prepares the batches sent, if any.
+fn sent_prepares(node: &str, sent: &Sent) -> Option<NarrationEvent> {
+    let (ballot, from_slot) = sent.iter().find_map(|(_, m)| match m {
         Message::Prepare {
             ballot, from_slot, ..
         } => Some((*ballot, *from_slot)),
         _ => None,
-    }) {
-        let peers = sent
-            .iter()
-            .filter(|(_, m)| matches!(m, Message::Prepare { .. }))
-            .count();
-        out.push(say(
-            NarrationKind::Election,
-            format!(
-                "{node} campaigns at ballot {}. It sends one Prepare to {}, and it claims every \
-                 slot from {} at once. Phase 1 asks about no value. It asks what the acceptors \
-                 have already accepted.",
-                show_ballot(ballot),
-                many(peers, "peer"),
-                from_slot.0
-            ),
-        ));
-    }
+    })?;
+    let peers = sent
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::Prepare { .. }))
+        .count();
+    Some(say(
+        NarrationKind::Election,
+        format!(
+            "{node} campaigns at ballot {}. It sends one Prepare to {}, and it claims every \
+             slot from {} at once. Phase 1 asks about no value. It asks what the acceptors \
+             have already accepted.",
+            show_ballot(ballot),
+            many(peers, "peer"),
+            from_slot.0
+        ),
+    ))
+}
 
-    if let Some(ballot) = sent.iter().find_map(|(_, m)| match m {
-        Message::Nack { ballot, .. } => Some(*ballot),
-        _ => None,
-    }) {
-        out.push(say(
-            NarrationKind::Nack,
-            format!(
-                "{node} refuses ballot {}. It has promised {}, and a promise is the only fence \
-                 Paxos has.",
-                show_ballot(ballot),
-                show_ballot(after.promised)
-            ),
-        ));
-    }
-
+/// The Accepts the batches sent, one sentence per slot: to a column of a grid,
+/// a Noop that fills a hole, or a value.
+fn sent_accepts(node: &str, sent: &Sent, system: QuorumSystem, out: &mut Vec<NarrationEvent>) {
     let accepts: BTreeMap<Slot, (Ballot, Command, usize)> =
         sent.iter().fold(BTreeMap::new(), |mut acc, (_, m)| {
             if let Message::Accept {
@@ -803,6 +824,36 @@ fn describe_sent(
             },
         ));
     }
+}
+
+/// The messages the batches put on the wire, grouped by what they are.
+fn describe_sent(
+    id: NodeId,
+    after: &NodeSnapshot,
+    sent: &Sent,
+    system: QuorumSystem,
+) -> Vec<NarrationEvent> {
+    let mut out = Vec::new();
+    let node = who(id);
+
+    out.extend(sent_prepares(&node, sent));
+
+    if let Some(ballot) = sent.iter().find_map(|(_, m)| match m {
+        Message::Nack { ballot, .. } => Some(*ballot),
+        _ => None,
+    }) {
+        out.push(say(
+            NarrationKind::Nack,
+            format!(
+                "{node} refuses ballot {}. It has promised {}, and a promise is the only fence \
+                 Paxos has.",
+                show_ballot(ballot),
+                show_ballot(after.promised)
+            ),
+        ));
+    }
+
+    sent_accepts(&node, sent, system, &mut out);
 
     if sent
         .iter()

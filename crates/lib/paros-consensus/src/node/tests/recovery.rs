@@ -529,7 +529,10 @@ fn a_scrub_repair_without_a_readable_record_writes_nothing() {
     );
     assert_eq!(n.repair_record(Slot(9)), None, "a slot never accepted");
     assert_eq!(n.repair_counters().repaired, 0);
-    assert!(drain_writes(&mut n).is_empty());
+    assert!(
+        drain_writes(&mut n).is_empty(),
+        "a repair of a slot never accepted writes nothing"
+    );
     assert_eq!(
         n.acceptor().faulty().len(),
         1,

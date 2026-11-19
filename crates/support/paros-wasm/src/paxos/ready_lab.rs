@@ -582,7 +582,7 @@ mod tests {
         .expect("a write");
         let step = lab.view().last.expect("ran");
         assert!(step.answer.expect("an answer").starts_with("NotLeader"));
-        assert!(step.readies.is_empty());
+        assert!(step.readies.is_empty(), "a refused write gives no Ready");
     }
 
     #[test]

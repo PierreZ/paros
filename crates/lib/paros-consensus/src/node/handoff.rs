@@ -464,8 +464,7 @@ impl ColocatedNode {
         // 5431805690316111145, recipe 13122:14051179970700299360).
         let prior: Vec<AcceptorConfig> = self
             .configs_in_force()
-            .map(|(prior, _)| prior.into_iter().cloned().collect())
-            .unwrap_or_default();
+            .map_or_default(|(prior, _)| prior.into_iter().cloned().collect());
         assert!(
             prior.is_empty() || self.config.has_matchmakers(),
             "a plain handoff carries no prior configuration"
@@ -511,26 +510,28 @@ impl ColocatedNode {
         Some(receipt)
     }
 
-    /// The configuration a handoff transfers, or `None` when the payload is
-    /// malformed (wire input: refused, never asserted). A matchmaker
-    /// deployment transfers one drawn from the pool, and its prior
+    /// The configuration a handoff transfers, or [`MalformedHandoff`] when
+    /// the payload is malformed (wire input: refused, never asserted). A
+    /// matchmaker deployment transfers one drawn from the pool, and its prior
     /// configurations (#815), each drawn from the pool and never the one in
-    /// force. The plain path carries neither, and keeps its static
-    /// membership.
-    #[allow(clippy::option_option)]
+    /// force. The plain path carries neither (`Ok(None)`), and keeps its
+    /// static membership.
     fn handoff_config(
         &self,
         config: Option<AcceptorConfig>,
         prior: &[AcceptorConfig],
-    ) -> Option<Option<AcceptorConfig>> {
+    ) -> Result<Option<AcceptorConfig>, MalformedHandoff> {
         match (self.config.has_matchmakers(), config) {
-            (false, None) => prior.is_empty().then_some(None),
-            (true, Some(config)) => (config.is_drawn_from(&self.pool)
-                && prior
-                    .iter()
-                    .all(|p| *p != config && p.is_drawn_from(&self.pool)))
-            .then_some(Some(config)),
-            _ => None,
+            (false, None) if prior.is_empty() => Ok(None),
+            (true, Some(config))
+                if config.is_drawn_from(&self.pool)
+                    && prior
+                        .iter()
+                        .all(|p| *p != config && p.is_drawn_from(&self.pool)) =>
+            {
+                Ok(Some(config))
+            }
+            _ => Err(MalformedHandoff),
         }
     }
 
@@ -593,7 +594,7 @@ impl ColocatedNode {
         }
         // The authority's configuration and its prior ones, or a malformed
         // payload ([`ColocatedNode::handoff_config`]).
-        let Some(config) = self.handoff_config(config, prior) else {
+        let Ok(config) = self.handoff_config(config, prior) else {
             self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
             return;
         };
@@ -776,3 +777,9 @@ impl ColocatedNode {
         }
     }
 }
+
+/// A handoff payload whose configurations do not fit the deployment: a
+/// configuration on the plain path, none on a matchmaker deployment, or one
+/// not drawn from the pool. Wire input, so the handoff is refused and counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MalformedHandoff;

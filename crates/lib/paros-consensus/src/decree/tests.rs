@@ -153,7 +153,10 @@ fn a_nack_preempts_and_names_the_promise_to_beat() {
         DecreePromise::Ignored,
         "a preempted proposal is dead"
     );
-    assert!(d.unanswered().is_empty());
+    assert!(
+        d.unanswered().is_empty(),
+        "a preempted proposal waits on no acceptor"
+    );
 }
 
 /// Review finding P8: the proposer half of "one ballot, one value". The

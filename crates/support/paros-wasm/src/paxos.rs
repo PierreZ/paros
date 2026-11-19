@@ -102,10 +102,17 @@ impl Game {
     // ---- internals ---------------------------------------------------------
 
     /// Run the action, and take the narration it produced.
-    #[allow(clippy::too_many_lines)]
     fn apply(&mut self, action: &Action) -> Result<Vec<NarrationEvent>, ActionError> {
         self.world.clear_narration();
         match action {
+            Action::CrashMatchmaker { .. }
+            | Action::RestartMatchmaker { .. }
+            | Action::Reconfigure { .. }
+            | Action::Retire { .. }
+            | Action::ReconfigureMatchmakers { .. }
+            | Action::ResendMatchmaking { .. }
+            | Action::ResendGc { .. }
+            | Action::ResendReconfigurer { .. } => self.apply_membership(action)?,
             Action::Deliver { id } => self.world.deliver(*id)?,
             Action::Drop { id } => self.world.drop_message(*id)?,
             Action::Duplicate { id, to } => self.world.duplicate(*id, *to)?,
@@ -151,6 +158,29 @@ impl Game {
                 Some(world) => world.wipe(*node)?,
                 None => self.log_world()?.wipe(NodeId(*node))?,
             },
+            Action::Compact { node, up_to } => {
+                self.log_world()?.compact(NodeId(*node), *up_to)?;
+            }
+            Action::ResendPending { node } => self.log_world()?.resend_pending(NodeId(*node))?,
+            Action::MoveRound { node, slot, column } => {
+                self.log_world()?
+                    .move_round(NodeId(*node), *slot, *column)?;
+            }
+            Action::StepDown { node } => self.log_world()?.step_down(NodeId(*node))?,
+            Action::OpenBallot { proposer, value } => {
+                self.decree_world()?.open_ballot(*proposer, value)?;
+            }
+            Action::SetReach { phase, nodes } => {
+                self.decree_world()?.set_reach(*phase, nodes)?;
+            }
+        }
+        Ok(self.world.take_narration())
+    }
+
+    /// Run an action on the membership: the matchmakers, a reconfiguration,
+    /// a retirement, and the re-sends of their requests.
+    fn apply_membership(&mut self, action: &Action) -> Result<(), ActionError> {
+        match action {
             Action::CrashMatchmaker { matchmaker } => {
                 self.log_world()?
                     .crash_matchmaker(paros_consensus::membership::MatchmakerId(*matchmaker))?;
@@ -201,23 +231,9 @@ impl Game {
             Action::ResendReconfigurer { node } => {
                 self.log_world()?.resend_reconfigurer(NodeId(*node))?;
             }
-            Action::Compact { node, up_to } => {
-                self.log_world()?.compact(NodeId(*node), *up_to)?;
-            }
-            Action::ResendPending { node } => self.log_world()?.resend_pending(NodeId(*node))?,
-            Action::MoveRound { node, slot, column } => {
-                self.log_world()?
-                    .move_round(NodeId(*node), *slot, *column)?;
-            }
-            Action::StepDown { node } => self.log_world()?.step_down(NodeId(*node))?,
-            Action::OpenBallot { proposer, value } => {
-                self.decree_world()?.open_ballot(*proposer, value)?;
-            }
-            Action::SetReach { phase, nodes } => {
-                self.decree_world()?.set_reach(*phase, nodes)?;
-            }
+            _ => unreachable!("apply sends only membership actions here"),
         }
-        Ok(self.world.take_narration())
+        Ok(())
     }
 
     fn log_world(&mut self) -> Result<&mut world::World, ActionError> {

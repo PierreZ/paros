@@ -21,7 +21,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["paxos"]
 # The Paxos step-through engine (#308, #811): `paros-consensus` driven by hand, and
 # nothing else.
-paxos = ["dep:paros-consensus"]
+paxos = ["dep:paros-consensus", "dep:serde", "dep:serde_json"]
 
 [[test]]
 name = "paxos_traces"
@@ -32,8 +32,7 @@ name = "paxos_world"
 required-features = ["paxos"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", features = ["derive"], optional = true }
 
 # `paxos`: the sans-IO core alone, with its serde derives.
 paros-consensus = { workspace = true, default-features = false, features = [
@@ -41,10 +40,15 @@ paros-consensus = { workspace = true, default-features = false, features = [
 ], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# MUST stay exactly 0.2.129: the flake pins `wasm-bindgen-cli` 0.2.129, and the
+# MUST stay exactly 0.2.130: the flake pins `wasm-bindgen-cli` 0.2.130, and the
 # CLI refuses a bundle produced by any other version of the crate.
-wasm-bindgen = "=0.2.129"
+wasm-bindgen = "=0.2.130"
+# The JSON the wasm exports take and answer.
+serde_json = { version = "1", optional = true }
 console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+serde_json = "1"
 
 [lints]
 workspace = true

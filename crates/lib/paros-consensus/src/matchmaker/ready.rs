@@ -144,6 +144,10 @@ impl MatchmakerReady<'_> {
 
     /// Acknowledge the batch: clears the pending buckets and releases the
     /// unique borrow. Consumes `self` — the guard cannot be reused.
+    ///
+    /// # Panics
+    ///
+    /// If a bucket is not empty after the clear: a programmer error.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(matchmaker = self.matchmaker.config.id.0)))]
     pub fn advance(self) {
         self.matchmaker.pending_writes.clear();

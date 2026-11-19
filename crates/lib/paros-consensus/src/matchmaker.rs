@@ -1227,8 +1227,7 @@ impl Matchmaker {
                             .hard_state
                             .journals
                             .get(&journal)
-                            .map(|scalars| scalars.retired.clone())
-                            .unwrap_or_default(),
+                            .map_or_default(|scalars| scalars.retired.clone()),
                     },
                 )
             })

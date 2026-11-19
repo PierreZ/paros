@@ -757,7 +757,7 @@ impl Run {
                 Who::Replica(rank) => self
                     .replicas
                     .get(usize::try_from(rank).expect("small"))
-                    .map(|replica| {
+                    .map_or_default(|replica| {
                         (0..SLOTS)
                             .map(Slot)
                             .filter_map(|slot| {
@@ -767,8 +767,7 @@ impl Run {
                                     .map(|command| cell(slot, command, true))
                             })
                             .collect()
-                    })
-                    .unwrap_or_default(),
+                    }),
                 Who::Proxy(_) | Who::Batcher => Vec::new(),
             })
             .collect()

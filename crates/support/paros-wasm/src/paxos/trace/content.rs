@@ -109,7 +109,6 @@ fn match_request(request: &MatchRequest) -> Content {
 }
 
 /// A matchmaker's answer to a matchmaking request.
-#[allow(clippy::single_match_else)]
 fn match_reply(answer: &MatchReply) -> Content {
     let ballot = show_ballot(answer.ballot);
     let mut fields = vec![field("ballot", ballot_text(answer.ballot))];
@@ -161,26 +160,23 @@ fn match_reply(answer: &MatchReply) -> Content {
         }
         MatchOutcome::Probed { effective, .. } => {
             fields.insert(0, field("answer", "in use"));
-            match effective {
-                Some((at, config)) => {
-                    fields.push(field(
-                        "in use",
-                        format!(
-                            "{} since {}",
-                            show_members(config.members()),
-                            show_ballot(*at)
-                        ),
-                    ));
+            if let Some((at, config)) = effective {
+                fields.push(field(
+                    "in use",
                     format!(
-                        "Acceptors {} are in use since ballot {}.",
+                        "{} since {}",
                         show_members(config.members()),
                         show_ballot(*at)
-                    )
-                }
-                None => {
-                    fields.push(field("in use", "the first configuration"));
-                    "Nobody changed the acceptors. The first configuration is in use.".to_string()
-                }
+                    ),
+                ));
+                format!(
+                    "Acceptors {} are in use since ballot {}.",
+                    show_members(config.members()),
+                    show_ballot(*at)
+                )
+            } else {
+                fields.push(field("in use", "the first configuration"));
+                "Nobody changed the acceptors. The first configuration is in use.".to_string()
             }
         }
         MatchOutcome::Refused(refusal) => {
@@ -207,9 +203,15 @@ fn gc_ack(ack: &GcAck) -> Content {
     }
 }
 
-#[allow(clippy::too_many_lines, clippy::single_match_else)]
 pub(super) fn node_message(message: &Message, log: bool) -> Content {
-    match message {
+    phase1_message(message, log)
+        .or_else(|| phase2_message(message, log))
+        .unwrap_or_else(|| other_message(message))
+}
+
+/// The content of a Phase-1 message; `None` for every other one.
+fn phase1_message(message: &Message, log: bool) -> Option<Content> {
+    Some(match message {
         Message::Prepare {
             ballot, from_slot, ..
         } => {
@@ -250,22 +252,17 @@ pub(super) fn node_message(message: &Message, log: bool) -> Content {
                 } else {
                     let _ = write!(voice, " My votes: {}.", short_list(&votes));
                 }
+            } else if let Some((at, command)) = accepted.values().next() {
+                let value = value_text(command);
+                fields.push(field("vote", format!("{value} at {}", show_ballot(*at))));
+                let _ = write!(
+                    voice,
+                    " I voted for {value} at ballot {} before.",
+                    show_ballot(*at)
+                );
             } else {
-                match accepted.values().next() {
-                    Some((at, command)) => {
-                        let value = value_text(command);
-                        fields.push(field("vote", format!("{value} at {}", show_ballot(*at))));
-                        let _ = write!(
-                            voice,
-                            " I voted for {value} at ballot {} before.",
-                            show_ballot(*at)
-                        );
-                    }
-                    None => {
-                        fields.push(field("vote", "none"));
-                        voice.push_str(" I did not vote for a value yet.");
-                    }
-                }
+                fields.push(field("vote", "none"));
+                voice.push_str(" I did not vote for a value yet.");
             }
             if !faulty.is_empty() {
                 fields.push(field("lost votes", faulty.len().to_string()));
@@ -281,6 +278,13 @@ pub(super) fn node_message(message: &Message, log: bool) -> Content {
             }
             Content { fields, voice }
         }
+        _ => return None,
+    })
+}
+
+/// The content of a Phase-2 message; `None` for every other one.
+fn phase2_message(message: &Message, log: bool) -> Option<Content> {
+    Some(match message {
         Message::Accept {
             ballot,
             slot,
@@ -361,6 +365,13 @@ pub(super) fn node_message(message: &Message, log: bool) -> Content {
             };
             Content { fields, voice }
         }
+        _ => return None,
+    })
+}
+
+/// The content of a catch-up, handoff, heartbeat or read message.
+fn other_message(message: &Message) -> Content {
+    match message {
         Message::CatchUpRequest { from_slot, .. } => Content {
             fields: vec![field("from slot", from_slot.0.to_string())],
             voice: format!(
@@ -504,7 +515,6 @@ fn reconfigure(request: &ReconfigureRequest) -> Content {
     }
 }
 
-#[allow(clippy::single_match_else)]
 fn reconfigure_reply(answer: &ReconfigureReply) -> Content {
     match answer {
         ReconfigureReply::Stopped { generation, .. } => Content {
@@ -520,26 +530,23 @@ fn reconfigure_reply(answer: &ReconfigureReply) -> Content {
         },
         ReconfigureReply::Promised { ballot, vote, .. } => {
             let mut fields = vec![field("ballot", ballot_text(*ballot))];
-            let voice = match vote {
-                Some((at, members)) => {
-                    fields.push(field(
-                        "vote",
-                        format!("{} at {}", show_set(members), show_ballot(*at)),
-                    ));
-                    format!(
-                        "I promise ballot {}. I voted for matchmakers {} at ballot {} before.",
-                        show_ballot(*ballot),
-                        show_set(members),
-                        show_ballot(*at)
-                    )
-                }
-                None => {
-                    fields.push(field("vote", "none"));
-                    format!(
-                        "I promise ballot {}. I did not vote yet.",
-                        show_ballot(*ballot)
-                    )
-                }
+            let voice = if let Some((at, members)) = vote {
+                fields.push(field(
+                    "vote",
+                    format!("{} at {}", show_set(members), show_ballot(*at)),
+                ));
+                format!(
+                    "I promise ballot {}. I voted for matchmakers {} at ballot {} before.",
+                    show_ballot(*ballot),
+                    show_set(members),
+                    show_ballot(*at)
+                )
+            } else {
+                fields.push(field("vote", "none"));
+                format!(
+                    "I promise ballot {}. I did not vote yet.",
+                    show_ballot(*ballot)
+                )
             };
             Content { fields, voice }
         }

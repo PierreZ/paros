@@ -192,8 +192,11 @@ pub enum AttemptView {
 /// TypeScript as fields: a node is running or not, it holds accepts it could
 /// re-send or not, an operator retired it or not, its disk was erased or not. A
 /// state machine over them would have to name states no node is ever in.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent facts that cross to TypeScript as flat fields"
+)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct NodeView {
     /// The node's id.
     pub id: u64,
@@ -673,24 +676,20 @@ pub fn show_role(role: NodeRole) -> RoleView {
     }
 }
 
-/// Render one in-flight message.
-///
-/// `phase` is the render family the SVG stage colours by, and it is
-/// deliberately coarser than the variant: `CatchUpRequest` and
-/// `CatchUpResponse` are one family, and so is the `TrimmedTo` that answers a
-/// catch-up below the floor.
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn message_view(
-    id: u64,
-    from: u64,
-    to: u64,
-    sent_at: u64,
-    message: &paros_consensus::Message,
-    system: QuorumSystem,
-) -> MessageView {
+/// What [`message_view`] draws of a message: its kind, its render family,
+/// its ballot, its slot and its summary line.
+type Shape = (
+    &'static str,
+    &'static str,
+    Option<paros_consensus::Ballot>,
+    Option<paros_consensus::Slot>,
+    String,
+);
+
+/// The shape of a Phase-1 or Phase-2 message; `None` for every other one.
+fn phase_shape(message: &paros_consensus::Message) -> Option<Shape> {
     use paros_consensus::Message as M;
-    let (kind, phase, ballot, slot, summary) = match message {
+    Some(match message {
         M::Prepare {
             ballot, from_slot, ..
         } => (
@@ -773,6 +772,14 @@ pub fn message_view(
                 show_ballot(*ballot)
             ),
         ),
+        _ => return None,
+    })
+}
+
+/// The shape of a catch-up, handoff, heartbeat or read message.
+fn other_shape(message: &paros_consensus::Message) -> Shape {
+    use paros_consensus::Message as M;
+    match message {
         M::CatchUpRequest { from_slot, .. } => (
             "CatchUpRequest",
             "catchup",
@@ -843,7 +850,27 @@ pub fn message_view(
             ),
         ),
         _ => ("Other", "other", None, None, "a message".to_string()),
-    };
+    }
+}
+
+/// Render one in-flight message.
+///
+/// `phase` is the render family the SVG stage colours by, and it is
+/// deliberately coarser than the variant: `CatchUpRequest` and
+/// `CatchUpResponse` are one family, and so is the `TrimmedTo` that answers a
+/// catch-up below the floor.
+#[must_use]
+pub fn message_view(
+    id: u64,
+    from: u64,
+    to: u64,
+    sent_at: u64,
+    message: &paros_consensus::Message,
+    system: QuorumSystem,
+) -> MessageView {
+    use paros_consensus::Message as M;
+    let (kind, phase, ballot, slot, summary) =
+        phase_shape(message).unwrap_or_else(|| other_shape(message));
     // The column is a Phase-2 fact, so only the two Phase-2 messages carry
     // one, and only under a grid: `QuorumSystem::column_of` answers `None`
     // for every other system, which is exactly "the whole membership".

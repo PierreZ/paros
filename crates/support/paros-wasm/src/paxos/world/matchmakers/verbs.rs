@@ -92,8 +92,7 @@ impl World {
     #[must_use]
     pub fn prior_configurations(&self, id: NodeId) -> Vec<AcceptorConfig> {
         self.index_of(id)
-            .map(|index| self.campaign_prior[index].clone())
-            .unwrap_or_default()
+            .map_or_default(|index| self.campaign_prior[index].clone())
     }
 
     pub(in crate::paxos::world) fn matchmaker_index(

@@ -74,7 +74,10 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`,
 Markdown, `docs/`, `specs/`) runs only the `wasm` job of `rust.yml`; a push to `main` runs
 everything. Rust 2024 edition, toolchain pinned in `rust-toolchain.toml` (incl.
-`wasm32-unknown-unknown`), clippy pedantic on (`[workspace.lints]`). Nothing is published to
+`wasm32-unknown-unknown`), clippy pedantic on (`[workspace.lints]`). The whole workspace passes
+pedantic with no lint allowed (Pierre, 2026-11-19): fix the code, never add `#[allow(clippy::..)]`.
+When a lint is wrong for one item, write `#[expect(clippy::<lint>, reason = "..")]` on that item
+and name it in the PR description. Nothing is published to
 crates.io: every crate is `publish = false`, and there is no release workflow.
 
 ## Environment & Nix

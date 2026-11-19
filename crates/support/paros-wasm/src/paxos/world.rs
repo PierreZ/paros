@@ -347,10 +347,8 @@ impl World {
             next_event: 1,
             narration: Vec::new(),
         };
-        for index in 0..count {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.set_election_timeout(election_timeout);
-            }
+        for node in world.nodes.iter_mut().take(count).flatten() {
+            node.set_election_timeout(election_timeout);
         }
         world
     }
