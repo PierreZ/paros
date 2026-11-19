@@ -208,6 +208,23 @@ gap, and a Phase-1 quorum inside one grid column. It also shows that the plain l
 for a wiped acceptor: one wipe that votes again as the old acceptor breaks `Agreement`. The table
 of every flavor with its model is in `specs/tla/README.md`.
 
+The cooperative leader handoff of DPaxos is `specs/tla/leader-handoff/` (#1187 (rework 2.8)):
+plain Multi-Paxos where the leadership is a state of a node, so an elected leader can give its
+ballot, its allocator frontier and its tail (decided slots and open rounds) to a successor with
+no Phase 1. Its safety checks are `Agreement`, `LearnedChosen`, `OneProposal` (one proposal for
+each slot and ballot, across the handoff) and `OneHolder` (one node at a time leads at a
+ballot), with a payload that arrives late or two times, a successor that restarts or resigns on
+its fence, and a later election. Its liveness check `Ends` has two forms: a handoff ends, and an
+election replaces a successor that is gone (it restarted, or the payload was lost). Each rule has
+a control that fails: a handoff leader that hands on again (two holders), a successor that takes
+a replayed payload below its frontier, a leader that does not record its own rounds (a restart
+forgets the frontier and a replayed payload rewinds it), and a successor that drops the open
+rounds (a slot stays open for ever). The model also shows review finding 3 of paros-consensus:
+with `on_heartbeat` as it is today, a late beat of the predecessor deposes the successor. That
+costs liveness only, never safety: the control `live_late_beat` fails and `late_beat_safe`
+passes. The fix of step 2.7 is the `BeatGuard` rule of the model, the guard that `on_accept`
+has: a leader keeps its role on a beat at the ballot that it holds.
+
 Matchmaker Paxos is `specs/tla/matchmaker/` (#1200 (TLA+ model Matchmaker Paxos)): `Agreement`
 and `Electable` for single-decree Matchmaker Paxos with matchmaking, Phase 1 over every
 configuration of `H_b`, a reconfiguration as a round change, GC and the retirement of a removed
