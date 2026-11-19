@@ -58,7 +58,10 @@ impl ColocatedNode {
             // slot. Nack *without* raising our promise (so a blind laggard
             // cannot ratchet our promise up and depose a healthy leader);
             // those slots are chosen, and the candidate must recover them out
-            // of band.
+            // of band (`TrimmedTo`). The TLA+ model `specs/tla/truncation/`
+            // checks this guard as `NoFillChosen` and `Recoverable`: with
+            // it off, a split floor lets a new leader fill a chosen slot
+            // with a `Noop`.
             PrepareOutcome::BelowFloor => {
                 // Negative space: a below-floor Nack is a pure reply — nothing
                 // durable moved.

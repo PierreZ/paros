@@ -47,7 +47,7 @@ Foundations:
 Roles (pure tallies, no deployment knowledge):
 
 - `acceptor.rs` → `Acceptor` → the durable promise, accepted records, compaction floor, CTRL faulty set; emits its own writes.
-- `acceptor/retention.rs` → `Acceptor::truncate` / `trim_to` → the two floor-moving ops (a concern, not a role).
+- `acceptor/retention.rs` → `Acceptor::truncate` / `trim_to` → the two floor-moving ops (a concern, not a role). Their TLA+ model, with the floor guard of `on_prepare` and the trim-point jump of `node/catch_up.rs`, is `specs/tla/truncation/` (#1017 (truncation model)).
 - `proposer.rs` → `Proposer` → the leader-side tallies; embeds the next five.
 - `proposer/election.rs` → Phase 1 → per-configuration completion, the P2c merge.
 - `proposer/probe.rs` → the CTRL repair probe (Stage 8) for slots a won election could not decide.
