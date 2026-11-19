@@ -36,7 +36,10 @@ Multi-Paxos (`specs/tla/truncation/`: the decided `Truncate` and the floor as a 
 journal, the floor guard of Phase 1 and the retry of a refused laggard, the trim-point jump that
 keeps the promise, the vote watermark over the floor, the faulty entries of CTRL with the
 tri-state tally and the repair probe; #1017 (truncation model), #1216 (truncation model, part
-2)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+2)), the Phase-1 bypass of a reconfiguration (`specs/tla/zero-stall/`: the bypass check, the
+decision hold, GC after the fence Phase 1, the handoff of a ballot that bypassed, two bypasses in
+a row; #1018 (zero-stall model, more rules)). `specs/tla/README.md` lists every flavor with its
+model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the

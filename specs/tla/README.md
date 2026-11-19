@@ -48,6 +48,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/` | #1190 (rework 6.10), done |
 | Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
+| Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -99,22 +100,61 @@ Constants select the variant:
 | `Owner` | `OwnerPaper3`: the paper's rounds `(r, id, s)`, a proposer owns two consecutive ballots. `OwnerParos3`: paros's `(round, node)`, a ballot of another proposer is between. |
 | `Check` | `TRUE`: bypass only if the matchmaker answers show no registration between `b` and `b2`. |
 | `Mode` | `carry`: the leader proposes its own values again at `b2`, with no Phase 1. `p212`: frankenpaxos `Phase212`, the slots below the frontier get a Phase 1 at `b2`. `none`: no bypass. |
-| `Gc` | `off`: no garbage collection. `chosen`: the leader of `b` asks the matchmakers to forget the ballots below `b` when each slot that it recovered or carried is chosen at `b` (the paper, §3.5) and, with `Hold`, when its Phase 1 is covered. `early`: a control, the leader asks with no condition. |
+| `Gc` | `off`: no garbage collection. `chosen`: the leader of `b` asks the matchmakers to forget the ballots below `b` when each slot that it recovered or carried is chosen at `b` (the paper, §3.5) and, with `Hold`, when its Phase 1 is covered. `nofence`: a control, the leader of `b2` asks before its Phase 1 at `b2` (the fence Phase 1) ends. `early`: a control, the leader asks with no condition. |
 | `CheckWm` | `TRUE`: bypass only if the highest watermark in the matchmaker answers is at most `b`. |
 | `Reads` | `TRUE`: the leader acks the chosen slots, and the model has the leaderless reads of Compartmentalized Paxos (§3.4) with the rule of `quorum_read.rs`: a reader asks a quorum of the configuration of a leadership that won, abandons the read if an answer shows a higher ballot, and reads at the highest slot voted or at the fence. |
 | `Hold` | `TRUE`: the decision hold. A leader acks no slot before a quorum of each prior configuration promised its ballot. |
-| `CfgChoices` | The configurations that the ballots can have: any (`CfgAny`), or one fixed journal move (`CfgMovePaper3`), which keeps the GC checks small. |
+| `Handoff` | `TRUE`: the cooperative handoff of DPaxos (`relinquish_to`). The node that minted a ballot hands it on one time, with its proposals and its open slots, while it leads at the ballot. The successor leads with no Phase 1. |
+| `Relinquish` | `TRUE`: a node that handed its ballot on never bypasses from it (it drops its proactive matchmaking). `FALSE`: a control, the minter still bypasses after the handoff. |
+| `SuccessorBypass` | `FALSE`: a successor never bypasses from a ballot that it did not mint. `TRUE`: a control, the successor bypasses to its own next ballot. |
+| `HandoffCarry` | `TRUE`: the handoff carries the slots that wait for the fence Phase 1. `FALSE`: a control, the successor takes them as free. |
+| `ChainRule` | `TRUE`: a leader bypasses again only after the fence Phase 1 of its last bypass (each slot it recovered or carried is proposed at its ballot). `FALSE`: a control, the slots that wait for the fence Phase 1 do not count. |
+| `CfgChoices` | The configurations that the ballots can have: any (`CfgAny`), or a few fixed journal moves (`CfgMovePaper3`, `CfgWm3`, `CfgWm4`, `CfgChain3`, `CfgChain4`), which keep the GC, watermark and chain checks small. |
 
-The invariants are `Agreement` (one value is chosen for each slot) and `ReadSafe` (no leaderless
-read that starts now can miss a slot that is acked).
+The invariants are `Agreement` (one value is chosen for each slot), `ReadSafe` (no leaderless
+read that starts now can miss a slot that is acked) and `WmRedundant` (when the matchmaker answers
+of `b2` show no registration strictly between `b` and `b2`, their highest watermark is at most `b`).
 
-The model has three ballots, three matchmakers, two values, one or two slots and two
+The model has three or four ballots, three matchmakers, two values, one or two slots and two
 configurations of two acceptors.
 
-Not in the model: matchmaker generations, lost durable state and the cooperative handoff. A
-reader is abstract (a read can use the basis of any leadership that won); `reads/` has an
-explicit reader. A GC check with four ballots on paros's ballots is too large for a complete
-search so far.
+Not in the model: matchmaker generations, lost durable state, and a handoff message that is late
+or sent two times (`leader-handoff/` has them, with its control `two_hops`). A reader is abstract
+(a read can use the basis of any leadership that won); `reads/` has an explicit reader.
+
+The rules of #1018 (zero-stall model, more rules), each with its check and its control:
+
+| Rule | Check (`pass`) | Control (`violation`) |
+|---|---|---|
+| Bypass check, the registration half (rule 3) | `p212_check` | `p212_nocheck` |
+| Bypass check, the watermark half (rule 3) | see the finding below | none: the registration half implies it |
+| GC fence (I5): the leader at `b2` makes no floor effective before its fence Phase 1 ends | `gc_p212_paper`, `wm_nocheck_small` | `gc_nofence` (21 steps), `gc_early` |
+| Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff`, `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
+| Chained bypass (8.3): a second bypass waits for the fence Phase 1 of the first | `chain_small`, `chain` (7.1 million states, 5 minutes, `long`) | `chain_open_small`, `chain_open` |
+
+Findings of #1018 (2026-11-19). No design decision is refuted.
+
+- **The watermark half of the bypass check adds nothing to safety.** A matchmaker moves its
+  watermark to `w` only for a leader at `w`, and a leader at `w` registered at a matchmaker quorum.
+  That quorum meets the quorum of `b2` at a matchmaker that holds `w` (GC keeps the registrations
+  at or above the watermark) or that refused `w`. So when the answers show no registration between
+  `b` and `b2`, the highest watermark is at most `b` (`WmRedundant`). The registration half alone
+  is safe with GC on (`wm_nocheck_small`, 1.8 million states, complete). On four ballots and three
+  proposers, TLC found no violation in bounded runs (`wm_nocheck`: 34 million states in 25 minutes;
+  `wm_redundant_small`: 26.7 million states in 9 minutes) and did not end. The check is cheap, so
+  code can keep it as a defense; no control can fail for it.
+- **A successor must not bypass.** `successor_bypass`: on the paper's ballots, the minter hands
+  ballot 1 on, the successor bypasses to its own ballot 3, and ballot 2 of the minter is between.
+  The paper's ballots have no check, so ballot 2 chooses a value that ballot 3 does not see. Only
+  the minter that still holds a ballot bypasses from it.
+- **The handoff carries the open slots.** `handoff_drop`: a successor that takes the slots that
+  wait for the fence Phase 1 as free proposes a second value for a slot that the minter chose at
+  the old ballot.
+- **A minter that handed on drops its proactive matchmaking.** `relinquish_off`: the minter bypasses
+  with what it knew at the handoff, and misses a value that the successor chose after it.
+- **GC waits for the fence Phase 1.** `gc_nofence`: the leader at `b2` collects the old ballots
+  while a slot that it carried is still open; a rival at `b3` then runs Phase 1 only on the new
+  configuration and chooses a second value.
 
 Results are in `zero-stall/checks.txt` and in the design document of #579 (zero-stall
 reconfiguration).
