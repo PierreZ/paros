@@ -96,7 +96,9 @@ the beat, the question in place of the sentence (the sentence gives the answer a
 to four answers (buttons, or the keys 1 to 4). Any answer, or "Show me", plays the beat; then
 the screen marks the right answer, the reader's answer and the reason (`why`). The answers live
 in the page only (`window.paxosStory.answers()`), and each one fires `paxos:answer` on the
-document. A page with no beats keeps the step-through alone. The story draws the recorded
+document. A "Break the rule" run ends with a "find the bug" question (`after`): its beat plays
+first, then the screen asks what went wrong in it, and an answer marks the right one with no
+second play. A page with no beats keeps the step-through alone. The story draws the recorded
 trace only; the step-through switches to the live wasm run.
 
 ## The course (`src/course.ts`)
