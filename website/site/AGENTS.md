@@ -91,7 +91,12 @@ its reply leaves. The end of a beat shows its `choices`. Back, Continue (Skip wh
 plays), the arrow keys, and the address `#run=<id>&beat=<n>`. "Show each message" opens the
 step-through at the last step of the beat (`window.paxosSteps.show`), and the step-through
 has "Back to the story" (`window.paxosStory.show`). With reduced motion a screen appears
-complete. A page with no beats keeps the step-through alone. The story draws the recorded
+complete. A beat with a `question` asks it before it plays: the screen shows the state before
+the beat, the question in place of the sentence (the sentence gives the answer away), and two
+to four answers (buttons, or the keys 1 to 4). Any answer, or "Show me", plays the beat; then
+the screen marks the right answer, the reader's answer and the reason (`why`). The answers live
+in the page only (`window.paxosStory.answers()`), and each one fires `paxos:answer` on the
+document. A page with no beats keeps the step-through alone. The story draws the recorded
 trace only; the step-through switches to the live wasm run.
 
 ## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))

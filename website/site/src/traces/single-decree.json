@@ -1800,7 +1800,17 @@
         {
           "says": "Two promises of three are a majority. Proposer 5 now holds ballot 1.5, and it asks every acceptor to vote for alpha.",
           "from": 4,
-          "to": 7
+          "to": 7,
+          "question": {
+            "asks": "Three promises are on the wire. How many must proposer 5 get before it asks for a vote?",
+            "answers": [
+              "One",
+              "Two",
+              "All three"
+            ],
+            "right": 1,
+            "why": "Two of three is a majority. Any two majorities share an acceptor, so a later ballot always meets an acceptor of this one."
+          }
         },
         {
           "says": "Each acceptor writes its vote to disk, then answers Accepted.",
@@ -1810,7 +1820,16 @@
         {
           "says": "Two votes for alpha at ballot 1.5 are a majority: alpha is chosen. No later ballot can change it.",
           "from": 10,
-          "to": 13
+          "to": 13,
+          "question": {
+            "asks": "Every acceptor wrote its vote. The Accepted messages are still on the wire. Is alpha chosen now?",
+            "answers": [
+              "Yes: a majority voted for it at one ballot",
+              "No: proposer 5 must count the votes first"
+            ],
+            "right": 0,
+            "why": "A value is chosen when a majority votes for it at one ballot. The proposer only learns it."
+          }
         },
         {
           "says": "Proposer 5 tells every acceptor that alpha is chosen. There is no separate learner here.",
@@ -6819,12 +6838,31 @@
         {
           "says": "Proposer 8 must propose the value of the highest vote that it heard of. So it asks for alpha, not bravo.",
           "from": 16,
-          "to": 19
+          "to": 19,
+          "question": {
+            "asks": "Proposer 8 wants bravo. One promise reports a vote for alpha at ballot 1.5. Which value does proposer 8 ask the acceptors to vote for?",
+            "answers": [
+              "bravo, its own value",
+              "alpha, the value that it heard of",
+              "No value: it stops"
+            ],
+            "right": 1,
+            "why": "A majority can have chosen alpha already. Proposer 8 cannot know, so it keeps alpha."
+          }
         },
         {
           "says": "The slow Accepts of ballot 1.5 arrive. Acceptors 2 and 3 promised 1.8, so they refuse them.",
           "from": 19,
-          "to": 23
+          "to": 23,
+          "question": {
+            "asks": "Acceptors 2 and 3 promised ballot 1.8. The slow Accepts of ballot 1.5 arrive now. What do acceptors 2 and 3 do?",
+            "answers": [
+              "They vote at ballot 1.5",
+              "They refuse the Accepts"
+            ],
+            "right": 1,
+            "why": "A promise for ballot 1.8 refuses every lower ballot."
+          }
         },
         {
           "says": "alpha is chosen at ballot 1.8. A later ballot finds an earlier vote and keeps its value.",
@@ -11816,7 +11854,17 @@
         {
           "says": "Now the Accepts of proposer 8 are refused. The two proposers can do this forever.",
           "from": 27,
-          "to": 33
+          "to": 33,
+          "question": {
+            "asks": "Every acceptor now holds a promise above ballot 1.8. The Accepts of proposer 8 arrive. What happens?",
+            "answers": [
+              "bravo is chosen",
+              "Every acceptor refuses",
+              "alpha is chosen"
+            ],
+            "right": 1,
+            "why": "Each proposer raised the promises above the ballot of the other one. No vote was given, so no value is chosen."
+          }
         },
         {
           "says": "Proposer 8 does not try again at once: a refused proposer waits. Proposer 5 is alone, and alpha is chosen.",
@@ -14911,7 +14959,16 @@
         {
           "says": "Acceptor 1 restarts. It reads its promise and its vote back from its disk, so it forgets nothing that it said.",
           "from": 12,
-          "to": 13
+          "to": 13,
+          "question": {
+            "asks": "Acceptor 1 voted for alpha, then crashed. It restarts now. Does it still hold its vote?",
+            "answers": [
+              "Yes: the vote is on its disk",
+              "No: a crash loses the vote"
+            ],
+            "right": 0,
+            "why": "The acceptor wrote the vote to disk before it answered. A restart reads it back."
+          }
         },
         {
           "says": "Proposer 8 opens ballot 1.8 for bravo.",
@@ -14921,7 +14978,17 @@
         {
           "says": "Acceptor 1 reports its vote in its promise. Proposer 8 must propose alpha, and alpha is chosen.",
           "from": 14,
-          "to": 29
+          "to": 29,
+          "question": {
+            "asks": "Only acceptor 1 voted for alpha, and no value is chosen. Proposer 8 wants bravo and reaches all three acceptors. Which value is chosen?",
+            "answers": [
+              "bravo",
+              "alpha",
+              "Both"
+            ],
+            "right": 1,
+            "why": "One vote is enough to bind proposer 8: it cannot know that alpha is not chosen, so it proposes alpha."
+          }
         },
         {
           "says": "This is why an acceptor writes to disk before it answers: a vote that it gave must outlive a crash.",
@@ -18167,7 +18234,16 @@
         {
           "says": "Every Accepted is lost. alpha is chosen, but proposer 5 does not know it.",
           "from": 10,
-          "to": 13
+          "to": 13,
+          "question": {
+            "asks": "Every acceptor voted for alpha. Every Accepted is lost on the way to proposer 5. Is alpha chosen?",
+            "answers": [
+              "Yes: the votes are on the disks",
+              "No: the proposer got no answer"
+            ],
+            "right": 0,
+            "why": "The votes of a majority choose the value. A lost answer only hides the choice from the proposer."
+          }
         },
         {
           "says": "Proposer 5 tries again at a higher ballot.",
@@ -21400,7 +21476,16 @@
         {
           "says": "Acceptors 2 and 3 vote for bravo: bravo is chosen.",
           "from": 15,
-          "to": 19
+          "to": 19,
+          "question": {
+            "asks": "Acceptor 1 voted for alpha. Proposer 8 got two promises, and neither reports a vote. Which value does proposer 8 ask for?",
+            "answers": [
+              "alpha",
+              "bravo, its own value"
+            ],
+            "right": 1,
+            "why": "One vote of three is not a majority, so alpha is not chosen. A proposer that hears of no vote is free."
+          }
         },
         {
           "says": "The slow Accepts of ballot 1.5 arrive. Acceptors 2 and 3 promised 1.8, so they refuse them. alpha can never get a second vote.",
@@ -24152,7 +24237,16 @@
         {
           "says": "Proposer 5 gets both copies. It counts acceptor 1 once: one promise from one acceptor is not a majority.",
           "from": 5,
-          "to": 7
+          "to": 7,
+          "question": {
+            "asks": "Proposer 5 gets the promise of acceptor 1 two times, and no other promise. Does it ask for votes now?",
+            "answers": [
+              "Yes: two promises are a majority",
+              "No: it counts acceptor 1 once"
+            ],
+            "right": 1,
+            "why": "A quorum is a set of acceptors, not a count of messages."
+          }
         },
         {
           "says": "Proposer 5 waits no more for this ballot and opens a higher one. The promises of ballot 1.5 are still on the wire.",
@@ -28863,7 +28957,16 @@
         {
           "says": "Proposer 8 opens ballot 1.8. Neither acceptor reports a vote, so it proposes bravo.",
           "from": 18,
-          "to": 23
+          "to": 23,
+          "question": {
+            "asks": "alpha is chosen. Acceptor 2 lost its disk. Proposer 8 asks acceptors 2 and 3 for a promise. Does a promise report the vote for alpha?",
+            "answers": [
+              "Yes: acceptor 2 voted for alpha",
+              "No: the vote was only on the lost disk"
+            ],
+            "right": 1,
+            "why": "Acceptor 3 never voted, and acceptor 2 forgot. The majority that chose alpha and the majority that promises now share only an acceptor with no memory."
+          }
         },
         {
           "says": "Acceptors 2 and 3 vote for bravo. Now two values are chosen.",

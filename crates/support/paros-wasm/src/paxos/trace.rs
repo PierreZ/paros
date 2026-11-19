@@ -334,6 +334,36 @@ impl Recorder {
         self
     }
 
+    /// Ask the reader a question before the open beat plays: `answers` in
+    /// order, `right` the right one from 0, and `why` it is right. The page
+    /// shows the question, plays the beat after any answer, then shows `why`.
+    /// Pin the right answer to the run with [`Recorder::holds`] after the
+    /// steps of the beat.
+    ///
+    /// # Panics
+    ///
+    /// When no beat is open, or the question is not well formed (see
+    /// `story::Beats::ask`).
+    pub fn ask(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) -> &mut Self {
+        self.beats.ask(asks, answers, right, why);
+        self
+    }
+
+    /// Check a fact of the world as it stands. A script calls it after the
+    /// steps of a beat that asks a question, so that the right answer is what
+    /// `paros-consensus` did and not what the script's author remembers.
+    ///
+    /// # Panics
+    ///
+    /// When `fact` is false: the core changed, and the story must change.
+    pub fn holds(&mut self, fact: impl Fn(&WorldView) -> bool, says: &str) -> &mut Self {
+        assert!(
+            fact(&self.game.world().view()),
+            "the run no longer shows that {says}"
+        );
+        self
+    }
+
     /// The world as it stands.
     #[must_use]
     pub fn world(&self) -> &WorldKind {

@@ -14,6 +14,13 @@
 // arrow keys move between screens, and the address #run=<id>&beat=<n> names
 // a screen. With reduced motion, a screen appears complete.
 //
+// A beat can ask a question before it plays. The screen then shows the
+// state before the beat, the question and its answers. The reader answers
+// (or presses "Show me"), the beat plays, and the screen says which answer
+// is right and why. A wrong answer costs nothing. The answers live in this
+// page only; window.paxosStory.answers() lists them, and each answer fires
+// the event "paxos:answer" on the document.
+//
 // No protocol logic here: every sentence, state and message comes from the
 // trace. This script runs before steps.js.
 (function () {
@@ -73,6 +80,9 @@
   var says = el("p", "story-says");
   says.setAttribute("aria-live", "polite");
   panel.appendChild(says);
+  var quiz = el("div", "story-quiz");
+  quiz.hidden = true;
+  panel.appendChild(quiz);
   var chosen = el("p", "story-chosen");
   panel.appendChild(chosen);
   var choices = el("div", "story-choices");
@@ -395,14 +405,75 @@
     drawWire(st.wire);
   }
 
+  // ---- questions ----
+
+  var asked = {};       // "run:beat" -> the index of the answer, -1 for "Show me"
+  var waiting = false;  // the screen shows a question that has no answer yet
+
+  function key() { return run.id + ":" + at; }
+
+  function answer(i) {
+    var q = run.beats[at].question;
+    asked[key()] = i;
+    var detail = { page: trace.page, run: run.id, beat: at, answer: i, right: i === q.right };
+    try { document.dispatchEvent(new CustomEvent("paxos:answer", { detail: detail })); } catch (e) { /* old browser */ }
+    go(at, true);
+  }
+
+  // The question of the beat on screen: its answers while it waits, then
+  // the reader's answer, the right one and why.
+  function drawQuiz(beat) {
+    var q = beat.question;
+    quiz.textContent = "";
+    quiz.hidden = !q;
+    if (!q) return;
+    if (waiting) {
+      quiz.appendChild(el("p", "story-quiz-head label", "Before it plays: what happens?"));
+      var list = el("div", "story-answers");
+      q.answers.forEach(function (text, i) {
+        var b = el("button", "story-answer", text);
+        b.type = "button";
+        b.insertBefore(el("span", "story-answer-key tnum", String(i + 1)), b.firstChild);
+        b.addEventListener("click", function () { answer(i); });
+        list.appendChild(b);
+      });
+      quiz.appendChild(list);
+      return;
+    }
+    var mine = asked[key()];
+    var head = el("p", "story-quiz-head label");
+    if (mine === undefined || mine < 0) {
+      head.appendChild(el("span", "chip-status", "answer"));
+    } else if (mine === q.right) {
+      head.appendChild(el("span", "chip-status done", "right"));
+    } else {
+      head.appendChild(el("span", "chip-status gap", "not this time"));
+    }
+    head.appendChild(document.createTextNode(" " + q.asks));
+    quiz.appendChild(head);
+    var list = el("ul", "story-answers done");
+    q.answers.forEach(function (text, i) {
+      var cls = i === q.right ? "right" : (i === mine ? "wrong" : "");
+      var li = el("li", "story-answer " + cls);
+      li.appendChild(el("span", "story-answer-key tnum", i === q.right ? "✓" : (i === mine ? "✗" : String(i + 1))));
+      li.appendChild(document.createTextNode(text));
+      list.appendChild(li);
+    });
+    quiz.appendChild(list);
+    quiz.appendChild(el("p", "story-why", q.why));
+  }
+
   // ---- screens ----
 
   function words() {
     var beat = run.beats[at];
     counter.textContent = "screen " + (at + 1) + " / " + run.beats.length;
     runName.textContent = run.label;
-    says.textContent = beat.says;
-    var st = stateAt(beat.to);
+    // A question hides the sentence of its beat: the sentence gives the answer.
+    says.textContent = waiting ? beat.question.asks : beat.says;
+    says.classList.toggle("asks", waiting);
+    drawQuiz(beat);
+    var st = stateAt(waiting ? beat.from : beat.to);
     chosen.textContent = "";
     if (st.broken) {
       chosen.className = "story-chosen broken";
@@ -417,7 +488,7 @@
       chosen.appendChild(el("span", "chip-status", "not chosen"));
     }
     var last = at === run.beats.length - 1;
-    if (last) {
+    if (last && !waiting) {
       // The run's outcome says what is chosen, in a sentence.
       chosen.textContent = "";
       chosen.appendChild(chosen.className.indexOf("broken") >= 0
@@ -436,9 +507,10 @@
       b.addEventListener("click", function () { open(target, choice.beat, true); });
       choices.appendChild(b);
     });
-    choices.hidden = !beat.choices.length;
+    choices.hidden = waiting || !beat.choices.length;
     backBtn.disabled = at === 0;
-    nextBtn.disabled = last;
+    nextBtn.disabled = last && !waiting;
+    nextBtn.textContent = waiting ? "Show me" : "Continue";
     others.querySelectorAll("button").forEach(function (b) {
       b.classList.toggle("now", b.dataset.run === run.id);
     });
@@ -455,7 +527,12 @@
     at = n;
     var mine = ++token;
     var beat = run.beats[at];
+    waiting = !!beat.question && !(key() in asked);
     words();
+    if (waiting) {
+      still(beat.from, beat.from);
+      return;
+    }
     if (!animate || reduced || beat.from === beat.to) {
       still(beat.to, beat.from);
       return;
@@ -480,11 +557,14 @@
   backBtn.addEventListener("click", function () { touched = true; nextBtn.textContent = "Continue"; go(at - 1, false); });
   nextBtn.addEventListener("click", function () {
     touched = true;
+    if (waiting) { answer(-1); return; }
     if (nextBtn.textContent === "Skip") { token++; nextBtn.textContent = "Continue"; still(run.beats[at].to, run.beats[at].from); return; }
     go(at + 1, true);
   });
   panel.addEventListener("keydown", function (e) {
     if (e.altKey || e.ctrlKey || e.metaKey) return;
+    var digit = /^[1-4]$/.test(e.key) ? parseInt(e.key, 10) - 1 : -1;
+    if (waiting && digit >= 0 && digit < run.beats[at].question.answers.length) { answer(digit); e.preventDefault(); return; }
     if (e.key === "ArrowRight") { nextBtn.click(); e.preventDefault(); }
     else if (e.key === "ArrowLeft") { if (!backBtn.disabled) backBtn.click(); e.preventDefault(); }
   });
@@ -492,6 +572,12 @@
 
   // The step-through calls back here: open the beat that holds step `n`.
   window.paxosStory = {
+    answers: function () {
+      return Object.keys(asked).map(function (k) {
+        var p = k.split(":");
+        return { run: p[0], beat: parseInt(p[1], 10), answer: asked[k] };
+      });
+    },
     show: function (id, n) {
       var target = null;
       stories.forEach(function (s) { if (s.id === id) target = s; });
