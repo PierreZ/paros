@@ -38,7 +38,56 @@ impl World {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// A crashed node shows its disk: that is exactly what survives.
+    fn crashed_node_view(&self, index: usize, wiped: bool) -> NodeView {
+        let id = self.pool[index];
+        let disk = &self.disks[index];
+        NodeView {
+            id: id.0,
+            flavour: NodeFlavour::Colocated,
+            alive: false,
+            role: None,
+            attempt: None::<AttemptView>,
+            ballot: None,
+            leader: None,
+            promised: Some(show_ballot(disk.hard_state().max_promised_ballot)),
+            accepted: disk
+                .records()
+                .iter()
+                .map(|(slot, (ballot, command))| {
+                    let chosen = disk.hard_state().chosen_index.is_some_and(|ci| *slot <= ci);
+                    SlotView::accepted(*slot, *ballot, command, chosen, disk.has_applied(*slot))
+                })
+                .collect(),
+            chosen_index: disk.hard_state().chosen_index.map(|s| s.0),
+            first_unchosen: None,
+            next_slot: None,
+            chosen_gap: None,
+            floor: Some(disk.floor().0),
+            election: None,
+            open_rounds: Vec::new(),
+            pending_accepts: false,
+            recovery_remaining: 0,
+            acceptors: disk.config().peers.iter().map(|n| n.0).collect(),
+            quorum_system: quorum_name(disk.config().quorum_system),
+            quorum: quorum_view(disk.config().quorum_system),
+            grid_cell: grid_cell(&disk.config().peers, disk.config().quorum_system, id),
+            applied: disk
+                .applied()
+                .iter()
+                .map(|(slot, command)| SlotView::applied_entry(*slot, command))
+                .collect(),
+            armed_seam: self.armed_seams[index],
+            acceptors_since: None,
+            matchmakers: None,
+            matchmaking: None,
+            gc: None,
+            handover: handover_view(&self.reconfigurers[index]),
+            retired: self.retired[index],
+            wiped,
+        }
+    }
+
     fn node_view(&self, index: usize) -> NodeView {
         let id = self.pool[index];
         let disk = &self.disks[index];
@@ -48,51 +97,7 @@ impl World {
         // refuses the boot.
         let wiped = disk.provisioned() && !disk.is_formatted();
         let Some(node) = self.nodes[index].as_ref() else {
-            // A crashed node shows its disk: that is exactly what survives.
-            return NodeView {
-                id: id.0,
-                flavour: NodeFlavour::Colocated,
-                alive: false,
-                role: None,
-                attempt: None::<AttemptView>,
-                ballot: None,
-                leader: None,
-                promised: Some(show_ballot(disk.hard_state().max_promised_ballot)),
-                accepted: disk
-                    .records()
-                    .iter()
-                    .map(|(slot, (ballot, command))| {
-                        let chosen = disk.hard_state().chosen_index.is_some_and(|ci| *slot <= ci);
-                        SlotView::accepted(*slot, *ballot, command, chosen, disk.has_applied(*slot))
-                    })
-                    .collect(),
-                chosen_index: disk.hard_state().chosen_index.map(|s| s.0),
-                first_unchosen: None,
-                next_slot: None,
-                chosen_gap: None,
-                floor: Some(disk.floor().0),
-                election: None,
-                open_rounds: Vec::new(),
-                pending_accepts: false,
-                recovery_remaining: 0,
-                acceptors: disk.config().peers.iter().map(|n| n.0).collect(),
-                quorum_system: quorum_name(disk.config().quorum_system),
-                quorum: quorum_view(disk.config().quorum_system),
-                grid_cell: grid_cell(&disk.config().peers, disk.config().quorum_system, id),
-                applied: disk
-                    .applied()
-                    .iter()
-                    .map(|(slot, command)| SlotView::applied_entry(*slot, command))
-                    .collect(),
-                armed_seam: self.armed_seams[index],
-                acceptors_since: None,
-                matchmakers: None,
-                matchmaking: None,
-                gc: None,
-                handover: handover_view(&self.reconfigurers[index]),
-                retired: self.retired[index],
-                wiped,
-            };
+            return self.crashed_node_view(index, wiped);
         };
         let accepted = node
             .acceptor()

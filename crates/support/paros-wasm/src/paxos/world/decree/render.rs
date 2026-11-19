@@ -58,7 +58,7 @@ impl DecreeWorld {
             accepted: acceptor
                 .role
                 .record(DECREE)
-                .map(|(ballot, command)| {
+                .map_or_default(|(ballot, command)| {
                     vec![SlotView::accepted(
                         DECREE,
                         *ballot,
@@ -66,8 +66,7 @@ impl DecreeWorld {
                         chosen_here,
                         false,
                     )]
-                })
-                .unwrap_or_default(),
+                }),
             floor: Some(acceptor.role.first_slot().0),
             alive: acceptor.alive,
             ..self.bare_node(acceptor.id.0, NodeFlavour::Acceptor)

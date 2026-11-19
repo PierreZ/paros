@@ -156,7 +156,10 @@ fn a_probe_that_finds_no_reconfiguration_settles_a_spare() {
         n.membership_probe().is_some(),
         "but re-probes from outside its belief"
     );
-    assert!(!drain_match_requests(&mut n).is_empty());
+    assert!(
+        !drain_match_requests(&mut n).is_empty(),
+        "the re-probe sends match requests"
+    );
 }
 
 /// A node outside a heard reconfiguration re-probes, and a quorum that

@@ -1,7 +1,6 @@
 //! Quorum reads (#143): the leaderless read path, pinned at the node.
 
 use super::*;
-#[allow(clippy::wildcard_imports)]
 use crate::contract::limits::Limits;
 
 /// A six-node `2 × 3` grid over `0..6`: rows `{0, 1, 2}` and `{3, 4, 5}`,
@@ -142,7 +141,10 @@ fn a_quorum_read_waits_for_the_replica_to_cover_the_watermark() {
         }
         true
     });
-    assert!(nodes[4].pending_read_states.is_empty());
+    assert!(
+        nodes[4].pending_read_states.is_empty(),
+        "node 4 serves no read before its held traffic arrives"
+    );
     for (to, m) in held.into_inner() {
         step_at(&mut nodes, to, m);
     }
@@ -227,7 +229,10 @@ fn a_quorum_read_survives_a_role_change_and_expires_by_ttl() {
         nodes[0].quorum_reads().is_empty(),
         "one tick past the window the read is gone"
     );
-    assert!(nodes[0].pending_read_states.is_empty());
+    assert!(
+        nodes[0].pending_read_states.is_empty(),
+        "an expired read leaves no read state"
+    );
 }
 
 /// Under a majority the "row" is the whole membership and any majority of
@@ -282,7 +287,10 @@ fn learning_a_newer_configuration_abandons_open_quorum_reads() {
         nodes[1].quorum_reads().is_empty(),
         "a row member that knows a successor configuration abandons the read"
     );
-    assert!(nodes[1].pending_read_states.is_empty());
+    assert!(
+        nodes[1].pending_read_states.is_empty(),
+        "an abandoned read leaves no read state"
+    );
 }
 
 /// The driver's named row (`quorum_read_in`): a read whose token defaults
@@ -500,6 +508,40 @@ fn an_unheard_acceptor_answers_no_pre_read() {
     );
 }
 
+/// Node 0 wins `b_old` under `C_old = {0, 1, 2}`, beats, and has one write
+/// chosen everywhere, so nodes 1 and 2 read on `(C_old, b_old)`.
+fn settle_under_c_old(nodes: &mut [ColocatedNode], mms: &mut [Matchmaker]) -> Ballot {
+    // Node 0 wins `b_old` under `C_old` and beats: every node hears it.
+    campaign(&mut nodes[0]);
+    let requests = drain_match_requests(&mut nodes[0]);
+    for reply in matchmake(mms, requests) {
+        nodes[0].on_match_reply(reply);
+    }
+    let q = drain(&mut nodes[0]);
+    deliver_all(nodes, q);
+    assert!(nodes[0].is_leader());
+    nodes[0].set_election_timeout(NO_CHECK_QUORUM);
+    nodes[0].tick();
+    let q = drain(&mut nodes[0]);
+    deliver_all(nodes, q);
+    let b_old = nodes[0].ballot();
+
+    // One write under `C_old`, chosen everywhere: the leadership settles.
+    let _ = nodes[0].propose(entry(1, 1, 1));
+    let q = drain(&mut nodes[0]);
+    deliver_all(nodes, q);
+    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
+    for n in &nodes[1..3] {
+        assert_eq!(
+            n.read_basis().map(|b| (b.config, b.since)),
+            Some((cfg(&[0, 1, 2]), b_old)),
+            "node {} reads on (C_old, b_old)",
+            n.config().id.0
+        );
+    }
+    b_old
+}
+
 /// Finding 1 of the paros-consensus review of 2026-11-16 (a `PreReadAck` fences
 /// a read with the belief ballot, not the promise). The reads model fences
 /// on the promise (`specs/tla/reads/Reads.tla:264`, `AckBallot`): an answer
@@ -525,7 +567,6 @@ fn an_unheard_acceptor_answers_no_pre_read() {
 /// below `W`. Red on 25d81d5, where the answer carried the belief ballot
 /// `b_old`; green once it carries the read fence (the promise).
 #[test]
-#[allow(clippy::too_many_lines)]
 fn a_promise_above_the_read_basis_ends_the_read_even_when_the_configuration_was_ignored() {
     let wide = [0, 1, 2, 3, 4];
     let lagging = [0, 1, 2];
@@ -538,34 +579,7 @@ fn a_promise_above_the_read_basis_ends_the_read_even_when_the_configuration_was_
     ];
     let mut mms = registries(1);
 
-    // Node 0 wins `b_old` under `C_old` and beats: every node hears it.
-    campaign(&mut nodes[0]);
-    let requests = drain_match_requests(&mut nodes[0]);
-    for reply in matchmake(&mut mms, requests) {
-        nodes[0].on_match_reply(reply);
-    }
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-    assert!(nodes[0].is_leader());
-    nodes[0].set_election_timeout(NO_CHECK_QUORUM);
-    nodes[0].tick();
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-    let b_old = nodes[0].ballot();
-
-    // One write under `C_old`, chosen everywhere: the leadership settles.
-    let _ = nodes[0].propose(entry(1, 1, 1));
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
-    for n in &nodes[1..3] {
-        assert_eq!(
-            n.read_basis().map(|b| (b.config, b.since)),
-            Some((cfg(&[0, 1, 2]), b_old)),
-            "node {} reads on (C_old, b_old)",
-            n.config().id.0
-        );
-    }
+    let b_old = settle_under_c_old(&mut nodes, &mut mms);
 
     // Node 0 reconfigures to `C_new = {0, 3, 4}`.
     let c_new = cfg(&[0, 3, 4]);

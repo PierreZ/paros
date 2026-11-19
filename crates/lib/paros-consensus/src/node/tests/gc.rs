@@ -191,7 +191,10 @@ fn a_refused_ack_teaches_the_successor_set() {
     assert_eq!(nodes[0].on_gc_ack(&refusal), GcStep::Ignored);
     assert_eq!(nodes[0].matchmaker_set(), Some(&successor));
     let again = gc_requests(&mut nodes[0]);
-    assert!(!again.is_empty());
+    assert!(
+        !again.is_empty(),
+        "the leader asks the successor set for its GC acks"
+    );
     assert!(
         again
             .iter()

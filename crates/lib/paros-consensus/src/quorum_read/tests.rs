@@ -61,7 +61,10 @@ fn a_read_completes_on_its_row_at_the_maximum_watermark() {
     );
     // The row is whole: confirmed at max(2, 3, nothing) = 3, but the
     // replica has not applied slot 3 yet.
-    assert!(reads.serve(|index| index <= Some(Slot(2))).is_empty());
+    assert!(
+        reads.serve(|index| index <= Some(Slot(2))).is_empty(),
+        "a read waits for the replica to apply the confirmed slot"
+    );
     assert_eq!(reads.pending()[0].confirmed_index(), Some(Some(Slot(3))));
     assert_eq!(
         reads.fold(1, NodeId(5), Some(Slot(7)), None),

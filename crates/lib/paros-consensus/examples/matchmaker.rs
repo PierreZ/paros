@@ -605,9 +605,7 @@ fn phase1(
     let ballot = campaign.ballot;
     let from_slot = campaign.from_slot;
     let me = campaign.me;
-    let own = me
-        .map(|id| acceptor(pool, id).role.records().clone())
-        .unwrap_or_default();
+    let own = me.map_or_default(|id| acceptor(pool, id).role.records().clone());
     if let Some(id) = me {
         // A candidate that is an acceptor promises its own ballot first,
         // durably, and is its own first voter in every prior configuration
@@ -1033,9 +1031,7 @@ fn decree_phase1(
                     show_ballot(*at)
                 ))
         );
-        let accepted = vote
-            .map(|record| BTreeMap::from([(DECREE, record)]))
-            .unwrap_or_default();
+        let accepted = vote.map_or_default(|record| BTreeMap::from([(DECREE, record)]));
         proposer.fold_promise(*id, b, DECREE, accepted, BTreeMap::new(), None);
     }
     assert!(proposer.phase1_won(b));

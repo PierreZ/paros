@@ -198,7 +198,10 @@ fn a_read_at_the_end_is_empty_and_below_first_seq_is_truncated() {
         }),
     ]);
     let p = page(r.read(Seq(2), 64, 64));
-    assert!(p.records.is_empty());
+    assert!(
+        p.records.is_empty(),
+        "a read at the end of the log returns no record"
+    );
     let p = page(r.read(Seq(7), 64, 64));
     assert_eq!(p.next(), Seq(7));
     assert!(matches!(r.read(Seq(0), 64, 64), LogRead::Truncated(s) if s.first_seq == Seq(1)));

@@ -153,7 +153,10 @@ fn a_campaign_registers_before_it_prepares() {
     assert!(!plain.matchmaking_pending());
     let msgs = drain(&mut plain);
     assert_eq!(prepares(&msgs).len(), 2);
-    assert!(drain_match_requests(&mut plain).is_empty());
+    assert!(
+        drain_match_requests(&mut plain).is_empty(),
+        "a node without matchmakers sends no match request"
+    );
     assert!(msgs.iter().all(|(_, m)| !matches!(
         m,
         Message::Prepare {
@@ -176,7 +179,10 @@ fn a_matchmaker_quorum_opens_phase_one() {
     let step = n.on_match_reply(replies[0].clone());
     assert_eq!(step, MatchStep::Registered { remaining: 1 });
     assert!(n.matchmaking_pending());
-    assert!(prepares(&drain(&mut n)).is_empty());
+    assert!(
+        prepares(&drain(&mut n)).is_empty(),
+        "no Prepare leaves before a matchmaker quorum registers"
+    );
     let step = n.on_match_reply(replies[1].clone());
     assert!(matches!(
         step,
@@ -225,7 +231,10 @@ fn a_refused_registration_never_becomes_a_leadership() {
     ));
     assert_eq!(n.role(), NodeRole::Follower);
     assert!(!n.matchmaking_pending());
-    assert!(prepares(&drain(&mut n)).is_empty());
+    assert!(
+        prepares(&drain(&mut n)).is_empty(),
+        "an abandoned campaign sends no Prepare"
+    );
     // The refusal's `highest` lifts the next campaign strictly above the
     // round that refused this one — never one round up from our own, which
     // the same registration would refuse again (the leapfrog livelock).
@@ -346,7 +355,10 @@ fn resend_targets_only_the_unanswered_matchmakers() {
     n.on_match_reply(registered(2, b, &[], Ballot::zero()));
     assert!(!n.matchmaking_pending());
     n.resend_matchmaking();
-    assert!(drain_match_requests(&mut n).is_empty());
+    assert!(
+        drain_match_requests(&mut n).is_empty(),
+        "an abandoned campaign re-sends no match request"
+    );
 }
 
 /// The election timeout does **not** abandon a campaign stuck in
@@ -1510,7 +1522,10 @@ fn a_below_watermark_refusal_lifts_the_next_campaign_above_the_watermark() {
     assert_eq!(step, MatchStep::Refused(refusal));
     assert_eq!(n.role(), NodeRole::Follower);
     assert!(!n.matchmaking_pending());
-    assert!(prepares(&drain(&mut n)).is_empty());
+    assert!(
+        prepares(&drain(&mut n)).is_empty(),
+        "an abandoned campaign sends no Prepare"
+    );
     campaign(&mut n);
     assert_eq!(n.ballot().round, 21, "one above the watermark round (20)");
 }
@@ -1676,7 +1691,10 @@ fn a_refused_membership_probe_closes_the_probe() {
     assert!(n.membership_probe().is_none());
     assert!(!n.matchmaking_pending());
     assert_eq!(n.role(), NodeRole::Follower);
-    assert!(drain_match_requests(&mut n).is_empty());
+    assert!(
+        drain_match_requests(&mut n).is_empty(),
+        "an abandoned campaign sends no match request"
+    );
 }
 
 /// A reply for another journal, for another generation, of the wrong kind,

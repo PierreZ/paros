@@ -254,8 +254,7 @@ impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
             None => self
                 .proposer
                 .election()
-                .map(|e| e.unpromised(None))
-                .unwrap_or_default(),
+                .map_or_default(|e| e.unpromised(None)),
             Some(round) => {
                 // A decree is never delegated: its rounds are always the
                 // proposer's own.
@@ -282,9 +281,7 @@ impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
         if !self.acceptors.contains(from) || self.preempted.is_some() {
             return DecreePromise::Ignored;
         }
-        let accepted = vote
-            .map(|vote| BTreeMap::from([(DECREE_SLOT, vote)]))
-            .unwrap_or_default();
+        let accepted = vote.map_or_default(|vote| BTreeMap::from([(DECREE_SLOT, vote)]));
         // A decree's whole log is one slot, so its promise is never paged:
         // one terminal page carries the vote or reports none.
         if self.proposer.fold_promise(

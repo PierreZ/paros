@@ -595,8 +595,7 @@ impl World {
         }
         let candidates = self
             .node(id)
-            .map(ColocatedNode::handoff_candidates)
-            .unwrap_or_default();
+            .map_or_default(ColocatedNode::handoff_candidates);
         if !candidates.contains(&to) {
             return Err(ActionError::new(
                 ActionErrorCode::HandoffRefused,

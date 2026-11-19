@@ -406,9 +406,7 @@ fn phase1(
                 // "page": the accepted value (if any) keyed by its slot, no
                 // damaged records, and no continuation cursor, because a
                 // one-slot log always fits in one page.
-                let accepted = vote
-                    .map(|record| BTreeMap::from([(DECREE, record)]))
-                    .unwrap_or_default();
+                let accepted = vote.map_or_default(|record| BTreeMap::from([(DECREE, record)]));
                 let fold =
                     proposer.fold_promise(id, ballot, DECREE, accepted, BTreeMap::new(), None);
                 assert_eq!(

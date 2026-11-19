@@ -493,8 +493,15 @@ mod tests {
     use super::*;
 
     /// One action of every kind, and its label.
-    #[allow(clippy::too_many_lines)]
     fn every_action() -> Vec<(Action, &'static str)> {
+        let mut actions = node_actions();
+        actions.extend(decree_actions());
+        actions.extend(membership_actions());
+        actions
+    }
+
+    /// The wire, clock, client and lifecycle actions, and their labels.
+    fn node_actions() -> Vec<(Action, &'static str)> {
         vec![
             (Action::Deliver { id: 3 }, "deliver message 3"),
             (Action::Drop { id: 3 }, "drop message 3"),
@@ -571,6 +578,49 @@ mod tests {
             ),
             (Action::Wipe { node: 1 }, "erase the disk of node 1"),
             (
+                Action::Compact { node: 1, up_to: 6 },
+                "compact node 1 before seq 6",
+            ),
+            (
+                Action::ResendPending { node: 1 },
+                "tell node 1 to re-send its pending Accepts",
+            ),
+            (Action::StepDown { node: 1 }, "make node 1 resign"),
+        ]
+    }
+
+    /// The single-decree world's actions, and their labels.
+    fn decree_actions() -> Vec<(Action, &'static str)> {
+        vec![
+            (
+                Action::OpenBallot {
+                    proposer: 5,
+                    value: "alpha".into(),
+                },
+                "tell proposer 5 to open a ballot for alpha",
+            ),
+            (
+                Action::SetReach {
+                    phase: Phase::One,
+                    nodes: vec![1, 2],
+                },
+                "let Phase 1 reach the acceptors [1, 2]",
+            ),
+            (
+                Action::SetReach {
+                    phase: Phase::Two,
+                    nodes: vec![3],
+                },
+                "let Phase 2 reach the acceptors [3]",
+            ),
+        ]
+    }
+
+    /// The matchmaker, reconfiguration and retirement actions, and their
+    /// labels.
+    fn membership_actions() -> Vec<(Action, &'static str)> {
+        vec![
+            (
                 Action::CrashMatchmaker { matchmaker: 2 },
                 "crash matchmaker 2",
             ),
@@ -620,36 +670,6 @@ mod tests {
             (
                 Action::ResendReconfigurer { node: 1 },
                 "tell node 1 to send its handover step again",
-            ),
-            (
-                Action::Compact { node: 1, up_to: 6 },
-                "compact node 1 before seq 6",
-            ),
-            (
-                Action::ResendPending { node: 1 },
-                "tell node 1 to re-send its pending Accepts",
-            ),
-            (Action::StepDown { node: 1 }, "make node 1 resign"),
-            (
-                Action::OpenBallot {
-                    proposer: 5,
-                    value: "alpha".into(),
-                },
-                "tell proposer 5 to open a ballot for alpha",
-            ),
-            (
-                Action::SetReach {
-                    phase: Phase::One,
-                    nodes: vec![1, 2],
-                },
-                "let Phase 1 reach the acceptors [1, 2]",
-            ),
-            (
-                Action::SetReach {
-                    phase: Phase::Two,
-                    nodes: vec![3],
-                },
-                "let Phase 2 reach the acceptors [3]",
             ),
         ]
     }

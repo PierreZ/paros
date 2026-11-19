@@ -120,6 +120,6 @@ build; clippy and nextest cover the crate through the workspace.
 
 ## Deps & pins (`Cargo.toml`)
 
-`serde`, `serde_json` always. `paxos`: `paros-consensus` (`default-features = false`, `serde`).
-wasm-only `wasm-bindgen = "=0.2.129"` (must equal the flake's `wasm-bindgen-cli`, bumped
+`paxos`: `serde`, and `paros-consensus` (`default-features = false`, `serde`); on wasm32 also `serde_json`, the JSON of the exports. The native tests take `serde_json` as a dev-dependency.
+wasm-only `wasm-bindgen = "=0.2.130"` (must equal the flake's `wasm-bindgen-cli`, bumped
 together) and `console_error_panic_hook`.

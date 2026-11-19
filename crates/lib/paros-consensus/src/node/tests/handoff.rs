@@ -723,7 +723,10 @@ fn a_matchmaker_successor_leads_under_the_carried_configurations() {
         panic!("a Relinquish")
     };
     assert_eq!(*config, Some(cfg(&[0, 1, 2])), "the minter's configuration");
-    assert!(prior.is_empty());
+    assert!(
+        prior.is_empty(),
+        "the minter's handoff carries no prior configuration"
+    );
 
     let moved = with_configs(&msg, Some(cfg(&[0, 1, 3])), vec![cfg(&[0, 1, 2])]);
     nodes[1].step(moved);

@@ -408,11 +408,8 @@ impl Recorder {
                 message: message_id,
                 wire,
                 nodes: lane_states,
-                fields: carried
-                    .as_ref()
-                    .map(|c| c.fields.clone())
-                    .unwrap_or_default(),
-                voice: carried.map(|c| c.voice).unwrap_or_default(),
+                fields: carried.as_ref().map_or_default(|c| c.fields.clone()),
+                voice: carried.map_or_default(|c| c.voice),
                 stage: words::stage_of(&message, log_world(&after)),
                 says: message_says(kind, &before, &after, &message, repeated),
                 chosen,

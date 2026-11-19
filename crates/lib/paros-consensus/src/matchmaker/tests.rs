@@ -319,7 +319,10 @@ fn a_losing_bootstrap_is_dropped_when_the_successor_is_learned() {
     let (writes, replies) = drain_reconfigure(&mut member);
     assert!(matches!(&replies[0], ReconfigureReply::Refused { .. }));
     assert!(writes.is_empty(), "a settled proposal is not stored");
-    assert!(member.hard_state().pending.is_empty());
+    assert!(
+        member.hard_state().pending.is_empty(),
+        "a refused proposal leaves nothing pending"
+    );
 }
 
 #[test]
@@ -401,7 +404,7 @@ fn a_registered_ballot_with_different_bytes_is_refused_write_once() {
     drain(&mut mm);
     mm.step(request(1, ballot(1, 1), &[0, 1]));
     let (writes, replies) = drain(&mut mm);
-    assert!(writes.is_empty());
+    assert!(writes.is_empty(), "a stale registration writes nothing");
     assert_eq!(
         replies[0].outcome,
         MatchOutcome::Refused(MatchRefusal::Stale {
@@ -615,7 +618,7 @@ fn a_fresh_matchmaker_resolves_its_phase_from_the_bootstrap_set() {
     assert_eq!(spare.phase(), MatchmakerPhase::Inactive);
     spare.step(request(1, ballot(1, 1), &[0, 1, 2]));
     let (writes, replies) = drain(&mut spare);
-    assert!(writes.is_empty());
+    assert!(writes.is_empty(), "an inactive matchmaker writes nothing");
     assert_eq!(
         replies[0].outcome,
         MatchOutcome::Refused(MatchRefusal::Inactive)
@@ -635,7 +638,10 @@ fn a_request_for_another_generation_is_refused_with_the_current_set() {
         MatchmakerGeneration(3),
     ));
     let (writes, replies) = drain(&mut mm);
-    assert!(writes.is_empty());
+    assert!(
+        writes.is_empty(),
+        "a request of another generation writes nothing"
+    );
     assert_eq!(
         replies[0].outcome,
         MatchOutcome::Refused(MatchRefusal::Generation {
@@ -689,7 +695,7 @@ fn a_stop_freezes_durably_and_is_idempotent() {
     ] {
         mm.step(request(1, ballot(2, 1), &[0, 1, 2]));
         let (writes, replies) = drain(mm);
-        assert!(writes.is_empty());
+        assert!(writes.is_empty(), "a stopped matchmaker writes nothing");
         assert_eq!(
             replies[0].outcome,
             MatchOutcome::Refused(MatchRefusal::Stopped { successor: None })
@@ -708,12 +714,57 @@ fn a_stop_freezes_durably_and_is_idempotent() {
     ));
 }
 
+/// The successor decree over generation 0 at one matchmaker: a promise and
+/// a vote, both durable; a lower ballot is refused with the promise, and a
+/// higher one learns the vote (P2c's input).
+fn decree_over_generation_zero(mm: &mut Matchmaker, successor: &MatchmakerSet) {
+    mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
+        from: NodeId(5),
+        generation: G0,
+        ballot: ballot(1, 5),
+    });
+    let (writes, replies) = drain_reconfigure(mm);
+    assert_eq!(writes.len(), 1, "a promise is durable");
+    assert!(matches!(
+        &replies[0],
+        ReconfigureReply::Promised { vote: None, .. }
+    ));
+    mm.step_reconfigure(ReconfigureRequest::DecreeAccept {
+        from: NodeId(5),
+        generation: G0,
+        ballot: ballot(1, 5),
+        members: successor.members().to_vec(),
+    });
+    let (writes, replies) = drain_reconfigure(mm);
+    assert_eq!(writes.len(), 1, "a vote is durable");
+    assert!(matches!(&replies[0], ReconfigureReply::Accepted { .. }));
+    // A lower decree ballot is refused with the promise.
+    mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
+        from: NodeId(4),
+        generation: G0,
+        ballot: ballot(1, 4),
+    });
+    let (_, replies) = drain_reconfigure(mm);
+    assert!(
+        matches!(&replies[0], ReconfigureReply::Nacked { promised, .. } if *promised == ballot(1, 5))
+    );
+    // A higher one learns the vote (P2c's input).
+    mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
+        from: NodeId(4),
+        generation: G0,
+        ballot: ballot(2, 4),
+    });
+    let (_, replies) = drain_reconfigure(mm);
+    assert!(
+        matches!(&replies[0], ReconfigureReply::Promised { vote: Some((b, m)), .. } if *b == ballot(1, 5) && *m == successor.members())
+    );
+}
+
 /// The handover end to end at one matchmaker in both generations: stop,
 /// bootstrap (pending, refused to serve), decree votes (durable), chosen
 /// (activates the pending registry whole, at the reconstructed
 /// watermark), and the new generation serves from the reconstruction.
 #[test]
-#[allow(clippy::too_many_lines)]
 fn a_chosen_successor_activates_its_pending_bootstrap() {
     let mut mm = fresh(0);
     mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
@@ -743,7 +794,7 @@ fn a_chosen_successor_activates_its_pending_bootstrap() {
         .page(None, REGISTRY_PAGE),
     });
     let (writes, replies) = drain_reconfigure(&mut mm);
-    assert!(writes.is_empty());
+    assert!(writes.is_empty(), "a refused bootstrap writes nothing");
     assert!(matches!(replies[0], ReconfigureReply::Refused { .. }));
     mm.step_reconfigure(ReconfigureRequest::Bootstrap {
         from: NodeId(5),
@@ -767,47 +818,7 @@ fn a_chosen_successor_activates_its_pending_bootstrap() {
         replies[0].outcome,
         MatchOutcome::Refused(MatchRefusal::Inactive)
     ));
-    // The decree over generation 0.
-    mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
-        from: NodeId(5),
-        generation: G0,
-        ballot: ballot(1, 5),
-    });
-    let (writes, replies) = drain_reconfigure(&mut mm);
-    assert_eq!(writes.len(), 1, "a promise is durable");
-    assert!(matches!(
-        &replies[0],
-        ReconfigureReply::Promised { vote: None, .. }
-    ));
-    mm.step_reconfigure(ReconfigureRequest::DecreeAccept {
-        from: NodeId(5),
-        generation: G0,
-        ballot: ballot(1, 5),
-        members: successor.members().to_vec(),
-    });
-    let (writes, replies) = drain_reconfigure(&mut mm);
-    assert_eq!(writes.len(), 1, "a vote is durable");
-    assert!(matches!(&replies[0], ReconfigureReply::Accepted { .. }));
-    // A lower decree ballot is refused with the promise.
-    mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
-        from: NodeId(4),
-        generation: G0,
-        ballot: ballot(1, 4),
-    });
-    let (_, replies) = drain_reconfigure(&mut mm);
-    assert!(
-        matches!(&replies[0], ReconfigureReply::Nacked { promised, .. } if *promised == ballot(1, 5))
-    );
-    // A higher one learns the vote (P2c's input).
-    mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
-        from: NodeId(4),
-        generation: G0,
-        ballot: ballot(2, 4),
-    });
-    let (_, replies) = drain_reconfigure(&mut mm);
-    assert!(
-        matches!(&replies[0], ReconfigureReply::Promised { vote: Some((b, m)), .. } if *b == ballot(1, 5) && *m == successor.members())
-    );
+    decree_over_generation_zero(&mut mm, &successor);
     // Chosen: the successor is recorded for generation 0 and, being a
     // member holding the bootstrap, this matchmaker activates it.
     let (writes, replies) = chosen(&mut mm, 5, &successor);
@@ -887,7 +898,7 @@ fn a_departed_matchmaker_answers_with_its_successor() {
         successor: set(1, &[4, 5, 6]),
     });
     let (writes, _) = drain_reconfigure(&mut mm);
-    assert!(writes.is_empty());
+    assert!(writes.is_empty(), "a repeated bootstrap writes nothing");
     assert_eq!(mm.successor(), Some(&successor));
 }
 

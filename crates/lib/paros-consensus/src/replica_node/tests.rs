@@ -992,7 +992,10 @@ fn a_trim_point_at_or_below_the_floor_is_a_no_op() {
         state: JournalState::default(),
     });
     let ready = replica.ready();
-    assert!(ready.writes().is_empty());
+    assert!(
+        ready.writes().is_empty(),
+        "a trim point at or below the floor writes nothing"
+    );
     ready.advance();
     assert_eq!(replica.counters().trim_jumps, 0);
     assert_eq!(replica.first_slot(), Slot(0));

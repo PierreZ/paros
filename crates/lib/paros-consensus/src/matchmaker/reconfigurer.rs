@@ -1005,7 +1005,6 @@ impl MatchmakerReconfigurer {
         step
     }
 
-    #[allow(clippy::too_many_lines)]
     fn fold_reply(&mut self, reply: ReconfigureReply) -> ReconfigurerStep {
         let from = reply.matchmaker();
         // A matchmaker that moved on past the generation we are replacing:
@@ -1032,346 +1031,378 @@ impl MatchmakerReconfigurer {
         }
         match &mut self.phase {
             ReconfigurerPhase::Idle => ReconfigurerStep::Ignored,
-            ReconfigurerPhase::Stopping {
-                old,
-                acks,
-                partial,
-                decree_floor,
+            ReconfigurerPhase::Stopping { .. } => self.fold_stopping(from, reply),
+            ReconfigurerPhase::Bootstrapping { .. } => self.fold_bootstrapping(from, reply),
+            ReconfigurerPhase::Deciding { .. } => self.fold_deciding(from, reply),
+            ReconfigurerPhase::Publishing { .. } => self.fold_publishing(from, &reply),
+        }
+    }
+
+    /// A frozen page of a member of the generation being replaced.
+    fn fold_stopping(&mut self, from: MatchmakerId, reply: ReconfigureReply) -> ReconfigurerStep {
+        let ReconfigurerPhase::Stopping {
+            old,
+            acks,
+            partial,
+            decree_floor,
+            ..
+        } = &mut self.phase
+        else {
+            unreachable!("fold_stopping runs in the Stopping phase");
+        };
+        let ReconfigureReply::Stopped {
+            generation,
+            after,
+            next,
+            registries,
+            successor,
+            decree_promised,
+            ..
+        } = reply
+        else {
+            return ReconfigurerStep::Ignored;
+        };
+        if generation != old.generation || !old.contains(from) {
+            return ReconfigurerStep::Ignored;
+        }
+        if let Some(successor) = successor {
+            self.abort();
+            return ReconfigurerStep::Superseded { successor };
+        }
+        if acks.contains_key(&from) {
+            // A member that already answered: the freeze is
+            // idempotent, so a re-sent `Stop` is answered again and
+            // the second copy moves nothing. Reporting it as
+            // progress reset the stall clock, which is how a phase
+            // whose remaining members were all dead stayed alive
+            // for the rest of a run.
+            return ReconfigurerStep::Ignored;
+        }
+        // A page counts only where it continues the member's report
+        // (#439): a stale or duplicated page moves nothing. Wire
+        // hygiene: at most a ceiling of journals, all above the
+        // cursor, and a cut page continues after its last journal.
+        let cursor = partial.get(&from).map(|(_, cursor)| *cursor);
+        let well_formed = registries.len() <= REGISTRY_PAGE
+            && registries
+                .keys()
+                .all(|journal| after.is_none_or(|after| *journal > after))
+            && next.is_none_or(|next| registries.keys().next_back() == Some(&next));
+        if after != cursor || !well_formed {
+            return ReconfigurerStep::Ignored;
+        }
+        let width = registries.len();
+        let mut report = partial.remove(&from).map_or_default(|(report, _)| report);
+        report.extend(registries);
+        *decree_floor = (*decree_floor).max(decree_promised);
+        if let Some(next) = next {
+            // A cut page is full: the member's page is its width.
+            assert!(width > 0, "a cut frozen page carries a journal");
+            self.cut = Some(self.cut.map_or(width, |cut| cut.min(width)));
+            // The report continues: ask its next page now.
+            partial.insert(from, (report, next));
+            self.pending.push((
+                from,
+                ReconfigureRequest::Stop {
+                    from: self.node,
+                    generation,
+                    after: Some(next),
+                },
+            ));
+            return ReconfigurerStep::Stopped {
+                remaining: old.quorum_size().saturating_sub(acks.len()),
+            };
+        }
+        if after.is_some() {
+            probe!(
+                reachable,
+                "handover: a reconfigurer reads a frozen registry over several pages"
+            );
+        }
+        acks.insert(from, report);
+        // The freeze does **not** close here. A quorum is what the
+        // reconstruction *needs*, never what it should settle for:
+        // closing on the ack that completed it made every `finish`
+        // propose exactly `quorum(M_g)` members, ratcheting a set of
+        // five to three to two to zero fault tolerance over a run
+        // (review finding P5). The driver closes it on its own
+        // cadence ([`Self::close_stop`]) once
+        // [`Self::stop_quorum_reached`], so every ack that arrives
+        // in between widens the reconstruction and a finish's
+        // proposal.
+        // A counted freeze: the member is in, and the decree floor
+        // covers its decree promise.
+        assert!(acks.contains_key(&from), "a counted freeze is recorded");
+        assert!(
+            *decree_floor >= decree_promised,
+            "the decree floor covers every frozen promise"
+        );
+        let quorum = old.quorum_size();
+        ReconfigurerStep::Stopped {
+            remaining: quorum.saturating_sub(acks.len()),
+        }
+    }
+
+    /// A member of the proposed set holds the reconstruction, or a page of it.
+    fn fold_bootstrapping(
+        &mut self,
+        from: MatchmakerId,
+        reply: ReconfigureReply,
+    ) -> ReconfigurerStep {
+        let ReconfigurerPhase::Bootstrapping {
+            old,
+            bootstrap,
+            acks,
+            held,
+            decree_floor,
+        } = &mut self.phase
+        else {
+            unreachable!("fold_bootstrapping runs in the Bootstrapping phase");
+        };
+        let ReconfigureReply::Bootstrapped {
+            set,
+            held: holds,
+            complete,
+            ..
+        } = reply
+        else {
+            return ReconfigurerStep::Ignored;
+        };
+        if set != bootstrap.set || !set.contains(from) || acks.contains(&from) {
+            return ReconfigurerStep::Ignored;
+        }
+        if !complete {
+            // The member holds the pages up to `holds` (#439): send
+            // the next one now. An answer that moved nothing is no
+            // progress; the driver's re-send cadence asks again.
+            if held.get(&from).copied().flatten() == holds && held.contains_key(&from) {
+                return ReconfigurerStep::Ignored;
+            }
+            held.insert(from, holds);
+            if holds.is_some() {
+                probe!(
+                    reachable,
+                    "handover: a reconfigurer sends a bootstrap over several pages"
+                );
+            }
+            // `bootstrap_page` borrows all of `self`; the phase is
+            // borrowed here, so read the two fields it reads.
+            let page = self.cut.map_or(self.limits.registry_page, |cut| {
+                cut.min(self.limits.registry_page)
+            });
+            self.pending.push((
+                from,
+                ReconfigureRequest::Bootstrap {
+                    from: self.node,
+                    bootstrap: bootstrap.page(holds, page),
+                },
+            ));
+            return ReconfigurerStep::Bootstrapped {
+                remaining: bootstrap.set.members().len() - acks.len(),
+            };
+        }
+        held.remove(&from);
+        acks.insert(from);
+        assert!(
+            acks.len() <= bootstrap.set.members().len(),
+            "only members of the proposed set acknowledge its bootstrap"
+        );
+        let remaining = bootstrap.set.members().len() - acks.len();
+        if remaining > 0 {
+            return ReconfigurerStep::Bootstrapped { remaining };
+        }
+        // Every member holds the reconstruction: the set may now be
+        // chosen. The decree opens at a fresh ballot of this node —
+        // strictly above every round this incarnation used *and*
+        // above the stop quorum's decree floor, so a rebooted node
+        // never reuses a ballot its earlier incarnation may have had
+        // a value accepted at (one ballot, one value).
+        self.round = self.round.max(decree_floor.round).saturating_add(1);
+        let ballot = Ballot {
+            round: self.round,
+            node: self.node,
+        };
+        // The decree opens strictly above every decree promise the stop
+        // quorum reported, at this reconfigurer's own ballot.
+        assert!(
+            ballot.round > decree_floor.round,
+            "a decree opens above the stop quorum's promises"
+        );
+        assert!(
+            ballot.node == self.node,
+            "a decree runs at this node's ballot"
+        );
+        let decree = Box::new(successor_decree(
+            ballot,
+            old,
+            bootstrap.set.members().to_vec(),
+        ));
+        self.phase = ReconfigurerPhase::Deciding {
+            old: old.clone(),
+            bootstrap: bootstrap.clone(),
+            decree,
+        };
+        self.resend();
+        ReconfigurerStep::Deciding { ballot }
+    }
+
+    /// A member of the old generation answers the successor decree.
+    fn fold_deciding(&mut self, from: MatchmakerId, reply: ReconfigureReply) -> ReconfigurerStep {
+        let ReconfigurerPhase::Deciding { old, decree, .. } = &mut self.phase else {
+            unreachable!("fold_deciding runs in the Deciding phase");
+        };
+        if !old.contains(from) {
+            return ReconfigurerStep::Ignored;
+        }
+        match reply {
+            ReconfigureReply::Promised {
+                generation,
+                ballot,
+                vote,
                 ..
             } => {
-                let ReconfigureReply::Stopped {
-                    generation,
-                    after,
-                    next,
-                    registries,
-                    successor,
-                    decree_promised,
-                    ..
-                } = reply
-                else {
+                if generation != old.generation || ballot != decree.ballot() {
                     return ReconfigurerStep::Ignored;
+                }
+                let members = match decree.on_promise(from, vote) {
+                    DecreePromise::Ignored => return ReconfigurerStep::Ignored,
+                    DecreePromise::Counted { remaining } => {
+                        return ReconfigurerStep::Promised { remaining };
+                    }
+                    DecreePromise::Quorum(members) => members,
                 };
-                if generation != old.generation || !old.contains(from) {
-                    return ReconfigurerStep::Ignored;
-                }
-                if let Some(successor) = successor {
-                    self.abort();
-                    return ReconfigurerStep::Superseded { successor };
-                }
-                if acks.contains_key(&from) {
-                    // A member that already answered: the freeze is
-                    // idempotent, so a re-sent `Stop` is answered again and
-                    // the second copy moves nothing. Reporting it as
-                    // progress reset the stall clock, which is how a phase
-                    // whose remaining members were all dead stayed alive
-                    // for the rest of a run.
-                    return ReconfigurerStep::Ignored;
-                }
-                // A page counts only where it continues the member's report
-                // (#439): a stale or duplicated page moves nothing. Wire
-                // hygiene: at most a ceiling of journals, all above the
-                // cursor, and a cut page continues after its last journal.
-                let cursor = partial.get(&from).map(|(_, cursor)| *cursor);
-                let well_formed = registries.len() <= REGISTRY_PAGE
-                    && registries
-                        .keys()
-                        .all(|journal| after.is_none_or(|after| *journal > after))
-                    && next.is_none_or(|next| registries.keys().next_back() == Some(&next));
-                if after != cursor || !well_formed {
-                    return ReconfigurerStep::Ignored;
-                }
-                let width = registries.len();
-                let mut report = partial
-                    .remove(&from)
-                    .map(|(report, _)| report)
-                    .unwrap_or_default();
-                report.extend(registries);
-                *decree_floor = (*decree_floor).max(decree_promised);
-                if let Some(next) = next {
-                    // A cut page is full: the member's page is its width.
-                    assert!(width > 0, "a cut frozen page carries a journal");
-                    self.cut = Some(self.cut.map_or(width, |cut| cut.min(width)));
-                    // The report continues: ask its next page now.
-                    partial.insert(from, (report, next));
-                    self.pending.push((
-                        from,
-                        ReconfigureRequest::Stop {
-                            from: self.node,
-                            generation,
-                            after: Some(next),
-                        },
-                    ));
-                    return ReconfigurerStep::Stopped {
-                        remaining: old.quorum_size().saturating_sub(acks.len()),
-                    };
-                }
-                if after.is_some() {
-                    probe!(
-                        reachable,
-                        "handover: a reconfigurer reads a frozen registry over several pages"
-                    );
-                }
-                acks.insert(from, report);
-                // The freeze does **not** close here. A quorum is what the
-                // reconstruction *needs*, never what it should settle for:
-                // closing on the ack that completed it made every `finish`
-                // propose exactly `quorum(M_g)` members, ratcheting a set of
-                // five to three to two to zero fault tolerance over a run
-                // (review finding P5). The driver closes it on its own
-                // cadence ([`Self::close_stop`]) once
-                // [`Self::stop_quorum_reached`], so every ack that arrives
-                // in between widens the reconstruction and a finish's
-                // proposal.
-                // A counted freeze: the member is in, and the decree floor
-                // covers its decree promise.
-                assert!(acks.contains_key(&from), "a counted freeze is recorded");
+                let adopted = decree.adopted_prior_vote();
+                // Phase 2 proposes the value P2c selected, at this ballot.
                 assert!(
-                    *decree_floor >= decree_promised,
-                    "the decree floor covers every frozen promise"
+                    decree.value() == Some(&members),
+                    "the decree proposes the selected value"
                 );
-                let quorum = old.quorum_size();
-                ReconfigurerStep::Stopped {
-                    remaining: quorum.saturating_sub(acks.len()),
+                assert!(
+                    decree.ballot() == ballot,
+                    "the decree proposes at its own ballot"
+                );
+                self.resend();
+                ReconfigurerStep::Proposing {
+                    ballot,
+                    members,
+                    adopted,
                 }
             }
-            ReconfigurerPhase::Bootstrapping {
-                old,
-                bootstrap,
-                acks,
-                held,
-                decree_floor,
+            ReconfigureReply::Accepted {
+                generation, ballot, ..
             } => {
-                let ReconfigureReply::Bootstrapped {
-                    set,
-                    held: holds,
-                    complete,
-                    ..
-                } = reply
-                else {
-                    return ReconfigurerStep::Ignored;
-                };
-                if set != bootstrap.set || !set.contains(from) || acks.contains(&from) {
+                if generation != old.generation || ballot != decree.ballot() {
                     return ReconfigurerStep::Ignored;
                 }
-                if !complete {
-                    // The member holds the pages up to `holds` (#439): send
-                    // the next one now. An answer that moved nothing is no
-                    // progress; the driver's re-send cadence asks again.
-                    if held.get(&from).copied().flatten() == holds && held.contains_key(&from) {
-                        return ReconfigurerStep::Ignored;
+                let members = match decree.on_accepted(from) {
+                    AcceptFold::Ignored => return ReconfigurerStep::Ignored,
+                    AcceptFold::Counted { remaining } => {
+                        return ReconfigurerStep::Accepted { remaining };
                     }
-                    held.insert(from, holds);
-                    if holds.is_some() {
-                        probe!(
-                            reachable,
-                            "handover: a reconfigurer sends a bootstrap over several pages"
-                        );
-                    }
-                    // `bootstrap_page` borrows all of `self`; the phase is
-                    // borrowed here, so read the two fields it reads.
-                    let page = self.cut.map_or(self.limits.registry_page, |cut| {
-                        cut.min(self.limits.registry_page)
-                    });
-                    self.pending.push((
-                        from,
-                        ReconfigureRequest::Bootstrap {
-                            from: self.node,
-                            bootstrap: bootstrap.page(holds, page),
-                        },
-                    ));
-                    return ReconfigurerStep::Bootstrapped {
-                        remaining: bootstrap.set.members().len() - acks.len(),
-                    };
-                }
-                held.remove(&from);
-                acks.insert(from);
-                assert!(
-                    acks.len() <= bootstrap.set.members().len(),
-                    "only members of the proposed set acknowledge its bootstrap"
-                );
-                let remaining = bootstrap.set.members().len() - acks.len();
-                if remaining > 0 {
-                    return ReconfigurerStep::Bootstrapped { remaining };
-                }
-                // Every member holds the reconstruction: the set may now be
-                // chosen. The decree opens at a fresh ballot of this node —
-                // strictly above every round this incarnation used *and*
-                // above the stop quorum's decree floor, so a rebooted node
-                // never reuses a ballot its earlier incarnation may have had
-                // a value accepted at (one ballot, one value).
-                self.round = self.round.max(decree_floor.round).saturating_add(1);
-                let ballot = Ballot {
-                    round: self.round,
-                    node: self.node,
+                    AcceptFold::Chosen(members) => members,
                 };
-                // The decree opens strictly above every decree promise the stop
-                // quorum reported, at this reconfigurer's own ballot.
+                let successor = MatchmakerSet::new(old.generation.next(), members);
                 assert!(
-                    ballot.round > decree_floor.round,
-                    "a decree opens above the stop quorum's promises"
+                    successor.generation == old.generation.next(),
+                    "a chosen successor is the next generation"
                 );
-                assert!(
-                    ballot.node == self.node,
-                    "a decree runs at this node's ballot"
-                );
-                let decree = Box::new(successor_decree(
-                    ballot,
-                    old,
-                    bootstrap.set.members().to_vec(),
-                ));
-                self.phase = ReconfigurerPhase::Deciding {
+                self.phase = ReconfigurerPhase::Publishing {
                     old: old.clone(),
-                    bootstrap: bootstrap.clone(),
-                    decree,
+                    successor: successor.clone(),
+                    old_acks: BTreeSet::new(),
+                    new_acks: BTreeSet::new(),
                 };
                 self.resend();
-                ReconfigurerStep::Deciding { ballot }
+                ReconfigurerStep::Chosen { successor }
             }
-            ReconfigurerPhase::Deciding { old, decree, .. } => {
-                if !old.contains(from) {
-                    return ReconfigurerStep::Ignored;
-                }
-                match reply {
-                    ReconfigureReply::Promised {
-                        generation,
-                        ballot,
-                        vote,
-                        ..
-                    } => {
-                        if generation != old.generation || ballot != decree.ballot() {
-                            return ReconfigurerStep::Ignored;
-                        }
-                        let members = match decree.on_promise(from, vote) {
-                            DecreePromise::Ignored => return ReconfigurerStep::Ignored,
-                            DecreePromise::Counted { remaining } => {
-                                return ReconfigurerStep::Promised { remaining };
-                            }
-                            DecreePromise::Quorum(members) => members,
-                        };
-                        let adopted = decree.adopted_prior_vote();
-                        // Phase 2 proposes the value P2c selected, at this ballot.
-                        assert!(
-                            decree.value() == Some(&members),
-                            "the decree proposes the selected value"
-                        );
-                        assert!(
-                            decree.ballot() == ballot,
-                            "the decree proposes at its own ballot"
-                        );
-                        self.resend();
-                        ReconfigurerStep::Proposing {
-                            ballot,
-                            members,
-                            adopted,
-                        }
-                    }
-                    ReconfigureReply::Accepted {
-                        generation, ballot, ..
-                    } => {
-                        if generation != old.generation || ballot != decree.ballot() {
-                            return ReconfigurerStep::Ignored;
-                        }
-                        let members = match decree.on_accepted(from) {
-                            AcceptFold::Ignored => return ReconfigurerStep::Ignored,
-                            AcceptFold::Counted { remaining } => {
-                                return ReconfigurerStep::Accepted { remaining };
-                            }
-                            AcceptFold::Chosen(members) => members,
-                        };
-                        let successor = MatchmakerSet::new(old.generation.next(), members);
-                        assert!(
-                            successor.generation == old.generation.next(),
-                            "a chosen successor is the next generation"
-                        );
-                        self.phase = ReconfigurerPhase::Publishing {
-                            old: old.clone(),
-                            successor: successor.clone(),
-                            old_acks: BTreeSet::new(),
-                            new_acks: BTreeSet::new(),
-                        };
-                        self.resend();
-                        ReconfigurerStep::Chosen { successor }
-                    }
-                    ReconfigureReply::Nacked {
-                        generation,
-                        ballot,
-                        promised,
-                        ..
-                    } => {
-                        if generation != old.generation || ballot != decree.ballot() {
-                            return ReconfigurerStep::Ignored;
-                        }
-                        let ballot = decree.ballot();
-                        // A preempted decree is dead until the driver's next
-                        // [`Self::resend`] reopens it, so a second refusal —
-                        // the same Nack duplicated, or another member's —
-                        // moves nothing and is `Ignored`: reporting it as
-                        // `Preempted` again reset the stall clock on every
-                        // refusal a dueling finisher sent, which is exactly
-                        // the "duplicate keeps a dead phase alive" of review
-                        // finding P4 (the handover model's claim 6 caught it
-                        // on its first seed). The promise it carries still
-                        // raises the floor the reopen clears.
-                        let already_preempted = decree.preempted().is_some();
-                        decree.on_nack(promised);
-                        if already_preempted || decree.preempted().is_none() {
-                            return ReconfigurerStep::Ignored;
-                        }
-                        // Preempted: the decree is reopened above the refusing
-                        // promise only by the driver's next [`Self::resend`],
-                        // so the driver paces the retry (a jittered backoff is
-                        // what breaks a duel between finishers of one frozen
-                        // generation — reopening here, on every Nack, kept
-                        // five of them preempting each other past round 900).
-                        ReconfigurerStep::Preempted { promised, ballot }
-                    }
-                    _ => ReconfigurerStep::Ignored,
-                }
-            }
-            ReconfigurerPhase::Publishing {
-                old,
-                successor,
-                old_acks,
-                new_acks,
+            ReconfigureReply::Nacked {
+                generation,
+                ballot,
+                promised,
+                ..
             } => {
-                let ReconfigureReply::Learned { generation, at, .. } = reply else {
-                    return ReconfigurerStep::Ignored;
-                };
-                if generation != old.generation {
+                if generation != old.generation || ballot != decree.ballot() {
                     return ReconfigurerStep::Ignored;
                 }
-                // A member of the *successor* counts toward the successor's
-                // quorum only once it is actually at that generation.
-                // Recording the chain link is what a departing member does;
-                // counting it let a publication finish while no quorum of
-                // the new set was serving it yet (review finding P7b). The
-                // generation test is also what keeps the count idempotent
-                // under a re-sent `Chosen` a member answers after
-                // activating.
-                let counted_old = old.contains(from) && old_acks.insert(from);
-                let counted_new =
-                    successor.contains(from) && at >= successor.generation && new_acks.insert(from);
-                if !counted_old && !counted_new {
+                let ballot = decree.ballot();
+                // A preempted decree is dead until the driver's next
+                // [`Self::resend`] reopens it, so a second refusal —
+                // the same Nack duplicated, or another member's —
+                // moves nothing and is `Ignored`: reporting it as
+                // `Preempted` again reset the stall clock on every
+                // refusal a dueling finisher sent, which is exactly
+                // the "duplicate keeps a dead phase alive" of review
+                // finding P4 (the handover model's claim 6 caught it
+                // on its first seed). The promise it carries still
+                // raises the floor the reopen clears.
+                let already_preempted = decree.preempted().is_some();
+                decree.on_nack(promised);
+                if already_preempted || decree.preempted().is_none() {
                     return ReconfigurerStep::Ignored;
                 }
-                // A counted learner is in the tally of the set it counts for.
-                if counted_new {
-                    assert!(
-                        new_acks.contains(&from),
-                        "a counted successor member is tallied"
-                    );
-                }
-                if old.has_quorum(old_acks) && successor.has_quorum(new_acks) {
-                    let successor = successor.clone();
-                    self.phase = ReconfigurerPhase::Idle;
-                    self.pending.clear();
-                    return ReconfigurerStep::Done { successor };
-                }
-                ReconfigurerStep::Published {
-                    old_remaining: old.remaining(old_acks),
-                    new_remaining: successor.remaining(new_acks),
-                }
+                // Preempted: the decree is reopened above the refusing
+                // promise only by the driver's next [`Self::resend`],
+                // so the driver paces the retry (a jittered backoff is
+                // what breaks a duel between finishers of one frozen
+                // generation — reopening here, on every Nack, kept
+                // five of them preempting each other past round 900).
+                ReconfigurerStep::Preempted { promised, ballot }
             }
+            _ => ReconfigurerStep::Ignored,
+        }
+    }
+
+    /// A member learned the chosen successor.
+    fn fold_publishing(
+        &mut self,
+        from: MatchmakerId,
+        reply: &ReconfigureReply,
+    ) -> ReconfigurerStep {
+        let ReconfigurerPhase::Publishing {
+            old,
+            successor,
+            old_acks,
+            new_acks,
+        } = &mut self.phase
+        else {
+            unreachable!("fold_publishing runs in the Publishing phase");
+        };
+        let ReconfigureReply::Learned { generation, at, .. } = *reply else {
+            return ReconfigurerStep::Ignored;
+        };
+        if generation != old.generation {
+            return ReconfigurerStep::Ignored;
+        }
+        // A member of the *successor* counts toward the successor's
+        // quorum only once it is actually at that generation.
+        // Recording the chain link is what a departing member does;
+        // counting it let a publication finish while no quorum of
+        // the new set was serving it yet (review finding P7b). The
+        // generation test is also what keeps the count idempotent
+        // under a re-sent `Chosen` a member answers after
+        // activating.
+        let counted_old = old.contains(from) && old_acks.insert(from);
+        let counted_new =
+            successor.contains(from) && at >= successor.generation && new_acks.insert(from);
+        if !counted_old && !counted_new {
+            return ReconfigurerStep::Ignored;
+        }
+        // A counted learner is in the tally of the set it counts for.
+        if counted_new {
+            assert!(
+                new_acks.contains(&from),
+                "a counted successor member is tallied"
+            );
+        }
+        if old.has_quorum(old_acks) && successor.has_quorum(new_acks) {
+            let successor = successor.clone();
+            self.phase = ReconfigurerPhase::Idle;
+            self.pending.clear();
+            return ReconfigurerStep::Done { successor };
+        }
+        ReconfigurerStep::Published {
+            old_remaining: old.remaining(old_acks),
+            new_remaining: successor.remaining(new_acks),
         }
     }
 

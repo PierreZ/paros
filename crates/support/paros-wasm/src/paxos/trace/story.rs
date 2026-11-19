@@ -294,7 +294,10 @@ mod tests {
         let beats = beats.finish(5);
         let spans: Vec<(usize, usize)> = beats.iter().map(|beat| (beat.from, beat.to)).collect();
         assert_eq!(spans, [(0, 0), (0, 3), (3, 5)]);
-        assert!(beats[0].choices.is_empty());
+        assert!(
+            beats[0].choices.is_empty(),
+            "the introduction beat offers no choice"
+        );
         assert_eq!(beats[2].choices[0].run, "down");
     }
 
@@ -329,7 +332,10 @@ mod tests {
         voted
             .votes
             .insert(1, ("1.0".to_string(), "bravo".to_string()));
-        assert!(voted.writes(&after, true).is_empty());
+        assert!(
+            voted.writes(&after, true).is_empty(),
+            "a vote that a Commit marks chosen writes nothing new"
+        );
         // A catch-up that replaces an old vote with the chosen record.
         let mut old = before.clone();
         old.votes
@@ -354,7 +360,10 @@ mod tests {
             ["promise 1.8", "slot 2: vote bravo at 1.8"]
         );
         assert_eq!(before.writes(&after, false)[1], "vote bravo at 1.8");
-        assert!(before.writes(&before, true).is_empty());
+        assert!(
+            before.writes(&before, true).is_empty(),
+            "an unchanged disk writes nothing"
+        );
         let down = Durable::default();
         assert!(
             down.writes(&after, true).is_empty(),
@@ -402,6 +411,6 @@ mod tests {
     fn holes_are_the_missing_slots_below_the_top() {
         assert_eq!(holes(0, [0, 2, 5]), [1, 3, 4]);
         assert_eq!(holes(3, [4]), [3]);
-        assert!(holes(0, []).is_empty());
+        assert!(holes(0, []).is_empty(), "an empty set has no hole");
     }
 }

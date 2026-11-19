@@ -958,8 +958,7 @@ impl DecreeWorld {
         let promised: Vec<NodeId> = self.proposers[index]
             .role
             .election()
-            .map(|election| election.promised().iter().copied().collect())
-            .unwrap_or_default();
+            .map_or_default(|election| election.promised().iter().copied().collect());
         let config = self.config_of(index);
         let members = config.members().len();
         // A bare proposer holds no promise of its own, so the win gate's

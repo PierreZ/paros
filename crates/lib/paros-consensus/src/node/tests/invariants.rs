@@ -8,7 +8,6 @@
 //! commands under one ballot, a decision that contradicts an earlier one) could
 //! produce, which is exactly what crash-beats-corruption is for.
 
-#[allow(clippy::wildcard_imports)]
 use super::*;
 
 fn accept(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
@@ -217,5 +216,8 @@ fn a_stale_trim_point_never_rewinds_a_frontier() {
     });
     assert_eq!(nodes[1].hard_state(), before);
     assert_eq!(nodes[1].acceptor().first_slot(), floor);
-    assert!(nodes[1].pending_writes.is_empty());
+    assert!(
+        nodes[1].pending_writes.is_empty(),
+        "a stale trim point writes nothing"
+    );
 }

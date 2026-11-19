@@ -37,12 +37,37 @@ fn candidate(id: u64) -> (ColocatedNode, Ballot) {
     (node, ballot)
 }
 
+/// Drive a new leader's recovery one bounded `Ready` batch at a time, from
+/// its `first` batch until nothing remains, and check it took several.
+fn drain_paged_recovery(leader: &mut ColocatedNode, first: Option<(usize, usize, usize)>) {
+    let mut recovery = first;
+    let mut recovery_pages = 0_usize;
+    loop {
+        let Some((started, _gap_fills, remaining)) = recovery else {
+            panic!("leader recovery exposes its bounded Ready chunk");
+        };
+        assert!(
+            started <= RECOVERY_BATCH,
+            "a leader starts at most one bounded recovery chunk per Ready ({started})"
+        );
+        recovery_pages += 1;
+        if remaining == 0 {
+            break;
+        }
+        leader.advance_recovery();
+        recovery = take_ready(leader).1;
+    }
+    assert!(
+        recovery_pages > 1,
+        "a leader recovery suffix continues across bounded Ready batches"
+    );
+}
+
 /// A long accepted suffix is served in `PROMISE_BATCH`-sized Promise pages,
 /// each continuation is requested exactly, only the terminal page completes the
 /// election, and the leader's recovery of that suffix is paged the same way.
 // One linear choreography: the recovery paging depends on the election the
 // promise paging completes, so splitting it would scatter the scenario.
-#[allow(clippy::too_many_lines)]
 #[test]
 fn promise_suffix_and_leader_recovery_are_paged() {
     let (mut candidate, ballot) = candidate(1);
@@ -133,27 +158,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
         "only a terminal Promise page completes the election quorum"
     );
 
-    let mut recovery = first_recovery;
-    let mut recovery_pages = 0_usize;
-    loop {
-        let Some((started, _gap_fills, remaining)) = recovery else {
-            panic!("leader recovery exposes its bounded Ready chunk");
-        };
-        assert!(
-            started <= RECOVERY_BATCH,
-            "a leader starts at most one bounded recovery chunk per Ready ({started})"
-        );
-        recovery_pages += 1;
-        if remaining == 0 {
-            break;
-        }
-        candidate.advance_recovery();
-        recovery = take_ready(&mut candidate).1;
-    }
-    assert!(
-        recovery_pages > 1,
-        "a leader recovery suffix continues across bounded Ready batches"
-    );
+    drain_paged_recovery(&mut candidate, first_recovery);
 }
 
 /// A gap fill can unlock a long suffix the node already learned chosen out of

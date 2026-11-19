@@ -22,7 +22,10 @@ fn a_plain_pool_never_moves() {
 fn a_plain_matchmaker_pool_never_moves() {
     let mut n = node(0, &[0, 1, 2]);
     assert!(!n.extend_matchmaker_pool(&[MatchmakerId(7)]));
-    assert!(n.matchmaker_pool().is_empty());
+    assert!(
+        n.matchmaker_pool().is_empty(),
+        "a plain node admits no matchmaker"
+    );
     assert!(n.matchmaker_set().is_none());
 }
 

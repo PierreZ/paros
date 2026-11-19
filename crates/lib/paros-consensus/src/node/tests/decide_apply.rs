@@ -1,5 +1,4 @@
 use super::*;
-#[allow(clippy::wildcard_imports)]
 use crate::contract::limits::Limits;
 
 #[test]

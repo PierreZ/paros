@@ -30,6 +30,25 @@ fn persist(n: &mut ColocatedNode, storage: &mut MemStorage) -> Vec<(MatchmakerId
     requests
 }
 
+/// `node` hears a beat of node 0, the leader at `ballot`, with
+/// `config` in force and `gc_floor` effective; it persists what it wrote.
+fn hear_leader(
+    node: &mut ColocatedNode,
+    ballot: Ballot,
+    config: AcceptorConfig,
+    gc_floor: Option<Ballot>,
+) {
+    node.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot,
+        commit: None,
+        config: Some(config),
+        fence: None,
+        gc_floor,
+    });
+    node.ready().advance();
+}
+
 /// Register `config` at `ballot` from `from` at every matchmaker of `mms`.
 fn register(mms: &mut [Matchmaker], request: &MatchRequest) {
     for mm in mms.iter_mut() {
@@ -45,7 +64,6 @@ fn register(mms: &mut [Matchmaker], request: &MatchRequest) {
 /// on the floor 12, every later campaign would need its promise and no
 /// leader would win again. The node must not retire on the floor alone.
 #[test]
-#[allow(clippy::too_many_lines)]
 fn a_stale_belief_of_another_node_holds_the_removed_member() {
     let mut mms = registries(3);
     let mut n3 = deployed_node(3, &[0, 1, 2, 3], &[0, 1, 2, 3], 3);
@@ -61,15 +79,7 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
         &mut mms,
         &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
     );
-    n3.step(Message::Heartbeat {
-        from: NodeId(0),
-        ballot: member_at,
-        commit: None,
-        config: Some(old.clone()),
-        fence: None,
-        gc_floor: None,
-    });
-    n3.ready().advance();
+    hear_leader(&mut n3, member_at, old.clone(), None);
     assert!(n3.is_acceptor());
     assert_eq!(n3.last_member_ballot(), member_at);
     // The reconfiguration to `{0,1,2}` wins at 12 and its floor is
@@ -93,15 +103,7 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
     );
     // Node 3 hears the leader at 12: it is outside, its belief is bound to
     // the floor, and the beat carries the floor.
-    n3.step(Message::Heartbeat {
-        from: NodeId(0),
-        ballot: w,
-        commit: None,
-        config: Some(new.clone()),
-        fence: None,
-        gc_floor: Some(w),
-    });
-    n3.ready().advance();
+    hear_leader(&mut n3, w, new.clone(), Some(w));
     assert!(!n3.is_acceptor());
     assert_eq!(n3.acceptors_since(), w);
     assert_eq!(n3.gc_floor_heard(), Some(w));
@@ -155,15 +157,7 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
         let _ = mm.advance_gc_watermark(J, generation, later);
         mm.ready().advance();
     }
-    n3.step(Message::Heartbeat {
-        from: NodeId(0),
-        ballot: later,
-        commit: None,
-        config: Some(new),
-        fence: None,
-        gc_floor: Some(later),
-    });
-    n3.ready().advance();
+    hear_leader(&mut n3, later, new, Some(later));
     assert!(!n3.may_retire_heard(), "a new belief is checked again");
     assert!(n3.check_retirement_heard());
     let requests = drain_match_requests(&mut n3);
@@ -331,7 +325,6 @@ fn a_retirement_check_under_a_live_leader_is_asked_again() {
 /// answer, and a matchmaker that answered refuses each later registration
 /// that names the node.
 #[test]
-#[allow(clippy::too_many_lines)]
 fn a_registration_after_the_check_does_not_strand_a_retired_member() {
     let mut mms = registries(3);
     let mut n2 = deployed_node(2, &[0, 1, 2], &[0, 1, 2], 3);
@@ -347,15 +340,7 @@ fn a_registration_after_the_check_does_not_strand_a_retired_member() {
         &mut mms,
         &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
     );
-    n2.step(Message::Heartbeat {
-        from: NodeId(0),
-        ballot: member_at,
-        commit: None,
-        config: Some(old.clone()),
-        fence: None,
-        gc_floor: None,
-    });
-    n2.ready().advance();
+    hear_leader(&mut n2, member_at, old.clone(), None);
     // The reconfiguration to `{0,1}` wins at 12 at matchmakers 0 and 1, and
     // its floor is effective there.
     let w = ballot(12, 0);
@@ -369,15 +354,7 @@ fn a_registration_after_the_check_does_not_strand_a_retired_member() {
     let stale = MatchRequest::new(J, NodeId(1), ballot(13, 1), old.clone(), generation);
     register(&mut mms[..1], &stale);
     // Node 2 hears the leader at 12 with the floor.
-    n2.step(Message::Heartbeat {
-        from: NodeId(0),
-        ballot: w,
-        commit: None,
-        config: Some(new.clone()),
-        fence: None,
-        gc_floor: Some(w),
-    });
-    n2.ready().advance();
+    hear_leader(&mut n2, w, new.clone(), Some(w));
     assert!(!n2.is_acceptor());
     assert_eq!(n2.gc_floor_heard(), Some(w));
     assert!(n2.check_retirement_heard(), "the check opens a probe");
@@ -499,7 +476,6 @@ fn retire_node_2(
 /// registers again, and a retirement check of the earlier incarnation is
 /// refused. Checked with TLA+: `specs/tla/retire-fence`, `rejoin_tagged`.
 #[test]
-#[allow(clippy::too_many_lines)]
 fn a_rejoined_node_is_named_again() {
     let mut mms = registries(3);
     let mut storage = MemStorage::for_node(2, &[0, 1, 2]);
@@ -575,7 +551,10 @@ fn a_rejoined_node_is_named_again() {
     let _ = persist(&mut r, &mut storage);
     assert!(r.check_retirement_heard(), "the check opens");
     let asks = persist(&mut r, &mut storage);
-    assert!(!asks.is_empty());
+    assert!(
+        !asks.is_empty(),
+        "the retirement check asks the matchmakers"
+    );
     assert!(asks.iter().all(|(_, q)| q.purpose
         == MatchPurpose::Retire {
             watermark: w,
@@ -772,7 +751,10 @@ fn a_running_journal_booked_again_rejoins() {
     );
     // A second call while the rejoin is open asks nothing new.
     assert!(n2.rejoin());
-    assert!(persist(&mut n2, &mut storage).is_empty());
+    assert!(
+        persist(&mut n2, &mut storage).is_empty(),
+        "a second rejoin asks nothing new"
+    );
     for reply in matchmake(&mut mms, requests) {
         let _ = n2.on_match_reply(reply);
         let _ = persist(&mut n2, &mut storage);

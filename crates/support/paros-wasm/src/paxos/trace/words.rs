@@ -508,8 +508,7 @@ fn push_changes(out: &mut String, before: &WorldView, after: &WorldView, kind: O
         let mut chars = quorum.chars();
         let who: String = chars
             .next()
-            .map(|first| first.to_uppercase().chain(chars).collect())
-            .unwrap_or_default();
+            .map_or_default(|first| first.to_uppercase().chain(chars).collect());
         push(
             out,
             &format!(
