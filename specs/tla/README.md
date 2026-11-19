@@ -26,6 +26,12 @@ Each folder is one model:
 A check that must give `violation` is a control. It shows that the model can find the bug that
 the rule prevents. A model with no control proves little.
 
+A model may also have a trace spec, `<Name>Trace.tla` and `<Name>Trace.cfg`: the model, forced
+to follow the events of one run of the code (#1198 (trace checking)). It is not in `checks.txt`:
+`crates/sim/consensus-sim/tests/traces.rs` runs it with TLC, through moonpool-tla, on the walks
+of `consensus-sim`. The trace specs today are `decree/DecreeTrace` (the decree walk) and
+`multi-paxos/MultiPaxosTrace` (every cell flavor but the matchmakers).
+
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
 `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and

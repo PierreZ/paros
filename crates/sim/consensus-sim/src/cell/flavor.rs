@@ -232,6 +232,11 @@ pub enum Mutant {
     /// quorum read. Caught by
     /// [`READ_SEES_WRITES`](crate::oracle::reads::READ_SEES_WRITES).
     LocalRead,
+    /// The driver drops the votes from every `Promise` it sends. The
+    /// oracle [`ONE_VALUE`](crate::oracle::ledger::ONE_VALUE) catches it
+    /// only when a second value is chosen; the trace check refuses the
+    /// first promise that hid a vote (`tests/traces.rs`).
+    HideVotes,
     /// The driver never re-sends a leader's pending `Accept`s. Caught by the
     /// liveness judge ([`Cell::converged`](super::Cell)).
     NoResend,

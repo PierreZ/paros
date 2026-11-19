@@ -23,6 +23,7 @@
 
 mod flavor;
 mod sites;
+pub mod trace;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -44,6 +45,7 @@ use crate::oracle::quorum::Phase2Rule;
 use crate::oracle::reads::Reads;
 
 pub use flavor::{Flavor, Mutant};
+pub use trace::{CellEvent, Cmd};
 
 /// The coverage sites of the cell. A walk names the ones its flavor must
 /// reach with [`moonpool_walk::Walk::expect_sometimes`].
@@ -196,13 +198,15 @@ pub struct Cell {
     expire_after: u64,
     /// The highest ballot a leader was seen at.
     leader_ballot: Option<paros_consensus::Ballot>,
+    /// The steps recorded for the trace check so far.
+    tracer: trace::Tracer,
 }
 
 impl Model for Cell {
     type Msg = Envelope;
     type Node = Party;
     type Action = Action;
-    type Event = ();
+    type Event = CellEvent;
 
     fn new(cx: &mut Cx<'_, Self>) -> Self {
         Self::build(Flavor::multi_paxos(), cx)
@@ -321,7 +325,7 @@ impl Model for Cell {
         match *party {
             Party::Node(id) => {
                 if self.node(id).live.is_none() {
-                    self.boot_node(id, cx);
+                    self.boot_node(id, true, cx);
                 }
             }
             Party::Proxy(id) => {
@@ -490,6 +494,7 @@ impl Cell {
             take_back_after,
             expire_after,
             leader_ballot: None,
+            tracer: trace::Tracer::default(),
             pool,
             flavor,
         };
@@ -513,7 +518,7 @@ impl Cell {
             .map(|i| ProxySite::new(ProxyId(i), cell.config.clone()))
             .collect();
         for id in cell.pool.clone() {
-            cell.boot_node(id, cx);
+            cell.boot_node(id, false, cx);
         }
         for id in cell.replica_ids() {
             cell.drain_replica(id, cx);
@@ -619,7 +624,11 @@ impl Cell {
         self.ledger.disk_chosen(&format!("node {}", id.0), index);
     }
 
-    fn boot_node(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
+    /// Boot node `id` from its disk; `again` when it ran before.
+    fn boot_node(&mut self, id: NodeId, again: bool, cx: &mut Cx<'_, Self>) {
+        if again {
+            cx.record(CellEvent::Restart { node: id });
+        }
         let site = self.node_mut(id);
         sometimes!(
             site.disk.hard_state().max_promised_ballot != paros_consensus::Ballot::zero(),
@@ -657,9 +666,20 @@ impl Cell {
             let Some(node) = site.live.as_mut() else {
                 return;
             };
+            // A new leader's frontier: one past the fence it opened its
+            // authority at (`try_become_leader`), before any allocation.
+            let leading = node.is_leader().then(|| {
+                let frontier = node.proposer().fence().map_or(0, |s| s.0 + 1);
+                (node.ballot(), Slot(frontier))
+            });
             let ready = node.ready();
             let writes = ready.writes().to_vec();
-            let mut out = route(ready.messages(), &pool, Some(id), &replicas);
+            let mut batch: Vec<(Audience, Message)> = ready.messages().to_vec();
+            if mutant == Some(Mutant::HideVotes) {
+                hide_votes(&mut batch);
+            }
+            let messages: Vec<Message> = batch.iter().map(|(_, m)| m.clone()).collect();
+            let mut out = route(&batch, &pool, Some(id), &replicas);
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
             let more = ready.recovery_batch().is_some();
@@ -689,9 +709,11 @@ impl Cell {
                 cx.crashed(&Party::Node(id));
                 return;
             }
+            let before = self.node(id).disk.hard_state().chosen_index;
             if mutant != Some(Mutant::SkipPersist) {
                 self.persist_node(id, &writes);
             }
+            self.trace_batch(id, leading, &writes, &messages, before, cx);
             if crash_between {
                 sometimes!(true, reach::CRASH_BEFORE_SEND);
                 self.crash_node(id);
@@ -725,6 +747,41 @@ impl Cell {
                 );
                 self.leader_ballot = self.leader_ballot.max(Some(ballot));
             }
+        }
+    }
+
+    /// Record the steps of a batch of node `id` that reached its disk
+    /// ([`trace`]); `before` is the disk's chosen index before the batch
+    /// (`None`: nothing chosen).
+    fn trace_batch(
+        &mut self,
+        id: NodeId,
+        leading: Option<(paros_consensus::Ballot, Slot)>,
+        writes: &[WriteOp],
+        messages: &[Message],
+        before: Option<Slot>,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        let site = self.node(id);
+        let after = site.disk.hard_state().chosen_index;
+        let chosen = site.live.as_ref().map(|node| node.replica().chosen());
+        let first = before.map_or(0, |s| s.0 + 1);
+        let last = after.map_or(0, |s| s.0 + 1);
+        let learned = (first..last)
+            .filter_map(|s| {
+                let command = chosen?.get(&Slot(s))?;
+                Some((Slot(s), Cmd::of(command)))
+            })
+            .collect();
+        let events = self.tracer.batch(&trace::Batch {
+            id,
+            leading,
+            writes,
+            messages,
+            learned,
+        });
+        for event in events {
+            cx.record(event);
         }
     }
 
@@ -1203,6 +1260,15 @@ fn route(
         }
     }
     out
+}
+
+/// The [`Mutant::HideVotes`] bug: every `Promise` leaves with no vote.
+fn hide_votes(batch: &mut [(Audience, Message)]) {
+    for (_, message) in batch {
+        if let Message::Promise { accepted, .. } = message {
+            accepted.clear();
+        }
+    }
 }
 
 /// The [`Mutant::EarlyCommit`] bug: a `Commit` for each `Accept` a node
