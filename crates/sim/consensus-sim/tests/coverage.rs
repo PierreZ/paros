@@ -36,8 +36,6 @@ const GAPS: &[(&str, &[&str])] = &[
             "phase1: a fresh leader heals a faulty chosen slot from its promise quorum",
             "phase2: a leader whose promise moved past its ballot opens a round it cannot record",
             "matchmaking: a campaign adopts a reconfiguration its won leadership ran",
-            "matchmaking: a campaign keeps its belief over a reconfiguration below a won leadership",
-            "matchmaking: a campaign meets a configuration outside the pool",
             "matchmaking: a campaign refutes a reconfiguration a late probe answer named",
             "matchmaking: a late probe answer names a refuted reconfiguration",
             "node: a campaign learns a later set from outside its set",
@@ -79,6 +77,7 @@ fn flavors() -> Vec<(String, Flavor)> {
         Flavor::disk_faults(),
         Flavor::retirement(),
         Flavor::handover(),
+        Flavor::lagging_reads(),
     ]
     .map(Flavor::paged);
     let full = full.into_iter().map(|f| (f.name.to_owned(), f));

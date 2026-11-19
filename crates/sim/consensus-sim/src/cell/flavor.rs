@@ -35,6 +35,16 @@ pub struct Flavor {
     /// at a time (`ColocatedNode::extend_pool`). Until then, a
     /// configuration that names one is outside that node's pool.
     pub late: u64,
+    /// Steer the walk toward a reader whose pool lags (#1228 (stale read by
+    /// a lagging reader)) until the settle rounds: only node 0 admits the
+    /// late nodes; a leader moves onto a late node once, away from the
+    /// members whose pools lag, and stays; a read goes to a lagging node,
+    /// first one that promised above its belief; the lagging nodes campaign
+    /// seldom and node 2 not at all; messages between the nodes that moved
+    /// and the lagging ones are lost ([`Cell`](super::Cell)'s
+    /// `lost_to_a_lagging_pool`). The pools catch up when the settle rounds
+    /// start.
+    pub lagging_reader: bool,
     /// Matchmakers in the matchmaker pool outside the bootstrap set, that a
     /// handover ([`Action::Handover`]) may name.
     pub matchmaker_spares: u64,
@@ -60,6 +70,7 @@ impl Flavor {
             matchmakers: 0,
             spares: 0,
             late: 0,
+            lagging_reader: false,
             matchmaker_spares: 0,
             limits: Limits::DEFAULT,
             mutant: None,
@@ -253,6 +264,7 @@ impl Flavor {
             name: "lagging-reads",
             spares: 2,
             late: 1,
+            lagging_reader: true,
             options: &[Action::Reconfigure, Action::Admit, Action::Read],
             ..Self::matchmakers()
         }

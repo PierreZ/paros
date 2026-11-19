@@ -96,8 +96,10 @@ Test only: `publish = false`, never a dependency of another crate.
   and on a grid), replicas, leaderless reads, every compartment, the batcher, matchmakers with
   reconfiguration, matchmakers with every compartment, disk faults, retirement and rejoin, the
   matchmaker set handover, and leaderless reads on matchmakers whose pools lag (`lagging-reads`,
-  #1228 (stale read by a lagging reader): it reaches the core's refusal of a reader that promised
-  above its basis). 60 seeds each in CI.
+  #1228 (stale read by a lagging reader)). 60 seeds each in CI; `lagging-reads` takes 120. The
+  `lagging-reads` walk is steered (`Flavor::lagging_reader`) and is the control of #1228: with
+  the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
+  `READ_SEES_WRITES` catches.
 - `tests/mutants.rs` → each oracle catches its mutant.
 - `tests/coverage.rs` → coverage-driven simulation (#1199): every flavor, and seven of them with
   small pages, walk with exploration on (moonpool-walk's `Walk::explore`): a run that passes a

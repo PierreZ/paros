@@ -21,8 +21,13 @@ const COMMON: &[&str] = &[
 
 /// Walk `flavor`; every site of [`COMMON`] and of `extra` must pass.
 fn walk(flavor: Flavor, extra: &[&str]) {
+    walk_seeds(flavor, extra, SEEDS);
+}
+
+/// [`walk`] over `seeds` seeds.
+fn walk_seeds(flavor: Flavor, extra: &[&str], seeds: u64) {
     let walk = Walk::<Cell>::new()
-        .seeds(SEEDS)
+        .seeds(seeds)
         .model(move |cx| Cell::build(flavor.clone(), cx));
     let expected: Vec<&str> = COMMON.iter().chain(extra).copied().collect();
     campaign(&walk, &expected);
@@ -198,9 +203,15 @@ fn matchmaker_set_handover() {
     );
 }
 
+/// Seeds of the lagging-reads walk. The walk is the control of #1228
+/// (stale read by a lagging reader): with the reader gated on its belief
+/// ballot (the code before #1228), seeds 67, 71 and 99 serve a stale read
+/// and `READ_SEES_WRITES` fails.
+const LAGGING_SEEDS: u64 = 120;
+
 #[test]
 fn reads_on_lagging_pools() {
-    walk(
+    walk_seeds(
         Flavor::lagging_reads(),
         &[
             reach::RECONFIGURED,
@@ -208,5 +219,6 @@ fn reads_on_lagging_pools() {
             reach::NODE_READ,
             reach::LAGGING_READER_REFUSED,
         ],
+        LAGGING_SEEDS,
     );
 }

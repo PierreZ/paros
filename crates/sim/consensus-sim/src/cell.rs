@@ -39,7 +39,7 @@ use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
-use paros_consensus::node::{Delegation, ProposeResult, ReconfigureResult};
+use paros_consensus::node::{BeliefSource, Delegation, ProposeResult, ReconfigureResult};
 use paros_consensus::{
     Ballot, ColocatedNode, Config, MatchmakerReconfigurer, Message, NodeId, ProxyLeader,
     ReplicaNode, Slot, Value, WriteOp,
@@ -447,8 +447,13 @@ impl Model for Cell {
     fn calm(&mut self, cx: &mut Cx<'_, Self>) {
         // The deployment's registry reaches every node: each pool admits
         // the late nodes, as #189 needs for liveness. Until then a late
-        // node hears no beat from a node that does not know it.
-        self.admit_all();
+        // node hears no beat from a node that does not know it. A
+        // lagging-reader walk keeps the pools lagging through the quiet
+        // phase, where leaders stand and reconfigure, and admits them when
+        // the settle rounds start (`Cell::tick_all`).
+        if !self.flavor.lagging_reader {
+            self.admit_all();
+        }
         // Some proxies stay dead for the tail: a leader's take-back is the
         // only way their rounds decide.
         for site in &mut self.proxies {
@@ -674,6 +679,82 @@ impl Cell {
     fn late_ids(&self) -> Vec<NodeId> {
         let all = self.flavor.acceptors + self.flavor.spares;
         (all - self.flavor.late..all).map(NodeId).collect()
+    }
+
+    /// Whether a lagging-reader walk skips the tick of node `id` before
+    /// the settle rounds. Node 2's clock stands still once its membership
+    /// probe heard what is in force, so it never campaigns and its read
+    /// fence stays on the old configuration. The clock of any other node
+    /// whose pool lags runs at a quarter of the rate, so it campaigns seldom
+    /// and a leader that moved onto a late node keeps its leadership long
+    /// enough to choose writes.
+    fn skips_tick(&self, id: NodeId, cx: &mut Cx<'_, Self>) -> bool {
+        if !self.flavor.lagging_reader || cx.phase() == Phase::Settle {
+            return false;
+        }
+        let heard = self
+            .node(id)
+            .live
+            .as_ref()
+            .is_some_and(|n| n.belief_source() != BeliefSource::Bootstrap);
+        (id == NodeId(2) && heard) || (self.lags(id) && !cx.rng().chance(1, 4))
+    }
+
+    /// Whether a lagging-reader walk loses `envelope`, sent by `from`, until
+    /// the settle rounds (#1228 (stale read by a lagging reader)). Node 2
+    /// is cut from every node that moved (a late node, or one that admitted
+    /// it): it hears no campaign and no beat of a leadership that moved. The
+    /// other lagging nodes get no `Commit` and no catch-up from a node that
+    /// moved, and lose a quarter of their `Prepare`s and of the read answers
+    /// of a node that moved. A lagging reader can then promise a newer
+    /// leadership, hold no vote of its writes, and still find, in node 2, an
+    /// answer on its old basis.
+    fn lost_to_a_lagging_pool(
+        &self,
+        from: NodeId,
+        envelope: &Envelope,
+        cx: &mut Cx<'_, Self>,
+    ) -> bool {
+        if !self.flavor.lagging_reader || cx.phase() == Phase::Settle {
+            return false;
+        }
+        let Party::Node(to) = envelope.to else {
+            return false;
+        };
+        let late = self.late_ids();
+        let moved = late.contains(&from) || late.iter().any(|l| self.admitted(from).contains(l));
+        if to == NodeId(2) {
+            return moved;
+        }
+        if !self.lags(to) {
+            return false;
+        }
+        match envelope.msg {
+            // The log of a leadership that moved reaches a lagging pool
+            // only once the pools catch up: its own votes then stay below
+            // the writes that leadership chose.
+            Wire::Paxos(Message::Commit { .. } | Message::CatchUpResponse { .. }) => moved,
+            Wire::Paxos(Message::Prepare { .. }) => cx.rng().chance(1, 4),
+            Wire::Paxos(Message::PreReadAck { .. }) => moved && cx.rng().chance(1, 4),
+            _ => false,
+        }
+    }
+
+    /// Whether the pool of node `id` lags: it is not a late node and has
+    /// not admitted every late node.
+    fn lags(&self, id: NodeId) -> bool {
+        let late = self.late_ids();
+        !late.contains(&id) && late.iter().any(|l| !self.admitted(id).contains(l))
+    }
+
+    /// Send what node `id` released, less what a lagging-reader walk
+    /// loses on the way ([`Cell::lost_to_a_lagging_pool`]).
+    fn send_from(&self, id: NodeId, out: Vec<Envelope>, cx: &mut Cx<'_, Self>) {
+        for envelope in out {
+            if !self.lost_to_a_lagging_pool(id, &envelope, cx) {
+                cx.send(envelope);
+            }
+        }
     }
 
     /// The late nodes node `id` admitted to its pool.
@@ -908,9 +989,7 @@ impl Cell {
             for envelope in &out {
                 self.judge_sent(&format!("node {}", id.0), envelope);
             }
-            for envelope in out {
-                cx.send(envelope);
-            }
+            self.send_from(id, out, cx);
             for (slot, _, command, outcome) in &committed {
                 self.applied(&format!("node {}", id.0), *slot, command, outcome);
             }
@@ -1154,6 +1233,9 @@ impl Cell {
     // ---- the clock and the clients ------------------------------------
 
     fn tick_all(&mut self, cx: &mut Cx<'_, Self>) {
+        if self.flavor.lagging_reader && cx.phase() == Phase::Settle {
+            self.admit_all();
+        }
         let expire_after = self.expire_after;
         for i in 0..self.proxies.len() {
             let id = ProxyId(i as u64);
@@ -1167,6 +1249,9 @@ impl Cell {
         let matchmaking = self.flavor.matchmakers > 0;
         let after = self.take_back_after;
         for id in self.pool.clone() {
+            if self.skips_tick(id, cx) {
+                continue;
+            }
             let Some(node) = self.node_mut(id).live.as_mut() else {
                 continue;
             };
@@ -1300,6 +1385,35 @@ impl Cell {
     fn read(&mut self, cx: &mut Cx<'_, Self>) {
         let mut parties: Vec<Party> = self.pool.iter().map(|id| Party::Node(*id)).collect();
         parties.extend(self.replica_ids().into_iter().map(Party::Replica));
+        if self.flavor.lagging_reader {
+            let lagging: Vec<Party> = self
+                .pool
+                .iter()
+                .filter(|id| self.lags(**id))
+                .map(|id| Party::Node(*id))
+                .collect();
+            // Of those, a node that promised above its belief: the reader
+            // of #1228.
+            let promised: Vec<Party> = lagging
+                .iter()
+                .copied()
+                .filter(|party| {
+                    let Party::Node(id) = party else { return false };
+                    self.node(*id)
+                        .live
+                        .as_ref()
+                        .is_some_and(|n| n.acceptor().promised() > n.acceptors_since())
+                })
+                .collect();
+            let lagging = if promised.is_empty() {
+                lagging
+            } else {
+                promised
+            };
+            if !lagging.is_empty() {
+                parties = lagging;
+            }
+        }
         let Some(&party) = cx.rng().pick(&parties) else {
             return;
         };
@@ -1362,6 +1476,18 @@ impl Cell {
         let size = Self::index(self.flavor.acceptors);
         // The leader draws from the pool it knows.
         let node = self.node(leader).live.as_ref().expect("a leader is up");
+        // A lagging-reader walk moves onto a late node once, and stays: the
+        // lagging members keep reading on the configuration it left.
+        let late_ids = self.late_ids();
+        if self.flavor.lagging_reader
+            && node
+                .acceptors()
+                .members()
+                .iter()
+                .any(|m| late_ids.contains(m))
+        {
+            return;
+        }
         let mut members = node.pool().to_vec();
         // A late node the leader admitted is a new machine: the operator
         // moves the journal onto it half of the time.
@@ -1374,8 +1500,25 @@ impl Cell {
             .rng()
             .pick(&late)
             .copied()
-            .filter(|_| cx.rng().chance(1, 2));
+            .filter(|_| self.flavor.lagging_reader || cx.rng().chance(1, 2));
+        // A lagging-reader walk moves away from the members whose pools lag:
+        // a quorum of the new configuration then chooses without them, while
+        // they still read on the old one.
+        let lagging: Vec<NodeId> = if self.flavor.lagging_reader {
+            node.acceptors()
+                .members()
+                .iter()
+                .copied()
+                .filter(|id| self.lags(*id))
+                .collect()
+        } else {
+            Vec::new()
+        };
         while members.len() > size {
+            if let Some(i) = members.iter().position(|m| lagging.contains(m)) {
+                members.remove(i);
+                continue;
+            }
             let out = Self::index(cx.rng().below(members.len() as u64));
             if Some(members[out]) != onto {
                 members.remove(out);
