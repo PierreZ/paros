@@ -1500,8 +1500,8 @@ The traces of the controls:
 - `gc_won_fill`: ballot 1 wins on `{a1, a2}` and proposes `trunc` at slots 0 and 1. `{a1, a3}`
   choose slot 0, and `a2` votes slot 1. `a3` opens ballot 2 under `C2` and wins on `{a2, a3}`, a
   quorum of both `C1` and `C2`. It proposes `trunc` again at slots 0 and 1 and, with
-  `GcRule = "won"`, raises the watermark at once, before any member of `C2` accepted or learned
-  slot 0. Ballot 3 of `a2` matches with `C2` alone and wins on `{a2, a4}`. It hears slot 1 only
+  `GcRule = "won"`, raises the watermark at once, before a Phase-2 quorum of `C2` accepted
+  or learned slot 0. Ballot 3 of `a2` matches with `C2` alone and wins on `{a2, a4}`. It hears slot 1 only
   (the vote of `a2`), its frontier is 2, and it fills slot 0 with a `Noop`. `a3`, the one member
   of `C2` that holds slot 0, is not in the quorum.
 - `cover_joined_fill`: ballot 1 wins on `{a1, a2}`, and `{a1, a3}` choose `trunc` at slot 0.
