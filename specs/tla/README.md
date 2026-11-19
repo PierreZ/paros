@@ -622,6 +622,98 @@ Not in the model: the ballot floor of a retry (a ballot above every `Nack`), the
 generation that fences a handover, the stop quorum that opens the handover's decree, the
 `cell_lost` refusal, and more than three acceptors.
 
+### `matchmaker/`: single-decree Matchmaker Paxos, for #1200 (TLA+ model Matchmaker Paxos)
+
+The model is single-decree Matchmaker Paxos as the paper gives it (Whittaker et al., §3) and as
+`paros-consensus` builds it (`matchmaking.rs`, `matchmaker.rs`, `collector.rs`). It is the base
+model of the matchmaker flavor: `retire-fence/` (how a node learns that it may retire),
+`handover-gc/` and the handover of #1097 (the matchmaker set itself), `abandoned-ballot/` (a
+candidate drops a registration) and `zero-stall/` (Phase-1 bypassing in Multi-Paxos) each extend
+one part of it.
+
+Each ballot has one proposer, and the proposer selects one configuration for its ballot. A
+reconfiguration is only a ballot whose configuration is new. A ballot runs three phases:
+
+1. Matchmaking. The proposer registers `(b, C_b)` at the matchmakers. A matchmaker refuses `b`
+   if it holds a registration at `b` or above, or if `b` is below its GC watermark. Else it
+   records `(b, C_b)` and answers with its registrations below `b` and its watermark. The
+   proposer closes on the answers of a matchmaker majority. `H_b` is the union of the answers,
+   above the maximum watermark.
+2. Phase 1 needs a promise quorum (a majority) of every configuration in `H_b`. An empty `H_b`
+   needs no Phase 1.
+3. Phase 2 addresses `C_b` alone.
+
+GC follows §3.4 and §3.5 of the paper. The proposer of `b` asks the matchmakers to forget the
+ballots below `b` when its value is chosen at `b` (scenario 1) or when its Phase 1 found no vote
+(scenario 2). A matchmaker raises its watermark to `b`, deletes its registrations below `b` and
+acks. The floor `b` is effective once a matchmaker majority acked it (`GcStep::Effective`). Only
+then may an acceptor that no registration at `b` or above names retire, and a retired acceptor
+takes no more steps. Until then a removed acceptor keeps answering Phase 1: the acceptor guards
+are pool-based. The retirement takes its two facts from the global state: no registration at the
+floor or above names the acceptor, and every matchmaker refuses a later registration that names
+it. That is the `allTomb` rule of `retire-fence/`, which checks how a node learns those facts.
+
+Constants select the rules. The first value of each is the rule of the paper and of the code.
+
+| Constant | Values |
+|---|---|
+| `Phase1` | `"every"`: a Phase-1 quorum of each configuration in `H_b`. `"union"`: a majority of the union of `H_b`. `"own"`: a majority of `C_b` alone. |
+| `MatchCheck` | `TRUE`: a matchmaker refuses `b` when it holds a registration at `b` or above. `FALSE`: it registers `b` anyway. |
+| `Histories` | `"quorum"`: the proposer closes on a matchmaker majority. `"one"`: it closes on one answer. |
+| `Reconfig` | `"round"`: Phase 2 addresses `C_b`. `"edit"`: the proposer may send its Phase 2 to another configuration, with no new ballot. |
+| `Gc` | `"paper"`: scenarios 1 and 2. `"early"`: the proposer asks for GC as soon as its Phase 1 is done. `"off"`: no GC. |
+| `Retire` | `"effective"`: an acceptor retires above an effective floor. `"oneAck"`: the floor counts as effective at one ack. `"removed"`: an acceptor retires when the newest configuration does not name it. `"off"`: no retirement. |
+
+The invariants are `Agreement` (one value is chosen) and `Electable` (whatever matchmaker
+majority a new ballot hears, each configuration of its history keeps a Phase-1 quorum that did
+not retire; the same name as in `retire-fence/`).
+
+The pool has five acceptors and two configurations, `A = {a1, a2, a3}` and `B = {a3, a4, a5}`.
+A move from `A` to `B` replaces `a1` and `a2`, and a majority of the union, `{a3, a4, a5}`, holds
+no Phase-1 quorum of `A`. Each ballot selects `A` or `B`. Two values. The controls use one
+matchmaker where the bug does not need more, two for `histories_one` and three for
+`retire_one_ack`.
+
+Results (`matchmaker/checks.txt`):
+
+| Check | Rule | Result |
+|---|---|---|
+| `reach` | `NoChoiceAboveRetired`, a reachability control: a value is chosen above a ballot whose configuration named an acceptor that retired | violation |
+| `phase1_own` | control: Phase 1 in `C_b` alone, two ballots | `Agreement` violation |
+| `phase1_union` | control: Phase 1 at a majority of the union of `H_b`, three ballots | `Agreement` violation |
+| `match_nocheck` | control: a matchmaker registers a ballot below one that it holds, two ballots | `Agreement` violation |
+| `histories_one` | control: the proposer closes on one answer, two matchmakers | `Agreement` violation |
+| `edit` | control: Phase 2 goes to a configuration that the ballot did not register | `Agreement` violation |
+| `gc_early` | control: GC as soon as Phase 1 is done, three ballots | `Agreement` violation (1.4 million states) |
+| `retire_removed` | control: an acceptor retires when the newest configuration does not name it | `Electable` violation |
+| `retire_one_ack` | control: the floor counts as effective at one ack, three matchmakers | `Electable` violation |
+| `matchmaker` | the rules, three matchmakers, two ballots | pass: `Agreement` and `Electable` (1.4 million states, 2.5 minutes) |
+| `matchmaker_one` | the rules, one matchmaker, three ballots | pass (6.2 million states, 6.5 minutes, `long`) |
+| `matchmaker_long` | the rules, three matchmakers, three ballots | no violation in 65.1 million distinct states, to depth 26 (a bounded run of 2 hours, 4 workers; `long`) |
+
+The trace of `phase1_union`: ballot 1 (`A`, empty history) chooses `v1` at `{a2, a3}`. Ballot 2
+registers `B`, so the history of ballot 3 holds `A` and `B`. Ballot 3 takes promises from
+`{a1, a4, a5}`, a majority of the union of five, and none of them voted. It proposes `v2`, and
+`{a1, a2}` choose it. With `Phase1 = "every"`, ballot 3 needs two promises of `A`, and one of them
+reports `v1`.
+
+The trace of `gc_early`: ballot 1 (`B`) chooses `v1` at `{a4, a5}`. Ballot 2 (`A`, history `{B}`)
+takes promises of `B`, finds `v1` and asks for GC before its own Phase 2. The floor 2 deletes the
+registration of ballot 1. Ballot 3 (`A`) gets the history `{A}` (the registration of ballot 2),
+takes promises from `{a1, a2}`, which did not vote, and chooses `v2`. Scenario 1 of the paper
+waits until the value of ballot 2 is chosen in `A`, so ballot 3 finds it there.
+
+The trace of `retire_one_ack`: ballot 1 registers `A` at two matchmakers. Ballot 2 registers
+`B`; its history `{A}` is not empty, but its Phase 1 finds no vote, so it asks for GC. One
+matchmaker acks, and `a1` and `a2` retire. A new ballot that hears the two other matchmakers gets
+`A` in its history, and `A` has one live acceptor.
+
+Not in the model: Multi-Paxos (more than one slot), the matchmaker generations and the handover
+(`handover-gc/`, #1097), Phase-1 bypassing (`zero-stall/`), scenario 3 of the GC (the chosen
+value on replicas), the effective configuration and the membership probe, lost durable state,
+how a node learns that it may retire (`retire-fence/`), the owner testimony (`abandoned-ballot/`),
+and liveness.
+
 ### `grid/`: the quorums of a grid, for #1102 (rework 1.13)
 
 `Grid.tla` is the quorums of `QuorumSystem::Grid { rows, cols, acks }`
