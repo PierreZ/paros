@@ -318,6 +318,11 @@ checked, each with a control that TLC breaks:
   grid**, not the first uncommitted slot: with that end, a Phase 1 that reads the old grid only
   below the end chooses two values for one slot. The sealing leader proposes again, in its own
   grid, each vote below the end that the replicas did not apply.
+- **A leader of the configuration in force writes every slot above the applied prefix and below
+  the start of its segment**: the vote that its Phase 1 saw, or a `Noop` where it saw none (the
+  election gap fill of the core, #1233 (segments gap fill)). Without the `Noop`, a slot below
+  the end with no vote is a hole that no ballot can write, because the old grid is sealed: the
+  replicas stop at it for ever, so retire, offload and trim never come.
 - A later Phase 1 reads a sealed configuration only below its end.
 - A leader's writes are fenced by its promise quorum, never by the table version, so a change of
   a sealed segment (retire, offload, trim) never stops the tail (as in Delos).
