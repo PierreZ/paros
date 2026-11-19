@@ -27,6 +27,34 @@ impl ColocatedNode {
     /// The node runs under `limits` for this incarnation: its page sizes,
     /// and its read window raised to the floor.
     ///
+    /// A restart reads back what the driver persisted, and the node boots
+    /// as a follower:
+    ///
+    /// ```
+    /// use paros_consensus::contract::MemStorage;
+    /// use paros_consensus::journal::JournalIdentifier;
+    /// use paros_consensus::{ColocatedNode, Config, Limits, NodeId};
+    ///
+    /// let config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([NodeId(1)]);
+    /// let mut disk = MemStorage::new(config);
+    /// let mut node = ColocatedNode::new(&disk, Limits::DEFAULT);
+    ///
+    /// // A node alone is its own quorum: the campaign wins at once.
+    /// node.campaign();
+    /// let ready = node.ready();
+    /// disk.apply(ready.writes());
+    /// ready.advance();
+    /// assert!(node.is_leader());
+    /// let promised = node.hard_state().max_promised_ballot;
+    ///
+    /// // The process stops. The next incarnation keeps the promise, and it
+    /// // does not keep the leadership.
+    /// drop(node);
+    /// let node = ColocatedNode::new(&disk, Limits::DEFAULT);
+    /// assert_eq!(node.hard_state().max_promised_ballot, promised);
+    /// assert!(!node.is_leader());
+    /// ```
+    ///
     /// # Panics
     ///
     /// If `limits` breaks [`Limits::assert_valid`], the configuration is
@@ -280,19 +308,19 @@ fn assert_config_shape(config: &Config) {
     // the quorum; a missing self silently deflates it.
     assert!(
         !config.peers.is_empty(),
-        "the bootstrap membership names at least one acceptor"
+        "Config::peers is empty: the bootstrap membership names at least one acceptor (Config::with_peers)"
     );
     assert!(
         config.peers.windows(2).all(|w| w[0] < w[1]),
-        "membership is sorted and deduplicated"
+        "Config::peers is not sorted and deduplicated (Config::with_peers sorts it)"
     );
     assert!(
         config.nodes.windows(2).all(|w| w[0] < w[1]),
-        "the node pool is sorted and deduplicated"
+        "Config::nodes is not sorted and deduplicated"
     );
     assert!(
         config.matchmakers.windows(2).all(|w| w[0] < w[1]),
-        "the matchmaker set is sorted and deduplicated"
+        "Config::matchmakers is not sorted and deduplicated"
     );
     // The bootstrap membership is drawn from the pool, and this node is
     // in the pool. On a plain deployment (no `nodes`, no matchmakers) the
@@ -304,16 +332,16 @@ fn assert_config_shape(config: &Config) {
             .peers
             .iter()
             .all(|p| config.pool().binary_search(p).is_ok()),
-        "the bootstrap membership is drawn from the node pool"
+        "Config::peers names a node outside Config::nodes: the bootstrap membership is drawn from the node pool"
     );
     assert!(
         config.pool().binary_search(&config.id).is_ok(),
-        "the node pool includes this node's own id"
+        "Config::id is not in the node pool (Config::nodes, or Config::peers when nodes is empty)"
     );
     if !config.has_matchmakers() {
         assert!(
             config.peers.binary_search(&config.id).is_ok(),
-            "a plain deployment's membership includes this node's own id"
+            "Config::id is not in Config::peers: a plain deployment's membership includes this node's own id"
         );
     }
     assert!(

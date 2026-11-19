@@ -101,7 +101,8 @@ cargo check --target wasm32-unknown-unknown -p paros-consensus
 cargo check --target wasm32-unknown-unknown -p paros-consensus --no-default-features
 cargo check -p paros-consensus --features serde
 RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps
-cargo run -p paros-consensus --example single_decree   # also multi_paxos, matchmaker, acceptor_grid, quorum_read, proxy_leader, replica_tier
+cargo run -p paros-consensus --example single_decree   # also multi_paxos, matchmaker, acceptor_grid, quorum_read, proxy_leader, replica_tier, quickstart, journal_calls, leader_handoff, reconfiguration
+cargo test --doc -p paros-consensus                    # the doc examples; nextest runs none
 cargo nextest run -p paros-consensus                   # incl. the handover and proxy model checkers
 ```
 

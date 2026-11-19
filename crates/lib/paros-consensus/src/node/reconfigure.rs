@@ -141,7 +141,7 @@ impl ColocatedNode {
             return ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted);
         }
         let previous = self.ballot;
-        self.campaign(RegistrationKind::Reconfiguration, config.clone());
+        self.open_campaign(RegistrationKind::Reconfiguration, config.clone());
         // Postconditions: a fresh ballot above the one this leadership held,
         // matchmaking open for it with `C_new`, and no Phase-1 or Phase-2
         // state left over from the old ballot (the stall is real).

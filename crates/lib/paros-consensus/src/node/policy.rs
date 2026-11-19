@@ -259,6 +259,22 @@ impl ColocatedNode {
         self.assert_invariants();
     }
 
+    /// Campaign now, as if the election clock had just run out:
+    /// [`ColocatedNode::campaign_above`] with nothing seen. A driver calls it
+    /// to start the first election of a cell, and a test or an example calls
+    /// it to elect a node without a clock. A no-op on the leader.
+    ///
+    /// Always sound, as `campaign_above` is: a campaign costs availability
+    /// only.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    pub fn campaign(&mut self) {
+        self.campaign_above(Ballot::zero());
+    }
+
     /// Campaign now, strictly above `seen`, as if the election clock had
     /// just run out: a follower or a candidate opens a fresh campaign (or its
     /// membership probe, the same path a timeout takes) at a round above

@@ -22,3 +22,31 @@ fn only_a_node_party_is_a_node() {
         Audience::Proxy(ProxyId(5))
     );
 }
+
+/// `kind` is the name of the variant, whatever the fields hold.
+#[test]
+fn a_message_names_its_variant() {
+    use super::Message;
+    use crate::types::{Ballot, Slot};
+
+    let beat_ack = |round| Message::HeartbeatAck {
+        from: NodeId(1),
+        ballot: Ballot {
+            round,
+            node: NodeId(2),
+        },
+        chosen: None,
+    };
+    assert_eq!(beat_ack(1).kind(), "HeartbeatAck");
+    assert_eq!(beat_ack(9).kind(), "HeartbeatAck");
+    let pull = Message::CatchUpRequest {
+        from: NodeId(1),
+        from_slot: Slot(4),
+    };
+    assert_eq!(pull.kind(), "CatchUpRequest");
+    let read = Message::PreRead {
+        reply_to: NodeId(1),
+        ctx: 7,
+    };
+    assert_eq!(read.kind(), "PreRead");
+}

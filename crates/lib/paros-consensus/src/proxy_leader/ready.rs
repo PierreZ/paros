@@ -49,6 +49,18 @@ impl ProxyReady<'_> {
         messages
     }
 
+    /// Whether the batch holds no message. The proxy's
+    /// [`crate::Ready::is_empty`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion of the bucket fails: a programmer error, never an
+    /// operating condition.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.messages().is_empty()
+    }
+
     /// Acknowledge the batch: clears the messages and releases the borrow.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(proxy = self.proxy.id.0)))]
     pub fn advance(self) {

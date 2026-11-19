@@ -180,7 +180,7 @@ use paros_consensus::proposer::{Campaign, PromiseFold, Proposer};
 use paros_consensus::types::Fingerprint;
 use paros_consensus::{Ballot, NodeId, Slot};
 
-use common::{ballot, command, show, show_ballot};
+use common::{ballot, command, show};
 
 /// The one decision. Paros's roles are written over a *log* of numbered
 /// slots (the next lesson fills many); single-decree Paxos is the same
@@ -380,7 +380,7 @@ fn phase1(
     assert_eq!(targets, vec![A, B, C], "Phase 1 addresses every acceptor");
     println!(
         "ballot {}: Prepare goes to every acceptor; the proposer hopes to choose {}",
-        show_ballot(ballot),
+        ballot,
         show(my_value)
     );
 
@@ -398,7 +398,7 @@ fn phase1(
                         "  {} -> promise; reports it already accepted {} at ballot {}",
                         name(id),
                         show(v),
-                        show_ballot(*b)
+                        *b
                     ),
                     None => println!("  {} -> promise; it has accepted nothing yet", name(id)),
                 }
@@ -428,7 +428,7 @@ fn phase1(
                 println!(
                     "  {} -> nack: it already promised the higher ballot {}; this attempt gives up",
                     name(id),
-                    show_ballot(promised)
+                    promised
                 );
                 return None;
             }
@@ -474,14 +474,14 @@ fn phase1(
         println!(
             "  P2c: a promise reported {} accepted at ballot {}, so that is what must be proposed; {} is set aside",
             show(reported),
-            show_ballot(*reported_at),
+            *reported_at,
             show(my_value)
         );
         Some(reported.clone())
     } else {
         println!(
             "  P2c: no promise reported a value accepted below ballot {}, so the proposer may propose its own {}",
-            show_ballot(ballot),
+            ballot,
             show(my_value)
         );
         Some(my_value.clone())
@@ -505,7 +505,7 @@ fn phase2(
     proposer.open_round(DECREE, ballot, candidate.clone(), None, None);
     println!(
         "ballot {}: Accept goes to every acceptor, asking for a vote on {}",
-        show_ballot(ballot),
+        ballot,
         show(candidate)
     );
     let mut chosen = None;
@@ -526,7 +526,7 @@ fn phase2(
             Err(promised) => println!(
                 "  {} -> nack: it promised the higher ballot {} and refuses this vote",
                 name(id),
-                show_ballot(promised)
+                promised
             ),
         }
         // ---- Chosen ----------------------------------------------------
@@ -544,7 +544,7 @@ fn phase2(
             println!(
                 "  chosen: {} at ballot {} -- a majority voted for it, and it can never change now",
                 show(&decided),
-                show_ballot(at)
+                at
             );
             chosen = Some(decided);
         }
@@ -576,7 +576,7 @@ fn assert_agreement(acceptors: &[AcceptorNode], at: Ballot, chosen: &Command) {
                 chosen,
                 "{} holds a different value at ballot {}",
                 name(acceptor.id),
-                show_ballot(*recorded_at)
+                *recorded_at
             );
         }
     }
@@ -697,7 +697,7 @@ fn scenario_prior_accept_never_chosen() {
     let late = acceptor(&mut acceptors, B).on_accept(ballot(3, NodeId(5)), value("old-value"));
     println!(
         "  B -> nack: it promised ballot {}, so ballot 3.5 can never get its vote",
-        show_ballot(late.expect_err("B promised ballot 7"))
+        late.expect_err("B promised ballot 7")
     );
     assert_eq!(late, Err(ballot(7, NodeId(8))));
     // "old-value" is still accepted at A — accepted is not chosen — and it
