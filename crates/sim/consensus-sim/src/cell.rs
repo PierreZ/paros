@@ -105,6 +105,9 @@ pub mod reach {
     pub const RETRY: &str = "cell: a client retried a write";
     /// A disk lost the value of a chosen record.
     pub const ROT_CHOSEN: &str = "cell: a disk rotted a chosen record";
+    /// A disk lost the value of a record that a peer already trimmed and
+    /// that a third node lacks.
+    pub const ROT_SPLIT_FLOOR: &str = "cell: a disk rotted a record below a peer's floor";
     /// A scrub found a rotted record and wrote it again.
     pub const SCRUBBED: &str = "cell: a scrub wrote a rotted record again";
     /// The operator retired a node.
@@ -980,6 +983,10 @@ impl Cell {
                 gc: &gc,
             };
             self.trace_batch(id, traced, before, cx);
+            if !self.rot_at_compaction(id, &writes, cx) {
+                // A fault stopped it between the persist and the send.
+                return;
+            }
             if crash_between {
                 sometimes!(true, reach::CRASH_BEFORE_SEND);
                 self.crash_node(id);
@@ -998,18 +1005,8 @@ impl Cell {
                 self.reads
                     .answered(&format!("node {}", id.0), state.ctx, state.index);
             }
-            let site = self.node_mut(id);
-            let Some(node) = site.live.as_mut() else {
+            if !self.after_batch(id) {
                 return;
-            };
-            node.advance_recovery();
-            if node.is_leader() {
-                let ballot = node.ballot();
-                sometimes!(
-                    self.leader_ballot.is_some_and(|b| b < ballot),
-                    reach::NEW_LEADER
-                );
-                self.leader_ballot = self.leader_ballot.max(Some(ballot));
             }
         }
     }
@@ -1042,6 +1039,24 @@ impl Cell {
                 msg: Wire::Gc(request),
             });
         }
+    }
+
+    /// After a batch of node `id`: advance its recovery and note the
+    /// ballot of a leader. Returns whether the node still runs.
+    fn after_batch(&mut self, id: NodeId) -> bool {
+        let Some(node) = self.node_mut(id).live.as_mut() else {
+            return false;
+        };
+        node.advance_recovery();
+        if node.is_leader() {
+            let ballot = node.ballot();
+            sometimes!(
+                self.leader_ballot.is_some_and(|b| b < ballot),
+                reach::NEW_LEADER
+            );
+            self.leader_ballot = self.leader_ballot.max(Some(ballot));
+        }
+        true
     }
 
     /// Record the steps of a batch of node `id` that reached its disk

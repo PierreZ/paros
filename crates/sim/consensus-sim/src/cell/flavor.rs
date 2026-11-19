@@ -233,6 +233,20 @@ impl Flavor {
         }
     }
 
+    /// Disk faults on three acceptors: a promise quorum holds one peer
+    /// beside the candidate, so one faulty copy can leave a chosen slot
+    /// undecidable, and the leader's repair probe blocks on it. With
+    /// truncation, the slot can sit below a peer's trim point, and the
+    /// peer's `TrimmedTo` resolves the probe.
+    #[must_use]
+    pub fn disk_faults_three() -> Self {
+        Self {
+            name: "disk-faults-3",
+            acceptors: 3,
+            ..Self::disk_faults()
+        }
+    }
+
     /// Matchmakers with reconfiguration, retirement and rejoin: the
     /// operator retires a node the effective GC floor released, and books
     /// a retired node again. The last spare joins the pool late, so a
