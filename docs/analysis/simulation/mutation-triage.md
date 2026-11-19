@@ -1,5 +1,10 @@
 # Mutation hunt: triage of the first run (#269)
 
+> History. This note records the runs of the setup that left the tree on 2026-11-19 (the hunt
+> of `paros-sim-runner`, `cargo xtask mutants`). Mutation testing now runs over
+> `paros-consensus`, judged by its own tests and `consensus-sim` (`.cargo/mutants.toml`). The
+> function names below can be out of date.
+
 This note records the first full `cargo xtask mutants` run over the
 safety-critical `paros-core` modules (`.cargo/mutants.toml`), and what was done
 with every surviving mutant. The weekly workflow writes later runs into the

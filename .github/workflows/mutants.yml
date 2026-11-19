@@ -18,9 +18,6 @@ on:
   schedule:
     - cron: '23 3 * * 0'
   workflow_dispatch:
-  # TEMPORARY: the first full run, on the branch of the pull request. Removed before merge.
-  push:
-    branches: [claude/project-thread-sy6hb2]
 
 permissions:
   contents: read
