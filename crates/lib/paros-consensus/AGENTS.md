@@ -76,7 +76,7 @@ Deployments (each wires roles and owns one `Ready`):
 - `node/{handoff,gc,matchmaking,reconfigure}.rs` → `DPaxos` handoff, GC wiring, matchmaking wiring, online reconfiguration (`relinquish_to`, `reconfigure`, `quorum_read`).
 - `node/{boot,acceptor,helpers,invariants}.rs` → boot path, acceptor wiring, `adopt_configuration`, `assert_invariants`.
 - `node/tests.rs` + `node/tests/*.rs` → unit tests, one file per concern.
-- `proxy_leader.rs` → `ProxyLeader` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, `expire_stale`; `proxy_leader/ready.rs` → `ProxyReady`.
+- `proxy_leader.rs` → `ProxyLeader` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, `expire_stale`; `proxy_leader/ready.rs` → `ProxyReady`. Its TLA+ model is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration.
 - `replica_node.rs` → `ReplicaNode`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis; `replica_node/ready.rs` → `ReplicaReady`; `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network.
 
 Test-only:

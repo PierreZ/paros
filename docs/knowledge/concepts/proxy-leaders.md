@@ -102,6 +102,12 @@ crashing and a leader handed off mid-round. After every step it asserts at most 
 slot, and that every proxy `Commit` is backed by a Phase-2 quorum of **durable** accepts at one
 ballot. "It bites": a proxy that commits one `Accepted` short is red on the first seed.
 
+The TLA+ model `specs/tla/proxy-leader/` (#1188 (rework 2.9)) checks the same rule over every
+state of a small deployment, with a reconfiguration, a new leader and a proxy crash: each
+`Commit` is backed by a Phase-2 quorum of the configuration that the round's `Accept` carried.
+A proxy that counts over a configuration that it learned with no check, while its round stays
+open, commits a value that no quorum chose (`belief_any`).
+
 ## 7. Liveness
 
 - Proxies are embarrassingly parallel: add them until they are not the bottleneck ([SRSM §3.1]).
@@ -124,6 +130,7 @@ ballot. "It bites": a proxy that commits one `Accepted` short is red on the firs
 | The leader's delegation | `paros-consensus/src/node.rs`: `Delegation`, `ColocatedNode::propose_in`; `paros-consensus/src/node/policy.rs`: `take_back_delegated` |
 | The proxy for a slot | `paros-consensus/src/membership/ids.rs`: `ProxyId`, `ProxyId::of` |
 | The model checker | `paros-consensus/src/models/proxy.rs` |
+| The TLA+ model | `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration |
 | The driver | `paros-roles/src/proxy_leader.rs`: `run_proxy`; a machine runs the proxy of each `Role::ProxyLeader` booking the registry holds for it (PR #775 (machine proxy leaders), #765) |
 
 **Sim gates and oracles** (`paros-sim/src/audit/state.rs`):
