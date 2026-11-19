@@ -48,7 +48,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/` | #1190 (rework 6.10), done |
 | Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
-| Truncation: the compaction floor, the trim-point jump and the gap fill, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`) | `truncation/` | #1017 (truncation model), done |
+| Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
@@ -883,7 +883,7 @@ The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s):
 
 Not in the model: matchmakers and reconfiguration (`zero-stall/`, `config-register/`), the
 cooperative handoff (`RecoveryPolicy::Inherited`), the CTRL tri-state of a rotted record and the
-repair probe, truncation and the trim-point jump (`truncation/`), the paging of a promise, the proxy leader
+repair probe, truncation and the trim-point jump (all three in `truncation/`), the paging of a promise, the proxy leader
 (`proxy-leader/`), a leader that a restart keeps, and more than two ballots (a check with three ballots does not finish in a CI job).
 
 ### `proxy-leader/`: the proxy leader, for #1188 (rework 2.9)
@@ -1235,55 +1235,94 @@ over the limits alone, the byte limit, truncation and the trim-point jump, a fau
 holds the walk, the reply owner (`slot % replica_count`, which nothing routes on), a read that
 expires, and a change of members.
 
-### `truncation/`: the compaction floor and the trim-point jump, for #1017 (truncation model)
+### `truncation/`: the compaction floor, the trim-point jump and the faulty entries, for #1017 (truncation model) and #1216 (truncation model, part 2)
 
 The model is plain Multi-Paxos (`multi-paxos/`, on a majority and with no wipe) with truncation
-added. Four rules of `paros-consensus` meet at the floor of an acceptor, and the model has each
-of them:
+added. The rules of `paros-consensus` that meet at the floor of an acceptor, and the model has
+each of them:
 
-- **The decided `Truncate`.** `Truncate` is a value in a slot. A node compacts when it learned
-  the slot and every slot below it: its floor goes one past the slot (`ColocatedNode::compact`,
-  clamped by `Replica::compaction_target`). Each node compacts at its own time, so the floors of
-  the nodes differ for some time. An acceptor holds no vote and no learned value below its floor.
+- **The decided truncation and the fold.** A truncation is a value in a slot
+  (`Control::Truncate { up_to }`): each value of `Cuts` truncates up to its position `CutAt`. The
+  fold raises `first_seq` to that position, clamped to `next_seq`, and never lowers it
+  (`JournalState::apply`). A position of `NS` or more (`trunc`) releases every record before the
+  slot. A node compacts when it learned the slot and every slot below it. Its floor goes to the
+  slot that holds the record at `first_seq`, or one past the slot when no record stays
+  (`Replica::compaction_target`, `ColocatedNode::compact`). Each command is one record, and the
+  model reads the fold from the chosen log: every node folds the same log. Each node compacts at
+  its own time, so the floors of the nodes differ for some time. An acceptor holds no vote and no
+  learned value below its floor.
 - **The floor guard in Phase 1** (`PrepareOutcome::BelowFloor`, `node/acceptor.rs`). A campaign
   asks from its first unchosen slot. An acceptor whose floor is above that slot does not promise
   and does not move its promise, because its promise could not report the slots that it
   compacted. An `Accept` below the floor is ignored (`AcceptOutcome::BelowFloor`).
+- **The retry of a laggard.** A candidate that a floor refused campaigns again from its new first
+  unchosen slot once a jump or a catch-up moved it (`on_nack`, then the next campaign). The model
+  keeps the ballot and sends a new `1a` from the new slot; the code opens the next round. With
+  two ballots in the model, a new round would be the last ballot, and the check of liveness needs
+  that ballot for the leader that no one preempts.
 - **The trim-point jump** (`Message::TrimmedTo`, `node/catch_up.rs`). A node that asks a peer
   for slots below the floor of the peer jumps to that floor. The jump carries no ballot: the
   promise does not move. A node that asks at or above the floor of the peer gets what the peer
   learned.
-- **The vote watermark** (`Acceptor::vote_watermark`): the last vote, or the floor minus 1 when
-  the acceptor holds no vote above its floor.
+- **The vote watermark** (`Acceptor::vote_watermark`): the last vote, faulty votes too, or the
+  floor minus 1 when the acceptor holds no vote above its floor.
+- **The faulty entries of CTRL** (`Acceptor::faulty`, `read_back_log` in `node/boot.rs`). A boot
+  finds the record of a slot damaged: its ballot is known and its value is lost. The boot also
+  drops the learned value of the slot, because the chosen map is rebuilt from the records. A
+  later `Accept` over the slot heals it (`record_accepted`). A scrub that reads the damage first
+  writes the record again from memory (`ColocatedNode::repair_record`). That write moves no state
+  of the model, so the model checks the damage that the scrub did not reach: `Rot` is a boot that
+  finds a faulty entry.
+- **The tri-state tally and the repair probe** (`slot_decidable` in `proposer.rs`,
+  `proposer/probe.rs`). At a slot with a faulty report, the threshold is the highest readable
+  report. An answer qualifies when it is not a faulty report above the threshold. A slot is
+  decided only when the qualifying answers hold a Phase-1 quorum; else the slot is blocked. The
+  repair probe decides a blocked slot later on more promises of the same ballot, or drops it
+  once the leader learned it. An acceptor whose promise is already at the ballot answers the
+  probe too (`Acceptor::prepare` re-affirms a promise at its own ballot): it took an `Accept` of
+  the ballot before the `Prepare` reached it.
 - **The election gap fill**, as in `multi-paxos/`: a new leader proposes again each slot that its
-  Phase 1 reported, and a `Noop` at each slot with no report below its frontier.
+  Phase 1 reported, and a `Noop` at each slot with no report below its frontier. A faulty report
+  moves the frontier too.
 
 | Constant | Values |
 |---|---|
 | `FloorGuard` | `"nack"`: an acceptor does not promise a campaign that asks from below its floor. `"ignore"`: a control, it promises and reports only what it still holds. |
 | `TrimPromise` | `"keep"`: the trim jump keeps the promise. `"copy"`: a control, the jump takes the promise of the peer. |
-| `CompactWhen` | `"prefix"`: a node compacts once it learned every slot up to the `Truncate`. `"learned"`: a control, it compacts once it learned the `Truncate` alone. |
+| `CompactWhen` | `"prefix"`: a node compacts once it learned every slot up to the truncation. `"learned"`: a control, it compacts once it learned the truncation alone. |
+| `FloorRule` | `"fold"`: the floor goes to the slot of the record at `first_seq`. `"slot"`: a control, the floor goes one past the slot of the truncation, whatever its position. |
 | `Watermark` | `"floor"`: the watermark counts the floor. `"votes"`: a control, it counts the retained votes only (0 for a compacted acceptor). |
+| `Tally` | `"ctrl"`: the tri-state tally. `"none"`: a control, a faulty report counts as no vote. |
+| `Retry` | `"jump"`: a refused candidate asks again from its new first unchosen slot. `"none"`: a control, it never asks again. |
 | `Restarts` | How many restarts can happen in the run. The floor is durable. |
+| `Faults`, `RotNodes` | How many faulty entries a boot can find in the run, and on which nodes. |
 | `Learners` | The nodes that catch up and jump. |
 
 The invariants:
 
 - `Agreement`: one value for each slot, with the compacted slots included. A vote is a `2b`
-  message that a compaction does not remove, so `msgs` is the ghost that keeps what was chosen.
+  message that a compaction or a lost record does not remove, so `msgs` is the ghost that keeps
+  what was chosen.
 - `LearnedChosen`: what a node learned was chosen.
 - `NoFillChosen`: a leader never proposes a `Noop` at a slot where a lower ballot chose another
   value.
 - `FloorChosen`: each slot below the floor of an acceptor is chosen.
-- `FloorTruncated`: each slot below a floor is at or below a chosen `Truncate`. Only the slots
-  below `first_seq` may be forgotten.
-- `Recoverable`: for each chosen slot, each Phase-1 quorum has a member that holds a vote there, or
-  a member whose floor is above the slot (and that member refuses a campaign from below it).
+- `FloorTruncated`: each slot below a floor is at or below a chosen truncation.
+- `FloorReleased`: each record below a floor is below `first_seq`. Only the records below
+  `first_seq` may be forgotten.
+- `Recoverable`: for each chosen slot, each Phase-1 quorum has a member that holds a vote there
+  (a faulty vote blocks the tally), or a member whose floor is above the slot (and that member
+  refuses a campaign from below it).
+- `ValueKept`: each chosen slot is below a floor, or a node can still read its value.
 - `WatermarkCovers`: the vote watermark of an acceptor is never below a slot that it voted.
+- `Ends` (liveness, `LiveSpec`): the last ballot `NB` wins, closes its repair probe and holds
+  every slot below its allocator. A chosen slot whose record a boot found faulty is still
+  applied. The fairness covers the owner of `NB` (campaign, retry, win, probe, decide, catch-up,
+  jump) and each acceptor (promise, accept).
 
-Results (`truncation/checks.txt`, three acceptors, two ballots, two slots, the values `Truncate`
-and `Noop` unless the line says otherwise, `a1` and `a2` catch up; the CI set runs in about 2.5
-minutes):
+Results (`truncation/checks.txt`, three acceptors, two ballots, two slots, the values `trunc` and
+`Noop`, and `a1` and `a2` catch up, unless the line says otherwise; the CI set runs in about 4
+minutes with 4 workers):
 
 | Check | Where | Rule | Result |
 |---|---|---|---|
@@ -1291,44 +1330,86 @@ minutes):
 | `reach_split` | ci | `NoSplitFloor`, a reachability control: one node compacted, one did not, and a slot above the floor is chosen | violation |
 | `reach_jump` | ci | `NoJump`, a reachability control: a node jumps over a slot that it never voted | violation |
 | `floor_ignore` | ci | Phase 1 ignores the floor | `NoFillChosen` violation |
-| `trim_promise` | ci | the trim jump takes the promise of the peer; one command too | `Agreement` violation (0.9 million states) |
-| `compact_early` | ci | a node compacts once it learned the `Truncate` alone | `FloorChosen` violation |
+| `trim_promise` | ci | the trim jump takes the promise of the peer; one command too | `Agreement` violation (731 thousand states) |
+| `compact_early` | ci | a node compacts once it learned the truncation alone | `FloorChosen` violation |
 | `watermark_votes` | ci | the watermark leaves the floor out | `WatermarkCovers` violation |
-| `safety` | ci | the rules of the code | pass (953 thousand states, 1 min with 4 workers) |
-| `restart` | long | one restart | pass (3.8 million states, 5 min) |
-| `full` | long | one command too, and every node catches up | pass (13.0 million states, 25 min) |
-| `three_slots` | long | three slots | no violation in 36.2 million distinct states (bounded: stopped after 58 min, 14.2 million states left on the queue) |
+| `safety` | ci | the rules of the code | pass (1.0 million states, 1.5 min) |
+| `reach_faulty` | ci | `NoFaultyChosen`, a reachability control: a boot finds a chosen slot faulty; one fault | violation |
+| `reach_block` | ci | `NoBlock`, a reachability control: a repair probe opens; one fault | violation |
+| `ctrl_none` | ci | a faulty report counts as no vote; one fault | `NoFillChosen` violation |
+| `two_rots` | ci | two faults: more than the majority survives | `ValueKept` violation |
+| `ctrl_one_slot` | ci | one fault, one slot | pass (32 thousand states) |
+| `ctrl_live` | ci | `Ends`, one fault on `a1` or `a3`, one slot, `a2` (the last leader) catches up | pass |
+| `reach_retry` | ci | `NoRetry`, a reachability control: a refused candidate asks again; `a1` leads ballot 1 and `a3` ballot 2 | violation |
+| `laggard_stuck` | ci | `Ends`, a refused candidate never asks again; one slot, `a2` and `a3` catch up | violation |
+| `laggard` | ci | `Ends`, the retry of the code; one slot, `a2` and `a3` catch up | pass |
+| `reach_keep` | ci | `NoKeep`, a reachability control: a floor stays below a truncation that a node applied; `c1` and `cut0` too | violation |
+| `fold_slot` | ci | the floor goes one past the truncation; `c1` and `cut0` too | `FloorReleased` violation |
+| `fold_one_leader` | ci | the fold, one ballot; `c1` and `cut0` too, every node catches up | pass (54 thousand states) |
+| `restart` | long | one restart | LONG_restart |
+| `full` | long | one command too, and every node catches up | LONG_full |
+| `three_slots` | long | three slots | LONG_three_slots |
+| `ctrl` | long | one fault on `a3` | LONG_ctrl |
+| `ctrl_all` | long | one fault on any node | LONG_ctrl_all |
+| `fold` | long | the fold; `c1` and `cut0` too | LONG_fold |
+| `fold_keep` | long | the fold; `c1` and `cut0` only, no node catches up | LONG_fold_keep |
 
 The long checks ran once on 2026-11-19 with 4 workers.
 
-The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s):
+The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s, unless the line says
+otherwise):
 
-- `floor_ignore` (the split floor of #409): ballot 1 wins on `{a1, a3}` and proposes `Truncate`
+- `floor_ignore` (the split floor of #409): ballot 1 wins on `{a1, a3}` and proposes `trunc`
   at slots 0 and 1. `{a1, a3}` choose slot 0, and `a1` alone votes slot 1. `a1` learns slot 0
   and compacts to floor 1. Ballot 2 asks from slot 0, and `a1` promises with its floor ignored:
   it reports its vote at slot 1 and nothing at slot 0, because it holds nothing there. Ballot 2
   wins on `{a1, a2}`, its frontier is 2, and it fills slot 0 with a `Noop`.
 - `trim_promise`: `a2` opens ballot 2 and promises it. Ballot 1 wins on `{a1, a3}` and proposes
-  `Truncate` at slot 0 and `c1` at slot 1. Ballot 2 wins on `{a2, a3}` and proposes another value
+  `trunc` at slot 0 and `c1` at slot 1. Ballot 2 wins on `{a2, a3}` and proposes another value
   at slot 1, and `{a2, a3}` choose it. `a1` compacts slot 0, and `a2` asks it from slot 0: the
   jump gives `a2` the promise 1 of `a1`. `a2` then votes `c1` at ballot 1, and `{a1, a2}` choose
   `c1` at slot 1 too. A jump that sets the promise can lower it; this is why `TrimmedTo` carries
   no ballot.
-- `compact_early`: `a1` learns the `Truncate` at slot 1 before slot 0 is chosen, compacts, and its
-  floor covers a slot that is not chosen.
-- `watermark_votes`: `{a1, a2}` choose `Truncate` at slot 0, and `a2` compacts its only vote.
-  With the floor left out, its watermark is `None`, below the slot that it voted. A quorum read
-  would not wait for that slot.
+- `compact_early`: `a1` learns the truncation at slot 1 before slot 0 is chosen, compacts, and
+  its floor covers a slot that is not chosen.
+- `watermark_votes`: `{a1, a2}` choose `trunc` at slot 0, and `a2` compacts its only vote. With
+  the floor left out, its watermark is `None`, below the slot that it voted. A quorum read would
+  not wait for that slot.
+- `ctrl_none`: `{a1, a3}` choose `trunc` at slot 0 at ballot 1. `a1` boots and finds slot 0
+  faulty. Ballot 2 wins on `{a1, a2}`: `a1` reports a faulty vote at ballot 1, and `a2` reports
+  nothing. When the faulty report counts as no vote, ballot 2 fills slot 0 with a `Noop` over the
+  chosen `trunc`. The tri-state tally does not let `a1` qualify (its faulty vote is above the
+  threshold 0), so `{a2}` alone is not a quorum and the slot is blocked; the repair probe waits
+  for `a3`, which reports `trunc`.
+- `two_rots`: `{a1, a2}` choose `trunc` at slot 0, and both boot with slot 0 faulty. No node can
+  read the value. The tri-state tally keeps the slot blocked, so this costs liveness, not
+  agreement: one fault is the limit of a majority of three.
+- `laggard_stuck`: `a1` leads ballot 1 and `a3` ballot 2. `{a1, a2}` choose `trunc` at slot 0,
+  and `a3` opens ballot 2 from slot 0. `a1` compacts to floor 1, and `a2` and `a3` jump to it.
+  `a1` and `a2` refuse a campaign from slot 0, and `a3` never asks again: ballot 2 never wins.
+  With the retry of the code (`laggard`), `a3` asks again from slot 1 and wins.
+- `fold_slot`: ballot 1 chooses `c1` at slot 0 and `cut0` at slot 1. `cut0` truncates up to
+  position 0, so `first_seq` stays 0 and the record of slot 0 stays. `a1` learns both slots and
+  compacts one past slot 1: its floor drops a record at `first_seq`.
 
-What the model does not find: no rule of the code is refuted, and no design decision is in
-question. The rule of the code differs from the text of #1017 at one point. The issue had a new
-leader take the slots below the highest floor in its promises as decided. The code does not let
-such a promise exist: an acceptor whose floor is above the slot that the campaign asks from
-refuses it (`BelowFloor`), and the candidate catches up out of band (`TrimmedTo`) before a new
-campaign. The model checks the code's rule.
+What the model finds: no rule of the code is refuted, and no design decision is in question. One
+rule of the code was missing from the first model: an acceptor whose promise is at the ballot
+answers a `Prepare` of that ballot again. Without it, `ctrl_live` gave a violation of `Ends`:
+`a3` alone voted slot 0 at ballot 1 and booted with it faulty, ballot 2 won on `{a2, a3}` with
+the slot blocked, and `a1` took an `Accept` of ballot 2 before its `Prepare`. The repair probe
+could not get the answer of `a1`. The code re-affirms (`Acceptor::prepare`), so the model does
+too.
 
-Not in the model: the faulty entries of CTRL (the scrub and the repair probe, #735 (fsyncgate)),
-a reconfiguration onto empty stores with a floor from `TrimmedTo`, the liveness of a laggard (a
-candidate that a floor refused campaigns again only after a jump; the model leaves the retry out,
-so it has no `Ends`), `first_seq` as a fold of the journal (the model uses the slot of the
-`Truncate`), wipes (`multi-paxos/` checks the identity rule), and grids.
+The rule of the code differs from the text of #1017 at one point. The issue had a new leader
+take the slots below the highest floor in its promises as decided. The code does not let such a
+promise exist: an acceptor whose floor is above the slot that the campaign asks from refuses it
+(`BelowFloor`), and the candidate catches up out of band (`TrimmedTo`) before a new campaign.
+The model checks the code's rule.
+
+Not in the model: a reconfiguration onto empty stores with a floor from `TrimmedTo` (step 2 of
+#1216 was only to be done if the faulty entries were cheap; they are not, as `ctrl` is a long
+check, so it moves to #1218 (truncation model, part 3)), a retained retry that holds the floor down
+(`compaction_target` walks down to the record that a retry above `first_seq` read; the model has
+no retry of a write), a scrub racing a boot (`Rot` is the damage that the scrub missed), a
+faulty entry at a slot that a node learned with no vote (in the code a learned slot always has
+its record), wipes (`multi-paxos/` checks the identity rule), and grids.
