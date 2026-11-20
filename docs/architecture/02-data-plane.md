@@ -667,7 +667,9 @@ carrying opaque bytes (section 4.3 of `04-roles.md`). Pierre answered three poin
   enters no safety rule and needs no TLA+ invariant.
 - **It is stamped per write**, not per batch.
 - **Client headers are opaque.** The journal never reads them, and a read cannot filter on them.
+- **In v1 paros adds only the leader time**, and keeps a reserved key space for later paros
+  headers (approved by Pierre on 2026-11-20).
 
 **Open** (#1299 decides each one): who stamps the leader time (the leader at propose or the
-batcher); the encoding, the size limits and the split between client keys and paros keys; and
+batcher); the encoding, the size limits and the exact reserved key space; and
 whether the headers are inside the value checksum and the offload hash.
