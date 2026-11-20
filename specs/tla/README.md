@@ -134,11 +134,12 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
-| Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
+| Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (now the whole state in the segment record, `seal-chain/`; first checked as `next_seq` in the segment record, the uuid in the journal's matchmaker record and a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
 | A user truncate across segments: the trim floor in the boundary state, the floor of a read from the segment in force, the floor check of an offloaded read, the trim of a sealed segment only once the floor is decided over it, the acceptors' compaction after `F + 1` replicas, the trim-point jump | the journal steps are designed, not built | `segment-truncate/` | #1276 (user truncate across segments), done |
 | Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301 (a resent write across a seal)) | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
+| Two seals in a row: a chain of segments with an empty segment and a seal before the `Fence`; where the boundary leader uuid lives (the segment record, or the journal metadata with a `Fence` at the next segment) | the journal steps are designed, not built | `seal-chain/` | #1303 (two seals in a row) |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -2368,8 +2369,9 @@ acceptors are gone.
 The finding that the model forced: a replica holds opaque bytes, but the journal state is folded
 at apply, so a replica of S2 that never sees a slot of S1 must start from the journal state at
 the seal (the boundary state: `next_seq` and the leader uuid). The rule `Boundary` selects where
-it lives. The design is `meta` (Pierre, 2026-11-20: the leader uuid goes to the journal's
-metadata, not to the segment record): the first replica of R1 that applied every slot of S1
+it lives. The design was `meta` (Pierre, 2026-11-20 morning: the leader uuid goes to the journal's
+metadata, not to the segment record; `seal-chain/` then found that `record` needs fewer rules
+through two seals in a row, #1303): the first replica of R1 that applied every slot of S1
 writes, in one compare-and-set at the matchmakers, `next_seq` into the segment record and the
 leader uuid into the journal's matchmaker record. The first leader of S2 reads the uuid there and
 proposes it at slot `K`, a `Fence(u)` that sets the leader uuid. A replica of S2 takes `next_seq`
@@ -2740,3 +2742,66 @@ matchmaker majority, across a handover); the store is atomic and has read-after-
 and GCS give for a single key; a reader of the object is not modelled (`Findable` checks that the
 bytes are where the record says); the trim floor of the core (`truncation/`) is one bit per
 segment here.
+
+### `seal-chain/`: two seals in a row, and where the boundary uuid lives, for #1303
+
+The journal state is folded at apply, and each segment has its own replica set
+(`segment-replicas/`), so a replica of a segment starts from the boundary state of the segment
+before it: `next_seq`, the trim floor `first_seq` and the leader uuid. `segment-replicas/` has one
+seal. This model has a chain of `G` segments and a seal at any time: before the first slot of a
+segment (an empty segment), before its `Fence`, and before its first leader read the uuid. The
+log is abstract (the leader chooses the slots in order; a seal closes the open segment at the
+frontier). A segment's replica set is one fold here: it applies the slots of its segment from its
+boundary state and answers the writer of each slot. The values are a write and a `Truncate` of
+`u1`, the `SetLeader` from `u1` to `u2`, the `Noop` of the gap fill and `Fence(u)`. The truth is
+the fold of the whole log.
+
+| Constant | Values (first: the design that passes) |
+|---|---|
+| `Boundary` | `record`: the first replica of a sealed segment that applied every slot writes `next_seq`, `first_seq` and the uuid into the record of that segment by compare-and-set; the next segment starts from it, with no `Fence`. `meta`: the record holds `next_seq` and `first_seq`, the uuid goes into the journal metadata (one field) in the same compare-and-set, the first leader of the next segment reads it and proposes `Fence(uuid)`, and a replica takes the uuid from the `Fence`. |
+| `BaseFrom` | (`record`) `pred`: segment `g` starts from the record of `g - 1`. `latest`: a control, from the highest record written. |
+| `FenceRead` | (`meta`) `rec`: the leader of `g` reads the uuid once the record of `g - 1` is written, in the same read of the register. `any`: a control, once the metadata holds a uuid. `stale`: a control, at any time. |
+| `EmptyMeta` | (`meta`) what the boundary write of a segment with no `Fence` applied does to the metadata. `keep`: nothing. `blank`: a control, it writes the uuid of the empty state. `wait`: a control, it waits for a uuid. |
+| `SealGuard` | (`meta`) `TRUE`: a seal waits for the `Fence` of the segment. |
+| `GapFill` | `FALSE`: in `meta`, the first slot of a segment is its `Fence`. `TRUE`: a `Noop` or a pipelined command can come first, and a replica refuses every command of its segment until it applied a `Fence` (#1302, candidate 1); in `record`, a `Noop` can take any slot. |
+
+Safety: `AckTrue` (each writer gets the answer of the whole log: no deposed writer writes, no
+`seq` twice), `OneFold`, `RecordTrue`, `NoMoveBack` (`next_seq` and `first_seq` never move back
+across the seals), and in `meta` `FenceTrue` and `MetaTrue`. Liveness: `Ends` (weak fairness;
+every slot is chosen, so the first write of a segment is never stuck behind its boundary state,
+every sealed segment's record is written and every slot is acked). Three segments and four
+slots, unless the name ends in `_g4` (four segments, five slots).
+
+| Check | CI | Result |
+|---|---|---|
+| `record`, `record_gap`, `record_g4`, `record_gap_g4` | ci | pass: the safety invariants (17.7 thousand, 52.8 thousand, 283 thousand and 1.1 million distinct states) |
+| `record_live` | ci | pass: `Ends` |
+| `record_latest` | ci | violation of `AckTrue`: segment 3 starts from the record of segment 1 while the record of segment 2 is not written; segment 2 took a `SetLeader`, and the deposed `u1` writes in segment 3 |
+| `record_reach_empty`, `record_reach_moved` | ci | violation: an empty middle segment and a write taken in segment 3; a `SetLeader` in segment 2 and the deposed writer refused in segment 3 |
+| `meta`, `meta_gap`, `meta_g4`, `meta_guard` | ci | pass: the safety invariants |
+| `meta_live`, `meta_gap_live`, `meta_guard_live` | ci | pass: `Ends` (`meta_guard_live` with `SealGuard` and `wait`) |
+| `meta_any` | ci | violation of `AckTrue`: segment 1 is empty, segment 2 takes `Fence(u1)` and the `SetLeader` to `u2`; the leader of segment 3 reads `u1`, the uuid of the first seal, before the second seal wrote it, and `u1` writes in segment 3 |
+| `meta_stale` | ci | violation of `AckTrue`: the leader of segment 2 reads the metadata before the first seal wrote it |
+| `meta_blank` | ci | violation of `AckTrue`: segment 1 takes the `SetLeader` to `u2`, segment 2 is empty, its seal writes `u1` into the metadata, and `u1` writes in segment 3 |
+| `meta_wait`, `meta_wait_gap` | ci | violation of `Ends`: segment 2 is sealed with no `Fence`, its replica has no uuid to write, and segment 3 never gets its `Fence` |
+| `meta_reach_empty`, `meta_reach_moved` | ci | violation: the same reach checks as `record_` |
+| `meta_gap_g4` | long | pass (5.5 million distinct states, 3 minutes) |
+
+The answer to #1303: both places are safe and live through two seals in a row, but not with the
+same rules. Pierre chose the segment record on 2026-11-20.
+
+- **The uuid in the segment record** needs no rule beyond "start from the record of your
+  predecessor". An empty segment copies that record as it is, a `Noop` anywhere is harmless, and
+  no `Fence` slot is needed, so the gap fill question of #1302 (the `Fence` slot against the
+  `Noop` gap fill) does not come up.
+- **The uuid in the journal metadata** needs two more rules, each with a control that lets a
+  deposed writer write: the leader reads the uuid in the same read as the record of the
+  predecessor (`meta_any`), and the boundary write of a segment with no `Fence` leaves the
+  metadata as it is (`meta_blank`; `meta_wait` stops the journal, unless a seal waits for the
+  `Fence`, `meta_guard_live`). It also needs the `Fence` slot and, with the gap fill, the refusal
+  rule of #1302. Here a segment chooses at most one `Fence`; a real log with leader changes can
+  choose two copies, and then a replica must apply only the first (`fence-gap/`, #1302).
+
+What is not in the model: the crashes and the reads inside one replica set (`segment-replicas/`),
+the seal end and the agreement (`experiments/segments/a/`, `multi-paxos/`), the register across a
+matchmaker handover (`segment-records/`), multi-writer mode (`multi-writer/`).
