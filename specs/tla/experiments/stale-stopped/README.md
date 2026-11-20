@@ -63,9 +63,9 @@ Invariants:
 
 ## Results
 
-`restart/checks.txt`. Three matchmakers, two values, symmetry over both. The `long` checks
-that say "not finished yet" were still running when this report was written; the PR of the
-fix adds their results.
+`restart/checks.txt`. Three matchmakers, two values, symmetry over both. A `long` check
+with retries or with two restarts has more than 20 million states and runs for hours on four
+cores; the ones that ran were stopped with no error found, and the others were not run.
 
 | Check | Rule | Constants | Result |
 |---|---|---|---|
@@ -81,11 +81,11 @@ fix adds their results.
 | `durable2a` | durable before `Accept` + floor | NR 2, 1 restart | pass (7,256,239 states, 6.5 min) |
 | `durable2a_nofloor` | durable before `Accept`, no floor | NR 2, 1 restart | pass (7,143,753 states, 6.5 min) |
 | `nonce_retry` | nonce + floor | NR 2, 1 restart, retries | pass (20,921,801 states, 19 min) |
-| `durable_retry` | durable + floor | NR 2, 1 restart, retries | not finished yet |
-| `durable2a_retry` | durable before `Accept` + floor | NR 2, 1 restart, retries | not finished yet |
-| `durable_nofloor_retry` | durable, no floor | NR 2, 1 restart, retries | not finished yet |
+| `durable_retry` | durable + floor | NR 2, 1 restart, retries | stopped at 37 million states, no error |
+| `durable2a_retry` | durable before `Accept` + floor | NR 2, 1 restart, retries | not run |
+| `durable_nofloor_retry` | durable, no floor | NR 2, 1 restart, retries | not run |
 | `nonce_two` | nonce + floor | NR 3, 2 restarts | not finished (stopped at 44 million states, no error) |
-| `durable_two` | durable + floor | NR 3, 2 restarts | not finished yet |
+| `durable_two` | durable + floor | NR 3, 2 restarts | not run |
 
 The trace of `stale_agreement` (depth 21) is shorter than the schedule of #1229, because the
 new incarnation needs no fresh message at all. Incarnation 0 proposes `v1`: `m1` and `m2`
