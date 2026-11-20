@@ -21,9 +21,11 @@ Both candidate fixes hold:
   necessary: with the nonce and no floor, a new incarnation opens at the round of the earlier
   one again (`nonce_nofloor`, violation).
 - **A decree round on disk, written before the `Prepare` of the round** (`durable`): pass. With
-  the durable round, the floor is not needed for safety: `durable2a_nofloor` (the weaker write)
-  passes with no floor, and `durable_nofloor` is still running. The floor only skips rounds that
-  the matchmakers would refuse.
+  the durable round, the floor is not needed for safety (`durable_nofloor`, and
+  `durable2a_nofloor` for the weaker write). `durable` and `durable_nofloor` reach the same
+  7,446,297 states: with one node, every promise comes from a round of this node, so the floor
+  never rises above the round on disk. With other nodes, the floor only skips rounds that the
+  matchmakers would refuse.
 - A variant of the durable round that is written only before the first `Accept` of the round
   (`durable2a`) passes too: a `Prepare` that the node sent at a round not on disk carries no
   value, so a later incarnation that uses that round again is safe.
@@ -75,7 +77,7 @@ fix adds their results.
 | `nonce_nofloor` | nonce, no floor | NR 2, 1 restart | `OneValuePerRound` violation |
 | `durable_reach` | durable | NR 2, 1 restart | `NoLearnAfterRestart` violation (reachable) |
 | `durable` | durable + floor | NR 2, 1 restart | pass (7,446,297 states, 6.5 min) |
-| `durable_nofloor` | durable, no floor | NR 2, 1 restart | not finished yet |
+| `durable_nofloor` | durable, no floor | NR 2, 1 restart | pass (7,446,297 states) |
 | `durable2a` | durable before `Accept` + floor | NR 2, 1 restart | pass (7,256,239 states, 6.5 min) |
 | `durable2a_nofloor` | durable before `Accept`, no floor | NR 2, 1 restart | pass (7,143,753 states, 6.5 min) |
 | `nonce_retry` | nonce + floor | NR 2, 1 restart, retries | pass (20,921,801 states, 19 min) |
