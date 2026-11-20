@@ -2,10 +2,9 @@
 (* The constants that a TLC configuration file cannot write. *)
 EXTENDS Bypass, TLC
 
-\* paros: ballot (round, node). Ballot 2 of proposer 2 is between ballots 1 and 3.
+\* paros: ballot (round, node), four ballots. Both proposers can bypass:
+\* proposer 1 from 1 to 3, proposer 2 from 2 to 4.
 OwnerParos == <<1, 2, 1, 2>>
-\* The paper: round (r, id, s). A proposer owns two consecutive ballots.
-OwnerPaper == <<1, 1, 2, 2>>
 
 \* Three ballots: enough for one bypass (1 to 3) with a rival ballot (2) between.
 OwnerParos3 == <<1, 2, 1>>
@@ -48,6 +47,10 @@ CfgWm3 == {<<{"a1", "a2"}, {"a3", "a4"}, {"a3", "a4"}>>,
            <<{"a1", "a2"}, {"a1", "a2"}, {"a3", "a4"}>>}
 CfgChain3 == {<<{"a1", "a2"}, {"a3", "a4"}, {"a1", "a2"}>>}
 CfgChain4 == {<<{"a1", "a2"}, {"a3", "a4"}, {"a1", "a2"}, {"a1", "a2"}>>}
+
+\* One journal move by a bypass, one proposer, two ballots: the liveness checks.
+OwnerMove2 == <<1, 1>>
+CfgMove2 == {<<{"a1", "a2"}, {"a3", "a4"}>>}
 
 Symmetry == Permutations(Values) \cup Permutations(Matchmakers)
 =============================================================================

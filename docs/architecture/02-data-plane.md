@@ -333,13 +333,117 @@ checked, each with a control that TLC breaks:
   the whole journal the replicas therefore do not bound write throughput, as they do in
   Compartmentalized Paxos (every replica executes every write, sections 3.3 and 8.5); inside one
   segment they still do. Because the journal state is folded at apply (sections 2.1 and 2.2), a
-  replica of the next segment starts from the **boundary state**: `next_seq` and the leader uuid
-  at the seal. The first replica of the old set that applied every slot of the segment writes
-  it once into the segment record, by compare-and-set; the replicas of the next segment read it
-  there, and a reader routes a read by the `seq` range that it gives. A segment retires after
-  `F + 1` replicas of its set hold it and the record holds its boundary state; after that the
-  next segment never needs its slots. **Open**: the trim floor (`first_seq`) is part of the
-  boundary state by our reading; the journal state model (#1189) decides it.
+  replica of the next segment starts from the **boundary state**, the journal state at the seal.
+  The first replica of the old set that applied every slot of the segment writes it in one
+  compare-and-set at the matchmakers: `next_seq` into the segment record, and the leader uuid
+  into the journal's matchmaker record (the journal metadata, beside the controller term, and
+  later quota and offload limits; Pierre, 2026-11-20). The first leader of the next segment
+  reads that uuid and proposes it as the segment's first slot, a `Fence(uuid)` that sets the
+  leader uuid. A replica of the next segment takes `next_seq` from the segment record and the
+  uuid from that slot, so a later change of the metadata never reaches its fold. A record with
+  `next_seq` and no uuid anywhere lets a writer that a `SetLeader` of the old segment deposed
+  write again; so does a `Fence` read before the seal wrote the uuid. A reader routes a read by
+  the `seq` range of the segment records. A segment retires after `F + 1` replicas of its set
+  hold it and its boundary state is written; after that the next segment never needs its
+  slots. **Open**: the trim floor (`first_seq`) is part of the boundary state by our reading;
+  the journal state model (#1189) decides it.
+
+**A leaderless read of the tail across a reshape** (#1254 (leaderless reads across a reshape),
+checked on 2026-11-20 in `specs/tla/experiments/segments/reads/`). A reader that holds the record
+of an old segment asks the old grid. With no fence, its answers need not see a slot that the new
+grid chose, and the read is stale (controls `part_bare` on the partitioned grid, `bare` on the
+full grid). The fence of the code closes it: each `PreReadAck` carries the read fence of the
+acceptor (`wire_read_fence`: the higher of its promise and its belief ballot), and an answer above
+the record ends the read. On the partitioned grid (the default grid, section 2.11) two Phase-1
+quorums meet, so the fence alone passes (`part_fence`); on a full grid it also needs the seal of
+each row (decision 31, section 2.5, #1209; `fence_rows`). The record check that the journal design
+proposed (the reader also reads the segment table at a matchmaker quorum, rule 1 of #1254) adds
+nothing while each acceptor keeps its promise. It adds safety only when an acceptor of a retired
+segment loses its state and answers as an empty store (`part_wipe_fence` and `wipe_fence_rows` fail
+with the promise alone); the belief half of the fence, with the refusal of an acceptor that did
+not hear what is in force, closes that case too (`part_wipe_belief`, `wipe_belief` pass).
+**Decided** (Pierre, 2026-11-20, #1254): the journal keeps the fence of the code, both halves
+(the promise and the belief ballot), with the refusal of an acceptor that did not hear what is in
+force and, on a full grid, the seal of each row. A read does not read the segment table at a
+matchmaker quorum. The journal state model (#1189) carries this rule. Across a Phase-1 bypass
+(#579) the promise fence alone is not enough, because the old acceptors never see the new ballot
+(#1258 (reshapes with a column below quorum), PR #1283). Since a read has no record check, the
+bypass closes that case with its own hold, which #1258 owns.
 
 The rejected design is in section 11 (alternatives). The code follows once the journal state
 model (#1189) includes these rules.
+
+### 2.11 Quorum everywhere
+
+**Every step of the journal waits for a quorum only** (decided by Pierre on 2026-11-20, #1257
+(quorum everywhere), checked by `specs/tla/quorum-everywhere/`). No step waits for every member
+of a group, as a FoundationDB commit waits for every TLog. With `F` acceptors down in every column
+of the old and the new grid, `F` matchmakers down in each matchmaker set and `F` replicas down in
+a segment's replica set, each step completes:
+
+| Step | It waits for |
+|---|---|
+| Write, and the decided `Truncate` | `F + 1` acceptors of one column; a stuck round moves to the next column (#533) |
+| Election | a matchmaker majority, then `F + 1` acceptors of every column of each configuration of `H_b` |
+| Leaderless read | `F + 1` acceptors of every column of the configuration in force; no matchmaker read: the fence of the code closes a reshape (#1254, decided in section 2.10) |
+| Seal | a Phase-1 quorum of the old grid, then a matchmaker majority for the compare-and-set of the end slot |
+| Retire | `F + 1` replicas of the segment, then a matchmaker majority |
+| Offload mark, record of a trim | a matchmaker majority |
+| Matchmaker set handover | a majority of the old set (the stop quorum), then a majority of the new set (the successor decree) |
+| Grid controller election, reshape call | a matchmaker majority for each compare-and-set on the matchmaker record (section 2.12, #1259) |
+
+Each step blocks with one member more down than its quorum allows, and each step that waits for
+every target blocks with `F` down: the model sees both. On a grid that is not full the leaderless
+read sends its `PreRead` to every member, but it completes on a Phase-1 quorum of the answers
+(`QuorumRead`, `has_phase1_quorum_in`): it sends to all and waits for a quorum, so it keeps its
+targets.
+
+A grid layout meets the rule for `F` exactly when `F + 1 <= acks <= rows - F`
+(`grid/GridCheck.tla`, `PerColumnTolerance`). The partitioned grid of section 3.4
+(`rows = 2F + 1`, `acks = F + 1`) and the majority meet it. The full grid (`acks = rows`) does not:
+a write needs a whole column. The journal therefore offers only the majority and the partitioned
+grid, and a grid that the grid controller picks keeps `F + 1 <= acks <= rows - F`.
+
+### 2.12 The grid controller's fenced reshape
+
+**The grid controller is its own role in each journal, elected by a term in the journal's
+matchmaker record** (decided by Pierre on 2026-11-20, #1259 (the fenced reshape call of the grid
+controller)). It runs on stateless machines; the Paxos leader does not run it. Its only effect on
+the journal is one compare-and-set on the matchmaker record:
+
+    reshape(expected configuration, new grid, controller term)
+
+The controller decides when and where; the record's guards decide whether it is safe. So the
+record trusts nothing that the controller computed. `specs/tla/grid-controller/` checks the
+election and the call with two controllers, a candidate race, a deposed controller that keeps
+calling, a crash between the plan and the call, a takeover after a crash, a lost request or
+reply, and an acceptor that fails after a plan named it. Each guard has a control that TLC
+breaks:
+
+- **The election raises the term.** A candidate reads the term, then writes term + 1 by
+  compare-and-set on the term it read; of two candidates that read the same term, one loses.
+  An election that keeps the term gives two controllers the same term, and both open segments.
+- **The call carries the term, and the record refuses any other term.** A deposed controller
+  that keeps calling changes nothing, even when its call names the configuration in force. A
+  refusal for the term tells it to stop.
+- **The expected configuration is the newest configuration of the table.** With this check, at
+  most one segment opens from one configuration, with or without the term check. A segment opens
+  twice from one configuration only when both checks are off: a deposed controller's call lands
+  after the new holder's.
+- **No reshape while a segment is not retired.** The newest configuration must be in force and
+  every older one retired, so one configuration is in force and at most one other is not retired
+  (rule 1 of the plan). A reshape asked while a segment is sealed but not retired is refused.
+- **The record checks `F + 1 <= acks <= rows - F` itself** (section 2.11). A grid outside the
+  bound can open and then never come into force: with `acks = 1` and one acceptor down, Phase 1
+  needs every member, the new configuration stays pending, and the guard above blocks every later
+  reshape, so the journal can never heal.
+- **The record answers a retry with the same answer** (a rule that the model found; **Open**
+  until Pierre agrees). The record keeps the identity of the call that opened each segment (the
+  controller term, the expected configuration and the grid), and answers a call that it already
+  took with "ok". Without it, a lost "ok" makes the retry fail its expected-configuration check,
+  and the controller is told "refused" for a reshape that took place.
+
+After the faults stop, every call is answered (done or refused) and every configuration that a
+reshape opened comes into force. The controller's crate (`paros-journal-control`) and its
+consensus-sim flavor (#1261 (grid controller decision tests)) come after the journal state model
+(#1189); the flavor's walk then trace-checks against this model.

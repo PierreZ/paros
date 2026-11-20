@@ -19,7 +19,9 @@
 (*   - A configuration per ballot: ballots below `R` use `C1`, ballots     *)
 (*     from `R` up use `C2` (`ColocatedNode::reconfigure`: a              *)
 (*     reconfiguration is a round change). A member of `C2` outside `C1`   *)
-(*     starts with floor 0, no vote and nothing learned.                   *)
+(*     starts with floor 0, no vote and nothing learned. Ballots from `R2` *)
+(*     up use `C3`, a second reconfiguration whose new members start empty *)
+(*     too.                                                                *)
 (*   - Matchmaking (`matchmaking.rs`): a candidate registers its ballot    *)
 (*     before its `Prepare`. A matchmaker refuses a ballot below one that  *)
 (*     it registered. The candidate gets the configurations of the         *)
@@ -42,7 +44,11 @@
 (*   - Every truncation releases every record before its slot: a node that *)
 (*     compacts at the truncation of slot `t` moves its floor to `t + 1`.  *)
 (*     The fold of `first_seq` is the subject of `truncation/`.            *)
-(*   - No faulty entry (CTRL) and no restart.                              *)
+(*   - No faulty entry (CTRL) and no restart: a restart keeps every       *)
+(*     durable record, and `truncation/` checks CTRL.                      *)
+(*   - A wipe (`Wipes`): an acceptor loses its whole store. `Identity`     *)
+(*     TRUE is the rule (a wiped acceptor never takes a step again);       *)
+(*     FALSE is a control (it comes back empty as the same acceptor).      *)
 (*                                                                         *)
 (* Constants (each rule has a control):                                    *)
 (*   GcRule  "fence": the rule of the code. The leader forgets the older   *)
@@ -57,8 +63,8 @@
 EXTENDS Integers, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Cuts, Noop,
-          NB, NS, Owner, C1, C2, R,
-          GcRule, Cover
+          NB, NS, Owner, C1, C2, R, C3, R2,
+          GcRule, Cover, Wipes, Identity
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
@@ -68,21 +74,24 @@ None == "none"
 
 ASSUME GcRule \in {"fence", "won"}
 ASSUME Cover \in {"chosen", "joined"}
+ASSUME Wipes \in Nat /\ Identity \in BOOLEAN
 ASSUME Learners \subseteq Acceptors
 ASSUME C1 \subseteq Acceptors /\ C2 \subseteq Acceptors /\ C1 # {} /\ C2 # {}
 ASSUME R \in Ballots
+ASSUME C3 \subseteq Acceptors /\ C3 # {} /\ R2 \in R..(NB + 1)
 ASSUME Noop \notin Proposals
 ASSUME Cuts # {} /\ Cuts \cap Commands = {}
 ASSUME Owner \in [Ballots -> Acceptors]
 Vote == [bal : 0..NB, val : Values \cup {None}]
 NoVote == [bal |-> 0, val |-> None]
 
-\* The configuration of ballot b, and its quorums: the majorities.
-Conf(b) == IF b >= R THEN C2 ELSE C1
+\* The configuration of ballot b, and its quorums: the majorities. Ballots
+\* from `R2` up use `C3`: a second reconfiguration (`R2 = NB + 1`: none).
+Conf(b) == IF b >= R2 THEN C3 ELSE IF b >= R THEN C2 ELSE C1
 Maj(C) == {Q \in SUBSET C : 2 * Cardinality(Q) > Cardinality(C)}
 
-\* The members of C2 that start with an empty store.
-Joiners == C2 \ C1
+\* The members of C2 and C3 that start with an empty store.
+Joiners == (C2 \ C1) \cup (C3 \ (C1 \cup C2))
 
 VARIABLES prom,     \* acceptor: the promise
           vote,     \* acceptor: the accepted record, per slot
@@ -94,9 +103,10 @@ VARIABLES prom,     \* acceptor: the promise
           fence,    \* ballot: one past its election fence `F`, once in Phase 2
           hist,     \* ballot: the configurations of `H_b`, from matchmaking
           wm,       \* the GC watermark of the matchmakers
-          msgs      \* every message sent: the ghost of every vote
+          msgs,     \* every message sent: the ghost of every vote
+          wiped     \* the acceptors that lost their disk
 
-vars == <<prom, vote, floor, learned, phase, from, next, fence, hist, wm, msgs>>
+vars == <<prom, vote, floor, learned, phase, from, next, fence, hist, wm, msgs, wiped>>
 
 Msg ==
   [type : {"1a"}, bal : Ballots, from : 0..NS]
@@ -113,9 +123,10 @@ TypeOK ==
   /\ from \in [Ballots -> 0..NS]
   /\ next \in [Ballots -> 0..NS]
   /\ fence \in [Ballots -> 0..NS]
-  /\ hist \in [Ballots -> SUBSET {C1, C2}]
+  /\ hist \in [Ballots -> SUBSET {C1, C2, C3}]
   /\ wm \in 0..NB
   /\ msgs \subseteq Msg
+  /\ wiped \subseteq Acceptors
 
 Init ==
   /\ prom = [a \in Acceptors |-> 0]
@@ -129,11 +140,15 @@ Init ==
   /\ hist = [b \in Ballots |-> {}]
   /\ wm = 0
   /\ msgs = {}
+  /\ wiped = {}
 
 Send(m) == msgs' = msgs \cup {m}
 SendAll(M) == msgs' = msgs \cup M
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
+
+\* Node n takes steps: with Identity, a wiped acceptor never does again.
+Up(n) == Identity => n \notin wiped
 
 \* Node n knows slot s: it learned the value, or the slot is below its floor.
 Holds(n, s) == s < floor[n] \/ learned[n][s] # None
@@ -175,6 +190,7 @@ Prepare(b) ==
   LET o == Owner[b]
       f == FirstUnchosen(o)
   IN /\ phase[b] = "idle"
+     /\ Up(o)
      /\ \A c \in Ballots : c > b => phase[c] = "idle"
      /\ prom[o] < b
      /\ phase' = [phase EXCEPT ![b] = "p1"]
@@ -183,7 +199,7 @@ Prepare(b) ==
                    {Conf(c) : c \in {d \in Ballots : d < b /\ d >= wm /\ phase[d] # "idle"}}]
      /\ prom' = [prom EXCEPT ![o] = b]
      /\ SendAll({[type |-> "1a", bal |-> b, from |-> f], PromiseMsg(o, b, f)})
-     /\ UNCHANGED <<vote, floor, learned, next, fence, wm>>
+     /\ UNCHANGED <<wiped, vote, floor, learned, next, fence, wm>>
 
 \* A floor refused the campaign of ballot b, and a jump or a catch-up since
 \* moved the first unchosen slot of its owner: the owner asks again.
@@ -191,17 +207,19 @@ AskAgain(b) ==
   LET o == Owner[b]
       f == FirstUnchosen(o)
   IN /\ phase[b] = "p1"
+     /\ Up(o)
      /\ prom[o] = b
      /\ \E a \in UNION Confs(b) : prom[a] < b /\ from[b] < floor[a]
      /\ f > from[b]
      /\ from' = [from EXCEPT ![b] = f]
      /\ SendAll({[type |-> "1a", bal |-> b, from |-> f], PromiseMsg(o, b, f)})
-     /\ UNCHANGED <<prom, vote, floor, learned, phase, next, fence, hist, wm>>
+     /\ UNCHANGED <<wiped, prom, vote, floor, learned, phase, next, fence, hist, wm>>
 
 \* Acceptor a of a configuration that the campaign covers promises ballot b,
 \* unless the floor guard refuses: a campaign that asks from below its
 \* floor gets a `Nack` (the model sends nothing).
 Promise(a, b) ==
+  /\ Up(a)
   /\ prom[a] < b
   /\ a \in UNION Confs(b)
   /\ \E m \in msgs :
@@ -209,7 +227,7 @@ Promise(a, b) ==
        /\ m.from >= floor[a]
        /\ prom' = [prom EXCEPT ![a] = b]
        /\ Send(PromiseMsg(a, b, m.from))
-  /\ UNCHANGED <<vote, floor, learned, phase, from, next, fence, hist, wm>>
+  /\ UNCHANGED <<wiped, vote, floor, learned, phase, from, next, fence, hist, wm>>
 
 \* The promises of ballot b that cover its campaign: one for each acceptor.
 PromiseSets(b) ==
@@ -237,6 +255,7 @@ Refill(S, b, s) ==
 \* frontier minus 1.
 Win(b) ==
   /\ phase[b] = "p1"
+  /\ Up(Owner[b])
   /\ \E S \in PromiseSets(b) :
        /\ Owner[b] \in {m.acc : m \in S}
        /\ \A C \in Confs(b) : \E Q \in Maj(C) : Q \subseteq {m.acc : m \in S}
@@ -245,21 +264,23 @@ Win(b) ==
              /\ fence' = [fence EXCEPT ![b] = f]
              /\ SendAll({Refill(S, b, s) : s \in from[b]..(f - 1)})
   /\ phase' = [phase EXCEPT ![b] = "p2"]
-  /\ UNCHANGED <<prom, vote, floor, learned, from, hist, wm>>
+  /\ UNCHANGED <<wiped, prom, vote, floor, learned, from, hist, wm>>
 
 -----------------------------------------------------------------------------
 (* Phase 2 *)
 
 Allocate(b, c) ==
   /\ phase[b] = "p2"
+  /\ Up(Owner[b])
   /\ next[b] < NS
   /\ next' = [next EXCEPT ![b] = @ + 1]
   /\ Send([type |-> "2a", bal |-> b, slot |-> next[b], val |-> c])
-  /\ UNCHANGED <<prom, vote, floor, learned, phase, from, fence, hist, wm>>
+  /\ UNCHANGED <<wiped, prom, vote, floor, learned, phase, from, fence, hist, wm>>
 
 \* Acceptor a of the configuration of ballot b votes. A slot below its
 \* floor is chosen already: it ignores the `Accept`.
 Accept(a, b, s) ==
+  /\ Up(a)
   /\ a \in Conf(b)
   /\ prom[a] <= b
   /\ s >= floor[a]
@@ -269,7 +290,7 @@ Accept(a, b, s) ==
        /\ prom' = [prom EXCEPT ![a] = b]
        /\ vote' = [vote EXCEPT ![a][s] = [bal |-> b, val |-> m.val]]
        /\ Send([type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> m.val])
-  /\ UNCHANGED <<floor, learned, phase, from, next, fence, hist, wm>>
+  /\ UNCHANGED <<wiped, floor, learned, phase, from, next, fence, hist, wm>>
 
 -----------------------------------------------------------------------------
 (* Learning, catch-up, compaction and the trim jump *)
@@ -282,13 +303,14 @@ LearnRecord(r, c, v) == IF r.val = v /\ r.bal >= c THEN r ELSE [bal |-> c, val |
 Decide(b, s) ==
   LET o == Owner[b]
   IN /\ phase[b] = "p2"
+     /\ Up(o)
      /\ ~Holds(o, s)
      /\ \E v \in Values :
           /\ ChosenAt(b, s, v)
           /\ learned' = [learned EXCEPT ![o][s] = v]
           /\ vote' = [vote EXCEPT ![o][s] = LearnRecord(@, b, v)]
           /\ prom' = [prom EXCEPT ![o] = IF @ < b THEN b ELSE @]
-     /\ UNCHANGED <<floor, phase, from, next, fence, hist, wm, msgs>>
+     /\ UNCHANGED <<wiped, floor, phase, from, next, fence, hist, wm, msgs>>
 
 \* Node n catches up from peer p, asking from its first unchosen slot. The
 \* peer is at or below that slot: it replays its records of the slots it
@@ -297,6 +319,7 @@ CatchUp(n, p) ==
   LET new == {s \in Slots : ~Holds(n, s) /\ learned[p][s] # None}
       top == Max({prom[n]} \cup {vote[p][s].bal : s \in new})
   IN /\ n \in Learners
+     /\ Up(n)
      /\ FirstUnchosen(n) >= floor[p]
      /\ new # {}
      /\ learned' = [learned EXCEPT ![n] = [s \in Slots |->
@@ -304,28 +327,30 @@ CatchUp(n, p) ==
      /\ vote' = [vote EXCEPT ![n] = [s \in Slots |->
                    IF s \in new THEN LearnRecord(@[s], vote[p][s].bal, learned[p][s]) ELSE @[s]]]
      /\ prom' = [prom EXCEPT ![n] = top]
-     /\ UNCHANGED <<floor, phase, from, next, fence, hist, wm, msgs>>
+     /\ UNCHANGED <<wiped, floor, phase, from, next, fence, hist, wm, msgs>>
 
 \* Node n asks peer p from below the floor of p. The peer answers
 \* `TrimmedTo`: n jumps to the floor of p. The promise does not move.
 TrimTo(n, p) ==
   /\ n \in Learners
+  /\ Up(n)
   /\ FirstUnchosen(n) < floor[p]
   /\ floor' = [floor EXCEPT ![n] = floor[p]]
   /\ vote' = [vote EXCEPT ![n] = DropVotes(n, floor[p])]
   /\ learned' = [learned EXCEPT ![n] = DropLearned(n, floor[p])]
-  /\ UNCHANGED <<prom, phase, from, next, fence, hist, wm, msgs>>
+  /\ UNCHANGED <<wiped, prom, phase, from, next, fence, hist, wm, msgs>>
 
 \* Node a learned the truncation at slot t and every slot below it: it
 \* releases every record before t, so its floor goes to t + 1.
 Compact(a, t) ==
+  /\ Up(a)
   /\ learned[a][t] \in Cuts
   /\ \A s \in 0..t : Holds(a, s)
   /\ t + 1 > floor[a]
   /\ floor' = [floor EXCEPT ![a] = t + 1]
   /\ vote' = [vote EXCEPT ![a] = DropVotes(a, t + 1)]
   /\ learned' = [learned EXCEPT ![a] = DropLearned(a, t + 1)]
-  /\ UNCHANGED <<prom, phase, from, next, fence, hist, wm, msgs>>
+  /\ UNCHANGED <<wiped, prom, phase, from, next, fence, hist, wm, msgs>>
 
 -----------------------------------------------------------------------------
 (* GC *)
@@ -339,13 +364,29 @@ Covers(a, b) ==
 \* candidate forgets the configurations of the ballots below b.
 Gc(b) ==
   /\ phase[b] = "p2"
+  /\ Up(Owner[b])
   /\ wm < b
   /\ GcRule = "fence" =>
        \E Q \in Maj(Conf(b)) : \A a \in Q : Covers(a, b)
   /\ wm' = b
-  /\ UNCHANGED <<prom, vote, floor, learned, phase, from, next, fence, hist, msgs>>
+  /\ UNCHANGED <<wiped, prom, vote, floor, learned, phase, from, next, fence, hist, msgs>>
+
+\* Acceptor a loses its disk: no promise, no record, nothing learned, floor
+\* 0. With Identity it never takes a step again (`decree/` and
+\* `multi-paxos/` have the same rule); with the control it comes back as
+\* the same acceptor and answers with the empty store.
+Wipe(a) ==
+  /\ Up(a)
+  /\ Cardinality(wiped) < Wipes
+  /\ wiped' = wiped \cup {a}
+  /\ prom' = [prom EXCEPT ![a] = 0]
+  /\ vote' = [vote EXCEPT ![a] = [s \in Slots |-> NoVote]]
+  /\ floor' = [floor EXCEPT ![a] = 0]
+  /\ learned' = [learned EXCEPT ![a] = [s \in Slots |-> None]]
+  /\ UNCHANGED <<phase, from, next, fence, hist, wm, msgs>>
 
 Next ==
+  \/ \E a \in Acceptors : Wipe(a)
   \/ \E b \in Ballots : Prepare(b) \/ AskAgain(b) \/ Win(b) \/ Gc(b)
   \/ \E b \in Ballots, c \in Proposals : Allocate(b, c)
   \/ \E a \in Acceptors, b \in Ballots : Promise(a, b)
@@ -390,11 +431,13 @@ Live == {Conf(c) : c \in {d \in Ballots : d >= wm /\ phase[d] # "idle"}}
 \* candidate must cover has, in each of its Phase-1 quorums, a member that
 \* holds a record there or whose floor is above the slot (and that member
 \* refuses a campaign that asks from below it). A candidate needs a quorum
-\* of each such configuration, so it meets that member.
+\* of each such configuration, so it meets that member. With Identity, a
+\* quorum with a wiped member never answers, so it does not count.
 Recoverable ==
   \A s \in Slots :
     IsChosen(s) =>
-      \E C \in Live : \A Q \in Maj(C) : \E a \in Q : vote[a][s].bal > 0 \/ floor[a] > s
+      \E C \in Live : \A Q \in Maj(C) :
+        (\A a \in Q : Up(a)) => \E a \in Q : vote[a][s].bal > 0 \/ floor[a] > s
 
 \* Reachability controls: each must be violated.
 \* A slot chosen under the first configuration.
@@ -412,4 +455,10 @@ NoGcSplit == ~(wm >= R /\ \E a \in C2, j \in Joiners :
 \* A ballot wins Phase 1 over the second configuration alone, once the
 \* GC forgot the first after it chose a slot.
 NoLateWin == ~(ChosenUnderC1 /\ \E b \in Ballots : b > R /\ phase[b] = "p2" /\ hist[b] = {C2})
+\* A ballot of the third configuration wins with the first forgotten, after a
+\* slot was chosen under the first.
+NoThirdWin == ~(ChosenUnderC1 /\ \E b \in Ballots : b >= R2 /\ phase[b] = "p2" /\ C1 \notin hist[b])
+\* A member of the second configuration is wiped after the GC forgot the
+\* first, once a slot was chosen under the first.
+NoWipeAfterGc == ~(wm >= R /\ ChosenUnderC1 /\ wiped \cap C2 # {})
 =============================================================================

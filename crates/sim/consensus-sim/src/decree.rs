@@ -1,6 +1,6 @@
 //! Single-decree Paxos under the walk: the [`Decree`] proposer of
 //! `paros-consensus` and its [`Acceptor`]s at [`DECREE_SLOT`], the flavor
-//! that the matchmaker handover and `cell init` run (TLA+ model
+//! that the matchmaker handover and `cluster init` run (TLA+ model
 //! `specs/tla/decree/`).
 //!
 //! Two proposers compete for one value over three acceptors. A proposer

@@ -306,9 +306,11 @@ impl Unbatcher {
             .collect();
         assert_eq!(at, seq + count, "the ranges cover the merged write");
         assert_eq!(out.len(), writes.len(), "one answer per write");
-        if out.len() > 1 {
-            probe!(reachable, "unbatcher: a merged write is scattered");
-        }
+        probe!(
+            sometimes,
+            out.len() > 1,
+            "unbatcher: a merged write is scattered"
+        );
         out
     }
 }

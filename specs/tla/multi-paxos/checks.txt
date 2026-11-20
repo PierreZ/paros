@@ -28,3 +28,7 @@ wipe                  pass       long
 spreads               pass       long
 full_grid             pass       long
 partitions            pass       long  50
+# One wipe of a node that is not the last leader, the identity rule: the run
+# still ends. Two wipes leave no majority: the control.
+live_wipe             pass       long
+live_wipe_two         violation  ci

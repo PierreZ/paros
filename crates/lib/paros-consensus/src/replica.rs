@@ -809,7 +809,8 @@ impl Replica {
         };
         let mut bytes = 0_usize;
         let mut at = from;
-        'writes: while at < state.next_seq && page.records.len() < limit {
+        // The record limit is checked before each record, inside the walk.
+        'writes: while at < state.next_seq {
             let (start, slot) = self
                 .positions
                 .range(..=at)
@@ -854,9 +855,10 @@ impl Replica {
             page.records.len() <= limit,
             "a read page honours its record limit"
         );
-        if page.records.len() > 1 {
-            assert!(bytes <= max_bytes, "a read page honours its byte budget");
-        }
+        assert!(
+            page.records.len() <= 1 || bytes <= max_bytes,
+            "a read page honours its byte budget"
+        );
         LogRead::Page(page)
     }
 

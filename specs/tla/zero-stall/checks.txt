@@ -42,3 +42,24 @@ chain_small        pass       ci
 chain_open_small   violation  ci
 chain              pass       long
 chain_open         violation  long
+# The rules together, with one matchmaker: GC, reads and the hold over two
+# bypasses in a row (p212 and carry), and over a handoff.
+chain_gc_reads        pass  ci
+chain_gc_reads_carry  pass  ci
+handoff_gc_reads      pass  ci
+# A restart ends every campaign and leadership of the node: only the
+# incarnation that won b bypasses from b. The control keeps it leading.
+restart_bypass      pass       ci
+restart_bypass_off  violation  ci
+# Two proposers that can both bypass (paros ballots, four ballots).
+owner_paros         pass       long
+# Two slots: the split of p212, a read fence above a non-zero fence, a GC with
+# one carried and one free slot, a handoff that carries a partial set.
+gc_two_slots        pass       long
+handoff_two_slots   pass       long
+chain_two_slots     pass       ci
+# Liveness: after a journal move by a bypass, every proposed slot is acked.
+# The control: the old members leave after the first leadership, so the
+# fence Phase 1 and the decision hold wait for good.
+live                     pass       ci
+live_old_gone            violation  ci

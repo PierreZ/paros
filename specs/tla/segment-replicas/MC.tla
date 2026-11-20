@@ -10,6 +10,11 @@ Values == {[op |-> "w", u |-> u1, n |-> 1],
            [op |-> "w", u |-> u2, n |-> 1],
            [op |-> "sl", new |-> u2, old |-> u1]}
 
+\* The deposed-writer case only: the `SetLeader` from u1 to u2, then a write
+\* of u1.
+Deposed == {[op |-> "w", u |-> u1, n |-> 1],
+            [op |-> "sl", new |-> u2, old |-> u1]}
+
 \* The liveness checks need no fold: one value keeps the state space small.
 OneValue == {[op |-> "w", u |-> u1, n |-> 1]}
 =============================================================================

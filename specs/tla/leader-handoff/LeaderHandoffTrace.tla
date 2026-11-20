@@ -1,9 +1,10 @@
 ------------------------- MODULE LeaderHandoffTrace -------------------------
 (***************************************************************************)
 (* The trace spec of `LeaderHandoff`: the model, forced to follow the      *)
-(* events that one walk of the `consensus-sim` cell recorded (#1198 (trace *)
-(* checking), `crates/sim/consensus-sim/src/cell/trace/leader_handoff.rs`).*)
-(* `l` is the index of the next event.                                     *)
+(* events that one walk of the `consensus-sim` cluster recorded (#1198     *)
+(* (trace checking),                                                       *)
+(* `crates/sim/consensus-sim/src/cluster/trace/leader_handoff.rs`). `l` is *)
+(* the index of the next event.                                            *)
 (*                                                                         *)
 (* The walk records a step when a batch of a node reached its disk, and    *)
 (* only when the step changes the model's state:                           *)

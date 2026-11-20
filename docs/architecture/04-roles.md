@@ -290,3 +290,16 @@ Each difference below is a **change** (the journal follows the rule above) or a 
 | No assignment port: the configuration is read at construction, with `Retire` and `rejoin` as calls. | `Assignments` (rule 5). | Change |
 | The borrow guard makes a second `ready()` before `advance()` a compile error, and an async driver copies the buckets out before it awaits. | `step` returns owned effects. With rule 1, nothing needs the guard: the role, not the borrow checker, says what may go out. | Proposal |
 | `ColocatedNode` keeps its contract. | Move `ColocatedNode` to the flight rule too, so that the examples, the walks and the journal share one driver contract. | Proposal |
+
+### 4.3 The consensus core is a library for everyone
+
+**`paros-consensus` stays usable by other people** (decided by Pierre on 2026-11-20). Anyone can
+use it to run plain Multi-Paxos, single-decree Paxos or any other flavor that it builds
+(leader handoff, grid quorums, matchmakers, proxy leaders, replicas, leaderless reads), with no
+part of the paros service. What paros needs comes from **optional behaviour and software
+composition**: a role or a policy that a caller opts into, or a layer above the core that
+composes the roles. The core never takes a concept of the service, such as a cell, a tenant
+policy or `cell init` (#1264 (remove the cell from paros-consensus), section 3.7). A paros need
+that the core cannot meet by composition is a new optional behaviour of the core, and its plain
+arm stays unchanged. This extends "plain Multi-Paxos is a shape of the core" of AGENTS.md to
+every flavor.

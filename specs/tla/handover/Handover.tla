@@ -48,10 +48,16 @@
 (*                 its tenant's set has the size for it (decision 35).      *)
 (* Clients    : TRUE = the candidates and the leader act (safety checks).   *)
 (* Faults     : the most machines that are down at one time, for good.      *)
+(* FrozenServes : FALSE = a frozen member serves nothing (the rule).        *)
+(*                 TRUE = a control: a frozen member still serves its       *)
+(*                 clients.                                                 *)
+(* ResizeGuard : TRUE = the operator records a new size only while no       *)
+(*                 target is named: a resize and a handover never overlap.  *)
+(*                 FALSE = a control: a resize during a handover.           *)
 EXTENDS Naturals, FiniteSets, Sequences
 
 CONSTANTS M0, Targets, Finish, FirstWrite, CloseState, Retarget, Resize,
-          JournalFirst, Clients, Faults
+          JournalFirst, Clients, Faults, FrozenServes, ResizeGuard
 
 Pool   == M0 \cup UNION {Targets[i] : i \in 1..Len(Targets)}
 TIdx   == 1..Len(Targets)
@@ -96,7 +102,9 @@ Set(g) == IF g = 0 THEN M0 ELSE IF chosen = None THEN {} ELSE chosen[1]
 InForceSet == IF chosen = None THEN M0 ELSE chosen[1]
 
 \* m serves generation g now.
-Serves(m, g) == /\ m \in Set(g) /\ gen[m] = g /\ phase[m] = "active" /\ up[m]
+Serves(m, g) ==
+    /\ m \in Set(g) /\ gen[m] = g /\ up[m]
+    /\ phase[m] = "active" \/ (FrozenServes /\ phase[m] = "frozen")
 
 \* A quorum of generation g where every member serves.
 Serving(g) == {Q \in Majorities(Set(g)) : \A m \in Q : Serves(m, g)}
@@ -163,11 +171,14 @@ Gc(Q) ==
 -----------------------------------------------------------------------------
 (* The control plane: the size, the survive number and the target. *)
 
-\* The operator records a new size, before the handover starts. Only this
-\* step changes the size.
+\* The operator records a new size. Only this step changes the size. With
+\* ResizeGuard, it does so only before a target is named: nothing else keeps
+\* a resize and a handover apart, because the decree runs over the old
+\* matchmakers, which do not read the control journal.
 RecordSize ==
     /\ Resize
-    /\ issued = 0
+    /\ ResizeGuard => issued = 0
+    /\ chosen = None
     /\ size = Cardinality(M0)
     /\ size' = Cardinality(M0) + 2
     /\ UNCHANGED <<gen, phase, up, wm, rg, reg, tgt, issued, survive, props,

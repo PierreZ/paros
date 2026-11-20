@@ -2,13 +2,13 @@
 //! every seed, and each flavor reaches the cases it exists for.
 
 use consensus_sim::campaign::campaign;
-use consensus_sim::cell::{Cell, Flavor, reach};
+use consensus_sim::cluster::{Cluster, Flavor, reach};
 use moonpool_walk::Walk;
 
 /// Seeds per flavor: a seed takes a few milliseconds in a debug build.
 const SEEDS: u64 = 60;
 
-/// The sites every flavor of the cell reaches.
+/// The sites every flavor of the cluster reaches.
 const COMMON: &[&str] = &[
     reach::CHOSEN,
     reach::NEW_LEADER,
@@ -29,9 +29,9 @@ fn walk(flavor: Flavor, extra: &[&str]) {
 
 /// [`walk`] over `seeds` seeds.
 fn walk_seeds(flavor: Flavor, extra: &[&str], seeds: u64) {
-    let walk = Walk::<Cell>::new()
+    let walk = Walk::<Cluster>::new()
         .seeds(seeds)
-        .model(move |cx| Cell::build(flavor.clone(), cx));
+        .model(move |cx| Cluster::build(flavor.clone(), cx));
     let expected: Vec<&str> = COMMON.iter().chain(extra).copied().collect();
     campaign(&walk, &expected);
 }
@@ -50,6 +50,39 @@ fn multi_paxos_on_five_with_truncation() {
             reach::TRUNCATE_MOVED,
             reach::RETRY,
             reach::LOST_UNSYNCED,
+        ],
+    );
+}
+
+#[test]
+fn compaction_steered() {
+    walk(
+        Flavor::compaction(),
+        &[reach::SET_LEADER, reach::COMPACTED, reach::TRIM_JUMP],
+    );
+}
+
+#[test]
+fn compartments_steered() {
+    walk(
+        Flavor::compartments_compacting(),
+        &[
+            reach::COMPACTED,
+            reach::REPLICA_APPLIED,
+            reach::REPLICA_READ,
+        ],
+    );
+}
+
+#[test]
+fn retirement_steered() {
+    walk(
+        Flavor::retiring(),
+        &[
+            reach::RECONFIGURED,
+            reach::GC_ACKED,
+            reach::RETIRED,
+            reach::REBOOKED,
         ],
     );
 }

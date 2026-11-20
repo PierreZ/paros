@@ -28,3 +28,10 @@ gone_peer         violation  ci
 retire_norecord   violation  ci
 # Two sealed slots, so that the fold crosses a SetLeader inside S1.
 safety_k2         pass       long   40
+# The design: next_seq in the segment record, the leader uuid in the journal's
+# matchmaker record, a Fence at the first slot of S2.
+meta_safety_ci    pass       ci
+meta_stale        violation  ci
+meta_safety       pass       long   40
+meta_live         pass       long
+meta_gone         pass       long   40

@@ -26,9 +26,14 @@
 (*     the decided slots, adopts the frontier, and proposes each pending   *)
 (*     slot again with the same command. It fills no gap with a `Noop`.    *)
 (*   - A leader records each round that it opens as its own vote before   *)
-(*     it sends the round (`record_own_round`). A restart computes the    *)
-(*     frontier from the votes on disk (`node/boot.rs`), so the frontier   *)
-(*     is durable.                                                         *)
+(*     it sends the round (`record_own_round`), in a grid column it is not *)
+(*     in too. A restart computes the frontier from the votes on disk      *)
+(*     (`node/boot.rs`), so the frontier is durable. A leader whose        *)
+(*     promise a higher ballot passed still opens a round, and records     *)
+(*     nothing: a replayed payload is then refused by the promise guard.   *)
+(*   - A learn is a record (`mark_chosen`): the node raises its promise to *)
+(*     the ballot that chose the slot and keeps the chosen value as its    *)
+(*     vote, unless it holds that value at a ballot at or above.           *)
 (*   - A handoff leader whose learned prefix does not reach its frontier   *)
 (*     can resign (`tick_handoff_fence`).                                  *)
 (*   - A beat at a ballot at or above the promise of a leader makes it a   *)
@@ -48,6 +53,8 @@
 (*               only removes behaviors, so the safety checks set 0.       *)
 (*   DropKinds   the kinds of message that may be lost ("2a", "rel").      *)
 (*   Resign      TRUE: a handoff leader may resign on an uncovered fence.  *)
+(*   Quiet       TRUE: `LiveSpec` lets a node campaign only while no node  *)
+(*               can exercise its ballot (the beats hold the timeout).     *)
 (* Rules, each with a control that turns it off:                           *)
 (*   OneHop        TRUE: only an elected leader hands off.                 *)
 (*                 FALSE: a control, a handoff leader hands on again.      *)
@@ -57,6 +64,15 @@
 (*                 FALSE: a control, a restart forgets the frontier.       *)
 (*   Pending       "keep": the successor proposes the pending slots again. *)
 (*                 "drop": a control, it drops them.                       *)
+(*   PromiseGuard  TRUE: a successor refuses a payload below its promise.  *)
+(*                 FALSE: a control, it installs it (and keeps the higher  *)
+(*                 promise).                                               *)
+(*   RecordAll     TRUE: a leader records every round, in a grid column it *)
+(*                 is not in too. FALSE: a control, only in its column.    *)
+(*   Abdicate      TRUE: the leader steps down as it sends the payload.    *)
+(*                 FALSE: a control, it keeps leading.                     *)
+(*   Named         TRUE: only the successor that the payload names installs*)
+(*                 it. FALSE: a control, any node installs it.             *)
 (*   BeatGuard     TRUE: a beat at a leader's own ballot keeps it leader.  *)
 (*                 FALSE: a control, the code of today: a late beat of the *)
 (*                 predecessor deposes the successor (review of            *)
@@ -65,8 +81,9 @@
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Noop, NB, NS, Q1, Q2, Owner,
-          HandBallots, Steady, Restarts, Drops, DropKinds, Resign,
-          OneHop, FrontierGuard, DurableFrontier, Pending, BeatGuard
+          HandBallots, Steady, Restarts, Drops, DropKinds, Resign, Quiet,
+          OneHop, FrontierGuard, DurableFrontier, Pending, BeatGuard,
+          PromiseGuard, RecordAll, Abdicate, Named
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
@@ -81,7 +98,8 @@ ASSUME Noop \notin Commands
 ASSUME Owner \in [Ballots -> Acceptors]
 ASSUME Q2 \in [Slots -> SUBSET SUBSET Acceptors]
 ASSUME Pending \in {"keep", "drop"}
-ASSUME {Resign, OneHop, FrontierGuard, DurableFrontier, BeatGuard} \subseteq BOOLEAN
+ASSUME {Resign, Quiet, OneHop, FrontierGuard, DurableFrontier, BeatGuard} \subseteq BOOLEAN
+ASSUME {PromiseGuard, RecordAll, Abdicate, Named} \subseteq BOOLEAN
 
 Vote == [bal : 0..NB, val : Values \cup {None}]
 NoVote == [bal |-> 0, val |-> None]
@@ -168,18 +186,36 @@ BootFrontier(n) ==
 \* (`record_own_round` refuses a round below the promise).
 Effective(n) == role[n] = "leader" /\ prom[n] = bal[n]
 
-\* The own vote and the messages of the rounds R that node n opens at
-\* ballot b. With DurableFrontier the node records each round as its vote.
-OwnVotes(n, b, R) ==
+\* Node n is in a Phase-2 quorum of slot s: on a grid, the slot's column.
+InColumn(n, s) == \E Q \in Q2[s] : n \in Q
+
+\* The slots of the rounds R that node n records as its own vote: every
+\* round with DurableFrontier, only those of its column with the control
+\* `RecordAll = FALSE`.
+Recorded(n, R) ==
   IF DurableFrontier
-  THEN [s \in Slots |-> IF R[s] # None THEN [bal |-> b, val |-> R[s]] ELSE vote[n][s]]
-  ELSE vote[n]
+  THEN {s \in Slots : R[s] # None /\ (RecordAll \/ InColumn(n, s))}
+  ELSE {}
+
+\* The own vote and the messages of the rounds R that node n opens at
+\* ballot b.
+OwnVotes(n, b, R) ==
+  [s \in Slots |-> IF s \in Recorded(n, R) THEN [bal |-> b, val |-> R[s]] ELSE vote[n][s]]
 RoundMsgs(n, b, R) ==
   {[type |-> "2a", bal |-> b, slot |-> s, val |-> R[s]] : s \in {t \in Slots : R[t] # None}}
-    \cup (IF DurableFrontier
-          THEN {[type |-> "2b", acc |-> n, bal |-> b, slot |-> s, val |-> R[s]] :
-                  s \in {t \in Slots : R[t] # None}}
-          ELSE {})
+    \cup {[type |-> "2b", acc |-> n, bal |-> b, slot |-> s, val |-> R[s]] : s \in Recorded(n, R)}
+
+\* Node n learns the values `rec[s].val` at the slots of DOMAIN rec, each
+\* chosen at ballot `rec[s].bal`. Each learn is a record (`mark_chosen`):
+\* the promise rises to the ballot, and the vote becomes the record unless
+\* the node holds that value at a ballot at or above.
+LearnRecs(n, rec) ==
+  LET L == DOMAIN rec
+      top == IF L = {} THEN 0 ELSE Max({rec[s].bal : s \in L})
+      Keeps(s) == vote[n][s].val = rec[s].val /\ vote[n][s].bal >= rec[s].bal
+  IN [p |-> IF top > prom[n] THEN top ELSE prom[n],
+      v |-> [s \in Slots |-> IF s \in L /\ ~Keeps(s) THEN rec[s] ELSE vote[n][s]],
+      l |-> [s \in Slots |-> IF s \in L THEN rec[s].val ELSE learned[n][s]]]
 
 -----------------------------------------------------------------------------
 (* Phase 1, as in multi-paxos/ *)
@@ -261,6 +297,20 @@ Allocate(n, c) ==
      /\ SendAll(RoundMsgs(n, bal[n], R))
      /\ UNCHANGED <<prom, learned, phase, role, bal, origin, restarts, drops, lost>>
 
+\* A leader whose promise a higher ballot passed opens a round for a fresh
+\* command: it sends the `Accept` and records nothing (`record_own_round`
+\* refuses a round below the promise). The round cannot be chosen: every
+\* Phase-2 quorum meets the quorum that raised the promise.
+AllocateStale(n, c) ==
+  LET s == nxt[n] IN
+  /\ role[n] = "leader"
+  /\ prom[n] > bal[n]
+  /\ s < NS
+  /\ nxt' = [nxt EXCEPT ![n] = s + 1]
+  /\ pend' = [pend EXCEPT ![n][s] = c]
+  /\ Send([type |-> "2a", bal |-> bal[n], slot |-> s, val |-> c])
+  /\ UNCHANGED <<prom, vote, learned, phase, role, bal, origin, restarts, drops, lost>>
+
 \* The leader n sends an open round again (`resend_pending`).
 Resend(n, s) ==
   LET m == [type |-> "2a", bal |-> bal[n], slot |-> s, val |-> pend[n][s]] IN
@@ -288,15 +338,23 @@ Decide(n, s) ==
   /\ learned[n][s] = None
   /\ \E v \in Values, Q \in Q2[s] :
        /\ \A a \in Q : [type |-> "2b", acc |-> a, bal |-> bal[n], slot |-> s, val |-> v] \in msgs
-       /\ learned' = [learned EXCEPT ![n][s] = v]
-  /\ UNCHANGED <<prom, vote, phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
+       /\ LET r == LearnRecs(n, [t \in {s} |-> [bal |-> bal[n], val |-> v]])
+          IN /\ learned' = [learned EXCEPT ![n] = r.l]
+             /\ vote' = [vote EXCEPT ![n] = r.v]
+             /\ prom' = [prom EXCEPT ![n] = r.p]
+  /\ UNCHANGED <<phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
 
-\* Node n catches up from peer p (`Commit`, `CatchUpRequest`).
+\* Node n catches up from peer p (`Commit`, `CatchUpRequest`). The answer
+\* carries the record of each slot at p (`serve_catchup`), which holds the
+\* learned value (`LearnRecordsHeld`).
 CatchUp(n, p) ==
   /\ n \in Learners
   /\ \E s \in Slots : learned[n][s] = None /\ learned[p][s] # None
-  /\ learned' = [learned EXCEPT ![n] = [s \in Slots |-> IF @[s] = None THEN learned[p][s] ELSE @[s]]]
-  /\ UNCHANGED <<prom, vote, phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
+  /\ LET r == LearnRecs(n, [s \in {t \in Slots : learned[n][t] = None /\ learned[p][t] # None} |-> vote[p][s]])
+     IN /\ learned' = [learned EXCEPT ![n] = r.l]
+        /\ vote' = [vote EXCEPT ![n] = r.v]
+        /\ prom' = [prom EXCEPT ![n] = r.p]
+  /\ UNCHANGED <<phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
 
 -----------------------------------------------------------------------------
 (* The handoff *)
@@ -306,28 +364,32 @@ CatchUp(n, p) ==
 Tail(n) == {s \in Slots : s >= FirstUnlearned(n) /\ s < nxt[n]}
 
 \* The leader n hands its ballot to node t and steps down in the same step.
+\* Its frontier covers its first unlearned slot (`LeaderFrontier`, which
+\* the code asserts in `relinquish_to`).
 Relinquish(n, t) ==
   /\ Effective(n)
   /\ bal[n] \in HandBallots
   /\ OneHop => origin[n] = "elected"
   /\ t # n
-  /\ FirstUnlearned(n) <= nxt[n]
   /\ \A s \in Tail(n) : learned[n][s] # None \/ pend[n][s] # None
   /\ Send([type |-> "rel", from |-> n, to |-> t, bal |-> bal[n],
            lo |-> FirstUnlearned(n), nxt |-> nxt[n],
            dec |-> [s \in Slots |-> IF s \in Tail(n) THEN learned[n][s] ELSE None],
            pen |-> [s \in Slots |-> IF s \in Tail(n) /\ learned[n][s] = None
                                     THEN pend[n][s] ELSE None]])
-  /\ role' = [role EXCEPT ![n] = "follower"]
-  /\ origin' = [origin EXCEPT ![n] = "elected"]
-  /\ pend' = [pend EXCEPT ![n] = NoRounds]
+  /\ IF Abdicate
+       THEN /\ role' = [role EXCEPT ![n] = "follower"]
+            /\ origin' = [origin EXCEPT ![n] = "elected"]
+            /\ pend' = [pend EXCEPT ![n] = NoRounds]
+       ELSE UNCHANGED <<role, origin, pend>>
   /\ UNCHANGED <<prom, vote, learned, phase, bal, nxt, restarts, drops, lost>>
 
 \* Node t installs the ballot that a payload hands to it, or refuses it.
+\* The decided slots of the payload are learned as records at its ballot.
 Install(t) ==
   \E m \in Delivered :
-    /\ m.type = "rel" /\ m.to = t
-    /\ m.bal >= prom[t]
+    /\ m.type = "rel" /\ (Named => m.to = t)
+    /\ PromiseGuard => m.bal >= prom[t]
     /\ ~(role[t] = "leader" /\ bal[t] = m.bal)
     /\ FrontierGuard => m.nxt >= nxt[t]
     /\ m.nxt >= FirstUnlearned(t)
@@ -335,11 +397,16 @@ Install(t) ==
            cursor == Max({m.lo, FirstNone(L)})
            R == [s \in Slots |->
                    IF Pending = "keep" /\ s >= cursor /\ L[s] = None THEN m.pen[s] ELSE None]
+           D == {s \in Slots : learned[t][s] = None /\ m.dec[s] # None}
+           rec == LearnRecs(t, [s \in D |-> [bal |-> m.bal, val |-> m.dec[s]]])
+           base == [s \in Slots |-> IF s \in D THEN rec.v[s] ELSE vote[t][s]]
        IN /\ learned' = [learned EXCEPT ![t] = L]
           /\ pend' = [pend EXCEPT ![t] = R]
-          /\ vote' = [vote EXCEPT ![t] = OwnVotes(t, m.bal, R)]
+          /\ vote' = [vote EXCEPT ![t] =
+                        [s \in Slots |-> IF s \in Recorded(t, R) THEN [bal |-> m.bal, val |-> R[s]]
+                                         ELSE base[s]]]
           /\ SendAll(RoundMsgs(t, m.bal, R))
-    /\ prom' = [prom EXCEPT ![t] = m.bal]
+          /\ prom' = [prom EXCEPT ![t] = IF rec.p > m.bal THEN rec.p ELSE m.bal]
     /\ role' = [role EXCEPT ![t] = "leader"]
     /\ bal' = [bal EXCEPT ![t] = m.bal]
     /\ origin' = [origin EXCEPT ![t] = "handoff"]
@@ -407,7 +474,7 @@ Drop ==
 Next ==
   \/ \E b \in Ballots : Prepare(b) \/ Win(b)
   \/ \E a \in Acceptors, b \in Ballots : Promise(a, b)
-  \/ \E n \in Acceptors, c \in Commands : Allocate(n, c)
+  \/ \E n \in Acceptors, c \in Commands : Allocate(n, c) \/ AllocateStale(n, c)
   \/ \E n \in Acceptors, s \in Slots : Resend(n, s) \/ Decide(n, s)
   \/ \E a \in Acceptors, b \in Ballots, s \in Slots : Accept(a, b, s)
   \/ \E n, p \in Acceptors : CatchUp(n, p) \/ Relinquish(n, p)
@@ -421,8 +488,12 @@ Spec == Init /\ [][Next]_vars
 
 \* The steps that a correct run takes in the end. A handoff, a fresh
 \* command, a beat, a restart and a loss may happen, but need not.
+\* With Quiet, a node campaigns only while no node can exercise its ballot:
+\* the beats of a leader hold the election timeout of every other node.
 Fairness ==
-  /\ \A b \in Ballots : WF_vars(Prepare(b)) /\ WF_vars(Win(b))
+  /\ \A b \in Ballots :
+       /\ WF_vars(Prepare(b) /\ (Quiet => ~ \E n \in Acceptors : Effective(n)))
+       /\ WF_vars(Win(b))
   /\ \A a \in Acceptors, b \in Ballots : WF_vars(Promise(a, b))
   /\ \A a \in Acceptors, b \in Ballots, s \in Slots : WF_vars(Accept(a, b, s))
   /\ \A n \in Acceptors, s \in Slots : WF_vars(Decide(n, s)) /\ WF_vars(Resend(n, s))
@@ -455,6 +526,21 @@ LearnedChosen == \A n \in Acceptors, s \in Slots : learned[n][s] # None => Chose
 \* One proposal for each slot and ballot, across the handoff.
 OneProposal ==
   \A m, n \in msgs : m.type = "2a" /\ n.type = "2a" /\ m.bal = n.bal /\ m.slot = n.slot => m = n
+
+\* The frontier of a leader that can exercise its ballot covers its first
+\* unlearned slot (`assert_leader_invariants`).
+LeaderFrontier == \A n \in Acceptors : Effective(n) => FirstUnlearned(n) <= nxt[n]
+
+\* Every open round of a leader that can exercise its ballot is recorded
+\* in its own log (`assert_leader_invariants`).
+OwnRecorded ==
+  \A n \in Acceptors, s \in Slots :
+    Effective(n) /\ pend[n][s] # None /\ RecordAll /\ DurableFrontier =>
+      vote[n][s] = [bal |-> bal[n], val |-> pend[n][s]]
+
+\* A learned slot holds its record (`node/learn.rs`).
+LearnRecordsHeld ==
+  \A n \in Acceptors, s \in Slots : learned[n][s] # None => vote[n][s].val = learned[n][s]
 
 \* One node at a time leads at a ballot.
 OneHolder ==

@@ -13,5 +13,29 @@ live               pass       ci
 live_gone          pass       ci
 live_drop_pending  violation  ci
 live_late_beat     violation  ci
-late_beat_safe     pass       long
 safety_long        pass       long
+# The beat guard is not in the code yet (rework 2.7): the code of today.
+late_beat_safe     pass       ci
+# A leader that a higher promise passed opens a round it cannot record; the
+# promise guard of the successor refuses the replayed payload. The control
+# installs it.
+promise_guard_off  violation  ci
+# A 2 x 2 grid: a leader records every round, in a column it is not in too.
+# The control records only in its column.
+grid                 pass       long
+grid_in_column_only  violation  ci
+# The leader steps down as it sends the payload; only the named successor
+# installs it. Each control breaks one of the two.
+keep_leading       violation  ci
+any_target         violation  ci
+# One node owns every ballot: the predecessor campaigns again.
+owner_twice        pass       long
+# Two ballots with two slots, and two restarts in one run.
+two_ballots        pass       long  60
+restart_twice      pass       long
+# The fence resignation is needed by no check: with quiet elections (a node
+# campaigns only while no node can use its ballot) and no resignation, the
+# run still ends after a lost payload or a restarted successor, and after a
+# lost `Accept`.
+live_quiet_no_resign pass      long
+live_quiet_2a        pass      long

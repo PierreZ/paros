@@ -66,6 +66,16 @@
 (*             "seq": as "record", but the record holds `next_seq` only;   *)
 (*             a replica of S2 starts with the leader uuid of the empty    *)
 (*             state.                                                      *)
+(*             "meta": the segment record holds `next_seq` only, and the   *)
+(*             leader uuid goes to the journal's metadata at the           *)
+(*             matchmakers, in the same compare-and-set. The first leader  *)
+(*             of S2 reads it there and proposes it as the first slot of   *)
+(*             S2, a `Fence(u)` that sets the leader uuid. A replica of S2 *)
+(*             takes `next_seq` from the record and the leader uuid from   *)
+(*             that slot, so a later change of the metadata cannot reach   *)
+(*             its fold.                                                   *)
+(*             "meta_stale": as "meta", but the first leader of S2 may     *)
+(*             read the metadata before the seal wrote it.                 *)
 (*   Route     "segment": a read goes to a replica of the set of the       *)
 (*             segment that holds its `seq`.                               *)
 (*             "other": a read goes to a replica of the other set.         *)
@@ -84,7 +94,12 @@ ASSUME R1 # {} /\ R2 # {} /\ R1 \cap R2 = {}
 ASSUME K \in 1..NS /\ NS \in Nat
 ASSUME F \in Nat /\ RetireAt \in Nat
 ASSUME Deliver \in {"segment", "all"}
-ASSUME Boundary \in {"record", "peer", "zero", "early", "seq"}
+ASSUME Boundary \in {"record", "peer", "zero", "early", "seq", "meta", "meta_stale"}
+
+\* The modes where the record holds `next_seq` and the metadata the uuid.
+MetaMode == Boundary \in {"meta", "meta_stale"}
+\* The modes where a replica of R1 writes the record.
+RecordMode == Boundary \in {"record", "early", "seq", "meta", "meta_stale"}
 ASSUME Route \in {"segment", "other"}
 ASSUME Gone \in BOOLEAN /\ RetireRecord \in BOOLEAN
 
@@ -105,13 +120,15 @@ Truncated == -3
 (***************************************************************************)
 (* The journal state and its fold (02-data-plane.md, sections 2.1-2.3).    *)
 (* A value is a `Write` of `n` records under leader uuid `u`, or a         *)
-(* `SetLeader(new, old)`, a compare-and-set of the leader uuid.            *)
+(* `SetLeader(new, old)`, a compare-and-set of the leader uuid, or (in the *)
+(* "meta" modes, at the first slot of S2 only) a `Fence(u)` that sets it.  *)
 (***************************************************************************)
 Empty == [next |-> 0, leader |-> U0]
 
 Step(st, v) ==
   IF v.op = "w"
   THEN IF v.u = st.leader THEN [st EXCEPT !.next = st.next + v.n] ELSE st
+  ELSE IF v.op = "fence" THEN [st EXCEPT !.leader = v.u]
   ELSE IF v.old = st.leader THEN [st EXCEPT !.leader = v.new] ELSE st
 
 \* The answer of a slot: the first `seq` of an accepted write, or -1 (a
@@ -124,19 +141,27 @@ VARIABLES
   applied,  \* how many slots of its segment each replica applied
   base,     \* each replica's boundary state, or None
   rec,      \* the boundary state in the record of S1, or None
+  meta,     \* the leader uuid in the journal's metadata, or None
   retired,  \* S1 retired: its acceptors are gone
   down,     \* the replicas that stopped
   acked,    \* the answer that the writer of each slot got, or None
   rd        \* the read of each acked write, or None
 
-vars == <<chosen, held, applied, base, rec, retired, down, acked, rd>>
+vars == <<chosen, held, applied, base, rec, meta, retired, down, acked, rd>>
 
 RECURSIVE FoldTo(_, _, _)
 \* The state after the chosen values of the slots lo .. hi - 1, from st.
 FoldTo(st, lo, hi) == IF lo >= hi THEN st ELSE FoldTo(Step(st, chosen[lo]), lo + 1, hi)
 
+\* The fold of the journal: a `Fence` only repeats what the log already
+\* decided, so the true state ignores it. A `Fence` with the wrong uuid
+\* makes a replica's fold differ from this one.
+Step0(st, v) == IF v.op = "fence" THEN st ELSE Step(st, v)
+RECURSIVE Fold0(_, _, _)
+Fold0(st, lo, hi) == IF lo >= hi THEN st ELSE Fold0(Step0(st, chosen[lo]), lo + 1, hi)
+
 \* The true journal state before slot s: the fold of the whole log.
-Truth(s) == FoldTo(Empty, 0, s)
+Truth(s) == Fold0(Empty, 0, s)
 
 \* A replica's starting state: empty for S1, its boundary state for S2.
 BaseOf(r) == IF SetOf(r) = 1 THEN Empty ELSE base[r]
@@ -161,7 +186,7 @@ Frontier == CHOOSE n \in 0..NS : (\A s \in 0..(n - 1) : chosen[s] # None) /\
 S1Full == \A s \in SlotsOf(1) : chosen[s] # None
 
 TypeOK ==
-  /\ chosen \in [Slots -> Vals \cup {None}]
+  /\ \A s \in Slots : chosen[s] \in Vals \cup {None} \/ (MetaMode /\ s = K /\ chosen[s].op = "fence")
   /\ held \in [Replicas -> SUBSET Slots]
   /\ applied \in [Replicas -> 0..NS]
   /\ retired \in BOOLEAN
@@ -173,6 +198,7 @@ Init ==
   /\ applied = [r \in Replicas |-> 0]
   /\ base = [r \in Replicas |-> None]
   /\ rec = None
+  /\ meta = None
   /\ retired = FALSE
   /\ down = {}
   /\ acked = [s \in Slots |-> None]
@@ -181,8 +207,20 @@ Init ==
 \* The leader chooses the next slot.
 Choose(v) ==
   /\ Frontier < NS
+  /\ ~(MetaMode /\ Frontier = K)
   /\ chosen' = [chosen EXCEPT ![Frontier] = v]
-  /\ UNCHANGED <<held, applied, base, rec, retired, down, acked, rd>>
+  /\ UNCHANGED <<held, applied, base, rec, meta, retired, down, acked, rd>>
+
+\* The first leader of S2 proposes the leader uuid that it read in the
+\* journal's metadata as the first slot of S2. With "meta_stale" it may read
+\* the metadata before the seal wrote it, and finds the first uuid.
+ChooseFence ==
+  /\ MetaMode
+  /\ Frontier = K
+  /\ K < NS
+  /\ Boundary = "meta" => meta # None
+  /\ chosen' = [chosen EXCEPT ![K] = [op |-> "fence", u |-> IF meta = None THEN U0 ELSE meta]]
+  /\ UNCHANGED <<held, applied, base, rec, meta, retired, down, acked, rd>>
 
 \* A replica gets a chosen slot. With "segment", only a slot of its own
 \* segment. The source is the leader's `Commit` or the slot's acceptors
@@ -195,7 +233,7 @@ Learn(r, s) ==
   /\ \/ Seg(s) = 2 \/ ~retired
      \/ \E p \in Live(Seg(s)) : s \in held[p]
   /\ held' = [held EXCEPT ![r] = @ \cup {s}]
-  /\ UNCHANGED <<chosen, applied, base, rec, retired, down, acked, rd>>
+  /\ UNCHANGED <<chosen, applied, base, rec, meta, retired, down, acked, rd>>
 
 \* A replica applies the next slot of its segment.
 Apply(r) ==
@@ -204,15 +242,16 @@ Apply(r) ==
   /\ Front(r) \in SlotsOf(SetOf(r))
   /\ Front(r) \in held[r]
   /\ applied' = [applied EXCEPT ![r] = @ + 1]
-  /\ UNCHANGED <<chosen, held, base, rec, retired, down, acked, rd>>
+  /\ UNCHANGED <<chosen, held, base, rec, meta, retired, down, acked, rd>>
 
 \* A replica of R1 writes the boundary state into the record of S1, once.
 WriteRecord(p) ==
-  /\ Boundary \in {"record", "early", "seq"}
+  /\ RecordMode
   /\ p \in R1 \ down
   /\ rec = None
-  /\ Boundary \in {"record", "seq"} => Front(p) = K
+  /\ Boundary # "early" => Front(p) = K
   /\ rec' = StateOf(p)
+  /\ meta' = IF MetaMode THEN StateOf(p).leader ELSE meta
   /\ UNCHANGED <<chosen, held, applied, base, retired, down, acked, rd>>
 
 \* A replica of R2 takes its boundary state.
@@ -224,9 +263,9 @@ TakeBase(r) ==
        [] Boundary = "peer" ->
             \E p \in Live(1) : Front(p) = K /\ base' = [base EXCEPT ![r] = StateOf(p)]
        [] Boundary = "zero" -> base' = [base EXCEPT ![r] = Empty]
-       [] Boundary = "seq" ->
+       [] Boundary \in {"seq", "meta", "meta_stale"} ->
             rec # None /\ base' = [base EXCEPT ![r] = [Empty EXCEPT !.next = rec.next]]
-  /\ UNCHANGED <<chosen, held, applied, rec, retired, down, acked, rd>>
+  /\ UNCHANGED <<chosen, held, applied, rec, meta, retired, down, acked, rd>>
 
 \* A live replica of the slot's segment that applied it answers the writer.
 Ack(s) ==
@@ -236,7 +275,7 @@ Ack(s) ==
        /\ Ready(r)
        /\ s < Front(r)
        /\ acked' = [acked EXCEPT ![s] = ResAt(r, s)]
-  /\ UNCHANGED <<chosen, held, applied, base, rec, retired, down, rd>>
+  /\ UNCHANGED <<chosen, held, applied, base, rec, meta, retired, down, rd>>
 
 \* The set that a read of the write at slot s goes to.
 Target(s) == IF Route = "segment" THEN Seg(s) ELSE Other(Seg(s))
@@ -250,7 +289,7 @@ StartRead(s) ==
   /\ rd[s] = None
   /\ \E r \in Live(Target(s)) :
        rd' = [rd EXCEPT ![s] = [rep |-> r, basis |-> Count(SetOf(r)), ans |-> Wait]]
-  /\ UNCHANGED <<chosen, held, applied, base, rec, retired, down, acked>>
+  /\ UNCHANGED <<chosen, held, applied, base, rec, meta, retired, down, acked>>
 
 \* The replica of an open read stopped: the reader asks another replica of
 \* the same set.
@@ -260,7 +299,7 @@ Reroute(s) ==
   /\ rd[s].rep \in down
   /\ \E r \in Live(SetOf(rd[s].rep)) :
        rd' = [rd EXCEPT ![s] = [rep |-> r, basis |-> Count(SetOf(r)), ans |-> Wait]]
-  /\ UNCHANGED <<chosen, held, applied, base, rec, retired, down, acked>>
+  /\ UNCHANGED <<chosen, held, applied, base, rec, meta, retired, down, acked>>
 
 \* The replica's applied prefix covers the basis: it answers.
 Serve(s) ==
@@ -270,7 +309,7 @@ Serve(s) ==
   /\ Ready(rd[s].rep)
   /\ applied[rd[s].rep] >= rd[s].basis
   /\ rd' = [rd EXCEPT ![s].ans = Lookup(rd[s].rep, acked[s])]
-  /\ UNCHANGED <<chosen, held, applied, base, rec, retired, down, acked>>
+  /\ UNCHANGED <<chosen, held, applied, base, rec, meta, retired, down, acked>>
 
 \* S1 retires: RetireAt replicas of R1 hold it, and with the boundary in the
 \* record, the record holds it.
@@ -278,16 +317,16 @@ Retire ==
   /\ ~retired
   /\ S1Full
   /\ Cardinality(Holders) >= RetireAt
-  /\ RetireRecord /\ Boundary \in {"record", "early", "seq"} => rec # None
+  /\ RetireRecord /\ RecordMode => rec # None
   /\ retired' = TRUE
-  /\ UNCHANGED <<chosen, held, applied, base, rec, down, acked, rd>>
+  /\ UNCHANGED <<chosen, held, applied, base, rec, meta, down, acked, rd>>
 
 \* A replica stops for good; at most F of each set.
 Crash(r) ==
   /\ r \notin down
   /\ Cardinality(down \cap Set(SetOf(r))) < F
   /\ down' = down \cup {r}
-  /\ UNCHANGED <<chosen, held, applied, base, rec, retired, acked, rd>>
+  /\ UNCHANGED <<chosen, held, applied, base, rec, meta, retired, acked, rd>>
 
 \* After the retire, every replica of R1 stops (offloaded, copies dropped).
 Vanish ==
@@ -295,10 +334,11 @@ Vanish ==
   /\ retired
   /\ ~(R1 \subseteq down)
   /\ down' = down \cup R1
-  /\ UNCHANGED <<chosen, held, applied, base, rec, retired, acked, rd>>
+  /\ UNCHANGED <<chosen, held, applied, base, rec, meta, retired, acked, rd>>
 
 Next ==
   \/ \E v \in Vals : Choose(v)
+  \/ ChooseFence
   \/ \E r \in Replicas, s \in Slots : Learn(r, s)
   \/ \E r \in Replicas : Apply(r) \/ WriteRecord(r) \/ TakeBase(r) \/ Crash(r)
   \/ \E s \in Slots : Ack(s) \/ StartRead(s) \/ Reroute(s) \/ Serve(s)
@@ -319,8 +359,12 @@ NoForeign == \A r \in Replicas : \A s \in held[r] : Seg(s) = SetOf(r)
 
 \* Every replica's fold is the fold of the whole log, although a replica of
 \* S2 never applied a slot of S1. (A replica of S2 that applied nothing is
-\* judged once S1 is full.)
-OneFold == \A r \in Replicas : Ready(r) /\ Frontier >= Front(r) => StateOf(r) = Truth(Front(r))
+\* judged once S1 is full. In the "meta" modes it has no leader uuid until
+\* it applies the `Fence` of slot K, so only its `next_seq` is judged then.)
+OneFold == \A r \in Replicas : Ready(r) /\ Frontier >= Front(r) =>
+  IF MetaMode /\ SetOf(r) = 2 /\ applied[r] = 0
+  THEN StateOf(r).next = Truth(Front(r)).next
+  ELSE StateOf(r) = Truth(Front(r))
 
 \* The record holds the journal state at the seal.
 RecordTrue == rec # None => S1Full /\ rec = Truth(K)

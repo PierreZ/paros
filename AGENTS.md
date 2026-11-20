@@ -52,7 +52,8 @@ Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
 only a resize record changes, the floor and the register across the handover; #1097 (rework
-1.8)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
+1.8); `specs/tla/handover-chain/`: three generations, clients that reach one member at a time,
+and the two fences of the state transfer; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
 read; #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
@@ -70,10 +71,20 @@ the prefix up to the election fence, with a control that forgets it at the win a
 that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
-more rules)), segment replica sets (`specs/tla/segment-replicas/`: a write reaches only the
-replica set of its segment, the boundary state of the seal in the segment record, reads routed
-to the set of the segment, retire at `F + 1` holders; #1271 (a write reaches only the replica
-set of its segment)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+more rules)), quorum everywhere (`specs/tla/quorum-everywhere/`: every step of the journal, the
+write, the election, the leaderless read, the seal, the retire, the offload mark, the trim and the
+matchmaker handover, waits for a quorum only and completes with F members down in every column,
+in each matchmaker set and in the replica set, with a control that blocks each step one member
+later and a control that waits for every member as a FoundationDB TLog commit; #1257 (quorum
+everywhere)), the grid controller (`specs/tla/grid-controller/`: its election by a term in the
+matchmaker record and the fenced `reshape(expected configuration, new grid, term)` call, with two
+candidates that race, a deposed controller that keeps calling, a crash between plan and call, a
+takeover, a lost reply and the bound `F + 1 <= acks <= rows - F`; #1259 (the fenced reshape call of
+the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a write reaches only the
+replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
+leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
+segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
+reaches only the replica set of its segment)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
@@ -87,11 +98,13 @@ machines), and coverage-driven simulation (the seeds are steered toward the bran
 reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
 crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
 walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
-`leader-handoff/` and `matchmaker/` (#1198 (trace checking), `tests/traces.rs`), and each trace
-spec names the steps its checked walks must take (a `Noop` gap fill, a reconfiguration, GC above
-frontier 0, and more; #1231 (traced walks reach the rules)); the read fence
-of `reads/`, the floor of `truncation/` and the walk with every compartment and matchmakers are
-not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
+`leader-handoff/`, `matchmaker/` (with the retirement), `reads/` (the read basis and the read fence), `truncation/`
+(the compaction floor and the trim jump, and the faulty entries of CTRL with the tri-state tally)
+and `compartments/` (the read replica and the batcher) (#1198 (trace checking),
+`tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
+fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
+reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
+rules)); the matchmaker set handover and the walk with every compartment and matchmakers are not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
@@ -145,6 +158,15 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
+- the `mutants` job (pull requests only): cargo-mutants on the lines of
+  `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
+  pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
+  `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
+  the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
+  surviving mutant fails the job: add the test that sees it in the same pull request. The
+  `Mutants` workflow runs every mutant of the core (about 2,850) in 16 shards each Sunday and on
+  demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
+  for an edit that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
@@ -234,6 +256,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   a final report are read by someone who has not seen your tool calls or the files you opened.
   Put the key points in the first sentences. Do not use a term you made up during the work.
   Say what you found, what you did, how you proved it, and what is next.
+- **Quorum everywhere** (Pierre, 2026-11-20, #1257): no step of the journal waits for every
+  member of a group (no full broadcast as a FoundationDB TLog commit). A new journal step gets
+  its row in `specs/tla/quorum-everywhere/`, with a control that blocks it one member later
+  (`docs/architecture/02-data-plane.md` §2.11).
 - **TLA+ is a thinking tool** (decided on 2026-11-12, #1020 (TLA+ ranked list)): when a
   protocol problem has more than one possible rule, you can write a small TLA+ model to find
   the solution, before you write Rust. Model each candidate rule as a constant, give each a
@@ -327,6 +353,13 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   never implied by code being present. Every peer and client message carries a `JournalIdentifier`
   `(TenantId, JournalId)`; under that identifier the plain deployment exchanges the same
   messages and persists the same scalars.
+
+**The core is a library for everyone** (decided by Pierre on 2026-11-20,
+`docs/architecture/04-roles.md` §4.3). `paros-consensus` stays usable by other people for plain
+Multi-Paxos, single-decree Paxos and every flavor it already builds. What paros needs comes from
+optional behaviour and software composition, never from a service concept inside the core (no
+cell, no tenant policy, no `cell init`; #1264 (remove the cell from paros-consensus)). A paros
+need that composition cannot meet is a new optional behaviour, with the plain arm unchanged.
 
 ## Matchmaking, reconfiguration, GC, generations
 
@@ -494,7 +527,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 
 Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`; `specs/tla/experiments/`
 holds the models that compare candidate designs before Pierre decides, such as the segments
-experiment of #1213 (segments in the protocol or in storage)), `website/site/` (the website,
+experiment of #1213 (segments in the protocol or in storage) and its check of leaderless reads
+across a reshape, #1254), `website/site/` (the website,
 Astro, one style for every page; `website/site/AGENTS.md`, the `update-the-site` skill),
 `website/shared/` (the design system: tokens, fonts, logo), `scripts/build-wasm.sh` (builds the
 wasm and stages it for the site), `docs/architecture/` (the target design), `docs/knowledge/`

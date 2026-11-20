@@ -56,6 +56,18 @@
 (*          the fence Phase 1 of the first. FALSE = a control: the slots     *)
 (*          that wait for the fence Phase 1 do not count.                    *)
 (*                                                                           *)
+(* Restarts : the number of restarts. A restart loses what the node knows   *)
+(*          that it proposed (`known`), and the node keeps every vote and    *)
+(*          registration.                                                    *)
+(* RestartBypass : FALSE = the rule: a restart ends each campaign and each   *)
+(*          leadership of the node, so only the incarnation that won b       *)
+(*          bypasses from b. TRUE = a control: the node still leads after    *)
+(*          the restart, with what it knew lost.                             *)
+(*                                                                           *)
+(* Gone   : the acceptors that take part in ballot 1 only: the old members  *)
+(*          of a journal move that leave after the first leadership. A       *)
+(*          liveness check uses it; every safety check has Gone = {}.        *)
+(*                                                                           *)
 (* Not in the model: matchmaker generations, lost durable state, a handoff   *)
 (* message that is late or sent two times (`leader-handoff/` has them, and   *)
 (* its control `two_hops`).                                                  *)
@@ -63,14 +75,14 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
           Gc, CheckWm, Reads, Hold, CfgChoices, Handoff, Relinquish, HandoffCarry,
-          ChainRule, SuccessorBypass
+          ChainRule, SuccessorBypass, Restarts, RestartBypass, Gone
 
 Ballots == 1..NB
 Nodes   == {Owner[b] : b \in Ballots}
 Free    == "free"
 Pending == "pending"
 
-VARIABLES status,    \* ballot -> "matching" | "matched" | "leading" | "switched"
+VARIABLES status,    \* ballot -> "matching" | "matched" | "leading" | "switched" | "dead"
           cfgOf,     \* ballot -> its configuration
           reg,       \* matchmaker -> set of <<ballot, config>>
           replied,   \* ballot -> matchmakers that answered its registration
@@ -85,12 +97,13 @@ VARIABLES status,    \* ballot -> "matching" | "matched" | "leading" | "switched
           acked,     \* slots that a leader acked to a client
           holder,    \* ballot -> the node that leads at it
           known,     \* node -> the <<ballot, slot, value>> proposals that it knows
-          via        \* ballot -> the ballot that its leader bypassed from, or 0
+          via,       \* ballot -> the ballot that its leader bypassed from, or 0
+          restarts   \* the number of restarts so far
 
 vars == <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals,
-          wm, maxwm, acked, holder, known, via>>
+          wm, maxwm, acked, holder, known, via, restarts>>
 
-ext == <<holder, known, via>>
+ext == <<holder, known, via, restarts>>
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 
@@ -115,6 +128,7 @@ Init == /\ status = [b \in Ballots |-> "matching"]
         /\ holder = [b \in Ballots |-> Owner[b]]
         /\ known = [n \in Nodes |-> {}]
         /\ via = [b \in Ballots |-> 0]
+        /\ restarts = 0
 
 \* Matchmaker m registers b if it holds no ballot at or above b and b is not
 \* below its watermark. It answers with what it held and with its watermark.
@@ -152,6 +166,7 @@ Promise(a, b) ==
     /\ \/ status[b] = "matched"
        \/ status[b] = "leading" /\ (HasPending(b) \/ (Hold /\ ~ Covered(b)))
     /\ a \in UNION PriorCfgs(b)
+    /\ a \in Gone => b = 1
     /\ promised[a] <= b
     /\ ~ \E p \in promises : p[1] = a /\ p[2] = b
     /\ promised' = [promised EXCEPT ![a] = b]
@@ -184,11 +199,12 @@ Propose(b, s, v) ==
     /\ proposals' = proposals \cup {<<b, s, v>>}
     /\ known' = [known EXCEPT ![holder[b]] = @ \cup {<<b, s, v>>}]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, wm, maxwm, acked,
-                   holder, via>>
+                   holder, via, restarts>>
 
 Accept(a, b, s, v) ==
     /\ <<b, s, v>> \in proposals
     /\ a \in cfgOf[b]
+    /\ a \in Gone => b = 1
     /\ promised[a] <= b
     /\ <<a, s, b, v>> \notin votes
     /\ promised' = [promised EXCEPT ![a] = b]
@@ -245,7 +261,7 @@ Bypass(b, b2) ==
                     ELSE Free]]
     /\ via' = [via EXCEPT ![b2] = b]
     /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked,
-                   holder, known>>
+                   holder, known, restarts>>
 
 \* The cooperative handoff (DPaxos, relinquish_to): the minter of b hands b
 \* on to node n, one hop. The successor gets the proposals at b and leads at
@@ -263,7 +279,7 @@ HandOn(b, n) ==
        ELSE safe' = [safe EXCEPT ![b] =
                 [s \in Slots |-> IF @[s] = Pending THEN Free ELSE @[s]]]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm,
-                   acked, via>>
+                   acked, via, restarts>>
 
 \* "p212" only: the Phase 1 at the new ballot for the slots below the frontier.
 Phase1Low(b) ==
@@ -313,6 +329,19 @@ Ack(b, s) ==
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
                    proposals, wm, maxwm, ext>>
 
+\* Node n restarts: it forgets what it proposed. With the rule, every
+\* campaign and every leadership of n ends ("dead"): a dead ballot proposes,
+\* bypasses, collects and acks nothing. Its rounds stay in the votes.
+Restart(n) ==
+    /\ restarts < Restarts
+    /\ restarts' = restarts + 1
+    /\ known' = [known EXCEPT ![n] = {}]
+    /\ IF RestartBypass
+       THEN UNCHANGED status
+       ELSE status' = [b \in Ballots |-> IF holder[b] = n THEN "dead" ELSE status[b]]
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals, wm, maxwm,
+                   acked, holder, via>>
+
 Next ==
     \/ \E b \in Ballots, m \in Matchmakers : Register(b, m)
     \/ \E b \in Ballots : MatchDone(b) \/ Phase1Done(b) \/ Phase1Low(b)
@@ -323,8 +352,26 @@ Next ==
     \/ \E b \in Ballots, n \in Nodes : HandOn(b, n)
     \/ \E b \in Ballots, m \in Matchmakers : Collect(b, m)
     \/ \E b \in Ballots, s \in Slots : Ack(b, s)
+    \/ \E n \in Nodes : Restart(n)
 
 Spec == Init /\ [][Next]_vars
+
+\* Every step of a campaign, a leadership and a read is fair; a handoff, a
+\* GC request and a restart are not.
+LiveSpec ==
+    /\ Spec
+    /\ \A b \in Ballots :
+          /\ \A m \in Matchmakers : WF_vars(Register(b, m))
+          /\ WF_vars(MatchDone(b)) /\ WF_vars(Phase1Done(b)) /\ WF_vars(Phase1Low(b))
+          /\ \A a \in Acceptors : WF_vars(Promise(a, b))
+          /\ \A s \in Slots : WF_vars(\E v \in Values : Propose(b, s, v))
+          /\ \A s \in Slots : WF_vars(Ack(b, s))
+          /\ \A b2 \in Ballots : WF_vars(Bypass(b, b2))
+    /\ \A a \in Acceptors, p \in Ballots \X Slots \X Values :
+          WF_vars(Accept(a, p[1], p[2], p[3]))
+
+\* Each slot that a leader proposed is acked to its client in the end.
+AckEnds == \A s \in Slots : (\E p \in proposals : p[2] = s) ~> s \in acked
 
 Chosen(s, v) ==
     \E b \in Ballots :

@@ -62,6 +62,19 @@ Tolerated ==
   IN IF a <= b THEN a ELSE b
 ToleratedIsExact == Survives(Tolerated) /\ ~Survives(Tolerated + 1)
 
+\* #1257 (quorum everywhere): f acceptors down in every column at once leave
+\* a Phase-1 quorum and a Phase-2 quorum of some column exactly when
+\* f + 1 <= acks <= rows - f. The partitions `rows = 2F + 1, acks = F + 1`
+\* survive F down in every column; the full grid (`acks = rows`) survives no
+\* member down in every column, because a write needs a whole column.
+SurvivesPerColumn(f) ==
+  \A D \in {S \in SUBSET GridMembers(M) :
+            \A j \in 0..(cols - 1) : Cardinality(S \cap GridColumn(M, cols, j)) = f} :
+    /\ \E P \in Q1 : P \cap D = {}
+    /\ \E C \in Q2 : C \cap D = {}
+PerColumnTolerance ==
+  \A f \in 0..Rows : SurvivesPerColumn(f) <=> (f + 1 <= acks /\ acks <= Rows - f)
+
 \* Not true of every grid. Two Phase-1 quorums meet only when
 \* 2 * (rows - acks + 1) > rows: on the partitions, not on the full grid.
 \* With Full = TRUE, TLC must find two rows that do not meet. This is why a

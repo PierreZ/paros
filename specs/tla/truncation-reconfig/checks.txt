@@ -14,3 +14,16 @@ safety             pass       ci
 cover_joined_fill  violation  long
 three_ballots      pass       long
 two_slots          pass       long  60
+# Three ballots and two slots under the code's rule, where a Noop can land on a
+# chosen slot: Learners = {a2}. reach_fill_gc shows that the GC fires there.
+reach_fill_gc      violation  ci
+fill_code          pass       long  50
+# A second reconfiguration (C1 to C2 to C3), each with new members.
+reach_chain        violation  ci
+chain_joined       violation  ci
+chain              pass       long  50
+# A wipe of a member that the GC counted. The rule: a wiped acceptor never
+# takes a step again. The control: it comes back empty as the same acceptor.
+reach_wipe         violation  ci
+wipe_revote        violation  ci
+wipe               pass       ci
