@@ -1,0 +1,28 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# The counts of section 5.1 say what the quorums say, on every grid that the
+# fenced reshape accepts, up to 9 acceptors and every live set. The states
+# are a partition, and the action of each state can run.
+health                pass       ci
+# Controls: a count that reads the wrong threshold.
+p2_only               violation  ci
+majority              violation  ci
+p1_only               violation  ci
+hold_short            violation  ci
+# Controls: the states of the first draft. With no writable column, the
+# leader alone puts the journal in WritesDegraded, whose bypass hold cannot
+# complete; and an electable grid with no writable column has no state.
+draft_states          violation  ci
+draft_one_state       violation  ci
+# Reached: a grid that the reshape accepts can be electable and write nowhere.
+reach_writes_blocked  violation  ci
+# Zones: no placement over two zones survives a zone (hold and alert after a
+# zone loss on three zones); zone_margin says what the quorums say; with
+# row = zone a zone loss takes every column to the same spare at once.
+zones2                pass       ci
+zones3                pass       ci
+zones3_placeable      violation  ci

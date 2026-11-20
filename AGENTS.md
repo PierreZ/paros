@@ -47,7 +47,7 @@ flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain
 commit and catch-up, restarts; #1185 (rework 1.14)), the cooperative leader handoff
 (`specs/tla/leader-handoff/`: one hop, the frontier guard, the durable frontier, the pending
 rounds proposed again, and the beat guard that rework 2.7 adds; #1187 (rework 2.8)), grid quorums
-(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `proxy-leader/`, `quorum-everywhere/` and `degraded-reshape/`; #1102 (rework 1.13)), Matchmaker
+(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
@@ -87,8 +87,8 @@ segment), reads routed to the set of the segment, retire at `F + 1` holders; #12
 reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
 `SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
 write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
-`Truncate` in both modes, a `Fence(None)` at a seal; #1274 (multi-writer mode through
-SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
+`Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301
+(a resent write across a seal)); #1274 (multi-writer mode through SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
 (`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
 segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
 (reshape with a column below quorum)), segment records across a matchmaker set handover
@@ -99,7 +99,10 @@ replica drops its copy only after a write of the offload mark is done at a major
 the offloader's full copy, conditional put and compare-and-set mark, a found object read and
 marked whatever its release, the delete of the key by a mark that finds the record trimmed, the
 scrub of the objects below the trim floor, the drop after the mark; #1256 (offload races and the
-offloader role)), two seals in a row (`specs/tla/seal-chain/`: a chain of segments with an
+offloader role)), the health measures of the grid (`specs/tla/health/`: the spares of a column,
+electable, writable and the hold of a bypass as counts against the quorums, the seven journal
+states and their fixed actions, no placement over two zones after a zone loss; #1260 (journal
+health measures)), two seals in a row (`specs/tla/seal-chain/`: a chain of segments with an
 empty segment and a seal before the `Fence`; the whole boundary state, the leader uuid too, in the
 segment record, with no `Fence` slot; #1303 (two seals in a row)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of

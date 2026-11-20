@@ -69,6 +69,18 @@ each write of the batch unanswered (at-least-once, §2.4). TLC checks the rule i
 `specs/tla/compartments/` (`AckedChosen`; the control `held_slot` loses an acked write, the
 control `held_notleader` lands a write two times) and the resend in `specs/tla/multi-writer/`.
 
+**A resend across a seal is answered `Below`** (#1301 (a resent write across a seal), TLC
+2026-11-20, `specs/tla/multi-writer/`). The fold of a segment holds the boundary state, not the
+records of the old segment (§2.10, #1271), so it cannot tell a `Duplicate` from a refusal at a
+position of the old segment. It answers `Below` there. `Below` is not final, like `Truncated`.
+The client reads that position from the replica set of the old segment: a sealed segment does
+not change, so the record there tells it the fate of its write, written or not (or `Truncated`
+below `first_seq`). Without the rule, the fold answers the resend of a written write "position
+taken", and a writer that writes it again lands it two times (controls `seal_local`,
+`seal_local_twice`). A fold that reads the old record at apply is safe too (`seal_global`), but
+apply would wait for another replica set. A digest of the last writes in the boundary state is
+safe only while it covers the writer's whole pipeline (`seal_digest`).
+
 The client pipelines a single-writer journal's writes with `paros::client::Pipeline` (#597
 (several writes in flight per journal)): one writer's leadership, shared by its callers, each
 write opened at the position after the last one and sent without waiting for the answer of the
@@ -240,12 +252,13 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   single-writer mode, open in multi-writer mode, judged at apply, `first_seq` monotone and
   clamped to `next_seq`.
 - **The seal carries `None`.** The leader uuid of the boundary state (section 2.10) may be
-  `None`. The journal's matchmaker record holds it, and the first leader of the next segment
-  proposes `Fence(None)`, which makes the next segment's fold multi-writer (check `seal_long`,
-  reach `reach_fence_none`). The record needs no third value for "not written": the leader
-  reads the uuid only after the seal wrote the boundary state, the same compare-and-set that
-  writes `next_seq` into the segment record (#1271). A `Fence` read before that write lets a
-  writer of the wrong mode in (control `boundary_early`).
+  `None`. The segment record holds it, and the next segment's fold starts from that record, so
+  it starts multi-writer (#1303 (two seals in a row)). `multi-writer/` checked the first form of
+  section 2.10: the journal's matchmaker record held the uuid, and the first leader of the next
+  segment proposed `Fence(None)` (check `seal_long`, reach `reach_fence_none`). There, a `Fence`
+  read before the seal wrote the uuid lets a writer of the wrong mode in (control
+  `boundary_early`). The record needs no third value for "not written": a replica of the next
+  segment starts only from a written record.
 
 **Open**: the leader of a fresh journal, before its first `SetLeader`: `None` (a fresh journal
 is multi-writer) or unset (every write and truncate is refused until a `SetLeader`). The model

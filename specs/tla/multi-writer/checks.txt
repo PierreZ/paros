@@ -27,3 +27,14 @@ dedup_after         violation  ci
 dedup_after_twice   violation  ci
 basis_stale         violation  ci
 boundary_early      violation  ci
+# #1301 (a resent write across a seal): the fold of the next segment does
+# not hold the old records. The rule: a position in the old segment is
+# answered "below", and the client reads it from the old segment.
+reach_below         violation  ci
+# A read of the old record at apply is safe too (Lookup = "global").
+seal_global         pass       ci
+# Controls: the fold finds no record (the code today), or keeps a digest of
+# one old record while the writer pipelines two writes.
+seal_local          violation  ci
+seal_local_twice    violation  ci
+seal_digest         violation  ci
