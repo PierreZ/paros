@@ -43,6 +43,21 @@ Q2GH == [c \in GH |-> GridQ2(SeqGH[c], 2, 2)]
 Q1GHSlack == [c \in GH |-> GridQ1(SeqGH[c], 2, 1, 1)]
 Q2GHOne == [c \in GH |-> GridQ2(SeqGH[c], 2, 1)]
 
+\* The journal grid, rows 2F + 1 = 3, cols 2, acks F + 1 = 2 (#1258 (reshape
+\* with a column below quorum), T5): J over a1..a6, then K, a heal where a7
+\* replaces a1. The layout is row-major over the sorted members, so every
+\* member that stays changes its column: J has the columns {a1, a3, a5} and
+\* {a2, a4, a6}, K has {a2, a4, a6} and {a3, a5, a7}. Phase 2 takes two of
+\* one column, any column; Phase 1 two of every column.
+JK == {"J", "K"}
+SeqJK == [c \in JK |-> IF c = "J" THEN <<"a1", "a2", "a3", "a4", "a5", "a6">>
+                                 ELSE <<"a2", "a3", "a4", "a5", "a6", "a7">>]
+MemJK == [c \in JK |-> GridMembers(SeqJK[c])]
+Q1JK == [c \in JK |-> GridQ1(SeqJK[c], 2, 2, 0)]
+Q2JK == [c \in JK |-> GridQ2(SeqJK[c], 2, 2)]
+\* The control: Phase 1 one acceptor short in every column.
+Q1JKShort == [c \in JK |-> GridQ1(SeqJK[c], 2, 2, 1)]
+
 \* Matchmaker hosts.
 HostOne == [m \in {"m1"} |-> "a1"]
 HostThree == [m \in {"m1", "m2", "m3"} |-> IF m = "m1" THEN "a1" ELSE IF m = "m2" THEN "a2" ELSE "a3"]
@@ -50,5 +65,6 @@ HostThree == [m \in {"m1", "m2", "m3"} |-> IF m = "m1" THEN "a1" ELSE IF m = "m2
 Symmetry == Permutations(Values)
 \* Each grid layout tiles its members (`QuorumSystem::admits`).
 ASSUME \A c \in GH : GridAdmits(SeqGH[c], 2, 2) /\ GridAdmits(SeqGH[c], 2, 1)
+ASSUME \A c \in JK : GridAdmits(SeqJK[c], 2, 2)
 
 =============================================================================

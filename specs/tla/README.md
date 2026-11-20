@@ -84,8 +84,8 @@ a trace spec `EXTENDS` its model.
 
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
-`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and
-`proxy-leader/`.
+`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`,
+`proxy-leader/`, `quorum-everywhere/` and `degraded-reshape/`.
 
 ## Experiments
 
@@ -132,7 +132,9 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
+| A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
+| Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
@@ -275,6 +277,13 @@ slot 1 waits for the fence Phase 1, and slot 2 is free. `{a3, a4}` choose slot 2
 The fence Phase 1 needs a Phase-1 quorum of `{a1, a2}` at ballot 2, and `a1` is gone, so slot 1
 waits for good, and the decision hold keeps slot 2 from its ack. A bypass thus needs a Phase-1
 quorum of the old configuration after the switch, as Phase 1 of an ordinary campaign does.
+
+- **With a grid column below quorum, the decision hold never acks** (#1258 (reshape with a
+  column below quorum), `degraded-reshape/`): it waits for a Phase-1 quorum of the old grid,
+  which no longer exists. The hold that gates only the acks and the read basis also misorders
+  two reads on the old basis. A hold before Phase 2 on `F + 1` of one old column, or the
+  segment-record check, closes both and stays live. GC with no hold keeps `Agreement`
+  (`gc_carry_nohold`).
 
 Results are in `zero-stall/checks.txt` and in the design document of #579 (zero-stall
 reconfiguration).
@@ -525,6 +534,8 @@ Each control turns off one rule, and each one fails:
 | `live` | `LiveSpec`: three matchmakers, one crash, no release; the top ballot wins | pass (15.5 million states, 17 minutes, `long`) |
 | `live_release` | `live` with stores released | pass (21 million states, 25 minutes, `long`) |
 | `agree_long` | `agree_mm3` with three ballots | no violation in 181 million distinct states, to depth 23 (a bounded run of 2 hours that filled the disk; `long`) |
+| `heal_partitioned_short` | control: the heal `J` to `K` of the journal grid 3 × 2 (`a7` replaces `a1`, so every member that stays changes its column), Phase 1 one acceptor short in every column | `Agreement` violation (417 thousand states, 4 minutes) |
+| `heal_partitioned` | the rule on that heal, seven acceptors, two ballots (#1258 (reshape with a column below quorum), T5) | pass: `Agreement` and `Electable` (32.8 million states, 59 minutes, `long`) |
 | `resize_long` | `resize` with three ballots | no violation in 109 million distinct states (a bounded run of 2 hours; `long`) |
 
 `agree` runs in CI because two ballots cannot show the bug of `switch_before`. The checks with
@@ -2028,6 +2039,7 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 | `handover` | a stop quorum of `MM`; Phase 1 and Phase 2 of the successor decree in `MM2` |
 | `ctl_election` | a matchmaker majority (read the controller term); a matchmaker majority (its compare-and-set, #1259) |
 | `reshape` | a matchmaker majority (the fenced reshape call, #1259) |
+| `bypass_hold` | `acks` of one column of `Old`, with the move (the hold before Phase 2 of a bypass, #1258) |
 
 `Old` is a sealed configuration and `New` the configuration in force: `New` moves the members
 of `Old` by `Shift` places, so with `Shift = 1` each member that stays changes its column. The
@@ -2046,6 +2058,8 @@ changes nothing, and the state space stays small.
 | `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (890 thousand distinct states with the two controller steps; 12 minutes locally with 4 workers while two other TLC runs shared the machine) |
 | `quorum_majority` | ci | pass: the majority of three (`partitions = 1`, a grid 3 × 1) |
 | `write_move` | ci | pass: `F + 1` down in one column, `F` in the others; the write moves and completes |
+| `bypass_hold_move` | ci | pass: the same for the hold before Phase 2 of a bypass, in the old grid |
+| `bypass_hold_every_column` | ci | violation: `F + 1` down in every column of `Old` blocks the hold |
 | `write_every_column`, `trim_every_column` | ci | violation: `F + 1` down in every column of `New` blocks the write |
 | `election_column`, `read_column`, `seal_column` | ci | violation: `F + 1` down in one column blocks Phase 1 |
 | `retire_replica` | ci | violation: `F + 1` replicas down blocks the retire |
@@ -2150,6 +2164,109 @@ The answer to #1259:
   follow once the consensus-sim flavor of the controller loop exists (#1261 (grid controller
   decision tests), after #1189).
 
+### `degraded-reshape/`: a reshape when a column is below quorum, for #1258 (reshape with a column below quorum)
+
+The journal grid is `Grid { rows: 2F + 1, cols: P, acks: F + 1 }` (section 2.11 of
+`docs/architecture/02-data-plane.md`). A column is below quorum when fewer than `F + 1` of its
+acceptors are live. Then no Phase-1 quorum of the grid exists, because Phase 1 needs `F + 1` of
+every column. A write still completes in another column (#533 (move a stuck round)). So no new
+leader can be elected, and a reconfiguration through a full Phase 1 is blocked. The question of
+#1258 is whether the live leader can still reshape away from that column with the Phase-1 bypass
+of `zero-stall/`, and then ack writes and retire the old grid.
+
+The model is `zero-stall/Bypass.tla` in the mode "carry" with the bypass check on, plus grid
+quorums from `grid/Grid.tla`, acceptors that crash, the seal end of design A (#1213 (segments
+experiment)), GC, and leaderless reads whose answer a client sees (`Serve`). A leader at ballot 1
+in the old grid bypasses to its ballot 2 in a new grid. A rival can lead at ballot 3. Constants:
+
+| Constant | Values |
+|---|---|
+| `Layout` | each configuration's members and grid. `LShrink`: the 3 × 2 grid of `a1`..`a6` (columns `{a1, a3, a5}` and `{a2, a4, a6}`), then the majority of the healthy column. `LSwap`: the same old grid, then the majority of `a5`, `a6` and a new `a7`: its write quorum `{a5, a7}` holds no acceptor of the healthy old column. `LSmall`: the grid 1 × 2 (`F = 0`), then a heal where the survivor changes columns. `LMaj`, `LMove`: moves between majorities of three, all live. |
+| `CanCrash`, `DownAtStart` | `a1` and `a3` crash (their column is below quorum), from the start in the checks of the degraded grid. The first ballot needs no Phase 1, so its leader leads in the old grid and writes in the healthy column. The read invariants judge every quorum, the crashed members too, so they also hold when a member comes back with its disk. |
+| `Hold` | what the leader of a ballot waits for. `phase1`: a Phase-1 quorum of each prior configuration promised its ballot (the decision hold of #579). `block`: the promises meet every read quorum of each prior configuration: on the grid, `F + 1` of one column, a Phase-2 quorum of the old grid. `block_short`: a control, one promise short of `block`. `none`. |
+| `Gate` | what the hold gates. `ack`: the acks (zero-stall today). `ack_read`: the acks and the read basis of the ballot (the option of #1270 (the hold does not order two reads)). `propose`: also the proposals: the leader sends no `Accept` at its ballot before its hold holds. |
+| `RecordCheck` | `TRUE`: after its acceptor answers, the reader asks a matchmaker majority and retries when one holds a registration of another configuration or a GC floor above its basis (rule 1 of #1254 (leaderless reads across a reshape)). |
+| `EndRule` | the end slot of the old segment, written once at the bypass. `frontier`: one above the highest slot that the leader proposed at its old ballot (its allocator frontier). `chosen`: a control, one above the chosen prefix. |
+
+The invariants: `Agreement`; `ReadSafe`, no read that can start now misses a slot that a client
+saw (a slot that a leader acked, or a slot that an earlier read returned); `ReadSafeAcked`, the
+same for the acked slots only (the property of `zero-stall/`). The liveness properties are
+`AckAfterBypass` (the bypass ballot acks a slot) and `RetireAfterBypass` (a matchmaker majority
+holds a GC floor at the bypass ballot), each under weak fairness of the protocol steps. Every
+step grows a set or moves a status, a promise or a watermark up, so every fair behavior ends in a
+state where no step is enabled, and the goals only grow. TLC checks each property as an invariant
+of those end states (`AckedAfterBypass`, `RetiredAfterBypass`), which is the same property and
+much faster than a temporal check.
+
+Not in the model: matchmaker crashes (`quorum-everywhere/` has them), matchmaker generations, the
+handoff and two bypasses in a row (`zero-stall/` has them). A read is one atomic step, as in
+`zero-stall/`. In a real read the matchmaker check of `RecordCheck` must come after the acceptor
+answers, so that a registration that an ack waited for is seen.
+
+| Check | CI | Result |
+|---|---|---|
+| `reach_degraded_ack` | ci | violation of `NoDegradedAck`: a bypass ballot acks a slot while a column of the old grid is below quorum |
+| `live_phase1_small`, `retire_phase1_small`, `live_phase1`, `retire_phase1` | ci, long | violation: with the decision hold of #579, the bypass ballot's writes are chosen in the new grid, but it never acks, and the old grid never retires (12 thousand states on `LShrink`) |
+| `live_record_small`, `live_record`, `live_record_plus` | ci | pass: with the record check and no hold, the bypass ballot acks and the old grid retires; `_plus` adds a crash in the healthy column (`F` down there) |
+| `live_block_propose_small`, `live_block_propose` | ci, long | pass: with the hold `block` before Phase 2, the same (23 thousand states, 17 minutes for the 3 × 2 grid) |
+| `safe_record` | ci | pass: `ReadSafe` on `LSwap` with the column below quorum (51 thousand states) |
+| `block_propose` | ci | pass: the same with the hold `block` before Phase 2 (28 thousand states, 7 minutes) |
+| `phase1_acked` | long | pass: the decision hold keeps `ReadSafeAcked` (it is safe, only not live) |
+| `hold_none` | ci | control: no hold, no record check; a read on the old basis misses an acked slot |
+| `block_short`, `block_propose_short` | ci | control: one promise short of `block` |
+| `phase1_ack_gate` | ci | violation: #1270 again; a read at the bypass ballot returns a slot before the hold |
+| `phase1_reads_maj`, `block_reads_maj` | ci | violation (a finding): a hold that gates the acks and the read basis still lets a read on the **old** basis return a slot that the new grid chose, from the old vote of one acceptor; a second read on the old basis, at a quorum without that acceptor, misses it (a trace of 15 states, all acceptors live) |
+| `phase1_propose_maj`, `block_propose_maj`, `safe_record_maj` | ci | pass: the hold before Phase 2, or the record check, orders those reads |
+| `seal_frontier` | ci | pass: the end at the allocator frontier (1.3 million states, 7 minutes) |
+| `seal_chosen` | ci | control: the end at the chosen prefix; a slot that the old ballot chose by a late quorum falls above the end, a rival's Phase 1 ignores its old votes, and two values are chosen |
+
+The answer to #1258:
+
+- **T1: the bypass does not rescue a column below quorum with the rule of #579.** The reading of
+  the journal design thread holds. The bypass itself works: the leader moves to the new grid with
+  no Phase 1, and its writes are chosen there. But the decision hold waits for a Phase-1 quorum of
+  the old grid, which no longer exists. So no slot is acked, GC never runs, and the old grid never
+  retires (`live_phase1`, `retire_phase1`).
+- **The decision hold has a second gap, besides #1270.** Gating the read basis of the bypass
+  ballot (the option of #1270) is not enough. A reader on the old basis can see the old vote of
+  one acceptor for a slot that the new grid chose, wait until the slot is chosen, and return it. A
+  second reader on the old basis, at a quorum without that acceptor, sees no higher promise and
+  returns less (`phase1_reads_maj`). Neither `ack` nor `ack_read` closes this. The rule that
+  #1270 chose for `zero-stall/` (a reader's chosen prefix counts a slot only once the ballot that
+  chose it is covered) is not in this model. By its definition it waits for a Phase-1 quorum of the
+  old grid, so it does not stay live with a column below quorum either.
+- **Two rules close both gaps and stay live with a column below quorum**:
+  1. **The segment-record check** of #1254, with no hold at all (`safe_record`,
+     `safe_record_maj`, `live_record`). The reader retries when a matchmaker majority shows a
+     segment above its basis; the bypass ballot registered at a majority before it proposed.
+     GC then waits only for the carried slots to be chosen at the new ballot, and keeps
+     `Agreement` with a rival (`zero-stall/gc_carry_nohold`, 4 million states, 3.5 minutes,
+     `long`; a rival in this model's 3 × 2 grid did not finish in 25 minutes).
+  2. **A hold before Phase 2 on a blocking set**: the bypassing leader sends no `Accept` at its new
+     ballot before the acceptors that promised it meet every read quorum of each prior
+     configuration. On the journal grid that is `F + 1` acceptors of one old column, which a
+     column below quorum leaves (`block_propose`, `block_propose_maj`, `live_block_propose`). The
+     fence of the code (the promise in each `PreReadAck`) then needs no matchmaker read. The
+     bypass costs one round trip to one old column before the first write, not a full Phase 1.
+     With one promise less it fails (`block_propose_short`).
+
+  Both change the rule of #579, which is not built. Pierre chose rule 2 on 2026-11-20 (section
+  2.13 of `docs/architecture/02-data-plane.md`), with the fence of the code on the read path
+  (section 2.10, #1254).
+- **The limit of the rule.** A reshape away from a column below quorum needs a live leader: the
+  first leader after the loss cannot run Phase 1 over the old grid. If the leader is lost too, the
+  journal stops writes until a member of the column comes back, as the grid controller's "hold and
+  alert" after a zone loss says.
+- **T2: the seal end of a bypass is the bypassing leader's allocator frontier**, one above the
+  highest slot it proposed at its old ballot (`seal_frontier`). It is the end of design A when no
+  Phase 1 ran: the leader proposed each slot that its own election's Phase 1 recovered before it
+  may bypass, so the frontier is at least one above the highest vote that Phase 1 saw. An end at
+  the chosen prefix chooses two values (`seal_chosen`).
+- **T5: a heal that moves survivors to other columns is safe.** The layout is row-major, so a
+  heal where `a7` replaces `a1` moves every member that stays to another column. The rule keeps
+  one value (`config-register/heal_partitioned`, 32.8 million states); with Phase 1 one acceptor
+  short in every column, TLC finds two (`heal_partitioned_short`).
+
 ### `segment-replicas/`: a write reaches only the replica set of its segment, for #1271
 
 Compartmentalized Paxos says that every replica executes every write (sections 3.3 and 8.5 of
@@ -2230,6 +2347,76 @@ The answer to #1271:
 - No decision is refuted. The model has no `Truncate`: that the trim floor (`first_seq`) is part
   of the boundary state is a reading, not a checked fact, and the journal state model (#1189)
   checks it.
+
+### `multi-writer/`: multi-writer mode through `SetLeader(None)` and `expected_seq`, for #1274
+
+Pierre decided on 2026-11-20 that `SetLeader(new, old)` may name `new = None`: the journal is
+then multi-writer, and the mode is what the last applied `SetLeader` left. There is no dedup
+table: a single writer gets exactly-once through `expected_seq`, multi-writer is at-least-once,
+and a held write is answered `Unknown` and resolved by a resend with the same `expected_seq`
+(#1232 (held writes)). No model checked the switch between modes.
+
+The log is abstract (the slots are chosen in order; `multi-paxos/` checks the agreement). Two
+clients call `SetLeader` with a fresh uuid of their own or `None` (a compare-and-set against the
+leader they read, which races with the slots in flight), send fenced writes under the uuid they
+last won (pipelined, each at the position after the last one; a deposed client keeps sending),
+send unfenced writes in any mode, and truncate up to the tail, fenced or not. A request stays in
+the network after it is proposed, so it can be proposed again in another slot: a resend, a copy
+of the transport, or a write that an old consensus leader proposed. One fold judges each slot at
+apply and records one answer; a client may never see it (the held write). The invariants judge
+every answer, so the answer to a resend is judged too. A client that sees a final refusal of a
+fenced write while the journal is multi-writer writes it again, unfenced. With `SealAt`, the slot
+`SealAt` is the first slot of the next segment: the fold of the old segment writes the boundary
+uuid into the matchmaker record after its last slot, and the first leader of the next segment
+proposes `Fence(uuid)` there (#1271 (a write reaches only the replica set of its segment)). The
+oracle `OracleAt` computes the leader at each slot from the `SetLeader` commands alone, with no
+fold and no segment, so a `Fence` with a wrong value shows.
+
+The fold of a fenced write, in this order: below `first_seq` it is `truncated`; below `next_seq`
+it is `dup` when the record there is the same write, else `taken`; a uuid that is not the
+leader is `fenced`; above `next_seq` it is `early`; else it is applied. An unfenced write is
+applied iff the leader is `None`, else `wrongmode`.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: `FenceTrue` (each record and each accepted truncate was judged under the leader that the `SetLeader` commands alone give), `AckTrue` (every `applied` or `dup` answer is the record at its `seq`), `RefusalFinal` (a `fenced` or `taken` answer to a fenced write is true now and for ever), `ExactlyOnce` (a write is at most once in the journal as a fenced record, and never both fenced and unfenced), `BasisFresh` (a writer never aims below the `next_seq` at which it started to lead), `FirstMonotone`; two clients, two writes each, two `SetLeader`, one `Truncate`, five slots, a fresh journal whose leader is `None`; 2.0 million distinct states |
+| `unset` | ci | pass: the same with a fresh journal whose leader is unset (every write and truncate refused until a `SetLeader`); 1.5 million distinct states |
+| `seal_long` | ci | pass: the same with a seal, the `Fence` at slot 4, six slots; 1.2 million distinct states |
+| `safety_long` | long | pass: six slots, no seal |
+| `reach_switch` | ci | violation: a write applied before `SetLeader(None, w)` is answered `dup` on its resend after it |
+| `reach_back` | ci | violation: after `SetLeader(w2, None)` a fenced write of `w2` is applied |
+| `reach_truncated` | ci | violation: an unfenced `Truncate` pushes a fenced write below `first_seq`, and its resend is answered `truncated` |
+| `reach_fence_none` | ci | violation: the `Fence` at the seal carries `None`, and a write after it is applied |
+| `multi_refusal` | ci | violation of `UnfencedRefusalFinal`, not a rule: an unfenced write lands from one copy while another copy is refused `wrongmode`; a resend cannot resolve an unfenced write |
+| `fence_propose` | ci | violation of `FenceTrue`: the fence is judged against the applied state at propose and not at apply; an unfenced truncate proposed while the leader is `None` lands after `SetLeader(a, None)` |
+| `fence_propose_write` | ci | violation of `FenceTrue`: the same with no truncate; a write lands under a leader that is not its own |
+| `dedup_after` | ci | violation of `RefusalFinal`: the fence comes before the position; a write applied before `SetLeader(None, a)` is refused `fenced` on its resend |
+| `dedup_after_twice` | ci | violation of `ExactlyOnce`: the same; the writer then writes it again, unfenced, and it is in the journal two times |
+| `basis_stale` | ci | violation of `BasisFresh`: a writer that won keeps the basis it had and aims at a position of the mode before |
+| `boundary_early` | ci | violation of `FenceTrue`: the first leader of the next segment reads the matchmaker record before the seal wrote the uuid, and proposes the `Fence` with the old value |
+
+The answer to #1274:
+
+- **The decisions hold.** No decision is refuted. `SetLeader(None)` and `SetLeader(new, None)`
+  switch the mode safely, with the fence judged at apply in both directions (`fence_propose`).
+- **The resend resolves a held write only if the fold judges the position before the fence.**
+  This rule is new. With it, a write in flight across `SetLeader(None, w1)` gets one of four
+  answers on a resend: `dup` (written), `fenced` or `taken` (not written, for ever), `early`
+  (resend later), or `truncated`. Without it the resend of a written write is refused, and a
+  writer that moves to unfenced writes lands it two times (`dedup_after`, `dedup_after_twice`).
+- **`truncated` is the one answer that resolves nothing**, as section 2.2 of
+  `docs/architecture/02-data-plane.md` already says. In multi-writer mode any writer may
+  truncate, so another writer can cause it (`reach_truncated`). The issue's invariant "every
+  `Unknown` resolves by a resend" holds except there.
+- **The switch back.** Only fenced writes of `w2` land after `SetLeader(w2, None)`; `w2` takes
+  its basis from the view of the answer (`basis_stale`). The journal is safe without the basis
+  rule (the position check refuses such a write); the rule makes the writer's first write land.
+- **An unfenced write cannot be resolved by a resend** (`multi_refusal`): that is the
+  at-least-once of multi-writer mode, also for a refusal.
+- **The seal.** `Fence(None)` works: the matchmaker record holds `None`, and the leader reads it
+  only after the seal wrote it (`seal_long`, `boundary_early`).
+- **Open**: the leader of a fresh journal (`None` or unset). Both pass; the journal state model
+  (#1189) decides.
 
 ### `segment-records/`: segment records across a matchmaker set handover, for #1275
 

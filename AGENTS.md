@@ -47,7 +47,7 @@ flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain
 commit and catch-up, restarts; #1185 (rework 1.14)), the cooperative leader handoff
 (`specs/tla/leader-handoff/`: one hop, the frontier guard, the durable frontier, the pending
 rounds proposed again, and the beat guard that rework 2.7 adds; #1187 (rework 2.8)), grid quorums
-(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/`; #1102 (rework 1.13)), Matchmaker
+(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `proxy-leader/`, `quorum-everywhere/` and `degraded-reshape/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
@@ -84,7 +84,14 @@ the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a wr
 replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
 leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
 segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
-reaches only the replica set of its segment)), segment records across a matchmaker set handover
+reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
+`SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
+write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
+`Truncate` in both modes, a `Fence(None)` at a seal; #1274 (multi-writer mode through
+SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
+(`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
+segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
+(reshape with a column below quorum)), segment records across a matchmaker set handover
 (`specs/tla/segment-records/`: the seal, the retire, the offload mark, the controller election and
 the reshape call as compare-and-sets on the matchmaker register while the set hands over; a
 replica drops its copy only after a write of the offload mark is done at a majority; #1275

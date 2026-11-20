@@ -23,3 +23,5 @@ live_release       pass       long
 grid_slack         violation  ci
 grid               pass       ci
 grid_long          pass       long  120
+heal_partitioned_short violation ci
+heal_partitioned   pass       long
