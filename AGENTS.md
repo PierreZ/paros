@@ -84,7 +84,11 @@ the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a wr
 replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
 leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
 segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
-reaches only the replica set of its segment)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+reaches only the replica set of its segment)), the offload of sealed segments (`specs/tla/offload/`:
+the offloader's full copy, conditional put and compare-and-set mark, a found object read and
+marked whatever its release, the delete of the key by a mark that finds the record trimmed, the
+scrub of the objects below the trim floor, the drop after the mark; #1256 (offload races and the
+offloader role)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),

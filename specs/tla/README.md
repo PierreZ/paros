@@ -133,6 +133,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
+| Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -2229,3 +2230,87 @@ The answer to #1271:
 - No decision is refuted. The model has no `Truncate`: that the trim floor (`first_seq`) is part
   of the boundary state is a reading, not a checked fact, and the journal state model (#1189)
   checks it.
+
+### `offload/`: the offloader and the races of offload, for #1256
+
+In design A (`docs/architecture/02-data-plane.md` section 2.10) a sealed segment goes to an object
+store, and its record in the journal's matchmaker record says `offloaded`. The upload is done by
+the offloader, a stateless role (Pierre, 2026-11-20). For each retired segment it reads the
+segment from a replica of the segment, builds the object with deterministic bytes, writes it with
+a conditional put at the key journal id + segment number, and marks `offloaded` in the record by
+compare-and-set. A replica drops its copy only after the mark.
+
+The model has one segment of `L = 2` slots, three replicas (`F = 1`) that apply its slots in
+order, and two offloaders of two releases (a rolling upgrade: the release is in the header, so
+their bytes differ). One offloader can stop for good between any two steps; the controller can
+stop between the record write of a trim and its delete. A mark can be lost (the write or its
+reply), and the offloader then starts again from the record. A user truncate trims the segment at
+any time (no fairness). The store is atomic: a put, a delete and the listing of one key are single
+steps. The liveness checks have weak fairness on every step but a trim, a lost mark and a stop,
+and strong fairness on the mark (a lost mark that comes back for ever is a network that never
+heals).
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: `ObjectTrue` (each object holds the whole segment), `Findable` (a slot that is not trimmed is at the acceptors before the retire, at `F + 1` replicas after it, and in the object once the record says offloaded), `AllOffloaded` (the segment ends offloaded or trimmed) and `NoOrphan` (no object of a trimmed segment stays for good); one stop; 14,627 distinct states |
+| `safety_crash2` | ci | pass: the same with two stops (both offloaders, or one offloader and the controller) |
+| `gate_sealed` | ci | pass: an offloader may also take a sealed segment that did not retire yet |
+| `tomb` | ci | pass: the trim writes a tombstone at the key and nobody scrubs, while no controller stops |
+| `safety_np2_l1`, `safety_np2` | long | pass, bounded at 40 minutes: two segments, trimmed in order |
+| `reach_duplicate` | ci | violation: a put finds the object of the other offloader |
+| `reach_lateupload` | ci | violation: a put lands after the trim and its delete |
+| `reach_stopbeforemark` | ci | violation: an offloader stops with its object in the store and no mark |
+| `reach_alldropped` | ci | violation: every replica dropped the copy of an offloaded segment |
+| `build_partial` | ci | violation of `ObjectTrue`: the offloader reads a replica that did not apply the whole segment |
+| `conflict_bytes` | ci | violation of `AllOffloaded`: when its put finds an object, the offloader marks only if the bytes equal its own. The offloader of the other release put and stopped; the one that is left never marks |
+| `conflict_abandon` | ci | violation of `AllOffloaded`: when its put finds an object, the offloader stops the attempt. After a lost mark, every next attempt finds its own object |
+| `recheck_anyfail` | ci | violation of `Findable`: the offloader deletes the key on any failed mark. Its mark fails because the other offloader marked first, and it deletes the marked object |
+| `late_upload` | ci | violation of `NoOrphan`: no delete on a failed mark and no scrub. The put of a slow offloader lands after the trim deleted the key |
+| `stop_before_mark` | ci | violation of `NoOrphan`: the delete on a failed mark, no scrub. The late put lands, and its offloader stops before the mark |
+| `scrub_unmarked` | ci | violation of `Findable`: the scrub also deletes an object with no mark. It deletes the object between the put and the mark, and the mark then names an object that is gone |
+| `trim_record` | ci | violation of `NoOrphan`: the trim deletes only the object that the record names (marked). The mark was lost, the trim came, and the object stays |
+| `drop_uploaded` | ci | violation of `Findable`: a replica drops its copy once the object is in the store, before the mark. The record does not name the object, and fewer than `F + 1` replicas hold the segment |
+| `tomb_ctl_stop` | ci | violation of `NoOrphan`: tombstones and no scrub; the controller stops between the record write of the trim and the tombstone, and the next controller does not know that a delete is to do |
+| `tomb_blind` | ci | violation of `NoOrphan`: tombstones with a put that overwrites; the late put replaces the tombstone |
+
+The answer to #1256:
+
+- **Late upload after trim.** An offloader that read `retired` can put after the trim deleted the
+  key (`reach_lateupload`). A check of the record before the put cannot close it: the trim can
+  come between the check and the put (`late_upload`). Two rules close it. The mark is a
+  compare-and-set from "not offloaded and not trimmed", so it fails after a trim, and **an
+  offloader whose mark finds the record trimmed deletes the key**. That is not enough when the
+  offloader stops between the put and the mark (`stop_before_mark`), so **the controller scrubs**:
+  it lists the store and deletes each object of a segment below the trim floor. The scrub needs
+  no record: the segment number is in the key.
+- **Lost record write.** After a lost mark the object has no mark. The next attempt finds the
+  object, and **an offloader whose put finds an object reads it and marks when it holds the whole
+  segment, whatever its release**. An offloader that gives up on a found object never marks
+  (`conflict_abandon`), and one that compares bytes never marks across a rolling upgrade
+  (`conflict_bytes`). If a trim comes before the next attempt, the trim deletes by the key, not
+  by a location in the record (`trim_record`), and the scrub deletes it too.
+- **Duplicate upload.** The conditional put keeps one object (`reach_duplicate`). The two
+  offloaders can build different bytes (two releases), but every object holds the same slots,
+  because **the offloader reads only a replica that applied every slot of the segment, up to the
+  `next_seq` of the record** (`build_partial`). A failed mark deletes the key only when the record
+  says trimmed: a delete on any failure deletes the marked object of the other offloader
+  (`recheck_anyfail`).
+- **Drop before mark.** A replica drops its copy only after the mark (`drop_uploaded`), as #1213
+  (segments experiment) found. The scrub never deletes an object whose segment is not trimmed:
+  the object of an offloader between its put and its mark is not an orphan yet
+  (`scrub_unmarked`).
+- **Retired or sealed.** An offloader may also take a sealed segment that did not retire yet
+  (`gate_sealed` passes). Safety needs one replica that holds the whole segment, and `F + 1`
+  holders until the mark; the retire is not needed. The design keeps "the controller offloads
+  retired segments" (decided), which this model shows is safe, not required.
+- **Tombstones.** A tombstone at trim also stops the late upload, with no scrub (`tomb`). But it
+  is not enough alone: a controller that stops between the trim and the tombstone leaves a key
+  open (`tomb_ctl_stop`), so a tombstone needs a list or a durable delete to do, as the scrub
+  does, and it leaves one object per trimmed segment for good. The design takes the scrub.
+- No decision is refuted.
+
+What the model leaves out: the matchmakers are one atomic register (`matchmaker/` and
+`handover/` check the quorum); the store is atomic and has read-after-write consistency, as S3
+and GCS give for a single key; a reader of the object is not modelled (`Findable` checks that the
+bytes are where the record says); the trim floor of the core (`truncation/`) is one bit per
+segment here.
