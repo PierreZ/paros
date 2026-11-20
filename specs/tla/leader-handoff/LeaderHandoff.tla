@@ -65,6 +65,10 @@
 (*   Resign      TRUE: a handoff leader may resign on an uncovered fence.  *)
 (*   Quiet       TRUE: `LiveSpec` lets a node campaign only while no node  *)
 (*               can exercise its ballot (the beats hold the timeout).     *)
+(*   Wiring      TRUE: the steps of the node's wiring that a traced walk   *)
+(*               takes too: `StepDown`, `Learn` and `Record`. The          *)
+(*               liveness checks set FALSE: a driver that steps every      *)
+(*               leader down for ever stops the run.                       *)
 (* Rules, each with a control that turns it off:                           *)
 (*   OneHop        TRUE: only an elected leader hands off.                 *)
 (*                 FALSE: a control, a handoff leader hands on again.      *)
@@ -91,7 +95,7 @@
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Noop, NB, NS, Q1, Q2, Owner,
-          HandBallots, Steady, Restarts, Drops, DropKinds, Resign, Quiet,
+          HandBallots, Steady, Restarts, Drops, DropKinds, Resign, Quiet, Wiring,
           OneHop, FrontierGuard, DurableFrontier, Pending, BeatGuard,
           PromiseGuard, RecordAll, Abdicate, Named
 
@@ -108,7 +112,7 @@ ASSUME Noop \notin Commands
 ASSUME Owner \in [Ballots -> Acceptors]
 ASSUME Q2 \in [Slots -> SUBSET SUBSET Acceptors]
 ASSUME Pending \in {"keep", "drop"}
-ASSUME {Resign, Quiet, OneHop, FrontierGuard, DurableFrontier, BeatGuard} \subseteq BOOLEAN
+ASSUME {Resign, Quiet, Wiring, OneHop, FrontierGuard, DurableFrontier, BeatGuard} \subseteq BOOLEAN
 ASSUME {PromiseGuard, RecordAll, Abdicate, Named} \subseteq BOOLEAN
 
 Vote == [bal : 0..NB, val : Values \cup {None}]
@@ -371,6 +375,7 @@ CatchUp(n, p) ==
 \* of a catch-up). It holds v as its record already: the record of a learn
 \* reaches the disk before the learn.
 Learn(n, s, v) ==
+  /\ Wiring
   /\ learned[n][s] = None
   /\ Chosen(s, v)
   /\ vote[n][s].val = v
@@ -378,9 +383,14 @@ Learn(n, s, v) ==
   /\ UNCHANGED <<prom, vote, phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
 
 \* Node n keeps the value v chosen at ballot b as its record of slot s
-\* (`mark_chosen`). It is no vote: it sends no 2b.
+\* (`mark_chosen`), below its promise. It is no vote: it sends no 2b. A
+\* recorded ballot never falls, and a held record of v at b stays.
 Record(n, b, s, v) ==
+  /\ Wiring
+  /\ b < prom[n]
   /\ ChosenAt(b, s, v)
+  /\ vote[n][s].bal <= b
+  /\ vote[n][s] # [bal |-> b, val |-> v]
   /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
   /\ UNCHANGED <<prom, learned, phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
 
@@ -456,6 +466,7 @@ FenceResign(n) ==
 \* Leader n stops leading: on a higher promise, on `CheckQuorum`, or when
 \* its driver asks (`step_down`). It keeps its frontier.
 StepDown(n) ==
+  /\ Wiring
   /\ role[n] = "leader"
   /\ role' = [role EXCEPT ![n] = "follower"]
   /\ origin' = [origin EXCEPT ![n] = "elected"]

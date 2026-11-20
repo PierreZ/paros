@@ -22,3 +22,10 @@ live_nomove       violation  ci
 code_three        pass       long
 safety_three      pass       long
 slots             pass       long
+# The colocated deployment of the cluster (`Colocated = TRUE`): each leader
+# is an acceptor, promises in the step that opens Phase 1, may send its
+# `Accept` itself and record its own vote, and a node keeps the record of a
+# learn. The control: with every proxy down, a round the leader sent itself
+# is committed.
+colocated          pass       ci
+reach_colocated    violation  ci

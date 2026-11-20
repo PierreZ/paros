@@ -66,7 +66,8 @@
 (*               `C_b` that holds the prefix below the frontier. "early":  *)
 (*               it goes at the win.                                       *)
 (*   Retire      "effective": a node retires above a floor that a          *)
-(*               matchmaker quorum acked. "oneAck": one ack is enough.     *)
+(*               matchmaker quorum acked. "oneAck": one ack is enough, and *)
+(*               a new ballot can hear a configuration that needs it.      *)
 (*   FloorGuard  "nack": a promise asks from at or above the floor.        *)
 (*               "ignore": it may ask from below.                          *)
 (*   CompactWhen "prefix": a compaction holds every slot below its floor.  *)
@@ -506,12 +507,15 @@ Accept(a, b, s, v) ==
 \* catch-up that taught it the value). The value is chosen at b or below:
 \* a later leader proposes the chosen value again at its own ballot, so a
 \* node can learn it at that ballot before a quorum votes there. It is no
-\* vote: it sends no 2b.
+\* vote: it sends no 2b. A recorded ballot never falls (`mark_chosen` keeps a
+\* held record of v at b or above).
 Record(n, b, s, v) ==
   /\ n \in Learners
   /\ Live(n)
   /\ s >= floor[n]
   /\ b < prom[n]
+  /\ vote[n][s].bal <= b
+  /\ vote[n][s] # [bal |-> b, val |-> v]
   /\ RecordAt = "chosen" => \E c \in 1..b : ChosenAt(c, s, v)
   /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
   /\ UNCHANGED <<prom, learned, phase, next, front, won, msgs, restarts, mmVars, floorVars,
@@ -915,9 +919,15 @@ ReadSeesAcked ==
   /\ \A c \in Ctxs : rds[c].state = "done" => rds[c].snap <= rds[c].index
   /\ \A c \in Ctxs : rrds[c].state = "done" => rrds[c].snap <= rrds[c].index
 
-\* A retired node is named by no registration at an effective floor or
-\* above.
-RetiredUnnamed == \A a \in retired : \E f \in Effective : Unnamed(a, f)
+\* The history that a matchmaker quorum Q would answer a new ballot.
+HistoryOf(Q) == Union({[mm |-> m, hist |-> reg[m], w |-> wm[m]] : m \in Q})
+
+\* No retirement strands a new ballot: whatever matchmaker quorum it hears,
+\* each configuration of its history keeps a Phase-1 quorum that did not
+\* retire.
+Electable ==
+  Matchmaking =>
+    \A Q \in MQuorums : \A c \in HistoryOf(Q) : \E P \in P1Quorums(c) : P \cap retired = {}
 
 \* A proxy commits only a value that is chosen at the round's ballot.
 CommitBacked ==
