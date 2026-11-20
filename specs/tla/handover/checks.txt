@@ -15,3 +15,8 @@ first_write_majority_safe  pass       long
 resize                     pass       ci
 live                       pass       ci
 live_resize                pass       ci
+# A frozen member serves nothing: the control lets it serve its clients.
+frozen_serves              violation  ci
+# A resize and a handover never overlap: the control records the size while
+# a target is named, and the decree chooses a set of the old size.
+resize_during              violation  ci
