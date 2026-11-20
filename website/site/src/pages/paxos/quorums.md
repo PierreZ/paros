@@ -2,6 +2,7 @@
 layout: ../../layouts/Doc.astro
 kicker: Paxos
 section: paxos/
+lab: true
 trace: quorums
 title: Quorums
 description: Which acceptors must answer. Majority, grids and partitions.
@@ -29,6 +30,13 @@ Pick a shape and stop some acceptors. `paros-consensus` says if an election and 
 finish.
 
 <div data-quorum-picker><p class="aside">The quorum picker needs JavaScript.</p></div>
+
+## Your turn
+
+Now you are the network. Deliver or drop each message, and reach the goal of each exercise.
+`paros-consensus` runs in this page and decides everything else.
+
+<div data-lab="majority grid-column"><p class="aside">The exercises need JavaScript.</p></div>
 
 ## The rule
 

@@ -3,7 +3,11 @@
 # checked before the rule is written in paros-consensus. It runs only when a spec,
 # its script or the flake changes. Each folder of specs/tla/ runs in its own
 # job, so a new model adds a job and not time to one job; the job `tlc` is
-# green only when every folder's job is green.
+# green only when every folder's job is green. The job `traces` runs the trace
+# checks of consensus-sim (`tests/traces.rs`): a trace spec EXTENDS its model,
+# so a change of a model or of a `*Trace.tla` alone must meet the walks too
+# (#1231 (traced walks reach the rules)). The Rust workflow runs them for a
+# change of the code.
 name: TLA
 
 on:
@@ -64,8 +68,24 @@ jobs:
       - name: Run TLC on specs/tla/${{ matrix.folder }}
         run: nix develop .#tla --command scripts/check-tla.sh "${{ matrix.folder }}"
 
+  traces:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: traces
+          cache-on-failure: true
+      - name: Check the consensus-sim walks against the trace specs
+        run: >-
+          nix develop --command cargo nextest run --profile ci --release
+          -p consensus-sim --test traces
+
   tlc:
-    needs: [specs, spec]
+    needs: [specs, spec, traces]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -73,3 +93,4 @@ jobs:
         run: |
           test "${{ needs.specs.result }}" = success
           test "${{ needs.spec.result }}" = success
+          test "${{ needs.traces.result }}" = success

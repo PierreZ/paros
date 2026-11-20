@@ -19,7 +19,9 @@
 (*   - A configuration per ballot: ballots below `R` use `C1`, ballots     *)
 (*     from `R` up use `C2` (`ColocatedNode::reconfigure`: a              *)
 (*     reconfiguration is a round change). A member of `C2` outside `C1`   *)
-(*     starts with floor 0, no vote and nothing learned.                   *)
+(*     starts with floor 0, no vote and nothing learned. Ballots from `R2` *)
+(*     up use `C3`, a second reconfiguration whose new members start empty *)
+(*     too.                                                                *)
 (*   - Matchmaking (`matchmaking.rs`): a candidate registers its ballot    *)
 (*     before its `Prepare`. A matchmaker refuses a ballot below one that  *)
 (*     it registered. The candidate gets the configurations of the         *)
@@ -57,7 +59,7 @@
 EXTENDS Integers, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Cuts, Noop,
-          NB, NS, Owner, C1, C2, R,
+          NB, NS, Owner, C1, C2, R, C3, R2,
           GcRule, Cover
 
 Ballots == 1..NB
@@ -71,18 +73,20 @@ ASSUME Cover \in {"chosen", "joined"}
 ASSUME Learners \subseteq Acceptors
 ASSUME C1 \subseteq Acceptors /\ C2 \subseteq Acceptors /\ C1 # {} /\ C2 # {}
 ASSUME R \in Ballots
+ASSUME C3 \subseteq Acceptors /\ C3 # {} /\ R2 \in R..(NB + 1)
 ASSUME Noop \notin Proposals
 ASSUME Cuts # {} /\ Cuts \cap Commands = {}
 ASSUME Owner \in [Ballots -> Acceptors]
 Vote == [bal : 0..NB, val : Values \cup {None}]
 NoVote == [bal |-> 0, val |-> None]
 
-\* The configuration of ballot b, and its quorums: the majorities.
-Conf(b) == IF b >= R THEN C2 ELSE C1
+\* The configuration of ballot b, and its quorums: the majorities. Ballots
+\* from `R2` up use `C3`: a second reconfiguration (`R2 = NB + 1`: none).
+Conf(b) == IF b >= R2 THEN C3 ELSE IF b >= R THEN C2 ELSE C1
 Maj(C) == {Q \in SUBSET C : 2 * Cardinality(Q) > Cardinality(C)}
 
-\* The members of C2 that start with an empty store.
-Joiners == C2 \ C1
+\* The members of C2 and C3 that start with an empty store.
+Joiners == (C2 \ C1) \cup (C3 \ (C1 \cup C2))
 
 VARIABLES prom,     \* acceptor: the promise
           vote,     \* acceptor: the accepted record, per slot
@@ -113,7 +117,7 @@ TypeOK ==
   /\ from \in [Ballots -> 0..NS]
   /\ next \in [Ballots -> 0..NS]
   /\ fence \in [Ballots -> 0..NS]
-  /\ hist \in [Ballots -> SUBSET {C1, C2}]
+  /\ hist \in [Ballots -> SUBSET {C1, C2, C3}]
   /\ wm \in 0..NB
   /\ msgs \subseteq Msg
 
@@ -412,4 +416,7 @@ NoGcSplit == ~(wm >= R /\ \E a \in C2, j \in Joiners :
 \* A ballot wins Phase 1 over the second configuration alone, once the
 \* GC forgot the first after it chose a slot.
 NoLateWin == ~(ChosenUnderC1 /\ \E b \in Ballots : b > R /\ phase[b] = "p2" /\ hist[b] = {C2})
+\* A ballot of the third configuration wins with the first forgotten, after a
+\* slot was chosen under the first.
+NoThirdWin == ~(ChosenUnderC1 /\ \E b \in Ballots : b >= R2 /\ phase[b] = "p2" /\ C1 \notin hist[b])
 =============================================================================

@@ -33,6 +33,7 @@
 //! - [`view`] — the world as the recorder reads it.
 
 pub mod action;
+pub mod lab;
 pub mod level;
 pub mod narration;
 pub mod picker;
@@ -324,6 +325,44 @@ mod wasm {
         {
             Ok(view) => json(&view),
             Err(error) => serde_json::json!({ "error": error }).to_string(),
+        }
+    }
+
+    /// An exercise of the Paxos course: a world the reader drives by hand,
+    /// with one goal.
+    #[wasm_bindgen(js_name = PaxosLab)]
+    pub struct WasmPaxosLab {
+        inner: crate::paxos::lab::Lab,
+    }
+
+    #[wasm_bindgen(js_class = PaxosLab)]
+    impl WasmPaxosLab {
+        /// Start the exercise `id`.
+        ///
+        /// # Errors
+        ///
+        /// A JS exception when no exercise has that id.
+        #[wasm_bindgen(constructor)]
+        pub fn new(id: &str) -> Result<WasmPaxosLab, JsError> {
+            console_error_panic_hook::set_once();
+            crate::paxos::lab::Lab::new(id)
+                .map(|inner| WasmPaxosLab { inner })
+                .map_err(|why| JsError::new(&why))
+        }
+
+        /// Play one JSON `Move`; answers the `LabView` as JSON.
+        pub fn play(&mut self, chosen: &str) -> String {
+            match serde_json::from_str::<crate::paxos::lab::Move>(chosen) {
+                Ok(chosen) => self.inner.play(&chosen),
+                Err(error) => return serde_json::json!({ "error": error.to_string() }).to_string(),
+            }
+            json(&self.inner.view())
+        }
+
+        /// The `LabView` as JSON.
+        #[must_use]
+        pub fn view(&self) -> String {
+            json(&self.inner.view())
         }
     }
 

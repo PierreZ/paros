@@ -8,6 +8,9 @@ handover_ignore  violation  ci
 handover         pass       ci
 handover_lost    violation  ci
 handover_live    pass       ci
+# A wiped matchmaker is refused at boot (amnesia): one wipe keeps agreement.
+# Its control is init_quorum: the wiped member answers Phase 1 again.
+handover_wipe    pass       ci
 init_reach       violation  ci
 init_quorum      violation  ci
 init             pass       ci

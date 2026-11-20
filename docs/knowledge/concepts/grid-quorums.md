@@ -113,6 +113,11 @@ because a short row or column would let a predicate answer for a cell that does 
 - An election needs `rows − acks + 1` live acceptors in every column. A partition that lost a
   majority stops elections, and so stops every later reconfiguration.
 - Which acceptors fail matters, not only how many ([WPaxos §3.1]: `Fmin` and `Fmax`).
+- `f` acceptors down in **every** column at once leave a Phase-1 and a Phase-2 quorum exactly
+  when `f + 1 <= acks <= rows - f` (`specs/tla/grid/GridCheck.tla`, `PerColumnTolerance`). The
+  partitions (`rows = 2F+1`, `acks = F+1`) survive `F` down in every column; the full-column grid
+  survives none. The journal's rule that every step waits for a quorum only (#1257 (quorum
+  everywhere), `specs/tla/quorum-everywhere/`) therefore uses the majority and the partitions.
 
 ## 8. Costs
 

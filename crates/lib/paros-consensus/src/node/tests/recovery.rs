@@ -663,7 +663,7 @@ fn a_repair_probe_requery_carries_the_configuration_in_force() {
 }
 
 /// A trim-point jump resolves a leader's blocked repair: the jump says that
-/// every slot below the point is chosen and trimmed in the cell, so the
+/// every slot below the point is chosen and trimmed at a quorum, so the
 /// probe drops the blocked slot below it, and a probe with no blocked slot
 /// left closes. This is the path of the split floor: the candidate asked
 /// for catch-up as it campaigned, it won before the trimmed peer's answer

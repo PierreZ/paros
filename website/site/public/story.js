@@ -21,6 +21,10 @@
 // page only; window.paxosStory.answers() lists them, and each answer fires
 // the event "paxos:answer" on the document.
 //
+// A "find the bug" question (`after` in the trace) waits for its beat: the
+// beat plays first, then the screen asks what went wrong in it. An answer
+// marks the right one and says why, with no second play.
+//
 // No protocol logic here: every sentence, state and message comes from the
 // trace. This script runs before steps.js.
 (function () {
@@ -207,9 +211,13 @@
       g.appendChild(svg("circle", { cx: entry.x, cy: entry.y, r: 17 }));
       g.appendChild(svg("text", { x: entry.x, y: entry.y + 4, class: "story-node-id" }, short(entry.lane)));
       var y = entry.y + 32;
+      // A state line keeps to the node's own column: a long one (a
+      // matchmaker's registry) is cut, and the node's title holds it whole.
+      var room = Math.max(8, Math.floor((entry.w - 8) / 6.2));
+      var clip = function (text) { return text.length > room ? text.slice(0, room - 1) + "…" : text; };
       var first = node.alive ? (lines[0] || "") : "down";
-      g.appendChild(svg("text", { x: entry.x, y: y, class: "story-node-line" }, first));
-      if (node.alive && lines[1]) g.appendChild(svg("text", { x: entry.x, y: y + 12, class: "story-node-line" }, lines.slice(1).join(" ")));
+      g.appendChild(svg("text", { x: entry.x, y: y, class: "story-node-line" }, clip(first)));
+      if (node.alive && lines[1]) g.appendChild(svg("text", { x: entry.x, y: y + 12, class: "story-node-line" }, clip(lines.slice(1).join(" "))));
       // The log: one box per slot, a dashed box for a hole.
       var cells = (st.logs && st.logs[entry.i]) || [];
       var holes = node.holes || [];
@@ -242,7 +250,7 @@
           g.appendChild(tag);
         });
       }
-      g.appendChild(svg("title", {}, plain(entry.lane.label)));
+      g.appendChild(svg("title", {}, plain(entry.lane.label) + (node.alive && lines.length ? ": " + lines.join(" ") : "")));
       nodesLayer.appendChild(g);
     });
   }
@@ -417,12 +425,28 @@
 
   function key() { return run.id + ":" + at; }
 
+  // The question of the beat on screen is asked before it plays.
+  function before() {
+    var q = run.beats[at].question;
+    return !!q && !q.after;
+  }
+
+  // The beat on screen has played to its end: a "find the bug" question with
+  // no answer is asked now.
+  function landed() {
+    var q = run.beats[at].question;
+    if (q && q.after && !(key() in asked)) {
+      waiting = true;
+      words();
+    }
+  }
+
   function answer(i) {
     var q = run.beats[at].question;
     asked[key()] = i;
     var detail = { page: trace.page, run: run.id, beat: at, answer: i, right: i === q.right };
     try { document.dispatchEvent(new CustomEvent("paxos:answer", { detail: detail })); } catch (e) { /* old browser */ }
-    go(at, true);
+    go(at, !q.after);
   }
 
   // The question of the beat on screen: its answers while it waits, then
@@ -433,7 +457,9 @@
     quiz.hidden = !q;
     if (!q) return;
     if (waiting) {
-      quiz.appendChild(el("p", "story-quiz-head label", "Before it plays: what happens?"));
+      quiz.appendChild(q.after
+        ? el("p", "story-quiz-head label", "Find the bug: " + q.asks)
+        : el("p", "story-quiz-head label", "Before it plays: what happens?"));
       var list = el("div", "story-answers");
       q.answers.forEach(function (text, i) {
         var b = el("button", "story-answer", text);
@@ -493,8 +519,12 @@
       });
       box.appendChild(b);
     } else {
-      box.appendChild(el("p", "story-next-done", "Lesson " + place.lesson.n + " is done."));
-      if (place.lesson.next) {
+      box.appendChild(el("p", "story-next-done", "Lesson " + place.lesson.n + " is done." + (place.lesson.labs.length ? " Now it is your turn." : "")));
+      if (place.lesson.labs.length && document.getElementById("your-turn")) {
+        var turn = el("a", "btn primary story-next-btn", "Your turn: " + place.lesson.labs.length + (place.lesson.labs.length === 1 ? " exercise" : " exercises"));
+        turn.href = "#lab=" + place.lesson.labs[0];
+        box.appendChild(turn);
+      } else if (place.lesson.next) {
         var a = el("a", "btn primary story-next-btn", "Next lesson: " + place.lesson.next.title);
         a.href = place.lesson.next.href;
         box.appendChild(a);
@@ -516,10 +546,11 @@
       ? "Lesson " + place.lesson.n + " · " + place.lesson.title + " · " + (place.k + 1) + " of " + place.lesson.runs.length + ": " + run.label
       : run.label;
     // A question hides the sentence of its beat: the sentence gives the answer.
-    says.textContent = waiting ? beat.question.asks : beat.says;
-    says.classList.toggle("asks", waiting);
+    var ahead = waiting && before();
+    says.textContent = ahead ? beat.question.asks : beat.says;
+    says.classList.toggle("asks", ahead);
     drawQuiz(beat);
-    var st = stateAt(waiting ? beat.from : beat.to);
+    var st = stateAt(ahead ? beat.from : beat.to);
     chosen.textContent = "";
     if (st.broken) {
       chosen.className = "story-chosen broken";
@@ -561,7 +592,7 @@
     choices.hidden = waiting || !choices.childNodes.length;
     backBtn.disabled = at === 0;
     nextBtn.disabled = last && !waiting;
-    nextBtn.textContent = waiting ? "Show me" : "Continue";
+    nextBtn.textContent = waiting ? (before() ? "Show me" : "Tell me") : "Continue";
     others.querySelectorAll("button").forEach(function (b) {
       b.classList.toggle("now", b.dataset.run === run.id);
     });
@@ -578,7 +609,7 @@
     at = n;
     var mine = ++token;
     var beat = run.beats[at];
-    waiting = !!beat.question && !(key() in asked);
+    waiting = before() && !(key() in asked);
     words();
     if (waiting) {
       still(beat.from, beat.from);
@@ -586,13 +617,14 @@
     }
     if (!animate || reduced || beat.from === beat.to) {
       still(beat.to, beat.from);
+      landed();
       return;
     }
     nextBtn.textContent = "Skip";
     var k = beat.from;
     (function next() {
       if (mine !== token) return;
-      if (k >= beat.to) { still(beat.to, beat.from); nextBtn.textContent = "Continue"; return; }
+      if (k >= beat.to) { still(beat.to, beat.from); nextBtn.textContent = "Continue"; landed(); return; }
       k += 1;
       playStep(k, mine).then(function (ok) { if (ok) next(); });
     })();
@@ -609,7 +641,7 @@
   nextBtn.addEventListener("click", function () {
     touched = true;
     if (waiting) { answer(-1); return; }
-    if (nextBtn.textContent === "Skip") { token++; nextBtn.textContent = "Continue"; still(run.beats[at].to, run.beats[at].from); return; }
+    if (nextBtn.textContent === "Skip") { token++; nextBtn.textContent = "Continue"; still(run.beats[at].to, run.beats[at].from); landed(); return; }
     go(at + 1, true);
   });
   panel.addEventListener("keydown", function (e) {

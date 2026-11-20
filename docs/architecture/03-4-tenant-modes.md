@@ -80,7 +80,9 @@ two acceptor layouts, and the person chooses for each journal with `partitions`:
   acks: F+1 }`. A write goes to one acceptor partition (a column) and is done at F+1 of it; an
   election or a tail read needs F+1 of every column. Acks from two acceptor partitions never add
   up. Elections and tail reads stop when any acceptor partition loses its majority, so their
-  availability is lower than one big majority. The plan states this cost in one line.
+  availability is lower than one big majority. The plan states this cost in one line. Every
+  step still waits for a quorum only: with F down in every partition, writes, elections, reads
+  and the segment steps complete (section 2.11, #1257 (quorum everywhere)).
 - **A change of `partitions` is a full reconfiguration**; a change of another count changes no
   quorum.
 - **A stuck round moves** (#533): a Phase-2 round that stays open for

@@ -28,7 +28,7 @@
 //!
 //! Why it is linearizable, in one sentence: a write acked before the read
 //! began was chosen by a full **column**, every row meets every column in
-//! one cell, so some member of the row voted that slot, and the maximum
+//! one acceptor, so some member of the row voted that slot, and the maximum
 //! watermark is at least it. The replica then waits until it has applied
 //! that far. (§3.5 does the case analysis; the same argument, written on
 //! [`paros_consensus::quorum_read`], is the module's contract.)

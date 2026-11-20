@@ -246,8 +246,8 @@ configuration of at most nine members. The vector is bound to the ballot with th
 configuration, because two nodes that disagree on a member's failure domain evaluate different
 quorums; the registry's zone tag is the composer's input, copied when it composes, never
 read live by a tally. An empty vector is the plain arm, byte-identical to today's configuration,
-so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides the same single format bump
-(section 3.7).
+so plain Multi-Paxos is unchanged. The configuration names no cell (section 3.7, #1264 (remove
+the cell from paros-consensus)).
 
 **The zone rule** is two predicates over a configuration's members `M`, built from
 `has_phase1_quorum` and `has_phase2_quorum` over subsets of voters, never a count:
@@ -262,11 +262,12 @@ The rule is valid for `Majority` and `Grid` alike (flexible quorums are deleted,
 
 **As built** (2026-10-16, #215 (zones)). `paros_consensus::FailureDomain { region, az }` and
 `AcceptorConfig::zoned` carry the labels; `AcceptorConfig::zone_rule` is the rule, answered
-`Unlabeled`, `Holds`, `LosesQuorum(d)` or `CommitsAlone(d)`. The configuration's `cell` rides
-with the labels (`AcceptorConfig::with_cell`, `Config::cell_id`), and both are in the wire's
-`paros.common.v1.AcceptorConfig` (fields 7 and 8, absent when empty) and in the stores' format
-version 5: a store of version 4 does not open. The registry's `failure_domain` is the `az`; the
-`region` stays empty, the cell's own region, until multi-region cells (#253). Under acceptor
+`Unlabeled`, `Holds`, `LosesQuorum(d)` or `CommitsAlone(d)`. The labels were in the wire's
+`paros.common.v1.AcceptorConfig` and in the stores' format version 5 at the tag
+`v0.2.0-alpha.1`. The configuration carried a `cell` beside them until 2026-11-20, when #1264
+(remove the cell from paros-consensus) removed it from the core. The registry's
+`failure_domain` is the `az`; the core gives the `region` no meaning, and the upper stack leaves
+it empty until multi-region cells (#253). Under acceptor
 partitions the rule applies per partition (#532 (acceptor partitions)), because the grid's own
 predicates do. The placement predicate labels the planned members from the registry and owns the
 configuration with its cell, for a create and for every step of the routine of rule 4. **Where

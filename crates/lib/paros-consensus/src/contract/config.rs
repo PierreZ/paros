@@ -100,11 +100,6 @@ pub struct Config {
     /// restart never changes a label.
     #[cfg_attr(feature = "serde", serde(default))]
     pub peer_domains: Vec<FailureDomain>,
-    /// The cell that owns the journal (#215 (zones), `docs/architecture/03-7-universe.md`
-    /// §3.7): the bootstrap configuration's `cell`. `0` is none, the plain
-    /// arm.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub cell_id: u64,
 }
 
 impl Config {
@@ -132,7 +127,6 @@ impl Config {
             journal,
             writer_mode: WriterMode::Single,
             peer_domains: Vec::new(),
-            cell_id: 0,
         };
         // A fresh configuration is the plain deployment: every opt-in is off.
         assert!(
@@ -178,8 +172,8 @@ impl Config {
     }
 
     /// The bootstrap acceptor configuration: `peers` under `quorum_system`,
-    /// each labeled with its failure domain when `peer_domains` names them,
-    /// owned by `cell_id` (#215 (zones)).
+    /// each labeled with its failure domain when `peer_domains` names them
+    /// (#215 (zones)).
     ///
     /// # Panics
     ///
@@ -189,7 +183,6 @@ impl Config {
     pub fn bootstrap(&self) -> AcceptorConfig {
         if self.peer_domains.is_empty() {
             return AcceptorConfig::new(self.peers.clone(), self.quorum_system)
-                .with_cell(self.cell_id)
                 .with_counts(self.proxy_count, self.replica_count);
         }
         assert_eq!(
@@ -206,9 +199,7 @@ impl Config {
             self.quorum_system,
         );
         assert!(config.is_zoned(), "a labeled bootstrap stays labeled");
-        config
-            .with_cell(self.cell_id)
-            .with_counts(self.proxy_count, self.replica_count)
+        config.with_counts(self.proxy_count, self.replica_count)
     }
 
     /// This configuration as the format marker records it (#754 (counts off

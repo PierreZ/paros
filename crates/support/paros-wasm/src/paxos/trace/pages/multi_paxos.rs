@@ -11,12 +11,59 @@ use super::{any, kind, log_outcome, touches};
 use crate::paxos::action::{Action, Seam};
 use crate::paxos::level::common::{crash, propose, start_election as elect};
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
+use crate::paxos::view::{RoleView, WorldView};
 
 /// The setup: three nodes, each an acceptor and a replica.
 const LEVEL: &str = "act2/steady-state";
 
 /// The beat of the base run that lists the other runs.
 const TURN: usize = 7;
+
+/// Some live node holds `value` chosen at `slot`.
+fn chosen_at(slot: u64, value: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world.nodes.iter().filter(|node| node.alive).any(|node| {
+            node.accepted
+                .iter()
+                .any(|record| record.slot == slot && record.chosen && record.value == value)
+        })
+    }
+}
+
+/// No node but `except` holds a record of `value`, at any slot. A leader
+/// writes its own vote before it sends, so the leader's disk is left out.
+fn only_on(except: u64, value: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world
+            .nodes
+            .iter()
+            .filter(|node| node.id != except)
+            .all(|node| node.accepted.iter().all(|record| record.value != value))
+    }
+}
+
+/// A message of kind `name` is on the wire.
+fn on_wire(name: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| world.wire.iter().any(|message| message.kind == name)
+}
+
+/// Node `id` leads.
+fn leads(id: u64) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world
+            .nodes
+            .iter()
+            .any(|node| node.id == id && node.role == Some(RoleView::Leader))
+    }
+}
+
+/// No node leads.
+fn no_leader(world: &WorldView) -> bool {
+    world
+        .nodes
+        .iter()
+        .all(|node| node.role != Some(RoleView::Leader))
+}
 
 /// End a run: a screen that goes back to the list of runs.
 fn back(run: &mut Recorder, says: &str) {
@@ -83,8 +130,25 @@ fn base() -> Scenario {
     .beat("Two votes of three choose alpha. The leader tells the others with a Commit.")
     .settle(any)
     .beat("bravo goes to slot 1 with the same ballot: one round trip for each write.")
+    .ask(
+        "Node 0 leads with ballot 1.0, and alpha is chosen at slot 0. The client writes bravo. \
+         What does the leader send first?",
+        &[
+            "A Prepare for slot 1",
+            "An Accept for slot 1, at ballot 1.0",
+            "A Commit for slot 0",
+        ],
+        1,
+        "One Phase 1 covered every slot from slot 0 up. A stable leader skips Phase 1, so each \
+         write costs one round trip.",
+    )
     .play(propose(0, "bravo"), "the client writes bravo")
+    .holds(
+        |world| on_wire("Accept")(world) && !on_wire("Prepare")(world),
+        "the leader sends an Accept and no Prepare",
+    )
     .settle(any)
+    .holds(chosen_at(1, "bravo"), "bravo is chosen at slot 1")
     .beat("Now choose what goes wrong.")
     .choice("The leader crashes during a write", "leader-crash", 0)
     .choice("A slot is lost with the leader", "gap", 0)
@@ -134,7 +198,19 @@ fn leader_crash() -> Scenario {
         "Node 1 holds a vote for bravo at slot 1 itself. A new leader proposes the vote it \
          finds, so bravo is proposed again at ballot 2.1 and chosen.",
     )
-    .settle_dropping(touches(0));
+    .ask(
+        "Only node 1 voted for bravo at slot 1, then the leader died. Node 1 is elected. What \
+         does it put in slot 1?",
+        &["bravo", "A no-op", "Nothing: slot 1 stays empty"],
+        0,
+        "Phase 1 reports every vote. One vote may be part of a choice that the new leader \
+         cannot see, so it proposes bravo again.",
+    )
+    .settle_dropping(touches(0))
+    .holds(
+        chosen_at(1, "bravo"),
+        "bravo is chosen at slot 1 at the new ballot",
+    );
     back(
         &mut run,
         "A vote that a quorum may have chosen is never lost: the next Phase 1 finds it.",
@@ -172,7 +248,24 @@ fn gap() -> Scenario {
         "Node 1 fills slot 1 with a no-op. Without it, no node could apply past slot 1, \
          because the log applies in order.",
     )
-    .settle_dropping(touches(0));
+    .ask(
+        "Slot 2 holds charlie, chosen. No promise reports a vote for slot 1. What does the new \
+         leader put in slot 1?",
+        &[
+            "bravo, the value that the client sent",
+            "A no-op",
+            "Nothing: it waits for the client",
+        ],
+        1,
+        "The new leader never heard of bravo. A no-op closes the hole, so every node can apply \
+         up to charlie.",
+    )
+    .settle_dropping(touches(0))
+    .holds(chosen_at(1, "Noop"), "a no-op is chosen at slot 1")
+    .holds(
+        only_on(0, "bravo"),
+        "bravo is on no disk but the dead leader's",
+    );
     back(
         &mut run,
         "bravo is lost: it was never chosen, so the client must write it again.",
@@ -199,7 +292,22 @@ fn lost_commit() -> Scenario {
         "The leader does not send a Commit again. Its next heartbeat says how far the log is \
          chosen.",
     )
+    .ask(
+        "Every Commit for alpha is lost. How do the followers learn that alpha is chosen?",
+        &[
+            "The leader sends the Commit again",
+            "The next heartbeat says how far the log is chosen",
+            "They never learn it",
+        ],
+        1,
+        "The heartbeat carries the commit index. A follower that sees a gap asks for the slots \
+         that it lacks.",
+    )
     .play(Action::Tick { node: 0 }, "the leader's clock ticks")
+    .holds(
+        |world| on_wire("Heartbeat")(world) && !on_wire("Commit")(world),
+        "the leader sends a heartbeat and no Commit",
+    )
     .settle(kind("Heartbeat"));
     run.beat(
         "Each follower sees that it lacks a chosen slot and asks the leader for it. An answer \
@@ -267,11 +375,28 @@ fn seam(seam: Seam) -> Scenario {
     .play(propose(0, "bravo"), "the client writes bravo")
     .drop_all(touches(0));
     run.beat("Node 1 is elected. Nodes 1 and 2 never heard of bravo, so no promise reports it.")
+        .ask(
+            if before {
+                "Node 0 stopped before its disk write. Nodes 1 and 2 elect node 1. Can bravo \
+                 still be chosen at slot 1?"
+            } else {
+                "Node 0 wrote its vote for bravo, then stopped before it sent anything. Nodes 1 \
+                 and 2 elect node 1. Can bravo still be chosen at slot 1?"
+            },
+            &[
+                "Yes: the leader accepted it",
+                "No: no promise of the new quorum reports it",
+            ],
+            1,
+            "The new quorum is nodes 1 and 2, and neither heard of bravo. A vote on one disk, or \
+             no vote at all, is not a choice.",
+        )
         .play(elect(1), "node 1 starts an election")
         .settle_dropping(touches(0));
     run.beat("The client writes charlie, and node 1 puts it in slot 1.")
         .play(propose(1, "charlie"), "the client writes charlie")
-        .settle_dropping(touches(0));
+        .settle_dropping(touches(0))
+        .holds(chosen_at(1, "charlie"), "charlie is chosen at slot 1");
     run.beat(if before {
         "Node 0 restarts with the disk it had before bravo. The heartbeat brings it the slots \
          it lacks."
@@ -344,6 +469,17 @@ fn read() -> Scenario {
         "A client reads from node 1, not from the leader. Node 1 asks each node for the \
          highest slot that it voted in.",
     )
+    .ask(
+        "A client reads from node 1, a follower. What does node 1 do first?",
+        &[
+            "It sends the read to the leader",
+            "It answers from its own log at once",
+            "It asks a quorum how far they voted",
+        ],
+        2,
+        "A read never goes through the leader, and a node alone can be behind. A quorum's \
+         answers say how far the node must apply before it answers.",
+    )
     .play(
         Action::QuorumRead {
             node: 1,
@@ -351,6 +487,7 @@ fn read() -> Scenario {
         },
         "a client reads from node 1",
     )
+    .holds(on_wire("PreRead"), "node 1 asks the nodes")
     .settle(kind("PreRead"));
     run.beat(
         "A quorum of answers tells node 1 how far it must apply. It applied slot 0, so it \
@@ -388,7 +525,20 @@ fn stale_nack() -> Scenario {
         "Both acceptors promised ballot 2.1, so each one refuses with a Nack. Node 0 learns \
          that it does not lead, and bravo is not chosen.",
     )
-    .settle(any);
+    .ask(
+        "Node 0 still thinks that it leads with ballot 1.0. Nodes 1 and 2 promised ballot 2.1. \
+         What happens to the Accepts for bravo?",
+        &[
+            "Nodes 1 and 2 vote, and bravo is chosen",
+            "Nodes 1 and 2 refuse, and node 0 stops leading",
+        ],
+        1,
+        "A promise refuses every lower ballot. The Nack tells node 0 that a higher ballot \
+         exists.",
+    )
+    .settle(any)
+    .holds(only_on(0, "bravo"), "nodes 1 and 2 did not vote for bravo")
+    .holds(|world| !leads(0)(world), "node 0 stops leading");
     back(
         &mut run,
         "A Nack carries no ballot. The old leader steps down, and a value from the wire never \
@@ -550,7 +700,19 @@ fn handoff_lost() -> Scenario {
             "node 0 hands the leadership to node 1",
         )
         .drop_all(kind("Relinquish"));
-    run.beat("No node leads now. The clock of node 1 runs until its election timeout.");
+    run.beat("No node leads now. The clock of node 1 runs until its election timeout.")
+        .ask(
+            "The Relinquish is lost. Node 0 already stopped leading. What happens next?",
+            &[
+                "Node 0 leads again",
+                "No node leads until an election timeout",
+                "Node 1 leads with the old ballot",
+            ],
+            1,
+            "Node 0 gave up its ballot before it sent the Relinquish, so it cannot take it \
+             back. A lost handoff costs one election, never a value.",
+        )
+        .holds(no_leader, "no node leads");
     for _ in 0..5 {
         run.play(Action::Tick { node: 1 }, "the clock of node 1 ticks")
             .settle(|message| message.kind != "Promise");
@@ -575,6 +737,18 @@ fn read_waits() -> Scenario {
     run.beat(
         "A client reads from node 1. The answers say that a node voted up to slot 1, and node \
          1 has not applied slot 1, so the read waits.",
+    )
+    .ask(
+        "Both followers voted for bravo at slot 1, but no Commit arrived yet. A client reads \
+         from node 1. What does node 1 do?",
+        &[
+            "It answers now, without bravo",
+            "It waits until it applies slot 1",
+            "It refuses the read",
+        ],
+        1,
+        "bravo may be chosen already. A read that skips it could miss a write that finished \
+         before the read began.",
     )
     .play(
         Action::QuorumRead {

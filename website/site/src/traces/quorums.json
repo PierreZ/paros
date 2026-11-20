@@ -9341,7 +9341,17 @@
         {
           "says": "Each write needs 3 votes of 5 too. A majority pays the same price on each write.",
           "from": 13,
-          "to": 26
+          "to": 26,
+          "question": {
+            "asks": "Five acceptors, majority quorums. How many acceptors can be down while the journal still elects and writes?",
+            "answers": [
+              "One",
+              "Two",
+              "Three"
+            ],
+            "right": 1,
+            "why": "Three of five is a majority, so two can be down. Every write still touches three acceptors."
+          }
         },
         {
           "says": "A majority survives 2 failures of 5, but every write touches 3 acceptors.",
@@ -12823,12 +12833,32 @@
         {
           "says": "Its Phase 1 asks acceptors 3 and 4. Neither one voted, so proposer 8 never hears of alpha.",
           "from": 19,
-          "to": 24
+          "to": 24,
+          "question": {
+            "asks": "alpha is chosen by acceptors 1 and 2. Proposer 8 asks only acceptors 3 and 4 for a promise. Does it hear of alpha?",
+            "answers": [
+              "Yes: alpha is chosen",
+              "No: its quorum shares no acceptor with the quorum that chose alpha"
+            ],
+            "right": 1,
+            "why": "A proposer learns only what its own quorum reports. Two quorums that share no acceptor cannot see each other."
+          }
         },
         {
           "says": "Proposer 8 gets bravo chosen. Two values are chosen.",
           "from": 24,
-          "to": 32
+          "to": 32,
+          "question": {
+            "asks": "Two values are chosen. What broke Paxos?",
+            "answers": [
+              "Proposer 8 proposed bravo after a Phase 1 with no vote",
+              "The two proposers counted quorums that share no acceptor",
+              "Acceptors 3 and 4 voted for bravo"
+            ],
+            "right": 1,
+            "why": "Each proposer followed Paxos inside its own half. The rule that broke is between the halves: every Phase 1 quorum must share an acceptor with every Phase 2 quorum.",
+            "after": true
+          }
         },
         {
           "says": "Two quorums that share no acceptor cannot see each other. Every shape in paros keeps the rule.",
@@ -14864,7 +14894,16 @@
         {
           "says": "Node 0 holds column 0, node 4 column 1 and node 5 column 2. One node of each column is a Phase 1 quorum, so node 0 is the leader.",
           "from": 14,
-          "to": 16
+          "to": 16,
+          "question": {
+            "asks": "Nodes 1, 2 and 3 are down. Nodes 0, 4 and 5 promise: one node of each column, and no full row. Is node 0 elected?",
+            "answers": [
+              "No: Phase 1 needs a full row",
+              "Yes: one node of each column is enough"
+            ],
+            "right": 1,
+            "why": "A write needs a full column. Every full column holds one node of the election quorum, so one node of each column is enough to see every write."
+          }
         },
         {
           "says": "The election finished with 3 of 6 nodes down. A write still needs a full column, and each column has a node down now.",
@@ -20830,7 +20869,16 @@
         {
           "says": "Slot 1 goes to column 1. Its column is complete, so bravo is chosen.",
           "from": 19,
-          "to": 29
+          "to": 29,
+          "question": {
+            "asks": "Node 3 of column 0 is down, so slot 0 is not chosen. Slot 1 goes to column 1. Is bravo chosen?",
+            "answers": [
+              "No: slot 0 must be chosen first",
+              "Yes: column 1 is complete"
+            ],
+            "right": 1,
+            "why": "Each slot has its own vote. The log applies in order, so slot 1 waits to be applied, but it is chosen."
+          }
         },
         {
           "says": "Node 3 restarts, and the leader sends its open Accept again. Column 0 votes, and alpha is chosen.",
@@ -32699,7 +32747,16 @@
         {
           "says": "Node 1 starts an election. Its Phase 1 needs a node of column 0, and node 3 is the only one left.",
           "from": 25,
-          "to": 40
+          "to": 40,
+          "question": {
+            "asks": "Only node 3 still holds the vote for alpha. Node 1 starts an election. Must its Phase 1 hear from node 3?",
+            "answers": [
+              "No: any three nodes are enough",
+              "Yes: it needs a node of column 0, and node 3 is the only one left"
+            ],
+            "right": 1,
+            "why": "An election needs one node of every column. A full column may have chosen a value, so the election must ask that column."
+          }
         },
         {
           "says": "Node 3 reports its vote, so node 1 proposes alpha again at slot 0. Node 3 votes, but column 0 is not complete: node 0 is down.",
@@ -38483,7 +38540,16 @@
         {
           "says": "Slot 0 goes to partition 0. Two votes of three choose alpha, so node 4 is not missed.",
           "from": 16,
-          "to": 25
+          "to": 25,
+          "question": {
+            "asks": "Node 4 of partition 0 is down. Slot 0 goes to partition 0. Can alpha be chosen?",
+            "answers": [
+              "No: partition 0 lost a node",
+              "Yes: 2 of its 3 nodes are a majority of the partition"
+            ],
+            "right": 1,
+            "why": "A write needs a majority of one partition. Each partition survives one failure."
+          }
         },
         {
           "says": "Slot 1 goes to partition 1, and 2 of its 3 nodes choose bravo.",

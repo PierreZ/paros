@@ -1628,11 +1628,9 @@ impl ColocatedNode {
     /// refuse cannot make a quorum, a re-ask cannot win, and the campaign
     /// is abandoned like any refused one: the node keeps the belief it led
     /// under, and its next campaign runs that one. Abandoning a campaign
-    /// costs availability, never safety. Witness
-    /// `replay-recipe 1516240296740112277 121760:12518854452560519938` on
-    /// b90808f: a reconfiguration of the cell's election journal onto two
-    /// re-booked nodes was re-asked for 49 s, the cell had no coordinator,
-    /// and a dead member of a data journal was never re-placed.
+    /// costs availability, never safety. Without the abandon, a
+    /// reconfiguration onto re-booked nodes that a quorum still holds as
+    /// retired is re-asked for ever, and the journal has no leader.
     fn fold_retired(&mut self, matchmaker: MatchmakerId, refusal: MatchRefusal) -> MatchStep {
         assert!(
             matches!(refusal, MatchRefusal::Retired { .. }),

@@ -5,7 +5,7 @@
 //! The lesson `matchmaker` teaches Matchmaker Paxos with the roles driven by
 //! hand. This example runs the same protocol the way a driver does: five
 //! [`ColocatedNode`]s, three [`paros_consensus::Matchmaker`]s, and the toy
-//! cell of `examples/common/cluster.rs`. Read `quickstart` first.
+//! cluster of `examples/common/cluster.rs`. Read `quickstart` first.
 //!
 //! # What a matchmaker deployment adds to the driver
 //!

@@ -6,4 +6,4 @@
 reach_skip     violation  ci
 reach_choice   violation  ci
 owner_noguard  violation  long
-owner          pass       long
+owner          pass       long  40

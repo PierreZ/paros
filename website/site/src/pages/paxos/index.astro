@@ -3,8 +3,8 @@
 // journal with each flavor at its place, a reading order with the problem
 // each flavor solves, and the words that every flavor page links to.
 import Doc from "../../layouts/Doc.astro";
-import { url } from "../../nav";
-import { LESSONS } from "../../course";
+import { REPO, url } from "../../nav";
+import { LESSONS, TLC_RUN } from "../../course";
 
 const traces = import.meta.glob("../../traces/*.json", { eager: true, import: "default" }) as Record<string, { scenarios: { id: string; beats?: unknown[] }[] }>;
 const traceOf = (page: string) => Object.entries(traces).find(([p]) => p.endsWith(`/${page}.json`))![1];
@@ -113,17 +113,25 @@ const f = (n: number) => FLAVORS[n - 1];
         <span class="lesson-body">
           <a class="lesson-title" href={l.href}>{l.title}</a>
           <span class="lesson-goal">After it, you can {l.goal}</span>
+          <span class="lesson-tlc">
+            <span class="tnum">{l.tlc.states.toLocaleString("en-US")}</span> states: TLC checked that {l.tlc.checks}{" "}
+            (<a href={`${REPO}/blob/main/specs/tla/${l.tlc.model}/${l.tlc.config}.cfg`}><code>{l.tlc.model}/{l.tlc.config}</code></a>).
+          </span>
           <span class="lesson-meta label">
             <span>{l.pageName}</span>
             <span class="tnum">{l.runs.length} runs</span>
             {l.story
               ? <span class="lesson-progress tnum" data-progress />
               : <span class="chip-status">step-through only</span>}
+            {l.labs?.length ? <span class="lesson-labs tnum" data-labs={l.labs.join(" ")}>{l.labs.length} {l.labs.length === 1 ? "exercise" : "exercises"}</span> : null}
           </span>
         </span>
       </li>
     ))}
   </ol>
+  <p class="aside">Each lesson has a model in <a href={`${REPO}/tree/main/specs/tla`}><code>specs/tla/</code></a>,
+  and the figure is the count of distinct states that {TLC_RUN.tool} found in one run of it on
+  {TLC_RUN.date}, with no error.</p>
   <p class="aside">Your progress stays in this browser only.
   <button type="button" class="linkish" data-course-forget hidden>Forget my progress</button></p>
   <p>Then the <a href={url("paxos/concepts/")}>concepts</a>: one short entry for each idea that
@@ -158,6 +166,12 @@ const f = (n: number) => FLAVORS[n - 1];
       out.textContent = seen === runs.length ? "done" : seen ? seen + " of " + runs.length + " seen" : "";
       out.className = "lesson-progress tnum" + (seen === runs.length ? " chip-status done" : "");
       li.classList.toggle("is-done", seen === runs.length);
+      var labs = li.querySelector("[data-labs]");
+      if (labs) {
+        var ids = labs.dataset.labs.split(" ");
+        var solved = ids.filter(function (id) { return st.solved[id]; }).length;
+        if (solved) { any = true; labs.textContent = solved + " of " + ids.length + (ids.length === 1 ? " exercise" : " exercises") + " solved"; }
+      }
     });
     var last = st.last;
     if (last) {

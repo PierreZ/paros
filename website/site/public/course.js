@@ -1,6 +1,6 @@
 // The progress of the Paxos course (src/course.ts), kept in this browser
 // only: the runs the reader saw to their end, the answers the reader gave,
-// and the last screen the reader opened. Nothing leaves the browser. When the
+// the exercises the reader solved, and the last screen the reader opened. Nothing leaves the browser. When the
 // storage is blocked or empty, the course works the same and remembers
 // nothing.
 (function () {
@@ -10,7 +10,7 @@
     var st = null;
     try { st = JSON.parse(window.localStorage.getItem(KEY) || "null"); } catch (e) { st = null; }
     if (!st || typeof st !== "object") st = {};
-    return { seen: st.seen || {}, answers: st.answers || {}, last: st.last || null };
+    return { seen: st.seen || {}, answers: st.answers || {}, solved: st.solved || {}, last: st.last || null };
   }
   function save(st) {
     try { window.localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) { /* storage blocked */ }
@@ -27,6 +27,8 @@
     answered: function (page, run, beat, answer) {
       change(function (st) { st.answers[page + "/" + run + ":" + beat] = answer; });
     },
+    // The reader reached the goal of exercise `id`.
+    solved: function (id) { change(function (st) { st.solved[id] = true; }); },
     // The answers already given on one page: "run:beat" -> answer.
     answersOf: function (page) {
       var out = {}, all = load().answers;

@@ -11,9 +11,13 @@ Test only: `publish = false`, never a dependency of another crate.
 - **Depend on `paros-consensus` directly**, never on the `paros` facade (rule 3 of
   `crates/lib/paros/AGENTS.md`).
 - **Drive the core through its public API only.** The core is never buggified and never mutated.
-  The cell is a driver: it honors the driver contract (`ready`, persist the writes, send the
+  The cluster is a driver: it honors the driver contract (`ready`, persist the writes, send the
   messages, `advance`) and crashes a party at the two points that the contract allows (before
-  the persist, and between the persist and the send).
+  the persist, and between the persist and the send). A crash may also lose a suffix of the
+  writes that no fsync covers yet: the contract fsyncs only a batch that `MustSync::for_batch`
+  marks `Sync`, so a relaxed `SetChosenIndex` may be lost, and a node may boot with a shorter
+  chosen prefix than it learned. The trace specs follow it: a `restart` event carries `upto`,
+  and the restart step forgets the learned slots at or above it.
 - **An oracle shares no code with the code it judges** (#909 (oracles that do not judge)). The
   Phase-2 rule (`oracle/quorum.rs`) is written again from the papers. Its one link to the core is
   a test that agrees with `AcceptorConfig::has_phase2_quorum` on every subset of small systems.
@@ -31,9 +35,9 @@ Test only: `publish = false`, never a dependency of another crate.
   `probes::core_probes` reads from the source of `paros-consensus`. There is no list of excused
   probes (Pierre, 2026-11-19: no excuses in simulation, no allow lists). A new probe in the core
   is reached by a walk in the same PR: add the walk move, the flavor or the steer that bends the
-  cell to it, never a larger budget alone. Each flavor also makes every move it allows.
+  cluster to it, never a larger budget alone. Each flavor also makes every move it allows.
 - **A steer bends the walk, never the core.** A steer is a choice of the driver that makes a
-  rare state likely: an aimed fault (`cell/faults.rs` strikes the split floor), a
+  rare state likely: an aimed fault (`cluster/faults.rs` strikes the split floor), a
   flavor with a small quorum or small pages. It stays a legal move of a real deployment.
 - The moonpool rev of `moonpool-walk`, `moonpool-assertions` and `moonpool-tla` here is the rev
   of the `moonpool-assertions` line of `paros-consensus`: one copy of the assertion table.
@@ -44,6 +48,15 @@ Test only: `publish = false`, never a dependency of another crate.
   its own step, with the reason in its header, never hidden.
 - **Every trace spec has a control**: a mutant that the oracles miss on some seed and TLC
   refuses (`tests/traces.rs`).
+- **Every trace spec names the rules its checked walks must meet** (`Spec::rules`,
+  `cluster/trace/rules.rs`; #1231 (traced walks reach the rules)): a promise that reports a vote,
+  a win above slot 0, three wins in one walk, a `Noop` gap fill, a vote, a learn, a `record`, a
+  restart, and the rules of the spec's own flavor (a handoff with a pending slot and its
+  install; a proxy commit after a proxy crash; a second configuration, a `Prepare` over two
+  configurations and a GC request above frontier 0). TLC accepting a walk that never takes a
+  step judges nothing, and an empty trace meets no rule. A new rule of a trace spec gets its
+  rule here in the same PR; when the walks cannot meet it, add the walk move or the steer, as
+  for a probe.
 
 ## Map
 
@@ -53,21 +66,31 @@ Test only: `publish = false`, never a dependency of another crate.
   - `quorum.rs` → `Phase2Rule`: a majority, or `acks` votes in one column of a grid.
   - `ledger.rs` → `Ledger`: the durable votes and promises of every node, each ballot bound to
     the configuration the matchmakers registered for it. Oracles `ONE_VALUE`, `COMMIT_BACKED`,
-    `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `ONE_FOLD`, `PREFIX_SHRINKS`.
+    `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `JOURNAL_FOLD`, `PREFIX_SHRINKS` (the durable
+    chosen prefix never shrinks: a crash may take back only what no fsync covered).
+  - `journal.rs` → `JournalSpec`: the single-writer journal contract
+    (`docs/architecture/02-data-plane.md` §2.1-§2.3, §2.6) written again, folded over the
+    commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
+    these rules give (so every party folds it the same way). It never calls
+    `paros_consensus::journal::state`; it uses the core's types as data only.
   - `reads.rs` → `Reads`: `READ_SEES_WRITES`, a leaderless read sees every write that completed
     before it started.
-- `cell.rs` + `cell/` → `Cell`, the model of a deployment of `ColocatedNode`s, and its driver
-  loop. `Flavor` (`cell/flavor.rs`) says what the cell holds (acceptors, quorum system, proxy
+- `cluster.rs` + `cluster/` → `Cluster`, the model of a deployment of `ColocatedNode`s, and its driver
+  loop. `Flavor` (`cluster/flavor.rs`) says what the cluster holds (acceptors, quorum system, proxy
   leaders, replicas, matchmakers, spares, late spares, matchmaker spares), which optional moves
   are on (`Flavor::allows`) and the `Limits` of every party (`Flavor::paged` puts every page
-  at its floor, so the paging branches run). `Mutant` is the bug of a control run: a planted driver bug that
-  an oracle or a trace check catches. `cell/sites.rs` holds each party with its disk. The liveness judge (`Cell::converged`): once the faults stop, one leader
+  at its floor, so the paging branches run). The journal's client (`Client` in `cluster.rs`)
+  pipelines its writes as the writer of `docs/architecture/02-data-plane.md` §2.2 does: it
+  writes at the next position it believes free, continues from the position a refusal names,
+  retries one of its last writes unchanged, and writes under a superseded uuid on purpose.
+  `Mutant` is the bug of a control run: a planted driver bug that
+  an oracle or a trace check catches. `cluster/sites.rs` holds each party with its disk. The liveness judge (`Cluster::converged`): once the faults stop, one leader
   stands with no open round, and every node and replica that is not retired learned its log.
   The moves beyond the clients and the clock (#1225 (walk moves for the unreached probes)):
-  - `cell/faults.rs` → `Action::Rot`: a disk loses the value of one record and keeps its
+  - `cluster/faults.rs` → `Action::Rot`: a disk loses the value of one record and keeps its
     identity (`MemStorage::rot`, CTRL's faulty entry), at most one faulty copy of a slot that no
     node trimmed; a scrub may find it while the node runs (`ColocatedNode::repair_record`). The split
-    floor (`Cell::split_floor`): a slot that one node trimmed, that a second node still holds,
+    floor (`Cluster::split_floor`): a slot that one node trimmed, that a second node still holds,
     and that a node which did not trim it has not learned chosen. Half the rots, and half the
     compactions of a flavor with rots, strike there: every copy left below the trim point rots,
     and the nodes that hold a copy or trimmed the slot stop. The walk restarts them; a lagging
@@ -75,23 +98,30 @@ Test only: `publish = false`, never a dependency of another crate.
     point resolves it. Below a trim point a fault on every copy loses nothing: the trim point
     carries the journal state. Flavor `disk-faults-3` has three acceptors, so a promise quorum
     holds one peer beside the candidate.
-  - `cell/retire.rs` → `Action::Retire` (the operator retires a node on an effective GC floor or
+  - `cluster/retire.rs` → `Action::Retire` (the operator retires a node on an effective GC floor or
     on the floor a beat carried, and never one that a reconfiguration it asked for above the
     floor names), `Action::Rejoin` (a retired node boots again, or a running non-member
     rejoins), `Action::Admit` (a node admits a late spare to its pool; until then a
     configuration that names the spare is outside that node's pool).
-  - `cell/handover.rs` → `Action::Handover`: each node's driver holds a
+  - `cluster/handover.rs` → `Action::Handover`: each node's driver holds a
     `MatchmakerReconfigurer`, starts a handover to a target from the matchmaker pool, finishes
     a frozen generation it meets, adopts a chosen set, and republishes it to a matchmaker left
     behind. A sibling journal on the bootstrap set makes a freeze and a bootstrap carry two
     journals, so a small page pages them.
-  - `cell.rs` → `Action::MoveRound` (a leader moves a stuck round to another column,
+  - `cluster.rs` → `Action::MoveRound` (a leader moves a stuck round to another column,
     `ColocatedNode::move_round`), and a client retry inside `Action::Propose` (the same records
     at a position written before).
-- `cell/trace.rs` + `cell/trace/` → `Tracer`, `CellEvent`, `Spec`: the steps of a cell walk as
+  - `cluster.rs` → `Action::Usurp` (a node that does not lead campaigns while a leader stands,
+    `ColocatedNode::campaign`) and two steers for the leadership that a higher ballot passed:
+    before the faults stop, a leader misses every message that would depose it (`deafens`) but
+    hears each `Commit`, and a leader move takes such a leader first (`pick_leader`).
+  - `cluster.rs` → a crash loses a suffix of the writes that no fsync covers yet, in half of the
+    crashes that have one (`LOST_UNSYNCED`).
+- `cluster/trace.rs` + `cluster/trace/` → `Tracer`, `ClusterEvent`, `Spec`: the steps of a cluster walk as
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs` and `matchmaker.rs` each say which
-  events their model keeps (`Spec::keeps`) and define its constants.
+  events their model keeps (`Spec::keeps`) and define its constants. `rules.rs` → `Rule`,
+  `Spec::rules`: the steps each spec's checked walks must take.
 - `decree.rs` → `DecreeModel`: single-decree Paxos (`paros_consensus::decree`), three acceptors
   and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
   `specs/tla/decree/DecreeTrace.tla`.
@@ -119,19 +149,29 @@ Test only: `publish = false`, never a dependency of another crate.
   seeds, `EXPLORE` = 10), and CI runs it as it is. Each walk runs in a process of its own (the
   ignored test `one_walk`, started again from the same binary), one per CPU (`COVERAGE_JOBS`):
   a process has its own branch counters, so a walk branches the same way whatever runs beside
-  it. Branch coverage needs the instrumented build that CI's `coverage` job runs:
+  it. CI splits the walks over four shards, each a job of at most 30 minutes: a shard
+  (`COVERAGE_SHARD=i/4`) walks the walks whose index is `i` modulo 4 and saves what each
+  reached (`COVERAGE_SAVE`), and the `coverage` job judges the union of the saved walks
+  (`COVERAGE_FROM`), which fails when a walk is missing. Branch coverage needs the instrumented
+  build that CI's `coverage-shard` jobs run:
   `RUSTC_WRAPPER=$PWD/scripts/sancov-rustc.sh SANCOV_CRATES=paros_consensus cargo nextest run
   --release --target-dir target/sancov -p consensus-sim --test coverage --no-capture`. Without
   it, `moonpool_explorer::sancov_edges_covered_live` returns 0 and only the probes steer. The
   `test` job of CI leaves the gate out (it is too long in debug). The `Coverage nightly`
   workflow runs it with 900 root seeds from a first seed that moves with the date.
-- `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): four
-  short walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of
-  each control that the oracles pass. Single decree against `decree/`; every cell flavor without
+- `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): the
+  walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of each
+  control that the oracles pass. Single decree against `decree/`; every cluster flavor without
   matchmakers against `multi-paxos/`; the flavors with proxy leaders against `proxy-leader/`;
-  the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`. TLC (`tlc`) is
-  in the nix dev shell; outside it the tests skip, and in CI a missing TLC fails. Knobs: `TRACE_SEEDS`, `TRACE_FROM`,
-  `TRACE_CHAOS`, `TRACE_DUMP`.
+  the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`. A cluster walk has
+  150 chaos steps. Each test searches the seeds (at most 300, oracles on, no TLC) and TLC checks
+  the first seed and each seed that meets a rule of the spec that no checked seed met before; a
+  walk of more than 200 kept events is skipped (TLC grows faster than the trace). The test fails
+  when a rule stays unmet. About four minutes in debug on four CPUs. TLC (`tlc`) is in the nix
+  dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
+  in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
+  a change of `specs/tla/` alone. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
+  `TRACE_CHAOS`, `TRACE_MAX_EVENTS`, `TRACE_DUMP`.
 - A long run: `MOONPOOL_WALK_SEEDS=1500 cargo nextest run --release -p consensus-sim`. One seed:
   `MOONPOOL_WALK_SEED=17`. The other knobs: `MOONPOOL_WALK_FROM`, `_STEPS`, `_TAIL`, and
   `_EXPLORE` (the runs each root seed may add). A failure in a branched run prints its timeline:

@@ -349,6 +349,15 @@ impl Recorder {
         self
     }
 
+    /// Ask the reader what went wrong in the open beat, after it played: the
+    /// "find the bug" question of a "Break the rule" run. Pin the answer
+    /// with [`Recorder::holds`] after the beat's steps, as for
+    /// [`Recorder::ask`].
+    pub fn find(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) -> &mut Self {
+        self.beats.find(asks, answers, right, why);
+        self
+    }
+
     /// Check a fact of the world as it stands. A script calls it after the
     /// steps of a beat that asks a question, so that the right answer is what
     /// `paros-consensus` did and not what the script's author remembers.
@@ -915,7 +924,7 @@ fn site_note(text: &str) -> Option<String> {
     Some(first.to_uppercase().chain(chars).collect())
 }
 
-fn lane_of(message: &MessageView, sender: bool) -> String {
+pub(crate) fn lane_of(message: &MessageView, sender: bool) -> String {
     let (id, party) = if sender {
         (message.from, message.from_party)
     } else {
@@ -929,7 +938,7 @@ fn lane_of(message: &MessageView, sender: bool) -> String {
 
 /// `Prepare 1.5`, `Accept 1.5 slot 2`: the variant and the numbers a reader
 /// follows. The value of an `Accept` is in the step's notes.
-fn message_label(message: &MessageView, log: bool) -> String {
+pub(crate) fn message_label(message: &MessageView, log: bool) -> String {
     let mut label = message.kind.clone();
     if let Some(ballot) = &message.ballot {
         label.push(' ');
@@ -1008,7 +1017,7 @@ fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
 }
 
 /// A few short lines per lane: what a reader must see change.
-fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
+pub(crate) fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
     let mut state: Vec<Vec<String>> = drawn(world).into_iter().map(words::node_lines).collect();
     state.extend(world.matchmakers.iter().map(|matchmaker| {
         if !matchmaker.alive {
