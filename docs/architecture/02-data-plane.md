@@ -349,7 +349,7 @@ force and, on a full grid, the seal of each row. A read does not read the segmen
 matchmaker quorum. The journal state model (#1189) carries this rule. Across a Phase-1 bypass
 (#579) the promise fence alone is not enough, because the old acceptors never see the new ballot
 (#1258 (reshapes with a column below quorum), PR #1283). Since a read has no record check, the
-bypass closes that case with its own hold, which #1258 owns.
+bypass closes that case with its own hold, section 2.13: the bypassing leader sends no `Accept` at its new ballot until its promises meet every read quorum of the old grid.
 
 The rejected design is in section 11 (alternatives). The code follows once the journal state
 model (#1189) includes these rules.
