@@ -20,7 +20,7 @@
 (* record from a good record or a good replica (the repair of a chosen     *)
 (* value, `ctrl-grid/`), a replica log from a live peer, from the grid     *)
 (* until the retire, or from the object once the segment is offloaded      *)
-(* (replicas serve offloaded reads), an object by a new put from a good    *)
+(* (replicas serve offloaded reads), an object by a replace from a good    *)
 (* replica log. When no good copy is left, the controller reports data     *)
 (* loss (no unsafe recover in v1; Pierre, 2026-11-20).                     *)
 (*                                                                         *)
@@ -234,7 +234,10 @@ RepairRep(r, s) ==
   /\ found' = found \ {<<r, s>>}
   /\ UNCHANGED <<acc, obj, seg, lost, objFaults>>
 
-\* A new put of a damaged object, from a good replica log.
+\* The replace of a damaged object, from a good replica log, in one step.
+\* The conditional put of the offloader never replaces an object, so how a
+\* replace works (a delete that the mark fences) is Open for the offload
+\* design (02-data-plane.md section 2.10).
 RepairObj(s) ==
   /\ <<Obj, s>> \in found
   /\ ReplicaGood(s)

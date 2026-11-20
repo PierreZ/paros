@@ -245,14 +245,18 @@ the batcher and the unbatcher, the walk and the journal fold of the replica, and
 replica, over an abstract log that `multi-paxos/` checks. Its safety checks are `OneRange` (each
 write of a batch gets its own `seq` range one time, also when a batch is sent again: a
 `TooLarge` split, an `Accept` sent again, a slot that a new leader recovers), `AnswerAgrees` (the
-unbatcher's range is the range that each replica folds), `InOrder` (a replica folds the chosen
+unbatcher's range is the range that each replica folds), `AckedChosen` (the unbatcher's range is
+the range that the fold of the chosen log gives the write, so an answered write is never lost,
+also when a deposed leader answers its held batches: #1232 (held writes)), `InOrder` (a replica folds the chosen
 log in slot order with no gap) and `ReadFresh` (a read that a read replica serves holds each
 write that was complete before the read started). Its liveness check `Ends`: each batch that was
 sent ends in the log and at each replica, also when its batcher stopped. Each rule has a control
 that fails: a batcher that sends an ambiguous batch again (a write applied two times), a walk
 that folds past a gap, a fold state that survives a restart (a slot applied two times), a read
-served from the replica's prefix alone, a read replica that counts as a voter, and a leader that
-does not send lost `Accept`s again.
+served from the replica's prefix alone, a read replica that counts as a voter, a leader that
+does not send lost `Accept`s again, a deposed leader that answers a held batch from the outcome
+of its slot (an acked write lost) or answers it `NotLeader` (the batcher's resend lands two
+times).
 
 The proxy leader is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): `CommitBacked` (a proxy
 sends `Commit` only on a Phase-2 quorum of the configuration that the round's `Accept` carried,

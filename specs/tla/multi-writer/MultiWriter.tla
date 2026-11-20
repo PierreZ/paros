@@ -34,7 +34,8 @@
 (* The fold of a fenced write, in this order (the rule):                   *)
 (*   1. e < first_seq: "truncated" (the write's fate is lost).             *)
 (*   2. e < next_seq: "dup" with the seq when the record at e is this     *)
-(*      write (same uuid, same op), else "taken".                          *)
+(*      write (same uuid, same op), else "taken". After a seal, a record  *)
+(*      of the old segment is not in the fold: see Lookup.                 *)
 (*   3. the leader is not u (another uuid, None or unset): "fenced".       *)
 (*   4. e > next_seq: "early" (a write in front of it is not applied yet). *)
 (*   5. else "applied" at e.                                               *)
@@ -57,6 +58,18 @@
 (*   InitLeader None or Unset: the leader of a fresh journal. Unset        *)
 (*             refuses every write and truncate until a SetLeader.         *)
 (*                                                                         *)
+(*   Lookup    what the fold of the next segment answers for a fenced      *)
+(*             write whose position is in the old segment, below the       *)
+(*             boundary (#1301 (a resent write across a seal)). The fold   *)
+(*             of a segment holds the boundary state, not the old records. *)
+(*             "boundary": "below", not final; the client reads that       *)
+(*             position from the old segment's replica set (the rule).     *)
+(*             "global": the fold reads the old record (a read across      *)
+(*             segments at apply). "local": a control, the fold finds no   *)
+(*             record and answers "taken" (`apply_write` as it is).        *)
+(*             "digest": a control, the boundary state keeps the last      *)
+(*             DigestSize records of the old segment, older is "taken".    *)
+(*                                                                         *)
 (* A client that sees a final refusal ("fenced" or "taken") of a fenced    *)
 (* write while the view says None sends the write again, unfenced: it now  *)
 (* writes in multi-writer mode.                                            *)
@@ -74,13 +87,16 @@ CONSTANTS
   MaxSlots,    \* slots of the log
   SealAt,      \* the first slot of the next segment, 0 for no seal
   InitLeader,
-  FenceAt, Dedup, Basis, Boundary
+  FenceAt, Dedup, Basis, Boundary, Lookup,
+  DigestSize   \* the old records that the "digest" control keeps
 
 ASSUME FenceAt \in {"apply", "propose"}
 ASSUME Dedup \in {"first", "after"}
 ASSUME Basis \in {"view", "stale"}
 ASSUME Boundary \in {"wait", "early"}
 ASSUME InitLeader \in {None, Unset}
+ASSUME Lookup \in {"boundary", "global", "local", "digest"}
+ASSUME DigestSize \in Nat
 ASSUME SealAt = 0 \/ (SealAt >= 2 /\ SealAt < MaxSlots)
 
 Uuids == [w : Writers, k : 1..MaxSL]
@@ -141,17 +157,34 @@ TruncOk(c) ==
        \/ leader \in Uuids /\ c.u = leader
   ELSE c.ok
 
-Position(c) ==
+\* The first seq of the next segment: next_seq of the boundary state.
+BoundarySeq == 1 + Cardinality({k \in DOMAIN log : log[k].slot < SealAt})
+
+\* Slot s is in the next segment, and the record at position e is in the old.
+OldRecord(e, s) == SealAt > 0 /\ s > SealAt /\ log[e].slot < SealAt
+
+\* The answer from the record at position e.
+Match(c) == IF log[c.e].u = c.u /\ log[c.e].op = c.op THEN "dup" ELSE "taken"
+
+\* The answer for a position below next_seq, judged at slot s.
+Below(c, s) ==
+  IF ~OldRecord(c.e, s) THEN Match(c)
+  ELSE CASE Lookup = "boundary" -> "below"
+         [] Lookup = "global" -> Match(c)
+         [] Lookup = "local" -> "taken"
+         [] Lookup = "digest" ->
+              IF c.e >= BoundarySeq - DigestSize THEN Match(c) ELSE "taken"
+
+Position(c, s) ==
   IF c.e < first THEN "truncated"
-  ELSE IF c.e < NextSeq
-       THEN IF log[c.e].u = c.u /\ log[c.e].op = c.op THEN "dup" ELSE "taken"
+  ELSE IF c.e < NextSeq THEN Below(c, s)
        ELSE IF c.e > NextSeq THEN "early" ELSE "applied"
 
-JudgeFenced(c) ==
+JudgeFenced(c, s) ==
   IF Dedup = "first"
-  THEN IF c.e < NextSeq THEN Position(c)
-       ELSE IF ~FenceOk(c) THEN "fenced" ELSE Position(c)
-  ELSE IF ~FenceOk(c) THEN "fenced" ELSE Position(c)
+  THEN IF c.e < NextSeq THEN Position(c, s)
+       ELSE IF ~FenceOk(c) THEN "fenced" ELSE Position(c, s)
+  ELSE IF ~FenceOk(c) THEN "fenced" ELSE Position(c, s)
 
 Answer(c, kind, s, slot) ==
   [m |-> [k \in {"kind", "u", "e", "op"} \cap DOMAIN c |-> c[k]],
@@ -165,7 +198,7 @@ Seal(s, newLeader) ==
   ELSE UNCHANGED <<meta, metaSet>>
 
 ApplyFenced(c, s) ==
-  LET a == JudgeFenced(c) IN
+  LET a == JudgeFenced(c, s) IN
   /\ IF a = "applied"
      THEN log' = Append(log, [u |-> c.u, op |-> c.op, slot |-> s])
      ELSE UNCHANGED log
@@ -270,6 +303,22 @@ MoveToMulti(a) ==
   /\ UNCHANGED <<slots, applied, leader, first, log, truncs, answers, lead,
                  basis, nops, slCount, truncCount, meta, metaSet, starts>>
 
+\* A client that got "below" reads that position from the replica set of
+\* the old segment (a sealed segment does not change) and learns the fate
+\* of its write: "dup" when the record there is its write, "truncated"
+\* when the position is below first_seq, else "taken".
+ResolveBelow(a) ==
+  /\ a \in answers
+  /\ a.kind = "below"
+  /\ LET k == IF a.m.e < first THEN "truncated"
+              ELSE IF log[a.m.e].u = a.m.u /\ log[a.m.e].op = a.m.op THEN "dup"
+              ELSE "taken"
+     IN answers' = answers \cup
+          {[m |-> a.m, kind |-> k, seq |-> IF k = "dup" THEN a.m.e ELSE 0,
+            leader |-> leader, slot |-> 0]}
+  /\ UNCHANGED <<slots, applied, leader, first, log, truncs, sent, lead,
+                 basis, nops, slCount, truncCount, meta, metaSet, starts>>
+
 \* A truncate up to the tail that the client read: fenced by the uuid that it
 \* won, or unfenced.
 CallTruncate(w, fenced) ==
@@ -325,7 +374,7 @@ Next ==
   \/ \E w \in Writers : \/ CallSetLeader(w, TRUE) \/ CallSetLeader(w, FALSE)
                          \/ SendFenced(w) \/ SendUnfenced(w)
                          \/ CallTruncate(w, TRUE) \/ CallTruncate(w, FALSE)
-  \/ \E a \in answers : MoveToMulti(a)
+  \/ \E a \in answers : MoveToMulti(a) \/ ResolveBelow(a)
   \/ \E m \in sent : Propose(m)
   \/ ProposeFence
 
@@ -417,6 +466,9 @@ NoWriteAfterBack ==
 NoFenceNone ==
   ~\E a \in answers : SealAt > 0 /\ a.slot > SealAt
                       /\ slots[SealAt].leader = None /\ a.kind = "applied"
+
+\* A resend after the seal finds its write below the boundary.
+NoBelow == ~\E a \in answers : a.kind = "below"
 
 \* A resend of a fenced write is answered truncated after an unfenced
 \* truncate.

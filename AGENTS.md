@@ -47,7 +47,7 @@ flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain
 commit and catch-up, restarts; #1185 (rework 1.14)), the cooperative leader handoff
 (`specs/tla/leader-handoff/`: one hop, the frontier guard, the durable frontier, the pending
 rounds proposed again, and the beat guard that rework 2.7 adds; #1187 (rework 2.8)), grid quorums
-(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/`; #1102 (rework 1.13)), Matchmaker
+(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
@@ -55,7 +55,7 @@ only a resize record changes, the floor and the register across the handover; #1
 1.8); `specs/tla/handover-chain/`: three generations, clients that reach one member at a time,
 and the two fences of the state transfer; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
-read; #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
+read, the held answers of a deposed leader (#1232 (held writes)); #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
@@ -87,12 +87,32 @@ segment), reads routed to the set of the segment, retire at `F + 1` holders; #12
 reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
 `SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
 write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
-`Truncate` in both modes, a `Fence(None)` at a seal; #1274 (multi-writer mode through
-SetLeader(None) and expected_seq)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state
+`Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301
+(a resent write across a seal)); #1274 (multi-writer mode through SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
+(`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
+segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
+(reshape with a column below quorum)), segment records across a matchmaker set handover
+(`specs/tla/segment-records/`: the seal, the retire, the offload mark, the controller election and
+the reshape call as compare-and-sets on the matchmaker register while the set hands over; a
+replica drops its copy only after a write of the offload mark is done at a majority; #1275
+(segment records across a matchmaker handover)), the offload of sealed segments (`specs/tla/offload/`:
+the offloader's full copy, conditional put and compare-and-set mark, a found object read and
+marked whatever its release, the delete of the key by a mark that finds the record trimmed, the
+scrub of the objects below the trim floor, the drop after the mark; #1256 (offload races and the
+offloader role)), the health measures of the grid (`specs/tla/health/`: the spares of a column,
+electable, writable and the hold of a bypass as counts against the quorums, the seven journal
+states and their fixed actions, no placement over two zones after a zone loss; #1260 (journal
+health measures)), a user truncate across segments (`specs/tla/segment-truncate/`: the trim floor
+in the boundary state, the floor of a read from the segment in force, the floor check of an
+offloaded read, the trim of a sealed segment once the floor is decided over it, the acceptors'
+compaction after `F + 1` replicas, the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
+segments with an empty segment and a seal before the `Fence`; the whole boundary state, the
+leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state
 tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty
 record, the repair of a chosen value in one write; `specs/tla/ctrl-segments/`: the copies of a
 sealed segment across retire and offload, the repair of a replica log and of an object, the
-data-loss report; #1263 (CTRL recovery in the journal)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+data-loss report; #1263 (CTRL recovery in the journal)).
+`specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
@@ -172,7 +192,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
-  `Mutants` workflow runs every mutant of the core (about 2,850) in 16 shards each Sunday and on
+  `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
   for an edit that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with

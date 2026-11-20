@@ -1,0 +1,38 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# The design: a full copy, a conditional put, a conflict that reads the
+# object, a delete of the key when the mark finds the record trimmed, the
+# scrub of the controller, the delete by key, a drop after the mark. Two
+# offloaders of two releases; one offloader or the controller stops.
+safety            pass       ci
+# Two stops: both offloaders and the controller are covered.
+safety_crash2     pass       ci
+# Two segments, trimmed in order. Each segment is offloaded alone, so the
+# CI set has one; these two do not finish in 30 minutes.
+safety_np2_l1     pass       long   40
+safety_np2        pass       long   40
+# An offloader may take a sealed segment that did not retire yet.
+gate_sealed       pass       ci
+# A tombstone at trim also stops the late upload, while no controller stops.
+tomb              pass       ci
+# Reach: a check that must break, so that the passing checks are not empty.
+reach_duplicate      violation  ci
+reach_lateupload     violation  ci
+reach_stopbeforemark violation  ci
+reach_alldropped     violation  ci
+# Controls: each one breaks the property of its file.
+build_partial     violation  ci
+conflict_bytes    violation  ci
+conflict_abandon  violation  ci
+recheck_anyfail   violation  ci
+late_upload       violation  ci
+stop_before_mark  violation  ci
+scrub_unmarked    violation  ci
+trim_record       violation  ci
+drop_uploaded     violation  ci
+tomb_ctl_stop     violation  ci
+tomb_blind        violation  ci

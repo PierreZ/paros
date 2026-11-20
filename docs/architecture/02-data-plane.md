@@ -57,6 +57,30 @@ a single-writer journal batches in its client (`paros::client::Writer`), never i
 A leader may refuse a `Write` from its own fold at propose time, so a superseded leader's
 pipelined burst does not burn slots. That is an optimisation; the apply-time check is the safety.
 
+**A held answer belongs to the command, not to the slot** (decided by Pierre on 2026-11-20,
+#1232 (held writes)). The consensus leader holds the answer of each `Write` it proposed until the
+slot is applied. After a leader change, the slot of a deposed leader can choose another command
+or a `Noop`. So a leader answers a held write from the outcome of its slot only when the command
+applied at the slot is the one it proposed there. Else it answers `Unknown`, and it may answer
+`Unknown` at any time. It never answers `NotLeader` for a write that holds a slot: the caller
+would send it again, and both copies can land. A single writer resolves an `Unknown` with a
+resend at the same `expected_seq` (exactly-once, the fold judges the position); a batcher answers
+each write of the batch unanswered (at-least-once, §2.4). TLC checks the rule in
+`specs/tla/compartments/` (`AckedChosen`; the control `held_slot` loses an acked write, the
+control `held_notleader` lands a write two times) and the resend in `specs/tla/multi-writer/`.
+
+**A resend across a seal is answered `Below`** (#1301 (a resent write across a seal), TLC
+2026-11-20, `specs/tla/multi-writer/`). The fold of a segment holds the boundary state, not the
+records of the old segment (§2.10, #1271), so it cannot tell a `Duplicate` from a refusal at a
+position of the old segment. It answers `Below` there. `Below` is not final, like `Truncated`.
+The client reads that position from the replica set of the old segment: a sealed segment does
+not change, so the record there tells it the fate of its write, written or not (or `Truncated`
+below `first_seq`). Without the rule, the fold answers the resend of a written write "position
+taken", and a writer that writes it again lands it two times (controls `seal_local`,
+`seal_local_twice`). A fold that reads the old record at apply is safe too (`seal_global`), but
+apply would wait for another replica set. A digest of the last writes in the boundary state is
+safe only while it covers the writer's whole pipeline (`seal_digest`).
+
 The client pipelines a single-writer journal's writes with `paros::client::Pipeline` (#597
 (several writes in flight per journal)): one writer's leadership, shared by its callers, each
 write opened at the position after the last one and sent without waiting for the answer of the
@@ -228,12 +252,13 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   single-writer mode, open in multi-writer mode, judged at apply, `first_seq` monotone and
   clamped to `next_seq`.
 - **The seal carries `None`.** The leader uuid of the boundary state (section 2.10) may be
-  `None`. The journal's matchmaker record holds it, and the first leader of the next segment
-  proposes `Fence(None)`, which makes the next segment's fold multi-writer (check `seal_long`,
-  reach `reach_fence_none`). The record needs no third value for "not written": the leader
-  reads the uuid only after the seal wrote the boundary state, the same compare-and-set that
-  writes `next_seq` into the segment record (#1271). A `Fence` read before that write lets a
-  writer of the wrong mode in (control `boundary_early`).
+  `None`. The segment record holds it, and the next segment's fold starts from that record, so
+  it starts multi-writer (#1303 (two seals in a row)). `multi-writer/` checked the first form of
+  section 2.10: the journal's matchmaker record held the uuid, and the first leader of the next
+  segment proposed `Fence(None)` (check `seal_long`, reach `reach_fence_none`). There, a `Fence`
+  read before the seal wrote the uuid lets a writer of the wrong mode in (control
+  `boundary_early`). The record needs no third value for "not written": a replica of the next
+  segment starts only from a written record.
 
 **Open**: the leader of a fresh journal, before its first `SetLeader`: `None` (a fresh journal
 is multi-writer) or unset (every write and truncate is refused until a `SetLeader`). The model
@@ -389,26 +414,116 @@ checked, each with a control that TLC breaks:
 - A leader's writes are fenced by its promise quorum, never by the table version, so a change of
   a sealed segment (retire, offload, trim) never stops the tail (as in Delos).
 - A replica drops its copy of a segment only after the record says offloaded. The object key is
-  the journal and the segment, so the record stores no location.
+  the journal and the segment, so the record stores no location. **"Says offloaded" means a
+  write of the mark that is done at a matchmaker majority** (#1275 (segment records across a
+  matchmaker handover), checked by `specs/tla/segment-records/`): the offloader's own
+  compare-and-set, after which it tells the replicas, or the replica's own compare-and-set of the
+  same value. A read that shows the mark is not enough: the mark can be on a minority only, and
+  another majority, or the successor of a matchmaker handover, says retired (control
+  `drop_read`). Each step that acts on a record (the retire of the old acceptors, a drop) acts on
+  a write that it saw done, never on a read alone.
+- **The records cross a handover of the matchmaker set** (#1275, `specs/tla/segment-records/`).
+  The records and the matchmaker record are one compare-and-set register for each journal, fenced
+  by the matchmaker generation. The handover's successor takes the highest write of the stop
+  quorum and the highest read generation, as for the configuration register (`handover/`), and
+  a frozen matchmaker takes nothing. So each record write that a majority took is in the
+  successor, no record moves back, the seal end is written once, a compare-and-set on the old
+  set after the stop fails, and a deposed controller's reshape fails across the handover too.
+  Controls: a successor that copies one member of the stop quorum (`close_one`,
+  `close_one_term`), a frozen member that takes writes (`frozen_serves`).
+- **Offload is prepared, not built, in v1** (Pierre, 2026-11-20). v1 keeps the offloaded state in
+  the segment record, the read path that checks it, and the record rules of #1256 and #1276
+  (user truncate across segments). The offloader role, the object store code and the scrub of the
+  objects come later. The rules below are the design for that day.
+- **The offloader** (a stateless role, Pierre 2026-11-20; checked by `specs/tla/offload/`, #1256
+  (offload races and the offloader role)) offloads a retired segment in four steps: it reads the
+  segment from a replica that applied every slot up to the `next_seq` of the record, builds the
+  object with deterministic bytes, writes it with a conditional put at the key, and marks
+  `offloaded` by compare-and-set from "not offloaded and not trimmed". The races of two
+  offloaders, a lost mark, an offloader that stops between the put and the mark, and a trim that
+  comes during the upload need these rules, each with a control that TLC breaks:
+  - A put that finds an object is not a failure: the offloader reads the object and marks when it
+    holds the whole segment, whatever the release in its header. Giving up never marks after a
+    lost mark; comparing bytes never marks across a rolling upgrade.
+  - A failed mark deletes the key only when the record says trimmed (the late upload after
+    trim). A delete on any failed mark deletes the object that the other offloader marked.
+  - The trim deletes the object by its key, marked or not, and the controller scrubs: it lists
+    the store and deletes each object of a segment below the trim floor. The scrub never deletes
+    an object of a segment that is not trimmed, even with no mark: that object can be between
+    its put and its mark. A tombstone at trim was checked too; it also needs a list (a
+    controller can stop between the trim and the tombstone) and stays for good, so the design
+    takes the scrub.
+  - Offload does not need the retire: one complete copy and `F + 1` holders until the mark are
+    enough. The controller still offloads retired segments only.
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in
   Compartmentalized Paxos (every replica executes every write, sections 3.3 and 8.5); inside one
   segment they still do. Because the journal state is folded at apply (sections 2.1 and 2.2), a
-  replica of the next segment starts from the **boundary state**, the journal state at the seal.
-  The first replica of the old set that applied every slot of the segment writes it in one
-  compare-and-set at the matchmakers: `next_seq` into the segment record, and the leader uuid
-  into the journal's matchmaker record (the journal metadata, beside the controller term, and
-  later quota and offload limits; Pierre, 2026-11-20). The first leader of the next segment
-  reads that uuid and proposes it as the segment's first slot, a `Fence(uuid)` that sets the
-  leader uuid. A replica of the next segment takes `next_seq` from the segment record and the
-  uuid from that slot, so a later change of the metadata never reaches its fold. A record with
-  `next_seq` and no uuid anywhere lets a writer that a `SetLeader` of the old segment deposed
-  write again; so does a `Fence` read before the seal wrote the uuid. A reader routes a read by
-  the `seq` range of the segment records. A segment retires after `F + 1` replicas of its set
-  hold it and its boundary state is written; after that the next segment never needs its
-  slots. **Open**: the trim floor (`first_seq`) is part of the boundary state by our reading;
-  the journal state model (#1189) decides it.
+  replica of the next segment starts from the **boundary state**, the journal state at the seal:
+  `next_seq`, the trim floor `first_seq` (#1276 (user truncate across segments),
+  `specs/tla/segment-truncate/`, below) and the leader uuid. **The whole boundary state is in
+  the segment record** (#1303 (two seals in a row), checked by `specs/tla/seal-chain/`; decided
+  by Pierre on 2026-11-20 after the check). The first replica of the old set
+  that applied every slot of the segment writes it once, by compare-and-set at the matchmakers,
+  into the record of that segment. A replica of the next segment starts from the record of the
+  segment just before it, never from the newest record written (control `record_latest`: a
+  deposed writer writes). An empty segment, sealed before its first slot, gets the record of its
+  predecessor again, and a `Noop` at any slot changes nothing, so no slot of the next segment is
+  needed for the boundary. `next_seq` and `first_seq` never move back across a chain of seals.
+  The first form of the rule put the uuid in the journal's matchmaker record and a `Fence(uuid)`
+  at the first slot of the next segment (#1271 (a write reaches only the replica set of its
+  segment), `specs/tla/segment-replicas/`, `meta`). Through two seals in a row it is also safe,
+  but it needs two more rules, each with a control where a deposed writer writes: the leader
+  reads the uuid in the same read as the record of the segment before (`meta_any`), and the seal
+  of a segment with no `Fence` leaves the field as it is (`meta_blank`). It also needs the
+  `Fence` slot and the refusal of every command before it when the gap fill takes that slot
+  (#1302 (the Fence slot against the Noop gap fill)). The segment record needs none of these. A
+  record with `next_seq` and no uuid lets a writer that a `SetLeader` of the old segment deposed
+  write again. A reader routes a read by the `seq` range of the segment records. A segment
+  retires after `F + 1` replicas of its set hold it and its boundary state is written; after
+  that the next segment never needs its slots.
+
+**A user truncate across segments** (#1276 (user truncate across segments), checked by
+`specs/tla/segment-truncate/`). A `Truncate` stays a decided command of the log, judged at apply
+(section 2.6). With segments, six rules keep it safe and live, each with a control that TLC
+breaks:
+
+- **The boundary state holds `first_seq`.** The replicas of the next segment check every read
+  against their own fold, and a floor that a `Truncate` of the old segment decided is in no slot
+  that they apply. Without `first_seq` in the boundary state (`nofirst`), or with a floor taken
+  from the trimmed segment records only (`trimstate`, wrong when the floor lands inside a
+  segment), a read returns a record below the floor. The writer of the boundary state writes
+  `first_seq` with `next_seq`, in the same compare-and-set; both are fixed at the seal.
+- **A read takes its floor from the segment in force.** A replica of a sealed segment folds only
+  up to the seal, so its own `first_seq` misses every later `Truncate`. The reader gets the floor
+  from a replica of the segment in force, at the basis of its leaderless read, and asks the
+  holder of an older segment only for a `seq` at or above that floor (`holder` returns a record
+  below the floor). Above the floor, every holder still has the record: its own floor is never
+  higher.
+- **A read of an offloaded segment checks the floor first.** The object holds the whole segment,
+  also the records below a floor that lands inside it. The replica that serves the object (or
+  its cache) answers `Truncated` below its floor (`cache_unchecked`).
+- **A segment is trimmed only once the floor is decided over it, and only when it is sealed.**
+  The record of a segment becomes trimmed when a replica's fold has `first_seq` at or above the
+  segment's last `seq` (the `next_seq` of its boundary state), from sealed, retired or offloaded;
+  a trimmed record never becomes live again, and the trim deletes the object by its key. A trim
+  on the intent to truncate, before the `Truncate` is decided (`trim_intent`), and a trim of the
+  open segment, whose range so far is below the floor (`trim_open`), lose records above the floor.
+  This agrees with the offloader of #1256 (offload races): the controller scrubs only objects of
+  segments below the trim floor, and a failed mark deletes the key only when the record says
+  trimmed.
+- **The acceptors of a segment compact only to a slot that `F + 1` replicas of its set compacted
+  to.** Each of these replicas applied and folded every slot below it, so with `F` of them down
+  one is still live to give a laggard its trim point. Acceptors that compact to the decided
+  floor alone (`acc_floor`) can drop the slots of a segment that no replica applied yet: nobody
+  can then fold the segment, its boundary state is never written, and the next segment never
+  starts. In the colocated core an acceptor compacts at the walk of its own node, so the case
+  does not come up; Compartmentalized Paxos does not state a rule for it, so this model is its
+  check.
+- **A laggard jumps.** A replica behind the floor of its segment, whose next slot no acceptor
+  and no peer holds, takes the trim point of a peer (`TrimmedTo`, as in `truncation/`) and never
+  fetches a slot of a trimmed segment (`nojump` stops it for ever).
 
 **A leaderless read of the tail across a reshape** (#1254 (leaderless reads across a reshape),
 checked on 2026-11-20 in `specs/tla/experiments/segments/reads/`). A reader that holds the record
@@ -430,7 +545,7 @@ force and, on a full grid, the seal of each row. A read does not read the segmen
 matchmaker quorum. The journal state model (#1189) carries this rule. Across a Phase-1 bypass
 (#579) the promise fence alone is not enough, because the old acceptors never see the new ballot
 (#1258 (reshapes with a column below quorum), PR #1283). Since a read has no record check, the
-bypass closes that case with its own hold, which #1258 owns.
+bypass closes that case with its own hold, section 2.13: the bypassing leader sends no `Accept` at its new ballot until its promises meet every read quorum of the old grid.
 
 The rejected design is in section 11 (alternatives). The code follows once the journal state
 model (#1189) includes these rules.
@@ -453,6 +568,7 @@ a segment's replica set, each step completes:
 | Offload mark, record of a trim | a matchmaker majority |
 | Matchmaker set handover | a majority of the old set (the stop quorum), then a majority of the new set (the successor decree) |
 | Grid controller election, reshape call | a matchmaker majority for each compare-and-set on the matchmaker record (section 2.12, #1259) |
+| Hold before Phase 2 of a bypass | `F + 1` acceptors of one column of the old grid; a stuck column moves (section 2.13, #1258) |
 
 Each step blocks with one member more down than its quorum allows, and each step that waits for
 every target blocks with `F` down: the model sees both. On a grid that is not full the leaderless
@@ -510,7 +626,94 @@ reshape opened comes into force. The controller's crate (`paros-journal-control`
 consensus-sim flavor (#1261 (grid controller decision tests)) come after the journal state model
 (#1189); the flavor's walk then trace-checks against this model.
 
-### 2.14 CTRL recovery in the journal
+### 2.13 A column below quorum
+
+**Not in v1** (Pierre, 2026-11-20, from the first review of the journal plan): a column below
+quorum is `F + 1` losses in one column, which is outside the promise of section 2.11. In v1 the
+journal holds and alerts. The Phase-1 bypass (#579) is not built in v1, so the hold before Phase 2
+below and the read rule of #1270 (bypass read order) do not apply to v1. They stay here as the
+rules for the day #579 comes back.
+
+**A column is below quorum** when fewer than `F + 1` of its acceptors are live (the grid of
+section 2.11: `rows = 2F + 1`, `acks = F + 1`). Writes go on in the other columns (#533 (move a
+stuck round)), but no Phase-1 quorum of the grid exists, so no new leader can be elected and no
+reshape can run a full Phase 1 over the old grid. #1258 (reshape with a column below quorum)
+checked with `specs/tla/degraded-reshape/` whether the live leader can reshape away with the
+Phase-1 bypass of #579 (zero-stall reconfiguration, `specs/tla/zero-stall/`):
+
+- **With the decision hold of #579, no.** The bypass moves the leader to the new grid with no
+  Phase 1, and its writes are chosen there. But the hold acks no slot before a Phase-1 quorum of
+  the old grid promised the new ballot, and GC waits for the same. That quorum does not exist, so
+  no slot is acked and the old grid never retires.
+- **The decision hold also does not order two reads**: #1270 (a read at the bypass ballot), and a
+  read on the old basis that saw the old vote of one acceptor for a slot that the new grid chose,
+  followed by a read on the old basis at a quorum without that acceptor. Gating the read basis
+  closes the first, not the second.
+- **The rule: a hold before Phase 2 on a blocking set** (decided by Pierre on 2026-11-20, #1258).
+  The bypassing leader sends no `Accept` at its new ballot until the acceptors that promised it
+  meet every read quorum of each prior configuration. On this grid that is `F + 1` acceptors of
+  one old column, which a column below quorum leaves. Its acks and its GC wait for the same
+  promises, not for a Phase-1 quorum of the old grid. The fence of the code (section 2.10, the
+  promise in each `PreReadAck`) then orders every read, with no matchmaker read on the read path,
+  which matches the choice of section 2.10. The bypass waits one round trip to one old column, not
+  for a full Phase 1. Checked by `block_propose`, `block_propose_maj` and `live_block_propose`;
+  with one promise less, TLC finds a stale read (`block_propose_short`). The segment-record check
+  on each read, with no hold, also passes (`safe_record`, `live_record`) and is the rejected
+  alternative.
+- **The rule needs a live leader.** If the leader is lost while a column is below quorum, no
+  election can run, and writes stop until a member of that column comes back: the grid
+  controller holds and alerts (section 2.12).
+- **The seal end of a bypass is the bypassing leader's allocator frontier**: one above the highest
+  slot that it proposed at its old ballot. A bypass runs no Phase 1, so the end of section 2.10
+  (one above the highest vote its Phase 1 saw) is replaced by the frontier, which is never lower,
+  because a leader bypasses only after it proposed every slot that its own election recovered. An
+  end at the chosen prefix chooses two values.
+- **A heal that moves survivors to other columns is safe**: the layout is row-major over the
+  sorted members (`grid/Grid.tla`), and a move between two partitioned grids where every survivor
+  changes column keeps one value (`config-register/heal_partitioned`); with Phase 1 one acceptor
+  short in every column, TLC finds two values (`heal_partitioned_short`).
+
+### 2.14 Record headers
+
+**Every journal record carries headers** (decided by Pierre on 2026-11-20, #1299 (record headers
+from clients and from paros)). A client can give headers with its `Write`, and paros can add its
+own, for example the leader time. This is the only idea of the Apache Iggy study that paros
+takes. The headers belong to the journal record format, not to `paros-consensus`, which keeps
+carrying opaque bytes (section 4.3 of `04-roles.md`). Pierre answered three points of #1299 on
+2026-11-20:
+
+- **The leader time is a hint only.** It promises no order across a leader change or a seal,
+  enters no safety rule and needs no TLA+ invariant.
+- **It is stamped per write**, not per batch.
+- **Client headers are opaque.** The journal never reads them, and a read cannot filter on them.
+- **In v1 paros adds only the leader time**, and keeps a reserved key space for later paros
+  headers (approved by Pierre on 2026-11-20).
+
+**Open** (#1299 decides each one): who stamps the leader time (the leader at propose or the
+batcher); the encoding, the size limits and the exact reserved key space; and
+whether the headers are inside the value checksum and the offload hash.
+
+### 2.15 The v1 scope of the journal
+
+Pierre's answers to the first review of the journal plan (2026-11-20,
+`/mnt/project-files/review/journal-plan-2026-11-20/fable-review-1.md`):
+
+- **A column below quorum is not in the v1 promise**: the journal holds and alerts (section 2.13).
+  The zero-stall bypass (#579) is out of v1.
+- **The elected controller stays**: its own role, elected by a term in the matchmaker record
+  (section 2.12).
+- **Offload is prepared, not built** (section 2.10). This replaces "offload retired segments" in
+  the controller's first scope: the controller heals, rolls and scrubs.
+- **The v1 controller has no SLOs and no scaling from latency or load.** It acts only on failures,
+  from protocol facts: heal, roll and scrub. The roles publish their metrics to the controller;
+  which metric drives which action is decided after tests (#1260 (health measures)).
+- **The boundary uuid lives in the segment record**, the result of #1303 (two seals in a row,
+  section 2.10).
+- **A write stall at each roll is accepted in v1, and measured.**
+- **The journal gets its own walk crate**: a `journal-sim` beside `consensus-sim`. `consensus-sim`
+  stays on `paros-consensus` only.
+
+### 2.17 CTRL recovery in the journal
 
 **A damaged record is repaired by CTRL, whoever finds it** (#1263 (CTRL recovery in the journal),
 checked on 2026-11-20 by `specs/tla/ctrl-grid/` and `specs/tla/ctrl-segments/`). The grid
@@ -554,8 +757,12 @@ checksums. Each rule has a control that TLC breaks:
   after the record says offloaded.** A put of a log that it did not check makes a rotted copy
   the only one once the replicas drop (`upload_any`); a drop before the mark loses the segment
   with no fault (`drop_retired`).
-- **A damaged object is put again from a replica, or reported as data loss.** While a replica of
-  the set holds a good log, the object is put again. Once no replica holds the segment, a
-  damaged object is data loss: outside the survive promise, reported, never recovered in an
-  unsafe way (Pierre, 2026-11-20). A loss report is always true: no good copy is left (`object`,
-  `live_object`, `reach_loss`).
+- **A damaged object is replaced from a replica, or reported as data loss.** While a replica of
+  the set holds a good log, a good copy exists to replace the object. Once no replica holds the
+  segment, a damaged object is data loss: outside the survive promise, reported, never recovered
+  in an unsafe way (Pierre, 2026-11-20). A loss report is always true: no good copy is left
+  (`object`, `live_object`, `reach_loss`). The model replaces the object in one step. The
+  offloader's conditional put never replaces an object, and no rule deletes the object of a
+  segment that is not trimmed (section 2.10, #1256 (offload races and the offloader role)).
+  **Open**: how a replace works (a delete that the mark fences) is for the offload design, with
+  its own check.
