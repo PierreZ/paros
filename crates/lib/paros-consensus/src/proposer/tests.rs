@@ -163,6 +163,60 @@ fn promise_pages_are_cursor_checked() {
     );
 }
 
+/// Wire hygiene of a `Promise` page: each rule of the shape check refuses
+/// the one malformed page that breaks it, next to the well-formed page it
+/// takes. An honest acceptor never sends these pages, so no walk reaches the
+/// refusals.
+#[test]
+fn a_promise_page_of_the_wrong_shape_is_refused() {
+    let acc = |slots: &[u64]| -> BTreeMap<Slot, (Ballot, Command)> {
+        slots
+            .iter()
+            .map(|&s| (Slot(s), (ballot(0, 1), cmd(s))))
+            .collect()
+    };
+    let fau = |slots: &[u64]| -> BTreeMap<Slot, Ballot> {
+        slots.iter().map(|&s| (Slot(s), ballot(0, 1))).collect()
+    };
+    let valid = |expected: u64,
+                 accepted: &[u64],
+                 faulty: &[u64],
+                 from: u64,
+                 next: Option<u64>| {
+        promise_page_shape_valid(
+            Slot(expected),
+            &acc(accepted),
+            &fau(faulty),
+            Slot(from),
+            next.map(Slot),
+        )
+    };
+    // Well formed: a terminal page, a continued page, an empty terminal page.
+    assert!(valid(2, &[2, 4], &[3], 2, None));
+    assert!(valid(2, &[2, 4], &[5], 2, Some(6)));
+    assert!(valid(2, &[], &[], 2, None));
+    // The page starts at the cursor the receiver expects.
+    assert!(!valid(2, &[3], &[], 3, None), "a page off its cursor");
+    // No entry sits below the page's start.
+    assert!(!valid(2, &[1, 4], &[], 2, None), "a record below the start");
+    assert!(!valid(2, &[4], &[1], 2, None), "a faulty entry below the start");
+    // The two maps are disjoint.
+    assert!(!valid(2, &[4], &[4], 2, None), "a slot both readable and faulty");
+    // A continued page carries an entry, and its cursor passes its start and
+    // every entry of both maps.
+    assert!(!valid(2, &[], &[], 2, Some(3)), "an empty continued page");
+    assert!(!valid(2, &[2], &[], 2, Some(2)), "a cursor at the start");
+    assert!(!valid(2, &[2, 5], &[], 2, Some(4)), "a cursor before a record");
+    assert!(!valid(2, &[2], &[5], 2, Some(4)), "a cursor before a faulty entry");
+    // At most the ceiling, across both maps.
+    let ceiling = PROMISE_BATCH as u64;
+    let readable: Vec<u64> = (0..ceiling / 2).collect();
+    let damaged: Vec<u64> = (ceiling / 2..ceiling).collect();
+    assert!(valid(0, &readable, &damaged, 0, None));
+    let over: Vec<u64> = (ceiling / 2..=ceiling).collect();
+    assert!(!valid(0, &readable, &over, 0, None), "a page past the ceiling");
+}
+
 /// A faulty report above the best `have` blocks the slot (Case 3) until
 /// a straggler's answer lets the probe decide it (Case 1).
 /// Review finding C8: the probe pages a straggler's `Promise` through the
