@@ -161,3 +161,16 @@ other.
 Matchmakers are mandatory in the service (section 3.1): every journal has its tenant's set,
 because reconfiguration is how a dead disk is replaced, a machine drained, a journal moved and a
 quorum system changed.
+
+### 4.2 The consensus core is a library for everyone
+
+**`paros-consensus` stays usable by other people** (decided by Pierre on 2026-11-20). Anyone can
+use it to run plain Multi-Paxos, single-decree Paxos or any other flavor that it builds
+(leader handoff, grid quorums, matchmakers, proxy leaders, replicas, leaderless reads), with no
+part of the paros service. What paros needs comes from **optional behaviour and software
+composition**: a role or a policy that a caller opts into, or a layer above the core that
+composes the roles. The core never takes a concept of the service, such as a cell, a tenant
+policy or `cell init` (#1264 (remove the cell from paros-consensus), section 3.7). A paros need
+that the core cannot meet by composition is a new optional behaviour of the core, and its plain
+arm stays unchanged. This extends "plain Multi-Paxos is a shape of the core" of AGENTS.md to
+every flavor.
