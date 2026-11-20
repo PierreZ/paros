@@ -418,6 +418,10 @@ checked, each with a control that TLC breaks:
   set after the stop fails, and a deposed controller's reshape fails across the handover too.
   Controls: a successor that copies one member of the stop quorum (`close_one`,
   `close_one_term`), a frozen member that takes writes (`frozen_serves`).
+- **Offload is prepared, not built, in v1** (Pierre, 2026-11-20). v1 keeps the offloaded state in
+  the segment record, the read path that checks it, and the record rules of #1256 and #1276
+  (user truncate across segments). The offloader role, the object store code and the scrub of the
+  objects come later. The rules below are the design for that day.
 - **The offloader** (a stateless role, Pierre 2026-11-20; checked by `specs/tla/offload/`, #1256
   (offload races and the offloader role)) offloads a retired segment in four steps: it reads the
   segment from a replica that applied every slot up to the `next_seq` of the record, builds the
@@ -443,20 +447,28 @@ checked, each with a control that TLC breaks:
   the whole journal the replicas therefore do not bound write throughput, as they do in
   Compartmentalized Paxos (every replica executes every write, sections 3.3 and 8.5); inside one
   segment they still do. Because the journal state is folded at apply (sections 2.1 and 2.2), a
-  replica of the next segment starts from the **boundary state**, the journal state at the seal.
-  The first replica of the old set that applied every slot of the segment writes it in one
-  compare-and-set at the matchmakers: `next_seq` into the segment record, and the leader uuid
-  into the journal's matchmaker record (the journal metadata, beside the controller term, and
-  later quota and offload limits; Pierre, 2026-11-20). The first leader of the next segment
-  reads that uuid and proposes it as the segment's first slot, a `Fence(uuid)` that sets the
-  leader uuid. A replica of the next segment takes `next_seq` from the segment record and the
-  uuid from that slot, so a later change of the metadata never reaches its fold. A record with
-  `next_seq` and no uuid anywhere lets a writer that a `SetLeader` of the old segment deposed
-  write again; so does a `Fence` read before the seal wrote the uuid. A reader routes a read by
-  the `seq` range of the segment records. A segment retires after `F + 1` replicas of its set
-  hold it and its boundary state is written; after that the next segment never needs its
-  slots. **Open**: the trim floor (`first_seq`) is part of the boundary state by our reading;
-  the journal state model (#1189) decides it.
+  replica of the next segment starts from the **boundary state**, the journal state at the seal:
+  `next_seq`, the trim floor `first_seq` and the leader uuid. **The whole boundary state is in
+  the segment record** (#1303 (two seals in a row), checked by `specs/tla/seal-chain/`; Pierre
+  chose on 2026-11-20 that TLA+ decides where the uuid lives). The first replica of the old set
+  that applied every slot of the segment writes it once, by compare-and-set at the matchmakers,
+  into the record of that segment. A replica of the next segment starts from the record of the
+  segment just before it, never from the newest record written (control `record_latest`: a
+  deposed writer writes). An empty segment, sealed before its first slot, gets the record of its
+  predecessor again, and a `Noop` at any slot changes nothing, so no slot of the next segment is
+  needed for the boundary. `next_seq` and `first_seq` never move back across a chain of seals.
+  The first form of the rule put the uuid in the journal's matchmaker record and a `Fence(uuid)`
+  at the first slot of the next segment (#1271 (a write reaches only the replica set of its
+  segment), `specs/tla/segment-replicas/`, `meta`). Through two seals in a row it is also safe,
+  but it needs two more rules, each with a control where a deposed writer writes: the leader
+  reads the uuid in the same read as the record of the segment before (`meta_any`), and the seal
+  of a segment with no `Fence` leaves the field as it is (`meta_blank`). It also needs the
+  `Fence` slot and the refusal of every command before it when the gap fill takes that slot
+  (#1302 (the Fence slot against the Noop gap fill)). The segment record needs none of these. A
+  record with `next_seq` and no uuid lets a writer that a `SetLeader` of the old segment deposed
+  write again. A reader routes a read by the `seq` range of the segment records. A segment
+  retires after `F + 1` replicas of its set hold it and its boundary state is written; after
+  that the next segment never needs its slots.
 
 **A leaderless read of the tail across a reshape** (#1254 (leaderless reads across a reshape),
 checked on 2026-11-20 in `specs/tla/experiments/segments/reads/`). A reader that holds the record
@@ -561,6 +573,12 @@ consensus-sim flavor (#1261 (grid controller decision tests)) come after the jou
 
 ### 2.13 A column below quorum
 
+**Not in v1** (Pierre, 2026-11-20, from the first review of the journal plan): a column below
+quorum is `F + 1` losses in one column, which is outside the promise of section 2.11. In v1 the
+journal holds and alerts. The Phase-1 bypass (#579) is not built in v1, so the hold before Phase 2
+below and the read rule of #1270 (bypass read order) do not apply to v1. They stay here as the
+rules for the day #579 comes back.
+
 **A column is below quorum** when fewer than `F + 1` of its acceptors are live (the grid of
 section 2.11: `rows = 2F + 1`, `acks = F + 1`). Writes go on in the other columns (#533 (move a
 stuck round)), but no Phase-1 quorum of the grid exists, so no new leader can be elected and no
@@ -600,3 +618,22 @@ Phase-1 bypass of #579 (zero-stall reconfiguration, `specs/tla/zero-stall/`):
   changes column keeps one value (`config-register/heal_partitioned`); with Phase 1 one acceptor
   short in every column, TLC finds two values (`heal_partitioned_short`).
 
+### 2.15 The v1 scope of the journal
+
+Pierre's answers to the first review of the journal plan (2026-11-20,
+`/mnt/project-files/review/journal-plan-2026-11-20/fable-review-1.md`):
+
+- **A column below quorum is not in the v1 promise**: the journal holds and alerts (section 2.13).
+  The zero-stall bypass (#579) is out of v1.
+- **The elected controller stays**: its own role, elected by a term in the matchmaker record
+  (section 2.12).
+- **Offload is prepared, not built** (section 2.10). This replaces "offload retired segments" in
+  the controller's first scope: the controller heals, rolls and scrubs.
+- **The v1 controller has no SLOs and no scaling from latency or load.** It acts only on failures,
+  from protocol facts: heal, roll and scrub. The roles publish their metrics to the controller;
+  which metric drives which action is decided after tests (#1260 (health measures)).
+- **The boundary uuid lives in the segment record**, the result of #1303 (two seals in a row,
+  section 2.10).
+- **A write stall at each roll is accepted in v1, and measured.**
+- **The journal gets its own walk crate**: a `journal-sim` beside `consensus-sim`. `consensus-sim`
+  stays on `paros-consensus` only.
