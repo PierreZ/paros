@@ -15,7 +15,7 @@
 use moonpool_walk::{Cx, sometimes};
 use paros_consensus::{Ballot, NodeId};
 
-use super::{Cluster, ClusterEvent, Mutant, reach};
+use super::{Cluster, ClusterEvent, Mutant, Steer, reach};
 
 impl Cluster {
     /// Retire one node that the evidence releases, or ask the matchmakers
@@ -34,7 +34,7 @@ impl Cluster {
             .collect();
         let sticky = self
             .checking
-            .filter(|id| self.flavor.retiring && candidates.contains(id));
+            .filter(|id| self.flavor.steer == Steer::Retiring && candidates.contains(id));
         let Some(id) = sticky.or_else(|| cx.rng().pick(&candidates).copied()) else {
             return;
         };
@@ -72,7 +72,7 @@ impl Cluster {
         self.drain_node(id, cx);
     }
 
-    /// One operator move of a [`Flavor::retiring`](super::Flavor::retiring)
+    /// One operator move of a [`Steer::Retiring`](super::Steer::Retiring)
     /// walk: a reconfiguration, a retirement or a rejoin.
     pub(super) fn operate(&mut self, cx: &mut Cx<'_, Self>) {
         match cx.rng().below(3) {
@@ -122,7 +122,7 @@ impl Cluster {
         // A lagging-reader walk admits the late nodes only at node 0: when
         // node 0 or a late node leads, it moves onto a late node while every
         // other pool lags until the settle rounds (`Cluster::tick_all`).
-        let steer = self.flavor.lagging_reader;
+        let steer = self.flavor.steer == Steer::LaggingReader;
         let pairs: Vec<(NodeId, NodeId)> = self
             .nodes
             .iter()

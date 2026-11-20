@@ -8,6 +8,7 @@ OwnerParos3 == <<1, 2, 1>>
 \* Two ballots of two proposers, and two ballots of one proposer (a bypass).
 OwnerTwo  == <<1, 2>>
 OwnerSame == <<1, 1>>
+OwnerSame3 == <<1, 1, 1>>
 
 \* A configuration of three members, then one of two with one common member.
 \* A majority of the first can choose a slot without the common member.

@@ -17,6 +17,11 @@ read_p212_nohold   violation  ci
 read_carry_nohold  violation  ci
 read_p212_hold     pass       ci
 read_carry_hold    pass       ci
+# A read also covers what an earlier read returned (#1270 (bypass read order)).
+# The control: a reader counts a slot that a ballot chose before its fence
+# Phase 1 (ReadHold = FALSE).
+read_p212_no_read_hold   violation  ci
+read_carry_no_read_hold  violation  ci
 # The GC floor after a bypass.
 gc_early           violation  ci
 gc_p212_paper      pass       long

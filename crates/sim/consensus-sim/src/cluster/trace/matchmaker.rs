@@ -55,6 +55,27 @@ fn ballots(events: &[ClusterEvent]) -> BTreeSet<Ballot> {
         .collect()
 }
 
+/// The layout of each configuration that a ballot selects, for
+/// `MatchmakerGridTrace.tla`: its members in the order of its grid. A
+/// configuration keeps its members sorted (`AcceptorConfig::members`), and
+/// its grid is row-major over them, so each set has one layout.
+pub(super) fn layouts(trace: &mut Trace, events: &[ClusterEvent]) {
+    let layouts: BTreeSet<Value> = events
+        .iter()
+        .filter_map(|event| match event {
+            ClusterEvent::Select { config, .. } => {
+                assert!(
+                    config.is_sorted(),
+                    "a configuration lists its members in order"
+                );
+                Some(Value::Seq(config.iter().map(|id| node(*id)).collect()))
+            }
+            _ => None,
+        })
+        .collect();
+    trace.define("TraceLayouts", Value::Set(layouts.into_iter().collect()));
+}
+
 /// The events of one cluster walk of a pool of `nodes` and `matchmakers`
 /// matchmakers as a trace of `MatchmakerTrace.tla`.
 pub(super) fn trace(nodes: u64, matchmakers: u64, events: &[ClusterEvent]) -> Trace {

@@ -62,6 +62,15 @@ of `consensus-sim`. The trace specs today are:
 - `matchmaker/RetireTrace`: `MatchmakerTrace` and the retirement (a node retires on an effective
   floor that no registration at or above names, a retired node takes no step, and a rejoin
   books it again), on the `retiring` flavor.
+- `matchmaker/MatchmakerGridTrace`: `MatchmakerTrace` with each configuration a grid (a win
+  needs a Phase-1 quorum of every grid of `H_b`, a value is chosen in one column of `C_b`) and
+  each proxy's `Commit` backed by a column of `C_b`, on the steered `reconfiguring` flavor
+  (matchmakers and every compartment).
+- `handover/HandoverTrace`: the matchmaker set handover over a chain of generations (a member
+  freezes, a member of a proposed set holds its whole bootstrap, a member of the old set votes
+  in the successor decree, a member of the chosen set activates with its bootstrap), with the
+  registrations and the GC acks of one journal, on the `handover` flavor. It states its rules
+  for many generations and does not extend `Handover.tla`, which hands generation 0 over once.
 
 A trace spec that extends the trace spec of another model links that model's modules into its
 folder, as `reads/` links `matchmaker/`.
@@ -124,6 +133,8 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
+| Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
+| Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -179,6 +190,7 @@ Constants select the variant:
 | `CheckWm` | `TRUE`: bypass only if the highest watermark in the matchmaker answers is at most `b`. |
 | `Reads` | `TRUE`: the leader acks the chosen slots, and the model has the leaderless reads of Compartmentalized Paxos (§3.4) with the rule of `quorum_read.rs`: a reader asks a quorum of the configuration of a leadership that won, abandons the read if an answer shows a higher ballot, and reads at the highest slot voted or at the fence. |
 | `Hold` | `TRUE`: the decision hold. A leader acks no slot before a quorum of each prior configuration promised its ballot. |
+| `ReadHold` | `TRUE`: the rule of #1270 (bypass read order). A read (`ReadReturn`) counts a slot in its chosen prefix only once the ballot that chose it is covered. `FALSE`: a control. |
 | `Handoff` | `TRUE`: the cooperative handoff of DPaxos (`relinquish_to`). The node that minted a ballot hands it on one time, with its proposals and its open slots, while it leads at the ballot. The successor leads with no Phase 1. |
 | `Relinquish` | `TRUE`: a node that handed its ballot on never bypasses from it (it drops its proactive matchmaking). `FALSE`: a control, the minter still bypasses after the handoff. |
 | `SuccessorBypass` | `FALSE`: a successor never bypasses from a ballot that it did not mint. `TRUE`: a control, the successor bypasses to its own next ballot. |
@@ -189,7 +201,7 @@ Constants select the variant:
 | `RestartBypass` | `FALSE`: a restart ends every campaign and every leadership of the node, so only the incarnation that won `b` bypasses from `b`. `TRUE`: a control, the node still leads after the restart. |
 
 The invariants are `Agreement` (one value is chosen for each slot), `ReadSafe` (no leaderless
-read that starts now can miss a slot that is acked) and `WmRedundant` (when the matchmaker answers
+read that starts now can miss a slot that is acked, or a slot that an earlier read returned) and `WmRedundant` (when the matchmaker answers
 of `b2` show no registration strictly between `b` and `b2`, their highest watermark is at most `b`).
 
 The model has three or four ballots, one or three matchmakers, two values, one or two slots and
@@ -210,6 +222,7 @@ The rules of #1018 (zero-stall model, more rules), each with its check and its c
 | GC fence (I5): the leader at `b2` makes no floor effective before its fence Phase 1 ends | `gc_p212_paper`, `wm_nocheck_small` | `gc_nofence` (21 steps), `gc_early` |
 | Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff`, `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
 | Chained bypass (8.3): a second bypass waits for the fence Phase 1 of the first | `chain_small`, `chain` (7.1 million states, 5 minutes, `long`) | `chain_open_small`, `chain_open` |
+| A reader's chosen prefix waits for the fence Phase 1 of the ballot that chose the slot (#1270 (bypass read order)) | `read_carry_hold` (343 thousand states), `read_p212_hold`, and every check with `Reads` | `read_carry_no_read_hold`, `read_p212_no_read_hold`: `ReadSafe` breaks in 13 states (ballot 1 in `{a1, a2}` bypasses to ballot 3 in `{a3, a4}`, which chooses slot 1, and a read on ballot 3 returns it; a read on ballot 1 asks `{a1, a2}` and misses it) |
 | Only the incarnation that won `b` bypasses from `b` (#1230 (rules no check tests)) | `restart_bypass` (489 thousand states) | `restart_bypass_off`: Agreement breaks in 16 states (propose at `b`, restart, bypass, the proposed slot is free at `b2`, a second value is chosen) |
 
 Findings of #1018 (2026-11-19). No design decision is refuted.
@@ -728,9 +741,8 @@ Finding of #1230 (rules no check tests): `SizeKept` needs a rule that no design 
 writes. The decree runs over the old matchmakers, which do not read the control journal, so
 nothing in the handover sees a resize that the operator records after the target is named
 (`resize_during`). The model keeps the size with `ResizeGuard`: a resize waits until no target is
-named. **Open**: Pierre picks the rule (a resize waits for the handover, or the coordinator names
-a new target of the new size and the decree refuses a proposal of the old size), and
-`docs/architecture/04-roles.md` records it.
+named. This is the rule (Pierre, 2026-11-20): a resize waits for the handover
+(`docs/architecture/04-roles.md`, rule 2).
 
 Not in the model: the decree (`decree/`), lost matchmaker state, more than one journal (a
 handover is paged, #439) and the registrations, which leave with rule 1. A client step that
@@ -817,6 +829,7 @@ Constants select the rule:
 | `Q1s`, `Q2s`, `Targets` | The quorum system, for each configuration (#1102 (rework 1.13)): the Phase-1 quorums, the Phase-2 quorums, and the sets of acceptors that a reader asks. A majority asks the whole membership. A grid takes them from `grid/Grid.tla`: the partitions ask the whole membership, the full grid asks one row (`row_of`). |
 | `Seal` | `quorum`: Phase 1 takes a Phase-1 quorum of each prior configuration (the code). `reads`: a candidate rule, not in the code: Phase 1 also takes one promise in each read target of each prior configuration, so each row of an old full grid hears of the campaign. |
 | `ReadAgain` | `TRUE`: a client gets the answer of a served read (`ReadClose`), and a second read can start. `ReadSeesAcked` then also orders reads: a served read covers each slot that an earlier read returned. |
+| `ReadHold` | The candidate rules of #1270 (bypass read order): what the decision hold also gates on the read side of a ballot. `off`: nothing, the hold gates only the acks of the leader (a control). `basis`: a reader takes no read basis at a ballot before its fence Phase 1 is covered. `serve`: a reader serves a read on a basis only when the ballot is covered. `prefix`: the chosen prefix of a reader counts a slot only once the ballot that chose it is covered, so a leader sends no `Commit` of a bypass ballot before its fence Phase 1. A ballot that won by a full Phase 1 is covered when it leads, so each rule acts only on a bypass ballot. |
 | `ReaderGate` | What gates the reader itself, to open, keep and serve a read (#1228 (stale read by a lagging reader)). `promise`: the rule of `Learner` on the promise of the reader (the code: `read_basis` and `fence_quorum_reads` use the read fence). `belief`: the belief ballot of the reader alone, and the reader counts its own answer with no fence (the code before #1228), a control. |
 
 The majority checks have four acceptors, the configurations `{a1, a2, a3}` and `{a3, a4}`, the
@@ -852,7 +865,14 @@ Results (`reads/checks.txt`):
 | `reads_lag_reader`: the same, the reader is gated on its promise (the code) | pass (557 thousand states) |
 | The bypass of #579 with the decision hold | pass |
 | `reads_plain_again`: the rules of `main`, and a second read | pass (897 thousand states) |
-| `reads_bypass_hold_again`: the bypass of #579 with the decision hold, and a second read | violation, a finding (1.3 million states, 21 steps): see below |
+| `reads_bypass_hold_again`: the bypass of #579 with the decision hold, and a second read, `ReadHold = "off"` | violation (1.6 million states, 21 steps): see below |
+| `reads_bypass_hold_again_p212`: the same, `Mode = "p212"` | violation (759 thousand states, 21 steps) |
+| `reads_bypass_hold_again_basis`: `ReadHold = "basis"` | violation (1.3 million states, 22 steps): see below |
+| `reads_bypass_hold_again_serve`: `ReadHold = "serve"` | violation (1.7 million states, 22 steps) |
+| `reads_bypass_hold_again_prefix`: `ReadHold = "prefix"`, the rule | pass (3.1 million states, 1.5 minutes) |
+| `reads_bypass_hold_again_prefix_p212`: the rule, `Mode = "p212"` | pass (2.1 million states, 2 minutes) |
+| `reads_bypass_hold_again_prefix_two_slots`: the rule, two slots (`long`) | no violation in 45.9 million distinct states (bounded: 30 minutes, 2 workers) |
+| `reads_bypass_hold_again_prefix_chain`: the rule, three ballots of one proposer, so two bypasses in a row (`long`) | no violation in 50.2 million distinct states (bounded: 30 minutes, 2 workers) |
 | `reads_two_slots`: `reads_plain` with two slots (`long`) | no violation in 30.7 million distinct states, to depth 24 (bounded: 50 minutes, 1 worker) |
 | `reads_three`: `reads_plain` with three ballots, `OwnerParos3`, so a reader can hold the basis of the middle leadership (`long`) | no violation in 33.4 million distinct states, to depth 25 (bounded: 50 minutes, 1 worker) |
 | #890, `strict` (`main` today) | pass |
@@ -916,9 +936,20 @@ the slot is chosen and not acked (the hold). `a1` takes the basis of ballot 2, a
 and is served at index 1, and its client gets the answer. Then `a3` takes the basis of ballot 1
 from a late beat, asks `{a3, a4}`, where no one promised ballot 2, and is served at index 0. The
 hold gates only the acks of the leader, and a reader serves on any chosen slot. The code of
-today has no bypass and passes (`reads_plain_again`). **Open**: the rule for #579 (for example,
-the hold also gates the reads at a bypass ballot until its fence Phase 1 is covered); the line
-stays `violation` in `checks.txt` until Pierre chooses it.
+today has no bypass and passes (`reads_plain_again`).
+
+The rule for #579 (Pierre asked for its own check on 2026-11-20): **a reader's chosen prefix
+counts a slot only once the ballot that chose it is covered** (`ReadHold = "prefix"`). The leader
+of a bypass ballot sends no `Commit` before its fence Phase 1 has a Phase-1 quorum of each prior
+configuration, as it sends no ack. Then a read that returns the slot comes after the fence Phase
+1, and a later read on an old basis meets an acceptor that promised the bypass ballot, and ends.
+The two weaker candidates fail. A gate on the read basis (`basis`) does not help, because the
+first read need not use the bypass ballot: `a3` voted slot 1 at ballot 1, answers a read on the
+basis of ballot 1 with its watermark 1, and then `a3` and `a4` choose slot 1 at ballot 2. The
+read is served at index 1. A second read on ballot 1 asks `{a1, a2}`, which never heard of ballot
+2, and is served at index 0. A gate on the serve (`serve`) fails with the same trace. The rule
+must gate the chosen prefix, which every read uses. `zero-stall/` checks the same rule
+(`ReadHold`) with its abstract reader.
 
 Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
 leader and a reader outside its configuration whose own abandoned campaign is above it.
@@ -2122,8 +2153,8 @@ The answer to #1259:
 - **A rule that the issue did not name: an idempotent answer.** A call whose "ok" is lost is sent
   again; without an idempotent answer the record refuses it, and the controller believes a
   reshape failed that took place (`noidem`). The record keeps the identity of the call that
-  opened each segment (term, expected configuration, grid) and answers it "ok" again. This is a
-  proposal, **Open** until Pierre agrees (`docs/architecture/02-data-plane.md` §2.12).
+  opened each segment (term, expected configuration, grid) and answers it "ok" again. Pierre
+  decided this rule on 2026-11-20 (`docs/architecture/02-data-plane.md` §2.12).
 - **The bound must be a guard of the record, not only a policy of the controller.** A grid outside
   `F + 1 <= acks <= rows - F` can open and never come into force with one acceptor down; the
   retire guard then blocks every heal (`live_nobound`).
@@ -2199,7 +2230,10 @@ The answer to #1258:
   ballot (the option of #1270) is not enough. A reader on the old basis can see the old vote of
   one acceptor for a slot that the new grid chose, wait until the slot is chosen, and return it. A
   second reader on the old basis, at a quorum without that acceptor, sees no higher promise and
-  returns less (`phase1_reads_maj`). No hold that gates only acks and reads closes this.
+  returns less (`phase1_reads_maj`). Neither `ack` nor `ack_read` closes this. The rule that
+  #1270 chose for `zero-stall/` (a reader's chosen prefix counts a slot only once the ballot that
+  chose it is covered) is not in this model. By its definition it waits for a Phase-1 quorum of the
+  old grid, so it does not stay live with a column below quorum either.
 - **Two rules close both gaps and stay live with a column below quorum**:
   1. **The segment-record check** of #1254, with no hold at all (`safe_record`,
      `safe_record_maj`, `live_record`). The reader retries when a matchmaker majority shows a
@@ -2231,3 +2265,154 @@ The answer to #1258:
   heal where `a7` replaces `a1` moves every member that stays to another column. The rule keeps
   one value (`config-register/heal_partitioned`, 32.8 million states); with Phase 1 one acceptor
   short in every column, TLC finds two (`heal_partitioned_short`).
+
+### `segment-replicas/`: a write reaches only the replica set of its segment, for #1271
+
+Compartmentalized Paxos says that every replica executes every write (sections 3.3 and 8.5 of
+`docs/references/papers/scaling-rsm-compartmentalization`), so the replicas bound write
+throughput. In design A each segment has its own replica set (`docs/architecture/02-data-plane.md`
+section 2.10). The model checks that a write can go to the replicas of its segment only.
+
+The journal has a sealed segment S1 (slots `0 .. K - 1`) with the replica set R1, and the open
+segment S2 (slots `K .. NS - 1`) with the disjoint replica set R2. The log is abstract (the leader
+chooses the slots in order; `multi-paxos/` checks the agreement and `experiments/segments/a/`
+the seal end). A replica gets a chosen slot from the `Commit`, from the acceptors of the slot's
+grid until the segment retires, or from a live peer of its own set. It applies the slots of its
+segment in order and folds the journal state: `next_seq` and the leader uuid, with a `Write`
+accepted only under the current leader and a `SetLeader` as a compare-and-set. A live replica
+of the segment that applied a slot acks the writer. A reader reads the `seq` of an acked write
+at one replica: the replica fixes the basis of its own segment (the leaderless read that `reads/`
+checks) and answers once its applied prefix covers it, with the slot, or `Tail` (the `seq` is at
+or above its `next_seq`), or `Truncated` (the `seq` is below what it knows). At most `F` replicas
+of each set crash, at any time. S1 retires once `F + 1` replicas of R1 hold it, and then its
+acceptors are gone.
+
+The finding that the model forced: a replica holds opaque bytes, but the journal state is folded
+at apply, so a replica of S2 that never sees a slot of S1 must start from the journal state at
+the seal (the boundary state: `next_seq` and the leader uuid). The rule `Boundary` selects where
+it lives. The design is `meta` (Pierre, 2026-11-20: the leader uuid goes to the journal's
+metadata, not to the segment record): the first replica of R1 that applied every slot of S1
+writes, in one compare-and-set at the matchmakers, `next_seq` into the segment record and the
+leader uuid into the journal's matchmaker record. The first leader of S2 reads the uuid there and
+proposes it at slot `K`, a `Fence(u)` that sets the leader uuid. A replica of S2 takes `next_seq`
+from the record and the uuid from slot `K`. The true fold ignores a `Fence`, so a `Fence` with a
+wrong uuid shows. `record` (the whole state in the segment record) is the first form of the rule,
+and the checks without the `meta_` prefix run it.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: `NoForeign` (no replica holds a slot of another segment), `OneFold` (every replica's fold is the fold of the whole log), `RecordTrue`, `AckTrue`, `ReadTrue` (a served read of an acked write returns that write); `K = 1`, `NS = 2`, three values (a write under each uuid and the `SetLeader` from `u1` to `u2`); 4.9 million distinct states |
+| `live` | ci | pass: with `F` replicas of each set down, every chosen slot is acked, every read is served, and S1 retires (`Ends`, weak fairness) |
+| `live_gone` | ci | pass: after the retire every replica of R1 stops; S2 still acks and serves (`EndsS2`) |
+| `reach_cross` | ci | violation: a read of each segment is served, across the seal |
+| `reach_retire` | ci | violation: S1 retires and a write of S2 is acked |
+| `deliver_all` | ci | violation of `NoForeign`: every replica gets every slot (the paper's replica); the invariant sees a broadcast |
+| `boundary_zero` | ci | violation of `OneFold`: R2 starts from the empty state, so its fold is not the fold of the whole log (a `seq` that S1 used is given again, or the fence uses a leader uuid that a `SetLeader` of S1 replaced) |
+| `boundary_early` | ci | violation of `OneFold`: the record is written before its writer applied every slot of S1 (`K = 2`) |
+| `boundary_seq` | ci | violation of `AckTrue`: the record holds `next_seq` only, and R2 starts with the first leader uuid. S1 decides `SetLeader(u2, u1)`; R2 then accepts a `Write` of the deposed writer `u1` that the whole log refuses |
+| `route_other` | ci | violation of `ReadTrue`: a read goes to a replica of the other set, which does not hold the `seq`: it answers `Truncated` (below its boundary state) or `Tail` (above the seal) for an acked write that nobody trimmed |
+| `retire_early` | ci | violation of `Ends`: S1 retires at `F` holders; the holder crashes and the slot is lost for the other replicas of R1 |
+| `set_size_f` | ci | violation of `Ends`: a replica set of `F` members; with `F` down nothing applies |
+| `gone_peer` | ci | violation of `EndsS2`: R2 asks a replica of R1 for the boundary state; R1 stops after the retire, before R2 asked |
+| `retire_norecord` | ci | violation of `EndsS2`: S1 retires before the record holds the boundary state; R1 stops, and nobody can write it |
+| `safety_k2` | long | pass, bounded at 40 minutes: `K = 2`, `NS = 3` |
+| `meta_safety_ci` | ci | pass: the safety invariants with the `meta` rule; two replicas in each set (safety needs no quorum of replicas), the `SetLeader` from `u1` to `u2` and a write of `u1` |
+| `meta_stale` | ci | violation of `AckTrue`: the same configuration as `meta_safety_ci`, but the first leader of S2 reads the metadata before the seal wrote the uuid and proposes `Fence(u1)`; S1 decided `SetLeader(u2, u1)`, and the deposed `u1` writes in S2 |
+| `meta_safety` | long | pass, bounded at 40 minutes: the `meta` rule, `NS = 3` (the `Fence` takes slot 1) |
+| `meta_live` | long | pass: `Ends` with the `meta` rule (20.7 million distinct states, about 55 minutes locally with 4 workers) |
+| `meta_gone` | long | pass, bounded at 40 minutes: `EndsS2` with the `meta` rule |
+
+The answer to #1271:
+
+- **A write reaches only the replica set of its segment.** No replica outside the set holds a
+  slot of the segment, and every fold, ack and read stays right. So, over the whole journal,
+  the replicas do not bound write throughput: each replica set executes only its segment's
+  writes. Inside one segment the bound of the paper still holds, because every replica of the
+  set executes every write of the segment.
+- **The boundary state is written at the seal.** This rule is new: the design said that a
+  record holds the start slot, the end slot, the grid and the state. `next_seq` goes to the
+  segment record and the leader uuid to the journal's matchmaker record, and the first leader of
+  the next segment fences it into the log. `next_seq` alone is not enough (`boundary_seq`), and
+  neither is a `Fence` read before the seal wrote the uuid (`meta_stale`). A replica of the next
+  segment starts its fold there. A replica of the old set is not a source: it can be gone
+  (`gone_peer`), and so can the zero state (`boundary_zero`) and a state written before the whole
+  segment was applied (`boundary_early`). The record also gives the reader the `seq` range of
+  each segment, so a read goes to the right set (`route_other`).
+- **Retire.** `F + 1` holders of the set are enough, and the retire also waits for the boundary
+  state in the record (`retire_early`, `retire_norecord`). After that the replicas of the next
+  segment never need the slots of the old one (`live_gone`).
+- **Liveness.** With `F` replicas of a set of `2F + 1` down, writes and reads of the segment end;
+  a set of `F` members does not (`set_size_f`).
+- No decision is refuted. The model has no `Truncate`: that the trim floor (`first_seq`) is part
+  of the boundary state is a reading, not a checked fact, and the journal state model (#1189)
+  checks it.
+
+### `multi-writer/`: multi-writer mode through `SetLeader(None)` and `expected_seq`, for #1274
+
+Pierre decided on 2026-11-20 that `SetLeader(new, old)` may name `new = None`: the journal is
+then multi-writer, and the mode is what the last applied `SetLeader` left. There is no dedup
+table: a single writer gets exactly-once through `expected_seq`, multi-writer is at-least-once,
+and a held write is answered `Unknown` and resolved by a resend with the same `expected_seq`
+(#1232 (held writes)). No model checked the switch between modes.
+
+The log is abstract (the slots are chosen in order; `multi-paxos/` checks the agreement). Two
+clients call `SetLeader` with a fresh uuid of their own or `None` (a compare-and-set against the
+leader they read, which races with the slots in flight), send fenced writes under the uuid they
+last won (pipelined, each at the position after the last one; a deposed client keeps sending),
+send unfenced writes in any mode, and truncate up to the tail, fenced or not. A request stays in
+the network after it is proposed, so it can be proposed again in another slot: a resend, a copy
+of the transport, or a write that an old consensus leader proposed. One fold judges each slot at
+apply and records one answer; a client may never see it (the held write). The invariants judge
+every answer, so the answer to a resend is judged too. A client that sees a final refusal of a
+fenced write while the journal is multi-writer writes it again, unfenced. With `SealAt`, the slot
+`SealAt` is the first slot of the next segment: the fold of the old segment writes the boundary
+uuid into the matchmaker record after its last slot, and the first leader of the next segment
+proposes `Fence(uuid)` there (#1271 (a write reaches only the replica set of its segment)). The
+oracle `OracleAt` computes the leader at each slot from the `SetLeader` commands alone, with no
+fold and no segment, so a `Fence` with a wrong value shows.
+
+The fold of a fenced write, in this order: below `first_seq` it is `truncated`; below `next_seq`
+it is `dup` when the record there is the same write, else `taken`; a uuid that is not the
+leader is `fenced`; above `next_seq` it is `early`; else it is applied. An unfenced write is
+applied iff the leader is `None`, else `wrongmode`.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: `FenceTrue` (each record and each accepted truncate was judged under the leader that the `SetLeader` commands alone give), `AckTrue` (every `applied` or `dup` answer is the record at its `seq`), `RefusalFinal` (a `fenced` or `taken` answer to a fenced write is true now and for ever), `ExactlyOnce` (a write is at most once in the journal as a fenced record, and never both fenced and unfenced), `BasisFresh` (a writer never aims below the `next_seq` at which it started to lead), `FirstMonotone`; two clients, two writes each, two `SetLeader`, one `Truncate`, five slots, a fresh journal whose leader is `None`; 2.0 million distinct states |
+| `unset` | ci | pass: the same with a fresh journal whose leader is unset (every write and truncate refused until a `SetLeader`); 1.5 million distinct states |
+| `seal_long` | ci | pass: the same with a seal, the `Fence` at slot 4, six slots; 1.2 million distinct states |
+| `safety_long` | long | pass: six slots, no seal |
+| `reach_switch` | ci | violation: a write applied before `SetLeader(None, w)` is answered `dup` on its resend after it |
+| `reach_back` | ci | violation: after `SetLeader(w2, None)` a fenced write of `w2` is applied |
+| `reach_truncated` | ci | violation: an unfenced `Truncate` pushes a fenced write below `first_seq`, and its resend is answered `truncated` |
+| `reach_fence_none` | ci | violation: the `Fence` at the seal carries `None`, and a write after it is applied |
+| `multi_refusal` | ci | violation of `UnfencedRefusalFinal`, not a rule: an unfenced write lands from one copy while another copy is refused `wrongmode`; a resend cannot resolve an unfenced write |
+| `fence_propose` | ci | violation of `FenceTrue`: the fence is judged against the applied state at propose and not at apply; an unfenced truncate proposed while the leader is `None` lands after `SetLeader(a, None)` |
+| `fence_propose_write` | ci | violation of `FenceTrue`: the same with no truncate; a write lands under a leader that is not its own |
+| `dedup_after` | ci | violation of `RefusalFinal`: the fence comes before the position; a write applied before `SetLeader(None, a)` is refused `fenced` on its resend |
+| `dedup_after_twice` | ci | violation of `ExactlyOnce`: the same; the writer then writes it again, unfenced, and it is in the journal two times |
+| `basis_stale` | ci | violation of `BasisFresh`: a writer that won keeps the basis it had and aims at a position of the mode before |
+| `boundary_early` | ci | violation of `FenceTrue`: the first leader of the next segment reads the matchmaker record before the seal wrote the uuid, and proposes the `Fence` with the old value |
+
+The answer to #1274:
+
+- **The decisions hold.** No decision is refuted. `SetLeader(None)` and `SetLeader(new, None)`
+  switch the mode safely, with the fence judged at apply in both directions (`fence_propose`).
+- **The resend resolves a held write only if the fold judges the position before the fence.**
+  This rule is new. With it, a write in flight across `SetLeader(None, w1)` gets one of four
+  answers on a resend: `dup` (written), `fenced` or `taken` (not written, for ever), `early`
+  (resend later), or `truncated`. Without it the resend of a written write is refused, and a
+  writer that moves to unfenced writes lands it two times (`dedup_after`, `dedup_after_twice`).
+- **`truncated` is the one answer that resolves nothing**, as section 2.2 of
+  `docs/architecture/02-data-plane.md` already says. In multi-writer mode any writer may
+  truncate, so another writer can cause it (`reach_truncated`). The issue's invariant "every
+  `Unknown` resolves by a resend" holds except there.
+- **The switch back.** Only fenced writes of `w2` land after `SetLeader(w2, None)`; `w2` takes
+  its basis from the view of the answer (`basis_stale`). The journal is safe without the basis
+  rule (the position check refuses such a write); the rule makes the writer's first write land.
+- **An unfenced write cannot be resolved by a resend** (`multi_refusal`): that is the
+  at-least-once of multi-writer mode, also for a refusal.
+- **The seal.** `Fence(None)` works: the matchmaker record holds `None`, and the leader reads it
+  only after the seal wrote it (`seal_long`, `boundary_early`).
+- **Open**: the leader of a fresh journal (`None` or unset). Both pass; the journal state model
+  (#1189) decides.

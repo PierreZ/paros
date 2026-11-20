@@ -69,7 +69,7 @@ tri-state tally and the repair probe; #1017 (truncation model), #1216 (truncatio
 GC of `node/gc.rs` forgets the old configuration only once a Phase-2 quorum of the new one holds
 the prefix up to the election fence, with a control that forgets it at the win and a control
 that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
-reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the fence
+reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold and the read prefix that it gates (#1270 (bypass read order)), GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
 more rules)), quorum everywhere (`specs/tla/quorum-everywhere/`: every step of the journal, the
 write, the election, the leaderless read, the seal, the retire, the offload mark, the trim and the
@@ -80,7 +80,15 @@ everywhere)), the grid controller (`specs/tla/grid-controller/`: its election by
 matchmaker record and the fenced `reshape(expected configuration, new grid, term)` call, with two
 candidates that race, a deposed controller that keeps calling, a crash between plan and call, a
 takeover, a lost reply and the bound `F + 1 <= acks <= rows - F`; #1259 (the fenced reshape call of
-the grid controller)), a reshape when a grid column is below quorum
+the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a write reaches only the
+replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
+leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
+segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
+reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
+`SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
+write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
+`Truncate` in both modes, a `Fence(None)` at a seal; #1274 (multi-writer mode through
+SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
 (`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
 segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
 (reshape with a column below quorum)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
@@ -97,13 +105,13 @@ machines), and coverage-driven simulation (the seeds are steered toward the bran
 reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
 crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
 walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
-`leader-handoff/`, `matchmaker/` (with the retirement), `reads/` (the read basis and the read fence), `truncation/`
-(the compaction floor and the trim jump, and the faulty entries of CTRL with the tri-state tally)
-and `compartments/` (the read replica and the batcher) (#1198 (trace checking),
+`leader-handoff/`, `matchmaker/` (with the retirement, and on grids with every compartment), `reads/` (the read basis and the read fence), `truncation/`
+(the compaction floor and the trim jump, and the faulty entries of CTRL with the tri-state tally),
+`compartments/` (the read replica and the batcher) and `handover/` (the matchmaker set handover) (#1198 (trace checking),
 `tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
-rules)); the matchmaker set handover and the walk with every compartment and matchmakers are not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
+rules)). Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
@@ -259,6 +267,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   member of a group (no full broadcast as a FoundationDB TLog commit). A new journal step gets
   its row in `specs/tla/quorum-everywhere/`, with a control that blocks it one member later
   (`docs/architecture/02-data-plane.md` §2.11).
+- **When in doubt about safety, use TLA+** (Pierre, 2026-11-20): when you are not sure that a
+  rule is safe, or that one rule also covers another case, write a TLA+ check (a check that
+  passes with the rule and a control that fails without it). Do not argue it in prose.
 - **TLA+ is a thinking tool** (decided on 2026-11-12, #1020 (TLA+ ranked list)): when a
   protocol problem has more than one possible rule, you can write a small TLA+ model to find
   the solution, before you write Rust. Model each candidate rule as a constant, give each a
