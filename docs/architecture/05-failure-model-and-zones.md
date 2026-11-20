@@ -93,7 +93,7 @@ not sync: a dirty page a failed commit left still reads as written and lands at 
 keep a record and lose its entry.
 So when its sync fails, moonpool-journal writes the batch again and syncs again, at most three
 syncs (moonpool#362). The batch is not acknowledged yet, so that rewrite is safe. A storage fault still quarantines its
-journal, not the process. A matchmaker process hosts one registry per tenant set. A registry found torn at
+journal, not the process. A matchmaker process hosts one registry per matchmaker set (one set per journal, section 3.4). A registry found torn at
 boot is lost for good: the process drops that set alone and serves its other sets, and the set
 heals around the lost member by a handover (decided on 2026-11-01, the fix of main's red after
 #834 (matchmaker shards)). Barrier violations ("sync
@@ -407,13 +407,20 @@ contribution from above, while Lemma 1's proof uses exact counts, which is the f
 
 **Every part of a journal has a named health measure, and every measure has a fixed action**
 (decided by Pierre on 2026-11-20, #1260 (journal health measures)). Pierre asked for the full
-list, so that the system and its tests know the state of every part. The other decisions of that
+list, so that the system and its tests know the state of every part. **The v1 scope of the second review** (Pierre, 2026-11-20, #1315 (bring docs and models in step
+with the v1 scope)) cuts this section for v1: v1 grids are the partitioned grid only
+(`rows = 2F + 1`, `acks = F + 1`, the majority being one column), so the two spares of a column
+are one number and WritesBlocked is not a v1 state; the bypass of section 2.13 is out of v1, so
+WritesDegraded holds and alerts; the Offload rows of the catalogue are for after v1. The model
+`specs/tla/health/` still checks the wider grids and the bypass hold, a superset of v1; its
+`V1` switch is #1319 (a v1 switch in health/). The other decisions of that
 day bind this section: the grid controller (section 2.12) is the journal's own elected role on
 stateless machines and also owns scrubbing; after a zone loss it holds and alerts; v1 has no
 unsafe recover; the autoscaling decisions get heavy tests. **The v1 controller has no service
-level objectives and no scaling driven by latency or load** (Pierre, 2026-11-20): it heals,
-rolls, scrubs and offloads, and it changes a count only to replace a member or a role that is
-gone. **v1 stays simple** (Pierre, 2026-11-20): each role publishes its metrics to the
+level objectives and no scaling driven by latency or load** (Pierre, 2026-11-20): in v1 it
+heals (re-replication of a sealed segment included) and scrubs, and it changes a count only to
+replace a member or a role that is gone. It does not roll segments and does not offload in v1
+(section 2.15, decisions of #1315). **v1 stays simple** (Pierre, 2026-11-20): each role publishes its metrics to the
 controller role, and which measure drives which action is decided later, after more tests. So
 the catalogue below is the reference list of measures. Its actions bind v1 only where heal
 needs them: the liveness measures, the controller's pace, and the guards of the protocol (the
@@ -439,7 +446,7 @@ controller's crate, after #1189 (journal state model), decides them).
 
 **The controller decides when and where; the protocol decides whether it is safe.** Each action
 below is a request that passes the guards of its step: the fenced reshape (section 2.12), the
-hold of a bypass (section 2.13), the retire at `F + 1` holders (section 2.10), the repair of CTRL
+hold of a bypass (section 2.13, after v1), the retire at `F + 1` holders (section 2.10), the repair of CTRL
 (#1263 (CTRL recovery in the journal)). A wrong measure can make the controller ask at the wrong
 time. It can never make an unsafe step pass.
 
@@ -454,9 +461,9 @@ A column has two spares, because Phase 1 and Phase 2 need different counts of it
 - `spare(column)` is the lower of the two.
 
 On the partitioned grid of section 2.11 (`rows = 2F + 1`, `acks = F + 1`) and on the majority
-(one column) the two spares are one number, and the status shows one spare per column. Other
-grids inside the bound of the fenced reshape (`F + 1 <= acks <= rows - F`) split them, and the
-catalogue keeps both:
+(one column) the two spares are one number, and the status shows one spare per column. These are
+the only v1 grids (section 2.11). Other grids inside the bound `F + 1 <= acks <= rows - F` split
+them; they are not in v1, and the catalogue keeps both spares for the day they come:
 
 - `rows = 4`, `acks = 2`, a column with 2 live: it still writes (`phase2_spare = 0`), but no
   election can run (`phase1_spare = −1`).
@@ -491,9 +498,9 @@ model checks that the action can run in that state, or that no action can (`Acti
 | Healthy | `spare >= 1` in every column | none |
 | AtRisk | a column has `spare = 0`; electable and writable; a placement that meets the zone rule exists | one heal reshape (it can run its full Phase 1). Two columns at risk: one reshape heals both |
 | AtRisk-Unplaceable | as AtRisk, and no placement meets the zone rule (a zone loss on three zones) | hold and alert: the degraded trap above |
-| WritesDegraded | not electable; a column can write; the leader is live | writes skip the columns that cannot write (#533 (move a stuck round)); a heal by the bypass of section 2.13, whose hold can complete |
+| WritesDegraded | not electable; a column can write; the leader is live | writes skip the columns that cannot write (#533 (move a stuck round)). v1: hold and alert. After v1: a heal by the bypass of section 2.13, whose hold can complete. No reshape runs, so the open segment grows until a member comes back |
 | ElectionBlocked | not electable; a column can write; no live leader | hold and page: no leader can be elected, so no write and no reshape until a member comes back |
-| WritesBlocked | electable; no column can write | a new leader heals by a full reshape (only on a grid where `acks > rows − acks + 1`) |
+| WritesBlocked | electable; no column can write | a new leader heals by a full reshape (only on a grid where `acks > rows − acks + 1`; no v1 grid, so not a v1 state) |
 | Stopped | not electable; no column can write | hold and page: no election, no write and no bypass hold |
 
 The first draft of this table (in the journal design document) named WritesDegraded and
@@ -509,8 +516,8 @@ rule that a TLA+ model checked:
 | Flag | Condition | Action |
 |---|---|---|
 | Reshaping | a segment is sealed and not retired (section 2.12: no reshape while a segment is not retired) | no second reshape; the heal waits for the retire |
-| ReshapeStalled | the seal is older than the stall window (**Open**) | alert with the cause: a replica set below `F + 1` holders, a matchmaker set below a majority, or an old grid that cannot give Phase 1 or the bypass hold |
-| ControlFrozen | the journal's matchmakers are below a majority | the data plane serves under the standing leader, and leaderless reads go on (they read no matchmaker, section 2.10); no election, seal, retire, reshape, offload mark or controller election can run (section 2.11). The action is a matchmaker handover when a majority of the old set is live, else hold and page |
+| ReshapeStalled | the seal is older than the stall window (**Open**) | alert with the cause: a replica set below `F + 1` holders, a found damage that is not repaired (`repairs_pending`), a matchmaker set below a majority, or an old grid that cannot give Phase 1 (or, after v1, the bypass hold) |
+| ControlFrozen | the journal's matchmakers are below a majority | with no reshape in flight, the data plane serves under the standing leader, and leaderless reads go on (they read no matchmaker, section 2.10). Between a seal and the boundary write, acked writes and tail reads of the new segment stop until a majority is back (accepted for v1, section 2.16); no election, seal, retire, reshape, offload mark or controller election can run (section 2.11). The action is a matchmaker handover when a majority of the old set is live, else hold and page |
 
 **A column lost for good is beyond the contract.** v1 has no unsafe recover (Pierre,
 2026-11-20). A column that lost more than `F` disks for good leaves the state Stopped or
@@ -537,7 +544,7 @@ a proposal, decided later (the first paragraph of this section).
 | Column | `move_rate` | O | rounds of the column that moved to another column (#533), per round | ratio | shown; a high rate while `phase2_spare >= 0` points to a gray failure |
 | Grid | `electable` | P | a Phase-1 quorum of every configuration of `H_b` is live (`has_phase1_quorum`) | yes, no | no: see the journal states |
 | Grid | `writable` | P | some column can choose a slot | yes, no | no: WritesBlocked or Stopped |
-| Grid | `bypass_hold` | P | the live members meet every read quorum of the configuration in force (section 2.13); equal to `writable` | yes, no | the WritesDegraded heal can run |
+| Grid | `bypass_hold` | P | the live members meet every read quorum of the configuration in force (section 2.13); equal to `writable` | yes, no | after v1: the WritesDegraded heal can run |
 | Grid | `zone_rule` | P | `AcceptorConfig::zone_rule` on the configuration and on its live members | Holds, LosesQuorum, CommitsAlone, Unlabeled | not Holds on a plan: the plan is refused |
 | Grid | `zone_margin` | P | the lowest `phase1_spare` and `phase2_spare` after the loss of any one zone | acceptors | `< 0`: a zone loss stops elections or writes; shown on the status |
 | Grid | `segments_unretired` | P | segments that are open or sealed (segment table) | segments | above 1: the Reshaping flag |
@@ -549,13 +556,13 @@ a proposal, decided later (the first paragraph of this section).
 | Journal | `election_rate` | O | won elections per window | elections per window | shown |
 | Matchmakers | `mm_spare` | P | live members minus a majority (`MatchmakerSet::quorum_size`) | matchmakers | `0`: a matchmaker handover; `< 0`: ControlFrozen |
 | Matchmakers | `generation_frozen` | P | a `Stopped { successor: None }` is seen, so a handover is in progress | yes, with an age | alert on age: any node that sees it finishes the handover |
-| Replicas | `holders(segment)` | P | replicas of the segment's set that hold the whole segment with a good scrub | replicas | below `F + 1`: no retire (safety); re-replicate from a holder. A found damage that is not repaired also blocks the retire (`repairs_pending`, a margin) |
+| Replicas | `holders(segment)` | P | replicas of the segment's set that hold the whole segment with a good scrub | replicas | below `F + 1`: no retire (safety); below the full set on a sealed segment: re-replicate from a holder (v1, its guard from #1314). A found damage that is not repaired also blocks the retire (`repairs_pending`, a margin) |
 | Replicas | `boundary_written(segment)` | P | the boundary state of the seal is at the matchmakers (section 2.10) | yes, no | no while sealed: no retire; the first replica that applied every slot writes it |
 | Proxy leaders, batchers, unbatchers | `live_count`, `queue_depth`, `batch_fill`, `utilisation` | O | per process | count, entries, ratio, ratio | a role below its count is started again (`live_count`); the others shown |
-| Offload | `offload_backlog` | P | segments that are retired and not marked offloaded | segments | late: alert; more offloaders |
-| Offload | `store_errors` | O | failed puts and reads of the object store | errors per window | shown; the offloader backs off on each error |
-| Offload | `drop_before_mark` | P | a replica dropped its copy before the record said offloaded | events | must be 0: a safety alert (section 2.10) |
-| Offload | `orphan_objects` | P | objects whose segment is below the trim floor | objects | above 0: the controller's scrub deletes them (#1256 (offload races)); an object of a segment that is not trimmed is never deleted |
+| Offload (after v1) | `offload_backlog` | P | segments that are retired and not marked offloaded | segments | late: alert; more offloaders |
+| Offload (after v1) | `store_errors` | O | failed puts and reads of the object store | errors per window | shown; the offloader backs off on each error |
+| Offload (after v1) | `drop_before_mark` | P | a replica dropped its copy before the record said offloaded | events | must be 0: a safety alert (section 2.10) |
+| Offload (after v1) | `orphan_objects` | P | objects whose segment is below the trim floor | objects | above 0: the controller's scrub deletes them (#1256 (offload races)); an object of a segment that is not trimmed is never deleted |
 | Scrub | `scrub_coverage(segment, member)` | P | share of the member's copy of the segment that a scrub read in this pass | ratio | below 1 at the end of a pass: the pass is late |
 | Scrub | `scrub_age(segment, member)` | O | time since the last scrub of that copy | seconds | above the pass bound: the next scrub goes there first |
 | Scrub | `damage_found` | P | records, replica log entries and objects that failed their checksum | records | above 0: a repair is queued |
@@ -599,7 +606,7 @@ Its tests come with its crate, after #1189, and follow the plan of the design do
    hysteresis.
 2. A reference `decide` written again from this section, with no shared code, compared with
    `decide` on every small view (`P <= 3`, `F <= 2`, three or four zones).
-3. A `consensus-sim` flavor where a controller step is a walk move, with two controllers of
+3. A walk in `journal-sim` (section 2.15) where a controller step is a walk move, with two controllers of
    different terms, trace-checked against `specs/tla/grid-controller/` (#1261 (grid controller
    decision tests)).
 4. A moonpool-sim scenario library: loads (ramp, step, spike, diurnal, a sawtooth at the

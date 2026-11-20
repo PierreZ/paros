@@ -2218,7 +2218,7 @@ The answer to #1259:
   retire guard then blocks every heal (`live_nobound`).
 - **Trace checking.** The controller has no code yet. The model's steps (`ReadTerm`, `Elect`,
   `Plan`, `Call`, `Process`, `Receive`, `SealIn`, `Retire`) are the events a trace spec will
-  follow once the consensus-sim flavor of the controller loop exists (#1261 (grid controller
+  follow once the `journal-sim` walk of the controller loop exists (#1261 (grid controller
   decision tests), after #1189).
 
 ### `degraded-reshape/`: a reshape when a column is below quorum, for #1258 (reshape with a column below quorum)
@@ -2495,6 +2495,8 @@ offloaded S1, and is "trunc" for a trimmed S1.
 | `trim_open` | ci | violation of `Findable`: the open S2 is trimmed when its range so far is below the floor; a later write of S2 has nowhere to live |
 | `acc_floor` | ci | violation of `Ends`: the acceptors of S1 compact to the decided floor before a replica of R1 applied S1; nobody can fold S1, the boundary state is never written, and R2 never starts |
 | `nojump` | ci | violation of `Ends`: no `TrimmedTo`; a replica of R2 behind the floor waits for ever for a slot that the acceptors and its peer dropped |
+| `crash_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (23.5 million distinct states, depth 26, 3.76 million states left on the queue), no violation; run of the second Fable review of the journal plan, 2026-11-20. A cut that finishes is #1321 |
+| `live_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (16.7 million distinct states, depth 20, 6.2 million states left and growing), no violation; `Ends` is checked as an invariant on a prefix of the state space only. Same run, same issue |
 
 The answer to #1276:
 
@@ -2623,7 +2625,8 @@ record is in the old segment:
 ### `segment-records/`: segment records across a matchmaker set handover, for #1275
 
 In design A (`docs/architecture/02-data-plane.md` section 2.10) the matchmakers of a journal hold
-its segment records and its matchmaker record (the controller term, the leader uuid). Every change
+its segment records and its matchmaker record (the controller term; the leader uuid of the
+boundary state is in the segment record since #1303, `seal-chain/`). Every change
 is a compare-and-set on that state: the seal, the retire, the offload mark, the controller
 election and the reshape call. `handover/` checks the floor and the configuration register across
 a handover of the matchmaker set, but it has no segment records. This model runs each record write
@@ -2826,7 +2829,8 @@ same rules. Pierre chose the segment record on 2026-11-20.
   metadata as it is (`meta_blank`; `meta_wait` stops the journal, unless a seal waits for the
   `Fence`, `meta_guard_live`). It also needs the `Fence` slot and, with the gap fill, the refusal
   rule of #1302. Here a segment chooses at most one `Fence`; a real log with leader changes can
-  choose two copies, and then a replica must apply only the first (`fence-gap/`, #1302).
+  choose two copies, and then a replica must apply only the first (#1302; no model of that case
+  is in the tree, because the design has no `Fence` slot).
 
 What is not in the model: the crashes and the reads inside one replica set (`segment-replicas/`),
 the seal end and the agreement (`experiments/segments/a/`, `multi-paxos/`), the register across a

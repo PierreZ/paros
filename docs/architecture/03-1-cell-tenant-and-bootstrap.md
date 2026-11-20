@@ -1,4 +1,4 @@
-[← 02-data-plane.md](02-data-plane.md) · [Index](README.md) · [03-2-machines.md →](03-2-machines.md)
+[← 02-1-journal-register.md](02-1-journal-register.md) · [Index](README.md) · [03-2-machines.md →](03-2-machines.md)
 
 ## 3. The control plane
 
@@ -141,7 +141,8 @@ cell are its **entry names** (decision 8, section 3.2), never "seeds". Some code
 
 **Every journal is born with its matchmaker set** (decided on 2026-10-04). The cell control
 journal is born with the matchmaker set `cell init` starts, and the universe tenant's control
-journal with its tenant's set; every tenant journal is born with its tenant's set. **Matchmakers
+journal with its own set; every tenant journal is born with its own set (one set per journal,
+2026-11-19, section 3.4). **Matchmakers
 are mandatory everywhere in the service** (decision 15, question 2 (c)): each journal of the
 service reconfigures and has the split of roles. Plain Multi-Paxos with no matchmakers is a
 shape of `paros-consensus` as a library, and `parosd` never runs it (step 0.11).

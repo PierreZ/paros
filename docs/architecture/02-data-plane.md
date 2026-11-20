@@ -1,4 +1,4 @@
-[← 01-goal.md](01-goal.md) · [Index](README.md) · [03-1-cell-tenant-and-bootstrap.md →](03-1-cell-tenant-and-bootstrap.md)
+[← 01-goal.md](01-goal.md) · [Index](README.md) · [02-1-journal-register.md →](02-1-journal-register.md)
 
 ## 2. The data plane
 
@@ -9,8 +9,12 @@ multi-writer, and `SetLeader(new, None)` makes it single-writer again (decided b
 2026-11-20, #1274 (multi-writer mode through SetLeader(None) and expected_seq); it replaces the
 mode fixed at create time of 2026-10-04). Section 2.4 has the rules of the switch. Every rule below is judged at apply time, in
 slot order, by a small per-journal state machine
-`(mode, leader_uuid, term, next_seq, first_seq)` that lives in `paros-consensus` beside the replica's
-walk.
+`(mode, leader_uuid, term, next_seq, first_seq)` beside the replica's walk. **The journal fold
+lives in the journal crates, not in `paros-consensus`** (decided by Pierre on 2026-11-20, #1315
+(bring docs and models in step with the v1 scope), decision 2): `SetLeader(None)`, the unset
+leader, the order "position before fence" and the answer `Below` change no type of the core. The
+core's fold (`journal/command.rs`, `journal/state.rs`) stays as it is today, for the users of the
+library (section 4.3).
 
 | Call | Single-writer | Multi-writer |
 |---|---|---|
@@ -80,6 +84,12 @@ taken", and a writer that writes it again lands it two times (controls `seal_loc
 `seal_local_twice`). A fold that reads the old record at apply is safe too (`seal_global`), but
 apply would wait for another replica set. A digest of the last writes in the boundary state is
 safe only while it covers the writer's whole pipeline (`seal_digest`).
+
+**Open** (#1320 (the wire shape that resolves a `Below` answer), decided with #1189): how the
+client resolves `Below`. The model resolves it with the writer uuid and the write of the record
+at that position, which a `Read` does not return today. The options are a `Resolve` call that a
+replica of the old segment judges against its stored entry, a field of `Read` with the writer
+uuid of each record, or a compare of bytes. Each one is a format fact of v1.
 
 The client pipelines a single-writer journal's writes with `paros::client::Pipeline` (#597
 (several writes in flight per journal)): one writer's leadership, shared by its callers, each
@@ -393,11 +403,13 @@ can come back later as a measured change, if the benchmark shows the cost of the
 **The matchmakers of a journal hold its segment table** (decided by Pierre on 2026-11-19, with
 the TLA+ experiment of #1213 (segments in the protocol or in storage),
 `specs/tla/experiments/segments/`). A segment is the run of slots that one configuration (one
-grid) holds. Only a reshape or a roll opens a segment; a leader change opens none. The
+grid) holds. Only a reshape opens a segment in v1 (no size or age roll, section 2.15); a leader
+change opens none. The
 matchmakers keep one record for each segment until trim: its start slot, its end slot, its grid
 and its state (open, sealed, retired, offloaded, trimmed). A segment whose only copy is in the
 object store is still in the table, so the grid controller, placement, the offload policy and
-the readers see where each slot range lives as decided state. The rules that the experiment
+the readers see where each slot range lives as decided state. Section 2.16 lists every field of
+the register, its writer and its guard. The rules that the experiment
 checked, each with a control that TLC breaks:
 
 - The first leader of the next configuration writes the end slot once, by compare-and-set, after
@@ -463,8 +475,19 @@ checked, each with a control that TLC breaks:
     its put and its mark. A tombstone at trim was checked too; it also needs a list (a
     controller can stop between the trim and the tombstone) and stays for good, so the design
     takes the scrub.
-  - Offload does not need the retire: one complete copy and `F + 1` holders until the mark are
+    - Offload does not need the retire: one complete copy and `F + 1` holders until the mark are
     enough. The controller still offloads retired segments only.
+  - **Open** (the offload design, after v1): the repair of a damaged object. The check of CTRL
+    in the journal (#1263, PR #1293) puts a damaged object again from a replica, but the put is
+    conditional, and no rule here deletes the object of a segment that is not trimmed. A replace
+    needs a delete that the mark fences.
+- **A sealed segment is re-replicated in v1** (decided by Pierre on 2026-11-20, #1315,
+  decision 4). With offload deferred, a sealed segment lives only on its replica set until the
+  user truncates over it. When a member of that set is lost, the controller copies the segment
+  from a holder to a new member and changes the replica set in the record. The model comes first:
+  #1314 (re-replication of a sealed segment's replica set) checks the change of the set, the copy,
+  the reader that routes with the old set, the trim that races the copy and the count of holders.
+  The guard of the change is its result.
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in
@@ -525,7 +548,14 @@ breaks:
   trimmed.
 - **The acceptors of a segment compact only to a slot that `F + 1` replicas of its set compacted
   to.** Each of these replicas applied and folded every slot below it, so with `F` of them down
-  one is still live to give a laggard its trim point. Acceptors that compact to the decided
+  one is still live to give a laggard its trim point. The acceptor never reads the chosen prefix
+  (`AGENTS.md`), so it does not count the replicas itself: the replicas report their compaction
+  point to the leader side, which counts them with a predicate of `membership/` on the replica
+  set (as `collector.rs` counts the GC acks today) and sends the acceptors a floor. This is the
+  layering rule applied to the new step; the message is new. **Not proved**: the step has no row
+  in `quorum-everywhere/` yet (#1318 (quorum-everywhere rows for the boundary write and the
+  acceptor compaction)). Without a `Truncate` the acceptors keep every vote of the open segment;
+  in v1 only a reshape and its retire free the votes of a segment. Acceptors that compact to the decided
   floor alone (`acc_floor`) can drop the slots of a segment that no replica applied yet: nobody
   can then fold the segment, its boundary state is never written, and the next segment never
   starts. In the colocated core an acceptor compacts at the walk of its own node, so the case
@@ -574,11 +604,13 @@ a segment's replica set, each step completes:
 | Election | a matchmaker majority, then `F + 1` acceptors of every column of each configuration of `H_b` |
 | Leaderless read | `F + 1` acceptors of every column of the configuration in force; no matchmaker read: the fence of the code closes a reshape (#1254, decided in section 2.10) |
 | Seal | a Phase-1 quorum of the old grid, then a matchmaker majority for the compare-and-set of the end slot |
+| Boundary write | one replica of the old set that applied the segment, then a matchmaker majority. **Not proved**: no row yet (#1318) |
+| Acceptor compaction | `F + 1` replicas of the segment's set report their compaction point. **Not proved**: no row yet (#1318) |
 | Retire | `F + 1` replicas of the segment, then a matchmaker majority |
-| Offload mark, record of a trim | a matchmaker majority |
+| Offload mark, record of a trim | a matchmaker majority. In v1 the offload mark is a rule of the record only: nothing writes it (section 2.10) |
 | Matchmaker set handover | a majority of the old set (the stop quorum), then a majority of the new set (the successor decree) |
 | Grid controller election, reshape call | a matchmaker majority for each compare-and-set on the matchmaker record (section 2.12, #1259) |
-| Hold before Phase 2 of a bypass | `F + 1` acceptors of one column of the old grid; a stuck column moves (section 2.13, #1258) |
+| Hold before Phase 2 of a bypass | not in v1 (section 2.13). `F + 1` acceptors of one column of the old grid; a stuck column moves (section 2.13, #1258) |
 
 Each step blocks with one member more down than its quorum allows, and each step that waits for
 every target blocks with `F` down: the model sees both. On a grid that is not full the leaderless
@@ -590,7 +622,11 @@ A grid layout meets the rule for `F` exactly when `F + 1 <= acks <= rows - F`
 (`grid/GridCheck.tla`, `PerColumnTolerance`). The partitioned grid of section 3.4
 (`rows = 2F + 1`, `acks = F + 1`) and the majority meet it. The full grid (`acks = rows`) does not:
 a write needs a whole column. The journal therefore offers only the majority and the partitioned
-grid, and a grid that the grid controller picks keeps `F + 1 <= acks <= rows - F`.
+grid. **In v1 the register takes exactly these grids**: `rows = 2F + 1`, `acks = F + 1`, with
+one or more columns, the majority being one column (decided by Pierre on 2026-11-20, #1315,
+decision 5). The wider bound `F + 1 <= acks <= rows - F` is what the models check, and a v1 grid
+is inside it. A grid of four rows, the state WritesBlocked and the separate phase-1 and phase-2
+spares of section 5.1 leave v1.
 
 ### 2.12 The grid controller's fenced reshape
 
@@ -621,7 +657,8 @@ breaks:
 - **No reshape while a segment is not retired.** The newest configuration must be in force and
   every older one retired, so one configuration is in force and at most one other is not retired
   (rule 1 of the plan). A reshape asked while a segment is sealed but not retired is refused.
-- **The record checks `F + 1 <= acks <= rows - F` itself** (section 2.11). A grid outside the
+- **The record checks the grid itself** (section 2.11): in v1 it takes only `rows = 2F + 1`,
+  `acks = F + 1`; the model checks the wider bound `F + 1 <= acks <= rows - F`. A grid outside the
   bound can open and then never come into force: with `acks = 1` and one acceptor down, Phase 1
   needs every member, the new configuration stays pending, and the guard above blocks every later
   reshape, so the journal can never heal.
@@ -633,8 +670,8 @@ breaks:
 
 After the faults stop, every call is answered (done or refused) and every configuration that a
 reshape opened comes into force. The controller's crate (`paros-journal-control`) and its
-consensus-sim flavor (#1261 (grid controller decision tests)) come after the journal state model
-(#1189); the flavor's walk then trace-checks against this model.
+walk in `journal-sim` (#1261 (grid controller decision tests), section 2.15) come after the
+journal state model (#1189); the walk then trace-checks against this model.
 
 ### 2.13 A column below quorum
 
@@ -713,12 +750,32 @@ Pierre's answers to the first review of the journal plan (2026-11-20,
 - **The elected controller stays**: its own role, elected by a term in the matchmaker record
   (section 2.12).
 - **Offload is prepared, not built** (section 2.10). This replaces "offload retired segments" in
-  the controller's first scope: the controller heals, rolls and scrubs.
+  the controller's first scope: the controller heals (re-replication included) and scrubs.
 - **The v1 controller has no SLOs and no scaling from latency or load.** It acts only on failures,
-  from protocol facts: heal, roll and scrub. The roles publish their metrics to the controller;
+  from protocol facts: heal and scrub. The roles publish their metrics to the controller;
   which metric drives which action is decided after tests (#1260 (health measures)).
 - **The boundary uuid lives in the segment record**, the result of #1303 (two seals in a row,
   section 2.10).
-- **A write stall at each roll is accepted in v1, and measured.**
+- **A write stall at each reshape is accepted in v1, and measured.**
 - **The journal gets its own walk crate**: a `journal-sim` beside `consensus-sim`. `consensus-sim`
   stays on `paros-consensus` only.
+
+Pierre's answers to the second review of the journal plan (2026-11-20, #1315 (bring docs and
+models in step with the v1 scope),
+`/mnt/project-files/review/journal-plan-2026-11-20/fable-review-2.md`):
+
+1. **The journal's compare-and-set register at the matchmakers is an optional role.** The
+   registration matchmaker of the paper stays in `paros-consensus` for the users of the library
+   (section 2.16, section 4.3).
+2. **The journal fold does not go into the core.** `Write`, `Truncate` and `SetLeader`, with
+   `None` and `Below`, live only in the journal crates. The core's fold stays as it is today
+   (section 2, section 4.3).
+3. **Matchmakers below a majority during a seal stop acked writes: accepted for v1.** It is more
+   than `F` matchmaker failures (section 2.16, section 5.1).
+4. **The re-replication of a sealed segment is in v1**, with its model first: #1314
+   (re-replication of a sealed segment's replica set) (section 2.10).
+5. **The v1 grids are the majority and the partitioned grid only** (`rows = 2F + 1`,
+   `acks = F + 1`). WritesBlocked and the separate phase-1 and phase-2 spares leave v1 (sections
+   2.11 and 5.1).
+6. **No size or age roll in v1.** A segment opens only on a reshape. Rolls come back with offload
+   (section 2.10). So in v1 the stall above and the window of decision 3 come only with a heal.

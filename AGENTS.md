@@ -83,11 +83,11 @@ takeover, a lost reply and the bound `F + 1 <= acks <= rows - F`; #1259 (the fen
 the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a write reaches only the
 replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
 leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
-segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
+segment; the uuid part is superseded by `seal-chain/`), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
 reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
 `SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
 write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
-`Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301
+`Truncate` in both modes, a `Fence(None)` at a seal (superseded by the uuid in the segment record of `seal-chain/`), a resend across a seal answered `below` (#1301
 (a resent write across a seal)); #1274 (multi-writer mode through SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
 (`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
 segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
@@ -114,7 +114,8 @@ record)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are
-its later steps). Then the journal is
+its later steps). `docs/architecture/02-1-journal-register.md` (§2.16) lists every record of the
+journal's matchmaker register with its writer, its guard and the models that check it (#1315). Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
