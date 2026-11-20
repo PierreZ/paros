@@ -406,6 +406,26 @@ checked, each with a control that TLC breaks:
   set after the stop fails, and a deposed controller's reshape fails across the handover too.
   Controls: a successor that copies one member of the stop quorum (`close_one`,
   `close_one_term`), a frozen member that takes writes (`frozen_serves`).
+- **The offloader** (a stateless role, Pierre 2026-11-20; checked by `specs/tla/offload/`, #1256
+  (offload races and the offloader role)) offloads a retired segment in four steps: it reads the
+  segment from a replica that applied every slot up to the `next_seq` of the record, builds the
+  object with deterministic bytes, writes it with a conditional put at the key, and marks
+  `offloaded` by compare-and-set from "not offloaded and not trimmed". The races of two
+  offloaders, a lost mark, an offloader that stops between the put and the mark, and a trim that
+  comes during the upload need these rules, each with a control that TLC breaks:
+  - A put that finds an object is not a failure: the offloader reads the object and marks when it
+    holds the whole segment, whatever the release in its header. Giving up never marks after a
+    lost mark; comparing bytes never marks across a rolling upgrade.
+  - A failed mark deletes the key only when the record says trimmed (the late upload after
+    trim). A delete on any failed mark deletes the object that the other offloader marked.
+  - The trim deletes the object by its key, marked or not, and the controller scrubs: it lists
+    the store and deletes each object of a segment below the trim floor. The scrub never deletes
+    an object of a segment that is not trimmed, even with no mark: that object can be between
+    its put and its mark. A tombstone at trim was checked too; it also needs a list (a
+    controller can stop between the trim and the tombstone) and stays for good, so the design
+    takes the scrub.
+  - Offload does not need the retire: one complete copy and `F + 1` holders until the mark are
+    enough. The controller still offloads retired segments only.
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in
