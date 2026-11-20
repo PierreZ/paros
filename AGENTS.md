@@ -398,8 +398,12 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   coordinator's `ReconfigureMatchmakers` too (#563: the node refuses an ask whose generation is
   no longer in force, so a re-ask the read left stale never starts a second handover);
   matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
-  `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop
-  quorum's maximum decree promise; any node that meets `Stopped { successor: None }` finishes
+  `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the decree
+  round on the node's disk, which the driver writes before the round's first request leaves
+  (`ReconfigurerReady::round`; decided on 2026-11-19, #1229 (a stale `Stopped` reply reuses a
+  decree ballot): a `Stopped` sent to an earlier incarnation can reach a later one, so the stop
+  quorum's maximum decree promise alone does not keep two incarnations apart), and above that
+  maximum promise, which only skips rounds the matchmakers refuse; any node that meets `Stopped { successor: None }` finishes
   the handover. `MatchmakerSet::new` / `AcceptorConfig::new` are the only constructors.
 
 Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,

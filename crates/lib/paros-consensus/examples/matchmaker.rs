@@ -1226,6 +1226,11 @@ fn beat(
     pool: &mut [MatchmakerNode],
 ) -> Vec<ReconfigurerStep> {
     let ready = reconfigurer.ready();
+    // Persist before send: a new decree round goes to disk before its
+    // requests leave, so no later incarnation of this node reuses it.
+    if let Some(round) = ready.round() {
+        println!("  decree round {round} written to disk before the batch leaves");
+    }
     let requests = ready.requests().to_vec();
     ready.advance();
     let mut steps = Vec::new();
@@ -1309,7 +1314,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
     // successor still inherits all three, whichever members answer.
     let m_0 = m_0();
     let m_1 = m_1();
-    let mut reconfigurer = MatchmakerReconfigurer::new(N3, Limits::DEFAULT);
+    let mut reconfigurer = MatchmakerReconfigurer::new(N3, 0, Limits::DEFAULT);
     reconfigurer
         .start(&m_0, m_1.members().to_vec())
         .expect("starts");

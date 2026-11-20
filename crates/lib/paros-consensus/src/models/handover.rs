@@ -151,10 +151,11 @@ impl Site {
 }
 
 /// A fresh reconfigurer for `node` that pages its bootstraps by `page`
-/// (#439).
-fn paged(node: NodeId, page: usize) -> MatchmakerReconfigurer {
+/// (#439) and starts from `round`, the decree round on the node's disk.
+fn paged(node: NodeId, page: usize, round: u64) -> MatchmakerReconfigurer {
     MatchmakerReconfigurer::new(
         node,
+        round,
         Limits {
             registry_page: page,
             ..Limits::DEFAULT
@@ -176,6 +177,8 @@ struct Campaign {
 /// its registration ballot counter, and its open campaign.
 struct Node {
     reconfigurer: MatchmakerReconfigurer,
+    /// The decree round on the node's disk: it survives a kill and a reboot.
+    decree_round: u64,
     believed: MatchmakerSet,
     next_round: u64,
     /// Pending ticks of a post-preemption backoff (the driver's jitter).
@@ -188,6 +191,19 @@ struct Node {
 }
 
 impl Node {
+    /// Drain the reconfigurer's batch, the way a driver does: the round of
+    /// the batch is on disk before its requests leave.
+    fn drain(&mut self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
+        let ready = self.reconfigurer.ready();
+        let round = ready.round();
+        let requests = ready.requests().to_vec();
+        ready.advance();
+        if let Some(round) = round {
+            self.decree_round = round;
+        }
+        requests
+    }
+
     fn adopt(&mut self, set: &MatchmakerSet) {
         if set.generation > self.believed.generation && !set.members().is_empty() {
             self.believed = set.clone();
@@ -666,7 +682,8 @@ impl World {
         let believed = MatchmakerSet::new(MatchmakerGeneration(0), bootstrap.clone());
         let nodes = (0..NODES)
             .map(|i| Node {
-                reconfigurer: paged(NodeId(i), page),
+                reconfigurer: paged(NodeId(i), page, 0),
+                decree_round: 0,
                 believed: believed.clone(),
                 next_round: 1,
                 backoff: 0,
@@ -749,10 +766,7 @@ impl World {
     }
 
     fn queue_requests(&mut self, from: NodeId) {
-        let ready = self.node(from).reconfigurer.ready();
-        let requests = ready.requests().to_vec();
-        ready.advance();
-        for (to, request) in requests {
+        for (to, request) in self.node(from).drain() {
             self.send(Envelope::Reconfigure { to, request });
         }
     }
@@ -1786,7 +1800,7 @@ impl World {
                 }
                 let page = self.page;
                 let n = self.node(node);
-                n.reconfigurer = paged(node, page);
+                n.reconfigurer = paged(node, page, n.decree_round);
                 n.backoff = 0;
             }
             86 => {
@@ -1797,7 +1811,7 @@ impl World {
                 );
                 let page = self.page;
                 let n = self.node(node);
-                n.reconfigurer = paged(node, page);
+                n.reconfigurer = paged(node, page, n.decree_round);
                 n.believed = bootstrap;
                 n.backoff = 0;
                 n.campaign = None;
@@ -2021,7 +2035,7 @@ impl World {
         );
         let page = self.page;
         for (i, node) in self.nodes.iter_mut().enumerate() {
-            node.reconfigurer = paged(NodeId(i as u64), page);
+            node.reconfigurer = paged(NodeId(i as u64), page, node.decree_round);
             node.believed = bootstrap.clone();
             node.backoff = 0;
             node.campaign = None;
@@ -2374,7 +2388,8 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
     }
     world.network.clear();
     let page = world.page;
-    world.node(node).reconfigurer = paged(node, page);
+    let round = world.node(node).decree_round;
+    world.node(node).reconfigurer = paged(node, page, round);
     // Another node meets the frozen generation: finish with whoever answers
     // (C is still unreachable).
     let finisher = NodeId(1);
@@ -2488,7 +2503,8 @@ fn killing_the_reconfigurer_after_chosen_cannot_change_the_outcome() {
         }
         world.network.clear();
         let page = world.page;
-        world.node(node).reconfigurer = paged(node, page);
+        let round = world.node(node).decree_round;
+        world.node(node).reconfigurer = paged(node, page, round);
         // A different node, believing the bootstrap set, meets the pool.
         for step in 0..QUIET_STEPS {
             world.quiet_step(step);
@@ -2618,12 +2634,7 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                                     .start(&believed, vec![MatchmakerId(3)])
                                     .expect("start");
                             }
-                            {
-                                let ready = world.node(reconfigurer_node).reconfigurer.ready();
-                                let requests = ready.requests().to_vec();
-                                ready.advance();
-                                requests
-                            };
+                            world.node(reconfigurer_node).drain();
                             let stop = ReconfigureRequest::Stop {
                                 from: reconfigurer_node,
                                 generation: MatchmakerGeneration(0),
