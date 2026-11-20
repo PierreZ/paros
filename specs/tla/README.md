@@ -1565,13 +1565,19 @@ reported a vote), or, above the new frontier, it is free again. The model has:
 - **The batcher** (`Batcher`): one lane of one multi-writer journal. A writer pushes a write
   while the lane fits the batcher's record limit, and the lane flushes as one batch at any time
   (`flush_records`, the tick). A batch is one unfenced `Write` to the leader, and the transport
-  delivers a request at most one time.
+  delivers a request at most one time (with `Copies`, a few more times).
 - **The edge refusal**: the leader refuses a merged batch over its record limit (`TooLarge`)
   before it allocates a slot. The batcher lowers its limit (`lower_limits`) and sends each write
   of the batch again, alone (`docs/architecture/02-data-plane.md` §2.4).
 - **The held answer**: the leader allocates the frontier slot, and answers once the slot and
-  every slot below it are chosen, with the `seq` that its fold gives the batch. A new leader holds
-  no answer of the old one.
+  every slot below it are chosen, with the `seq` that its fold gives the batch, and only when the
+  slot chose the batch that the leader proposed there. A new leader holds no answer of the old
+  one.
+- **The deposed leader** (#1232 (held writes)): the old leader stays up and keeps its held
+  answers. It answers a held batch `Unknown` at any time, or `ok` when the slot chose that batch.
+  It never answers `NotLeader` for a batch that holds a slot. The batcher treats `Unknown` as an
+  ambiguous batch. A single writer resolves an `Unknown` with a resend at the same
+  `expected_seq`; `multi-writer/` checks that half (`AckTrue`, `RefusalFinal`, `ExactlyOnce`).
 - **The unbatcher** (`Unbatcher::scatter`) cuts the answer in batch order, so each write gets
   its own dense range.
 - **An ambiguous batch**: a batch with no answer in time is answered unanswered, write by
@@ -1597,6 +1603,8 @@ reported a vote), or, above the new frontier, it is free again. The model has:
 | `Read` | `"quorum"`: the leaderless read (the code). `"local"`: a control, the replica serves from its prefix with no watermarks. |
 | `RQ` | The sets that close a read: a majority of the acceptors (the code), or the control `WithReplicas`, where a read replica counts as a voter and answers with its own prefix. |
 | `LeaderMax`, `BatchMax` | The leader's record limit and the batcher's limit before it hears the leader's. With 3, the merged batch of `w1` (one record) and `w2` (two records) fits; with 2, the leader refuses it. |
+| `Held` | What a deposed leader answers for a held batch. `"unknown"`: `Unknown`, or `ok` when the slot chose the batch (the rule, #1232). `"slot"`: a control, it answers from the outcome of the slot, whatever the slot chose. `"notleader"`: a control, it answers `NotLeader`, and the batcher follows the hint and sends the batch again (§2.4). |
+| `Copies` | How many times in a run the transport may deliver a batch one more time. 0 in every check but `copies` and `copies_onerange`. |
 | `Leaders`, `Restarts`, `Crash` | How many leader changes and replica restarts can happen, and whether the batcher can stop for good. |
 
 The safety invariants:
@@ -1607,6 +1615,9 @@ The safety invariants:
 - `OneAnswer`: each write gets one answer, a range or unanswered.
 - `AnswerAgrees`: the range that the unbatcher gives a write is the range that each replica
   folds for it.
+- `AckedChosen`: the range that the unbatcher gives a write is the range that the fold of the
+  chosen log gives it, also when no replica walked the slot yet. An answered write is never lost
+  (#1232).
 - `InOrder`: a replica folds the chosen log in slot order with no gap, and its state is the fold
   of that prefix.
 - `Dense`: the ranges of a replica's state are disjoint and cover `[0, next_seq)`.
@@ -1636,6 +1647,11 @@ Results (`compartments/checks.txt`; the CI set runs in about 45 seconds with 4 w
 | `restart` | ci | the rules of the code, one replica restart | pass |
 | `reads` | ci | the rules of the code, one reader | pass (700 thousand states) |
 | `resend_ambiguous` | ci | the batcher sends an ambiguous batch again | `OneRange` violation |
+| `reach_deposed_ok` | ci | `NoDeposedOk`, a reachability control: a deposed leader answers a held batch `ok` | violation |
+| `held_slot` | ci | a deposed leader answers from the outcome of the slot | `AckedChosen` violation |
+| `held_notleader` | ci | a deposed leader answers `NotLeader`, and the batcher sends the batch again | `OneRange` violation |
+| `copies` | ci | the rules of the code, and the transport delivers a batch one more time; no `OneRange` and no `AnswerAgrees` | pass (3 million states, 50 s) |
+| `copies_onerange` | ci | the same, with `OneRange`: a copy lands again (multi-writer is at-least-once) | `OneRange` violation |
 | `walk_skip` | ci | the walk folds a slot past a gap | `AnswerAgrees` violation |
 | `boot_keep` | ci | the fold state survives a restart, and the walk starts again at the chosen index on disk | `OneRange` violation |
 | `read_local` | ci | the replica serves a read from its prefix | `ReadFresh` violation |
@@ -1644,9 +1660,9 @@ Results (`compartments/checks.txt`; the CI set runs in about 45 seconds with 4 w
 | `live_split` | ci | the rules of the code, the leader refuses the merged batch | `Ends` pass |
 | `live_noresend` | ci | the leader does not send lost `Accept`s again | `Ends` violation |
 | `reads_two` | long | two replicas, one reader | pass (4.5 million states, 2 min) |
-| `safety` | long | the whole model at once: one leader change, a batcher that can stop, one restart, one reader | pass (12.7 million states, 4.6 min) |
+| `safety` | long | the whole model at once: one leader change with a deposed leader that stays up, a batcher that can stop, one restart, one reader | pass (36.5 million states, 27 min) |
 
-The long checks ran once on 2026-11-19 with 4 workers.
+The long checks ran once on 2026-11-20 with 4 workers, with the held answers of #1232.
 
 The traces of the controls:
 
@@ -1666,14 +1682,25 @@ The traces of the controls:
   and the reader `r1` itself, two answers with watermark 0, and is served empty.
 - `live_noresend`: the `Accept`s of the slot of `w1` are lost, and nothing sends them again: the
   slot stays open for good.
+- `held_slot`: the leader allocates slot 0 to the batch of `w1`. A new leader wins with frontier 1
+  and fills slot 0 with a `Noop`, which is chosen. The deposed leader answers `w1` from the
+  outcome of slot 0: `[0, 1)`. No slot holds `w1`, so an acked write is lost.
+- `held_notleader`: slot 0 chooses the batch of `w1`, and then a new leader wins. The
+  deposed leader answers `NotLeader`, the batcher sends `w1` to the new leader, and the copy gets
+  slot 1: the replica gives `w1` two ranges.
+- `copies_onerange`: the transport delivers the batch of `w1` two times, and each copy gets a slot.
+  This is the at-least-once of a multi-writer journal (§2.4). A single writer is exactly-once
+  because the fold judges its `expected_seq` (`multi-writer/`).
 
 What the model does not find: no rule of the code is refuted, and no design decision is in
-question. The read replica's rule is the rule of `reads/`, and the walk's rule is the module doc
+question. The rule for held answers (#1232) is the decision of 2026-11-20 (`Unknown`, resolved
+through `expected_seq`). The read replica's rule is the rule of `reads/`, and the walk's rule is the module doc
 of `replica.rs` ("the fold is contiguous or it stops").
 
 Not in the model: the log itself (`multi-paxos/`), the proxy leader (`proxy-leader/`), more
-than one journal (a lane never mixes journals, so one lane is enough), the `NotLeader` refusal (it
-takes no slot, so it is the same case as `TooLarge`; this is a reading of the code, not a check), a write
+than one journal (a lane never mixes journals, so one lane is enough), the `NotLeader` refusal at
+the edge (it takes no slot, so it is the same case as `TooLarge`; this is a reading of the code,
+not a check; the `NotLeader` answer of a deposed leader for a held batch is `held_notleader`), a write
 over the limits alone, the byte limit, truncation and the trim-point jump, a faulty record that
 holds the walk, the reply owner (`slot % replica_count`, which nothing routes on), a read that
 expires, and a change of members.
