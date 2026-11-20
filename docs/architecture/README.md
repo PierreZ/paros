@@ -37,20 +37,21 @@ stays valid: find its file in the section map.
 
 1. [01-goal.md](01-goal.md): §1 Goal; §1.1 The eight root rules
 2. [02-data-plane.md](02-data-plane.md): §2 The data plane
-3. [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md): §3 The control plane; §3.1 The cell tenant and bootstrap
-4. [03-2-machines.md](03-2-machines.md): §3.2 Machines
-5. [03-3-coordinators-and-placement.md](03-3-coordinators-and-placement.md): §3.3 Control planes, recovery and placement
-6. [03-4-tenant-modes.md](03-4-tenant-modes.md): §3.4 Journal configuration
-7. [03-5-frontend-and-resolver.md](03-5-frontend-and-resolver.md): §3.5 The frontend and the resolver
-8. [03-6-status.md](03-6-status.md): §3.6 Status
-9. [03-7-universe.md](03-7-universe.md): §3.7 The universe
-10. [03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md): §3.8 Identifiers; §3.9 Checkpoints; §3.10 Recovery (deferred); §3.11 Transport security
-11. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract; §4.3 The consensus core is a library for everyone
-12. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones
-13. [06-verification.md](06-verification.md): §6 Verification
-14. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
-15. [10-sources.md](10-sources.md): §10 Sources
-16. [11-alternatives.md](11-alternatives.md): §11 Alternatives considered
+3. [02-1-journal-register.md](02-1-journal-register.md): §2.16 The journal's matchmaker register
+4. [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md): §3 The control plane; §3.1 The cell tenant and bootstrap
+5. [03-2-machines.md](03-2-machines.md): §3.2 Machines
+6. [03-3-coordinators-and-placement.md](03-3-coordinators-and-placement.md): §3.3 Control planes, recovery and placement
+7. [03-4-tenant-modes.md](03-4-tenant-modes.md): §3.4 Journal configuration
+8. [03-5-frontend-and-resolver.md](03-5-frontend-and-resolver.md): §3.5 The frontend and the resolver
+9. [03-6-status.md](03-6-status.md): §3.6 Status
+10. [03-7-universe.md](03-7-universe.md): §3.7 The universe
+11. [03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md): §3.8 Identifiers; §3.9 Checkpoints; §3.10 Recovery (deferred); §3.11 Transport security
+12. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract; §4.3 The consensus core is a library for everyone
+13. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones
+14. [06-verification.md](06-verification.md): §6 Verification
+15. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
+16. [10-sources.md](10-sources.md): §10 Sources
+17. [11-alternatives.md](11-alternatives.md): §11 Alternatives considered
 
 ## Section map
 
@@ -69,6 +70,12 @@ stays valid: find its file in the section map.
 | §2.8 | Underneath | [02-data-plane.md](02-data-plane.md) |
 | §2.9 | Store durability | [02-data-plane.md](02-data-plane.md) |
 | §2.10 | Segments | [02-data-plane.md](02-data-plane.md) |
+| §2.11 | Quorum everywhere | [02-data-plane.md](02-data-plane.md) |
+| §2.12 | The grid controller's fenced reshape | [02-data-plane.md](02-data-plane.md) |
+| §2.13 | A column below quorum | [02-data-plane.md](02-data-plane.md) |
+| §2.14 | Record headers | [02-data-plane.md](02-data-plane.md) |
+| §2.15 | The v1 scope of the journal | [02-data-plane.md](02-data-plane.md) |
+| §2.16 | The journal's matchmaker register | [02-1-journal-register.md](02-1-journal-register.md) |
 | §3 | The control plane | [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md) |
 | §3.1 | The cell tenant and bootstrap | [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md) |
 | §3.2 | Machines | [03-2-machines.md](03-2-machines.md) |
@@ -86,6 +93,7 @@ stays valid: find its file in the section map.
 | §4.2 | The journal's sans-IO contract | [04-roles.md](04-roles.md) |
 | §4.3 | The consensus core is a library for everyone | [04-roles.md](04-roles.md) |
 | §5 | Failure model and zones | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
+| §5.1 | Journal health | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §6 | Verification | [06-verification.md](06-verification.md) |
 | §7 | The rework: phases and steps | [07-changes-milestones-done.md](07-changes-milestones-done.md) |
 | §8 | Milestones | [07-changes-milestones-done.md](07-changes-milestones-done.md) |

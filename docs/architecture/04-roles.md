@@ -13,7 +13,7 @@ placed by the cell from the counts that a person typed for a journal (rule 7, se
 | Replica | storage | `ReplicaNode`; booked per journal by `replicas` (1 by default); serves `Read` |
 | Batcher | stateless | `paros_consensus::Batcher`, `paros::roles::batcher`; booked per journal by `batchers` (1 by default); multi-writer journals only (section 2.4) |
 | Unbatcher | stateless | `paros_consensus::Unbatcher`, in the batcher's process (section 2.4) |
-| Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared; holds the register of rule 1 for each journal of its tenant |
+| Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per journal (decided by Pierre on 2026-11-19), processes shared; the journal's register is an optional role beside the paper's registration matchmaker (section 2.16) |
 | Frontend (the entry role) | frontend | `paros::roles::frontend`; served by the machines that the operator gives the `frontend` role (decision 15, question 6) and named by `Resolve`; authorizes, resolves names and forwards each call to the role that serves it (section 3.5) |
 | Resolver | frontend | universe level, shared by every tenant; redirects a client to its namespace's cell, never carries data (section 3.5); served beside the frontend |
 | Coordinator (universe, cell, tenant) | none | not a role of a machine: any machine of the cell that proved it serves can win the term with `SetLeader`, and a stateless machine tries first (decisions 1, 7 and 15, question 5; section 3.3) |
@@ -72,6 +72,15 @@ belief, an abandoned successor, a store released before the switch) fail. It cha
 Matchmaker Paxos paper as paros built it, so its model comes first (`AGENTS.md`: a change to a
 paper needs a TLA+ check).
 
+**Rule 1 and the journal register** (Pierre, 2026-11-20, #1315 (bring docs and models in step
+with the v1 scope), decision 1). The registration matchmaker of the paper stays in
+`paros-consensus` for the users of the library (section 4.3). The register of the journal is an
+optional role beside it, and section 2.16 lists its fields, writers and guards. There, "in force"
+means the state that the seal end of the predecessor gives, and the step that lets old acceptors
+stop is the retire (section 2.16); the "switch" below is the word of rule 1 for the core. **Open**
+(#1189 and step 2.3 decide): how steps 2.3 to 2.5 change, since they turn the core's matchmaker
+into the register and delete the registrations.
+
 **For each journal, the matchmakers hold a register: the configuration in force, and at most one
 open successor.** Each configuration has an epoch, the high part of its ballot.
 
@@ -115,7 +124,7 @@ traces stay as controls of `config-register`, and the 2x2 grid of `abandoned-bal
 
 ```
  candidate (ballot b, epoch e)
-   │ 1. read the register ──────────► matchmakers (majority of the tenant's set)
+      │ 1. read the register ──────────► matchmakers (majority of the journal's set)
    │ ◄──────────── C_in_force, and C_successor when one is open
    │ 2. Phase 1a(b) ────────────────► a quorum of C_in_force  (AND of C_successor, if open)
    │ ◄──────────── promises + votes    (adopt the highest-ballot vote per slot)
@@ -162,14 +171,14 @@ the round on disk (Pierre, 2026-11-19, #1229 (a stale `Stopped` reply reuses a d
 A `Stopped` reply carries no incarnation, so a reply sent to an earlier incarnation can reach a
 later one, and the floor of the stop quorum alone does not keep the round above the rounds of
 the earlier incarnation (`specs/tla/experiments/stale-stopped/`). The decree still opens above
-that floor, which skips rounds that the matchmakers would refuse. A handover is paged (#439): a set keeps one register per journal of
-its tenant, so a `Stop` and its answers carry one page at a time.
+that floor, which skips rounds that the matchmakers would refuse. A handover is paged (#439): a `Stop` and its answers carry one page
+at a time. With one set per journal (2026-11-19) a set holds the state of one journal.
 
 **GC.** A configuration is forgotten once it is sealed and its successor is in force: no future
 leader can need its Phase-1 quorum. The compaction floor and the GC watermark never wait on each
 other.
 
-Matchmakers are mandatory in the service (section 3.1): every journal has its tenant's set,
+Matchmakers are mandatory in the service (section 3.1): every journal has its own set,
 because reconfiguration is how a dead disk is replaced, a machine drained, a journal moved and a
 quorum system changed.
 
@@ -308,3 +317,15 @@ policy or `cell init` (#1264 (remove the cell from paros-consensus), section 3.7
 that the core cannot meet by composition is a new optional behaviour of the core, and its plain
 arm stays unchanged. This extends "plain Multi-Paxos is a shape of the core" of AGENTS.md to
 every flavor.
+
+**Two decisions of 2026-11-20 apply the rule to the journal** (Pierre, #1315 (bring docs and
+models in step with the v1 scope)):
+
+- **The journal fold stays out of the core.** `Write`, `Truncate` and `SetLeader`, with
+  `SetLeader(None)`, the unset leader, the order "position before fence" and the answer `Below`,
+  live only in the journal crates. The core's `Command`, `Outcome` and fold
+  (`journal/command.rs`, `journal/state.rs`) stay as they are today. The journal does not make
+  the core generic over the command for this.
+- **The journal's compare-and-set register is an optional role.** The registration matchmaker of
+  the Matchmaker Paxos paper stays in the core, with what it builds. The register sits beside it
+  (section 2.16).
