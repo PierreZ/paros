@@ -2327,8 +2327,8 @@ chosen value.
 | `drop_first_up` | long | pass: a repair in two writes (delete, then write) with no restart |
 | `repair_none` | long | pass: no repair, only a later `Accept` heals: the repair adds a copy, it never decides |
 | `live` | long | pass: `Ends`, the last ballot settles and every faulty record of a learned slot is repaired |
-| `grid` | long, 60 min | pass (bounded): the default grid of the journal, two columns of three, acks 2 |
-| `grid_majority` | long | violation of `NoFillChosen`: the majority control on the default grid |
+| `grid` | long, 60 min | pass (bounded): the default grid of the journal, two columns of three, acks 2; no violation in 60 min (10.9 million distinct states, depth 19), a bounded run, not a proof |
+| `grid_majority` | long | violation of `NoFillChosen`: the majority control on the default grid (668 thousand states, 1 min) |
 | `reach_faulty`, `reach_block`, `reach_repair`, `reach_cross` | ci | violation: a faulty record of a chosen slot, a repair probe, a repair, and a ballot of `c2` that chooses a slot where a record of `c1` is faulty |
 | `grid4_majority` | ci | violation of `NoFillChosen`: the qualifying answers need a majority of the four members. Ballot 1 chooses `v` on `a1`; a scrub finds `a1` damaged; ballot 2 hears `a1` faulty and three empty answers, three is a majority, and it fills the slot with a `Noop`. The grid needs both members of column 0 to qualify, and `a1` does not: the slot is blocked |
 | `plus_one` | ci | violation of `NoFillChosen`: the threshold is one above the highest readable report (item 5) |
