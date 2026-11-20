@@ -418,8 +418,8 @@ breaks:
   bound can open and then never come into force: with `acks = 1` and one acceptor down, Phase 1
   needs every member, the new configuration stays pending, and the guard above blocks every later
   reshape, so the journal can never heal.
-- **The record answers a retry with the same answer** (a rule that the model found; **Open**
-  until Pierre agrees). The record keeps the identity of the call that opened each segment (the
+- **The record answers a retry with the same answer** (a rule that the model found, decided by
+  Pierre on 2026-11-20). The record keeps the identity of the call that opened each segment (the
   controller term, the expected configuration and the grid), and answers a call that it already
   took with "ok". Without it, a lost "ok" makes the retry fail its expected-configuration check,
   and the controller is told "refused" for a reshape that took place.

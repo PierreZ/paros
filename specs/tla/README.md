@@ -2109,8 +2109,8 @@ The answer to #1259:
 - **A rule that the issue did not name: an idempotent answer.** A call whose "ok" is lost is sent
   again; without an idempotent answer the record refuses it, and the controller believes a
   reshape failed that took place (`noidem`). The record keeps the identity of the call that
-  opened each segment (term, expected configuration, grid) and answers it "ok" again. This is a
-  proposal, **Open** until Pierre agrees (`docs/architecture/02-data-plane.md` §2.12).
+  opened each segment (term, expected configuration, grid) and answers it "ok" again. Pierre
+  decided this rule on 2026-11-20 (`docs/architecture/02-data-plane.md` §2.12).
 - **The bound must be a guard of the record, not only a policy of the controller.** A grid outside
   `F + 1 <= acks <= rows - F` can open and never come into force with one acceptor down; the
   retire guard then blocks every heal (`live_nobound`).
