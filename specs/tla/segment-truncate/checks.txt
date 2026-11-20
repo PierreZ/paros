@@ -9,12 +9,18 @@
 # reads of an offloaded segment. K = 2, NS = 4, a write and Truncate(1),
 # Truncate(2).
 safety            pass       ci
-# One replica of each set may crash (F = 1, two replicas, retire at F + 1).
+# One replica of each set may crash (F = 1, two replicas, retire at F + 1),
+# with a write and Truncate(1).
 crash             pass       ci
 # Every run ends with every read served, R2 at the end of the log, S1
 # offloaded or trimmed, and the object of a trimmed S1 deleted.
 live_reads        pass       ci
-live              pass       ci
+# The same with F = 1 and crashes (three replicas in R1, two in R2), no
+# reads; about 11 minutes with 4 workers, so it stays out of CI.
+live              pass       long
+# The crash and liveness checks with all three values.
+crash_all         pass       long   40
+live_all          pass       long   40
 # Reach: a check that must break, so that the passing checks are not empty.
 reach_inside          violation  ci
 reach_object          violation  ci

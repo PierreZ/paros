@@ -2450,10 +2450,10 @@ offloaded S1, and is "trunc" for a trimmed S1.
 
 | Check | CI | Result |
 |---|---|---|
-| `safety` | ci | pass: `FoldTrue`, `BoundaryTrue`, `ReadFloor` (no read returns a record below the floor decided when it started), `ReadKeep` (no record at or above the floor is lost, and "trunc" only below it), `TrimTrue` (a trimmed record is a sealed segment wholly below the floor), `Findable` (each record at or above the floor is at a live replica, the acceptors or the object), `TrimStays` (a trimmed record never becomes live again); `K = 2`, `NS = 4`, a write, `Truncate(1)`, `Truncate(2)`; one replica in R1, two in R2; @SAFETY@ |
-| `crash` | ci | pass: the safety invariants with two replicas in each set, `F = 1`, retire at `F + 1`; @CRASH@ |
-| `live_reads` | ci | pass: `Ends`: a run ends (no step is enabled) with every read served, every live replica of R2 at the end of the log, S1 offloaded or trimmed (trimmed when the floor covers it), and the object of a trimmed S1 deleted; @LIVER@ |
-| `live` | ci | pass: `Ends` with three replicas in each set and `F = 1`, no reads; @LIVE@ |
+| `safety` | ci | pass: `FoldTrue`, `BoundaryTrue`, `ReadFloor` (no read returns a record below the floor decided when it started), `ReadKeep` (no record at or above the floor is lost, and "trunc" only below it), `TrimTrue` (a trimmed record is a sealed segment wholly below the floor), `Findable` (each record at or above the floor is at a live replica, the acceptors or the object), `TrimStays` (a trimmed record never becomes live again); `K = 2`, `NS = 4`, a write, `Truncate(1)`, `Truncate(2)`; one replica in R1, two in R2; 2.0 million distinct states, about 2 minutes |
+| `crash` | ci | pass: the safety invariants with two replicas in each set, `F = 1`, retire at `F + 1`, a write and `Truncate(1)`; 6.3 million distinct states, about 6 minutes |
+| `live_reads` | ci | pass: `Ends`: a run ends (no step is enabled) with every read served, every live replica of R2 at the end of the log, S1 offloaded or trimmed (trimmed when the floor covers it), and the object of a trimmed S1 deleted; no crash; 3.9 million distinct states, about 3 minutes |
+| `live` | long | pass: `Ends` with `F = 1` and crashes, three replicas in R1 and two in R2, a write and `Truncate(1)`, no reads; 10.7 million distinct states, about 11 minutes with 4 workers |
 | `reach_inside` | ci | violation: the floor lands inside S1 and a read of S1 above it is served |
 | `reach_object` | ci | violation: a read of the offloaded S1 is served from the object, with a floor above 0 |
 | `reach_trim_sealed`, `reach_trim_retired`, `reach_trim_offloaded` | ci | violation: S1 is trimmed from each of its three states |
