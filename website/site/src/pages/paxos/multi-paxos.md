@@ -2,6 +2,7 @@
 layout: ../../layouts/Doc.astro
 kicker: Paxos
 section: paxos/
+lab: true
 trace: multi-paxos
 title: Multi-Paxos
 description: A journal is a log of slots. One Phase 1 elects a leader for every slot, and each write then costs one round trip.
@@ -24,6 +25,14 @@ and reads. Continue plays the next screen, and "Show each message" opens the
 step-through.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
+
+## Your turn
+
+Now you are the network. Deliver or drop each message, and reach the goal of each exercise.
+`paros-consensus` runs in this page and decides everything else. "Deliver all" delivers every
+message on the wire, and the messages they send, until the wire is empty.
+
+<div data-lab="gap read"><p class="aside">The exercises need JavaScript.</p></div>
 
 ## The rule
 
