@@ -128,7 +128,9 @@ walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `prox
 `tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
-rules)). Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
+rules)). The trace checks are tested too: each trace spec must refuse about 20 named edits of
+its recorded walks at the edited event or after it (#1308 (mutate recorded traces),
+`trace/mutate.rs`). Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
