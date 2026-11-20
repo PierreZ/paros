@@ -13,7 +13,7 @@ use paros_consensus::matchmaker::{
 use paros_consensus::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use paros_consensus::{MatchmakerReconfigurer, NodeId};
 
-use super::{Cluster, Envelope, Party, Wire, reach};
+use super::{Cluster, Envelope, Mutant, Party, Wire, reach, trace};
 
 /// The driver ticks a handover may stall before its node gives it up.
 const ABANDON_TICKS: u64 = 12;
@@ -100,9 +100,23 @@ impl Cluster {
         cx: &mut Cx<'_, Self>,
     ) {
         let from = request.from();
+        let mut request = request;
+        if self.flavor.mutant == Some(Mutant::ShrinkBootstrap) {
+            shrink_bootstrap(&mut request);
+        }
+        let before = self
+            .matchmaker(id)
+            .live
+            .as_ref()
+            .map(trace::handover_before);
         let Some(replies) = self.matchmaker_mut(id).reconfigure(request) else {
             return;
         };
+        if let (Some(before), Some(matchmaker)) = (before, self.matchmaker(id).live.as_ref()) {
+            for event in trace::handover_steps(id, &before, matchmaker) {
+                cx.record(event);
+            }
+        }
         self.bind_registrations(id);
         for reply in replies {
             cx.send(Envelope {
@@ -187,5 +201,17 @@ impl Cluster {
                 successor: set.clone(),
             }),
         });
+    }
+}
+
+/// The [`Mutant::ShrinkBootstrap`] bug: a bootstrap page loses the lowest
+/// record of the walk's journal on the wire.
+fn shrink_bootstrap(request: &mut ReconfigureRequest) {
+    if let ReconfigureRequest::Bootstrap { bootstrap, .. } = request
+        && let Some(registry) = bootstrap
+            .registries
+            .get_mut(&paros_consensus::journal::JournalIdentifier::UNSET.journal)
+    {
+        registry.history.pop_first();
     }
 }

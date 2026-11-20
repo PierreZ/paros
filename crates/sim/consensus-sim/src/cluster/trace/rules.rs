@@ -458,12 +458,75 @@ const RETIRE: &[Rule] = &[
     },
 ];
 
+/// The rules of `HandoverTrace`.
+const HANDOVER: &[Rule] = &[
+    Rule {
+        name: "a matchmaker freezes",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::MmStop { .. }))
+        },
+    },
+    Rule {
+        name: "a bootstrap carries a registration",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::MmBoot { registry, .. } if !registry.is_empty()))
+        },
+    },
+    Rule {
+        name: "a matchmaker votes in the successor decree",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::MmVote { .. }))
+        },
+    },
+    Rule {
+        name: "a matchmaker activates a later generation",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::MmActivate { .. }))
+        },
+    },
+    Rule {
+        name: "a matchmaker registers after a handover",
+        met: |events| {
+            let mut active = BTreeSet::new();
+            events.iter().any(|e| match e {
+                ClusterEvent::MmActivate { matchmaker, .. } => {
+                    active.insert(*matchmaker);
+                    false
+                }
+                ClusterEvent::Register { matchmaker, .. } => active.contains(matchmaker),
+                _ => false,
+            })
+        },
+    },
+    Rule {
+        name: "two handovers in one walk",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::MmActivate { set, .. } if set.generation.0 >= 2))
+        },
+    },
+];
+
 impl Spec {
     /// The steps of this spec that some checked walk must take.
     #[must_use]
     pub fn rules(self) -> Vec<Rule> {
+        if self == Self::Handover {
+            // The handover is the matchmakers' own: no log step is its.
+            return HANDOVER.to_vec();
+        }
         let mut rules = LOG.to_vec();
         match self {
+            Self::Handover => {}
             Self::MultiPaxos => rules.push(RESTART),
             Self::LeaderHandoff => {
                 rules.push(RESTART);
@@ -517,6 +580,7 @@ mod tests {
             Spec::Compartments,
             Spec::Faults,
             Spec::Retire,
+            Spec::Handover,
         ] {
             assert!(spec.rules().iter().all(|rule| !rule.met(&[])), "{spec:?}");
         }

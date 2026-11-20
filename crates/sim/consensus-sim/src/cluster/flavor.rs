@@ -482,4 +482,9 @@ pub enum Mutant {
     /// stays down, so no oracle sees it; the trace check refuses the
     /// retirement (`RetireTrace.tla`).
     RetireUnchecked,
+    /// The network drops the lowest record of the walk's journal from each
+    /// bootstrap page of a handover. The successor generation then lacks a
+    /// registration that a quorum of the frozen one held; the trace check
+    /// refuses the bootstrap (`HandoverTrace.tla`).
+    ShrinkBootstrap,
 }

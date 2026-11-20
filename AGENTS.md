@@ -95,12 +95,12 @@ reached; model-state coverage is for later, Pierre 2026-11-19). They live in the
 crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
 walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
 `leader-handoff/`, `matchmaker/` (with the retirement), `reads/` (the read basis and the read fence), `truncation/`
-(the compaction floor and the trim jump, and the faulty entries of CTRL with the tri-state tally)
-and `compartments/` (the read replica and the batcher) (#1198 (trace checking),
+(the compaction floor and the trim jump, and the faulty entries of CTRL with the tri-state tally),
+`compartments/` (the read replica and the batcher) and `handover/` (the matchmaker set handover) (#1198 (trace checking),
 `tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
-rules)); the matchmaker set handover and the walk with every compartment and matchmakers are not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
+rules)); the walk with every compartment and matchmakers is not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
