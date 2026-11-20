@@ -890,6 +890,11 @@ pub enum Spec {
     /// `specs/tla/matchmaker/MatchmakerTrace.tla`: matchmaking, Phase 1
     /// over `H_b`, Phase 2 in `C_b` and the GC, on a majority.
     Matchmaker,
+    /// `specs/tla/matchmaker/MatchmakerGridTrace.tla`: `MatchmakerTrace`
+    /// with each configuration a grid: Phase 1 over every grid of `H_b`,
+    /// Phase 2 in one column of `C_b`, and each proxy's `Commit` backed by
+    /// a column of `C_b`.
+    MatchmakerGrid,
     /// `specs/tla/reads/ReadsTrace.tla`: `MatchmakerTrace` and the
     /// leaderless reads of `reads/`: the read basis of a won leadership,
     /// the answers and their read fence, and the served index.
@@ -925,6 +930,7 @@ impl Spec {
             Self::ProxyLeader => spec("proxy-leader", "ProxyLeaderTrace"),
             Self::LeaderHandoff => spec("leader-handoff", "LeaderHandoffTrace"),
             Self::Matchmaker => spec("matchmaker", "MatchmakerTrace"),
+            Self::MatchmakerGrid => spec("matchmaker", "MatchmakerGridTrace"),
             Self::Reads => spec("reads", "ReadsTrace"),
             Self::Truncation => spec("truncation", "TruncationTrace"),
             Self::Compartments => spec("compartments", "CompartmentsTrace"),
@@ -943,6 +949,9 @@ impl Spec {
             Self::ProxyLeader => proxy_leader::keeps(event),
             Self::LeaderHandoff => leader_handoff::keeps(event),
             Self::Matchmaker => matchmaker::keeps(event),
+            Self::MatchmakerGrid => {
+                matchmaker::keeps(event) || matches!(event, ClusterEvent::Commit { .. })
+            }
             Self::Handover => handover::keeps(event),
             Self::Retire => {
                 matchmaker::keeps(event)
@@ -991,6 +1000,17 @@ impl Spec {
                     "{self:?} runs on a majority"
                 );
                 matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
+            }
+            Self::MatchmakerGrid => {
+                assert!(
+                    matches!(flavor.quorum, QuorumSystem::Grid { .. }),
+                    "MatchmakerGridTrace runs on a grid"
+                );
+                let mut trace =
+                    matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events);
+                matchmaker::layouts(&mut trace, events);
+                grid(&mut trace, flavor.quorum);
+                trace
             }
             Self::Reads => {
                 assert!(

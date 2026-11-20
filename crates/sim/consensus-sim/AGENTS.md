@@ -60,7 +60,8 @@ Test only: `publish = false`, never a dependency of another crate.
   promise in pages that reports one, a win over it; a node that retires, rejoins and promises
   again; a matchmaker that freezes, a bootstrap that carries a registration, a vote in the
   successor decree, an activation, a registration after a handover, and two handovers in one
-  walk). TLC accepting a walk that never takes a
+  walk; a proxy commit under a configuration that a reconfiguration selected, and a win on half
+  of a grid). TLC accepting a walk that never takes a
   step judges nothing, and an empty trace meets no rule. A new rule of a trace spec gets its
   rule here in the same PR; when the walks cannot meet it, add the walk move or the steer, as
   for a probe.
@@ -153,12 +154,14 @@ Test only: `publish = false`, never a dependency of another crate.
   reconfiguration, matchmakers with every compartment, disk faults (on five and on three), retirement
   and rejoin, the matchmaker set handover, and leaderless reads on matchmakers whose pools lag
   (`lagging-reads`, #1228 (stale read by a lagging reader)), and Multi-Paxos on five steered
-  toward compactions (`compaction`, `Flavor::compacting`: a client claims an unclaimed journal
+  toward compactions (`compaction`, `Steer::Compacting`: a client claims an unclaimed journal
   and often truncates, and the first leader that compacts steps down once), every compartment
   steered the same way (`compartments-compaction`), and retirement steered toward retirements
-  (`retiring`, `Flavor::retiring`: half the client moves are operator moves, and the operator
-  retries the node it asked the matchmakers to check). 60 seeds each in CI; `lagging-reads`
-  takes 120. The `lagging-reads` walk is steered (`Flavor::lagging_reader`) and is the control of
+  (`retiring`, `Steer::Retiring`: half the client moves are operator moves, and the operator
+  retries the node it asked the matchmakers to check), and every compartment with matchmakers
+  steered toward reconfigurations (`reconfiguring`, `Steer::Reconfiguring`: a quarter of the
+  client moves are reconfigurations). 60 seeds each in CI; `lagging-reads`
+  takes 120. The `lagging-reads` walk is steered (`Steer::LaggingReader`) and is the control of
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.
 - `tests/mutants.rs` → each oracle catches its mutant.
@@ -191,9 +194,12 @@ Test only: `publish = false`, never a dependency of another crate.
   batcher walk against `compartments/BatcherTrace` (control: a lane sent out of push order); the
   flavors `disk-faults` and `disk-faults-3` against `truncation/FaultsTrace` (control: a promise
   that hides a faulty record); the `retiring` flavor against `matchmaker/RetireTrace` (control: a
-  retirement with no evidence); the `handover` flavor against `handover/HandoverTrace`
-  (control: a bootstrap page that lost a registration, `Mutant::ShrinkBootstrap`). A retiring walk has 250 quiet steps, the others 10: a
-  retirement needs a leader that stands while its GC floor becomes effective. Every
+  retirement with no evidence); the `reconfiguring` flavor against
+  `matchmaker/MatchmakerGridTrace` (control: an early GC request on a grid, `Mutant::EarlyGc` on
+  `reconfigured-compartments`); the `handover` flavor against `handover/HandoverTrace`
+  (control: a bootstrap page that lost a registration, `Mutant::ShrinkBootstrap`). A retiring or a reconfiguring walk has 250 quiet steps, the others
+  10: a retirement needs a leader that stands while its GC floor becomes effective, and a
+  delegated round under a new configuration needs a leadership of it that settles. Every
   control searches from seed 1, never from a seed picked by hand. A cluster walk has
   150 chaos steps. Each test searches the seeds (at most 300, oracles on, no TLC) and TLC checks
   the first seed and each seed that meets a rule of the spec that no checked seed met before; a
@@ -212,9 +218,8 @@ Test only: `publish = false`, never a dependency of another crate.
 
 ## Not traced yet
 
-Not traced yet (#1198 (trace checking)):
-
-- `reconfigured-compartments`: matchmakers with a grid for each configuration, proxies and the
-  handoff in one trace spec.
-
-That walk is checked against `multi-paxos/` only.
+Every cluster flavor has a trace spec (#1198 (trace checking), #1231 (traced walks reach the
+rules)). A spec judges the steps of its own model: `MatchmakerGridTrace` judges the
+matchmaking, the log, the GC and the proxy `Commit` of the walk with every compartment, and
+the proxy rounds across a crash and the guards of a handoff are judged by `proxy-leader/` and
+`leader-handoff/` on their own walks.

@@ -62,6 +62,10 @@ of `consensus-sim`. The trace specs today are:
 - `matchmaker/RetireTrace`: `MatchmakerTrace` and the retirement (a node retires on an effective
   floor that no registration at or above names, a retired node takes no step, and a rejoin
   books it again), on the `retiring` flavor.
+- `matchmaker/MatchmakerGridTrace`: `MatchmakerTrace` with each configuration a grid (a win
+  needs a Phase-1 quorum of every grid of `H_b`, a value is chosen in one column of `C_b`) and
+  each proxy's `Commit` backed by a column of `C_b`, on the steered `reconfiguring` flavor
+  (matchmakers and every compartment).
 - `handover/HandoverTrace`: the matchmaker set handover over a chain of generations (a member
   freezes, a member of a proposed set holds its whole bootstrap, a member of the old set votes
   in the successor decree, a member of the chosen set activates with its bootstrap), with the

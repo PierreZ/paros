@@ -9,12 +9,12 @@
 //! always checks, 1), `TRACE_FROM` (the first seed, 1), `TRACE_SEARCH`
 //! (the seeds a flavor may search for its rules, 300), `TRACE_CHAOS`
 //! (chaos steps of a cluster walk, 150), `TRACE_QUIET` (quiet steps of a
-//! cluster walk, 10; 250 for a retiring walk), `TRACE_MAX_EVENTS` (the longest
+//! cluster walk, 10; 250 for a retiring or a reconfiguring walk), `TRACE_MAX_EVENTS` (the longest
 //! trace TLC checks, 200), and `TRACE_DUMP` (print every event of each
 //! checked cluster walk).
 
 use consensus_sim::batcher::{self, BatchEvent, BatchModel, BatchMutant};
-use consensus_sim::cluster::{Cluster, ClusterEvent, Flavor, Mutant, Spec};
+use consensus_sim::cluster::{Cluster, ClusterEvent, Flavor, Mutant, Spec, Steer};
 use consensus_sim::decree::{self, DecreeEvent, DecreeModel, DecreeMutant};
 use consensus_sim::trace::{Verdict, require_tlc, spec};
 use moonpool_walk::Walk;
@@ -115,12 +115,19 @@ fn tlc_refuses_an_acceptor_that_forgot_its_promise() {
 }
 
 /// A cluster walk of `chaos` chaos steps, then its quiet steps: 10, or 250
-/// for a [`Flavor::retiring`] walk. A retirement is an operator move on a
-/// calm cluster: it needs a leader that stands while its GC floor becomes
-/// effective and every matchmaker checks the node, and in the chaos steps
-/// the leaders of a cluster with matchmakers seldom stand that long.
+/// for a [`Steer::Retiring`] or a [`Steer::Reconfiguring`] walk. A
+/// retirement and a proxy round under a new configuration each follow an
+/// operator move on a calm cluster: a retirement needs a leader that
+/// stands while its GC floor becomes effective and every matchmaker checks
+/// the node, and a delegated round needs a leadership of the new
+/// configuration that settles. In the chaos steps the leaders of a cluster
+/// with matchmakers seldom stand that long.
 fn cluster_walk_of(flavor: Flavor, chaos: u64) -> Walk<Cluster> {
-    let quiet = if flavor.retiring { 250 } else { 10 };
+    let quiet = if flavor.steer == Steer::Retiring || flavor.steer == Steer::Reconfiguring {
+        250
+    } else {
+        10
+    };
     Walk::<Cluster>::new()
         .chaos_steps(chaos)
         .quiet_steps(knob("TRACE_QUIET", quiet))
@@ -261,6 +268,11 @@ fn tlc_accepts_the_compartment_walks() {
 #[test]
 fn tlc_accepts_the_matchmaker_walks() {
     accepts(Spec::Matchmaker, &Flavor::matchmakers());
+}
+
+#[test]
+fn tlc_accepts_the_reconfigured_compartment_walks() {
+    accepts(Spec::MatchmakerGrid, &Flavor::reconfiguring());
 }
 
 #[test]
@@ -413,6 +425,27 @@ fn tlc_refuses_an_early_gc() {
         Mutant::EarlyGc,
         1..=30,
         40,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, ClusterEvent::GcAsk { .. }),
+        "seed {seed}: TLC refused {event:?}, not a GC request"
+    );
+}
+
+/// The control of `MatchmakerGridTrace`: the early GC request on grids. A
+/// Phase-2 quorum of a grid is one column, so the request must wait for a
+/// column of `C_b` to learn the prefix; TLC refuses the request.
+#[test]
+fn tlc_refuses_an_early_gc_on_a_grid() {
+    require_tlc(&Spec::MatchmakerGrid.check());
+    let (seed, event, state) = first_refused_cluster(
+        Spec::MatchmakerGrid,
+        &Flavor::reconfigured_compartments(),
+        Mutant::EarlyGc,
+        1..=40,
+        150,
     )
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
