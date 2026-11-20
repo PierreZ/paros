@@ -28,12 +28,15 @@
 (*     past the chosen prefix that its disk holds (`upto`).                *)
 (*                                                                         *)
 (* "learn", "record" and "restart" are the three steps that are not steps *)
-(* of the model. The model's `Restart` keeps every learned slot. The code *)
-(* writes its chosen index relaxed (`MustSync::Relaxed`): a crash may lose *)
-(* the writes that no fsync covered, so a node may boot with a shorter     *)
-(* prefix than it learned. The restart step is the model's `Restart` that  *)
-(* also forgets every learned slot at or above `upto`, and asks that the   *)
-(* node learned every slot below it. Forgetting a chosen value only takes  *)
+(* of the model. The code writes its chosen index relaxed                  *)
+(* (`MustSync::Relaxed`): a crash may lose the writes that no fsync        *)
+(* covered, so a node may boot with a shorter prefix than it learned. The  *)
+(* model's `Restart` has this already: it keeps a prefix of what the node  *)
+(* learned, up to any `k` in `0..FirstUnlearned(a)`. The restart step is   *)
+(* that `Restart` with `k = upto`: it forgets every learned slot at or     *)
+(* above `upto`, and asks that the node learned every slot below it. It is *)
+(* still the trace spec's own step, because it ends other ballots than     *)
+(* `Restart` does (see `Reboot`). Forgetting a chosen value only takes     *)
 (* knowledge away: the node learns the slot again, chosen, later.          *)
 (*                                                                         *)
 (* The code learns a slot from one `Commit`; the model's `CatchUp`        *)
@@ -113,13 +116,15 @@ Record(n, b, s, v) ==
   /\ UNCHANGED <<prom, dprom, learned, phase, next, front, wiped, restarts, msgs>>
 
 \* Node n boots again from its disk, with the chosen prefix below upto: the
-\* trace spec's own step, see above. It is `Restart`, and it forgets what a
-\* crash lost of the learned prefix. The campaigns of n die, and so does
-\* the ballot n led (`led`, 0 for none). The model's `Restart` kills every
-\* ballot n owns, but a leader may have handed its ballot on before the
-\* crash (the walk's handoff, which this model does not have): that ballot
-\* lives on at its successor, and the successor's restart ends it.
-\* `Reboot` is the boot; `TraceRestart` adds that n learned the prefix.
+\* trace spec's own step, see above. It is `Restart` with `k = upto`: the
+\* memory goes back to the disk and the learned slots at or above upto are
+\* forgotten. It differs from `Restart` in the ballots it ends. The
+\* campaigns of n die, and so does the ballot n led (`led`, 0 for none).
+\* The model's `Restart` kills every ballot n owns, but a leader may have
+\* handed its ballot on before the crash (the walk's handoff, which this
+\* model does not have): that ballot lives on at its successor, and the
+\* successor's restart ends it. `Reboot` is the boot; `TraceRestart` adds
+\* the guard of `Restart` on `k`: n learned every slot below upto.
 Reboot(n, upto, led) ==
   /\ Live(n)
   /\ restarts < Restarts
