@@ -24,6 +24,5 @@ additional_cargo_test_args = ["-E", "binary(traces)", "--test-threads", "2"]
 # incremental build, so a mutant builds in seconds and the walks run fast.
 profile = "mutants"
 
-# `scripts/mutants.sh` runs this pass with `--baseline skip --timeout 400`:
-# the baseline of cargo-mutants builds paros-consensus alone, which has no
-# trace check, and the trace checks take about 90 s.
+# `scripts/mutants.sh` runs the trace checks once on the unmutated tree, then
+# this pass with `--baseline skip` and a timeout of three times that run.
