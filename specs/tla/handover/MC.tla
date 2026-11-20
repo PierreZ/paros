@@ -12,4 +12,6 @@ Named == << {"Y", "Z", "W"}, {"Z", "W", "V"}, {"V", "W", "X", "Y", "Z"} >>
 \* live machines is left.
 NamedLive == << {"Y", "Z", "W"}, {"Z", "W", "V"}, {"Y", "W", "V"},
                 {"Y", "Z", "V"}, {"V", "W", "X", "Y", "Z"} >>
+\* One target: the smallest handover, for the controls of the client side.
+NamedOne == << {"Y", "Z", "W"} >>
 =============================================================================

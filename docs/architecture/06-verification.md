@@ -223,7 +223,11 @@ rounds (a slot stays open for ever). The model also shows review finding 3 of pa
 with `on_heartbeat` as it is today, a late beat of the predecessor deposes the successor. That
 costs liveness only, never safety: the control `live_late_beat` fails and `late_beat_safe`
 passes. The fix of step 2.7 is the `BeatGuard` rule of the model, the guard that `on_accept`
-has: a leader keeps its role on a beat at the ballot that it holds.
+has: a leader keeps its role on a beat at the ballot that it holds. Since #1230 (rules no check
+tests), the model also has the leader that opens a round it cannot record (its promise passed
+its ballot), a learn that writes a record and raises the promise (`mark_chosen`), and a 2 x 2
+full grid; the promise guard, the record outside the leader's column, the abdication in the
+same step and the named successor each have a control that fails.
 
 Matchmaker Paxos is `specs/tla/matchmaker/` (#1200 (TLA+ model Matchmaker Paxos)): `Agreement`
 and `Electable` for single-decree Matchmaker Paxos with matchmaking, Phase 1 over every

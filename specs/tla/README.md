@@ -155,16 +155,20 @@ Constants select the variant:
 | `HandoffCarry` | `TRUE`: the handoff carries the slots that wait for the fence Phase 1. `FALSE`: a control, the successor takes them as free. |
 | `ChainRule` | `TRUE`: a leader bypasses again only after the fence Phase 1 of its last bypass (each slot it recovered or carried is proposed at its ballot). `FALSE`: a control, the slots that wait for the fence Phase 1 do not count. |
 | `CfgChoices` | The configurations that the ballots can have: any (`CfgAny`), or a few fixed journal moves (`CfgMovePaper3`, `CfgWm3`, `CfgWm4`, `CfgChain3`, `CfgChain4`), which keep the GC, watermark and chain checks small. |
+| `Restarts` | How many restarts a run has. A restart forgets what the node proposed (`known`); the votes and the registrations stay. |
+| `RestartBypass` | `FALSE`: a restart ends every campaign and every leadership of the node, so only the incarnation that won `b` bypasses from `b`. `TRUE`: a control, the node still leads after the restart. |
 
 The invariants are `Agreement` (one value is chosen for each slot), `ReadSafe` (no leaderless
 read that starts now can miss a slot that is acked) and `WmRedundant` (when the matchmaker answers
 of `b2` show no registration strictly between `b` and `b2`, their highest watermark is at most `b`).
 
-The model has three or four ballots, three matchmakers, two values, one or two slots and two
-configurations of two acceptors.
+The model has three or four ballots, one or three matchmakers, two values, one or two slots and
+two configurations of two acceptors.
 
-Not in the model: matchmaker generations, lost durable state, and a handoff message that is late
-or sent two times (`leader-handoff/` has them, with its control `two_hops`). A reader is abstract
+Not in the model: matchmaker generations, lost durable state (a restart loses only volatile
+state), the committed prefix and the floor of a bypass leadership (Scenario 3 of the paper, §4.5;
+`truncation-reconfig/` has them for a reconfiguration with Phase 1), no liveness property, and a
+handoff message that is late or sent two times (`leader-handoff/` has them, with its control `two_hops`). A reader is abstract
 (a read can use the basis of any leadership that won); `reads/` has an explicit reader.
 
 The rules of #1018 (zero-stall model, more rules), each with its check and its control:
@@ -176,6 +180,7 @@ The rules of #1018 (zero-stall model, more rules), each with its check and its c
 | GC fence (I5): the leader at `b2` makes no floor effective before its fence Phase 1 ends | `gc_p212_paper`, `wm_nocheck_small` | `gc_nofence` (21 steps), `gc_early` |
 | Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff`, `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
 | Chained bypass (8.3): a second bypass waits for the fence Phase 1 of the first | `chain_small`, `chain` (7.1 million states, 5 minutes, `long`) | `chain_open_small`, `chain_open` |
+| Only the incarnation that won `b` bypasses from `b` (#1230 (rules no check tests)) | `restart_bypass` (489 thousand states) | `restart_bypass_off`: Agreement breaks in 16 states (propose at `b`, restart, bypass, the proposed slot is free at `b2`, a second value is chosen) |
 
 Findings of #1018 (2026-11-19). No design decision is refuted.
 
@@ -200,6 +205,17 @@ Findings of #1018 (2026-11-19). No design decision is refuted.
 - **GC waits for the fence Phase 1.** `gc_nofence`: the leader at `b2` collects the old ballots
   while a slot that it carried is still open; a rival at `b3` then runs Phase 1 only on the new
   configuration and chooses a second value.
+
+The rules together and the larger shapes (#1230 (rules no check tests)), all `pass` and complete:
+
+| Check | What it adds | States |
+|---|---|---|
+| `chain_gc_reads`, `chain_gc_reads_carry` | two bypasses in a row with GC, reads and the hold, `p212` and `carry`, one matchmaker | 41 thousand, 113 thousand |
+| `handoff_gc_reads` | a handoff with GC, reads and the hold, one matchmaker | 149 thousand |
+| `owner_paros` (`long`) | two proposers that can both bypass (`OwnerParos`: 1 to 3, 2 to 4), GC, reads and the hold | 1.1 million |
+| `chain_two_slots` | two slots: two bypasses, a carried slot and a free slot in one leadership | 366 thousand |
+| `gc_two_slots` (`long`) | two slots with GC, reads and the hold: a read fence above a non-zero fence, a GC with one carried and one free slot | 2.2 million, 3 minutes |
+| `handoff_two_slots` (`long`) | two slots: a handoff that carries one pending and one free slot | 6.2 million, 8 minutes |
 
 Results are in `zero-stall/checks.txt` and in the design document of #579 (zero-stall
 reconfiguration).
@@ -586,6 +602,8 @@ Constants select the rule. The first value of each is the rule of the rework.
 | `CloseState` | `"max"`: the maximum floor and read generation, the register of the highest write. `"inforce"`: the register keeps only the configuration in force and drops the open successor. `"noread"`: the read generation does not cross. |
 | `Retarget` | `TRUE`: the coordinator names a new target when a member of the last one is down. |
 | `JournalFirst` | `TRUE`: a journal records a higher survive number before its tenant's set has the size for it (decision 35). |
+| `FrozenServes` | `FALSE`: a frozen member serves nothing. `TRUE`: a control, a frozen member still serves its clients. |
+| `ResizeGuard` | `TRUE`: the operator records a new size only while no target is named, so a resize and a handover never overlap. `FALSE`: a control, a resize during a handover. |
 
 The invariants:
 
@@ -621,6 +639,8 @@ Results (`handover/checks.txt`):
 | `live` | `LiveSpec`, the rules, one crash | pass: `Ends` (33 thousand states) |
 | `live_resize` | `LiveSpec`, the resize, no crash | pass (538 states) |
 | `first_write_majority_safe` | `FirstWrite = "majority"`, every invariant but `FirstWriteFull` | pass (6.9 million states, 3 minutes; `long`) |
+| `frozen_serves` | control: a frozen member serves its clients (one target, no crash) | `ReadCarried` violation (13 states deep, 1.4 million states) |
+| `resize_during` | control: the operator records the size 5 while the target `{Y, Z, W}` is named | `SizeKept` violation (10 states: `X` and `Y` freeze, the stop closes, the size is recorded, the decree chooses the set of three) |
 
 The trace of `answerers`: the coordinator names `{Y, Z, W}`. `Y` and `Z` freeze, and a finish
 closes on them. It proposes the members that answered, thinned to an odd count: `{Z}`. `Z`
@@ -648,6 +668,14 @@ that holds the bootstrap. The rule is the size rule: a member that holds no stat
 so a set chosen at a majority serves with fewer members than its size, and one more loss
 stops it (`first_write_majority` shows the chosen set with a member that holds nothing).
 
+Finding of #1230 (rules no check tests): `SizeKept` needs a rule that no design document
+writes. The decree runs over the old matchmakers, which do not read the control journal, so
+nothing in the handover sees a resize that the operator records after the target is named
+(`resize_during`). The model keeps the size with `ResizeGuard`: a resize waits until no target is
+named. **Open**: Pierre picks the rule (a resize waits for the handover, or the coordinator names
+a new target of the new size and the decree refuses a proposal of the old size), and
+`docs/architecture/04-roles.md` records it.
+
 Not in the model: the decree (`decree/`), a client step that reaches a minority
 (`config-register/`), the clients of generation 1, a second handover, lost matchmaker state,
 more than one journal (a handover is paged, #439) and the registrations, which leave with
@@ -674,6 +702,7 @@ Constants select the rule:
 | `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis, and opens or serves no read on it (`main` today). `own`: option (b), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
 | `Q1s`, `Q2s`, `Targets` | The quorum system, for each configuration (#1102 (rework 1.13)): the Phase-1 quorums, the Phase-2 quorums, and the sets of acceptors that a reader asks. A majority asks the whole membership. A grid takes them from `grid/Grid.tla`: the partitions ask the whole membership, the full grid asks one row (`row_of`). |
 | `Seal` | `quorum`: Phase 1 takes a Phase-1 quorum of each prior configuration (the code). `reads`: a candidate rule, not in the code: Phase 1 also takes one promise in each read target of each prior configuration, so each row of an old full grid hears of the campaign. |
+| `ReadAgain` | `TRUE`: a client gets the answer of a served read (`ReadClose`), and a second read can start. `ReadSeesAcked` then also orders reads: a served read covers each slot that an earlier read returned. |
 | `ReaderGate` | What gates the reader itself, to open, keep and serve a read (#1228 (stale read by a lagging reader)). `promise`: the rule of `Learner` on the promise of the reader (the code: `read_basis` and `fence_quorum_reads` use the read fence). `belief`: the belief ballot of the reader alone, and the reader counts its own answer with no fence (the code before #1228), a control. |
 
 The majority checks have four acceptors, the configurations `{a1, a2, a3}` and `{a3, a4}`, the
@@ -708,6 +737,10 @@ Results (`reads/checks.txt`):
 | `reads_lag_reader_belief`: the reader `a1` can lag, the reader is gated on its belief ballot | violation (114 thousand states): `a1` and `a2` promise ballot 2 and `a1` ignores its configuration; ballot 2 chooses slot 1 in `{a3, a4, a5}`; `a1` reads on ballot 1 with its own answer and the answer of `a3`, and serves index 0 |
 | `reads_lag_reader`: the same, the reader is gated on its promise (the code) | pass (557 thousand states) |
 | The bypass of #579 with the decision hold | pass |
+| `reads_plain_again`: the rules of `main`, and a second read | pass (897 thousand states) |
+| `reads_bypass_hold_again`: the bypass of #579 with the decision hold, and a second read | violation, a finding (1.3 million states, 21 steps): see below |
+| `reads_two_slots`: `reads_plain` with two slots (`long`) | no violation in 30.7 million distinct states, to depth 24 (bounded: 50 minutes, 1 worker) |
+| `reads_three`: `reads_plain` with three ballots, `OwnerParos3`, so a reader can hold the basis of the middle leadership (`long`) | no violation in 33.4 million distinct states, to depth 25 (bounded: 50 minutes, 1 worker) |
 | #890, `strict` (`main` today) | pass |
 | #890, option (b) | pass |
 | #890, the node ignores its promise | pass |
@@ -762,6 +795,17 @@ refusal only costs availability: a rebooted acceptor does not help a read until 
 probe answers. The code keeps it today. To remove it is a change of `on_pre_read` with this
 check as its model; it is not part of this step.
 
+Finding of #1230 (rules no check tests): the decision hold of the bypass does not order two
+reads (#1270 (bypass read order)). The trace of `reads_bypass_hold_again`: ballot 1 leads in
+`{a3, a4}` and bypasses to ballot 2 in `{a1, a2, a3}`. `a1` and `a2` accept slot 1 at ballot 2;
+the slot is chosen and not acked (the hold). `a1` takes the basis of ballot 2, asks `{a1, a2}`
+and is served at index 1, and its client gets the answer. Then `a3` takes the basis of ballot 1
+from a late beat, asks `{a3, a4}`, where no one promised ballot 2, and is served at index 0. The
+hold gates only the acks of the leader, and a reader serves on any chosen slot. The code of
+today has no bypass and passes (`reads_plain_again`). **Open**: the rule for #579 (for example,
+the hold also gates the reads at a bypass ballot until its fence Phase 1 is covered); the line
+stays `violation` in `checks.txt` until Pierre chooses it.
+
 Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
 leader and a reader outside its configuration whose own abandoned campaign is above it.
 `learner_own_serves` finds a read that option (b) serves and that `strict` refuses.
@@ -775,8 +819,10 @@ recommendation: the learner checks have only majority quorums.
 Not in the model: GC watermarks, matchmaker generations, the replica tier, a read that expires,
 an acceptor that loses its disk (its promise is durable here), the `StaleConfiguration` path
 that binds the belief below the promise (the fence of the code covers it, because it takes the
-higher of the two), the registration of the abandoned campaign, more than one slot (so a slot's column is any
-column), and a move between a grid and a majority.
+higher of the two), the registration of the abandoned campaign, and a move between a grid and a majority. Two slots
+(`reads_two_slots`) and three leaderships (`reads_three`) are `long` checks on the majority only
+(so a slot's column is any column), and no check has the leader's fill up to an orphan
+watermark (`fill_to_watermark`) or a liveness property.
 
 ### `campaign-discovery/`: how a campaign learns the matchmaker set in force, for #1034 (campaign asks the pool)
 
@@ -837,6 +883,7 @@ The two uses of a decree are two sets of constants:
 | `Phase1` | `"quorum"`: Phase 2 opens at a Phase-1 quorum of promises. `"every"`: Phase 2 opens only when every acceptor promised. |
 | `Pick` | `"highest"`: the proposer takes the value of the highest vote that the promises report, else any value (P2c). `"ignore"`: a control, the proposer takes any value. |
 | `Wipes` | How many acceptors can lose their disk, each one time. A wiped acceptor answers Phase 1 as a new acceptor, with no promise and no vote. |
+| `Refuse` | `TRUE`: a wiped acceptor is refused at boot as amnesia (`docs/architecture/05-failure-model-and-zones.md`), and it takes no step: the rule of the matchmaker handover. `FALSE`: it answers as `Identity` says. |
 | `Identity` | `TRUE`: a wiped acceptor never votes again. It answers with a new node id, and the plan names the old one (`not_a_member`, `docs/architecture/03-1-cell-tenant-and-bootstrap.md`). `FALSE`: it votes again as the old acceptor. This is all that `decree.rs` alone can see. |
 | `Down` | The acceptors that never take a step (the liveness checks). |
 
@@ -854,6 +901,7 @@ Results (`decree/checks.txt`, three ballots, two values, all in CI, 35 seconds t
 | `handover` | handover | P2c | pass (17 thousand states) |
 | `handover_lost` | handover | two of three matchmakers down | `Ends` violation |
 | `handover_live` | handover | one of three matchmakers down | pass |
+| `handover_wipe` | handover | one wipe, the wiped matchmaker refused at boot (`Refuse`); its control is `init_quorum`, where the wiped member answers Phase 1 again | pass (65 thousand states) |
 | `init_reach` | cell init | `NoChoiceAfterWipe`, a reachability control: a ballot above the first chooses after a wipe | violation |
 | `init_quorum` | cell init | Phase 1 at a majority, one wipe | `Agreement` violation |
 | `init` | cell init | Phase 1 at every member, one wipe | pass (13 thousand states) |
@@ -1117,6 +1165,73 @@ The traces of the controls:
   `a1` votes at ballot 1, and `p1` commits slot 0 on that one vote.
 - `live_nomove`: `p1` is gone, the slot only goes to `p1`, the leader never takes it back, and
   no `Commit` comes.
+
+### `leader-handoff/`: the cooperative handoff of DPaxos, for #1187 (rework 2.8)
+
+The model is plain Multi-Paxos where the leadership is a state of a node, so an elected leader
+can give its ballot, its allocator frontier and its tail (the decided slots and the open rounds)
+to a successor with no Phase 1 (`node/handoff.rs`: `relinquish_to`, `on_relinquish`). A payload
+can arrive late, two times or never; a node can restart; a successor can resign on its fence; a
+later ballot can win an election. The quorums come from `grid/Grid.tla`: a majority, or a 2 x 2
+full grid where slot `s` uses column `s % 2` for Phase 2.
+
+What the model follows in the code:
+
+- A learn is a record (`mark_chosen`, `node/learn.rs`): `Decide`, `CatchUp` and the decided
+  slots of a payload raise the promise to the ballot that chose the slot, and keep the chosen
+  value as the vote unless the node holds it at a ballot at or above.
+- A leader records each round that it opens as its own vote (`record_own_round`), in a grid
+  column it is not in too. A leader whose promise a higher ballot passed still opens a round and
+  records nothing (`AllocateStale`, `node/phase2.rs`): the promise guard of the successor is then
+  the only cover against a replayed payload.
+- The successor installs a payload only when the payload names it, its ballot is at or above the
+  promise, the successor does not hold that ballot already, and the payload's frontier is at or
+  above the successor's frontier and first unlearned slot. It proposes each pending slot again and
+  fills no gap with a `Noop` (`RecoveryPolicy::Inherited`).
+
+Each rule has a constant whose first value is the code, and a control:
+
+| Constant | Rule (code) | Control |
+|---|---|---|
+| `OneHop` | only the elected minter of a ballot hands it on | `two_hops`: `OneHolder` breaks |
+| `FrontierGuard` | a successor refuses a payload below its frontier | `replay`: `OneProposal` breaks |
+| `DurableFrontier` | a leader records its own rounds | `volatile_frontier`: `OneProposal` breaks |
+| `Pending` | `"keep"`: the successor proposes the pending slots again | `live_drop_pending`: `Ends` breaks |
+| `BeatGuard` | `TRUE`: a beat at the leader's own ballot keeps it leader (rework 2.7; the code of today has `FALSE`) | `live_late_beat`: `Ends` breaks |
+| `PromiseGuard` | a successor refuses a payload below its promise | `promise_guard_off`: `OneProposal` breaks in 11 states (ballot 1 hands on to a node that promised ballot 2; the successor opens slot 0 with no record, restarts, installs the replayed payload and opens slot 0 again with another command) |
+| `RecordAll` | a leader records every round, in a column it is not in too | `grid_in_column_only`: `OneProposal` breaks in 10 states on the grid (the successor opens a slot of the other column with no record, restarts, installs the replay and opens it again) |
+| `Abdicate` | the leader steps down in the step that sends the payload | `keep_leading`: `OneHolder` breaks in 6 states |
+| `Named` | only the named successor installs a payload | `any_target`: `OneHolder` breaks in 7 states |
+
+The invariants are `Agreement`, `LearnedChosen`, `OneProposal` (one proposal for each slot and
+ballot, across the handoff), `OneHolder` (one node at a time leads at a ballot), and three
+assertions of the code: `LeaderFrontier` (the frontier of a leader that can use its ballot covers
+its first unlearned slot; `relinquish_to` asserts it), `OwnRecorded` (each open round of such a
+leader is its own vote) and `LearnRecordsHeld` (a learned slot holds its record). `Ends` is the
+liveness check: a handoff ends, and an election replaces a successor that is gone.
+
+Results (`leader-handoff/checks.txt`):
+
+| Check | Shape | Result |
+|---|---|---|
+| `reach` | `NoHandoffLearns`, a reachability control: a successor learns a slot | violation (8 states) |
+| `safety` | NB 1, NS 2, two commands, one restart | pass (875 thousand states) |
+| `safety_elect` | NB 2, NS 1, one restart, a later election | pass (2.5 million states) |
+| `late_beat_safe` | `safety` with the beat of today's code (`BeatGuard = FALSE`) | pass (950 thousand states) |
+| `live`, `live_gone` | `Ends` with a lost `Accept`, and with a lost payload or a restarted successor | pass (115 thousand, 441 thousand states) |
+| `grid` (`long`) | the 2 x 2 full grid, NB 1, NS 2, no restart | pass (2.5 million states, 7 minutes) |
+| `owner_twice` (`long`) | `safety_elect` where one node owns every ballot: the predecessor campaigns again after it hands on | pass (2.7 million states, 6 minutes) |
+| `two_ballots` (`long`, bounded at 60 minutes) | NB 2, NS 2: a tail with a decided and a pending slot meets an election with its gap fill | no violation in 5.4 million distinct states, to depth 17 (a first run, stopped after 13 minutes) |
+| `restart_twice` (`long`) | `safety` with two restarts | pass (1.9 million states, 9 minutes with 1 worker) |
+| `safety_long` (`long`) | NB 2, NS 1, two commands | pass |
+
+Not in the model: the paged recovery of the successor (`HANDOFF_BATCH`: the model installs the
+whole payload in one step), the matchmaker `config` and `prior` of a payload, proxies and
+delegation, the `rejected_unfit` refusal, and the read fence. Because the payload holds the whole
+tail and a `2b` reaches every node, the stall that `tick_handoff_fence` exists for (a decision
+that only the departed leader knew) cannot happen in the model: `FenceResign` is reachable
+(`replay` uses it) but no check needs it. A check for it needs the paged recovery; it is part 3
+of #1230 (rules no check tests).
 
 ### `matchmaker/`: single-decree Matchmaker Paxos, for #1200 (TLA+ model Matchmaker Paxos)
 
@@ -1465,6 +1580,7 @@ each of them:
 | `Restarts` | How many restarts can happen in the run. |
 | `Faults`, `RotNodes` | How many faulty entries a boot can find in the run, and on which nodes. |
 | `Learners` | The nodes that catch up and jump. |
+| `C3`, `R2` | A second reconfiguration: ballots from `R2` up use `C3`, whose new members start empty too. `R2 = NB + 1`: no second reconfiguration. |
 
 The invariants:
 
@@ -1650,6 +1766,7 @@ is no faulty entry and no restart.
 | `GcRule` | `"fence"`: the rule of the code, a Phase-2 quorum of `C_b` holds every slot up to `F`. `"won"`: a control, the leader forgets the old configuration as soon as it wins Phase 1. |
 | `Cover` | `"chosen"`: a member counts toward the fence when it holds each slot up to `F` (it learned the slot, or the slot is below its floor). `"joined"`: a control, a new member counts too, with floor 0 and no record. |
 | `Learners` | The nodes that catch up and jump. |
+| `C3`, `R2` | A second reconfiguration: ballots from `R2` up use `C3`, whose new members start empty too. `R2 = NB + 1`: no second reconfiguration. |
 
 The invariants are `Agreement`, `LearnedChosen`, `NoFillChosen` and `FloorChosen` of
 `truncation/`, and:
@@ -1679,8 +1796,18 @@ workers):
 | `cover_joined_fill` | long | the new member counts with no record; two slots, `a3` alone catches up | `NoFillChosen` violation (4.8 million states, 4.5 min) |
 | `three_ballots` | long | the rules of the code; one slot | pass (41.5 million states, 54 min) |
 | `two_slots` | long | the rules of the code; two ballots | no violation in 43.8 million distinct states (bounded: stopped after 63 min, 21.2 million states left on the queue) |
+| `reach_fill_gc` | ci | `NoGc` on the shape of `fill_code`: the GC fires there | violation (302 thousand states, 27 s) |
+| `fill_code` | long | the rules of the code; three ballots and two slots, `a2` alone catches up: the smallest shape where the two `*_fill` controls find a `Noop` over a chosen slot | no violation in 8.2 million distinct states (bounded: 50 minutes, 1 worker) |
+| `reach_chain` | ci | `NoThirdWin`, a reachability control: two reconfigurations (`C1 = {a1, a2, a3}`, `C2 = {a2, a3, a4}`, `C3 = {a3, a4, a5}`), and ballot 3 wins in `C3` with `C1` forgotten after `C1` chose a slot; one slot | violation (1.3 million states, 2.7 min with 1 worker) |
+| `chain_joined` | ci | the same, a new member counts with no record | `Recoverable` violation (13 thousand states) |
+| `chain` | long | the rules of the code over the two reconfigurations; one slot | no violation in 10.7 million distinct states, to depth 19 (bounded: 50 minutes, 1 worker) |
 
-The long checks ran once on 2026-11-19 (#1218 (truncation model, part 3)) with 4 workers.
+The long checks ran once on 2026-11-19 (#1218 (truncation model, part 3)) with 4 workers;
+`fill_code` and `chain` ran on 2026-11-20 (#1230 (rules no check tests)).
+
+Not in the model, still: a faulty entry (CTRL) across configurations, which is the class of
+#267 (the tri-state tally over every prior configuration, `proposer.rs`, `slot_decidable`), a
+restart, and a wipe of a member that the GC counted. They are part 3 of #1230.
 
 With one slot, a `Noop` never lands on a chosen slot: a candidate whose Phase 1 reports nothing
 has its frontier at its first slot and fills nothing. So the two controls that must find the
