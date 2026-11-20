@@ -4,7 +4,7 @@
 #   scripts/mutants.sh [ARGS...]
 #
 # ARGS go to the first pass and cut the set of mutants, for example
-# `--shard 3/16 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.
+# `--shard 3/24 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.
 #
 # 1. The first pass runs every mutant against the fast tests: the tests of
 #    paros-consensus and of consensus-sim, without the coverage gate and the

@@ -5,7 +5,7 @@
 # The first pass judges each mutant with the fast tests: an incremental build,
 # then a few seconds of tests. The second pass judges only the survivors of the
 # first pass with the trace checks (TLC, about 90 s each). The run is cut into
-# 16 shards and runs each week and on demand. Each pull request runs the
+# 24 shards and runs each week and on demand. Each pull request runs the
 # mutants of the lines it changes (the `mutants` job of `rust.yml`).
 #
 # A survivor is a finding (AGENTS.md, the absolute rule): the `score` job
@@ -27,13 +27,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # One job builds the dev shell and stores it in the cache of the run, so
+  # the shards read the shell from that cache. With no such job, each shard
+  # fetched the shell on its own, and one shard that could not reach
+  # cache.nixos.org built the toolchain from source and failed on a 403 of
+  # a GNU mirror.
+  devshell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - run: nix develop --command cargo --version
+
+  # With 16 shards, a shard took 3.5 to more than 5 hours and four shards
+  # hit the timeout. With 24 shards, a shard has about 3.5 hours of work.
   shard:
+    needs: devshell
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     steps:
       - uses: actions/checkout@v7
       # Each cargo-mutants worker builds the workspace in a copy of its own,
@@ -48,11 +64,15 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       # The script exits with 2 when a mutant survives: the shard still
       # uploads its outcomes, and the `score` job judges them.
-      - name: Run shard ${{ matrix.shard }} of 16
-        run: >-
-          nix develop --command scripts/mutants.sh
-          --shard ${{ matrix.shard }}/16 --sharding round-robin
-          || [ "$?" -eq 2 ]
+      # `shard.done` marks a shard whose two passes ran to the end: the
+      # `score` job counts only those shards, because a shard that was cut
+      # has first-pass misses that no second pass judged.
+      - name: Run shard ${{ matrix.shard }} of 24
+        run: |
+          nix develop --command scripts/mutants.sh \
+            --shard ${{ matrix.shard }}/24 --sharding round-robin \
+            || [ "$?" -eq 2 ]
+          touch shard.done
       - name: Show the survivors of the shard
         if: always()
         run: |
@@ -66,6 +86,7 @@ jobs:
         with:
           name: mutants-shard-${{ matrix.shard }}
           path: |
+            shard.done
             survivors.txt
             mutants.first/*.txt
             mutants.first/outcomes.json
@@ -89,20 +110,27 @@ jobs:
       - name: Score the run
         run: |
           set -euo pipefail
-          lines() { cat shards/*/"$1" 2>/dev/null | sed '/^$/d' | sort -u; }
-          shards=$(find shards -mindepth 1 -maxdepth 1 -type d | wc -l)
+          # Only the shards that ran to the end count: a shard that was cut
+          # would add first-pass misses that no second pass judged.
+          done_dirs=$(find shards -mindepth 2 -maxdepth 2 -name shard.done -printf '%h\n' | sort)
+          lines() { for d in $done_dirs; do cat "$d/$1" 2>/dev/null || true; done | sed '/^$/d' | sort -u; }
+          shards=$(printf '%s\n' "$done_dirs" | sed '/^$/d' | wc -l)
+          cut=$(find shards -mindepth 1 -maxdepth 1 -type d | sort | comm -23 - <(printf '%s\n' "$done_dirs") | xargs -r -n1 basename)
           first_caught=$(lines mutants.first/caught.txt | wc -l)
           first_missed=$(lines mutants.first/missed.txt | wc -l)
           timeout=$(lines mutants.first/timeout.txt | wc -l)
           unviable=$(lines mutants.first/unviable.txt | wc -l)
           survivors=$(lines survivors.txt)
-          missed=$(printf '%s' "$survivors" | sed '/^$/d' | wc -l)
+          missed=$(printf '%s\n' "$survivors" | sed '/^$/d' | wc -l)
           caught=$((first_caught + first_missed - missed + timeout))
           viable=$((caught + missed))
           {
             echo "## Mutants of paros-consensus"
             echo
-            echo "Shards: $shards of 16. Viable mutants: $viable. Unviable: $unviable."
+            echo "Shards that ran to the end: $shards of 24. Viable mutants: $viable. Unviable: $unviable."
+            if [ -n "$cut" ]; then
+              echo "Shards cut or failed (left out of the score): $(printf '%s' "$cut" | paste -sd, -)."
+            fi
             echo "First pass (fast tests): $first_caught caught, $timeout timeouts, $first_missed missed."
             echo "Second pass (trace checks, on the $first_missed): $((first_missed - missed)) caught, $missed survive."
             if [ "$viable" -gt 0 ]; then
@@ -120,4 +148,4 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
-          [ "$shards" -eq 16 ] && [ "$missed" -eq 0 ]
+          [ "$shards" -eq 24 ] && [ "$missed" -eq 0 ]

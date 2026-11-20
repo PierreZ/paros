@@ -91,10 +91,14 @@ write judged before its uuid so a resend resolves a held write, the writer's bas
 SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
 (`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
 segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
-(reshape with a column below quorum)), the health measures of the grid (`specs/tla/health/`: the spares of a column, electable,
-writable and the hold of a bypass as counts against the quorums, the seven journal states and
-their fixed actions, no placement over two zones after a zone loss; #1260 (journal health
-measures)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+(reshape with a column below quorum)), segment records across a matchmaker set handover
+(`specs/tla/segment-records/`: the seal, the retire, the offload mark, the controller election and
+the reshape call as compare-and-sets on the matchmaker register while the set hands over; a
+replica drops its copy only after a write of the offload mark is done at a majority; #1275
+(segment records across a matchmaker handover)), the health measures of the grid
+(`specs/tla/health/`: the spares of a column, electable, writable and the hold of a bypass as
+counts against the quorums, the seven journal states and their fixed actions, no placement over
+two zones after a zone loss; #1260 (journal health measures)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
@@ -174,7 +178,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
-  `Mutants` workflow runs every mutant of the core (about 2,850) in 16 shards each Sunday and on
+  `Mutants` workflow runs every mutant of the core (about 2,850) in 24 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
   for an edit that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
