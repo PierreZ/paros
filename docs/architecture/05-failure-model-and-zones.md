@@ -538,7 +538,7 @@ is **Open** (the first paragraph of this section).
 | Journal | `election_rate` | O | won elections per window | elections per window | churning: no reshape starts |
 | Matchmakers | `mm_spare` | P | live members minus a majority (`MatchmakerSet::quorum_size`) | matchmakers | `0`: a matchmaker handover; `< 0`: ControlFrozen |
 | Matchmakers | `generation_frozen` | P | a `Stopped { successor: None }` is seen, so a handover is in progress | yes, with an age | alert on age: any node that sees it finishes the handover |
-| Replicas | `holders(segment)` | P | replicas of the segment's set that hold the whole segment with a good scrub | replicas | below `F + 1`: no retire; re-replicate from a holder |
+| Replicas | `holders(segment)` | P | replicas of the segment's set that hold the whole segment with a good scrub | replicas | below `F + 1`: no retire (safety); re-replicate from a holder. A found damage that is not repaired also blocks the retire (`repairs_pending`, a margin) |
 | Replicas | `boundary_written(segment)` | P | the boundary state of the seal is at the matchmakers (section 2.10) | yes, no | no while sealed: no retire; the first replica that applied every slot writes it |
 | Proxy leaders, batchers, unbatchers | `live_count`, `queue_depth`, `batch_fill`, `utilisation` | O | per process | count, entries, ratio, ratio | the inputs of the cheap knob; a role below its count is started again |
 | Offload | `offload_backlog` | P | segments that are retired and not marked offloaded | segments | late: alert; more offloaders |
@@ -548,7 +548,7 @@ is **Open** (the first paragraph of this section).
 | Scrub | `scrub_coverage(segment, member)` | P | share of the member's copy of the segment that a scrub read in this pass | ratio | below 1 at the end of a pass: the pass is late |
 | Scrub | `scrub_age(segment, member)` | O | time since the last scrub of that copy | seconds | above the pass bound: the next scrub goes there first |
 | Scrub | `damage_found` | P | records, replica log entries and objects that failed their checksum | records | above 0: a repair is queued |
-| Scrub | `repairs_pending` | P | damage found and not repaired | records | above 0 for N windows: alert. Not a retire guard: `F + 1` holders already leave a good copy (#1263) |
+| Scrub | `repairs_pending` | P | damage found and not repaired, per segment | records | above 0 on a segment: no retire of that segment until the repair is done (a margin, kept by Pierre on 2026-11-20, #1263: `F + 1` holders already leave a good copy, so safety does not need it); above 0 for N windows: alert |
 | Data | `data_lost` | P | a slot or a segment with no good copy at the acceptors, the replicas or the object store | slots | must be 0; above 0: page. A report is always true (#1263); no unsafe recover in v1 |
 | Controller | `term_current` | P | the controller's term is the term of the matchmaker record | yes, no | no: stop (section 2.12) |
 | Controller | `signal_age` | O | age of the oldest input of a plan | seconds | stale: no expensive plan |
