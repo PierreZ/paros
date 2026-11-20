@@ -55,7 +55,7 @@ only a resize record changes, the floor and the register across the handover; #1
 1.8); `specs/tla/handover-chain/`: three generations, clients that reach one member at a time,
 and the two fences of the state transfer; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
-read; #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
+read, the held answers of a deposed leader (#1232 (held writes)); #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the

@@ -97,6 +97,17 @@ pub enum NodeRole {
 /// slot is applied and answer from its [`crate::journal::Outcome`] (#204) — a proposal
 /// is never judged here, only at apply.
 ///
+/// A held reply belongs to the command, not to the slot (#1232 (held writes)).
+/// After a leader change, the slot of a deposed leader can choose another command
+/// or a `Noop`. So the driver answers a held reply from the outcome only when the
+/// command applied at the slot is the command it proposed there
+/// (`Ready::committed` gives the command of each applied slot). Else it answers
+/// `Unknown`, and it may answer `Unknown` at any time. It never answers
+/// `NotLeader` for a command that holds a slot: a resend of that command can land
+/// two times. A single writer resolves an `Unknown` with a resend at the same
+/// `expected_seq`. TLC checks the rule in `specs/tla/compartments/`
+/// (`AckedChosen`, controls `held_slot` and `held_notleader`).
+///
 /// ```
 /// use paros_consensus::contract::MemStorage;
 /// use paros_consensus::journal::{Control, JournalIdentifier};
@@ -118,7 +129,8 @@ pub enum ProposeResult {
     /// This node is not the leader; the client should retry the hinted node
     /// (`None` if leadership is currently unknown).
     NotLeader(Option<NodeId>),
-    /// Admitted at this slot; answer from the slot's outcome once applied.
+    /// Admitted at this slot; answer from the slot's outcome once applied, when
+    /// the command applied there is this one (else `Unknown`).
     Accepted(Slot),
 }
 

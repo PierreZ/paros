@@ -57,6 +57,18 @@ a single-writer journal batches in its client (`paros::client::Writer`), never i
 A leader may refuse a `Write` from its own fold at propose time, so a superseded leader's
 pipelined burst does not burn slots. That is an optimisation; the apply-time check is the safety.
 
+**A held answer belongs to the command, not to the slot** (decided by Pierre on 2026-11-20,
+#1232 (held writes)). The consensus leader holds the answer of each `Write` it proposed until the
+slot is applied. After a leader change, the slot of a deposed leader can choose another command
+or a `Noop`. So a leader answers a held write from the outcome of its slot only when the command
+applied at the slot is the one it proposed there. Else it answers `Unknown`, and it may answer
+`Unknown` at any time. It never answers `NotLeader` for a write that holds a slot: the caller
+would send it again, and both copies can land. A single writer resolves an `Unknown` with a
+resend at the same `expected_seq` (exactly-once, the fold judges the position); a batcher answers
+each write of the batch unanswered (at-least-once, §2.4). TLC checks the rule in
+`specs/tla/compartments/` (`AckedChosen`; the control `held_slot` loses an acked write, the
+control `held_notleader` lands a write two times) and the resend in `specs/tla/multi-writer/`.
+
 The client pipelines a single-writer journal's writes with `paros::client::Pipeline` (#597
 (several writes in flight per journal)): one writer's leadership, shared by its callers, each
 write opened at the position after the last one and sent without waiting for the answer of the

@@ -12,6 +12,17 @@ restart           pass       ci
 reads             pass       ci
 reads_two         pass       long
 resend_ambiguous  violation  ci
+# Held writes of a deposed leader that stays up (#1232 (held writes)): the
+# rule answers Unknown, or ok when the slot chose the batch. The reach
+# check shows that a deposed leader's ok happens; each control breaks.
+reach_deposed_ok  violation  ci
+held_slot         violation  ci
+held_notleader    violation  ci
+# A transport that delivers a batch more than one time: a copy lands again
+# (multi-writer is at-least-once), so OneRange and AnswerAgrees are not
+# rules then. AckedChosen and the rest hold: the answer names one copy.
+copies            pass       ci
+copies_onerange   violation  ci
 walk_skip         violation  ci
 boot_keep         violation  ci
 read_local        violation  ci

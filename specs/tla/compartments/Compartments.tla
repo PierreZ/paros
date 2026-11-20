@@ -20,15 +20,25 @@
 (*     into the lane while the lane fits the batcher's record limit, and   *)
 (*     the lane flushes as one batch at any time (`flush_records`, the     *)
 (*     tick). A batch is one unfenced `Write` request to the leader. The   *)
-(*     transport delivers a request at most one time.                      *)
+(*     transport delivers a request at most one time, or, with `Copies`,   *)
+(*     a few more times.                                                   *)
 (*   - The leader refuses a merged batch over its record limit at the edge *)
 (*     (`TooLarge`), before it allocates a slot. The batcher lowers its    *)
 (*     limit (`lower_limits`) and sends each write of the batch again,     *)
 (*     alone (docs/architecture/02-data-plane.md, section 2.4).            *)
 (*   - Else the leader allocates the frontier slot and holds the answer.   *)
 (*     It answers once the slot and every slot below it are chosen, with  *)
-(*     the `seq` that its fold gives the batch. Only the leader that       *)
-(*     received the batch holds its answer: a new leader answers nothing.  *)
+(*     the `seq` that its fold gives the batch, and only when the command *)
+(*     chosen at the slot is the batch it proposed there. Only the leader *)
+(*     that received the batch holds its answer: a new leader answers     *)
+(*     nothing.                                                           *)
+(*   - A deposed leader stays up and still holds its answers (#1232 (held *)
+(*     writes)). It answers a held batch `Unknown` at any time, or `ok`   *)
+(*     when the command chosen at the slot is the batch it proposed       *)
+(*     there. It never answers a held batch `NotLeader`. The batcher      *)
+(*     treats `Unknown` as an ambiguous batch. A single writer resolves   *)
+(*     an `Unknown` with a resend at the same `expected_seq`; that half   *)
+(*     is checked in `multi-writer/` (`AckTrue`, `RefusalFinal`).          *)
 (*   - The unbatcher (`Unbatcher::scatter`) cuts the answer in batch       *)
 (*     order: each write gets its own dense range.                         *)
 (*   - A batch with no answer is ambiguous: the batcher answers each write *)
@@ -71,12 +81,25 @@
 (*             walk starts again at the chosen index on disk.              *)
 (*   Read      "quorum": the leaderless read (the code).                   *)
 (*             "local": a control, the replica serves from its prefix.     *)
+(*   Copies    how many times in a run the transport may deliver a batch   *)
+(*             one more time (0: at most one time, as in the code's       *)
+(*             contract with the batcher).                                 *)
+(*             A copy lands again (multi-writer is at-least-once), so      *)
+(*             `OneRange` and `AnswerAgrees` are not rules then: the       *)
+(*             answer names one copy. `AckedChosen` and the rest hold.     *)
+(*   Held      what a deposed leader answers for a held batch.             *)
+(*             "unknown": `Unknown`, or `ok` when the chosen command at   *)
+(*             the slot is the batch (the rule, #1232).                    *)
+(*             "slot": a control, it answers from the outcome of the slot, *)
+(*             whatever command the slot chose.                            *)
+(*             "notleader": a control, it answers `NotLeader`, and the     *)
+(*             batcher follows the hint and sends the batch again.         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Writes, Count, BatchMax, LeaderMax, Acceptors, Replicas, Readers,
           NS, MaxSends, Leaders, Restarts, Crash, Q2, RQ,
-          Resend, Accepts, Walk, Boot, Read
+          Resend, Accepts, Walk, Boot, Read, Held, Copies
 
 Slots == 0..(NS - 1)
 Ids == 1..MaxSends
@@ -100,6 +123,8 @@ ASSUME Walk \in {"prefix", "skip"}
 ASSUME Boot \in {"refold", "keep"}
 ASSUME Read \in {"quorum", "local"}
 ASSUME Crash \in BOOLEAN
+ASSUME Copies \in Nat
+ASSUME Held \in {"unknown", "slot", "notleader"}
 
 VARIABLES
   \* The batcher.
@@ -116,7 +141,9 @@ VARIABLES
   open,     \* the open slots whose Accepts are on the way
   chosen,   \* the chosen value at each slot, or None
   frontier, \* the leader's allocator frontier
-  held,     \* the slots whose answer the leader holds
+  held,     \* the answers the leader holds: [s |-> slot, id |-> batch id]
+  deposed,  \* the answers that deposed leaders still hold
+  copies,   \* the extra deliveries of a batch so far
   changes,  \* the leader changes so far
   wm,       \* each acceptor's vote watermark: one past its highest vote
   \* The writes, as the writers see them.
@@ -132,7 +159,7 @@ VARIABLES
   served    \* each replica's last served read, or None
 
 vars == <<lane, pushed, limit, bup, batches, reqs, replies, prop, open, chosen,
-          frontier, held, changes, wm, ranges, ambiguous, learned, walked,
+          frontier, held, deposed, copies, changes, wm, ranges, ambiguous, learned, walked,
           state, disk, restarts, reading, served>>
 
 Max(a, b) == IF a > b THEN a ELSE b
@@ -185,6 +212,8 @@ Init ==
   /\ chosen = [s \in Slots |-> None]
   /\ frontier = 0
   /\ held = {}
+  /\ deposed = {}
+  /\ copies = 0
   /\ changes = 0
   /\ wm = [a \in Acceptors |-> 0]
   /\ ranges = [w \in Writes |-> {}]
@@ -197,7 +226,7 @@ Init ==
   /\ reading = [r \in Replicas |-> NoRead]
   /\ served = [r \in Replicas |-> NoServe]
 
-Unchanged_log == UNCHANGED <<prop, open, chosen, frontier, held, changes, wm>>
+Unchanged_log == UNCHANGED <<prop, open, chosen, frontier, held, deposed, copies, changes, wm>>
 Unchanged_replicas == UNCHANGED <<learned, walked, state, disk, restarts, reading, served>>
 
 \* Send the writes `ws` as one batch.
@@ -237,12 +266,24 @@ Hear(rp) ==
   /\ replies' = replies \ {rp}
   /\ IF batches[rp.id].st # "sent"
        \* An ambiguous batch was answered already: the late answer is dropped.
-       THEN /\ UNCHANGED <<batches, reqs, limit, ranges>>
+       THEN /\ UNCHANGED <<batches, reqs, limit, ranges, ambiguous>>
        ELSE IF rp.kind = "ok"
          THEN /\ batches' = [batches EXCEPT ![rp.id].st = "done"]
               /\ ranges' = [w \in Writes |->
                               ranges[w] \cup {<<x[2], x[3]>> : x \in {y \in Scatter(rp.id, rp.seq) : y[1] = w}}]
-              /\ UNCHANGED <<reqs, limit>>
+              /\ UNCHANGED <<reqs, limit, ambiguous>>
+       ELSE IF rp.kind = "unknown"
+         \* The batch may have run: each of its writes is answered unanswered.
+         THEN /\ batches' = [batches EXCEPT ![rp.id].st = "ambiguous"]
+              /\ ambiguous' = ambiguous \cup Range(batches[rp.id].ws)
+              /\ UNCHANGED <<reqs, limit, ranges>>
+       ELSE IF rp.kind = "notleader"
+         \* A control: the batcher follows the hint and sends the batch again.
+         THEN /\ Len(batches) < MaxSends
+              /\ batches' = Append([batches EXCEPT ![rp.id].st = "redirected"],
+                                   [ws |-> batches[rp.id].ws, st |-> "sent"])
+              /\ reqs' = reqs \cup {Len(batches) + 1}
+              /\ UNCHANGED <<limit, ranges, ambiguous>>
          \* TooLarge: lower the limit and send each write again, alone.
          ELSE /\ limit' = LeaderMax
               /\ Len(batches) + Len(batches[rp.id].ws) <= MaxSends
@@ -250,8 +291,8 @@ Hear(rp) ==
               /\ batches' = [batches EXCEPT ![rp.id].st = "refused"]
                              \o [i \in DOMAIN batches[rp.id].ws |->
                                    [ws |-> <<batches[rp.id].ws[i]>>, st |-> "sent"]]
-              /\ UNCHANGED ranges
-  /\ UNCHANGED <<lane, pushed, bup, ambiguous>>
+              /\ UNCHANGED <<ranges, ambiguous>>
+  /\ UNCHANGED <<lane, pushed, bup>>
   /\ Unchanged_log /\ Unchanged_replicas
 
 \* No answer came in time: each write of batch id is answered unanswered.
@@ -286,17 +327,19 @@ CrashBatcher ==
 \* The leader receives batch id.
 Receive(id) ==
   /\ id \in reqs
-  /\ reqs' = reqs \ {id}
+  \* With Copies, another copy of the request stays on the way.
+  /\ \/ reqs' = reqs \ {id} /\ UNCHANGED copies
+     \/ copies < Copies /\ copies' = copies + 1 /\ UNCHANGED reqs
   /\ IF Len(batches[id].ws) > 1 /\ SumOf(batches[id].ws) > LeaderMax
        \* At the edge: a merged batch over the limit takes no slot.
-       THEN /\ replies' = replies \cup {[id |-> id, kind |-> "toolarge", seq |-> 0]}
-            /\ Unchanged_log
+       THEN /\ replies' = replies \cup {[id |-> id, kind |-> "toolarge", seq |-> 0, from |-> "leader"]}
+            /\ UNCHANGED <<prop, open, chosen, frontier, held, deposed, changes, wm>>
        ELSE /\ frontier < NS
             /\ prop' = [prop EXCEPT ![frontier] = id]
             /\ open' = open \cup {frontier}
-            /\ held' = held \cup {frontier}
+            /\ held' = held \cup {[s |-> frontier, id |-> id]}
             /\ frontier' = frontier + 1
-            /\ UNCHANGED <<replies, chosen, changes, wm>>
+            /\ UNCHANGED <<replies, chosen, deposed, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, bup, batches, ranges, ambiguous>>
   /\ Unchanged_replicas
 
@@ -310,7 +353,7 @@ Choose(s) ==
      ELSE \E Q \in Q2 : wm' = [a \in Acceptors |-> IF a \in Q THEN Max(wm[a], s + 1) ELSE wm[a]]
   /\ chosen' = [chosen EXCEPT ![s] = prop[s]]
   /\ open' = open \ {s}
-  /\ UNCHANGED <<prop, frontier, held, changes>>
+  /\ UNCHANGED <<prop, frontier, held, deposed, copies, changes>>
   /\ UNCHANGED <<lane, pushed, limit, bup, batches, reqs, replies, ranges, ambiguous>>
   /\ Unchanged_replicas
 
@@ -318,7 +361,7 @@ Choose(s) ==
 LoseAccepts(s) ==
   /\ s \in open
   /\ open' = open \ {s}
-  /\ UNCHANGED <<prop, chosen, frontier, held, changes, wm>>
+  /\ UNCHANGED <<prop, chosen, frontier, held, deposed, copies, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, bup, batches, reqs, replies, ranges, ambiguous>>
   /\ Unchanged_replicas
 
@@ -329,14 +372,14 @@ ResendAccepts(s) ==
   /\ chosen[s] = None
   /\ s \notin open
   /\ open' = open \cup {s}
-  /\ UNCHANGED <<prop, chosen, frontier, held, changes, wm>>
+  /\ UNCHANGED <<prop, chosen, frontier, held, deposed, copies, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, bup, batches, reqs, replies, ranges, ambiguous>>
   /\ Unchanged_replicas
 
 \* A new leader wins Phase 1. Each open slot below its frontier keeps its
 \* proposal or gets a Noop; each open slot above it is free again. Every
-\* slot that the new leader recovers is sent again. The held answers die
-\* with the old leader.
+\* slot that the new leader recovers is sent again. The new leader holds
+\* no answer. The old leader stays up and keeps the answers it held.
 NewLeader ==
   /\ changes < Leaders
   /\ \E f \in 0..frontier :
@@ -349,20 +392,47 @@ NewLeader ==
             /\ open' = {s \in 0..(f - 1) : chosen[s] = None}
             /\ frontier' = f
   /\ held' = {}
+  /\ deposed' = deposed \cup held
   /\ changes' = changes + 1
-  /\ UNCHANGED <<chosen, wm>>
+  /\ UNCHANGED <<chosen, copies, wm>>
   /\ UNCHANGED <<lane, pushed, limit, bup, batches, reqs, replies, ranges, ambiguous>>
   /\ Unchanged_replicas
 
-\* The leader answers the batch of slot s: the slot and every slot below
-\* it are chosen, so its fold gives the batch its seq.
-Answer(s) ==
-  /\ s \in held
-  /\ \A k \in 0..s : chosen[k] # None
-  /\ held' = held \ {s}
-  /\ replies' = replies \cup
-       {[id |-> chosen[s], kind |-> "ok", seq |-> FoldFrom(EmptyState, Prefix(s)).next]}
-  /\ UNCHANGED <<prop, open, chosen, frontier, changes, wm>>
+\* The slot and every slot below it are chosen.
+PrefixChosen(s) == \A k \in 0..s : chosen[k] # None
+
+\* The answer `ok` to the batch of held answer h: the fold of the chosen
+\* prefix below its slot gives the batch its seq.
+OkReply(h, from) == [id |-> h.id, kind |-> "ok", seq |-> FoldFrom(EmptyState, Prefix(h.s)).next,
+                     from |-> from]
+
+\* The leader answers the batch of held answer h: the slot chose the batch
+\* that the leader proposed there.
+Answer(h) ==
+  /\ h \in held
+  /\ PrefixChosen(h.s)
+  /\ chosen[h.s] = h.id
+  /\ held' = held \ {h}
+  /\ replies' = replies \cup {OkReply(h, "leader")}
+  /\ UNCHANGED <<prop, open, chosen, frontier, deposed, copies, changes, wm>>
+  /\ UNCHANGED <<lane, pushed, limit, bup, batches, reqs, ranges, ambiguous>>
+  /\ Unchanged_replicas
+
+\* A deposed leader answers the batch of held answer h (#1232).
+AnswerDeposed(h) ==
+  /\ h \in deposed
+  /\ deposed' = deposed \ {h}
+  /\ CASE Held = "unknown" ->
+            \/ replies' = replies \cup {[id |-> h.id, kind |-> "unknown", seq |-> 0, from |-> "deposed"]}
+            \/ /\ PrefixChosen(h.s)
+               /\ chosen[h.s] = h.id
+               /\ replies' = replies \cup {OkReply(h, "deposed")}
+       [] Held = "slot" ->
+            /\ PrefixChosen(h.s)
+            /\ replies' = replies \cup {OkReply(h, "deposed")}
+       [] Held = "notleader" ->
+            replies' = replies \cup {[id |-> h.id, kind |-> "notleader", seq |-> 0, from |-> "deposed"]}
+  /\ UNCHANGED <<prop, open, chosen, frontier, held, copies, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, bup, batches, reqs, ranges, ambiguous>>
   /\ Unchanged_replicas
 
@@ -463,7 +533,9 @@ Next ==
   \/ \E rp \in replies : Hear(rp) \/ LoseReply(rp)
   \/ \E id \in Ids : Timeout(id) \/ Receive(id)
   \/ CrashBatcher
-  \/ \E s \in Slots : Choose(s) \/ LoseAccepts(s) \/ ResendAccepts(s) \/ Answer(s)
+  \/ \E s \in Slots : Choose(s) \/ LoseAccepts(s) \/ ResendAccepts(s)
+  \/ \E h \in held : Answer(h)
+  \/ \E h \in deposed : AnswerDeposed(h)
   \/ NewLeader
   \/ \E r \in Replicas :
        \/ \E s \in Slots : Learn(r, s)
@@ -502,7 +574,9 @@ TypeOK ==
   /\ Len(batches) <= MaxSends
   /\ reqs \subseteq Ids
   /\ open \subseteq Slots
-  /\ held \subseteq Slots
+  /\ held \subseteq [s : Slots, id : Ids]
+  /\ deposed \subseteq [s : Slots, id : Ids]
+  /\ copies \in 0..Copies
 
 \* OneRange: each write of a batch gets its own seq range one time, at each
 \* replica, also when a batch is sent again (a TooLarge split, an Accept
@@ -522,6 +596,16 @@ OneAnswer ==
 AnswerAgrees ==
   \A r \in Replicas : \A x \in state[r].at :
     ranges[x[1]] \subseteq {<<x[2], x[3]>>}
+
+\* AckedChosen: each range that the unbatcher gave a write is the range that
+\* the fold of the chosen log gives it. An answered write is never lost,
+\* also when no replica walked its slot yet (#1232).
+AckedChosen ==
+  LET n == CHOOSE k \in 0..NS : (\A s \in 0..(k - 1) : chosen[s] # None)
+                                /\ (k = NS \/ chosen[k] = None)
+      at == FoldFrom(EmptyState, Prefix(n)).at
+  IN \A w \in Writes : \A rg \in ranges[w] :
+       \E x \in at : x[1] = w /\ x[2] = rg[1] /\ x[3] = rg[2]
 
 \* InOrder: a replica folds the chosen log in slot order with no gap, and
 \* its state is the fold of that prefix.
@@ -547,5 +631,7 @@ ReadFresh ==
 \* Reachability controls: each must be violated.
 NoMergedChosen == \A s \in Slots : chosen[s] \notin {id \in DOMAIN batches : Len(batches[id].ws) > 1}
 NoSplit == \A id \in DOMAIN batches : batches[id].st # "refused" \/ \E w \in Writes : ranges[w] = {}
+\* A deposed leader answers a held batch ok, and a write gets its range from it.
+NoDeposedOk == \A rp \in replies : ~(rp.kind = "ok" /\ rp.from = "deposed")
 NoReadAfterWrite == \A r \in Replicas : ~served[r].on \/ served[r].must = {}
 =============================================================================
