@@ -36,9 +36,10 @@ const LOG: &[Rule] = &[
     Rule {
         name: "a promise reports a vote",
         met: |events| {
-            events
-                .iter()
-                .any(|e| matches!(e, ClusterEvent::Promise { votes, .. } if !votes.is_empty()))
+            events.iter().any(|e| {
+                matches!(e, ClusterEvent::Promise { votes, .. } | ClusterEvent::Page { votes, .. }
+                    if !votes.is_empty())
+            })
         },
     },
     Rule {
@@ -203,6 +204,260 @@ const MATCHMAKER: &[Rule] = &[
     },
 ];
 
+/// `ReadsTrace`: the read basis of a beat, its fence, the reader's own
+/// answer, a read that must see a completed write, and an answer whose
+/// read fence ends the read.
+const READS: &[Rule] = &[
+    Rule {
+        name: "a node learns its read basis from a beat",
+        met: |events| {
+            events.iter().any(
+                |e| matches!(e, ClusterEvent::Basis { node, ballot, .. } if *node != ballot.node),
+            )
+        },
+    },
+    Rule {
+        name: "a read basis carries a fence",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Basis { fence: Some(_), .. }))
+        },
+    },
+    Rule {
+        name: "a reader answers its own read",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::ReadStart { own: Some(_), .. }))
+        },
+    },
+    Rule {
+        name: "a read after a completed write is served",
+        met: |events| {
+            let mut applied = false;
+            let mut after = BTreeSet::new();
+            events.iter().any(|e| match e {
+                ClusterEvent::Applied { .. } => {
+                    applied = true;
+                    false
+                }
+                ClusterEvent::ReadStart { ctx, .. } if applied => {
+                    after.insert(*ctx);
+                    false
+                }
+                ClusterEvent::ReadServe { ctx, .. } => after.contains(ctx),
+                _ => false,
+            })
+        },
+    },
+    Rule {
+        name: "an answer above the read basis ends the read",
+        met: |events| {
+            let mut basis = BTreeMap::new();
+            let mut fences = BTreeMap::new();
+            events.iter().any(|e| match e {
+                ClusterEvent::ReadStart { ctx, ballot, .. } => {
+                    basis.insert(*ctx, *ballot);
+                    false
+                }
+                ClusterEvent::ReadAck {
+                    acceptor,
+                    ctx,
+                    fence: Some(fence),
+                    ..
+                } => {
+                    fences.insert((*acceptor, *ctx), *fence);
+                    false
+                }
+                ClusterEvent::ReadFold { acceptor, ctx, .. } => fences
+                    .get(&(*acceptor, *ctx))
+                    .zip(basis.get(ctx))
+                    .is_some_and(|(fence, basis)| fence > basis),
+                _ => false,
+            })
+        },
+    },
+];
+
+/// The rules of the compaction floor of `truncation/`.
+const TRUNCATION: &[Rule] = &[
+    Rule {
+        name: "a node compacts its log",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Compact { .. }))
+        },
+    },
+    Rule {
+        name: "a compaction keeps a record at or above first_seq",
+        met: |events| {
+            events.iter().enumerate().any(|(i, e)| {
+                let ClusterEvent::Compact { floor, .. } = e else {
+                    return false;
+                };
+                let folds = events[..i].iter().filter_map(|e| match e {
+                    ClusterEvent::Fold { slot, high, first } => Some((*slot, *high, *first)),
+                    _ => None,
+                });
+                let first = folds.clone().next_back().map_or(0, |(_, _, first)| first);
+                folds
+                    .into_iter()
+                    .any(|(slot, high, _)| slot >= *floor && high > first)
+            })
+        },
+    },
+    Rule {
+        name: "a node jumps to the trim point of a peer",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Trim { .. }))
+        },
+    },
+    Rule {
+        name: "an acceptor promises after it compacted",
+        met: |events| {
+            events.iter().enumerate().any(|(i, e)| {
+                let ClusterEvent::Compact { node, .. } = e else {
+                    return false;
+                };
+                events[i..].iter().any(|e| {
+                    matches!(e, ClusterEvent::Promise { acceptor, .. } | ClusterEvent::Page { acceptor, .. }
+                        if acceptor == node)
+                })
+            })
+        },
+    },
+];
+
+/// The rules of the read replica of `compartments/`.
+const COMPARTMENTS: &[Rule] = &[
+    Rule {
+        name: "a replica learns a slot",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::ReplicaLearn { .. }))
+        },
+    },
+    Rule {
+        name: "a replica folds a slot",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::ReplicaApply { .. }))
+        },
+    },
+    Rule {
+        name: "a replica boots again and folds its prefix again",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::ReplicaBoot { from, .. } if from.0 > 0))
+        },
+    },
+    Rule {
+        name: "a replica moves its floor",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::ReplicaFloor { .. }))
+        },
+    },
+    Rule {
+        name: "a replica serves a read opened after a completed write",
+        met: |events| {
+            events.iter().enumerate().any(|(i, e)| {
+                let ClusterEvent::ReplicaRead { ctx, .. } = e else {
+                    return false;
+                };
+                events[..i]
+                    .iter()
+                    .any(|e| matches!(e, ClusterEvent::Applied { .. }))
+                    && events[i..]
+                        .iter()
+                        .any(|e| matches!(e, ClusterEvent::ReplicaServe { ctx: c, .. } if c == ctx))
+            })
+        },
+    },
+];
+
+/// The rules of the faulty entries of CTRL of `truncation/`.
+const FAULTS: &[Rule] = &[
+    Rule {
+        name: "a boot reads a faulty record",
+        met: |events| events.iter().any(|e| matches!(e, ClusterEvent::Rot { .. })),
+    },
+    Rule {
+        name: "a promise reports a faulty record",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Page { faulty, .. } if !faulty.is_empty()))
+        },
+    },
+    Rule {
+        name: "a promise comes in pages",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Page { next: Some(_), .. }))
+        },
+    },
+    Rule {
+        name: "a leader wins over a faulty report",
+        met: |events| {
+            let mut faulty = BTreeSet::new();
+            events.iter().any(|e| match e {
+                ClusterEvent::Page {
+                    ballot, faulty: f, ..
+                } if !f.is_empty() => {
+                    faulty.insert(*ballot);
+                    false
+                }
+                ClusterEvent::Win { ballot, .. } => faulty.contains(ballot),
+                _ => false,
+            })
+        },
+    },
+];
+
+/// The rules of `RetireTrace`.
+const RETIRE: &[Rule] = &[
+    Rule {
+        name: "a node retires",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Retire { .. }))
+        },
+    },
+    Rule {
+        name: "a retired node rejoins",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Rejoin { .. }))
+        },
+    },
+    Rule {
+        name: "a node that rejoined promises",
+        met: |events| {
+            let mut back = BTreeSet::new();
+            events.iter().any(|e| match e {
+                ClusterEvent::Rejoin { node } => {
+                    back.insert(*node);
+                    false
+                }
+                ClusterEvent::Promise { acceptor, .. } => back.contains(acceptor),
+                _ => false,
+            })
+        },
+    },
+];
+
 impl Spec {
     /// The steps of this spec that some checked walk must take.
     #[must_use]
@@ -218,6 +473,28 @@ impl Spec {
             Self::Matchmaker => {
                 rules.push(RESTART);
                 rules.extend_from_slice(MATCHMAKER);
+            }
+            Self::Reads => {
+                rules.push(RESTART);
+                rules.extend_from_slice(MATCHMAKER);
+                rules.extend_from_slice(READS);
+            }
+            Self::Truncation => {
+                rules.push(RESTART);
+                rules.extend_from_slice(TRUNCATION);
+            }
+            Self::Compartments => {
+                rules.push(RESTART);
+                rules.extend_from_slice(COMPARTMENTS);
+            }
+            Self::Faults => {
+                rules.push(RESTART);
+                rules.extend_from_slice(FAULTS);
+            }
+            Self::Retire => {
+                rules.push(RESTART);
+                rules.extend_from_slice(MATCHMAKER);
+                rules.extend_from_slice(RETIRE);
             }
         }
         rules
@@ -235,6 +512,11 @@ mod tests {
             Spec::LeaderHandoff,
             Spec::ProxyLeader,
             Spec::Matchmaker,
+            Spec::Reads,
+            Spec::Truncation,
+            Spec::Compartments,
+            Spec::Faults,
+            Spec::Retire,
         ] {
             assert!(spec.rules().iter().all(|rule| !rule.met(&[])), "{spec:?}");
         }

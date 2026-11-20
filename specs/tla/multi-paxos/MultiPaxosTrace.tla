@@ -42,9 +42,16 @@
 (* model asks of every learn: the value is chosen (`LearnedChosen`). A     *)
 (* slot learned again (the prefix reaches a slot of the payload) is no     *)
 (* step. The code also keeps a learned value as the slot's accepted        *)
-(* record, at the ballot that chose it (`mark_chosen`), which the model    *)
-(* does not do: the record step asks that a quorum chose the value at that *)
-(* ballot, and the later promises of the node report it.                   *)
+(* record (`mark_chosen`), which the model does not do. The record's      *)
+(* ballot is the ballot of the `Commit` or of the catch-up that taught it, *)
+(* which can be above the ballot that chose the value: a later leader     *)
+(* proposes the chosen value again at its own ballot, and a node learns   *)
+(* it from that leader before a quorum votes at that ballot. So the record *)
+(* step asks that a quorum chose the value at the record's ballot or      *)
+(* below. That is safe: once v is chosen at c, every ballot above c that  *)
+(* has a value in slot s has v (P2c), so the record reports to a later    *)
+(* Phase 1 only a value that no other value can replace. The later        *)
+(* promises of the node report it.                                        *)
 (*                                                                         *)
 (* Ballots are the ranks of the code's `(round, node)` ballots in the run, *)
 (* from 1. Nodes and commands are strings; `Noop` is "noop".               *)
@@ -96,10 +103,11 @@ Learn(n, s, v) ==
        /\ learned' = [learned EXCEPT ![n][s] = v]
        /\ UNCHANGED <<prom, vote, dprom, dvote, phase, next, front, wiped, restarts, msgs>>
 
-\* A node keeps the value chosen at ballot b as its record of slot s: the
-\* trace spec's own step, see above. It is no vote: it sends no 2b.
+\* A node keeps a value chosen at ballot b or below as its record of slot
+\* s, at ballot b: the trace spec's own step, see above. It is no vote: it
+\* sends no 2b.
 Record(n, b, s, v) ==
-  /\ ChosenAt(b, s, v)
+  /\ \E c \in 1..b : ChosenAt(c, s, v)
   /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
   /\ dvote' = [dvote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
   /\ UNCHANGED <<prom, dprom, learned, phase, next, front, wiped, restarts, msgs>>
@@ -111,11 +119,11 @@ Record(n, b, s, v) ==
 \* ballot n owns, but a leader may have handed its ballot on before the
 \* crash (the walk's handoff, which this model does not have): that ballot
 \* lives on at its successor, and the successor's restart ends it.
-TraceRestart(n, upto, led) ==
+\* `Reboot` is the boot; `TraceRestart` adds that n learned the prefix.
+Reboot(n, upto, led) ==
   /\ Live(n)
   /\ restarts < Restarts
   /\ restarts' = restarts + 1
-  /\ \A s \in Slots : s < upto => learned[n][s] # None
   /\ prom' = [prom EXCEPT ![n] = dprom[n]]
   /\ vote' = [vote EXCEPT ![n] = dvote[n]]
   /\ learned' = [learned EXCEPT ![n] = [s \in Slots |-> IF s >= upto THEN None ELSE @[s]]]
@@ -124,6 +132,10 @@ TraceRestart(n, upto, led) ==
                    \/ b = led /\ phase[b] = "p2"
                 THEN "dead" ELSE phase[b]]
   /\ UNCHANGED <<dprom, dvote, next, front, wiped, msgs>>
+
+TraceRestart(n, upto, led) ==
+  /\ \A s \in Slots : s < upto => learned[n][s] # None
+  /\ Reboot(n, upto, led)
 
 Step ==
   \/ /\ e.event = "prepare" /\ IsBallot /\ IsNode("owner") /\ Has("from")

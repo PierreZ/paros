@@ -45,6 +45,19 @@ pub struct Flavor {
     /// `lost_to_a_lagging_pool`). The pools catch up when the settle rounds
     /// start.
     pub lagging_reader: bool,
+    /// Steered toward compactions: a client claims the journal before it
+    /// writes, when the journal has no leader uuid, a client often
+    /// truncates after a write, and the first leader that compacted steps
+    /// down once, so that a campaign meets the floors. A compaction needs a claim, accepted writes
+    /// and an applied truncation, which a plain walk of 150 steps seldom
+    /// gathers.
+    pub compacting: bool,
+    /// Steered toward retirements: half the client moves are operator
+    /// moves (a reconfiguration, a retirement or a rejoin). A retirement
+    /// needs a reconfiguration, a GC floor that a matchmaker quorum acked,
+    /// a check by every matchmaker and a second retire move, which a plain
+    /// walk of 150 steps seldom gathers.
+    pub retiring: bool,
     /// Matchmakers in the matchmaker pool outside the bootstrap set, that a
     /// handover ([`Action::Handover`]) may name.
     pub matchmaker_spares: u64,
@@ -71,6 +84,8 @@ impl Flavor {
             spares: 0,
             late: 0,
             lagging_reader: false,
+            compacting: false,
+            retiring: false,
             matchmaker_spares: 0,
             limits: Limits::DEFAULT,
             mutant: None,
@@ -284,6 +299,41 @@ impl Flavor {
         }
     }
 
+    /// Multi-Paxos on five with truncation, steered toward compactions
+    /// ([`Flavor::compacting`]): the walk of `truncation/`'s trace spec.
+    #[must_use]
+    pub fn compaction() -> Self {
+        Self {
+            name: "compaction",
+            compacting: true,
+            ..Self::multi_paxos_five()
+        }
+    }
+
+    /// Every compartment, steered toward compactions
+    /// ([`Flavor::compacting`]): the walk of the read replica's trace spec
+    /// (`compartments/`), whose replicas then move their floors.
+    #[must_use]
+    pub fn compartments_compacting() -> Self {
+        Self {
+            name: "compartments-compaction",
+            compacting: true,
+            ..Self::compartments()
+        }
+    }
+
+    /// Retirement and rejoin, steered toward retirements
+    /// ([`Flavor::retiring`]): the walk of `matchmaker/`'s retirement trace
+    /// spec.
+    #[must_use]
+    pub fn retiring() -> Self {
+        Self {
+            name: "retiring",
+            retiring: true,
+            ..Self::retirement()
+        }
+    }
+
     /// Matchmakers with reconfiguration and the matchmaker set handover
     /// (`MatchmakerReconfigurer`) over a matchmaker pool of five.
     #[must_use]
@@ -393,6 +443,25 @@ pub enum Mutant {
     /// alone; the trace check refuses the request
     /// (`MatchmakerTrace.tla`).
     EarlyGc,
+    /// The driver writes the sender's belief ballot as the read fence of
+    /// each `PreReadAck`, and not the higher of its promise and its belief
+    /// (the fence before PR #1074, `Fence = "belief"` of `reads/`). A read
+    /// goes stale only when a lagging acceptor promised a newer campaign
+    /// that chose a write; the trace check refuses the answer itself
+    /// (`ReadsTrace.tla`).
+    BeliefFence,
+    /// The driver drops the vote watermark from each `PreReadAck`: the
+    /// sender says it never voted. A read goes stale only when every
+    /// answer that holds a completed write is hidden and the fence is
+    /// below it; the trace check refuses the first answer whose watermark
+    /// is not its sender's (`ReadsTrace.tla`).
+    HideWatermark,
+    /// The disk compacts each `WriteOp::Truncate` to the end of the chosen
+    /// prefix, past the slots that still hold records at or above
+    /// `first_seq` (`FloorRule = "slot"` of `truncation/`). A reader loses
+    /// a record only when it asks that disk for it; the trace check
+    /// refuses the compaction itself (`TruncationTrace.tla`).
+    CompactPastFold,
     /// The network rewrites the command of each `Commit` it delivers to a
     /// replica. Caught by
     /// [`LEARNED_CHOSEN`](crate::oracle::ledger::LEARNED_CHOSEN).
@@ -402,4 +471,15 @@ pub enum Mutant {
     /// another way than the rules give. Caught by
     /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
     CorruptTrimJump,
+    /// The driver drops the faulty records from every `Promise` it sends:
+    /// a lost value reads as no vote (`Tally = "none"` of `truncation/`).
+    /// A value is lost only when the candidate fills a chosen slot with a
+    /// `Noop` over it; the trace check refuses the first promise that hid
+    /// a faulty record (`FaultsTrace.tla`).
+    HideFaulty,
+    /// The operator retires a node with no evidence: no effective floor,
+    /// no check by the matchmakers. A retired node is only a node that
+    /// stays down, so no oracle sees it; the trace check refuses the
+    /// retirement (`RetireTrace.tla`).
+    RetireUnchecked,
 }

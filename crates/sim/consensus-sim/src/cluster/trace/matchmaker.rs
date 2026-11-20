@@ -43,7 +43,13 @@ fn ballots(events: &[ClusterEvent]) -> BTreeSet<Ballot> {
             | ClusterEvent::Register { ballot, .. }
             | ClusterEvent::Prepare { ballot, .. }
             | ClusterEvent::GcAsk { ballot }
-            | ClusterEvent::GcAck { ballot, .. } => Some(*ballot),
+            | ClusterEvent::GcAck { ballot, .. }
+            | ClusterEvent::Basis { ballot, .. }
+            | ClusterEvent::ReadStart { ballot, .. }
+            | ClusterEvent::ReadAck {
+                fence: Some(ballot),
+                ..
+            } => Some(*ballot),
             _ => None,
         })
         .collect()

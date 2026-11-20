@@ -18,16 +18,20 @@ const SHIFT: i64 = 1;
 /// spec. A restart changes nothing in this model, and a leadership is a
 /// ballot's, not a node's.
 pub(super) fn keeps(event: &ClusterEvent) -> bool {
-    !matches!(
+    matches!(
         event,
-        ClusterEvent::Restart { .. }
-            | ClusterEvent::StepDown { .. }
-            | ClusterEvent::Relinquish { .. }
-            | ClusterEvent::Install { .. }
-            | ClusterEvent::Select { .. }
-            | ClusterEvent::Register { .. }
-            | ClusterEvent::GcAsk { .. }
-            | ClusterEvent::GcAck { .. }
+        ClusterEvent::Prepare { .. }
+            | ClusterEvent::Promise { .. }
+            | ClusterEvent::Win { .. }
+            | ClusterEvent::Propose { .. }
+            | ClusterEvent::Direct { .. }
+            | ClusterEvent::Delegate { .. }
+            | ClusterEvent::Fanout { .. }
+            | ClusterEvent::Commit { .. }
+            | ClusterEvent::Crash { .. }
+            | ClusterEvent::Accept { .. }
+            | ClusterEvent::Record { .. }
+            | ClusterEvent::Learn { .. }
     )
 }
 
