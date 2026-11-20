@@ -498,6 +498,8 @@ Each control turns off one rule, and each one fails:
 | `live` | `LiveSpec`: three matchmakers, one crash, no release; the top ballot wins | pass (15.5 million states, 17 minutes, `long`) |
 | `live_release` | `live` with stores released | pass (21 million states, 25 minutes, `long`) |
 | `agree_long` | `agree_mm3` with three ballots | no violation in 181 million distinct states, to depth 23 (a bounded run of 2 hours that filled the disk; `long`) |
+| `heal_partitioned_short` | control: the heal `J` to `K` of the journal grid 3 × 2 (`a7` replaces `a1`, so every member that stays changes its column), Phase 1 one acceptor short in every column | `Agreement` violation (417 thousand states, 4 minutes) |
+| `heal_partitioned` | the rule on that heal, seven acceptors, two ballots (#1258 (reshape with a column below quorum), T5) | pass: `Agreement` and `Electable` (32.8 million states, 59 minutes, `long`) |
 | `resize_long` | `resize` with three ballots | no violation in 109 million distinct states (a bounded run of 2 hours; `long`) |
 
 `agree` runs in CI because two ballots cannot show the bug of `switch_before`. The checks with
@@ -2203,4 +2205,7 @@ The answer to #1258:
   Phase 1 ran: the leader proposed each slot that its own election's Phase 1 recovered before it
   may bypass, so the frontier is at least one above the highest vote that Phase 1 saw. An end at
   the chosen prefix chooses two values (`seal_chosen`).
-- **T5** is in `config-register/` (`heal_partitioned`, `heal_partitioned_short`).
+- **T5: a heal that moves survivors to other columns is safe.** The layout is row-major, so a
+  heal where `a7` replaces `a1` moves every member that stays to another column. The rule keeps
+  one value (`config-register/heal_partitioned`, 32.8 million states); with Phase 1 one acceptor
+  short in every column, TLC finds two (`heal_partitioned_short`).
