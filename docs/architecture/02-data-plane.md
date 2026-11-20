@@ -457,7 +457,7 @@ checked, each with a control that TLC breaks:
   segment they still do. Because the journal state is folded at apply (sections 2.1 and 2.2), a
   replica of the next segment starts from the **boundary state**, the journal state at the seal.
   The first replica of the old set that applied every slot of the segment writes it in one
-  compare-and-set at the matchmakers: `next_seq` into the segment record, and the leader uuid
+  compare-and-set at the matchmakers: `next_seq` and `first_seq` into the segment record, and the leader uuid
   into the journal's matchmaker record (the journal metadata, beside the controller term, and
   later quota and offload limits; Pierre, 2026-11-20). The first leader of the next segment
   reads that uuid and proposes it as the segment's first slot, a `Fence(uuid)` that sets the
@@ -467,8 +467,50 @@ checked, each with a control that TLC breaks:
   write again; so does a `Fence` read before the seal wrote the uuid. A reader routes a read by
   the `seq` range of the segment records. A segment retires after `F + 1` replicas of its set
   hold it and its boundary state is written; after that the next segment never needs its
-  slots. **Open**: the trim floor (`first_seq`) is part of the boundary state by our reading;
-  the journal state model (#1189) decides it.
+  slots. The boundary state also holds the trim floor (`first_seq`), in the segment record
+  beside `next_seq` (#1276 (user truncate across segments), checked by
+  `specs/tla/segment-truncate/`, below).
+
+**A user truncate across segments** (#1276 (user truncate across segments), checked by
+`specs/tla/segment-truncate/`). A `Truncate` stays a decided command of the log, judged at apply
+(section 2.6). With segments, six rules keep it safe and live, each with a control that TLC
+breaks:
+
+- **The boundary state holds `first_seq`.** The replicas of the next segment check every read
+  against their own fold, and a floor that a `Truncate` of the old segment decided is in no slot
+  that they apply. Without `first_seq` in the boundary state (`nofirst`), or with a floor taken
+  from the trimmed segment records only (`trimstate`, wrong when the floor lands inside a
+  segment), a read returns a record below the floor. The writer of the boundary state writes
+  `first_seq` with `next_seq`, in the same compare-and-set; both are fixed at the seal.
+- **A read takes its floor from the segment in force.** A replica of a sealed segment folds only
+  up to the seal, so its own `first_seq` misses every later `Truncate`. The reader gets the floor
+  from a replica of the segment in force, at the basis of its leaderless read, and asks the
+  holder of an older segment only for a `seq` at or above that floor (`holder` returns a record
+  below the floor). Above the floor, every holder still has the record: its own floor is never
+  higher.
+- **A read of an offloaded segment checks the floor first.** The object holds the whole segment,
+  also the records below a floor that lands inside it. The replica that serves the object (or
+  its cache) answers `Truncated` below its floor (`cache_unchecked`).
+- **A segment is trimmed only once the floor is decided over it, and only when it is sealed.**
+  The record of a segment becomes trimmed when a replica's fold has `first_seq` at or above the
+  segment's last `seq` (the `next_seq` of its boundary state), from sealed, retired or offloaded;
+  a trimmed record never becomes live again, and the trim deletes the object by its key. A trim
+  on the intent to truncate, before the `Truncate` is decided (`trim_intent`), and a trim of the
+  open segment, whose range so far is below the floor (`trim_open`), lose records above the floor.
+  This agrees with the offloader of #1256 (offload races): the controller scrubs only objects of
+  segments below the trim floor, and a failed mark deletes the key only when the record says
+  trimmed.
+- **The acceptors of a segment compact only to a slot that `F + 1` replicas of its set compacted
+  to.** Each of these replicas applied and folded every slot below it, so with `F` of them down
+  one is still live to give a laggard its trim point. Acceptors that compact to the decided
+  floor alone (`acc_floor`) can drop the slots of a segment that no replica applied yet: nobody
+  can then fold the segment, its boundary state is never written, and the next segment never
+  starts. In the colocated core an acceptor compacts at the walk of its own node, so the case
+  does not come up; Compartmentalized Paxos does not state a rule for it, so this model is its
+  check.
+- **A laggard jumps.** A replica behind the floor of its segment, whose next slot no acceptor
+  and no peer holds, takes the trim point of a peer (`TrimmedTo`, as in `truncation/`) and never
+  fetches a slot of a trimmed segment (`nojump` stops it for ever).
 
 **A leaderless read of the tail across a reshape** (#1254 (leaderless reads across a reshape),
 checked on 2026-11-20 in `specs/tla/experiments/segments/reads/`). A reader that holds the record
@@ -612,3 +654,22 @@ Phase-1 bypass of #579 (zero-stall reconfiguration, `specs/tla/zero-stall/`):
   changes column keeps one value (`config-register/heal_partitioned`); with Phase 1 one acceptor
   short in every column, TLC finds two values (`heal_partitioned_short`).
 
+### 2.14 Record headers
+
+**Every journal record carries headers** (decided by Pierre on 2026-11-20, #1299 (record headers
+from clients and from paros)). A client can give headers with its `Write`, and paros can add its
+own, for example the leader time. This is the only idea of the Apache Iggy study that paros
+takes. The headers belong to the journal record format, not to `paros-consensus`, which keeps
+carrying opaque bytes (section 4.3 of `04-roles.md`). Pierre answered three points of #1299 on
+2026-11-20:
+
+- **The leader time is a hint only.** It promises no order across a leader change or a seal,
+  enters no safety rule and needs no TLA+ invariant.
+- **It is stamped per write**, not per batch.
+- **Client headers are opaque.** The journal never reads them, and a read cannot filter on them.
+- **In v1 paros adds only the leader time**, and keeps a reserved key space for later paros
+  headers (approved by Pierre on 2026-11-20).
+
+**Open** (#1299 decides each one): who stamps the leader time (the leader at propose or the
+batcher); the encoding, the size limits and the exact reserved key space; and
+whether the headers are inside the value checksum and the offload hash.
