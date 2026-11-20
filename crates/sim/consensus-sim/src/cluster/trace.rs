@@ -60,6 +60,7 @@
 mod compartments;
 mod encode;
 mod faults;
+mod handover;
 mod leader_handoff;
 mod matchmaker;
 mod multi_paxos;
@@ -77,10 +78,24 @@ use paros_consensus::contract::message::Audience;
 use paros_consensus::contract::write::AcceptorWrite;
 use paros_consensus::journal::{Command, Control, command_fingerprint};
 use paros_consensus::matchmaker::{GcRequest, MatchPurpose, MatchRequest};
-use paros_consensus::membership::{MatchmakerId, ProxyId, QuorumSystem};
+use paros_consensus::membership::{MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
 use paros_consensus::{Ballot, Message, NodeId, Slot, WriteOp};
 
 pub use rules::Rule;
+
+/// What the tracer reads of a matchmaker before a handover's request.
+pub(super) fn handover_before(matchmaker: &paros_consensus::Matchmaker) -> handover::Before {
+    handover::Before::of(matchmaker)
+}
+
+/// The handover steps of matchmaker `id` since `before`.
+pub(super) fn handover_steps(
+    id: MatchmakerId,
+    before: &handover::Before,
+    matchmaker: &paros_consensus::Matchmaker,
+) -> Vec<ClusterEvent> {
+    handover::steps(id, before, matchmaker)
+}
 
 use super::Flavor;
 use crate::trace::{Ranks, Trace, TraceCheck, int, spec};
@@ -308,6 +323,35 @@ pub enum ClusterEvent {
     /// `node` jumped to the trim point `floor` of a peer
     /// (`WriteOp::TrimmedTo`, `TrimTo`).
     Trim { node: NodeId, floor: Slot },
+    /// `matchmaker` froze its generation `generation` (`Stop`).
+    MmStop {
+        matchmaker: MatchmakerId,
+        generation: u64,
+    },
+    /// `matchmaker` holds the whole bootstrap of the proposed `set`: the
+    /// journal's `floor` and the ballots of its `registry` (`Bootstrap`).
+    MmBoot {
+        matchmaker: MatchmakerId,
+        set: MatchmakerSet,
+        floor: Ballot,
+        registry: Vec<Ballot>,
+    },
+    /// `matchmaker` voted for `set` at `ballot` in the decree that chooses
+    /// the successor of `generation` (`Decide`).
+    MmVote {
+        matchmaker: MatchmakerId,
+        generation: u64,
+        ballot: Ballot,
+        set: Vec<MatchmakerId>,
+    },
+    /// `matchmaker` serves `set`'s generation, with the journal's `floor`
+    /// and the ballots of its `registry` (`Activate`).
+    MmActivate {
+        matchmaker: MatchmakerId,
+        set: MatchmakerSet,
+        floor: Ballot,
+        registry: Vec<Ballot>,
+    },
     /// The operator retired `node` on the evidence the core asks for, and
     /// it shut down (`Shutdown`).
     Retire { node: NodeId },
@@ -866,6 +910,10 @@ pub enum Spec {
     /// retirement: a node retires on an effective floor that no
     /// registration above names, and a retired node rejoins.
     Retire,
+    /// `specs/tla/handover/HandoverTrace.tla`: the matchmaker set
+    /// handover over many generations: each freeze, bootstrap, decree vote
+    /// and activation, and the registrations and floors it carries.
+    Handover,
 }
 
 impl Spec {
@@ -882,6 +930,7 @@ impl Spec {
             Self::Compartments => spec("compartments", "CompartmentsTrace"),
             Self::Faults => spec("truncation", "FaultsTrace"),
             Self::Retire => spec("matchmaker", "RetireTrace"),
+            Self::Handover => spec("handover", "HandoverTrace"),
         }
     }
 
@@ -894,6 +943,7 @@ impl Spec {
             Self::ProxyLeader => proxy_leader::keeps(event),
             Self::LeaderHandoff => leader_handoff::keeps(event),
             Self::Matchmaker => matchmaker::keeps(event),
+            Self::Handover => handover::keeps(event),
             Self::Retire => {
                 matchmaker::keeps(event)
                     || matches!(
@@ -949,6 +999,11 @@ impl Spec {
                 );
                 reads::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
             }
+            Self::Handover => handover::trace(
+                flavor.matchmakers + flavor.matchmaker_spares,
+                &(0..flavor.matchmakers).map(MatchmakerId).collect::<Vec<_>>(),
+                events,
+            ),
             Self::Truncation | Self::Faults => {
                 assert!(
                     flavor.matchmakers == 0 && flavor.proxies == 0 && flavor.replicas == 0,

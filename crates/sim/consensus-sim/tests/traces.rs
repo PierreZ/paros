@@ -563,6 +563,31 @@ fn tlc_refuses_a_retirement_with_no_evidence() {
     );
 }
 
+#[test]
+fn tlc_accepts_the_handover_walks() {
+    accepts(Spec::Handover, &Flavor::handover());
+}
+
+/// The control of `HandoverTrace`: a network that drops a record from a
+/// bootstrap page. TLC refuses the bootstrap.
+#[test]
+fn tlc_refuses_a_bootstrap_that_lost_a_registration() {
+    require_tlc(&Spec::Handover.check());
+    let (seed, event, state) = first_refused_cluster(
+        Spec::Handover,
+        &Flavor::handover(),
+        Mutant::ShrinkBootstrap,
+        1..=40,
+        150,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, ClusterEvent::MmBoot { .. }),
+        "seed {seed}: TLC refused {event:?}, not a bootstrap"
+    );
+}
+
 /// The batcher walks TLC always checks: a trace of a batcher walk costs
 /// about a second.
 const BATCHER_SEEDS: u64 = 20;
