@@ -227,6 +227,18 @@ fn reconfigured_compartments() {
 }
 
 #[test]
+fn reconfiguration_steered() {
+    walk(
+        Flavor::reconfiguring(),
+        &[
+            reach::RECONFIGURED,
+            reach::CHOSEN_RECONFIGURED,
+            reach::PROXY_COMMIT,
+        ],
+    );
+}
+
+#[test]
 fn disk_faults() {
     walk(
         Flavor::disk_faults(),

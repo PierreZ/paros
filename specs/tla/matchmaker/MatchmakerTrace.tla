@@ -31,13 +31,13 @@
 (*     `C_b` does not name counts toward no quorum. A node that `C_b` does *)
 (*     not name writes a record at `b` only for a value chosen at `b`: it  *)
 (*     learned the value (`mark_chosen`) above its promise, so the walk    *)
-(*     sees an "accept". A value is chosen at a ballot once a majority of  *)
-(*     the configuration of that ballot voted for it;                      *)
+(*     sees an "accept". A value is chosen at a ballot once a Phase-2      *)
+(*     quorum of the configuration of that ballot voted for it;            *)
 (*   - "gcask": the leader asks the matchmakers to forget the ballots      *)
 (*     below its own (`GcAsk`). The model's guard is single-decree (a      *)
 (*     chosen value, or a Phase 1 that found no vote). The log's guard is  *)
-(*     the one of `node/gc.rs`: the leader won, and a majority of `C_b`    *)
-(*     learned every slot below the frontier of its Phase 1;               *)
+(*     the one of `node/gc.rs`: the leader won, and a Phase-2 quorum of    *)
+(*     `C_b` learned every slot below the frontier of its Phase 1;         *)
 (*   - "gcack": a matchmaker raised its watermark (`GcAck`).               *)
 (*                                                                         *)
 (* The code drops from `H_b` a configuration that only abandoned ballots   *)
@@ -127,10 +127,16 @@ Recovery(S, b, from, f) ==
   {[type |-> "2a", bal |-> b, slot |-> s,
     val |-> IF Top(S, s).bal > 0 THEN Top(S, s).val ELSE "noop"] : s \in from..(f - 1)}
 
-\* A value is chosen at slot s and ballot b once a majority of C_b voted
-\* for it at b.
+\* The Phase-1 and the Phase-2 quorums of the log under configuration c:
+\* its majorities. `MatchmakerGridTrace` replaces both with the quorums of
+\* a grid over c.
+P1Quorums(c) == Maj(c)
+P2Quorums(c) == Maj(c)
+
+\* A value is chosen at slot s and ballot b once a Phase-2 quorum of C_b
+\* voted for it at b.
 LChosenAt(b, s, v) ==
-  \E Q \in Maj(cfg[b]) : \A a \in Q :
+  \E Q \in P2Quorums(cfg[b]) : \A a \in Q :
     [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in lmsgs
 LChosen(s, v) == \E b \in Ballots : LChosenAt(b, s, v)
 
@@ -186,7 +192,7 @@ TWin ==
               f == Frontier(S, from)
           IN /\ \A m, n \in S : m.acc = n.acc => m = n
              /\ Owner[b] \in acc
-             /\ \A c \in hist[b] : Abandoned(b, c, lmsgs) \/ \E Q \in Maj(c) : Q \subseteq acc
+             /\ \A c \in hist[b] : Abandoned(b, c, lmsgs) \/ \E Q \in P1Quorums(c) : Q \subseteq acc
              /\ f = e.front
              /\ lfront' = [lfront EXCEPT ![b] = f]
              /\ lnext' = [lnext EXCEPT ![b] = f]
@@ -266,7 +272,7 @@ TGcAsk ==
   /\ e.event = "gcask" /\ IsBallot
   /\ LET b == e.bal IN
      /\ lphase[b] = "p2"
-     /\ \E Q \in Maj(cfg[b]) : \A a \in Q, s \in Slots : s < lfront[b] => learned[a][s] # None
+     /\ \E Q \in P2Quorums(cfg[b]) : \A a \in Q, s \in Slots : s < lfront[b] => learned[a][s] # None
      /\ [type |-> "ga", bal |-> b] \notin msgs
      /\ Send([type |-> "ga", bal |-> b])
   /\ UNCHANGED <<cfg, reg, wm, answers, matched, hist, p1, prom, vbal, vval, retired>>

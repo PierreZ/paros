@@ -35,29 +35,9 @@ pub struct Flavor {
     /// at a time (`ColocatedNode::extend_pool`). Until then, a
     /// configuration that names one is outside that node's pool.
     pub late: u64,
-    /// Steer the walk toward a reader whose pool lags (#1228 (stale read by
-    /// a lagging reader)) until the settle rounds: only node 0 admits the
-    /// late nodes; a leader moves onto a late node once, away from the
-    /// members whose pools lag, and stays; a read goes to a lagging node,
-    /// first one that promised above its belief; the lagging nodes campaign
-    /// seldom and node 2 not at all; messages between the nodes that moved
-    /// and the lagging ones are lost ([`Cluster`](super::Cluster)'s
-    /// `lost_to_a_lagging_pool`). The pools catch up when the settle rounds
-    /// start.
-    pub lagging_reader: bool,
-    /// Steered toward compactions: a client claims the journal before it
-    /// writes, when the journal has no leader uuid, a client often
-    /// truncates after a write, and the first leader that compacted steps
-    /// down once, so that a campaign meets the floors. A compaction needs a claim, accepted writes
-    /// and an applied truncation, which a plain walk of 150 steps seldom
-    /// gathers.
-    pub compacting: bool,
-    /// Steered toward retirements: half the client moves are operator
-    /// moves (a reconfiguration, a retirement or a rejoin). A retirement
-    /// needs a reconfiguration, a GC floor that a matchmaker quorum acked,
-    /// a check by every matchmaker and a second retire move, which a plain
-    /// walk of 150 steps seldom gathers.
-    pub retiring: bool,
+    /// The steer of the walk toward one rare protocol event (see
+    /// [`Steer`]).
+    pub steer: Steer,
     /// Matchmakers in the matchmaker pool outside the bootstrap set, that a
     /// handover ([`Action::Handover`]) may name.
     pub matchmaker_spares: u64,
@@ -67,6 +47,44 @@ pub struct Flavor {
     pub limits: Limits,
     /// The bug planted in the driver, for a control run.
     pub mutant: Option<Mutant>,
+}
+
+/// The steer of a walk: the one rare protocol event that the walk moves
+/// toward, which a plain walk of 150 steps seldom reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Steer {
+    /// No steer: the walk picks its moves at random.
+    None,
+    /// Steer the walk toward a reader whose pool lags (#1228 (stale read by
+    /// a lagging reader)) until the settle rounds: only node 0 admits the
+    /// late nodes; a leader moves onto a late node once, away from the
+    /// members whose pools lag, and stays; a read goes to a lagging node,
+    /// first one that promised above its belief; the lagging nodes campaign
+    /// seldom and node 2 not at all; messages between the nodes that moved
+    /// and the lagging ones are lost ([`Cluster`](super::Cluster)'s
+    /// `lost_to_a_lagging_pool`). The pools catch up when the settle rounds
+    /// start.
+    LaggingReader,
+    /// Steered toward compactions: a client claims the journal before it
+    /// writes, when the journal has no leader uuid, a client often
+    /// truncates after a write, and the first leader that compacted steps
+    /// down once, so that a campaign meets the floors. A compaction needs a claim, accepted writes
+    /// and an applied truncation, which a plain walk of 150 steps seldom
+    /// gathers.
+    Compacting,
+    /// Steered toward retirements: half the client moves are operator
+    /// moves (a reconfiguration, a retirement or a rejoin). A retirement
+    /// needs a reconfiguration, a GC floor that a matchmaker quorum acked,
+    /// a check by every matchmaker and a second retire move, which a plain
+    /// walk of 150 steps seldom gathers.
+    Retiring,
+    /// Steered toward reconfigurations: a quarter of the client moves are
+    /// reconfigurations. A proxy's `Commit` under a configuration that a
+    /// reconfiguration selected needs a reconfiguration that a matchmaker
+    /// quorum registered, a leadership of the new configuration that
+    /// settles, and a round it delegates, which a plain walk of 150 steps
+    /// seldom gathers.
+    Reconfiguring,
 }
 
 impl Flavor {
@@ -83,9 +101,7 @@ impl Flavor {
             matchmakers: 0,
             spares: 0,
             late: 0,
-            lagging_reader: false,
-            compacting: false,
-            retiring: false,
+            steer: Steer::None,
             matchmaker_spares: 0,
             limits: Limits::DEFAULT,
             mutant: None,
@@ -230,6 +246,18 @@ impl Flavor {
         }
     }
 
+    /// Matchmakers and every compartment, steered toward reconfigurations
+    /// ([`Steer::Reconfiguring`]): the walk of `matchmaker/`'s grid trace
+    /// spec.
+    #[must_use]
+    pub fn reconfiguring() -> Self {
+        Self {
+            name: "reconfiguring",
+            steer: Steer::Reconfiguring,
+            ..Self::reconfigured_compartments()
+        }
+    }
+
     /// Disk faults over Multi-Paxos on five acceptors with truncation: a
     /// disk loses the value of a record and keeps its identity (CTRL's
     /// faulty entry), and a scrub may find the damage while the node runs.
@@ -293,43 +321,43 @@ impl Flavor {
             name: "lagging-reads",
             spares: 2,
             late: 1,
-            lagging_reader: true,
+            steer: Steer::LaggingReader,
             options: &[Action::Reconfigure, Action::Admit, Action::Read],
             ..Self::matchmakers()
         }
     }
 
     /// Multi-Paxos on five with truncation, steered toward compactions
-    /// ([`Flavor::compacting`]): the walk of `truncation/`'s trace spec.
+    /// ([`Steer::Compacting`]): the walk of `truncation/`'s trace spec.
     #[must_use]
     pub fn compaction() -> Self {
         Self {
             name: "compaction",
-            compacting: true,
+            steer: Steer::Compacting,
             ..Self::multi_paxos_five()
         }
     }
 
     /// Every compartment, steered toward compactions
-    /// ([`Flavor::compacting`]): the walk of the read replica's trace spec
+    /// ([`Steer::Compacting`]): the walk of the read replica's trace spec
     /// (`compartments/`), whose replicas then move their floors.
     #[must_use]
     pub fn compartments_compacting() -> Self {
         Self {
             name: "compartments-compaction",
-            compacting: true,
+            steer: Steer::Compacting,
             ..Self::compartments()
         }
     }
 
     /// Retirement and rejoin, steered toward retirements
-    /// ([`Flavor::retiring`]): the walk of `matchmaker/`'s retirement trace
+    /// ([`Steer::Retiring`]): the walk of `matchmaker/`'s retirement trace
     /// spec.
     #[must_use]
     pub fn retiring() -> Self {
         Self {
             name: "retiring",
-            retiring: true,
+            steer: Steer::Retiring,
             ..Self::retirement()
         }
     }

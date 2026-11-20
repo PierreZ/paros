@@ -52,7 +52,7 @@ use crate::oracle::ledger::Ledger;
 use crate::oracle::quorum::Phase2Rule;
 use crate::oracle::reads::Reads;
 
-pub use flavor::{Flavor, Mutant};
+pub use flavor::{Flavor, Mutant, Steer};
 pub use trace::{ClusterEvent, Cmd, OwnAnswer, Rule, Spec};
 
 /// The coverage sites of the cluster. A walk names the ones its flavor must
@@ -269,7 +269,7 @@ pub struct Cluster {
     /// The next read token.
     next_ctx: u64,
     /// A compacting walk stepped a leader down after it compacted
-    /// ([`Flavor::compacting`]).
+    /// ([`Steer::Compacting`]).
     stepped_after_compaction: bool,
     /// The writing client of the journal.
     client: Client,
@@ -296,7 +296,7 @@ pub struct Cluster {
     /// The reconfigurations the operator asked for: each ballot and the
     /// members it names.
     asked: Vec<(Ballot, Vec<NodeId>)>,
-    /// The node a [`Flavor::retiring`] operator asked the matchmakers to
+    /// The node a [`Steer::Retiring`] operator asked the matchmakers to
     /// check, and retires on its next retire moves while it may still.
     checking: Option<NodeId>,
     /// The late nodes each node admitted to its pool. The deployment's
@@ -352,8 +352,17 @@ impl Model for Cluster {
         }
         match action {
             Action::Tick => self.tick_all(cx),
-            Action::Propose if self.flavor.compacting => self.write_and_truncate(cx),
-            Action::Propose if self.flavor.retiring && cx.rng().chance(1, 2) => self.operate(cx),
+            Action::Propose if self.flavor.steer == Steer::Compacting => {
+                self.write_and_truncate(cx);
+            }
+            Action::Propose if self.flavor.steer == Steer::Retiring && cx.rng().chance(1, 2) => {
+                self.operate(cx);
+            }
+            Action::Propose
+                if self.flavor.steer == Steer::Reconfiguring && cx.rng().chance(1, 4) =>
+            {
+                self.reconfigure(cx);
+            }
             Action::Propose => self.propose(cx),
             Action::Claim => self.claim(cx),
             Action::StepDown => self.step_down(cx),
@@ -519,7 +528,7 @@ impl Model for Cluster {
         // lagging-reader walk keeps the pools lagging through the quiet
         // phase, where leaders stand and reconfigure, and admits them when
         // the settle rounds start (`Cluster::tick_all`).
-        if !self.flavor.lagging_reader {
+        if self.flavor.steer != Steer::LaggingReader {
             self.admit_all();
         }
         // Some proxies stay dead for the tail: a leader's take-back is the
@@ -766,7 +775,7 @@ impl Cluster {
     /// and a leader that moved onto a late node keeps its leadership long
     /// enough to choose writes.
     fn skips_tick(&self, id: NodeId, cx: &mut Cx<'_, Self>) -> bool {
-        if !self.flavor.lagging_reader || cx.phase() == Phase::Settle {
+        if self.flavor.steer != Steer::LaggingReader || cx.phase() == Phase::Settle {
             return false;
         }
         let heard = self
@@ -792,7 +801,7 @@ impl Cluster {
         envelope: &Envelope,
         cx: &mut Cx<'_, Self>,
     ) -> bool {
-        if !self.flavor.lagging_reader || cx.phase() == Phase::Settle {
+        if self.flavor.steer != Steer::LaggingReader || cx.phase() == Phase::Settle {
             return false;
         }
         let Party::Node(to) = envelope.to else {
@@ -1479,7 +1488,7 @@ impl Cluster {
     // ---- the clock and the clients ------------------------------------
 
     fn tick_all(&mut self, cx: &mut Cx<'_, Self>) {
-        if self.flavor.lagging_reader && cx.phase() == Phase::Settle {
+        if self.flavor.steer == Steer::LaggingReader && cx.phase() == Phase::Settle {
             self.admit_all();
         }
         self.step_down_after_compaction(cx);
@@ -1579,7 +1588,7 @@ impl Cluster {
         cx.rng().pick(pool).copied()
     }
 
-    /// The client of [`Flavor::compacting`]: it claims a journal that has
+    /// The client of [`Steer::Compacting`]: it claims a journal that has
     /// no leader uuid, else it writes, and truncates after one write in
     /// two.
     fn write_and_truncate(&mut self, cx: &mut Cx<'_, Self>) {
@@ -1599,12 +1608,12 @@ impl Cluster {
         }
     }
 
-    /// The first leader that compacted in a [`Flavor::compacting`] walk
+    /// The first leader that compacted in a [`Steer::Compacting`] walk
     /// steps down, once: the next campaign asks the acceptors that
     /// compacted, over their floors. Compactions come late in a walk, when
     /// the client's moves have stopped, so the clock makes this move.
     fn step_down_after_compaction(&mut self, cx: &mut Cx<'_, Self>) {
-        if !self.flavor.compacting || self.stepped_after_compaction {
+        if self.flavor.steer != Steer::Compacting || self.stepped_after_compaction {
             return;
         }
         let compacted = self.leaders().into_iter().find(|id| {
@@ -1699,7 +1708,7 @@ impl Cluster {
     fn read(&mut self, cx: &mut Cx<'_, Self>) {
         let mut parties: Vec<Party> = self.pool.iter().map(|id| Party::Node(*id)).collect();
         parties.extend(self.replica_ids().into_iter().map(Party::Replica));
-        if self.flavor.lagging_reader {
+        if self.flavor.steer == Steer::LaggingReader {
             let lagging: Vec<Party> = self
                 .pool
                 .iter()
@@ -1838,7 +1847,7 @@ impl Cluster {
         // A lagging-reader walk moves onto a late node once, and stays: the
         // lagging members keep reading on the configuration it left.
         let late_ids = self.late_ids();
-        if self.flavor.lagging_reader
+        if self.flavor.steer == Steer::LaggingReader
             && node
                 .acceptors()
                 .members()
@@ -1859,11 +1868,11 @@ impl Cluster {
             .rng()
             .pick(&late)
             .copied()
-            .filter(|_| self.flavor.lagging_reader || cx.rng().chance(1, 2));
+            .filter(|_| self.flavor.steer == Steer::LaggingReader || cx.rng().chance(1, 2));
         // A lagging-reader walk moves away from the members whose pools lag:
         // a quorum of the new configuration then chooses without them, while
         // they still read on the old one.
-        let lagging: Vec<NodeId> = if self.flavor.lagging_reader {
+        let lagging: Vec<NodeId> = if self.flavor.steer == Steer::LaggingReader {
             node.acceptors()
                 .members()
                 .iter()

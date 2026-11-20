@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_consensus::Ballot;
+use paros_consensus::{Ballot, NodeId};
 
 use super::{ClusterEvent, Cmd, Spec};
 
@@ -200,6 +200,57 @@ const MATCHMAKER: &[Rule] = &[
             events
                 .iter()
                 .any(|e| matches!(e, ClusterEvent::GcAck { .. }))
+        },
+    },
+];
+
+/// `MatchmakerGridTrace`: a win on a Phase-1 quorum of a grid that is no
+/// majority of its configuration (on a `2 × 2` full grid, one acceptor of
+/// each column), and a proxy's `Commit` under a configuration that a
+/// reconfiguration selected.
+const GRID: &[Rule] = &[
+    Rule {
+        name: "a proxy commits under a second configuration",
+        met: |events| {
+            let mut first = None;
+            let mut config: BTreeMap<Ballot, &Vec<NodeId>> = BTreeMap::new();
+            events.iter().any(|e| match e {
+                ClusterEvent::Select { ballot, config: c } => {
+                    first.get_or_insert(c);
+                    config.insert(*ballot, c);
+                    false
+                }
+                ClusterEvent::Commit { ballot, .. } => {
+                    config.get(ballot).is_some_and(|c| Some(*c) != first)
+                }
+                _ => false,
+            })
+        },
+    },
+    Rule {
+        name: "a ballot wins on half of its grid",
+        met: |events| {
+            let mut config: BTreeMap<Ballot, usize> = BTreeMap::new();
+            let mut promised: BTreeMap<Ballot, BTreeSet<NodeId>> = BTreeMap::new();
+            events.iter().any(|e| match e {
+                ClusterEvent::Select { ballot, config: c } => {
+                    config.insert(*ballot, c.len());
+                    false
+                }
+                ClusterEvent::Promise {
+                    acceptor, ballot, ..
+                } => {
+                    promised.entry(*ballot).or_default().insert(*acceptor);
+                    false
+                }
+                ClusterEvent::Win { ballot, .. } => config.get(ballot).is_some_and(|n| {
+                    // The owner promises its own ballot when it prepares.
+                    let mut quorum = promised.get(ballot).cloned().unwrap_or_default();
+                    quorum.insert(ballot.node);
+                    2 * quorum.len() <= *n
+                }),
+                _ => false,
+            })
         },
     },
 ];
@@ -537,6 +588,11 @@ impl Spec {
                 rules.push(RESTART);
                 rules.extend_from_slice(MATCHMAKER);
             }
+            Self::MatchmakerGrid => {
+                rules.push(RESTART);
+                rules.extend_from_slice(MATCHMAKER);
+                rules.extend_from_slice(GRID);
+            }
             Self::Reads => {
                 rules.push(RESTART);
                 rules.extend_from_slice(MATCHMAKER);
@@ -575,6 +631,7 @@ mod tests {
             Spec::LeaderHandoff,
             Spec::ProxyLeader,
             Spec::Matchmaker,
+            Spec::MatchmakerGrid,
             Spec::Reads,
             Spec::Truncation,
             Spec::Compartments,
