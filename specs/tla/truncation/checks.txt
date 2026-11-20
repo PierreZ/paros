@@ -21,6 +21,7 @@ two_rots         violation  ci
 ctrl_one_slot    pass       ci
 ctrl_three       pass       ci
 ctrl_have        violation  ci
+ctrl_plus_one    violation  ci
 rot_two          pass       ci
 ctrl_live        pass       ci
 reach_retry      violation  ci

@@ -447,3 +447,52 @@ After the faults stop, every call is answered (done or refused) and every config
 reshape opened comes into force. The controller's crate (`paros-journal-control`) and its
 consensus-sim flavor (#1261 (grid controller decision tests)) come after the journal state model
 (#1189); the flavor's walk then trace-checks against this model.
+
+### 2.14 CTRL recovery in the journal
+
+**A damaged record is repaired by CTRL, whoever finds it** (#1263 (CTRL recovery in the journal),
+checked on 2026-11-20 by `specs/tla/ctrl-grid/` and `specs/tla/ctrl-segments/`). The grid
+controller owns the scrub: it schedules a read of every copy (the acceptor records, the replica
+logs, the offloaded objects), and the roles that hold the data read them back with their
+checksums. Each rule has a control that TLC breaks:
+
+- **The tri-state tally asks a Phase-1 quorum of every configuration of `H_b`, never a count.**
+  At a slot with a faulty report, the threshold is the highest readable report; an answer
+  qualifies unless it is a faulty report above it; the slot is decided only when the qualifying
+  answers hold a Phase-1 quorum of each configuration of `H_b` (`slot_decidable` calls
+  `has_phase1_quorum` for each `prior` configuration). On a grid this is `rows - acks + 1`
+  qualifying answers of every column. A majority of the members fills a chosen slot with a
+  `Noop` on a grid (`grid4_majority`). A tally that asks only the configuration of its ballot
+  fills a slot of a sealed segment that a faulty record of the old grid holds (`two_current`).
+  A threshold one above the highest readable report loses a chosen value (`plus_one`, and
+  `truncation/ctrl_plus_one`).
+- **A scrub and a boot give the same faulty record.** A damaged record keeps its ballot and
+  loses its value, whoever reads it. A scrub that drops the damaged record, so that the slot
+  reads as a slot with no vote, chooses two values (`damage_drop`).
+- **A repair writes a chosen value.** The journal keeps no record in memory, so an acceptor
+  cannot write the record again from its own copy (as the old parosd scrubber did, section 5).
+  It writes the value that a node learned (a replica, or the leader) under the ballot that the
+  faulty record keeps. A value copied from a peer's vote that is not known to be chosen loses a
+  chosen value (`repair_peer`). With no repair at all the journal stays safe (`repair_none`):
+  the repair adds a copy, it never decides.
+- **A repair replaces the damaged record in one write.** A repair that deletes the record first
+  and writes the new one after is safe while the acceptor answers nothing between the two
+  (`drop_first_up`), but a restart between the two forgets the repair, and the slot reads as a
+  slot with no vote (`drop_first`).
+- **A sealed segment retires at `F + 1` replica holders, and a repair never needs the retired
+  grid.** A found damaged replica log is repaired from a live peer of its set, from the grid
+  until the retire, or from the object once offloaded. A damaged copy is one of the `F` failed
+  copies of the survive promise until its repair, so `F + 1` holders always leave one good copy
+  to repair from. **Finding**: the retire does not need to wait for a found damage to be
+  repaired (`retire_any` passes with a damaged counted replica); the rule that #1263 proposed
+  is a margin, not a safety rule. A retire at `F` holders loses a slot (`retire_f`,
+  `live_retire_f`).
+- **The offloader puts only a log that passes its checksum, and a replica drops its copy only
+  after the record says offloaded.** A put of a log that it did not check makes a rotted copy
+  the only one once the replicas drop (`upload_any`); a drop before the mark loses the segment
+  with no fault (`drop_retired`).
+- **A damaged object is put again from a replica, or reported as data loss.** While a replica of
+  the set holds a good log, the object is put again. Once no replica holds the segment, a
+  damaged object is data loss: outside the survive promise, reported, never recovered in an
+  unsafe way (Pierre, 2026-11-20). A loss report is always true: no good copy is left (`object`,
+  `live_object`, `reach_loss`).
