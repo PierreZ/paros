@@ -20,6 +20,7 @@ reach_retire      violation  ci
 deliver_all       violation  ci
 boundary_zero     violation  ci
 boundary_early    violation  ci
+boundary_seq      violation  ci
 route_other       violation  ci
 retire_early      violation  ci
 set_size_f        violation  ci

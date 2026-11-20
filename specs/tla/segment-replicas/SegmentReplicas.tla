@@ -63,6 +63,9 @@
 (*             "zero": a replica of S2 starts from the empty state.        *)
 (*             "early": as "record", but the record may be written before  *)
 (*             the writer applied every slot of S1.                        *)
+(*             "seq": as "record", but the record holds `next_seq` only;   *)
+(*             a replica of S2 starts with the leader uuid of the empty    *)
+(*             state.                                                      *)
 (*   Route     "segment": a read goes to a replica of the set of the       *)
 (*             segment that holds its `seq`.                               *)
 (*             "other": a read goes to a replica of the other set.         *)
@@ -81,7 +84,7 @@ ASSUME R1 # {} /\ R2 # {} /\ R1 \cap R2 = {}
 ASSUME K \in 1..NS /\ NS \in Nat
 ASSUME F \in Nat /\ RetireAt \in Nat
 ASSUME Deliver \in {"segment", "all"}
-ASSUME Boundary \in {"record", "peer", "zero", "early"}
+ASSUME Boundary \in {"record", "peer", "zero", "early", "seq"}
 ASSUME Route \in {"segment", "other"}
 ASSUME Gone \in BOOLEAN /\ RetireRecord \in BOOLEAN
 
@@ -205,10 +208,10 @@ Apply(r) ==
 
 \* A replica of R1 writes the boundary state into the record of S1, once.
 WriteRecord(p) ==
-  /\ Boundary \in {"record", "early"}
+  /\ Boundary \in {"record", "early", "seq"}
   /\ p \in R1 \ down
   /\ rec = None
-  /\ Boundary = "record" => Front(p) = K
+  /\ Boundary \in {"record", "seq"} => Front(p) = K
   /\ rec' = StateOf(p)
   /\ UNCHANGED <<chosen, held, applied, base, retired, down, acked, rd>>
 
@@ -221,6 +224,8 @@ TakeBase(r) ==
        [] Boundary = "peer" ->
             \E p \in Live(1) : Front(p) = K /\ base' = [base EXCEPT ![r] = StateOf(p)]
        [] Boundary = "zero" -> base' = [base EXCEPT ![r] = Empty]
+       [] Boundary = "seq" ->
+            rec # None /\ base' = [base EXCEPT ![r] = [Empty EXCEPT !.next = rec.next]]
   /\ UNCHANGED <<chosen, held, applied, rec, retired, down, acked, rd>>
 
 \* A live replica of the slot's segment that applied it answers the writer.
@@ -273,7 +278,7 @@ Retire ==
   /\ ~retired
   /\ S1Full
   /\ Cardinality(Holders) >= RetireAt
-  /\ RetireRecord /\ Boundary \in {"record", "early"} => rec # None
+  /\ RetireRecord /\ Boundary \in {"record", "early", "seq"} => rec # None
   /\ retired' = TRUE
   /\ UNCHANGED <<chosen, held, applied, base, rec, down, acked, rd>>
 
