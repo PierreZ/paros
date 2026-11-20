@@ -60,8 +60,9 @@
 (*           a slot (`merge_report`). "lowest": a control, it takes the    *)
 (*           lowest. Two reports of different ballots at one slot need    *)
 (*           three ballots, so the control is red only at `NB = 3`.        *)
-(*   Restartable the nodes that may restart. A liveness check leaves out   *)
-(*           the owner of the last ballot, whose restart ends its ballot.  *)
+(*   Restartable the nodes that may restart or lose their disk. A liveness *)
+(*           check leaves out the owner of the last ballot, whose restart  *)
+(*           or wipe ends its ballot.                                      *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -322,6 +323,7 @@ Restart(a) ==
 \* Acceptor a loses its disk: it comes back with no promise and no vote.
 Wipe(a) ==
   /\ Live(a)
+  /\ a \in Restartable
   /\ Cardinality(wiped) < Wipes
   /\ wiped' = wiped \cup {a}
   /\ prom' = [prom EXCEPT ![a] = 0]

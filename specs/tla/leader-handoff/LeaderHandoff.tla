@@ -53,6 +53,8 @@
 (*               only removes behaviors, so the safety checks set 0.       *)
 (*   DropKinds   the kinds of message that may be lost ("2a", "rel").      *)
 (*   Resign      TRUE: a handoff leader may resign on an uncovered fence.  *)
+(*   Quiet       TRUE: `LiveSpec` lets a node campaign only while no node  *)
+(*               can exercise its ballot (the beats hold the timeout).     *)
 (* Rules, each with a control that turns it off:                           *)
 (*   OneHop        TRUE: only an elected leader hands off.                 *)
 (*                 FALSE: a control, a handoff leader hands on again.      *)
@@ -79,7 +81,7 @@
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Noop, NB, NS, Q1, Q2, Owner,
-          HandBallots, Steady, Restarts, Drops, DropKinds, Resign,
+          HandBallots, Steady, Restarts, Drops, DropKinds, Resign, Quiet,
           OneHop, FrontierGuard, DurableFrontier, Pending, BeatGuard,
           PromiseGuard, RecordAll, Abdicate, Named
 
@@ -96,7 +98,7 @@ ASSUME Noop \notin Commands
 ASSUME Owner \in [Ballots -> Acceptors]
 ASSUME Q2 \in [Slots -> SUBSET SUBSET Acceptors]
 ASSUME Pending \in {"keep", "drop"}
-ASSUME {Resign, OneHop, FrontierGuard, DurableFrontier, BeatGuard} \subseteq BOOLEAN
+ASSUME {Resign, Quiet, OneHop, FrontierGuard, DurableFrontier, BeatGuard} \subseteq BOOLEAN
 ASSUME {PromiseGuard, RecordAll, Abdicate, Named} \subseteq BOOLEAN
 
 Vote == [bal : 0..NB, val : Values \cup {None}]
@@ -486,13 +488,18 @@ Spec == Init /\ [][Next]_vars
 
 \* The steps that a correct run takes in the end. A handoff, a fresh
 \* command, a beat, a restart and a loss may happen, but need not.
+\* With Quiet, a node campaigns only while no node can exercise its ballot:
+\* the beats of a leader hold the election timeout of every other node.
 Fairness ==
-  /\ \A b \in Ballots : WF_vars(Prepare(b)) /\ WF_vars(Win(b))
+  /\ \A b \in Ballots :
+       /\ WF_vars(Prepare(b) /\ (Quiet => ~ \E n \in Acceptors : Effective(n)))
+       /\ WF_vars(Win(b))
   /\ \A a \in Acceptors, b \in Ballots : WF_vars(Promise(a, b))
   /\ \A a \in Acceptors, b \in Ballots, s \in Slots : WF_vars(Accept(a, b, s))
   /\ \A n \in Acceptors, s \in Slots : WF_vars(Decide(n, s)) /\ WF_vars(Resend(n, s))
   /\ \A n, p \in Acceptors : WF_vars(CatchUp(n, p))
   /\ \A n \in Acceptors : WF_vars(Install(n))
+  /\ Resign => \A n \in Acceptors : WF_vars(FenceResign(n))
 
 LiveSpec == Spec /\ Fairness
 
