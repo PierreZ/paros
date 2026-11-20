@@ -140,8 +140,11 @@ caught by the matchmaking oracles). Main is red on a share of the seeds while th
 phase 1 are open, so a red alone shows nothing: the command first records the reds of the
 unmutated hunt over the same seeds (the baseline), and a mutant is caught only by a red that the
 baseline does not have on that seed, of one of the causes that the mutant names
-(`paros_sim::mutant_hunt`). The weekly mutation hunt (`cargo xtask mutants`) judges each
-cargo-mutants mutant against the same kind of baseline. Over 300 seeds, 21 of 23 mutants are
+(`paros_sim::mutant_hunt`). The weekly mutation hunt of that time (`cargo xtask mutants`)
+judged each cargo-mutants mutant against the same kind of baseline. Both hunts left the tree
+with `paros-sim` on 2026-11-19. Mutation testing now runs over `paros-consensus` with its own
+tests and `consensus-sim` as the judge (`.cargo/mutants.toml`, the `Mutants` workflow and the
+`mutants` job of `rust.yml`). Over 300 seeds, 21 of 23 mutants are
 caught; four of them first by the liveness cause "no tenant is left mid-operation", not by the oracle
 their bug is aimed at. Two survive because the hunt's seeds do not reach their state
 (#1177 (mutants whose state the seeds never reach)), and one equivalent mutant is deleted.

@@ -432,3 +432,22 @@ fn a_read_budget_spans_several_writes() {
     let p = page(r.read(Seq(1), 1, 64));
     assert_eq!(bytes(&p), vec![b"bb".to_vec()]);
 }
+
+/// A floor left on a slot that holds no record fails the check, even when
+/// the journal's first record sits right at the base: slot 1 holds the
+/// first `Truncate` and no record, and slot 2 holds position 1, the first
+/// record. The floor may go up to slot 2, so slot 1 is not needed.
+#[test]
+#[should_panic(expected = "a compaction leaves a needed slot at the floor")]
+fn a_floor_on_a_slot_without_records_fails_the_check() {
+    let commands = [
+        append(&[b"a"]),
+        truncate_to(1, 0),
+        append(&[b"b"]),
+        truncate_to(1, 0),
+    ];
+    let (mut r, target) = walked(WriterMode::Multi, &commands);
+    assert_eq!(target, Some(Slot(1)), "slot 2 holds the first record");
+    r.truncate(Slot(1));
+    r.assert_compacted();
+}

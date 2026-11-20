@@ -23,9 +23,11 @@ target
 # Claude Code agent worktrees (nested checkouts, never project content)
 .claude/worktrees/
 
-# cargo-mutants output (`cargo xtask mutants`, #269)
+# cargo-mutants output (`scripts/mutants.sh`)
 mutants.out/
 mutants.out.old/
+mutants.first/
+survivors.txt
 # The negative hunt's output (`cargo xtask negative`, #742)
 negative.out/
 /target-main

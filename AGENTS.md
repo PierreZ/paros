@@ -152,6 +152,15 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
+- the `mutants` job (pull requests only): cargo-mutants on the lines of
+  `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
+  pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
+  `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
+  the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
+  surviving mutant fails the job: add the test that sees it in the same pull request. The
+  `Mutants` workflow runs every mutant of the core (about 2,850) in 16 shards each Sunday and on
+  demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
+  for an edit that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
   `cargo check --target wasm32-unknown-unknown -p paros`

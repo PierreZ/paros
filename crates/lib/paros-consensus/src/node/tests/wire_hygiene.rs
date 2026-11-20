@@ -2,11 +2,10 @@
 //!
 //! The simulation runs honest peers only, and its fault model has no bit
 //! flips, so a check that refuses a malformed message is never reached
-//! there: the mutation hunt (#269) cannot kill an edit that makes such a
-//! check more permissive. Each test below feeds one malformed shape to the
-//! check that must refuse it, next to the well-formed twin it must take, so
-//! the test is not vacuous. `.cargo/mutants.toml` excludes the edits these
-//! tests pin, naming this file.
+//! there. These tests are what catches a mutant that makes such a check
+//! more permissive (`.cargo/mutants.toml`). Each test feeds one malformed
+//! shape to the check that must refuse it, next to the well-formed twin it
+//! must take, so the test is not vacuous.
 
 use std::collections::BTreeMap;
 
