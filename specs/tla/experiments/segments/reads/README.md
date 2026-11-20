@@ -110,6 +110,7 @@ reshape and two ballots unless the row says more. TLC 2.19, 2 workers.
 | `wipe_belief_noseal` | 2 x 1 | promise and belief | no | row | yes | violation (6,927 states) |
 | `wipe_belief` (the whole fence of the code) | 2 x 1 | promise and belief | yes | row | yes | pass (87,368 states) |
 | `part_bare` | 3 x 1 | no | no | row | no | violation (27,728 states) |
+| `part_wipe_fence` | 3 x 1 | promise | no | row | yes | violation (149,727 states, 52 s) |
 | `part_fence_one` (the code), one slot | 3 x 1 | promise | no | row | no | pass (99,273 states, 14 s) |
 | `part_wipe_fence_one`, one slot | 3 x 1 | promise | no | row | yes | violation (40,145 states) |
 | `part_wipe_belief_one`, one slot | 3 x 1 | promise and belief | no | row | yes | pass (151,103 states, 20 s) |
@@ -123,9 +124,22 @@ The long checks (`scripts/check-tla.sh --all`):
 | Check | Grid | Fence | Seal rows | Rule | Wipe | Result |
 |---|---|---|---|---|---|---|
 | `wipe_column_three`: three configurations, three ballots | 2 x 1 | promise | no | column | yes | violation (1.5 million states, 4 min) |
-LONG_ROWS
+| `part_fence`: two slots | 3 x 1 | promise | no | row | no | pass (6.3 million states, 39 min) |
+| `fence_rows_long`: three ballots | 2 x 1 | promise | yes | row | no | pass (1.7 million states, 12 min) |
+| `fence_rows_three`: three configurations, three ballots | 2 x 1 | promise | yes | row | no | pass (5.2 million states, 11 min on 4 workers) |
 
-BOUNDED_RUNS
+Seven passing runs did not finish in 45 minutes on 2 workers. They are bounded results, not
+checks, and they are not in `checks.txt`: TLC found no violation in the states that it explored.
+
+| Run | Grid | Rules | Explored with no violation |
+|---|---|---|---|
+| promise and belief fence, empty store, two slots | 3 x 1 | `part_wipe_belief` with `NS = 2` | 8.0 million states, depth 24 |
+| rule 1, empty store, two slots | 3 x 1 | `part_wipe_record` with `NS = 2` | 7.8 million states, depth 23 |
+| rule 1, three ballots | 2 x 1 | `record` with `NB = 3` | 8.0 million states, depth 23 |
+| rule 2, three ballots | 2 x 1 | `column` with `NB = 3` | 7.2 million states, depth 24 |
+| promise and belief fence and row seal, empty store, three configurations | 2 x 1 | `wipe_belief` with `NG = 3`, `NB = 3` | 6.9 million states, depth 26 |
+| the code with #1209, two ballots | 2 x 2 | `fence_rows` on the 2 x 2 grids | 9.7 million states, depth 19 (27 min, then stopped) |
+| rule 1, two ballots | 2 x 2 | `record` on the 2 x 2 grids | 7.1 million states, depth 17 (22 min, then stopped) |
 
 `reach_stale` shows that the passing checks see the dangerous case: a read starts on the record
 of configuration 1 after configuration 2 chose a slot, the fence ends it, and it is served on
