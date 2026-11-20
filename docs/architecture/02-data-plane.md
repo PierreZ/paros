@@ -328,6 +328,18 @@ checked, each with a control that TLC breaks:
   a sealed segment (retire, offload, trim) never stops the tail (as in Delos).
 - A replica drops its copy of a segment only after the record says offloaded. The object key is
   the journal and the segment, so the record stores no location.
+- **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
+  reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
+  the whole journal the replicas therefore do not bound write throughput, as they do in
+  Compartmentalized Paxos (every replica executes every write, sections 3.3 and 8.5); inside one
+  segment they still do. Because the journal state is folded at apply (sections 2.1 and 2.2), a
+  replica of the next segment starts from the **boundary state**: `next_seq` and the leader uuid
+  at the seal. The first replica of the old set that applied every slot of the segment writes
+  it once into the segment record, by compare-and-set; the replicas of the next segment read it
+  there, and a reader routes a read by the `seq` range that it gives. A segment retires after
+  `F + 1` replicas of its set hold it and the record holds its boundary state; after that the
+  next segment never needs its slots. **Open**: the trim floor (`first_seq`) is part of the
+  boundary state by our reading; the journal state model (#1189) decides it.
 
 The rejected design is in section 11 (alternatives). The code follows once the journal state
 model (#1189) includes these rules.

@@ -1,0 +1,29 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# Writes reach only the replica set of their segment: the folds, the acks
+# and the reads stay right (one sealed slot, one open slot, F = 1 crash in
+# each set at any time).
+safety            pass       ci
+# With F replicas of each set down, every write is acked, every read is
+# served, and S1 retires.
+live              pass       ci
+# S1 retired, then every replica of R1 stops: S2 still ends well.
+live_gone         pass       ci
+# Reach: a check that must break, so that the passing checks are not empty.
+reach_cross       violation  ci
+reach_retire      violation  ci
+# Controls: each one breaks the property of its file.
+deliver_all       violation  ci
+boundary_zero     violation  ci
+boundary_early    violation  ci
+route_other       violation  ci
+retire_early      violation  ci
+set_size_f        violation  ci
+gone_peer         violation  ci
+retire_norecord   violation  ci
+# Two sealed slots, so that the fold crosses a SetLeader inside S1.
+safety_k2         pass       long   40

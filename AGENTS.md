@@ -70,7 +70,10 @@ the prefix up to the election fence, with a control that forgets it at the win a
 that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
-more rules)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+more rules)), segment replica sets (`specs/tla/segment-replicas/`: a write reaches only the
+replica set of its segment, the boundary state of the seal in the segment record, reads routed
+to the set of the segment, retire at `F + 1` holders; #1271 (a write reaches only the replica
+set of its segment)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the

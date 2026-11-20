@@ -93,6 +93,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
+| Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal in the segment record; reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
@@ -1706,3 +1707,69 @@ The answer to #1218: with the rule of the code, `Recoverable` holds over the Pha
 up to `F`: it learned it (and so holds a record, `mark_chosen`) or jumped above it with
 `TrimmedTo` (and so refuses a campaign from below its floor). Each Phase-1 quorum of `C2` meets
 that Phase-2 quorum. No decision is refuted.
+
+### `segment-replicas/`: a write reaches only the replica set of its segment, for #1271
+
+Compartmentalized Paxos says that every replica executes every write (sections 3.3 and 8.5 of
+`docs/references/papers/scaling-rsm-compartmentalization`), so the replicas bound write
+throughput. In design A each segment has its own replica set (`docs/architecture/02-data-plane.md`
+section 2.10). The model checks that a write can go to the replicas of its segment only.
+
+The journal has a sealed segment S1 (slots `0 .. K - 1`) with the replica set R1, and the open
+segment S2 (slots `K .. NS - 1`) with the disjoint replica set R2. The log is abstract (the leader
+chooses the slots in order; `multi-paxos/` checks the agreement and `experiments/segments/a/`
+the seal end). A replica gets a chosen slot from the `Commit`, from the acceptors of the slot's
+grid until the segment retires, or from a live peer of its own set. It applies the slots of its
+segment in order and folds the journal state: `next_seq` and the leader uuid, with a `Write`
+accepted only under the current leader and a `SetLeader` as a compare-and-set. A live replica
+of the segment that applied a slot acks the writer. A reader reads the `seq` of an acked write
+at one replica: the replica fixes the basis of its own segment (the leaderless read that `reads/`
+checks) and answers once its applied prefix covers it, with the slot, or `Tail` (the `seq` is at
+or above its `next_seq`), or `Truncated` (the `seq` is below what it knows). At most `F` replicas
+of each set crash, at any time. S1 retires once `F + 1` replicas of R1 hold it, and then its
+acceptors are gone.
+
+The finding that the model forced: a replica holds opaque bytes, but the journal state is folded
+at apply, so a replica of S2 that never sees a slot of S1 must start from the journal state at
+the seal (the boundary state). The design keeps it in the segment record: the first replica of
+R1 that applied every slot of S1 writes it once, by compare-and-set at the matchmakers, and the
+replicas of S2 read it there.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: `NoForeign` (no replica holds a slot of another segment), `OneFold` (every replica's fold is the fold of the whole log), `RecordTrue`, `AckTrue`, `ReadTrue` (a served read of an acked write returns that write); `K = 1`, `NS = 2`, three values (a write under each uuid and the `SetLeader` from `u1` to `u2`); 4.9 million distinct states |
+| `live` | ci | pass: with `F` replicas of each set down, every chosen slot is acked, every read is served, and S1 retires (`Ends`, weak fairness) |
+| `live_gone` | ci | pass: after the retire every replica of R1 stops; S2 still acks and serves (`EndsS2`) |
+| `reach_cross` | ci | violation: a read of each segment is served, across the seal |
+| `reach_retire` | ci | violation: S1 retires and a write of S2 is acked |
+| `deliver_all` | ci | violation of `NoForeign`: every replica gets every slot (the paper's replica); the invariant sees a broadcast |
+| `boundary_zero` | ci | violation of `OneFold`: R2 starts from the empty state, so its fold is not the fold of the whole log (a `seq` that S1 used is given again, or the fence uses a leader uuid that a `SetLeader` of S1 replaced) |
+| `boundary_early` | ci | violation of `OneFold`: the record is written before its writer applied every slot of S1 (`K = 2`) |
+| `route_other` | ci | violation of `ReadTrue`: a read goes to a replica of the other set, which does not hold the `seq`: it answers `Truncated` (below its boundary state) or `Tail` (above the seal) for an acked write that nobody trimmed |
+| `retire_early` | ci | violation of `Ends`: S1 retires at `F` holders; the holder crashes and the slot is lost for the other replicas of R1 |
+| `set_size_f` | ci | violation of `Ends`: a replica set of `F` members; with `F` down nothing applies |
+| `gone_peer` | ci | violation of `EndsS2`: R2 asks a replica of R1 for the boundary state; R1 stops after the retire, before R2 asked |
+| `retire_norecord` | ci | violation of `EndsS2`: S1 retires before the record holds the boundary state; R1 stops, and nobody can write it |
+| `safety_k2` | long | pass, bounded at 40 minutes: `K = 2`, `NS = 3` |
+
+The answer to #1271:
+
+- **A write reaches only the replica set of its segment.** No replica outside the set holds a
+  slot of the segment, and every fold, ack and read stays right. So, over the whole journal,
+  the replicas do not bound write throughput: each replica set executes only its segment's
+  writes. Inside one segment the bound of the paper still holds, because every replica of the
+  set executes every write of the segment.
+- **The segment record holds the boundary state.** This rule is new: the design said that a
+  record holds the start slot, the end slot, the grid and the state. A replica of the next
+  segment starts its fold there. A replica of the old set is not a source: it can be gone
+  (`gone_peer`), and so can the zero state (`boundary_zero`) and a state written before the whole
+  segment was applied (`boundary_early`). The record also gives the reader the `seq` range of
+  each segment, so a read goes to the right set (`route_other`).
+- **Retire.** `F + 1` holders of the set are enough, and the retire also waits for the boundary
+  state in the record (`retire_early`, `retire_norecord`). After that the replicas of the next
+  segment never need the slots of the old one (`live_gone`).
+- **Liveness.** With `F` replicas of a set of `2F + 1` down, writes and reads of the segment end;
+  a set of `F` members does not (`set_size_f`).
+- No decision is refuted. The model has no `Truncate`: that the trim floor (`first_seq`) is part
+  of the boundary state is a reading, not a checked fact, and the journal state model (#1189)
+  checks it.
