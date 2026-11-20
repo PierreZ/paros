@@ -1,4 +1,4 @@
-//! The operator's moves on the pool of a cell with matchmakers: retire a
+//! The operator's moves on the pool of a cluster with matchmakers: retire a
 //! node ([`Action::Retire`](super::Action::Retire)), book a node again
 //! ([`Action::Rejoin`](super::Action::Rejoin)), and admit a late node to the
 //! pool of one node ([`Action::Admit`](super::Action::Admit)).
@@ -15,9 +15,9 @@
 use moonpool_walk::{Cx, sometimes};
 use paros_consensus::{Ballot, NodeId};
 
-use super::{Cell, reach};
+use super::{Cluster, reach};
 
-impl Cell {
+impl Cluster {
     /// Retire one node that the evidence releases, or ask the matchmakers
     /// to check it when the check is still missing.
     pub(super) fn retire(&mut self, cx: &mut Cx<'_, Self>) {
@@ -105,7 +105,7 @@ impl Cell {
         let late = self.late_ids();
         // A lagging-reader walk admits the late nodes only at node 0: when
         // node 0 or a late node leads, it moves onto a late node while every
-        // other pool lags until the settle rounds (`Cell::tick_all`).
+        // other pool lags until the settle rounds (`Cluster::tick_all`).
         let steer = self.flavor.lagging_reader;
         let pairs: Vec<(NodeId, NodeId)> = self
             .nodes

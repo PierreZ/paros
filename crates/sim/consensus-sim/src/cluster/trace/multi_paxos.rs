@@ -1,4 +1,4 @@
-//! The events of a cell walk as a trace of
+//! The events of a cluster walk as a trace of
 //! `specs/tla/multi-paxos/MultiPaxosTrace.tla`: the log of every flavor
 //! without matchmakers.
 
@@ -6,29 +6,29 @@ use moonpool_tla::Value;
 use paros_consensus::NodeId;
 use paros_consensus::membership::QuorumSystem;
 
-use super::{CellEvent, Sizes, encode, grid, ranks};
+use super::{ClusterEvent, Sizes, encode, grid, ranks};
 use crate::trace::{Trace, int, node};
 
 /// The steps of `MultiPaxos.tla`: Phase 1 and Phase 2 of the leader, the
 /// votes, the learns and the restarts. The proxy's steps and the leader's
 /// audiences are not in it: a delegated round is a round of its ballot.
-pub(super) fn keeps(event: &CellEvent) -> bool {
+pub(super) fn keeps(event: &ClusterEvent) -> bool {
     matches!(
         event,
-        CellEvent::Prepare { .. }
-            | CellEvent::Promise { .. }
-            | CellEvent::Win { .. }
-            | CellEvent::Propose { .. }
-            | CellEvent::Accept { .. }
-            | CellEvent::Record { .. }
-            | CellEvent::Learn { .. }
-            | CellEvent::Restart { .. }
+        ClusterEvent::Prepare { .. }
+            | ClusterEvent::Promise { .. }
+            | ClusterEvent::Win { .. }
+            | ClusterEvent::Propose { .. }
+            | ClusterEvent::Accept { .. }
+            | ClusterEvent::Record { .. }
+            | ClusterEvent::Learn { .. }
+            | ClusterEvent::Restart { .. }
     )
 }
 
-/// The events of one cell walk as a trace of `MultiPaxosTrace.tla`, for
-/// a cell of `acceptors` nodes under `quorum`.
-pub(super) fn trace(acceptors: u64, quorum: QuorumSystem, events: &[CellEvent]) -> Trace {
+/// The events of one cluster walk as a trace of `MultiPaxosTrace.tla`, for
+/// a cluster of `acceptors` nodes under `quorum`.
+pub(super) fn trace(acceptors: u64, quorum: QuorumSystem, events: &[ClusterEvent]) -> Trace {
     let (ballots, ranks) = ranks(events);
     let mut sizes = Sizes::default();
     let mut trace = Trace::new();

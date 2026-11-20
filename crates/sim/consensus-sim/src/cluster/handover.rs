@@ -13,12 +13,12 @@ use paros_consensus::matchmaker::{
 use paros_consensus::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use paros_consensus::{MatchmakerReconfigurer, NodeId};
 
-use super::{Cell, Envelope, Party, Wire, reach};
+use super::{Cluster, Envelope, Party, Wire, reach};
 
 /// The driver ticks a handover may stall before its node gives it up.
 const ABANDON_TICKS: u64 = 12;
 
-impl Cell {
+impl Cluster {
     /// A fresh reconfigurer for node `id`.
     pub(super) fn reconfigurer(&self, id: NodeId) -> MatchmakerReconfigurer {
         MatchmakerReconfigurer::new(id, self.flavor.limits)

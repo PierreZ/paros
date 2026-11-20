@@ -1,4 +1,4 @@
-//! The parties of a cell: each state machine with its disk.
+//! The parties of a cluster: each state machine with its disk.
 
 use paros_consensus::contract::mem_storage::MemStorage;
 use paros_consensus::contract::write::AcceptorWrite;

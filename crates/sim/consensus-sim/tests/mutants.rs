@@ -3,7 +3,7 @@
 //! campaign must fail with that oracle's message.
 
 use consensus_sim::campaign::try_campaign;
-use consensus_sim::cell::{Cell, Flavor, Mutant};
+use consensus_sim::cluster::{Cluster, Flavor, Mutant};
 use consensus_sim::oracle::journal::JOURNAL_FOLD;
 use consensus_sim::oracle::ledger::{
     COMMIT_BACKED, LEARNED_CHOSEN, ONE_VALUE, PERSIST_BEFORE_SEND, PREFIX_SHRINKS,
@@ -15,10 +15,10 @@ use moonpool_walk::Walk;
 /// failure that names `oracle`.
 fn caught(flavor: Flavor, mutant: Mutant, seeds: u64, oracle: &str) {
     let flavor = flavor.with(mutant);
-    let walk = Walk::<Cell>::new()
+    let walk = Walk::<Cluster>::new()
         .seeds(seeds)
         .env_prefix(None)
-        .model(move |cx| Cell::build(flavor.clone(), cx));
+        .model(move |cx| Cluster::build(flavor.clone(), cx));
     match try_campaign(&walk, &[]) {
         Ok(coverage) => panic!(
             "{mutant:?} survived {seeds} seeds; {oracle} did not fire\n{}",

@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use consensus_sim::campaign::{Coverage, try_campaign};
-use consensus_sim::cell::{Cell, Flavor};
+use consensus_sim::cluster::{Cluster, Flavor};
 use consensus_sim::decree::{DecreeModel, DecreeMutant};
 use consensus_sim::probes::core_probes;
 use moonpool_walk::{Model, Walk};
@@ -56,7 +56,7 @@ const SAVE_VAR: &str = "COVERAGE_SAVE";
 /// The directory that the judge reads the saved walks of every shard from.
 const FROM_VAR: &str = "COVERAGE_FROM";
 
-/// Every flavor of the cell, with its own pages and with the smallest
+/// Every flavor of the cluster, with its own pages and with the smallest
 /// pages, each with the name its report prints.
 fn flavors() -> Vec<(String, Flavor)> {
     let full = vec![
@@ -208,11 +208,12 @@ fn run(name: &str) -> Reached {
     if let Some((_, flavor)) = flavors().into_iter().find(|(n, _)| n == name) {
         let allows = flavor.clone();
         let allowed = move |index: usize| {
-            <Cell as Model>::actions()
+            <Cluster as Model>::actions()
                 .get(index)
                 .is_some_and(|action| allows.allows(*action))
         };
-        let walk = explore(Walk::<Cell>::new()).model(move |cx| Cell::build(flavor.clone(), cx));
+        let walk =
+            explore(Walk::<Cluster>::new()).model(move |cx| Cluster::build(flavor.clone(), cx));
         return Reached::new(name, &walk_result(try_campaign(&walk, &[])), &allowed);
     }
     let coverage = match name {
