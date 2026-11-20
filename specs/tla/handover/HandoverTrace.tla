@@ -16,10 +16,15 @@
 (*     generation g - 1 acked, and every registration at or above its      *)
 (*     floor that a majority of g - 1 held, and it holds no registration   *)
 (*     that g - 1 never held (`CloseState` = "max");                       *)
-(*   - "vote": a frozen member of g votes in the decree that chooses the   *)
-(*     successor of g, for a set whose every member holds its bootstrap    *)
-(*     (`FirstWrite` = "every"). A set is chosen once a majority of g      *)
-(*     voted for it at one decree ballot (`Decide`);                       *)
+(*   - "vote": a member of g, frozen or still serving, votes in the        *)
+(*     decree that chooses the successor of g, for a set whose every       *)
+(*     member holds its bootstrap (`FirstWrite` = "every"). A set is       *)
+(*     chosen once a majority of g voted for it at one decree ballot       *)
+(*     (`Decide`). A vote needs no freeze: the acceptors of `Decide` in    *)
+(*     `Handover.tla` are the members of the old set, whatever their       *)
+(*     phase, and the code's decree acceptor answers before its own        *)
+(*     matchmaker froze. The state of the proposed set is judged at its    *)
+(*     "boot";                                                             *)
 (*   - "activate": a member of the set chosen for g serves g, with the     *)
 (*     state of its bootstrap of that set (`Activate`);                    *)
 (*   - "register" and "gcack": a matchmaker that serves its generation     *)
@@ -106,7 +111,7 @@ Boot ==
 Vote ==
   /\ e.event = "vote" /\ IsMatchmaker /\ IsGen /\ Has("bal") /\ Has("set")
   /\ LET g == e.gen IN
-     /\ e.mm \in Set(g) /\ gen[e.mm] = g /\ phase[e.mm] = "stopped"
+     /\ e.mm \in Set(g) /\ gen[e.mm] = g /\ phase[e.mm] # "inactive"
      /\ \A x \in e.set : \E r \in boots : r.mm = x /\ r.gen = g + 1 /\ r.set = e.set
      /\ votes' = votes \cup {[mm |-> e.mm, gen |-> g, bal |-> e.bal, set |-> e.set]}
   /\ UNCHANGED <<gen, phase, wm, reg, held, acked, boots>>

@@ -462,7 +462,11 @@ const RETIRE: &[Rule] = &[
 const HANDOVER: &[Rule] = &[
     Rule {
         name: "a matchmaker freezes",
-        met: |events| events.iter().any(|e| matches!(e, ClusterEvent::MmStop { .. })),
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::MmStop { .. }))
+        },
     },
     Rule {
         name: "a bootstrap carries a registration",
@@ -474,7 +478,11 @@ const HANDOVER: &[Rule] = &[
     },
     Rule {
         name: "a matchmaker votes in the successor decree",
-        met: |events| events.iter().any(|e| matches!(e, ClusterEvent::MmVote { .. })),
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::MmVote { .. }))
+        },
     },
     Rule {
         name: "a matchmaker activates a later generation",

@@ -58,7 +58,9 @@ Test only: `publish = false`, never a dependency of another crate.
   keeps a record, a trim jump, a promise after a compaction; a replica that boots again, moves
   its floor and serves a read after a completed write; a boot that reads a faulty record, a
   promise in pages that reports one, a win over it; a node that retires, rejoins and promises
-  again). TLC accepting a walk that never takes a
+  again; a matchmaker that freezes, a bootstrap that carries a registration, a vote in the
+  successor decree, an activation, a registration after a handover, and two handovers in one
+  walk). TLC accepting a walk that never takes a
   step judges nothing, and an empty trace meets no rule. A new rule of a trace spec gets its
   rule here in the same PR; when the walks cannot meet it, add the walk move or the steer, as
   for a probe.
@@ -125,12 +127,14 @@ Test only: `publish = false`, never a dependency of another crate.
 - `cluster/trace.rs` + `cluster/trace/` → `Tracer`, `ClusterEvent`, `Spec`: the steps of a cluster walk as
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs`, `matchmaker.rs`, `reads.rs`,
-  `truncation.rs`, `compartments.rs` and `faults.rs` each say which events their model keeps
+  `truncation.rs`, `compartments.rs`, `faults.rs` and `handover.rs` each say which events their model keeps
   (`Spec::keeps`, a list of the model's own steps) and define its constants. `reads.rs` records the read basis, the answers and the served
   reads; `truncation.rs` the journal fold of each slot (`Fold`, from the first party that
   applies it) and each floor a node writes; `compartments.rs` the learns, the walk, the floors
   and the boot of a read replica; `faults.rs` each page of a promise (`Page`, with its faulty
-  reports) and each record a boot reads faulty (`Rot`). `rules.rs` → `Rule`,
+  reports) and each record a boot reads faulty (`Rot`); `handover.rs` the handover steps of a
+  matchmaker (`MmStop`, `MmBoot`, `MmVote`, `MmActivate`), read from its durable state before
+  and after it steps a request. `rules.rs` → `Rule`,
   `Spec::rules`: the steps each spec's checked walks must take.
 - `decree.rs` → `DecreeModel`: single-decree Paxos (`paros_consensus::decree`), three acceptors
   and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
@@ -187,7 +191,8 @@ Test only: `publish = false`, never a dependency of another crate.
   batcher walk against `compartments/BatcherTrace` (control: a lane sent out of push order); the
   flavors `disk-faults` and `disk-faults-3` against `truncation/FaultsTrace` (control: a promise
   that hides a faulty record); the `retiring` flavor against `matchmaker/RetireTrace` (control: a
-  retirement with no evidence). A retiring walk has 250 quiet steps, the others 10: a
+  retirement with no evidence); the `handover` flavor against `handover/HandoverTrace`
+  (control: a bootstrap page that lost a registration, `Mutant::ShrinkBootstrap`). A retiring walk has 250 quiet steps, the others 10: a
   retirement needs a leader that stands while its GC floor becomes effective. Every
   control searches from seed 1, never from a seed picked by hand. A cluster walk has
   150 chaos steps. Each test searches the seeds (at most 300, oracles on, no TLC) and TLC checks
@@ -211,6 +216,5 @@ Not traced yet (#1198 (trace checking)):
 
 - `reconfigured-compartments`: matchmakers with a grid for each configuration, proxies and the
   handoff in one trace spec.
-- The flavor `handover`: no trace spec has the matchmaker set handover.
 
-Those walks are checked against `multi-paxos/` only, or not at all.
+That walk is checked against `multi-paxos/` only.

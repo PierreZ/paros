@@ -62,6 +62,11 @@ of `consensus-sim`. The trace specs today are:
 - `matchmaker/RetireTrace`: `MatchmakerTrace` and the retirement (a node retires on an effective
   floor that no registration at or above names, a retired node takes no step, and a rejoin
   books it again), on the `retiring` flavor.
+- `handover/HandoverTrace`: the matchmaker set handover over a chain of generations (a member
+  freezes, a member of a proposed set holds its whole bootstrap, a member of the old set votes
+  in the successor decree, a member of the chosen set activates with its bootstrap), with the
+  registrations and the GC acks of one journal, on the `handover` flavor. It states its rules
+  for many generations and does not extend `Handover.tla`, which hands generation 0 over once.
 
 A trace spec that extends the trace spec of another model links that model's modules into its
 folder, as `reads/` links `matchmaker/`.

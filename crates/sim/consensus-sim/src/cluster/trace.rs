@@ -1001,7 +1001,9 @@ impl Spec {
             }
             Self::Handover => handover::trace(
                 flavor.matchmakers + flavor.matchmaker_spares,
-                &(0..flavor.matchmakers).map(MatchmakerId).collect::<Vec<_>>(),
+                &(0..flavor.matchmakers)
+                    .map(MatchmakerId)
+                    .collect::<Vec<_>>(),
                 events,
             ),
             Self::Truncation | Self::Faults => {

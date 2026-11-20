@@ -13,9 +13,9 @@
 use std::collections::BTreeSet;
 
 use moonpool_tla::Value;
+use paros_consensus::Ballot;
 use paros_consensus::journal::{JournalId, JournalIdentifier};
 use paros_consensus::matchmaker::{Matchmaker, MatchmakerHardState, MatchmakerPhase};
-use paros_consensus::Ballot;
 use paros_consensus::membership::{MatchmakerId, MatchmakerSet};
 
 use super::{ClusterEvent, encode};
