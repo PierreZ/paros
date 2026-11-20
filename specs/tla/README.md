@@ -68,6 +68,10 @@ Each experiment has one folder for each design, with the same layout as a model,
 - `experiments/segments/`: #1213 (segments in the protocol or in storage). Design A, the segment
   table in the matchmakers (`a/`), against design B, plain Matchmaker Paxos with chunks local to
   each replica and a variant with offload claims in the log (`b/`).
+- `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
+  ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
+  the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
+  and a decree round on disk.
 
 ## The Paxos flavors and their models
 
@@ -90,6 +94,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
+| The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -871,7 +876,8 @@ never answers blocks Phase 1 (`init_down`), and a wiped member that answers does
 (`init_live`).
 
 Not in the model: the ballot floor of a retry (a ballot above every `Nack`), the matchmaker
-generation that fences a handover, the stop quorum that opens the handover's decree, the
+generation that fences a handover, the stop quorum that opens the handover's decree (it is in
+`experiments/stale-stopped/`, #1229 (a stale `Stopped` reply reuses a decree ballot)), the
 `cell_lost` refusal, and more than three acceptors.
 
 ### `multi-paxos/`: plain Multi-Paxos, for #1185 (rework 1.14)

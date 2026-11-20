@@ -25,7 +25,26 @@ export interface Lesson {
    * `crates/support/paros-wasm/src/paxos/lab.rs`. The page that holds the
    * lesson draws them under `## Your turn`. */
   labs?: string[];
+  /** One TLC run of a model of `specs/tla/` that checks the idea of the
+   * lesson. The figure is copied from TLC's output of that run, never
+   * estimated: run it again with the command in `website/site/AGENTS.md`
+   * and change `states` and `TLC_RUN` together. */
+  tlc: Tlc;
 }
+
+export interface Tlc {
+  /** The folder in `specs/tla/`. */
+  model: string;
+  /** The `.cfg` file of the folder, without `.cfg`. */
+  config: string;
+  /** "distinct states found" in TLC's output. */
+  states: number;
+  /** What TLC checked, as the end of "TLC checked that ...". */
+  checks: string;
+}
+
+/** The day of the TLC runs of every lesson, and the TLC that ran them. */
+export const TLC_RUN = { date: "2026-11-19", tool: "TLC 2.19" };
 
 export const LESSONS: Lesson[] = [
   {
@@ -35,6 +54,7 @@ export const LESSONS: Lesson[] = [
     page: "single-decree",
     runs: ["base", "acceptor-down", "second-proposer", "lost-message", "acceptor-restart", "repeated-answers", "accept-is-a-promise", "fenced-out", "duel", "break-the-rule"],
     labs: ["vote-not-chosen", "two-values", "duel"],
+    tlc: { model: "decree", config: "handover", states: 17153, checks: "two values are never chosen, with three acceptors, two values and three ballots" },
   },
   {
     id: "majority",
@@ -42,6 +62,8 @@ export const LESSONS: Lesson[] = [
     goal: "say which two sets of acceptors must share an acceptor, and count how many acceptors can fail.",
     page: "quorums",
     runs: ["majority", "break-the-rule"],
+    labs: ["majority"],
+    tlc: { model: "grid", config: "grid", states: 69, checks: "every Phase 1 quorum meets every Phase 2 quorum, in every grid of up to nine acceptors" },
   },
   {
     id: "the-log",
@@ -49,6 +71,8 @@ export const LESSONS: Lesson[] = [
     goal: "follow one election and many writes, and say how a new leader recovers the log of a dead one.",
     page: "multi-paxos",
     runs: ["base", "leader-crash", "gap", "lost-commit", "lagging", "seam-before-sync", "seam-after-sync", "stale-nack", "stale-promise", "recovery-crash", "handoff", "handoff-lost"],
+    labs: ["gap"],
+    tlc: { model: "multi-paxos", config: "majority", states: 362774, checks: "no two commands are chosen at one slot, with three acceptors, two slots and two ballots" },
   },
   {
     id: "reads",
@@ -56,6 +80,8 @@ export const LESSONS: Lesson[] = [
     goal: "say why a read asks a quorum and not the leader, and what a node does when the log that it needs is gone.",
     page: "multi-paxos",
     runs: ["read", "read-waits", "truncate", "trimmed"],
+    labs: ["read"],
+    tlc: { model: "reads", config: "reads_plain", states: 663441, checks: "a read sees every write that was acknowledged before it, with four acceptors and two ballots" },
   },
   {
     id: "grids",
@@ -63,6 +89,8 @@ export const LESSONS: Lesson[] = [
     goal: "pick a write quorum and an election quorum on a grid, and say what each shape costs.",
     page: "quorums",
     runs: ["base", "election", "column-down", "stuck-column", "two-shapes", "partitions"],
+    labs: ["grid-column"],
+    tlc: { model: "multi-paxos", config: "partitions_down", states: 176882, checks: "the last leader always learns every slot that it proposed, on a 3 x 2 grid in two partitions with one acceptor down in each partition" },
   },
   {
     id: "compartments",
@@ -70,6 +98,7 @@ export const LESSONS: Lesson[] = [
     goal: "name each role of a compartmentalized journal, and say what breaks when it stops.",
     page: "compartmentalized",
     runs: ["colocated", "base", "batcher", "read", "proxy-crash", "lost-vote", "proxy-nack"],
+    tlc: { model: "compartments", config: "batch", states: 14154, checks: "each write of a batch gets one range of the log, in order, with a leader change and a batcher that stops" },
   },
   {
     id: "matchmakers",
@@ -77,6 +106,8 @@ export const LESSONS: Lesson[] = [
     goal: "follow one reconfiguration, and say why the old configurations can be forgotten.",
     page: "matchmaker",
     runs: ["base", "leader-crash", "replace", "retire", "break-the-rule"],
+    labs: ["old-set"],
+    tlc: { model: "matchmaker", config: "matchmaker", states: 1421865, checks: "two values are never chosen across a reconfiguration, with three matchmakers and two ballots" },
   },
 ];
 

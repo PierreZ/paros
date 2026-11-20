@@ -2,6 +2,7 @@
 layout: ../../layouts/Doc.astro
 kicker: Paxos
 section: paxos/
+lab: true
 trace: matchmaker
 title: Matchmaker Paxos
 description: Change the acceptors of a journal while it takes writes. A reconfiguration is only a new ballot with a new configuration.
@@ -20,6 +21,13 @@ answer names the configurations of the lower ballots. A `GcRequest` lets the mat
 forget the configurations that no longer hold a chosen slot.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
+
+## Your turn
+
+Now you are the network. Deliver or drop each message, and reach the goal.
+`paros-consensus` runs in this page and decides everything else.
+
+<div data-lab="old-set"><p class="aside">The exercises need JavaScript.</p></div>
 
 ## The rule
 

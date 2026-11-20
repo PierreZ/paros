@@ -71,7 +71,10 @@ that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
 more rules)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
-designed again from the ground up, together with Pierre.
+designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
+`step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
+`Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
+and its flight rule has a model, `specs/tla/flight-rule/`. No journal code exists yet.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
 same code: model-based trace checking (each run of the core is checked against its TLA+
@@ -262,7 +265,10 @@ borrow, so a second `ready()` before `advance()` is a compile error. Persist-bef
 ordering is documented on `Ready`/`HardState`
 (`docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`). The driver that owns the core and
 does its I/O was in the removed `paros-roles` (`docs/archive/v0.2.0-alpha.1/paros-roles.md`);
-today only the examples, the model checkers and the wasm engine drive the core.
+today only the examples, the model checkers and the wasm engine drive the core. The journal's
+roles follow a different contract, the flight rule (`docs/architecture/04-roles.md` §4.2): each
+persist batch has an id and each send names the persist id it waits on, so a driver may pipeline
+and group commit. §4.2 lists every difference from `Ready`/`advance` as a change or a proposal.
 
 **One file per role; `ColocatedNode` is wiring** (timers, messages, the persist-before-send
 batch) and holds **no protocol tally of its own**:
@@ -320,7 +326,7 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   messages and persists the same scalars.
 
 **The core is a library for everyone** (decided by Pierre on 2026-11-20,
-`docs/architecture/04-roles.md` §4.2). `paros-consensus` stays usable by other people for plain
+`docs/architecture/04-roles.md` §4.3). `paros-consensus` stays usable by other people for plain
 Multi-Paxos, single-decree Paxos and every flavor it already builds. What paros needs comes from
 optional behaviour and software composition, never from a service concept inside the core (no
 cell, no tenant policy, no `cell init`; #1264 (remove the cell from paros-consensus)). A paros

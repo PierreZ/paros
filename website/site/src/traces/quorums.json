@@ -12847,7 +12847,18 @@
         {
           "says": "Proposer 8 gets bravo chosen. Two values are chosen.",
           "from": 24,
-          "to": 32
+          "to": 32,
+          "question": {
+            "asks": "Two values are chosen. What broke Paxos?",
+            "answers": [
+              "Proposer 8 proposed bravo after a Phase 1 with no vote",
+              "The two proposers counted quorums that share no acceptor",
+              "Acceptors 3 and 4 voted for bravo"
+            ],
+            "right": 1,
+            "why": "Each proposer followed Paxos inside its own half. The rule that broke is between the halves: every Phase 1 quorum must share an acceptor with every Phase 2 quorum.",
+            "after": true
+          }
         },
         {
           "says": "Two quorums that share no acceptor cannot see each other. Every shape in paros keeps the rule.",
