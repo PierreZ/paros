@@ -1,0 +1,2 @@
+# The folders of specs/tla/ whose guard mutation needs more than one job of 30
+# minutes (`.github/workflows/tla-mutants.yml`): <folder> <number of jobs>.

@@ -6,7 +6,9 @@ definition that primes a variable, where the item has no prime, no `UNCHANGED`
 and calls no action. For each guard, the script writes a copy of the tree in
 which that one item is `TRUE`, and runs the checks of the folder
 (`checks.txt`, the `ci` lines, as `scripts/check-tla.sh` runs them) on the
-copy. The mutant is caught when at least one check does not give the result
+copy, the `pass` lines first: a guard set to TRUE mostly adds behaviours, which
+only a `pass` line can see. A guard under a negation removes behaviours, and a
+control (a `violation` line) can see that. The mutant is caught when at least one check does not give the result
 that `checks.txt` names. A check of every folder that links the module counts.
 
 A mutant that every check accepts is a survivor: the guard is not necessary,

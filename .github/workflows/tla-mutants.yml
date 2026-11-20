@@ -17,6 +17,12 @@ on:
   schedule:
     - cron: '41 4 * * 6'
   workflow_dispatch:
+  # TEMPORARY, for the first full run on the pull request of #1311; removed before merge.
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/mutate-tla.py"
+      - ".github/workflows/tla-mutants.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -39,7 +45,7 @@ jobs:
               [ -f "$m" ] || continue
               f=$(dirname "${m#specs/tla/}")
               n=$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)
-              n=${n:-1}
+              n=${n:-3}
               for i in $(seq 1 "$n"); do echo "$f $i/$n"; done
             done | jq -R . | jq -sc .)
           test "$slices" != "[]"
@@ -60,7 +66,7 @@ jobs:
       - name: Mutate the guards of specs/tla/${{ matrix.slice }}
         run: |
           read -r folder shard <<<"${{ matrix.slice }}"
-          nix develop .#tla --command scripts/mutate-tla.py --shard "$shard" "$folder"
+          nix develop .#tla --command scripts/mutate-tla.py --shard "$shard" --out mutants.tsv "$folder"
 
   mutants:
     needs: [slices, slice]
