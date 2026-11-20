@@ -73,7 +73,8 @@ Each experiment has one folder for each design, with the same layout as a model,
   fence on the promise passes (with the seal of each row of #1209 on a full grid), and the
   record check of the reader (rule 1) passes too. An acceptor of a retired segment that loses its
   state breaks the promise fence alone; the belief half of the fence with the refusal of an
-  acceptor that did not hear closes it, and so does the record check.
+  acceptor that did not hear closes it, and so does the record check. Pierre chose the fence of
+  the code, with no record check (2026-11-20, `docs/architecture/02-data-plane.md` §2.10).
 - `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
   ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
   the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
@@ -1967,7 +1968,7 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 |---|---|
 | `write` | `acks` of one column of `New`, with the move |
 | `election` | a matchmaker majority; a Phase-1 quorum of `Old`; a Phase-1 quorum of `New` |
-| `read` | a Phase-1 quorum of the answers to `GridReadTargets(New)`; a matchmaker majority (the segment-record check of #1254) |
+| `read` | a Phase-1 quorum of the answers to `GridReadTargets(New)`; a matchmaker majority (the segment-record check that #1254 proposed; the journal does not keep it, `docs/architecture/02-data-plane.md` §2.10, so this wait asks more than the read needs) |
 | `seal` | a Phase-1 quorum of `Old` (the highest vote); a matchmaker majority (the compare-and-set of the end slot) |
 | `retire` | `F + 1` replicas of the segment hold it; a matchmaker majority |
 | `offload` | a matchmaker majority (the offload mark, #1256) |

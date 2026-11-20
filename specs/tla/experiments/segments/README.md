@@ -45,6 +45,8 @@ real with no fence; the read fence on the promise closes it (with the seal of ea
 decision 31, #1209, on a full grid), so the record check of the reader adds nothing there; an
 acceptor of a retired segment that loses its state opens the case again, and the belief half of
 the fence (with the refusal of an acceptor that did not hear) or the record check closes it.
+Pierre chose the fence of the code, with no record check (2026-11-20,
+`docs/architecture/02-data-plane.md` §2.10).
 
 ## The two designs
 
