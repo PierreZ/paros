@@ -2721,7 +2721,7 @@ slots, unless the name ends in `_g4` (four segments, five slots).
 | `meta_gap_g4` | long | pass (5.5 million distinct states, 3 minutes) |
 
 The answer to #1303: both places are safe and live through two seals in a row, but not with the
-same rules.
+same rules. Pierre chose the segment record on 2026-11-20.
 
 - **The uuid in the segment record** needs no rule beyond "start from the record of your
   predecessor". An empty segment copies that record as it is, a `Noop` anywhere is harmless, and

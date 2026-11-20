@@ -462,8 +462,8 @@ checked, each with a control that TLC breaks:
   segment they still do. Because the journal state is folded at apply (sections 2.1 and 2.2), a
   replica of the next segment starts from the **boundary state**, the journal state at the seal:
   `next_seq`, the trim floor `first_seq` and the leader uuid. **The whole boundary state is in
-  the segment record** (#1303 (two seals in a row), checked by `specs/tla/seal-chain/`; Pierre
-  chose on 2026-11-20 that TLA+ decides where the uuid lives). The first replica of the old set
+  the segment record** (#1303 (two seals in a row), checked by `specs/tla/seal-chain/`; decided
+  by Pierre on 2026-11-20 after the check). The first replica of the old set
   that applied every slot of the segment writes it once, by compare-and-set at the matchmakers,
   into the record of that segment. A replica of the next segment starts from the record of the
   segment just before it, never from the newest record written (control `record_latest`: a
