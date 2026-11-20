@@ -545,10 +545,11 @@ checksums. Each rule has a control that TLC breaks:
   grid.** A found damaged replica log is repaired from a live peer of its set, from the grid
   until the retire, or from the object once offloaded. A damaged copy is one of the `F` failed
   copies of the survive promise until its repair, so `F + 1` holders always leave one good copy
-  to repair from. **Finding**: the retire does not need to wait for a found damage to be
-  repaired (`retire_any` passes with a damaged counted replica); the rule that #1263 proposed
-  is a margin, not a safety rule. A retire at `F` holders loses a slot (`retire_f`,
-  `live_retire_f`).
+  to repair from. A retire at `F` holders loses a slot (`retire_f`, `live_retire_f`).
+- **The retire does not count a replica whose damage a scrub found and no repair fixed.** This
+  is a margin, not a safety rule: the model shows that the retire stays safe without it
+  (`retire_any` passes with a damaged counted replica). **Decided** (Pierre, 2026-11-20): keep
+  the guard, because a disk that rots once often fails again soon.
 - **The offloader puts only a log that passes its checksum, and a replica drops its copy only
   after the record says offloaded.** A put of a log that it did not check makes a rotted copy
   the only one once the replicas drop (`upload_any`); a drop before the mark loses the segment

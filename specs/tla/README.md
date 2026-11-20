@@ -2368,4 +2368,6 @@ promise (`ObjFaults`). `Survive`: with no damaged object, every slot keeps a goo
 it that is not repaired". The model shows that it is not needed for the survive promise: a
 damaged copy is one of the `F` failed copies until its repair, so `F + 1` counted holders leave at
 least one good copy, whatever their damage (`retire_any`). It is a margin, not a safety rule.
+**Decided** (Pierre, 2026-11-20): the journal keeps it as a margin (`RetireCount = "clean"`, the
+design value of the model).
 `F + 1` holders is the rule (`retire_f`).
