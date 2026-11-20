@@ -1659,9 +1659,9 @@ Results (`compartments/checks.txt`; the CI set runs in about 45 seconds with 4 w
 | `live_split` | ci | the rules of the code, the leader refuses the merged batch | `Ends` pass |
 | `live_noresend` | ci | the leader does not send lost `Accept`s again | `Ends` violation |
 | `reads_two` | long | two replicas, one reader | pass (4.5 million states, 2 min) |
-| `safety` | long | the whole model at once: one leader change, a batcher that can stop, one restart, one reader | pass (12.7 million states, 4.6 min) |
+| `safety` | long | the whole model at once: one leader change with a deposed leader that stays up, a batcher that can stop, one restart, one reader | pass (36.5 million states, 27 min) |
 
-The long checks ran once on 2026-11-19 with 4 workers.
+The long checks ran once on 2026-11-20 with 4 workers, with the held answers of #1232.
 
 The traces of the controls:
 
