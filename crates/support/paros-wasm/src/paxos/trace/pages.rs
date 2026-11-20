@@ -3,7 +3,7 @@
 
 use crate::paxos::WorldKind;
 use crate::paxos::trace::Trace;
-use crate::paxos::view::{MessageView, PartyView};
+use crate::paxos::view::{MessageView, PartyView, WorldView};
 
 mod matchmaker;
 mod multi_paxos;
@@ -58,6 +58,18 @@ pub(super) fn touches(node: u64) -> impl Fn(&MessageView) -> bool {
     move |message| {
         (message.to == node && message.to_party == PartyView::Node)
             || (message.from == node && message.from_party == PartyView::Node)
+    }
+}
+
+/// Node `id` holds a vote for `value`: an acceptor's vote in the
+/// single-decree world, an accepted record at any slot in the log world.
+pub(super) fn voted(id: u64, value: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .is_some_and(|node| node.accepted.iter().any(|vote| vote.value == value))
     }
 }
 

@@ -349,6 +349,15 @@ impl Recorder {
         self
     }
 
+    /// Ask the reader what went wrong in the open beat, after it played: the
+    /// "find the bug" question of a "Break the rule" run. Pin the answer
+    /// with [`Recorder::holds`] after the beat's steps, as for
+    /// [`Recorder::ask`].
+    pub fn find(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) -> &mut Self {
+        self.beats.find(asks, answers, right, why);
+        self
+    }
+
     /// Check a fact of the world as it stands. A script calls it after the
     /// steps of a beat that asks a question, so that the right answer is what
     /// `paros-consensus` did and not what the script's author remembers.

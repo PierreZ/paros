@@ -5,7 +5,7 @@
 //! proposer, then what goes wrong one fault at a time. The base run ends with
 //! a screen of choices; every other run ends with a way back to it.
 
-use super::{any, decree_outcome, kind};
+use super::{any, decree_outcome, kind, voted};
 use crate::paxos::action::{Action, Phase};
 use crate::paxos::level::common::open;
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
@@ -49,17 +49,6 @@ fn majority_voted(value: &'static str) -> impl Fn(&WorldView) -> bool {
             .filter(|node| node.accepted.iter().any(|vote| vote.value == value))
             .count();
         voters >= 2
-    }
-}
-
-/// The value that acceptor `id` voted for is `value`.
-fn voted(id: u64, value: &'static str) -> impl Fn(&WorldView) -> bool {
-    move |world| {
-        world
-            .nodes
-            .iter()
-            .find(|node| node.id == id)
-            .is_some_and(|node| node.accepted.iter().any(|vote| vote.value == value))
     }
 }
 
@@ -613,8 +602,23 @@ fn break_the_rule() -> Scenario {
         .play(open(8, "bravo"), "proposer 8 opens a ballot for bravo")
         .settle(phase1);
     run.beat("Acceptors 2 and 3 vote for bravo. Now two values are chosen.")
+        .find(
+            "Two values are chosen. Which step broke Paxos?",
+            &[
+                "Acceptor 2 promised ballot 1.8 as if it never voted",
+                "Acceptor 3 voted for bravo",
+                "Proposer 8 proposed bravo",
+            ],
+            0,
+            "No promise reported a vote, so proposer 8 was free to propose bravo, and acceptor 3 \
+             kept its own promise. Acceptor 2 broke the rule: its vote for alpha was gone, so the \
+             two majorities met at an acceptor with no memory.",
+        )
         .settle(|message| message.kind != "Commit")
-        .drop_all(kind("Commit"));
+        .drop_all(kind("Commit"))
+        .holds(voted(1, "alpha"), "acceptor 1 keeps its vote for alpha")
+        .holds(voted(2, "bravo"), "acceptor 2 votes for bravo")
+        .holds(voted(3, "bravo"), "acceptor 3 votes for bravo");
     back(
         &mut run,
         "A majority that forgets its vote is no longer a majority. So an acceptor keeps its \

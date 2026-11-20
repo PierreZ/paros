@@ -7,7 +7,7 @@
 //! choices; every other run ends with a way back to it. There is no flexible
 //! run: step 0.12 of the rework deleted `QuorumSystem::Flexible` (decision 27).
 
-use super::{any, decree_outcome, kind, log_outcome, touches};
+use super::{any, decree_outcome, kind, log_outcome, touches, voted};
 use crate::paxos::action::{Action, Phase};
 use crate::paxos::level::common::{crash, open, propose, start_election as elect};
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
@@ -212,8 +212,22 @@ fn break_the_rule() -> Scenario {
     .settle(kind("Prepare"))
     .settle(kind("Promise"))
     .beat("Proposer 8 gets bravo chosen. Two values are chosen.")
+    .find(
+        "Two values are chosen. What broke Paxos?",
+        &[
+            "Proposer 8 proposed bravo after a Phase 1 with no vote",
+            "The two proposers counted quorums that share no acceptor",
+            "Acceptors 3 and 4 voted for bravo",
+        ],
+        1,
+        "Each proposer followed Paxos inside its own half. The rule that broke is between the \
+         halves: every Phase 1 quorum must share an acceptor with every Phase 2 quorum.",
+    )
     .settle(|message| message.kind != "Commit")
-    .drop_all(kind("Commit"));
+    .drop_all(kind("Commit"))
+    .holds(voted(1, "alpha"), "acceptor 1 keeps its vote for alpha")
+    .holds(voted(3, "bravo"), "acceptor 3 votes for bravo")
+    .holds(voted(4, "bravo"), "acceptor 4 votes for bravo");
     back(
         &mut run,
         "Two quorums that share no acceptor cannot see each other. Every shape in paros keeps \

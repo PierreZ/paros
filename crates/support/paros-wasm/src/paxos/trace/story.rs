@@ -52,8 +52,10 @@ pub struct Beat {
 /// asks nothing, and five answers do not fit a phone screen.
 const ANSWERS: std::ops::RangeInclusive<usize> = 2..=4;
 
-/// One question before a beat plays. The reader predicts what the beat
-/// shows; a wrong answer costs nothing, and the beat plays after any answer.
+/// One question of a beat. Before the beat plays, the reader predicts what
+/// it shows; a wrong answer costs nothing, and the beat plays after any
+/// answer. With `after`, the beat plays first and the reader finds what went
+/// wrong in it: the "find the bug" question of a "Break the rule" run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
     /// The question.
@@ -64,6 +66,9 @@ pub struct Question {
     pub right: usize,
     /// Why it is right: one or two sentences, shown after the beat played.
     pub why: String,
+    /// The question is asked after the beat played, not before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after: bool,
 }
 
 /// One choice at the end of a beat: open another run of the same page at one
@@ -230,6 +235,19 @@ impl Beats {
     /// with a full stop, when the answers are fewer than two or more than
     /// four, when two answers are the same, or when `right` names no answer.
     pub(super) fn ask(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) {
+        self.put(asks, answers, right, why, false);
+    }
+
+    /// Ask the reader what went wrong, after the open beat played.
+    ///
+    /// # Panics
+    ///
+    /// As [`Beats::ask`].
+    pub(super) fn find(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) {
+        self.put(asks, answers, right, why, true);
+    }
+
+    fn put(&mut self, asks: &str, answers: &[&str], right: usize, why: &str, after: bool) {
         let open = self
             .beats
             .last_mut()
@@ -269,6 +287,7 @@ impl Beats {
             answers: answers.iter().map(ToString::to_string).collect(),
             right,
             why: why.to_string(),
+            after,
         });
     }
 
@@ -310,8 +329,8 @@ impl Beats {
         for (beat, end) in beats.iter_mut().zip(ends) {
             assert!(beat.from <= end, "beats are in step order");
             beat.to = end;
-            // A question predicts what the beat shows, so the beat shows
-            // something.
+            // A question predicts or judges what the beat shows, so the
+            // beat shows something.
             assert!(
                 beat.question.is_none() || beat.from < beat.to,
                 "a beat with a question has a step: {:?}",
@@ -400,6 +419,25 @@ mod tests {
         assert!(beats[0].question.is_none(), "the first beat asks nothing");
         let question = beats[1].question.as_ref().expect("the open beat asks");
         assert_eq!(question.answers[question.right], "Two");
+    }
+
+    #[test]
+    fn a_find_question_is_asked_after_its_beat() {
+        let mut beats = Beats::default();
+        beats.open(0, "Two values are chosen.");
+        beats.find(
+            "Which step broke Paxos?",
+            &["The wipe", "The vote"],
+            0,
+            "The wipe lost a vote.",
+        );
+        beats.open(2, "Back.");
+        beats.ask("Again?", &["Yes", "No"], 0, "Yes.");
+        let beats = beats.finish(3);
+        let find = beats[0].question.as_ref().expect("the first beat asks");
+        assert!(find.after, "a find question waits for the beat");
+        let ask = beats[1].question.as_ref().expect("the second beat asks");
+        assert!(!ask.after, "an ask question comes before the beat");
     }
 
     #[test]

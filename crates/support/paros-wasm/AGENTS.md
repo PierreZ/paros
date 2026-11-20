@@ -59,7 +59,8 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   a page reads (#1146 (recorder for the animated chapters)): a script opens beats with
   `Recorder::beat("one sentence.")` (written next to its actions; a beat with no step is an
   introduction screen), may ask a question before it plays with
-  `Recorder::ask(question, answers, right, why)` and pins the right answer to the world with
+  `Recorder::ask(question, answers, right, why)`, or ask what went wrong after it played with
+`Recorder::find` (same arguments; the "find the bug" question of a "Break the rule" run), and pins the right answer to the world with
   `Recorder::holds(fact, says)` after the beat's steps (a `holds` that fails stops the trace, so
   a change of the core cannot leave a wrong answer on the site), and ends one with
   `Recorder::choice(label, run, beat)`, which opens
