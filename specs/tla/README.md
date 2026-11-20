@@ -134,7 +134,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
-| Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
+| Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301 (a resent write across a seal)) | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
@@ -2422,6 +2422,11 @@ applied iff the leader is `None`, else `wrongmode`.
 | `dedup_after_twice` | ci | violation of `ExactlyOnce`: the same; the writer then writes it again, unfenced, and it is in the journal two times |
 | `basis_stale` | ci | violation of `BasisFresh`: a writer that won keeps the basis it had and aims at a position of the mode before |
 | `boundary_early` | ci | violation of `FenceTrue`: the first leader of the next segment reads the matchmaker record before the seal wrote the uuid, and proposes the `Fence` with the old value |
+| `reach_below` | ci | violation of `NoBelow`: a resend after the seal finds its write below the boundary and is answered `below` |
+| `seal_global` | ci | pass: the fold of the next segment reads the old record at apply (rule 2 of #1301); 1.2 million distinct states |
+| `seal_local` | ci | violation of `RefusalFinal`: the fold of the next segment finds no record at a position of the old segment and answers `taken` (the code of `apply_write` today) |
+| `seal_local_twice` | ci | violation of `ExactlyOnce`: the same; the writer then writes it again, unfenced, and it is in the journal two times |
+| `seal_digest` | ci | violation of `RefusalFinal`: the boundary state keeps the last record of the old segment only, and the writer pipelined two writes |
 
 The answer to #1274:
 
@@ -2445,6 +2450,32 @@ The answer to #1274:
   only after the seal wrote it (`seal_long`, `boundary_early`).
 - **Open**: the leader of a fresh journal (`None` or unset). Both pass; the journal state model
   (#1189) decides.
+
+The answer to #1301 (a resent write across a seal). The fold of a segment holds the boundary
+state (`next_seq`, `first_seq`, the leader uuid), not the records of the old segment (#1271).
+`Lookup` selects what it answers for a fenced write whose position is below `next_seq` and whose
+record is in the old segment:
+
+- **`"local"`, the code today** (`apply_write` reads `accepted_at` in its own log): it finds no
+  record and answers `taken`. The trace of `seal_local`: `SetLeader(a)`, a write at position 1
+  applied at slot 3, the seal at slot 4, the resend at slot 5 answered `taken` for a write that
+  is in the journal. A writer that then writes it again lands it two times
+  (`seal_local_twice`). Exactly-once breaks.
+- **`"boundary"`, the rule** (rule 1 of the issue): the fold answers `below`. It is not final,
+  like `truncated`. The client reads that position from the replica set of the old segment
+  (reads route to the segment that holds the position, #1271), and the sealed segment does not
+  change, so the read gives the fate: the record is the write (written), another record (not
+  written, final), or a position below `first_seq` (`truncated`). All of `seal_long` passes, and
+  `reach_below` shows the answer happens. The fold stays local: apply reads nothing outside the
+  segment.
+- **`"global"`** (rule 2): the fold reads the old record at apply. It is safe too
+  (`seal_global`), but apply then waits for a read of another replica set (or of the offloaded
+  object), so the fold of a segment is no longer a function of its own log. Not selected.
+- **`"digest"`** (rule 3): the boundary state keeps the last `DigestSize` records of the old
+  segment. It is safe only while the digest covers every write that a writer can have in flight
+  across the seal: with one record and two pipelined writes it fails (`seal_digest`), with two it
+  passes. The pipeline depth of a writer has no bound in the journal, so no digest size is safe.
+  Not selected.
 
 ### `segment-records/`: segment records across a matchmaker set handover, for #1275
 

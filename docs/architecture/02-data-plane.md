@@ -69,6 +69,18 @@ each write of the batch unanswered (at-least-once, §2.4). TLC checks the rule i
 `specs/tla/compartments/` (`AckedChosen`; the control `held_slot` loses an acked write, the
 control `held_notleader` lands a write two times) and the resend in `specs/tla/multi-writer/`.
 
+**A resend across a seal is answered `Below`** (#1301 (a resent write across a seal), TLC
+2026-11-20, `specs/tla/multi-writer/`). The fold of a segment holds the boundary state, not the
+records of the old segment (§2.10, #1271), so it cannot tell a `Duplicate` from a refusal at a
+position of the old segment. It answers `Below` there. `Below` is not final, like `Truncated`.
+The client reads that position from the replica set of the old segment: a sealed segment does
+not change, so the record there tells it the fate of its write, written or not (or `Truncated`
+below `first_seq`). Without the rule, the fold answers the resend of a written write "position
+taken", and a writer that writes it again lands it two times (controls `seal_local`,
+`seal_local_twice`). A fold that reads the old record at apply is safe too (`seal_global`), but
+apply would wait for another replica set. A digest of the last writes in the boundary state is
+safe only while it covers the writer's whole pipeline (`seal_digest`).
+
 The client pipelines a single-writer journal's writes with `paros::client::Pipeline` (#597
 (several writes in flight per journal)): one writer's leadership, shared by its callers, each
 write opened at the position after the last one and sent without waiting for the answer of the
