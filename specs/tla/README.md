@@ -135,6 +135,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
 | Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
+| Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -2416,3 +2417,67 @@ The answer to #1274:
   only after the seal wrote it (`seal_long`, `boundary_early`).
 - **Open**: the leader of a fresh journal (`None` or unset). Both pass; the journal state model
   (#1189) decides.
+
+### `segment-records/`: segment records across a matchmaker set handover, for #1275
+
+In design A (`docs/architecture/02-data-plane.md` section 2.10) the matchmakers of a journal hold
+its segment records and its matchmaker record (the controller term, the leader uuid). Every change
+is a compare-and-set on that state: the seal, the retire, the offload mark, the controller
+election and the reshape call. `handover/` checks the floor and the configuration register across
+a handover of the matchmaker set, but it has no segment records. This model runs each record write
+at the same time as a handover.
+
+The record is one value `<<st, end, term, cfg>>`: the state of one segment (open, sealed, retired,
+offloaded), the seal end (one value stands for the pair that the seal's compare-and-set writes,
+`next_seq` and the leader uuid, PR #1277), the controller term, and the count of reshapes. The
+matchmakers hold it as the compare-and-set register of `cas-register/` (FoundationDB's
+`LocalGenerationReg`): the operation with index `i` reads at a majority of one matchmaker
+generation (each member raises its read generation to `i`), checks its condition on the value of
+the highest write, and writes at generation `i`, one member at a time; a member takes the write
+only if its read generation is at most `i` and its write generation is below `i`. The operation
+is done at a majority. Every message is fenced by the matchmaker generation. The set `{X, Y, Z}`
+hands over to `{Y, Z, W}` with the steps of `handover/` (stop, close on a frozen majority,
+bootstrap, decree, activate), at any point of the record writes, and one machine can go down for
+good. The old acceptors retire when a retire write is done; a replica drops its copy when a write
+of the offload mark is done (the offloader's, or its own write of the same value).
+
+| Check | CI | Result |
+|---|---|---|
+| `seal` | ci | pass: two first leaders race to seal, then a retire; every invariant; 4.1 million distinct states, about 2.5 minutes with 4 workers |
+| `offload` | ci | pass: from a retired record, the offload mark and a replica that writes it again before it drops; every invariant; 0.46 million distinct states |
+| `control` | ci | pass: two elections, then a reshape of the controller of term 1, deposed by the second election; every invariant; 5.1 million distinct states |
+| `mixed` | long | pass: from a sealed record, a retire, an election and a reshape of term 1; every invariant; 7.5 million distinct states, about 5 minutes |
+| `reach_seal`, `reach_offload` | ci | violation of `NoCrossRun`: a write is done at each generation, then the old acceptors retire (or a replica drops its copy) |
+| `close_one` | ci | violation of `Carried`: the successor copies the register of one member of the stop quorum, not the highest write; a seal that a majority took is lost |
+| `close_one_term` | ci | violation of `ReshapeFenced`: the same, and the successor holds term 1 after the election of term 2; the deposed controller's reshape is done |
+| `frozen_serves` | ci | violation of `Carried`: a frozen member still takes writes, so a compare-and-set is done on the old set after the stop quorum closed; the successor does not hold it |
+| `drop_read` | ci | violation of `DropKept`: a replica drops its copy after a read that shows the offload mark; the mark was on one member only, and a majority that does not hold it (the successor's too) says retired |
+
+The invariants: `Carried` (each write that a majority took is returned by each serving majority
+of its generation and of each later one, or a later value), `NoBackward` (the done writes, in
+the order of their generations, never move back: the state never returns, the seal end never
+changes, the term and the reshapes never go down), `SealOnce` (every done seal wrote the same
+end, and every serving majority returns that end or none), `ReshapeFenced` (a reshape of term 1
+is done only if no earlier election raised the term above 1), `RetireKept` and `DropKept` (the
+old acceptors retire, and a replica drops its copy, only when every serving majority, old or
+new, holds the record at or after retired, or offloaded).
+
+The answer to #1275:
+
+- **The handover carries every record write that a majority took.** The successor takes the
+  highest write of the stop quorum and the highest read generation, as `handover/` does for the
+  configuration register (`close_one`, `close_one_term`). No record moves back and the seal end
+  is written once.
+- **A compare-and-set on the old set after the stop fails**, because a frozen member takes
+  nothing (`frozen_serves`).
+- **A deposed controller changes nothing across the handover**: the term crosses with the
+  record, and the reshape checks it (`control`, `close_one_term`).
+- **A rule that the model found: a replica drops its copy only after a write of the offload mark
+  is done at a majority**: the offloader's own compare-and-set (it then tells the replicas), or
+  the replica's own compare-and-set of the same value. A read that shows the mark is not enough
+  (`drop_read`): the mark can be on a minority, and a read of another majority, or the successor
+  after a handover, says retired. The same holds for each step that acts on a record: it acts on
+  a write that it saw done, never on a read alone. This control fails with no handover too; the
+  handover is one more way to lose a mark that a minority holds.
+- No decision is refuted.
+

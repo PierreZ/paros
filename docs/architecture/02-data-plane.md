@@ -389,7 +389,23 @@ checked, each with a control that TLC breaks:
 - A leader's writes are fenced by its promise quorum, never by the table version, so a change of
   a sealed segment (retire, offload, trim) never stops the tail (as in Delos).
 - A replica drops its copy of a segment only after the record says offloaded. The object key is
-  the journal and the segment, so the record stores no location.
+  the journal and the segment, so the record stores no location. **"Says offloaded" means a
+  write of the mark that is done at a matchmaker majority** (#1275 (segment records across a
+  matchmaker handover), checked by `specs/tla/segment-records/`): the offloader's own
+  compare-and-set, after which it tells the replicas, or the replica's own compare-and-set of the
+  same value. A read that shows the mark is not enough: the mark can be on a minority only, and
+  another majority, or the successor of a matchmaker handover, says retired (control
+  `drop_read`). Each step that acts on a record (the retire of the old acceptors, a drop) acts on
+  a write that it saw done, never on a read alone.
+- **The records cross a handover of the matchmaker set** (#1275, `specs/tla/segment-records/`).
+  The records and the matchmaker record are one compare-and-set register for each journal, fenced
+  by the matchmaker generation. The handover's successor takes the highest write of the stop
+  quorum and the highest read generation, as for the configuration register (`handover/`), and
+  a frozen matchmaker takes nothing. So each record write that a majority took is in the
+  successor, no record moves back, the seal end is written once, a compare-and-set on the old
+  set after the stop fails, and a deposed controller's reshape fails across the handover too.
+  Controls: a successor that copies one member of the stop quorum (`close_one`,
+  `close_one_term`), a frozen member that takes writes (`frozen_serves`).
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in

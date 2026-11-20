@@ -91,7 +91,11 @@ write judged before its uuid so a resend resolves a held write, the writer's bas
 SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
 (`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
 segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
-(reshape with a column below quorum)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+(reshape with a column below quorum)), segment records across a matchmaker set handover
+(`specs/tla/segment-records/`: the seal, the retire, the offload mark, the controller election and
+the reshape call as compare-and-sets on the matchmaker register while the set hands over; a
+replica drops its copy only after a write of the offload mark is done at a majority; #1275
+(segment records across a matchmaker handover)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
