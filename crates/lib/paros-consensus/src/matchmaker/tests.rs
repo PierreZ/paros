@@ -992,7 +992,10 @@ fn a_gc_ack_from_a_frozen_generation_says_it_is_stopped() {
 #[test]
 fn a_gc_ack_names_the_set_in_force_only_to_a_request_behind_it() {
     let mut ahead = fresh(0);
-    let ack = answer_gc(&mut ahead, &gc_request(MatchmakerGeneration(3), ballot(5, 1)));
+    let ack = answer_gc(
+        &mut ahead,
+        &gc_request(MatchmakerGeneration(3), ballot(5, 1)),
+    );
     assert!(!ack.applied);
     assert_eq!(ack.newer, None, "an earlier set is not a later one");
     assert!(!ack.stopped);

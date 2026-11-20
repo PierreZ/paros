@@ -178,11 +178,7 @@ fn a_promise_page_of_the_wrong_shape_is_refused() {
     let fau = |slots: &[u64]| -> BTreeMap<Slot, Ballot> {
         slots.iter().map(|&s| (Slot(s), ballot(0, 1))).collect()
     };
-    let valid = |expected: u64,
-                 accepted: &[u64],
-                 faulty: &[u64],
-                 from: u64,
-                 next: Option<u64>| {
+    let valid = |expected: u64, accepted: &[u64], faulty: &[u64], from: u64, next: Option<u64>| {
         promise_page_shape_valid(
             Slot(expected),
             &acc(accepted),
@@ -199,22 +195,37 @@ fn a_promise_page_of_the_wrong_shape_is_refused() {
     assert!(!valid(2, &[3], &[], 3, None), "a page off its cursor");
     // No entry sits below the page's start.
     assert!(!valid(2, &[1, 4], &[], 2, None), "a record below the start");
-    assert!(!valid(2, &[4], &[1], 2, None), "a faulty entry below the start");
+    assert!(
+        !valid(2, &[4], &[1], 2, None),
+        "a faulty entry below the start"
+    );
     // The two maps are disjoint.
-    assert!(!valid(2, &[4], &[4], 2, None), "a slot both readable and faulty");
+    assert!(
+        !valid(2, &[4], &[4], 2, None),
+        "a slot both readable and faulty"
+    );
     // A continued page carries an entry, and its cursor passes its start and
     // every entry of both maps.
     assert!(!valid(2, &[], &[], 2, Some(3)), "an empty continued page");
     assert!(!valid(2, &[2], &[], 2, Some(2)), "a cursor at the start");
-    assert!(!valid(2, &[2, 5], &[], 2, Some(4)), "a cursor before a record");
-    assert!(!valid(2, &[2], &[5], 2, Some(4)), "a cursor before a faulty entry");
+    assert!(
+        !valid(2, &[2, 5], &[], 2, Some(4)),
+        "a cursor before a record"
+    );
+    assert!(
+        !valid(2, &[2], &[5], 2, Some(4)),
+        "a cursor before a faulty entry"
+    );
     // At most the ceiling, across both maps.
     let ceiling = PROMISE_BATCH as u64;
     let readable: Vec<u64> = (0..ceiling / 2).collect();
     let damaged: Vec<u64> = (ceiling / 2..ceiling).collect();
     assert!(valid(0, &readable, &damaged, 0, None));
     let over: Vec<u64> = (ceiling / 2..=ceiling).collect();
-    assert!(!valid(0, &readable, &over, 0, None), "a page past the ceiling");
+    assert!(
+        !valid(0, &readable, &over, 0, None),
+        "a page past the ceiling"
+    );
 }
 
 /// A faulty report above the best `have` blocks the slot (Case 3) until
