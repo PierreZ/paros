@@ -413,7 +413,12 @@ stateless machines and also owns scrubbing; after a zone loss it holds and alert
 unsafe recover; the autoscaling decisions get heavy tests. **The v1 controller has no service
 level objectives and no scaling driven by latency or load** (Pierre, 2026-11-20): it heals,
 rolls, scrubs and offloads, and it changes a count only to replace a member or a role that is
-gone. The minimum interval between two reshapes, the suspicion windows and the cap of the rate
+gone. **v1 stays simple** (Pierre, 2026-11-20): each role publishes its metrics to the
+controller role, and which measure drives which action is decided later, after more tests. So
+the catalogue below is the reference list of measures. Its actions bind v1 only where heal
+needs them: the liveness measures, the controller's pace, and the guards of the protocol (the
+journal states, the flags, the retire guards, `data_lost`, `drop_before_mark`). Every other
+action in the table is a proposal, **decided later**. The minimum interval between two reshapes, the suspicion windows and the cap of the rate
 limiter are **Open**: no number is set until Pierre gives one or a source gives one (the
 controller's crate, after #1189 (journal state model), decides them).
 
@@ -518,7 +523,8 @@ blocks on a slot that it cannot prove empty (#1216 (truncation model, part 2)).
 
 P = a protocol fact; O = an operational signal. A window, a target or a rate without a number
 is **Open** (the first paragraph of this section). "Shown" means the status shows the measure and
-the v1 controller does not act on it.
+the v1 controller does not act on it. An action outside heal, the protocol guards and the controller's pace is
+a proposal, decided later (the first paragraph of this section).
 
 | Level | Measure | Kind | Definition | Unit | States and the fixed action |
 |---|---|---|---|---|---|
