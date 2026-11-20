@@ -271,8 +271,8 @@ pub struct ColocatedNode {
     /// node back in on every re-probe, and each campaign it opened raised
     /// the highest round past the won leadership's own campaign (witness
     /// replay-recipe 14417936395176983165
-    /// 28163:4735761864443555,79094:11194683813547561891 on 45e0926: no
-    /// leader of the cell control journal for the whole tail). A probe
+    /// 28163:4735761864443555,79094:11194683813547561891 on 45e0926: the
+    /// journal had no leader for the whole tail). A probe
     /// quorum that names it still adopts it. `Ballot::zero()` until then;
     /// volatile.
     refuted_fact: Ballot,

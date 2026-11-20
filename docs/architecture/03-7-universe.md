@@ -241,20 +241,17 @@ Copy: the tenant coordinator reconfigures each journal to a `C_new` whose member
 `(region, az)` failure domains over the target cell's machines; catch-up crosses regions and needs a
 throttle knob; the matchmaker set hands over by generation. Flip: `SetLeader` on the tenant's
 control journal. Redirect: the directory pointer, folded by the resolvers. Forget: the old cell
-releases the bookings. With the `cell_id` in the configuration (below), the copy itself names
-the owning cell. The reverse move, from a multi-region cell to a regional one, is the same under
+releases the bookings. The reverse move, from a multi-region cell to a regional one, is the same under
 the regional rule.
 
-**The cell inside the configuration** (decided on 2026-10-07, #215, #232; open until then). A
-matchmaker's registry binds an acceptor set and its quorum system to a ballot, and from M11
-`AcceptorConfig` also carries the configuration's `cell_id`, in the same single format bump as
-its failure domains (section 5). Node ids are universe-unique, so a reconfiguration onto another cell's
-machines already moves a journal's data; with the `cell_id` in the configuration the move is
-itself decided by Paxos: the effective configuration (the highest-ballot reconfiguration a
-matchmaker quorum holds) names the cell that owns the journal, the directory is a cache of that
-fact, and a reconfiguration naming another cell for a cell tenant's journal can be refused where
-it is registered. The cost is one field in `AcceptorConfig` that the core never decides on, and
-every node knowing its own cell.
+**The consensus core and the journal know no cell** (decided by Pierre on 2026-11-20, #1264
+(remove the cell from paros-consensus); this replaces "the cell inside the configuration" of
+2026-10-07, #215, #232). Cells, `cell init` and how a journal's first configuration is agreed
+are the upper stack's problem. The journal takes an initial configuration as input, and
+`AcceptorConfig` carries no `cell_id`. Node ids are universe-unique, so a reconfiguration onto
+another cell's machines moves a journal's data with no cell in the configuration. The layer
+above the journal records which cell owns a journal, and refuses a move it does not permit
+before it asks for the reconfiguration.
 
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
 tombstone set so it cannot silently rejoin), moving namespaces between cells, moving the universe

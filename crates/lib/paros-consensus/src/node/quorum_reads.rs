@@ -250,10 +250,9 @@ impl ColocatedNode {
     /// The leader's own vote is filled too, when it reads or answers a
     /// `PreRead`: a handoff successor (`relinquish_to`) need not sit in the
     /// minter's promise quorum, so its own acceptor can hold the orphan,
-    /// and no peer ever reports it to the leader. Red→green: recipe
-    /// 17501933643633293259 on #938's 36e0deb (the successor's own vote at
-    /// slot 14 under round 7 sat at its frontier; every read at every member
-    /// waited on it, and the cell coordinator never published its term).
+    /// and no peer ever reports it to the leader. Without the fill, that
+    /// orphan sits at the successor's frontier and every read at every
+    /// member waits on it for ever.
     ///
     /// [`Control::Noop`]: crate::journal::Control::Noop
     fn fill_to_watermark(&mut self, watermark: Option<Slot>) {

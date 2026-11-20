@@ -11,17 +11,13 @@
 //! place), no gap fill and no recovery. Its acceptors run the same
 //! [`Acceptor`](crate::acceptor::Acceptor) over the same one slot.
 //!
-//! Two decrees run on it:
-//!
-//! - **The matchmaker handover** (`matchmaker/reconfigurer.rs`): the
-//!   successor set, over the matchmakers of `M_g` under a majority — paros
-//!   supports **majority matchmaker quorums only**
-//!   ([`MatchmakerSet::has_quorum`](crate::membership::MatchmakerSet::has_quorum) is the
-//!   same rule), and the handover is safe exactly under that model.
-//! - **`cell init`** (#277, `paros::machine`): the cell plan, over the
-//!   listed initial members under a majority, with [`Phase1Rule::EveryAcceptor`]:
-//!   Phase 1 waits for every listed member, so a wiped member cannot hide
-//!   a vote that only the others hold.
+//! In the core, one decree runs on it: **the matchmaker handover**
+//! (`matchmaker/reconfigurer.rs`), the successor set, over the matchmakers
+//! of `M_g` under a majority. paros supports **majority matchmaker quorums
+//! only** ([`MatchmakerSet::has_quorum`](crate::membership::MatchmakerSet::has_quorum)
+//! is the same rule), and the handover is safe exactly under that model.
+//! A caller above the core can run any other one-shot decision on it, with
+//! the [`Phase1Rule`] its acceptors need.
 //!
 //! The caller names the acceptors and their quorum system; every quorum
 //! question still crosses `membership`.
@@ -49,10 +45,10 @@ pub enum Phase1Rule {
     Quorum,
     /// Only once every acceptor promised, and the promises hold a Phase-1
     /// quorum too. The decree then adopts the highest vote of every
-    /// acceptor (P2c over all of them). `cell init` runs this rule
-    /// (#246): an acceptor that lost its disk answers as a new acceptor
-    /// with no vote, so a Phase 1 that heard only some acceptors could
-    /// miss a vote that the others hold.
+    /// acceptor (P2c over all of them). A decree whose acceptors can lose
+    /// their disk runs this rule (#246): an acceptor that lost its disk
+    /// answers as a new acceptor with no vote, so a Phase 1 that heard only
+    /// some acceptors could miss a vote that the others hold.
     EveryAcceptor,
 }
 

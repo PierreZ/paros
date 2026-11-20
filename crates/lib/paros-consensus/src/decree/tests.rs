@@ -177,7 +177,7 @@ fn two_votes_at_one_ballot_are_a_programmer_error() {
     let _ = d.on_promise(MatchmakerId(1), Some((ballot(1, 0), ids(&[2]))));
 }
 
-/// `cell init`'s rule (#246): under [`Phase1Rule::EveryAcceptor`] a
+/// The rule for acceptors that can lose their disk (#246): under [`Phase1Rule::EveryAcceptor`] a
 /// majority of promises is not enough, and the vote that only the last
 /// acceptor reports is the one the decree adopts.
 #[test]
