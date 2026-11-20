@@ -19,7 +19,7 @@ whose promise is a ballot of a later configuration ends the read (`quorum_read.r
 - On the partitioned grid, the default grid of the journal (#1257 (quorum everywhere) excludes
   the full grid), two Phase-1 quorums of one grid meet, so the reader always asks an acceptor
   that promised the new ballot: the fence alone passes (`part_fence`).
-- On the full grid two rows do not meet, and the fence also needs the seal of each row of
+- On the full grid (which the journal does not offer, section 2.11 of `docs/architecture/02-data-plane.md`, but `paros-consensus` still builds for other users) two rows do not meet, and the fence also needs the seal of each row of
   decision 31 (#1209 (seal each row of a full grid)): `fence_rows` passes, and each half alone
   fails (`fence_only`, `seal_only`).
 - Rule 2 (a row and a whole write column) passes on the full grid with no seal of each row

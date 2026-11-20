@@ -362,7 +362,7 @@ a segment's replica set, each step completes:
 |---|---|
 | Write, and the decided `Truncate` | `F + 1` acceptors of one column; a stuck round moves to the next column (#533) |
 | Election | a matchmaker majority, then `F + 1` acceptors of every column of each configuration of `H_b` |
-| Leaderless read | `F + 1` acceptors of every column of the configuration in force, then a matchmaker majority for the segment-record check (#1254) |
+| Leaderless read | `F + 1` acceptors of every column of the configuration in force; with the segment-record check, also a matchmaker majority (#1254, **Open** in section 2.10: the fence of the code needs no matchmaker read) |
 | Seal | a Phase-1 quorum of the old grid, then a matchmaker majority for the compare-and-set of the end slot |
 | Retire | `F + 1` replicas of the segment, then a matchmaker majority |
 | Offload mark, record of a trim | a matchmaker majority |
