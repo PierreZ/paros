@@ -29,9 +29,11 @@
 (*     ballot whose configuration names it, or at its own ballot: a leader *)
 (*     records each round it opens (`record_own_round`), and a vote that   *)
 (*     `C_b` does not name counts toward no quorum. A node that `C_b` does *)
-(*     not name writes a record at `b` only for a value chosen at `b`: it  *)
-(*     learned the value (`mark_chosen`) above its promise, so the walk    *)
-(*     sees an "accept". A value is chosen at a ballot once a Phase-2      *)
+(*     not name writes a record at `b` only for a value chosen at `b` or   *)
+(*     below: it learned the value (`mark_chosen`) from a `Commit` of `b`  *)
+(*     above its promise, so the walk sees an "accept". By P2c every       *)
+(*     proposal at or above the choosing ballot carries the same value, so *)
+(*     the record is safe. A value is chosen at a ballot once a Phase-2    *)
 (*     quorum of the configuration of that ballot voted for it;            *)
 (*   - "gcask": the leader asks the matchmakers to forget the ballots      *)
 (*     below its own (`GcAsk`). The model's guard is single-decree (a      *)
@@ -225,16 +227,17 @@ TAccept ==
            THEN /\ [type |-> "2a", bal |-> b, slot |-> e.slot, val |-> e.val] \in lmsgs
                 /\ lprom' = [lprom EXCEPT ![a] = b]
                 /\ lmsgs' = lmsgs \cup {[type |-> "2b", acc |-> a, bal |-> b, slot |-> e.slot, val |-> e.val]}
-           ELSE /\ LChosenAt(b, e.slot, e.val)
+           ELSE /\ \E c \in 1..b : LChosenAt(c, e.slot, e.val)
                 /\ UNCHANGED <<lprom, lmsgs>>
   /\ UNCHANGED <<learned, lphase, lnext, lfront>>
   /\ UNCHANGED vars
 
-\* A node keeps the value chosen at ballot b as its record of slot s,
-\* below its promise (`mark_chosen`). It is no vote: it sends no 2b.
+\* A node keeps a value chosen at ballot b or below as its record of slot s
+\* at b, below its promise (`mark_chosen` keeps the ballot of the `Commit`
+\* it learned the value from). It is no vote: it sends no 2b.
 TRecord ==
   /\ e.event = "record" /\ IsNode("node") /\ IsBallot /\ IsSlot /\ IsValue
-  /\ LChosenAt(e.bal, e.slot, e.val)
+  /\ \E c \in 1..e.bal : LChosenAt(c, e.slot, e.val)
   /\ lvote' = [lvote EXCEPT ![e.node][e.slot] = [bal |-> e.bal, val |-> e.val]]
   /\ UNCHANGED <<lprom, learned, lphase, lnext, lfront, lmsgs>>
   /\ UNCHANGED vars
