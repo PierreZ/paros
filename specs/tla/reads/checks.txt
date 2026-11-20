@@ -27,9 +27,15 @@ grid_full_seal      pass       ci
 grid_partitions     pass       long  120
 # A second read: a served read also covers what an earlier read returned.
 reads_plain_again        pass       ci
-# A finding, not a control: the decision hold of the planned bypass does not
-# order two reads (#1270 (bypass read order)). The rule is Open until #579.
-reads_bypass_hold_again  violation  ci
+# The read order of the planned bypass (#1270 (bypass read order)): the rule
+# `ReadHold = "prefix"` passes. The controls: no read rule ("off"), and the
+# two weaker candidates, a gate on the read basis and a gate on the serve.
+reads_bypass_hold_again              violation  ci
+reads_bypass_hold_again_p212         violation  ci
+reads_bypass_hold_again_basis        violation  ci
+reads_bypass_hold_again_serve        violation  ci
+reads_bypass_hold_again_prefix       pass       ci
+reads_bypass_hold_again_prefix_p212  pass       ci
 # Two slots, and three leaderships with a reader on the middle one.
 reads_two_slots          pass       long  50
 reads_three              pass       long  50
