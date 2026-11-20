@@ -91,7 +91,11 @@ write judged before its uuid so a resend resolves a held write, the writer's bas
 SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
 (`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
 segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
-(reshape with a column below quorum)), the offload of sealed segments (`specs/tla/offload/`:
+(reshape with a column below quorum)), segment records across a matchmaker set handover
+(`specs/tla/segment-records/`: the seal, the retire, the offload mark, the controller election and
+the reshape call as compare-and-sets on the matchmaker register while the set hands over; a
+replica drops its copy only after a write of the offload mark is done at a majority; #1275
+(segment records across a matchmaker handover)), the offload of sealed segments (`specs/tla/offload/`:
 the offloader's full copy, conditional put and compare-and-set mark, a found object read and
 marked whatever its release, the delete of the key by a mark that finds the record trimmed, the
 scrub of the objects below the trim floor, the drop after the mark; #1256 (offload races and the
@@ -175,7 +179,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
-  `Mutants` workflow runs every mutant of the core (about 2,850) in 16 shards each Sunday and on
+  `Mutants` workflow runs every mutant of the core (about 2,850) in 24 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
   for an edit that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
