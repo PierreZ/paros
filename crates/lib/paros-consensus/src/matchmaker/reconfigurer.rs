@@ -17,8 +17,8 @@
 //!   |             `Proposer` + `Acceptor` roles over a one-slot log, a majority of M_g
 //!   |             for both phases — the only quorum model paros
 //!   |             supports for matchmakers): Phase 1 at a fresh ballot strictly above
-//!   |             the stop quorum's decree promises (a rebooted node must never reuse
-//!   |             a ballot of its earlier incarnation), P2c adopts a competing proposal
+//!   |             the round on disk (a rebooted node must never reuse a ballot of its
+//!   |             earlier incarnation) and the stop quorum's decree promises, P2c adopts a competing proposal
 //!   |             already voted, Phase 2 with the selected value; a Nack reopens
 //!   |             higher on the driver's next re-send
 //!   v
@@ -38,16 +38,22 @@
 //! a proposal: `Chosen` is sent only from the `Publishing` phase, which is
 //! entered only on a Phase-2 quorum.
 //!
-//! The reconfigurer holds no durable state. A crash loses the proposal, and
-//! the next attempt (this node's or another's) re-runs the same steps: the
-//! stop is idempotent, the bootstrap is keyed by the proposed set, and the
-//! decree's votes are durable at the matchmakers, so the retry either adopts
-//! what was already chosen or completes what was started. The one thing a
-//! fresh incarnation must not do is reuse a decree ballot its predecessor
-//! may have had a value accepted at: the `Stopped` replies carry each frozen
-//! member's decree promise, and the decree opens strictly above their
-//! maximum (the handover model checker, `crate::models::handover`, found the
-//! reuse on its seed 103 — two values at one ballot).
+//! The reconfigurer's only durable state is its decree round. A crash loses
+//! the proposal, and the next attempt (this node's or another's) re-runs the
+//! same steps: the stop is idempotent, the bootstrap is keyed by the proposed
+//! set, and the decree's votes are durable at the matchmakers, so the retry
+//! either adopts what was already chosen or completes what was started. The
+//! one thing a fresh incarnation must not do is reuse a decree ballot its
+//! predecessor may have had a value accepted at. So the driver writes each
+//! new round before the batch that carries it leaves
+//! ([`ReconfigurerReady::round`]), and a new incarnation starts from the round
+//! on disk ([`MatchmakerReconfigurer::new`]). The floor of the stop quorum
+//! (each `Stopped` carries the member's decree promise) does not give this
+//! alone: a `Stopped` carries no incarnation, so a reply sent to an earlier
+//! incarnation can complete the stop quorum of a later one with a floor below
+//! a round the earlier one used (#1229 (a stale `Stopped` reply reuses a
+//! decree ballot), `specs/tla/experiments/stale-stopped/`). The decree still
+//! opens above the floor, which skips rounds the matchmakers would refuse.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -221,16 +227,56 @@ pub enum ReconfigurerStep {
 ///
 /// # Order
 ///
-/// 1. Send [`ReconfigurerReady::requests`]. There is no durability step:
-///    the reconfigurer holds no durable state of its own (a crash loses the
-///    proposal and the next attempt re-runs the idempotent steps).
-/// 2. Call [`ReconfigurerReady::advance`] to release the gate.
+/// 1. Write [`ReconfigurerReady::round`] to disk when it is `Some`, durably,
+///    before anything of the batch leaves. The decree round is the
+///    reconfigurer's only durable state; the rest of a handover is lost in a
+///    crash, and the next attempt runs the idempotent steps again.
+/// 2. Send [`ReconfigurerReady::requests`].
+/// 3. Call [`ReconfigurerReady::advance`] to release the gate.
 #[must_use = "a ReconfigurerReady must be processed and then advanced; a dropped one keeps its batch, which the next ready() returns again"]
 pub struct ReconfigurerReady<'a> {
     reconfigurer: &'a mut MatchmakerReconfigurer,
 }
 
 impl ReconfigurerReady<'_> {
+    /// The decree round the driver writes to disk before it sends the batch,
+    /// or `None` when the batch opens no new round. At the next boot the
+    /// driver gives the round on disk to [`MatchmakerReconfigurer::new`].
+    ///
+    /// A decree ballot has one value only if no two incarnations of a node
+    /// open the decree at one round. The floor of the stop quorum does not
+    /// give that: a `Stopped` reply carries no incarnation, so a reply sent to
+    /// an earlier incarnation can complete the stop quorum of a later one with
+    /// a floor below a round the earlier one used (#1229 (a stale `Stopped`
+    /// reply reuses a decree ballot), `specs/tla/experiments/stale-stopped/`).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn round(&self) -> Option<u64> {
+        let r = &*self.reconfigurer;
+        // A round to write is the round the next decree request carries,
+        // and it is above the round already on disk.
+        if let Some(round) = r.unpersisted {
+            assert!(
+                round == r.round,
+                "the round to write is the last round minted"
+            );
+            assert!(
+                round > r.durable,
+                "the round to write is above the round on disk"
+            );
+        } else {
+            assert!(
+                r.round == r.durable,
+                "a batch with no round to write sends a round on disk"
+            );
+        }
+        r.unpersisted
+    }
+
     /// The requests the running phase wants on the wire, in order.
     ///
     /// # Panics
@@ -251,6 +297,20 @@ impl ReconfigurerReady<'_> {
         if !self.reconfigurer.is_busy() {
             assert!(requests.is_empty(), "an idle reconfigurer sends nothing");
         }
+        // Persist before send: no decree request carries a round above the
+        // round that this batch writes or that is already on disk.
+        let written = self
+            .reconfigurer
+            .unpersisted
+            .unwrap_or(self.reconfigurer.durable);
+        assert!(
+            requests.iter().all(|(_, r)| match r {
+                ReconfigureRequest::DecreePrepare { ballot, .. }
+                | ReconfigureRequest::DecreeAccept { ballot, .. } => ballot.round <= written,
+                _ => true,
+            }),
+            "a decree request carries a round that is on disk before it leaves"
+        );
         requests
     }
 
@@ -262,12 +322,37 @@ impl ReconfigurerReady<'_> {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     pub fn advance(self) {
-        self.reconfigurer.pending.clear();
+        let r = self.reconfigurer;
+        r.pending.clear();
+        // The driver wrote the round of this batch: it is on disk now.
+        if let Some(round) = r.unpersisted.take() {
+            assert!(round > r.durable, "the round on disk only rises");
+            r.durable = round;
+        }
         assert!(
-            self.reconfigurer.pending.is_empty(),
+            r.pending.is_empty(),
             "an advanced batch has no request left"
         );
+        assert!(
+            r.round == r.durable,
+            "an advanced batch leaves its round on disk"
+        );
     }
+}
+
+/// Mint the next decree round: strictly above `round` (the last round minted,
+/// at or above the round on disk) and above `floor`, and mark it to be
+/// written before the batch that carries it leaves.
+fn mint(round: &mut u64, unpersisted: &mut Option<u64>, floor: u64) -> u64 {
+    let before = *round;
+    *round = (*round).max(floor).saturating_add(1);
+    *unpersisted = Some(*round);
+    assert!(
+        *round > before,
+        "a minted round is above every round minted before"
+    );
+    assert!(*round > floor, "a minted round is above the floor");
+    *round
 }
 
 /// Whether every journal's reconstructed history sits at or above its own
@@ -304,9 +389,16 @@ pub struct Reconstruction {
 #[derive(Debug)]
 pub struct MatchmakerReconfigurer {
     node: NodeId,
-    /// The last decree round this node used (volatile; a fresh incarnation
-    /// starts over, and the acceptors' promises push it up through Nacks).
+    /// The last decree round this node minted: the round on disk, or the
+    /// round of the batch not yet advanced. It only rises, across
+    /// incarnations too: [`MatchmakerReconfigurer::new`] starts from the
+    /// round on disk.
     round: u64,
+    /// The decree round on disk, as the driver last acknowledged it.
+    durable: u64,
+    /// A round minted since the last [`ReconfigurerReady::advance`], that the
+    /// driver writes before it sends the batch ([`ReconfigurerReady::round`]).
+    unpersisted: Option<u64>,
     phase: ReconfigurerPhase,
     pending: Vec<(MatchmakerId, ReconfigureRequest)>,
     /// Driver ticks since the running phase last made progress (see
@@ -324,7 +416,8 @@ pub struct MatchmakerReconfigurer {
 
 impl MatchmakerReconfigurer {
     /// An idle reconfigurer for `node`, that pages its bootstraps by
-    /// `limits.registry_page`.
+    /// `limits.registry_page` and opens its next decree above `round`, the
+    /// decree round on disk (0 when the node never wrote one).
     ///
     /// # Panics
     ///
@@ -332,11 +425,13 @@ impl MatchmakerReconfigurer {
     /// own invariants, preconditions or postconditions fails: a programmer
     /// error, never an operating condition.
     #[must_use]
-    pub fn new(node: NodeId, limits: Limits) -> Self {
+    pub fn new(node: NodeId, round: u64, limits: Limits) -> Self {
         limits.assert_valid();
         let reconfigurer = Self {
             node,
-            round: 0,
+            round,
+            durable: round,
+            unpersisted: None,
             phase: ReconfigurerPhase::Idle,
             pending: Vec::new(),
             elapsed: 0,
@@ -344,6 +439,10 @@ impl MatchmakerReconfigurer {
             cut: None,
         };
         assert!(!reconfigurer.is_busy(), "a fresh reconfigurer is idle");
+        assert!(
+            reconfigurer.round == round,
+            "a fresh reconfigurer starts from the round on disk"
+        );
         reconfigurer.assert_invariants();
         reconfigurer
     }
@@ -363,6 +462,7 @@ impl MatchmakerReconfigurer {
     /// successor is not the next generation, or an idle reconfigurer keeps
     /// work or a clock.
     pub fn assert_invariants(&self) {
+        self.assert_round();
         match &self.phase {
             ReconfigurerPhase::Idle => {
                 assert!(
@@ -460,6 +560,18 @@ impl MatchmakerReconfigurer {
                 );
             }
         }
+    }
+
+    /// The minted round is on disk, or is the round the next batch writes.
+    fn assert_round(&self) {
+        assert!(
+            self.round == self.unpersisted.unwrap_or(self.durable),
+            "the minted round is on disk or waits to be written"
+        );
+        assert!(
+            self.unpersisted.is_none_or(|round| round > self.durable),
+            "a round waiting to be written is above the round on disk"
+        );
     }
 
     /// Where the reconfigurer stands.
@@ -829,12 +941,9 @@ impl MatchmakerReconfigurer {
             } => {
                 if let Some(promised) = decree.preempted() {
                     // Reopen strictly above the promise that refused us.
-                    self.round = self.round.max(promised.round).saturating_add(1);
+                    let round = mint(&mut self.round, &mut self.unpersisted, promised.round);
                     **decree = successor_decree(
-                        Ballot {
-                            round: self.round,
-                            node: me,
-                        },
+                        Ballot { round, node: me },
                         old,
                         bootstrap.set.members().to_vec(),
                     );
@@ -1212,14 +1321,14 @@ impl MatchmakerReconfigurer {
             return ReconfigurerStep::Bootstrapped { remaining };
         }
         // Every member holds the reconstruction: the set may now be
-        // chosen. The decree opens at a fresh ballot of this node —
-        // strictly above every round this incarnation used *and*
-        // above the stop quorum's decree floor, so a rebooted node
-        // never reuses a ballot its earlier incarnation may have had
-        // a value accepted at (one ballot, one value).
-        self.round = self.round.max(decree_floor.round).saturating_add(1);
+        // chosen. The decree opens at a fresh ballot of this node:
+        // above every round on disk, so no incarnation of this node
+        // reuses a ballot an earlier one may have had a value accepted
+        // at (one ballot, one value), and above the stop quorum's
+        // decree floor, so the matchmakers do not refuse it.
+        let round = mint(&mut self.round, &mut self.unpersisted, decree_floor.round);
         let ballot = Ballot {
-            round: self.round,
+            round,
             node: self.node,
         };
         // The decree opens strictly above every decree promise the stop
