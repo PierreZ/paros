@@ -84,7 +84,11 @@ the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a wr
 replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
 leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
 segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
-reaches only the replica set of its segment)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+reaches only the replica set of its segment)), segment records across a matchmaker set handover
+(`specs/tla/segment-records/`: the seal, the retire, the offload mark, the controller election and
+the reshape call as compare-and-sets on the matchmaker register while the set hands over; a
+replica drops its copy only after a write of the offload mark is done at a majority; #1275
+(segment records across a matchmaker handover)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
