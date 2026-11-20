@@ -97,11 +97,13 @@ machines), and coverage-driven simulation (the seeds are steered toward the bran
 reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
 crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
 walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
-`leader-handoff/` and `matchmaker/` (#1198 (trace checking), `tests/traces.rs`), and each trace
-spec names the steps its checked walks must take (a `Noop` gap fill, a reconfiguration, GC above
-frontier 0, and more; #1231 (traced walks reach the rules)); the read fence
-of `reads/`, the floor of `truncation/` and the walk with every compartment and matchmakers are
-not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
+`leader-handoff/`, `matchmaker/` (with the retirement), `reads/` (the read basis and the read fence), `truncation/`
+(the compaction floor and the trim jump, and the faulty entries of CTRL with the tri-state tally)
+and `compartments/` (the read replica and the batcher) (#1198 (trace checking),
+`tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
+fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
+reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
+rules)); the matchmaker set handover and the walk with every compartment and matchmakers are not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
@@ -155,6 +157,15 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
+- the `mutants` job (pull requests only): cargo-mutants on the lines of
+  `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
+  pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
+  `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
+  the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
+  surviving mutant fails the job: add the test that sees it in the same pull request. The
+  `Mutants` workflow runs every mutant of the core (about 2,850) in 16 shards each Sunday and on
+  demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
+  for an edit that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
   `cargo check --target wasm32-unknown-unknown -p paros`

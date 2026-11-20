@@ -44,6 +44,27 @@ of `consensus-sim`. The trace specs today are:
 - `matchmaker/MatchmakerTrace`: matchmaking, Phase 1 over every configuration of `H_b`, Phase 2
   in `C_b` and the GC, on the flavor with matchmakers. The model decides one value; the trace
   spec takes its matchmaking and GC, and writes the log as its own steps.
+- `reads/ReadsTrace`: `MatchmakerTrace` and the leaderless reads (the read basis of a won
+  leadership, the read fence of each answer, the served index), on the lagging-reads flavor.
+- `truncation/TruncationTrace`: `MultiPaxosTrace` and the compaction floor (the journal fold,
+  each compaction against `first_seq`, the trim jump, the floor guards, a restart that holds
+  the slots below its floor), on the `compaction` flavor (Multi-Paxos on five, steered toward
+  compactions).
+- `compartments/CompartmentsTrace`: `MultiPaxosTrace` and the read replica (its learns, its walk
+  in slot order, its floors, its boot and its leaderless read), on the every-compartment flavor.
+- `compartments/BatcherTrace`: the batcher and the unbatcher (each push fits the lane, a batch is
+  the whole lane in push order or one write alone, the unbatcher cuts the range in batch order),
+  on the batcher walk. The walk has no Paxos under the batcher, so this spec states the batcher
+  rules of `Compartments.tla` and does not extend it.
+- `truncation/FaultsTrace`: `TruncationTrace` and the faulty entries of CTRL (a boot that reads
+  a record faulty, the pages of a promise with their faulty reports, the tri-state tally of the
+  win, the repair probe), on the flavors `disk-faults` and `disk-faults-3`.
+- `matchmaker/RetireTrace`: `MatchmakerTrace` and the retirement (a node retires on an effective
+  floor that no registration at or above names, a retired node takes no step, and a rejoin
+  books it again), on the `retiring` flavor.
+
+A trace spec that extends the trace spec of another model links that model's modules into its
+folder, as `reads/` links `matchmaker/`.
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take
@@ -73,7 +94,8 @@ Each experiment has one folder for each design, with the same layout as a model,
   fence on the promise passes (with the seal of each row of #1209 on a full grid), and the
   record check of the reader (rule 1) passes too. An acceptor of a retired segment that loses its
   state breaks the promise fence alone; the belief half of the fence with the refusal of an
-  acceptor that did not hear closes it, and so does the record check.
+  acceptor that did not hear closes it, and so does the record check. Pierre chose the fence of
+  the code, with no record check (2026-11-20, `docs/architecture/02-data-plane.md` §2.10).
 - `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
   ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
   the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
@@ -1977,7 +1999,7 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 |---|---|
 | `write` | `acks` of one column of `New`, with the move |
 | `election` | a matchmaker majority; a Phase-1 quorum of `Old`; a Phase-1 quorum of `New` |
-| `read` | a Phase-1 quorum of the answers to `GridReadTargets(New)`; a matchmaker majority (the segment-record check of #1254) |
+| `read` | a Phase-1 quorum of the answers to `GridReadTargets(New)`; a matchmaker majority (the segment-record check that #1254 proposed; the journal does not keep it, `docs/architecture/02-data-plane.md` §2.10, so this wait asks more than the read needs) |
 | `seal` | a Phase-1 quorum of `Old` (the highest vote); a matchmaker majority (the compare-and-set of the end slot) |
 | `retire` | `F + 1` replicas of the segment hold it; a matchmaker majority |
 | `offload` | a matchmaker majority (the offload mark, #1256) |

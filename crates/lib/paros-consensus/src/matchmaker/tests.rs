@@ -986,6 +986,34 @@ fn a_gc_ack_from_a_frozen_generation_says_it_is_stopped() {
     assert!(ack.stopped);
 }
 
+/// An active matchmaker behind or ahead of the addressed generation refuses
+/// with the set it serves. That set is a later one only when the request is
+/// behind it: a request from a later generation learns no set here.
+#[test]
+fn a_gc_ack_names_the_set_in_force_only_to_a_request_behind_it() {
+    let mut ahead = fresh(0);
+    let ack = answer_gc(
+        &mut ahead,
+        &gc_request(MatchmakerGeneration(3), ballot(5, 1)),
+    );
+    assert!(!ack.applied);
+    assert_eq!(ack.newer, None, "an earlier set is not a later one");
+    assert!(!ack.stopped);
+
+    let mut stopped = fresh(0);
+    stopped.step_reconfigure(ReconfigureRequest::Stop {
+        from: NodeId(5),
+        generation: G0,
+        after: None,
+    });
+    drain_reconfigure(&mut stopped);
+    assert_eq!(
+        stopped.newer_set(MatchmakerGeneration(3)),
+        None,
+        "a frozen matchmaker serves no request from a later generation"
+    );
+}
+
 /// A handover merges retirement records node by node (#1037 (rejoin)):
 /// the later incarnation wins, so a rejoin a stop quorum member holds
 /// survives an older retirement; at one incarnation a retirement wins.

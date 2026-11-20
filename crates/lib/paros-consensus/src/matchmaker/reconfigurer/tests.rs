@@ -928,3 +928,30 @@ fn a_stale_stopped_reply_does_not_reuse_a_decree_ballot() {
         "Phase 1 adopts the value of the highest vote it heard"
     );
 }
+
+/// The invariant check is the oracle of every test above: each corrupted
+/// field below is a state that no public call can reach, and the check must
+/// name it.
+#[test]
+#[should_panic(expected = "an idle reconfigurer's clock is stopped")]
+fn an_idle_reconfigurer_with_a_running_clock_breaks_its_invariants() {
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 0, Limits::DEFAULT);
+    r.elapsed = 1;
+    r.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "the minted round is on disk or waits to be written")]
+fn a_minted_round_neither_on_disk_nor_waiting_breaks_the_round_invariant() {
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 3, Limits::DEFAULT);
+    r.round = 4;
+    r.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "a round waiting to be written is above the round on disk")]
+fn a_waiting_round_at_the_round_on_disk_breaks_the_round_invariant() {
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), 3, Limits::DEFAULT);
+    r.unpersisted = Some(3);
+    r.assert_invariants();
+}

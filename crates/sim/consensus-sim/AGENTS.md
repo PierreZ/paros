@@ -53,7 +53,12 @@ Test only: `publish = false`, never a dependency of another crate.
   a win above slot 0, three wins in one walk, a `Noop` gap fill, a vote, a learn, a `record`, a
   restart, and the rules of the spec's own flavor (a handoff with a pending slot and its
   install; a proxy commit after a proxy crash; a second configuration, a `Prepare` over two
-  configurations and a GC request above frontier 0). TLC accepting a walk that never takes a
+  configurations and a GC request above frontier 0; a read basis from a beat, a reader that
+  answers itself, a read after a completed write, an answer above the basis; a compaction that
+  keeps a record, a trim jump, a promise after a compaction; a replica that boots again, moves
+  its floor and serves a read after a completed write; a boot that reads a faulty record, a
+  promise in pages that reports one, a win over it; a node that retires, rejoins and promises
+  again). TLC accepting a walk that never takes a
   step judges nothing, and an empty trace meets no rule. A new rule of a trace spec gets its
   rule here in the same PR; when the walks cannot meet it, add the walk move or the steer, as
   for a probe.
@@ -119,8 +124,13 @@ Test only: `publish = false`, never a dependency of another crate.
     crashes that have one (`LOST_UNSYNCED`).
 - `cluster/trace.rs` + `cluster/trace/` → `Tracer`, `ClusterEvent`, `Spec`: the steps of a cluster walk as
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
-  `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs` and `matchmaker.rs` each say which
-  events their model keeps (`Spec::keeps`) and define its constants. `rules.rs` → `Rule`,
+  `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs`, `matchmaker.rs`, `reads.rs`,
+  `truncation.rs`, `compartments.rs` and `faults.rs` each say which events their model keeps
+  (`Spec::keeps`, a list of the model's own steps) and define its constants. `reads.rs` records the read basis, the answers and the served
+  reads; `truncation.rs` the journal fold of each slot (`Fold`, from the first party that
+  applies it) and each floor a node writes; `compartments.rs` the learns, the walk, the floors
+  and the boot of a read replica; `faults.rs` each page of a promise (`Page`, with its faulty
+  reports) and each record a boot reads faulty (`Rot`). `rules.rs` → `Rule`,
   `Spec::rules`: the steps each spec's checked walks must take.
 - `decree.rs` → `DecreeModel`: single-decree Paxos (`paros_consensus::decree`), three acceptors
   and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
@@ -128,6 +138,8 @@ Test only: `publish = false`, never a dependency of another crate.
 - `trace.rs` → what every trace check shares: `spec` (a trace spec of `specs/tla/`),
   `require_tlc`, `Ranks` (the code's ballots as the model's `1..NB`), the names of nodes.
 - `batcher.rs` → `BatchModel`: the batcher and the unbatcher (Compartmentalized Paxos §3.5).
+  `BatchEvent` and `trace` are its steps for `specs/tla/compartments/BatcherTrace.tla`;
+  `BatchMutant::ReverseLane` is the control.
 
 ## Tests and seeds
 
@@ -136,7 +148,12 @@ Test only: `publish = false`, never a dependency of another crate.
   and on a grid), replicas, leaderless reads, every compartment, the batcher, matchmakers with
   reconfiguration, matchmakers with every compartment, disk faults (on five and on three), retirement
   and rejoin, the matchmaker set handover, and leaderless reads on matchmakers whose pools lag
-  (`lagging-reads`, #1228 (stale read by a lagging reader)). 60 seeds each in CI; `lagging-reads`
+  (`lagging-reads`, #1228 (stale read by a lagging reader)), and Multi-Paxos on five steered
+  toward compactions (`compaction`, `Flavor::compacting`: a client claims an unclaimed journal
+  and often truncates, and the first leader that compacts steps down once), every compartment
+  steered the same way (`compartments-compaction`), and retirement steered toward retirements
+  (`retiring`, `Flavor::retiring`: half the client moves are operator moves, and the operator
+  retries the node it asked the matchmakers to check). 60 seeds each in CI; `lagging-reads`
   takes 120. The `lagging-reads` walk is steered (`Flavor::lagging_reader`) and is the control of
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.
@@ -163,11 +180,20 @@ Test only: `publish = false`, never a dependency of another crate.
   walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of each
   control that the oracles pass. Single decree against `decree/`; every cluster flavor without
   matchmakers against `multi-paxos/`; the flavors with proxy leaders against `proxy-leader/`;
-  the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`. A cluster walk has
+  the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`; the lagging
+  reads against `reads/` (controls: a read fence below the promise, a hidden watermark);
+  the `compaction` flavor against `truncation/` (control: a compaction past the fold);
+  every compartment against `compartments/` (control: a replica read with no quorum); the
+  batcher walk against `compartments/BatcherTrace` (control: a lane sent out of push order); the
+  flavors `disk-faults` and `disk-faults-3` against `truncation/FaultsTrace` (control: a promise
+  that hides a faulty record); the `retiring` flavor against `matchmaker/RetireTrace` (control: a
+  retirement with no evidence). A retiring walk has 250 quiet steps, the others 10: a
+  retirement needs a leader that stands while its GC floor becomes effective. Every
+  control searches from seed 1, never from a seed picked by hand. A cluster walk has
   150 chaos steps. Each test searches the seeds (at most 300, oracles on, no TLC) and TLC checks
   the first seed and each seed that meets a rule of the spec that no checked seed met before; a
   walk of more than 200 kept events is skipped (TLC grows faster than the trace). The test fails
-  when a rule stays unmet. About four minutes in debug on four CPUs. TLC (`tlc`) is in the nix
+  when a rule stays unmet. About three minutes in release on four CPUs. TLC (`tlc`) is in the nix
   dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
   in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
   a change of `specs/tla/` alone. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
@@ -183,14 +209,8 @@ Test only: `publish = false`, never a dependency of another crate.
 
 Not traced yet (#1198 (trace checking)):
 
-- The read fence of `reads/`. Its model is a Matchmaker log with the Phase-1 bypass and one
-  read; the `reads` flavor has no matchmakers and many reads.
-- The floor of `truncation/`. Its fold reads one record for each command, and the trace would
-  need the outcome of each write and each `SetLeader` as the model's values.
-- The batcher and the replica of `compartments/`.
 - `reconfigured-compartments`: matchmakers with a grid for each configuration, proxies and the
   handoff in one trace spec.
-- The flavors `disk-faults`, `disk-faults-3`, `retirement` and `handover`: no model has faulty entries, the
-  retirement check or the matchmaker set handover.
+- The flavor `handover`: no trace spec has the matchmaker set handover.
 
 Those walks are checked against `multi-paxos/` only, or not at all.

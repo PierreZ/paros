@@ -55,6 +55,39 @@ fn multi_paxos_on_five_with_truncation() {
 }
 
 #[test]
+fn compaction_steered() {
+    walk(
+        Flavor::compaction(),
+        &[reach::SET_LEADER, reach::COMPACTED, reach::TRIM_JUMP],
+    );
+}
+
+#[test]
+fn compartments_steered() {
+    walk(
+        Flavor::compartments_compacting(),
+        &[
+            reach::COMPACTED,
+            reach::REPLICA_APPLIED,
+            reach::REPLICA_READ,
+        ],
+    );
+}
+
+#[test]
+fn retirement_steered() {
+    walk(
+        Flavor::retiring(),
+        &[
+            reach::RECONFIGURED,
+            reach::GC_ACKED,
+            reach::RETIRED,
+            reach::REBOOKED,
+        ],
+    );
+}
+
+#[test]
 fn leader_handoff() {
     walk(Flavor::handoff(), &[reach::HANDOFF, reach::LOST_UNSYNCED]);
 }

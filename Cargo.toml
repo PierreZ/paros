@@ -22,3 +22,11 @@ categories = ["algorithms", "network-programming"]
 pedantic = { level = "warn", priority = -1 }
 disallowed_types = "deny"
 
+
+# The build of a mutant (`.cargo/mutants.toml`): release code, so the walks run
+# fast, built incrementally in many units, so a mutant that edits one function
+# rebuilds in seconds, not in a minute.
+[profile.mutants]
+inherits = "release"
+incremental = true
+codegen-units = 256

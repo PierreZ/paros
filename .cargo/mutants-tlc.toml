@@ -1,0 +1,29 @@
+# The second pass of the mutation testing of paros-consensus
+# (`.cargo/mutants.toml` is the first pass, and says how both run). Run by
+# `scripts/mutants.sh`, which selects the survivors of the first pass, so only
+# they run here. The judge is the trace checks of consensus-sim
+# (`tests/traces.rs`): the walks of every flavor, checked against the TLA+
+# models with TLC.
+
+# Equivalent mutants: an edit that no test can see because the code does the
+# same thing with it. Each entry names the reason. Nothing else goes here: a
+# survivor that changes behaviour gets a test (or an issue), never an entry
+# (AGENTS.md, the absolute rule: no allow list).
+exclude_re = []
+
+# Two TLC runs at a time: each one is a JVM, and more of them at once ran a
+# four-core runner out of memory.
+test_package = ["paros-consensus", "consensus-sim"]
+test_tool = "nextest"
+# The workspace builds paros-consensus with `serde` on (paros-wasm asks for
+# it), so the serde code is mutated too: its tests must run.
+features = ["paros-consensus/serde"]
+additional_cargo_test_args = ["-E", "binary(traces)", "--test-threads", "2"]
+
+# The `mutants` profile of the workspace `Cargo.toml`: release code with an
+# incremental build, so a mutant builds in seconds and the walks run fast.
+profile = "mutants"
+
+# `scripts/mutants.sh` runs this pass with `--baseline skip --timeout 400`:
+# the baseline of cargo-mutants builds paros-consensus alone, which has no
+# trace check, and the trace checks take about 90 s.

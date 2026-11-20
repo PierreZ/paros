@@ -12,10 +12,13 @@
 //! 2. `win` or `install`: the node became leader of its ballot by Phase 1,
 //!    with its frontier, or by a handoff. A ballot won in the batch that
 //!    prepares it (an empty `H_b`) wins just after its `prepare`;
-//! 3. `learn`: each slot that the disk's chosen prefix grew by;
+//! 3. `accept` and `record` (as in 5) of each vote the batch wrote before
+//!    a floor; `learn`: each slot that the disk's chosen prefix grew by;
+//!    then `compact` and `trim`: each floor the batch wrote. A floor drops
+//!    the votes below it, so a vote written before it comes first;
 //! 4. one event for each message the batch sends that changes a model:
 //!    the first `Prepare` of a ballot, the promise that raised an
-//!    acceptor, the first `Accept` of each `(ballot, slot)` (`propose`),
+//!    acceptor, each page of a promise (`page`), the first `Accept` of each `(ballot, slot)` (`propose`),
 //!    the first `Accept` of it to the acceptors (`direct`) and to each
 //!    proxy (`delegate`), a `Relinquish`. A message the batch would send
 //!    is a step even when a crash stops the send: its writes are durable;
@@ -25,13 +28,20 @@
 //!    value as the slot's accepted record, at the ballot that chose it).
 //!
 //! 6. `select`: the first registration the node sends for a ballot;
-//!    `gcask`: the first GC request at a watermark.
+//!    `gcask`: the first GC request at a watermark;
+//! 7. `basis`: a read basis the node did not hold before; `readack`: the
+//!    first answer of the node to a read.
 //!
 //! For a batch of a proxy: `fanout`, the proxy opened a round, and
 //! `commit`, the proxy decided it. For a matchmaker: `register`, a
 //! registration it did not hold before, and `gcack`, a GC request it
-//! applied. `restart` is a node that boots again from its disk, and
-//! `crash` a proxy that lost its rounds.
+//! applied. `restart` is a node that boots again from its disk, with a
+//! `rot` for each record its boot read faulty, and
+//! `crash` a proxy that lost its rounds. The driver loop records the
+//! rest itself: the reads a node opens, folds and serves, the fold of each
+//! slot the first party applies (`fold`, before the floor of its batch),
+//! the highest slot applied (`applied`), and the steps of a read replica
+//! (`compartments.rs`).
 //!
 //! The tracer keeps a mirror of what it recorded (the promise and the vote
 //! of each node, the open rounds of each proxy), so that it records a step
@@ -42,14 +52,23 @@
 //! ([`Spec::keeps`]): `multi_paxos.rs` writes them for
 //! `specs/tla/multi-paxos/`, `proxy_leader.rs` for `specs/tla/proxy-leader/`,
 //! `leader_handoff.rs` for `specs/tla/leader-handoff/`, `matchmaker.rs`
-//! for `specs/tla/matchmaker/`.
+//! for `specs/tla/matchmaker/`, `reads.rs` for `specs/tla/reads/`,
+//! `truncation.rs` for `specs/tla/truncation/`, `compartments.rs` for
+//! `specs/tla/compartments/` and `faults.rs` for the faulty entries of
+//! `specs/tla/truncation/FaultsTrace.tla`.
 
+mod compartments;
 mod encode;
+mod faults;
 mod leader_handoff;
 mod matchmaker;
 mod multi_paxos;
 mod proxy_leader;
+mod reads;
 mod rules;
+mod truncation;
+
+pub(super) use compartments::replica_writes;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -92,6 +111,14 @@ impl Cmd {
             Self::Fresh(fingerprint) => Value::Str(format!("c{fingerprint:x}")),
         }
     }
+}
+
+/// The answer of a reader of the configuration to its own read: its vote
+/// watermark (`None`: it never voted).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnAnswer {
+    /// The reader's vote watermark.
+    pub watermark: Option<Slot>,
 }
 
 /// One step of a cluster walk, as the walk took it.
@@ -229,6 +256,114 @@ pub enum ClusterEvent {
         matchmaker: MatchmakerId,
         ballot: Ballot,
     },
+    /// `node` holds the read basis of the leadership that won `ballot`,
+    /// with its `fence` (`LearnBasis` of `reads/`).
+    Basis {
+        node: NodeId,
+        ballot: Ballot,
+        fence: Option<Slot>,
+    },
+    /// `node` opened the read `ctx` on its basis (`ReadStart`): the basis
+    /// ballot and fence, and the reader's own watermark when the reader
+    /// answers itself.
+    ReadStart {
+        node: NodeId,
+        ctx: u64,
+        ballot: Ballot,
+        fence: Option<Slot>,
+        own: Option<OwnAnswer>,
+    },
+    /// `acceptor` answered the read `ctx` with its vote watermark and its
+    /// read fence (the `PreReadAck` it sent).
+    ReadAck {
+        acceptor: NodeId,
+        ctx: u64,
+        watermark: Option<Slot>,
+        fence: Option<Ballot>,
+    },
+    /// `node` folded the answer of `acceptor` into its read `ctx`
+    /// (`PreReadAck` of `reads/`): counted, or the end of the read when
+    /// its fence is above the basis.
+    ReadFold {
+        node: NodeId,
+        acceptor: NodeId,
+        ctx: u64,
+    },
+    /// `node` served the read `ctx` at `index` (`ReadServe`).
+    ReadServe {
+        node: NodeId,
+        ctx: u64,
+        index: Option<Slot>,
+    },
+    /// A party applied `slot`, the highest so far: the writes up to it
+    /// completed (`Ack`).
+    Applied { slot: Slot },
+    /// The first party that applied `slot` folded it: its records end at
+    /// position `high` (0: it holds none), and `first_seq` is `first`
+    /// after it (`fold` of `truncation/`).
+    Fold { slot: Slot, high: u64, first: u64 },
+    /// `node` compacted its log below `floor`, the first slot it still
+    /// holds (`WriteOp::Truncate`, `Compact`).
+    Compact { node: NodeId, floor: Slot },
+    /// `node` jumped to the trim point `floor` of a peer
+    /// (`WriteOp::TrimmedTo`, `TrimTo`).
+    Trim { node: NodeId, floor: Slot },
+    /// The operator retired `node` on the evidence the core asks for, and
+    /// it shut down (`Shutdown`).
+    Retire { node: NodeId },
+    /// The operator booked the retired `node` again: it boots from its
+    /// disk and rejoins (`MatchPurpose::Rejoin`).
+    Rejoin { node: NodeId },
+    /// `acceptor` sent a page of its promise of `ballot`: the readable
+    /// `votes` and the `faulty` records from `from` up to `next` (none: the
+    /// last page). The first page, each continuation, and an answer again
+    /// at a ballot it promised already; each page once.
+    Page {
+        acceptor: NodeId,
+        ballot: Ballot,
+        from: Slot,
+        next: Option<Slot>,
+        votes: Vec<(Slot, Ballot, Cmd)>,
+        faulty: Vec<(Slot, Ballot)>,
+    },
+    /// The fold of `node` stops at `slot` (none: it runs to the end of the
+    /// prefix): a slot of its prefix whose value a boot lost, until a
+    /// catch-up brings it back (`Replica::fold_hole`).
+    Hole { node: NodeId, slot: Option<Slot> },
+    /// The boot of `node` read its record of `slot` faulty: the record
+    /// keeps `ballot` and lost its value (CTRL's faulty entry, `Rot`).
+    Rot {
+        node: NodeId,
+        slot: Slot,
+        ballot: Ballot,
+    },
+    /// The read replica `replica` holds `cmd`, chosen at `slot` at
+    /// `ballot` (`WriteOp::Learned`).
+    ReplicaLearn {
+        replica: NodeId,
+        slot: Slot,
+        ballot: Ballot,
+        cmd: Cmd,
+    },
+    /// `replica` folded `slot` into its journal state.
+    ReplicaApply { replica: NodeId, slot: Slot },
+    /// `replica` compacted its log, or jumped to a trim point when `jump`:
+    /// `floor` is the first slot it still holds.
+    ReplicaFloor {
+        replica: NodeId,
+        floor: Slot,
+        jump: bool,
+    },
+    /// `replica` booted again; its fold is at `from`.
+    ReplicaBoot { replica: NodeId, from: Slot },
+    /// `replica` opened the read `ctx`.
+    ReplicaRead { replica: NodeId, ctx: u64 },
+    /// `replica` served the read `ctx` at `index`.
+    ReplicaServe {
+        replica: NodeId,
+        ctx: u64,
+        index: Option<Slot>,
+    },
 }
 
 /// What one persisted batch of a node holds, for the tracer.
@@ -252,6 +387,9 @@ pub(super) struct Batch<'a> {
     pub(super) matchmaking: &'a [MatchRequest],
     /// The GC requests the batch sends to the matchmakers.
     pub(super) gc: &'a [GcRequest],
+    /// The node's read basis after the batch, on a deployment with
+    /// matchmakers: its ballot and its fence.
+    pub(super) basis: Option<(Ballot, Option<Slot>)>,
 }
 
 /// What the tracer recorded of one proxy: the model's `pbal`, `round` and
@@ -282,6 +420,21 @@ pub(super) struct Tracer {
     registered: BTreeSet<(MatchmakerId, Ballot)>,
     gc_asked: BTreeSet<Ballot>,
     gc_acked: BTreeSet<(MatchmakerId, Ballot)>,
+    /// The read basis of each node, as the tracer recorded it.
+    basis: BTreeMap<NodeId, (Ballot, Option<Slot>)>,
+    /// The answers the tracer recorded, by acceptor and read.
+    read_acks: BTreeSet<(NodeId, u64)>,
+    /// The basis ballot of each read the tracer saw open.
+    reads: BTreeMap<u64, Ballot>,
+    /// The highest slot a party applied.
+    applied: Option<Slot>,
+    /// The fold of each slot a party applied: the end of its records and
+    /// `first_seq` after it.
+    folds: Vec<(u64, u64)>,
+    /// Each page of a promise the tracer recorded.
+    pages: faults::Pages,
+    /// The fold hole of each node, as the tracer recorded it.
+    holes: BTreeMap<NodeId, Slot>,
 }
 
 impl Tracer {
@@ -290,6 +443,23 @@ impl Tracer {
     pub(super) fn batch(&mut self, batch: &Batch<'_>) -> Vec<ClusterEvent> {
         let mut events = Vec::new();
         self.leadership(batch, &mut events);
+        let leads = batch.leading.map(|(ballot, _, _)| ballot);
+        // A vote the batch writes before a floor is a step before the
+        // learns and the floor: a slot below a floor takes no vote.
+        let floor = batch
+            .writes
+            .iter()
+            .position(|w| matches!(w, WriteOp::Truncate { .. } | WriteOp::TrimmedTo { .. }));
+        for write in &batch.writes[..floor.unwrap_or(0)] {
+            if let WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
+                slot,
+                ballot,
+                value,
+            }) = write
+            {
+                self.vote(batch.id, leads, *slot, *ballot, Cmd::of(value), &mut events);
+            }
+        }
         for &(slot, cmd) in &batch.learned {
             events.push(ClusterEvent::Learn {
                 node: batch.id,
@@ -297,6 +467,8 @@ impl Tracer {
                 cmd,
             });
         }
+        // A floor drops what the node learned below it.
+        Self::floors(batch, &mut events);
         for (audience, message) in batch.messages {
             self.message(batch.id, &batch.prior, audience, message, &mut events);
         }
@@ -333,7 +505,7 @@ impl Tracer {
             let win = events.remove(w);
             events.insert(p, win);
         }
-        let leads = batch.leading.map(|(ballot, _, _)| ballot);
+        // The votes after the floor; `vote` skips those recorded above.
         for write in batch.writes {
             if let WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
@@ -343,6 +515,12 @@ impl Tracer {
             {
                 self.vote(batch.id, leads, *slot, *ballot, Cmd::of(value), &mut events);
             }
+        }
+        // A won leadership is a read basis once its `Win` is recorded.
+        self.basis(batch, &mut events);
+        // An answer carries the watermark of the votes of its batch.
+        for (_, message) in batch.messages {
+            self.read_ack(message, &mut events);
         }
         events
     }
@@ -383,14 +561,28 @@ impl Tracer {
     }
 
     /// Node `id` booted again with the chosen prefix below `upto`: it
-    /// leads nothing.
-    pub(super) fn restart(&mut self, id: NodeId, upto: Slot) -> ClusterEvent {
+    /// leads nothing, holds no read basis, and its boot read the records
+    /// of `faulty` faulty, each with its ballot.
+    pub(super) fn restart(
+        &mut self,
+        id: NodeId,
+        upto: Slot,
+        faulty: &[(Slot, Ballot)],
+    ) -> Vec<ClusterEvent> {
         let led = self.leads.remove(&id);
-        ClusterEvent::Restart {
+        self.basis.remove(&id);
+        self.holes.remove(&id);
+        let mut events = vec![ClusterEvent::Restart {
             node: id,
             upto,
             led,
-        }
+        }];
+        events.extend(
+            faulty
+                .iter()
+                .map(|(slot, ballot)| self.rot(id, *slot, *ballot)),
+        );
+        events
     }
 
     /// The event of one message a node sends, if it is a step.
@@ -420,7 +612,11 @@ impl Tracer {
                 from_slot,
                 accepted,
                 ..
-            } if self.promise.get(from).is_none_or(|p| p < ballot) => {
+            } => {
+                events.extend(self.page(message));
+                if self.promise.get(from).is_some_and(|p| p >= ballot) {
+                    return;
+                }
                 self.raise(*from, *ballot);
                 events.push(ClusterEvent::Promise {
                     acceptor: *from,
@@ -650,6 +846,26 @@ pub enum Spec {
     /// `specs/tla/matchmaker/MatchmakerTrace.tla`: matchmaking, Phase 1
     /// over `H_b`, Phase 2 in `C_b` and the GC, on a majority.
     Matchmaker,
+    /// `specs/tla/reads/ReadsTrace.tla`: `MatchmakerTrace` and the
+    /// leaderless reads of `reads/`: the read basis of a won leadership,
+    /// the answers and their read fence, and the served index.
+    Reads,
+    /// `specs/tla/truncation/TruncationTrace.tla`: `MultiPaxosTrace` and
+    /// the compaction floor of `truncation/`: the journal fold, each
+    /// compaction and each trim-point jump.
+    Truncation,
+    /// `specs/tla/compartments/CompartmentsTrace.tla`: `MultiPaxosTrace`
+    /// and the read replica of `compartments/`: its learns, its walk in
+    /// slot order, its boot and its leaderless read.
+    Compartments,
+    /// `specs/tla/truncation/FaultsTrace.tla`: `TruncationTrace` and the
+    /// faulty entries of CTRL: a boot that reads a faulty record, the
+    /// pages of a promise, the tri-state tally and the repair probe.
+    Faults,
+    /// `specs/tla/matchmaker/RetireTrace.tla`: `MatchmakerTrace` and the
+    /// retirement: a node retires on an effective floor that no
+    /// registration above names, and a retired node rejoins.
+    Retire,
 }
 
 impl Spec {
@@ -661,6 +877,11 @@ impl Spec {
             Self::ProxyLeader => spec("proxy-leader", "ProxyLeaderTrace"),
             Self::LeaderHandoff => spec("leader-handoff", "LeaderHandoffTrace"),
             Self::Matchmaker => spec("matchmaker", "MatchmakerTrace"),
+            Self::Reads => spec("reads", "ReadsTrace"),
+            Self::Truncation => spec("truncation", "TruncationTrace"),
+            Self::Compartments => spec("compartments", "CompartmentsTrace"),
+            Self::Faults => spec("truncation", "FaultsTrace"),
+            Self::Retire => spec("matchmaker", "RetireTrace"),
         }
     }
 
@@ -673,6 +894,21 @@ impl Spec {
             Self::ProxyLeader => proxy_leader::keeps(event),
             Self::LeaderHandoff => leader_handoff::keeps(event),
             Self::Matchmaker => matchmaker::keeps(event),
+            Self::Retire => {
+                matchmaker::keeps(event)
+                    || matches!(
+                        event,
+                        ClusterEvent::Retire { .. } | ClusterEvent::Rejoin { .. }
+                    )
+            }
+            Self::Reads => matchmaker::keeps(event) || reads::keeps(event),
+            Self::Truncation => multi_paxos::keeps(event) || truncation::keeps(event),
+            Self::Compartments => multi_paxos::keeps(event) || compartments::keeps(event),
+            Self::Faults => {
+                faults::keeps(event)
+                    || (multi_paxos::keeps(event) || truncation::keeps(event))
+                        && !matches!(event, ClusterEvent::Promise { .. })
+            }
         }
     }
 
@@ -699,12 +935,33 @@ impl Spec {
                 );
                 leader_handoff::trace(flavor.acceptors, events)
             }
-            Self::Matchmaker => {
+            Self::Matchmaker | Self::Retire => {
                 assert!(
                     flavor.quorum == QuorumSystem::Majority,
-                    "MatchmakerTrace runs on a majority"
+                    "{self:?} runs on a majority"
                 );
                 matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
+            }
+            Self::Reads => {
+                assert!(
+                    flavor.quorum == QuorumSystem::Majority && flavor.replicas == 0,
+                    "ReadsTrace runs on a majority, with no replica"
+                );
+                reads::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
+            }
+            Self::Truncation | Self::Faults => {
+                assert!(
+                    flavor.matchmakers == 0 && flavor.proxies == 0 && flavor.replicas == 0,
+                    "{self:?} runs on plain Multi-Paxos"
+                );
+                multi_paxos::trace(flavor.acceptors, flavor.quorum, events)
+            }
+            Self::Compartments => {
+                assert!(
+                    flavor.matchmakers == 0 && flavor.replicas > 0,
+                    "CompartmentsTrace runs on read replicas, with no matchmaker"
+                );
+                compartments::trace(flavor, events)
             }
         }
     }
@@ -843,6 +1100,7 @@ mod tests {
             prior: Vec::new(),
             matchmaking: &[],
             gc: &[],
+            basis: None,
         };
         assert_eq!(tracer.batch(&batch).len(), 1);
         assert!(tracer.batch(&batch).is_empty(), "the same vote again");
@@ -861,6 +1119,7 @@ mod tests {
             prior: Vec::new(),
             matchmaking: &[],
             gc: &[],
+            basis: None,
         };
         let events = tracer.batch(&batch);
         assert!(matches!(events[0], ClusterEvent::Win { .. }));
@@ -886,6 +1145,7 @@ mod tests {
             prior: Vec::new(),
             matchmaking: &[],
             gc: &[],
+            basis: None,
         };
         let events = tracer.batch(&batch);
         assert!(matches!(events[0], ClusterEvent::Propose { .. }));

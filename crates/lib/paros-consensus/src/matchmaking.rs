@@ -718,3 +718,6 @@ impl Matchmaking {
         Some((*newest, config.clone()))
     }
 }
+
+#[cfg(test)]
+mod tests;

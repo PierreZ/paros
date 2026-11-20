@@ -289,3 +289,14 @@ fn a_proxy_batch_is_empty_until_a_delegation() {
     assert!(ready.is_empty(), "an advanced batch is gone");
     ready.advance();
 }
+
+/// The invariant check is the oracle of every proxy test: a delegator kept
+/// for a slot with no open round is a state that no call reaches, and the
+/// check must name it.
+#[test]
+#[should_panic(expected = "a proxy remembers a delegator only for an open round")]
+fn a_delegator_without_an_open_round_breaks_the_proxy_invariants() {
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    proxy.delegators.insert(Slot(3), NodeId(0));
+    proxy.assert_invariants();
+}
