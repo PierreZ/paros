@@ -130,7 +130,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
-| Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
+| Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call, heal of a sealed segment) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
@@ -140,6 +140,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
 | Two seals in a row: a chain of segments with an empty segment and a seal before the `Fence`; where the boundary leader uuid lives (the segment record, or the journal metadata with a `Fence` at the next segment) | the journal steps are designed, not built | `seal-chain/` | #1303 (two seals in a row) |
+| Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -2071,6 +2072,7 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 | `ctl_election` | a matchmaker majority (read the controller term); a matchmaker majority (its compare-and-set, #1259) |
 | `reshape` | a matchmaker majority (the fenced reshape call, #1259) |
 | `bypass_hold` | `acks` of one column of `Old`, with the move (the hold before Phase 2 of a bypass, #1258) |
+| `heal` | one replica of the set that holds the sealed segment whole (the copy); a matchmaker majority (the compare-and-set of the new set, #1314) |
 
 `Old` is a sealed configuration and `New` the configuration in force: `New` moves the members
 of `Old` by `Shift` places, so with `Shift = 1` each member that stays changes its column. The
@@ -2094,6 +2096,7 @@ changes nothing, and the state space stays small.
 | `write_every_column`, `trim_every_column` | ci | violation: `F + 1` down in every column of `New` blocks the write |
 | `election_column`, `read_column`, `seal_column` | ci | violation: `F + 1` down in one column blocks Phase 1 |
 | `retire_replica` | ci | violation: `F + 1` replicas down blocks the retire |
+| `heal_replica` | ci | pass: with `F + 1` replicas down, the heal still copies from the one live holder (the control is `heal_mm`: the copy needs no quorum of the set) |
 | `<step>_mm`, for each step that asks the matchmakers | ci | violation: `F + 1` down in one matchmaker set blocks the step |
 | `<step>_all`, for each step | ci | violation: a wait that needs every target (a TLog commit) blocks with `F` down |
 | `full_grid_write` | ci | violation: the full grid (`acks = rows`) writes only with a whole column |
@@ -2805,3 +2808,78 @@ same rules. Pierre chose the segment record on 2026-11-20.
 What is not in the model: the crashes and the reads inside one replica set (`segment-replicas/`),
 the seal end and the agreement (`experiments/segments/a/`, `multi-paxos/`), the register across a
 matchmaker handover (`segment-records/`), multi-writer mode (`multi-writer/`).
+
+### `re-replication/`: the heal of a sealed segment's replica set, for #1314
+
+Offload is prepared, not built, in v1, so a retired segment lives only on its replica set until a
+user `Truncate` trims it. Its acceptors are gone. When a member of the set is down, the grid
+controller heals: it copies the segment to a new replica and writes the new set into the segment
+record (decided in v1 by Pierre on 2026-11-20). The segment has `K` chosen slots whose bytes never
+change, so a copy is a range of slots `[lo, hi)`; `FL0` is the trim floor of the boundary state
+(a replica that compacted holds `[FL0, hi)`) and `fl` the floor that the journal decided later.
+The record is one value of the matchmaker register (state, replica set, controller term and the
+register version, which every write raises), and each step on it is atomic, so a step acts on a
+write that is done. Replicas crash and come back with their disk, at most `F` members of the set
+down at one time. A member that lags copies from a peer or jumps to its trim point. A controller
+is elected by a term, plans a heal for a down member (a new replica and a source), lets the new
+replica copy one slot at a time, and commits the new set, or aborts. A replica that is not a member
+and no plan's new replica drops its copy, and every replica drops it after the trim. A reader takes
+the floor and the set, asks a member, and reads both again on a refusal.
+
+| Constant | Values (first: the design that passes) |
+|---|---|
+| `CountWhen` | `done`: the commit needs the new replica's report that its copy reached the segment end. `start`: the replica counts when its copy starts. |
+| `CopyFrom` | `full`: the source is a member that holds every slot up to the segment end. `any`: any member that holds a slot; the new replica takes the end of the source's copy as the segment end. `outside`: a live replica that holds every slot, a member or not. |
+| `Cas` | `cas`: a compare-and-set on the register version of the plan's read (and on the term, `TermFence`). `term`: the term check only; the commit writes its read with the new set. `blind`: no check. |
+| `TermFence` | `TRUE`: the `cas` commit also checks the term. `FALSE`: the version alone. |
+| `Report` | `copy`: a "done" report belongs to the copy of one plan. `sticky`: the controller keeps a report from an earlier copy. |
+| `Refuse` | `TRUE`: a member that does not hold the slot refuses the read. `FALSE`: a member whose copy ends below the slot answers "no record". |
+
+Safety: `Findable` (each slot at or above the floor of a segment that is not trimmed is on a live
+replica), `Margin` (with `D` members of the set down, at least `F + 1 - D` live members hold the
+whole segment: it survives every failure that the promise still allows), `SetSize`, `ReadTrue` (a
+read answers the record, or "trunc" below the floor) and `TrimStays`. Liveness: `Ends` (every run
+ends with each read answered, no plan open, and each member a good holder unless it is down and no
+live replica is left to replace it; after the trim, no live replica holds a slot). Five replicas,
+three in the first set (`F = 1`), two controllers, two slots, two crashes, one restart, two terms.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass (61 thousand distinct states) |
+| `safety_trim` | ci | pass: the floor rises over the whole segment and the record is trimmed (402 thousand) |
+| `safety_floor` | ci | pass: `FL0 = 1`, replicas that compacted, a copy that jumps, reads of both slots (8.7 million, about 4 minutes with 4 workers) |
+| `version_only` | ci | pass: the commit checks the version only, not the term (402 thousand) |
+| `live`, `live_trim` | ci | pass: `Ends` |
+| `reach_heal`, `reach_two_heals`, `reach_read_new`, `reach_trim_abort`, `reach_back_drop` | ci | violation: a heal, two heals in a row, a read served by a new replica, a heal that the trim aborts, a removed replica that comes back with its copy |
+| `count_start` | ci | violation of `Margin`: a down member is replaced by a new replica before it copied anything; without `Margin`, the next crash loses a slot (`Findable`) |
+| `copy_any` | ci | violation of `Margin`: the source is a laggard that holds one slot, the new replica stops there and counts; without `Margin`, `Findable` breaks |
+| `cas_term` | ci | violation of `TrimStays`: the trim lands between the plan's read and its commit, and the commit writes the old value back, retired |
+| `cas_blind` | ci | violation of `Margin`: a deposed controller's commit removes a member that came back, which drops its copy; the new controller's commit, from an older read, puts it back, empty |
+| `report_sticky` | ci | violation of `Margin` (and `Findable` without it): a copy completes, an election aborts its plan, the replica drops its copy, and the next plan counts it on the old report |
+| `answer_partial` | ci | violation of `ReadTrue`: a laggard member answers "no record" for a slot that its copy has not reached |
+| `live_outside` | ci | violation of `Ends`: the source is a replica outside the set, it drops its copy during the copy, and the heal stops for good |
+
+The answer to #1314: the heal is safe and live with six rules, and no decision is refuted.
+
+- **A new replica counts only on its own complete copy**: its report that the copy reached the
+  segment end, the `next_seq` of the record (`count_start`).
+- **The copy comes from a member of the set that holds every slot up to the segment end**, as the
+  offloader of #1256 (`copy_any` loses a slot; `live_outside` stops the heal).
+- **The commit is a compare-and-set on the version of the register that the controller read.**
+  The term check alone writes an old record over a trim (`cas_term`), and no check puts back a
+  replica that dropped its copy (`cas_blind`). With the version, the term adds no safety
+  (`version_only`), because an election writes the register; it stays, to tell a deposed
+  controller to stop (#1259).
+- **A "done" report belongs to one copy** (`report_sticky`).
+- **A replica that does not hold the slot refuses the read** (`answer_partial`). A read routed
+  with the set from before a heal stays correct: a removed replica holds the slot (the bytes never
+  change) or refuses.
+- **A replica outside the set drops its copy**, a removed replica that comes back too, and it
+  joins again only through a new copy. A trim during a heal fails the commit, and the copy stops.
+
+`quorum-everywhere/` has the `heal` row: one member that holds the segment, then a matchmaker
+majority. It passes with `F + 1` members of the set down (`heal_replica`).
+
+What is not in the model: the register across a matchmaker handover (`segment-records/`), a
+replica that comes back with an empty disk (a new replica stands for it), a source that the
+controller changes during a copy (the plan aborts and a new plan starts), and offload.
