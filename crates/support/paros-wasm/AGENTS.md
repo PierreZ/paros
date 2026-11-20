@@ -102,7 +102,9 @@ The `applied` log in `world/disk.rs` is the **game's own** application stand-in,
 
 ### Changing a run
 
-1. A trace script is in `src/paxos/trace/pages.rs`. It runs on a setup of `src/paxos/level/`.
+1. A trace script is in `src/paxos/trace/pages/` (one file per page: `single_decree.rs`,
+   `multi_paxos.rs`, `matchmaker.rs`, `quorums.rs`; the compartmentalized page is
+   `trace/compart.rs`). It runs on a setup of `src/paxos/level/`.
    Add no setup for a new game level; a page that needs a new world adds its setup there.
 2. A new view field: change `src/paxos/view.rs`, rerun `paxos_traces`, commit `website/site/src/traces/`.
 3. `cargo nextest run -p paros-wasm`; then the web gates below.

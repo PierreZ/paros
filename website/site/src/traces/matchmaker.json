@@ -7317,6 +7317,85 @@
           ]
         }
       ],
+      "beats": [
+        {
+          "says": "Two matchmakers keep which acceptors each ballot uses. Nodes 0, 1 and 2 are the acceptors. Node 3 waits outside.",
+          "from": 0,
+          "to": 0
+        },
+        {
+          "says": "Node 0 first asks the matchmakers which acceptors are in force. Then it registers ballot 2.0 with acceptors 0, 1 and 2 at both of them.",
+          "from": 0,
+          "to": 9,
+          "question": {
+            "asks": "Node 0 wants to lead. What must it do before it sends a Prepare?",
+            "answers": [
+              "Nothing: it sends the Prepare at once",
+              "Register its ballot and its acceptors at a majority of the matchmakers",
+              "Ask every acceptor which acceptors are in force"
+            ],
+            "right": 1,
+            "why": "The matchmakers keep the acceptors of each ballot. A new leader learns the older configurations from them, so its Phase 1 asks the right acceptors."
+          }
+        },
+        {
+          "says": "Phase 1 runs on acceptors 0, 1 and 2. Once it wins, node 0 tells the matchmakers to forget the configurations below ballot 2.0.",
+          "from": 9,
+          "to": 20
+        },
+        {
+          "says": "alpha is chosen at slot 0 by two votes of three.",
+          "from": 20,
+          "to": 28
+        },
+        {
+          "says": "The operator adds node 3. A configuration never changes in place: node 0 registers a new ballot, 3.0, with acceptors 0, 1, 2 and 3, and runs Phase 1 again.",
+          "from": 28,
+          "to": 42,
+          "question": {
+            "asks": "The operator adds node 3 to the acceptors. What does node 0 do?",
+            "answers": [
+              "It sends node 3 the log and goes on at ballot 2.0",
+              "It registers a new ballot with the four acceptors, then runs Phase 1 again",
+              "It waits until a matchmaker tells node 3"
+            ],
+            "right": 1,
+            "why": "A change of the acceptors is a change of round. The configuration is bound to its ballot, so the leader opens ballot 3.0 with the new set."
+          }
+        },
+        {
+          "says": "bravo goes to slot 1. With four acceptors, it needs three votes.",
+          "from": 42,
+          "to": 52
+        },
+        {
+          "says": "Now choose a case.",
+          "from": 52,
+          "to": 52,
+          "choices": [
+            {
+              "label": "The leader crashes",
+              "run": "leader-crash",
+              "beat": 0
+            },
+            {
+              "label": "Replace an acceptor, then lose the leader",
+              "run": "replace",
+              "beat": 0
+            },
+            {
+              "label": "Remove an acceptor and retire it",
+              "run": "retire",
+              "beat": 0
+            },
+            {
+              "label": "Break the rule: skip the matchmakers",
+              "run": "break-the-rule",
+              "beat": 0
+            }
+          ]
+        }
+      ],
       "chapters": [
         {
           "title": "node 0 starts an election",
@@ -13392,6 +13471,45 @@
             },
             {
               "alive": true
+            }
+          ]
+        }
+      ],
+      "beats": [
+        {
+          "says": "Node 0 leads at ballot 2.0, and alpha is chosen at slot 0, as in the first story.",
+          "from": 0,
+          "to": 28
+        },
+        {
+          "says": "Node 0 crashes. Node 1 registers ballot 3.1 at the matchmakers, and they report the acceptors of ballot 2.0: nodes 0, 1 and 2.",
+          "from": 28,
+          "to": 40,
+          "question": {
+            "asks": "Node 0 crashed. Which acceptors must node 1 ask in Phase 1?",
+            "answers": [
+              "Acceptors 0, 1 and 2, the set the matchmakers report",
+              "All four nodes",
+              "Only the matchmakers"
+            ],
+            "right": 0,
+            "why": "The matchmakers report the acceptors of every ballot they still remember. Here that is one set, and a majority of it is enough."
+          }
+        },
+        {
+          "says": "bravo is chosen at slot 1 by nodes 1 and 2.",
+          "from": 40,
+          "to": 47
+        },
+        {
+          "says": "A crash of the leader costs one round of matchmaking and one Phase 1, as in Multi-Paxos.",
+          "from": 47,
+          "to": 47,
+          "choices": [
+            {
+              "label": "Choose another case",
+              "run": "base",
+              "beat": 6
             }
           ]
         }
@@ -21998,6 +22116,50 @@
             },
             {
               "alive": true
+            }
+          ]
+        }
+      ],
+      "beats": [
+        {
+          "says": "Node 0 leads at ballot 2.0, and alpha is chosen at slot 0, as in the first story.",
+          "from": 0,
+          "to": 28
+        },
+        {
+          "says": "The operator replaces node 2 with node 3. Node 0 registers ballot 3.0 with acceptors 0, 1 and 3, and runs Phase 1.",
+          "from": 28,
+          "to": 42
+        },
+        {
+          "says": "Node 0 crashes. Node 3 campaigns at ballot 4.3. The matchmakers report two sets: 0, 1, 2 for ballot 2.0 and 0, 1, 3 for ballot 3.0.",
+          "from": 42,
+          "to": 56,
+          "question": {
+            "asks": "The matchmakers report two sets of acceptors. Whose promises does node 3 need?",
+            "answers": [
+              "A majority of the new set only",
+              "A majority of each set",
+              "A majority of all four nodes"
+            ],
+            "right": 1,
+            "why": "A value may be chosen in either set, so Phase 1 needs a quorum of every set the matchmakers report. Nodes 1 and 2 cover the old set, and nodes 1 and 3 the new one."
+          }
+        },
+        {
+          "says": "bravo is chosen at slot 1 by nodes 1 and 3.",
+          "from": 56,
+          "to": 63
+        },
+        {
+          "says": "Node 2 is out of the new set, but its promise still counts for the old one. Removed is not shut down.",
+          "from": 63,
+          "to": 63,
+          "choices": [
+            {
+              "label": "Choose another case",
+              "run": "base",
+              "beat": 6
             }
           ]
         }
@@ -30647,6 +30809,50 @@
           ]
         }
       ],
+      "beats": [
+        {
+          "says": "Node 0 leads at ballot 2.0, and alpha is chosen at slot 0, as in the first story.",
+          "from": 0,
+          "to": 32
+        },
+        {
+          "says": "The operator removes node 3. Node 0 registers ballot 3.0 with acceptors 0, 1 and 2.",
+          "from": 32,
+          "to": 46
+        },
+        {
+          "says": "The leader beats. Once ballot 3.0 holds, it tells the matchmakers to forget the configurations below 3.0, and they write that down.",
+          "from": 46,
+          "to": 57
+        },
+        {
+          "says": "Node 3 asks the matchmakers whether any registration still names it. None does, so the operator retires it.",
+          "from": 57,
+          "to": 63,
+          "question": {
+            "asks": "When can node 3 shut down for good?",
+            "answers": [
+              "As soon as the operator removes it",
+              "Once a matchmaker quorum forgot every configuration that names it",
+              "Never: an acceptor stays forever"
+            ],
+            "right": 1,
+            "why": "While the matchmakers remember a set that names node 3, a future leader can need its promise. Once they forget it, no leader can ask."
+          }
+        },
+        {
+          "says": "Forget first, then retire: an acceptor leaves only when no leader can need it again.",
+          "from": 63,
+          "to": 63,
+          "choices": [
+            {
+              "label": "Choose another case",
+              "run": "base",
+              "beat": 6
+            }
+          ]
+        }
+      ],
       "chapters": [
         {
           "title": "node 0 starts an election",
@@ -33178,6 +33384,45 @@
                 "value": "bravo",
                 "ballot": "1.8"
               }
+            }
+          ]
+        }
+      ],
+      "beats": [
+        {
+          "says": "Proposer 5 gets alpha chosen by acceptors 1 and 2. Acceptor 3 never votes, and the Commits are lost.",
+          "from": 0,
+          "to": 15
+        },
+        {
+          "says": "Proposer 8 moves to acceptor 3 alone, and asks no matchmaker. paros refuses this change. Here it is allowed, to show why.",
+          "from": 15,
+          "to": 16
+        },
+        {
+          "says": "Proposer 8 opens ballot 1.8 for bravo on acceptor 3 alone.",
+          "from": 16,
+          "to": 24,
+          "question": {
+            "asks": "alpha is chosen by acceptors 1 and 2. Proposer 8 asks only acceptor 3. Can it choose bravo?",
+            "answers": [
+              "No: its Phase 1 finds the vote for alpha",
+              "Yes: acceptor 3 never voted, so Phase 1 finds nothing",
+              "No: acceptor 3 refuses a new set of acceptors"
+            ],
+            "right": 1,
+            "why": "With no matchmaker, ballot 1.8 does not know the acceptors of ballot 1.5. Its Phase 1 meets no vote for alpha, so two values are chosen."
+          }
+        },
+        {
+          "says": "The matchmakers are how a new ballot learns the old acceptors. Skip them, and two majorities need not meet.",
+          "from": 24,
+          "to": 24,
+          "choices": [
+            {
+              "label": "Choose another case",
+              "run": "base",
+              "beat": 6
             }
           ]
         }
