@@ -22,3 +22,8 @@ fill_code          pass       long  50
 reach_chain        violation  ci
 chain_joined       violation  ci
 chain              pass       long  50
+# A wipe of a member that the GC counted. The rule: a wiped acceptor never
+# takes a step again. The control: it comes back empty as the same acceptor.
+reach_wipe         violation  ci
+wipe_revote        violation  ci
+wipe               pass       ci

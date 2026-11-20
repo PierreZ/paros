@@ -64,6 +64,10 @@
 (*          bypasses from b. TRUE = a control: the node still leads after    *)
 (*          the restart, with what it knew lost.                             *)
 (*                                                                           *)
+(* Gone   : the acceptors that take part in ballot 1 only: the old members  *)
+(*          of a journal move that leave after the first leadership. A       *)
+(*          liveness check uses it; every safety check has Gone = {}.        *)
+(*                                                                           *)
 (* Not in the model: matchmaker generations, lost durable state, a handoff   *)
 (* message that is late or sent two times (`leader-handoff/` has them, and   *)
 (* its control `two_hops`).                                                  *)
@@ -71,7 +75,7 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
           Gc, CheckWm, Reads, Hold, CfgChoices, Handoff, Relinquish, HandoffCarry,
-          ChainRule, SuccessorBypass, Restarts, RestartBypass
+          ChainRule, SuccessorBypass, Restarts, RestartBypass, Gone
 
 Ballots == 1..NB
 Nodes   == {Owner[b] : b \in Ballots}
@@ -162,6 +166,7 @@ Promise(a, b) ==
     /\ \/ status[b] = "matched"
        \/ status[b] = "leading" /\ (HasPending(b) \/ (Hold /\ ~ Covered(b)))
     /\ a \in UNION PriorCfgs(b)
+    /\ a \in Gone => b = 1
     /\ promised[a] <= b
     /\ ~ \E p \in promises : p[1] = a /\ p[2] = b
     /\ promised' = [promised EXCEPT ![a] = b]
@@ -199,6 +204,7 @@ Propose(b, s, v) ==
 Accept(a, b, s, v) ==
     /\ <<b, s, v>> \in proposals
     /\ a \in cfgOf[b]
+    /\ a \in Gone => b = 1
     /\ promised[a] <= b
     /\ <<a, s, b, v>> \notin votes
     /\ promised' = [promised EXCEPT ![a] = b]
@@ -349,6 +355,23 @@ Next ==
     \/ \E n \in Nodes : Restart(n)
 
 Spec == Init /\ [][Next]_vars
+
+\* Every step of a campaign, a leadership and a read is fair; a handoff, a
+\* GC request and a restart are not.
+LiveSpec ==
+    /\ Spec
+    /\ \A b \in Ballots :
+          /\ \A m \in Matchmakers : WF_vars(Register(b, m))
+          /\ WF_vars(MatchDone(b)) /\ WF_vars(Phase1Done(b)) /\ WF_vars(Phase1Low(b))
+          /\ \A a \in Acceptors : WF_vars(Promise(a, b))
+          /\ \A s \in Slots : WF_vars(\E v \in Values : Propose(b, s, v))
+          /\ \A s \in Slots : WF_vars(Ack(b, s))
+          /\ \A b2 \in Ballots : WF_vars(Bypass(b, b2))
+    /\ \A a \in Acceptors, p \in Ballots \X Slots \X Values :
+          WF_vars(Accept(a, p[1], p[2], p[3]))
+
+\* Each slot that a leader proposed is acked to its client in the end.
+AckEnds == \A s \in Slots : (\E p \in proposals : p[2] = s) ~> s \in acked
 
 Chosen(s, v) ==
     \E b \in Ballots :

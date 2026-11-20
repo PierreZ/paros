@@ -48,5 +48,9 @@ CfgWm3 == {<<{"a1", "a2"}, {"a3", "a4"}, {"a3", "a4"}>>,
 CfgChain3 == {<<{"a1", "a2"}, {"a3", "a4"}, {"a1", "a2"}>>}
 CfgChain4 == {<<{"a1", "a2"}, {"a3", "a4"}, {"a1", "a2"}, {"a1", "a2"}>>}
 
+\* One journal move by a bypass, one proposer, two ballots: the liveness checks.
+OwnerMove2 == <<1, 1>>
+CfgMove2 == {<<{"a1", "a2"}, {"a3", "a4"}>>}
+
 Symmetry == Permutations(Values) \cup Permutations(Matchmakers)
 =============================================================================
