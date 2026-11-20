@@ -1,0 +1,36 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [minutes]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that a property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# Every rule: safety, then liveness once the faults stop.
+safety               pass       ci
+safety_long          pass       long  60
+live_ci              pass       ci
+live                 pass       long
+# The two checks that each keep one segment for one configuration alone.
+noterm_one           pass       ci
+noexp_one            pass       ci
+# Controls: each rule off breaks its property.
+elect_noraise        violation  ci
+noterm               violation  ci
+noterm_holder        violation  ci
+noexp_noterm         violation  ci
+noexp_noidem         violation  ci
+noretire             violation  ci
+nobound              violation  ci
+live_nobound         violation  ci
+noidem               violation  ci
+# Reachability: the model reaches each case of #1259.
+reach_lost_race            violation  ci
+reach_deposed              violation  ci
+reach_stale_refused        violation  ci
+reach_takeover             violation  ci
+reach_open_after_takeover  violation  ci
+reach_crash_after_plan     violation  ci
+reach_open_after_crash     violation  ci
+reach_sealed_refused       violation  ci
+reach_ok_lost              violation  ci
+reach_fail_after_plan      violation  ci
+reach_inforce_with_failed  violation  ci
