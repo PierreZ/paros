@@ -87,8 +87,8 @@ segment), reads routed to the set of the segment, retire at `F + 1` holders; #12
 reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
 `SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
 write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
-`Truncate` in both modes, a `Fence(None)` at a seal; #1274 (multi-writer mode through
-SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
+`Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301
+(a resent write across a seal)); #1274 (multi-writer mode through SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
 (`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
 segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
 (reshape with a column below quorum)), segment records across a matchmaker set handover
