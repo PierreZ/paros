@@ -405,6 +405,16 @@ checked, each with a control that TLC breaks:
   grid**, not the first uncommitted slot: with that end, a Phase 1 that reads the old grid only
   below the end chooses two values for one slot. The sealing leader proposes again, in its own
   grid, each vote below the end that the replicas did not apply.
+- **A faulty vote counts for the end** (#1313 (the seal end against a CTRL faulty record), checked
+  on 2026-11-20 by `specs/tla/seal-ctrl/`). "Saw a vote" includes a CTRL faulty report (a record
+  that kept its ballot and lost its value), so the end is the frontier of the sealer's Phase 1 over
+  the old grid. An end of readable votes only (`end_readable`) lands at or below a chosen slot whose
+  top copy rotted, and the next leader, reading below the end, chooses a second value there. The
+  seal does not wait for the repair probe: a blocked slot below the end stays in the tri-state tally
+  of every later Phase 1. Two other candidates keep one value but leave a chosen slot of the old
+  grid at or above an end of readable votes, out of the boundary state and the retire: a seal that
+  waits for its repair probe (`wait_cover`), and a Phase 1 that reads the whole old grid
+  (`end_readable_cover`); the latter also keeps the old grid in every later Phase 1.
 - **A leader of the configuration in force writes every slot above the applied prefix and below
   the start of its segment**: the vote that its Phase 1 saw, or a `Noop` where it saw none (the
   election gap fill of the core, #1233 (segments gap fill)). Without the `Noop`, a slot below

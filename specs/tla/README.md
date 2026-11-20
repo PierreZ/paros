@@ -140,6 +140,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
 | Two seals in a row: a chain of segments with an empty segment and a seal before the `Fence`; where the boundary leader uuid lives (the segment record, or the journal metadata with a `Fence` at the next segment) | the journal steps are designed, not built | `seal-chain/` | #1303 (two seals in a row) |
+| The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -2805,3 +2806,69 @@ same rules. Pierre chose the segment record on 2026-11-20.
 What is not in the model: the crashes and the reads inside one replica set (`segment-replicas/`),
 the seal end and the agreement (`experiments/segments/a/`, `multi-paxos/`), the register across a
 matchmaker handover (`segment-records/`), multi-writer mode (`multi-writer/`).
+
+### `seal-ctrl/`: the seal end against a CTRL faulty record, for #1313
+
+The first leader of the next configuration writes the end of the old segment once, after its
+Phase 1: one above the highest slot where its Phase 1 saw a vote in the old grid, and a later
+Phase 1 reads the old grid only below the end (`docs/architecture/02-data-plane.md` §2.10). CTRL
+(`truncation/`, #1216) lets a boot find a record damaged, with its ballot known and its value
+lost. The second review of the journal plan (new finding 1) asked what a faulty report counts for
+in the end: if only readable votes count, the end can land at or below a chosen slot whose top copy
+rotted, and the next leader then reads nothing there. No model combined the two. This one does.
+
+The old grid is one column of three acceptors (`F = 1`); the next configuration has one acceptor
+(three in `_cfg3`). Ballot 1 is the old grid's leader, in Phase 2 from the start. Each later ballot
+is a leader of the next configuration: it reads the end at matchmaking, runs Phase 1 over both
+configurations (a promise quorum of each, Matchmaker Paxos), proposes in its own configuration
+only, and the first one that finished Phase 1 writes the end by compare-and-set. Phase 1 has the
+tri-state tally of `truncation/` (a faulty report above the highest readable one does not qualify;
+the qualifying answers need a quorum of each configuration that counts at the slot; else the slot
+is blocked and the repair probe decides it on later promises of the same ballot), and the frontier
+counts faulty reports, as `proposer.rs` does. A boot may find a faulty record on any old acceptor
+at any time. Each ballot writes one command (`v1` for the old leader, `v2` for the next ones), and
+a message can arrive late, two times or never.
+
+| Constant | Values (first: the rule that passes) |
+|---|---|
+| `EndRule` | `any`: the end counts every vote of the old grid that the sealer's Phase 1 saw, faulty votes too. `readable`: readable votes only. |
+| `ReadOld` | `belowEnd`: a Phase 1 that read an end reads the old grid only below it. `all`: it reads the whole old grid (rule 3 of #1313). |
+| `SealWait` | `none`: the sealer writes the end from the promises of its win. `repaired`: it writes the end only once its repair probe closed every blocked slot, from every promise it holds then (rule 2 of #1313). |
+
+Safety: `Agreement` (no slot chooses two values, across the seal) and `EndCovers` (the end is above
+every slot that the old grid chose: the old replicas fold only the slots below the end into the
+boundary state, and the old grid retires once `F + 1` of them hold those slots). Liveness: `Ends`,
+written as an invariant (every step is bounded, so a run ends where no step is enabled; then the
+end is written and every slot that the old grid chose is chosen in the next configuration too),
+with one faulty record, or with one old acceptor down (`live_down`).
+
+| Check | CI | Result |
+|---|---|---|
+| `safety`, `safety_two`, `safety_nb4`, `safety_ns2` | ci | pass: `Agreement`, `EndCovers` (22.7 thousand, 51.4 thousand, 1.27 million, 840 thousand distinct states; `safety_two` has two faulty records, `safety_nb4` four ballots, `safety_ns2` two slots) |
+| `safety_cfg3` | long | pass: three acceptors in the next configuration (1.2 million distinct states, 5 minutes) |
+| `live`, `live_ns2`, `live_down` | ci | pass: `Ends` |
+| `reach_faulty` | ci | violation: the end is written while an old acceptor holds a faulty record at a slot that the old grid chose |
+| `end_readable` | ci | violation of `Agreement`: `v1` is chosen at slot 0 by `a1` and `a3`; `a1` finds its record faulty; the sealer hears `a1` (faulty) and `a2` (no vote), so slot 0 is blocked and the end of readable votes is 0; the next leader reads the old grid below 0, sees nothing at slot 0 and chooses `v2` there |
+| `read_all` | ci | pass: `Agreement` (rule 3: the next leader sees the faulty record and the tally blocks the slot) |
+| `read_all_nb4`, `read_all_ns2` | long | pass: `Agreement` |
+| `end_readable_cover` | ci | violation of `EndCovers` with rule 3: the same run, the end is 0 under a chosen slot |
+| `wait`, `wait_live` | ci | pass: `Agreement`, `Ends` (rule 2) |
+| `wait_nb4` | long | pass: `Agreement` |
+| `wait_cover` | ci | violation of `EndCovers` with rule 2: `a2` votes `v1` at slot 0 for the old leader, the next configuration took `v1` at ballot 2, `a2`'s record rots, ballot 3 hears `a2` (faulty, below the readable vote of ballot 2, so nothing blocks) and writes the end 0; then `a3` takes the old leader's `v1` and the old grid chooses slot 0 above the end |
+
+The answer to #1313: **the end counts faulty votes** (rule 1, without its second half). The end is
+one above the highest slot where the sealer's Phase 1 saw any vote in the old grid, a faulty vote
+too: the frontier of its Phase 1 over the old grid. With that end the reading below the end stays
+safe, no seal waits for the repair probe, and the seal is live with a faulty record or with one old
+acceptor down. The repair probe is not needed before the seal: a blocked slot below the end stays in
+the tally of every later Phase 1. Rules 2 and 3 keep `Agreement` but not `EndCovers`: with an end of
+readable votes, the old grid can still hold a chosen slot at or above the end (in `wait_cover` the
+vote under the faulty record is the one that a late `Accept` completes), so the boundary state and
+the retire of §2.10 would miss it. Rule 3 also keeps the whole old grid in every later Phase 1, which
+the end makes needless.
+
+What is not in the model: a faulty record of the next configuration (the tally is the one of
+`truncation/`, and `ctrl-grid/` of PR #1293 (CTRL recovery in the journal)), two ballots in the old grid (the tally of three ballots is checked in
+`truncation/`), the retire and the boundary write (`segment-replicas/`, `seal-chain/`), the register
+across a matchmaker handover (`segment-records/`), and the bypass (no Phase 1, the end is the
+frontier, §2.13).
