@@ -1,0 +1,426 @@
+----------------------------- MODULE MultiWriter -----------------------------
+(***************************************************************************)
+(* Multi-writer mode through SetLeader(None) and expected_seq, #1274       *)
+(* (multi-writer mode through SetLeader(None) and expected_seq).           *)
+(*                                                                         *)
+(* The decisions it checks (Pierre, 2026-11-20):                           *)
+(*   - `SetLeader(new, old)` may name `new = None`. The journal is then    *)
+(*     multi-writer. The mode is what the last applied `SetLeader` left.   *)
+(*   - There is no dedup table. A single writer gets exactly-once through  *)
+(*     `expected_seq`; multi-writer is at-least-once.                      *)
+(*   - A held write is answered `Unknown` (#1232 (held writes)). The       *)
+(*     client resolves it by a resend with the same `expected_seq`.        *)
+(*   - At a seal, the leader uuid of the boundary state goes into the      *)
+(*     journal's matchmaker record, and the first leader of the next       *)
+(*     segment proposes it as a `Fence(uuid)` at the first slot of the     *)
+(*     segment (#1271 (a write reaches only the replica set of its         *)
+(*     segment)). Here the uuid can be None.                               *)
+(*                                                                         *)
+(* The log is abstract: the slots are chosen in order (`multi-paxos/`      *)
+(* checks the agreement). A command is proposed into the next free slot.   *)
+(* A request stays in the network after it is proposed, so it can be       *)
+(* proposed again: that is a resend of the client, a copy that the         *)
+(* transport made, or a write that an old consensus leader proposed in     *)
+(* another slot. One fold judges each slot at apply, in slot order, and    *)
+(* records one answer. A client may never see an answer: that is the held  *)
+(* write that is answered `Unknown`. The invariants judge every answer,    *)
+(* seen or not, so the answer to a resend is judged too.                   *)
+(*                                                                         *)
+(* A fenced write is [u, e, op]: the leader uuid, `expected_seq` and the   *)
+(* write. An unfenced write is [op]. Each uuid is fresh: the k-th          *)
+(* `SetLeader` names [w, k] (a reinstated uuid is decision C of section    *)
+(* 2.3 and is out of this model).                                          *)
+(*                                                                         *)
+(* The fold of a fenced write, in this order (the rule):                   *)
+(*   1. e < first_seq: "truncated" (the write's fate is lost).             *)
+(*   2. e < next_seq: "dup" with the seq when the record at e is this     *)
+(*      write (same uuid, same op), else "taken".                          *)
+(*   3. the leader is not u (another uuid, None or unset): "fenced".       *)
+(*   4. e > next_seq: "early" (a write in front of it is not applied yet). *)
+(*   5. else "applied" at e.                                               *)
+(* An unfenced write is applied when the leader is None, else "wrongmode". *)
+(*                                                                         *)
+(* Constants select the rules. The first value of each is the design; each *)
+(* other value is a control.                                               *)
+(*   FenceAt   "apply": the uuid of a write or a truncate is judged at     *)
+(*             apply. "propose": it is judged against the applied state    *)
+(*             when the command is proposed, and not again at apply.       *)
+(*   Dedup     "first": steps 1 and 2 come before step 3. "after": the     *)
+(*             fence comes first, so the resend of a write that was        *)
+(*             applied before a switch is answered "fenced".               *)
+(*   Basis     "view": a writer whose SetLeader applied takes its next     *)
+(*             `expected_seq` from the view of the answer. "stale": it     *)
+(*             keeps the basis it had.                                     *)
+(*   Boundary  "wait": the first leader of the next segment reads the uuid *)
+(*             in the matchmaker record only after the seal wrote it.      *)
+(*             "early": it may read it before.                             *)
+(*   InitLeader None or Unset: the leader of a fresh journal. Unset        *)
+(*             refuses every write and truncate until a SetLeader.         *)
+(*                                                                         *)
+(* A client that sees a final refusal ("fenced" or "taken") of a fenced    *)
+(* write while the view says None sends the write again, unfenced: it now  *)
+(* writes in multi-writer mode.                                            *)
+(***************************************************************************)
+EXTENDS Naturals, Sequences, FiniteSets, TLC
+
+CONSTANTS
+  Writers,     \* the clients
+  None,        \* the leader of a multi-writer journal
+  Unset,       \* the leader of a fresh journal, with InitLeader = Unset
+  NoLead,      \* a client that never led
+  MaxOps,      \* writes of each client
+  MaxSL,       \* SetLeader commands in a run
+  MaxTrunc,    \* Truncate commands in a run
+  MaxSlots,    \* slots of the log
+  SealAt,      \* the first slot of the next segment, 0 for no seal
+  InitLeader,
+  FenceAt, Dedup, Basis, Boundary
+
+ASSUME FenceAt \in {"apply", "propose"}
+ASSUME Dedup \in {"first", "after"}
+ASSUME Basis \in {"view", "stale"}
+ASSUME Boundary \in {"wait", "early"}
+ASSUME InitLeader \in {None, Unset}
+ASSUME SealAt = 0 \/ (SealAt >= 2 /\ SealAt < MaxSlots)
+
+Uuids == [w : Writers, k : 1..MaxSL]
+Leaders == Uuids \cup {None, Unset}
+Ops == [w : Writers, n : 1..MaxOps]
+
+VARIABLES
+  slots,      \* the chosen log, Seq of commands
+  applied,    \* slots applied by the fold
+  leader,     \* fold: the leader uuid, None or Unset
+  first,      \* fold: first_seq
+  log,        \* fold: the records, log[s] is the record at seq s
+  truncs,     \* fold: the accepted truncates, [u, slot]
+  answers,    \* every answer of the fold
+  sent,       \* the requests in the network
+  lead,       \* client: the uuid that it last won, or NoLead
+  basis,      \* client: its next expected_seq
+  nops,       \* client: writes sent so far
+  slCount, truncCount,
+  meta,       \* the leader uuid in the journal's matchmaker record
+  metaSet,    \* the seal wrote it
+  starts      \* the next_seq at which each uuid started to lead
+
+vars == <<slots, applied, leader, first, log, truncs, answers, sent, lead,
+          basis, nops, slCount, truncCount, meta, metaSet, starts>>
+
+NextSeq == Len(log) + 1
+
+----------------------------------------------------------------------------
+(* The commands.                                                           *)
+
+Fenced(u, e, op) == [kind |-> "f", u |-> u, e |-> e, op |-> op]
+Unfenced(op) == [kind |-> "u", op |-> op]
+
+\* `ok` is the propose-time check: used only with FenceAt = "propose".
+WithCheck(m, ok) == m @@ [ok |-> ok]
+
+ProposeOk(m) ==
+  CASE m.kind = "f" -> leader = m.u
+    [] m.kind = "u" -> leader = None
+    [] m.kind = "t" -> \/ leader = None /\ m.u = None
+                       \/ leader \in Uuids /\ m.u = leader
+    [] OTHER -> TRUE
+
+\* The slot that a new command takes is free and is not the Fence slot.
+CanAppend == Len(slots) < MaxSlots /\ Len(slots) + 1 # SealAt
+
+AppendCmd(cmd) == slots' = Append(slots, WithCheck(cmd, ProposeOk(cmd)))
+
+----------------------------------------------------------------------------
+(* The fold, at apply.                                                     *)
+
+FenceOk(c) == IF FenceAt = "apply" THEN leader = c.u ELSE c.ok
+
+TruncOk(c) ==
+  IF FenceAt = "apply"
+  THEN \/ leader = None /\ c.u = None
+       \/ leader \in Uuids /\ c.u = leader
+  ELSE c.ok
+
+Position(c) ==
+  IF c.e < first THEN "truncated"
+  ELSE IF c.e < NextSeq
+       THEN IF log[c.e].u = c.u /\ log[c.e].op = c.op THEN "dup" ELSE "taken"
+       ELSE IF c.e > NextSeq THEN "early" ELSE "applied"
+
+JudgeFenced(c) ==
+  IF Dedup = "first"
+  THEN IF c.e < NextSeq THEN Position(c)
+       ELSE IF ~FenceOk(c) THEN "fenced" ELSE Position(c)
+  ELSE IF ~FenceOk(c) THEN "fenced" ELSE Position(c)
+
+Answer(c, kind, s, slot) ==
+  [m |-> [k \in {"kind", "u", "e", "op"} \cap DOMAIN c |-> c[k]],
+   kind |-> kind, seq |-> s, leader |-> leader, slot |-> slot]
+
+\* The seal: the fold of the old segment writes the boundary uuid after its
+\* last slot.
+Seal(s, newLeader) ==
+  IF SealAt > 0 /\ s = SealAt - 1
+  THEN meta' = newLeader /\ metaSet' = TRUE
+  ELSE UNCHANGED <<meta, metaSet>>
+
+ApplyFenced(c, s) ==
+  LET a == JudgeFenced(c) IN
+  /\ IF a = "applied"
+     THEN log' = Append(log, [u |-> c.u, op |-> c.op, slot |-> s])
+     ELSE UNCHANGED log
+  /\ answers' = answers \cup
+       {Answer(c, a, IF a = "dup" THEN c.e ELSE IF a = "applied" THEN NextSeq ELSE 0, s)}
+  /\ UNCHANGED <<leader, first, truncs, lead, basis, starts>>
+  /\ Seal(s, leader)
+
+ApplyUnfenced(c, s) ==
+  LET a == IF leader = None THEN "applied" ELSE "wrongmode" IN
+  /\ IF a = "applied"
+     THEN log' = Append(log, [u |-> None, op |-> c.op, slot |-> s])
+     ELSE UNCHANGED log
+  /\ answers' = answers \cup {Answer(c, a, IF a = "applied" THEN NextSeq ELSE 0, s)}
+  /\ UNCHANGED <<leader, first, truncs, lead, basis, starts>>
+  /\ Seal(s, leader)
+
+\* SetLeader is a compare-and-set. A writer that won takes its basis from the
+\* view of the answer: next_seq after the SetLeader.
+ApplySetLeader(c, s) ==
+  IF leader = c.old /\ c.new # leader
+  THEN /\ leader' = c.new
+       /\ IF c.new \in Uuids
+          THEN /\ lead' = [lead EXCEPT ![c.new.w] = c.new]
+               /\ basis' = [basis EXCEPT ![c.new.w] =
+                              IF Basis = "view" THEN NextSeq ELSE @]
+               /\ starts' = starts \cup {[u |-> c.new, s |-> NextSeq, from |-> c.old]}
+          ELSE UNCHANGED <<lead, basis, starts>>
+       /\ UNCHANGED <<first, log, truncs, answers>>
+       /\ Seal(s, c.new)
+  ELSE /\ UNCHANGED <<leader, first, log, truncs, answers, lead, basis, starts>>
+       /\ Seal(s, leader)
+
+ApplyTruncate(c, s) ==
+  /\ IF TruncOk(c)
+     THEN /\ first' = IF c.upto > first
+                      THEN IF c.upto < NextSeq THEN c.upto ELSE NextSeq
+                      ELSE first
+          /\ truncs' = truncs \cup {[u |-> c.u, slot |-> s]}
+     ELSE UNCHANGED <<first, truncs>>
+  /\ UNCHANGED <<leader, log, answers, lead, basis, starts>>
+  /\ Seal(s, leader)
+
+\* The first slot of the next segment: it sets the leader of the new fold.
+ApplyFence(c, s) ==
+  /\ leader' = c.leader
+  /\ UNCHANGED <<first, log, truncs, answers, lead, basis, starts, meta, metaSet>>
+
+Apply ==
+  /\ applied < Len(slots)
+  /\ LET s == applied + 1
+         c == slots[s]
+     IN CASE c.kind = "f" -> ApplyFenced(c, s)
+          [] c.kind = "u" -> ApplyUnfenced(c, s)
+          [] c.kind = "sl" -> ApplySetLeader(c, s)
+          [] c.kind = "t" -> ApplyTruncate(c, s)
+          [] c.kind = "fence" -> ApplyFence(c, s)
+  /\ applied' = applied + 1
+  /\ UNCHANGED <<slots, sent, nops, slCount, truncCount>>
+
+----------------------------------------------------------------------------
+(* The clients and the leader that proposes.                               *)
+
+\* A client calls SetLeader(new, old): `old` is the leader it read, `new` is a
+\* fresh uuid of its own or None. The call races with the slots in flight.
+CallSetLeader(w, toNone) ==
+  /\ slCount < MaxSL
+  /\ CanAppend
+  /\ LET new == IF toNone THEN None ELSE [w |-> w, k |-> slCount + 1] IN
+     AppendCmd([kind |-> "sl", new |-> new, old |-> leader])
+  /\ slCount' = slCount + 1
+  /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
+                 basis, nops, truncCount, meta, metaSet, starts>>
+
+\* A client that won a uuid writes under it, pipelined: each write at the
+\* position after the last one. A deposed client keeps writing.
+SendFenced(w) ==
+  /\ lead[w] # NoLead
+  /\ nops[w] < MaxOps
+  /\ sent' = sent \cup {Fenced(lead[w], basis[w], [w |-> w, n |-> nops[w] + 1])}
+  /\ basis' = [basis EXCEPT ![w] = @ + 1]
+  /\ nops' = [nops EXCEPT ![w] = @ + 1]
+  /\ UNCHANGED <<slots, applied, leader, first, log, truncs, answers, lead,
+                 slCount, truncCount, meta, metaSet, starts>>
+
+\* Any client may send an unfenced write, in any mode.
+SendUnfenced(w) ==
+  /\ nops[w] < MaxOps
+  /\ sent' = sent \cup {Unfenced([w |-> w, n |-> nops[w] + 1])}
+  /\ nops' = [nops EXCEPT ![w] = @ + 1]
+  /\ UNCHANGED <<slots, applied, leader, first, log, truncs, answers, lead,
+                 basis, slCount, truncCount, meta, metaSet, starts>>
+
+\* A client whose fenced write got a final refusal while the journal is
+\* multi-writer writes it again, unfenced.
+MoveToMulti(a) ==
+  /\ a \in answers
+  /\ a.m.kind = "f"
+  /\ a.kind \in {"fenced", "taken"}
+  /\ a.leader = None
+  /\ sent' = sent \cup {Unfenced(a.m.op)}
+  /\ UNCHANGED <<slots, applied, leader, first, log, truncs, answers, lead,
+                 basis, nops, slCount, truncCount, meta, metaSet, starts>>
+
+\* A truncate up to the tail that the client read: fenced by the uuid that it
+\* won, or unfenced.
+CallTruncate(w, fenced) ==
+  /\ truncCount < MaxTrunc
+  /\ CanAppend
+  /\ fenced => lead[w] # NoLead
+  /\ AppendCmd([kind |-> "t", u |-> IF fenced THEN lead[w] ELSE None, upto |-> NextSeq])
+  /\ truncCount' = truncCount + 1
+  /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
+                 basis, nops, slCount, meta, metaSet, starts>>
+
+\* The consensus leader proposes a request from the network: a first send,
+\* a resend or a copy.
+Propose(m) ==
+  /\ m \in sent
+  /\ CanAppend
+  /\ AppendCmd(m)
+  /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
+                 basis, nops, slCount, truncCount, meta, metaSet, starts>>
+
+\* The first leader of the next segment proposes the Fence with the uuid in
+\* the matchmaker record.
+ProposeFence ==
+  /\ SealAt > 0
+  /\ Len(slots) + 1 = SealAt
+  /\ Boundary = "wait" => metaSet
+  /\ slots' = Append(slots, [kind |-> "fence", leader |-> meta, ok |-> TRUE])
+  /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
+                 basis, nops, slCount, truncCount, meta, metaSet, starts>>
+
+----------------------------------------------------------------------------
+
+Init ==
+  /\ slots = <<>>
+  /\ applied = 0
+  /\ leader = InitLeader
+  /\ first = 1
+  /\ log = <<>>
+  /\ truncs = {}
+  /\ answers = {}
+  /\ sent = {}
+  /\ lead = [w \in Writers |-> NoLead]
+  /\ basis = [w \in Writers |-> 1]
+  /\ nops = [w \in Writers |-> 0]
+  /\ slCount = 0
+  /\ truncCount = 0
+  /\ meta = InitLeader
+  /\ metaSet = FALSE
+  /\ starts = {}
+
+Next ==
+  \/ Apply
+  \/ \E w \in Writers : \/ CallSetLeader(w, TRUE) \/ CallSetLeader(w, FALSE)
+                         \/ SendFenced(w) \/ SendUnfenced(w)
+                         \/ CallTruncate(w, TRUE) \/ CallTruncate(w, FALSE)
+  \/ \E a \in answers : MoveToMulti(a)
+  \/ \E m \in sent : Propose(m)
+  \/ ProposeFence
+
+Spec == Init /\ [][Next]_vars
+
+----------------------------------------------------------------------------
+(* The oracle: the leader at each slot from the SetLeader commands alone,  *)
+(* by their compare-and-set, with no segment and no fold.                  *)
+
+RECURSIVE OracleUpTo(_)
+OracleUpTo(s) ==
+  IF s = 0 THEN InitLeader
+  ELSE LET l == OracleUpTo(s - 1)
+           c == slots[s]
+       IN IF c.kind = "sl" /\ c.old = l /\ c.new # l THEN c.new ELSE l
+
+\* The leader that judges slot s: the one that the slots before it left.
+OracleAt(s) == OracleUpTo(s - 1)
+
+----------------------------------------------------------------------------
+(* Invariants.                                                             *)
+
+TypeOK ==
+  /\ applied \in 0..Len(slots)
+  /\ Len(slots) <= MaxSlots
+  /\ leader \in Leaders
+  /\ first \in 1..NextSeq
+  /\ meta \in Leaders
+
+\* The fence: a record of a uuid was judged under that uuid, and an unfenced
+\* record under None, in both directions of a switch and across the seal.
+\* The same for the accepted truncates.
+FenceTrue ==
+  /\ \A s \in DOMAIN log : OracleAt(log[s].slot) = log[s].u
+  /\ \A t \in truncs : OracleAt(t.slot) = t.u
+
+\* Every write acknowledged (applied, or dup on a resend) is in the journal at
+\* the seq of the answer.
+AckTrue ==
+  \A a \in answers :
+    a.kind \in {"applied", "dup"} =>
+      /\ a.seq \in DOMAIN log
+      /\ log[a.seq].op = a.m.op
+      /\ log[a.seq].u = IF a.m.kind = "f" THEN a.m.u ELSE None
+
+\* A final refusal of a fenced write is true now and for ever: the write is
+\* not in the journal as a fenced record. So a resend resolves an Unknown.
+RefusalFinal ==
+  \A a \in answers :
+    (a.m.kind = "f" /\ a.kind \in {"fenced", "taken"}) =>
+      \A s \in DOMAIN log : ~(log[s].u # None /\ log[s].op = a.m.op)
+
+\* Single-writer mode is exactly-once: a write is at most once in the journal
+\* as a fenced record, and never both as a fenced and an unfenced record.
+ExactlyOnce ==
+  \A s, t \in DOMAIN log :
+    (s # t /\ log[s].op = log[t].op) => (log[s].u = None /\ log[t].u = None)
+
+\* A writer that won a SetLeader never aims a write below the next_seq at
+\* which it started to lead, the position that the switch left.
+BasisFresh ==
+  \A m \in sent : \A st \in starts :
+    (m.kind = "f" /\ m.u = st.u) => m.e >= st.s
+
+FirstMonotone == [][first' >= first]_vars
+
+\* Not a rule: the limit of the multi-writer contract. A refusal of an
+\* unfenced write is true only for that copy; another copy of the same
+\* write can land later, after the mode went back to None.
+UnfencedRefusalFinal ==
+  \A a \in answers :
+    (a.m.kind = "u" /\ a.kind = "wrongmode") =>
+      \A s \in DOMAIN log : log[s].op # a.m.op
+
+----------------------------------------------------------------------------
+(* Reach: invariants that must break, so that the passing checks are not   *)
+(* empty.                                                                  *)
+
+\* A write applied before SetLeader(None, u) is answered dup on its resend
+\* after it.
+NoDupAfterSwitch == ~\E a \in answers : a.kind = "dup" /\ a.leader = None
+
+\* After SetLeader(u, None), a write of u is applied.
+NoWriteAfterBack ==
+  ~\E a \in answers, st \in starts :
+     a.kind = "applied" /\ a.m.kind = "f" /\ st.from = None /\ a.m.u = st.u
+
+\* The Fence at the seal carries None, and a write is judged after it.
+NoFenceNone ==
+  ~\E a \in answers : SealAt > 0 /\ a.slot > SealAt
+                      /\ slots[SealAt].leader = None /\ a.kind = "applied"
+
+\* A resend of a fenced write is answered truncated after an unfenced
+\* truncate.
+NoTruncatedResend ==
+  ~\E a \in answers, t \in truncs :
+     a.kind = "truncated" /\ a.m.kind = "f" /\ t.u = None
+=============================================================================

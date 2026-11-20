@@ -145,6 +145,13 @@ sequenceDiagram
   fence its own older writes by drawing a new one.
 - A **multi-writer** journal has no fence: an unfenced `Write` lands at apply, at-least-once
   (02-data-plane.md §2.4). A call shaped for the other mode is `Outcome::WrongMode`.
+- The mode is the leader value itself (decided by Pierre on 2026-11-20, #1274 (multi-writer mode
+  through SetLeader(None) and expected_seq)): `SetLeader(None, old)` makes the journal
+  multi-writer and `SetLeader(new, None)` single-writer again. The fold judges the position of a
+  fenced `Write` (below `next_seq`: `Duplicate` if identical, else refused) before its uuid, so
+  the resend of a write in flight across a switch still tells its writer whether it landed. TLC
+  checks it, with controls, in `specs/tla/multi-writer/` (02-data-plane.md §2.4.1). The sources
+  have no such switch: it is paros's own rule.
 
 ## 10. Pitfalls
 
