@@ -38,11 +38,17 @@ run() {
   esac
 }
 
-rm -f survivors.txt
+rm -rf survivors.txt mutants.out
 run -j "${MUTANTS_JOBS:-2}" "$@"
+touch survivors.txt
+# A cut with no mutant (`--in-diff` of a diff that changes only comments of
+# the core) runs nothing, and cargo-mutants writes no `mutants.out/`.
+if [ ! -d mutants.out ]; then
+  echo "First pass: the cut holds no mutant. Nothing to run."
+  exit 0
+fi
 rm -rf mutants.first
 cp -r mutants.out mutants.first
-touch survivors.txt
 
 if [ ! -s mutants.first/missed.txt ]; then
   echo "First pass: no mutant missed. The second pass has nothing to run."

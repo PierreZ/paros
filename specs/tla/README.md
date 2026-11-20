@@ -137,6 +137,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
 | Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
+| Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -1565,13 +1566,19 @@ reported a vote), or, above the new frontier, it is free again. The model has:
 - **The batcher** (`Batcher`): one lane of one multi-writer journal. A writer pushes a write
   while the lane fits the batcher's record limit, and the lane flushes as one batch at any time
   (`flush_records`, the tick). A batch is one unfenced `Write` to the leader, and the transport
-  delivers a request at most one time.
+  delivers a request at most one time (with `Copies`, a few more times).
 - **The edge refusal**: the leader refuses a merged batch over its record limit (`TooLarge`)
   before it allocates a slot. The batcher lowers its limit (`lower_limits`) and sends each write
   of the batch again, alone (`docs/architecture/02-data-plane.md` §2.4).
 - **The held answer**: the leader allocates the frontier slot, and answers once the slot and
-  every slot below it are chosen, with the `seq` that its fold gives the batch. A new leader holds
-  no answer of the old one.
+  every slot below it are chosen, with the `seq` that its fold gives the batch, and only when the
+  slot chose the batch that the leader proposed there. A new leader holds no answer of the old
+  one.
+- **The deposed leader** (#1232 (held writes)): the old leader stays up and keeps its held
+  answers. It answers a held batch `Unknown` at any time, or `ok` when the slot chose that batch.
+  It never answers `NotLeader` for a batch that holds a slot. The batcher treats `Unknown` as an
+  ambiguous batch. A single writer resolves an `Unknown` with a resend at the same
+  `expected_seq`; `multi-writer/` checks that half (`AckTrue`, `RefusalFinal`, `ExactlyOnce`).
 - **The unbatcher** (`Unbatcher::scatter`) cuts the answer in batch order, so each write gets
   its own dense range.
 - **An ambiguous batch**: a batch with no answer in time is answered unanswered, write by
@@ -1597,6 +1604,8 @@ reported a vote), or, above the new frontier, it is free again. The model has:
 | `Read` | `"quorum"`: the leaderless read (the code). `"local"`: a control, the replica serves from its prefix with no watermarks. |
 | `RQ` | The sets that close a read: a majority of the acceptors (the code), or the control `WithReplicas`, where a read replica counts as a voter and answers with its own prefix. |
 | `LeaderMax`, `BatchMax` | The leader's record limit and the batcher's limit before it hears the leader's. With 3, the merged batch of `w1` (one record) and `w2` (two records) fits; with 2, the leader refuses it. |
+| `Held` | What a deposed leader answers for a held batch. `"unknown"`: `Unknown`, or `ok` when the slot chose the batch (the rule, #1232). `"slot"`: a control, it answers from the outcome of the slot, whatever the slot chose. `"notleader"`: a control, it answers `NotLeader`, and the batcher follows the hint and sends the batch again (§2.4). |
+| `Copies` | How many times in a run the transport may deliver a batch one more time. 0 in every check but `copies` and `copies_onerange`. |
 | `Leaders`, `Restarts`, `Crash` | How many leader changes and replica restarts can happen, and whether the batcher can stop for good. |
 
 The safety invariants:
@@ -1607,6 +1616,9 @@ The safety invariants:
 - `OneAnswer`: each write gets one answer, a range or unanswered.
 - `AnswerAgrees`: the range that the unbatcher gives a write is the range that each replica
   folds for it.
+- `AckedChosen`: the range that the unbatcher gives a write is the range that the fold of the
+  chosen log gives it, also when no replica walked the slot yet. An answered write is never lost
+  (#1232).
 - `InOrder`: a replica folds the chosen log in slot order with no gap, and its state is the fold
   of that prefix.
 - `Dense`: the ranges of a replica's state are disjoint and cover `[0, next_seq)`.
@@ -1636,6 +1648,11 @@ Results (`compartments/checks.txt`; the CI set runs in about 45 seconds with 4 w
 | `restart` | ci | the rules of the code, one replica restart | pass |
 | `reads` | ci | the rules of the code, one reader | pass (700 thousand states) |
 | `resend_ambiguous` | ci | the batcher sends an ambiguous batch again | `OneRange` violation |
+| `reach_deposed_ok` | ci | `NoDeposedOk`, a reachability control: a deposed leader answers a held batch `ok` | violation |
+| `held_slot` | ci | a deposed leader answers from the outcome of the slot | `AckedChosen` violation |
+| `held_notleader` | ci | a deposed leader answers `NotLeader`, and the batcher sends the batch again | `OneRange` violation |
+| `copies` | ci | the rules of the code, and the transport delivers a batch one more time; no `OneRange` and no `AnswerAgrees` | pass (3 million states, 50 s) |
+| `copies_onerange` | ci | the same, with `OneRange`: a copy lands again (multi-writer is at-least-once) | `OneRange` violation |
 | `walk_skip` | ci | the walk folds a slot past a gap | `AnswerAgrees` violation |
 | `boot_keep` | ci | the fold state survives a restart, and the walk starts again at the chosen index on disk | `OneRange` violation |
 | `read_local` | ci | the replica serves a read from its prefix | `ReadFresh` violation |
@@ -1644,9 +1661,9 @@ Results (`compartments/checks.txt`; the CI set runs in about 45 seconds with 4 w
 | `live_split` | ci | the rules of the code, the leader refuses the merged batch | `Ends` pass |
 | `live_noresend` | ci | the leader does not send lost `Accept`s again | `Ends` violation |
 | `reads_two` | long | two replicas, one reader | pass (4.5 million states, 2 min) |
-| `safety` | long | the whole model at once: one leader change, a batcher that can stop, one restart, one reader | pass (12.7 million states, 4.6 min) |
+| `safety` | long | the whole model at once: one leader change with a deposed leader that stays up, a batcher that can stop, one restart, one reader | pass (36.5 million states, 27 min) |
 
-The long checks ran once on 2026-11-19 with 4 workers.
+The long checks ran once on 2026-11-20 with 4 workers, with the held answers of #1232.
 
 The traces of the controls:
 
@@ -1666,14 +1683,25 @@ The traces of the controls:
   and the reader `r1` itself, two answers with watermark 0, and is served empty.
 - `live_noresend`: the `Accept`s of the slot of `w1` are lost, and nothing sends them again: the
   slot stays open for good.
+- `held_slot`: the leader allocates slot 0 to the batch of `w1`. A new leader wins with frontier 1
+  and fills slot 0 with a `Noop`, which is chosen. The deposed leader answers `w1` from the
+  outcome of slot 0: `[0, 1)`. No slot holds `w1`, so an acked write is lost.
+- `held_notleader`: slot 0 chooses the batch of `w1`, and then a new leader wins. The
+  deposed leader answers `NotLeader`, the batcher sends `w1` to the new leader, and the copy gets
+  slot 1: the replica gives `w1` two ranges.
+- `copies_onerange`: the transport delivers the batch of `w1` two times, and each copy gets a slot.
+  This is the at-least-once of a multi-writer journal (§2.4). A single writer is exactly-once
+  because the fold judges its `expected_seq` (`multi-writer/`).
 
 What the model does not find: no rule of the code is refuted, and no design decision is in
-question. The read replica's rule is the rule of `reads/`, and the walk's rule is the module doc
+question. The rule for held answers (#1232) is the decision of 2026-11-20 (`Unknown`, resolved
+through `expected_seq`). The read replica's rule is the rule of `reads/`, and the walk's rule is the module doc
 of `replica.rs` ("the fold is contiguous or it stops").
 
 Not in the model: the log itself (`multi-paxos/`), the proxy leader (`proxy-leader/`), more
-than one journal (a lane never mixes journals, so one lane is enough), the `NotLeader` refusal (it
-takes no slot, so it is the same case as `TooLarge`; this is a reading of the code, not a check), a write
+than one journal (a lane never mixes journals, so one lane is enough), the `NotLeader` refusal at
+the edge (it takes no slot, so it is the same case as `TooLarge`; this is a reading of the code,
+not a check; the `NotLeader` answer of a deposed leader for a held batch is `held_notleader`), a write
 over the limits alone, the byte limit, truncation and the trim-point jump, a faulty record that
 holds the walk, the reply owner (`slot % replica_count`, which nothing routes on), a read that
 expires, and a change of members.
@@ -2529,3 +2557,88 @@ The answer to #1275:
   handover is one more way to lose a mark that a minority holds.
 - No decision is refuted.
 
+### `offload/`: the offloader and the races of offload, for #1256
+
+In design A (`docs/architecture/02-data-plane.md` section 2.10) a sealed segment goes to an object
+store, and its record in the journal's matchmaker record says `offloaded`. The upload is done by
+the offloader, a stateless role (Pierre, 2026-11-20). For each retired segment it reads the
+segment from a replica of the segment, builds the object with deterministic bytes, writes it with
+a conditional put at the key journal id + segment number, and marks `offloaded` in the record by
+compare-and-set. A replica drops its copy only after the mark.
+
+The model has one segment of `L = 2` slots, three replicas (`F = 1`) that apply its slots in
+order, and two offloaders of two releases (a rolling upgrade: the release is in the header, so
+their bytes differ). One offloader can stop for good between any two steps; the controller can
+stop between the record write of a trim and its delete. A mark can be lost (the write or its
+reply), and the offloader then starts again from the record. A user truncate trims the segment at
+any time (no fairness). The store is atomic: a put, a delete and the listing of one key are single
+steps. The liveness checks have weak fairness on every step but a trim, a lost mark and a stop,
+and strong fairness on the mark (a lost mark that comes back for ever is a network that never
+heals).
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: `ObjectTrue` (each object holds the whole segment), `Findable` (a slot that is not trimmed is at the acceptors before the retire, at `F + 1` replicas after it, and in the object once the record says offloaded), `AllOffloaded` (the segment ends offloaded or trimmed) and `NoOrphan` (no object of a trimmed segment stays for good); one stop; 14,627 distinct states |
+| `safety_crash2` | ci | pass: the same with two stops (both offloaders, or one offloader and the controller) |
+| `gate_sealed` | ci | pass: an offloader may also take a sealed segment that did not retire yet |
+| `tomb` | ci | pass: the trim writes a tombstone at the key and nobody scrubs, while no controller stops |
+| `safety_np2_l1` | long | pass: two segments of one slot, trimmed in order; 8,636,080 distinct states, about 40 minutes locally |
+| `safety_np2` | long | pass, bounded at 40 minutes: two segments of two slots |
+| `reach_duplicate` | ci | violation: a put finds the object of the other offloader |
+| `reach_lateupload` | ci | violation: a put lands after the trim and its delete |
+| `reach_stopbeforemark` | ci | violation: an offloader stops with its object in the store and no mark |
+| `reach_alldropped` | ci | violation: every replica dropped the copy of an offloaded segment |
+| `build_partial` | ci | violation of `ObjectTrue`: the offloader reads a replica that did not apply the whole segment |
+| `conflict_bytes` | ci | violation of `AllOffloaded`: when its put finds an object, the offloader marks only if the bytes equal its own. The offloader of the other release put and stopped; the one that is left never marks |
+| `conflict_abandon` | ci | violation of `AllOffloaded`: when its put finds an object, the offloader stops the attempt. After a lost mark, every next attempt finds its own object |
+| `recheck_anyfail` | ci | violation of `Findable`: the offloader deletes the key on any failed mark. Its mark fails because the other offloader marked first, and it deletes the marked object |
+| `late_upload` | ci | violation of `NoOrphan`: no delete on a failed mark and no scrub. The put of a slow offloader lands after the trim deleted the key |
+| `stop_before_mark` | ci | violation of `NoOrphan`: the delete on a failed mark, no scrub. The late put lands, and its offloader stops before the mark |
+| `scrub_unmarked` | ci | violation of `Findable`: the scrub also deletes an object with no mark. It deletes the object between the put and the mark, and the mark then names an object that is gone |
+| `trim_record` | ci | violation of `NoOrphan`: the trim deletes only the object that the record names (marked). The mark was lost, the trim came, and the object stays |
+| `drop_uploaded` | ci | violation of `Findable`: a replica drops its copy once the object is in the store, before the mark. The record does not name the object, and fewer than `F + 1` replicas hold the segment |
+| `tomb_ctl_stop` | ci | violation of `NoOrphan`: tombstones and no scrub; the controller stops between the record write of the trim and the tombstone, and the next controller does not know that a delete is to do |
+| `tomb_blind` | ci | violation of `NoOrphan`: tombstones with a put that overwrites; the late put replaces the tombstone |
+
+The answer to #1256:
+
+- **Late upload after trim.** An offloader that read `retired` can put after the trim deleted the
+  key (`reach_lateupload`). A check of the record before the put cannot close it: the trim can
+  come between the check and the put (`late_upload`). Two rules close it. The mark is a
+  compare-and-set from "not offloaded and not trimmed", so it fails after a trim, and **an
+  offloader whose mark finds the record trimmed deletes the key**. That is not enough when the
+  offloader stops between the put and the mark (`stop_before_mark`), so **the controller scrubs**:
+  it lists the store and deletes each object of a segment below the trim floor. The scrub needs
+  no record: the segment number is in the key.
+- **Lost record write.** After a lost mark the object has no mark. The next attempt finds the
+  object, and **an offloader whose put finds an object reads it and marks when it holds the whole
+  segment, whatever its release**. An offloader that gives up on a found object never marks
+  (`conflict_abandon`), and one that compares bytes never marks across a rolling upgrade
+  (`conflict_bytes`). If a trim comes before the next attempt, the trim deletes by the key, not
+  by a location in the record (`trim_record`), and the scrub deletes it too.
+- **Duplicate upload.** The conditional put keeps one object (`reach_duplicate`). The two
+  offloaders can build different bytes (two releases), but every object holds the same slots,
+  because **the offloader reads only a replica that applied every slot of the segment, up to the
+  `next_seq` of the record** (`build_partial`). A failed mark deletes the key only when the record
+  says trimmed: a delete on any failure deletes the marked object of the other offloader
+  (`recheck_anyfail`).
+- **Drop before mark.** A replica drops its copy only after the mark (`drop_uploaded`), as #1213
+  (segments experiment) found. The scrub never deletes an object whose segment is not trimmed:
+  the object of an offloader between its put and its mark is not an orphan yet
+  (`scrub_unmarked`).
+- **Retired or sealed.** An offloader may also take a sealed segment that did not retire yet
+  (`gate_sealed` passes). Safety needs one replica that holds the whole segment, and `F + 1`
+  holders until the mark; the retire is not needed. The design keeps "the controller offloads
+  retired segments" (decided), which this model shows is safe, not required.
+- **Tombstones.** A tombstone at trim also stops the late upload, with no scrub (`tomb`). But it
+  is not enough alone: a controller that stops between the trim and the tombstone leaves a key
+  open (`tomb_ctl_stop`), so a tombstone needs a list or a durable delete to do, as the scrub
+  does, and it leaves one object per trimmed segment for good. The design takes the scrub.
+- No decision is refuted.
+
+What the model leaves out: the matchmakers are one atomic register (`matchmaker/` and
+`handover/` check the quorum; `segment-records/` checks that the mark is a write done at a
+matchmaker majority, across a handover); the store is atomic and has read-after-write consistency, as S3
+and GCS give for a single key; a reader of the object is not modelled (`Findable` checks that the
+bytes are where the record says); the trim floor of the core (`truncation/`) is one bit per
+segment here.

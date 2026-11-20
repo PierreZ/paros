@@ -55,7 +55,7 @@ only a resize record changes, the floor and the register across the handover; #1
 1.8); `specs/tla/handover-chain/`: three generations, clients that reach one member at a time,
 and the two fences of the state transfer; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
-read; #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
+read, the held answers of a deposed leader (#1232 (held writes)); #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
@@ -95,10 +95,14 @@ segment-record check and a hold before Phase 2 that stay live, the seal end of a
 (`specs/tla/segment-records/`: the seal, the retire, the offload mark, the controller election and
 the reshape call as compare-and-sets on the matchmaker register while the set hands over; a
 replica drops its copy only after a write of the offload mark is done at a majority; #1275
-(segment records across a matchmaker handover)), the health measures of the grid
-(`specs/tla/health/`: the spares of a column, electable, writable and the hold of a bypass as
-counts against the quorums, the seven journal states and their fixed actions, no placement over
-two zones after a zone loss; #1260 (journal health measures)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+(segment records across a matchmaker handover)), the offload of sealed segments (`specs/tla/offload/`:
+the offloader's full copy, conditional put and compare-and-set mark, a found object read and
+marked whatever its release, the delete of the key by a mark that finds the record trimmed, the
+scrub of the objects below the trim floor, the drop after the mark; #1256 (offload races and the
+offloader role)), the health measures of the grid (`specs/tla/health/`: the spares of a column,
+electable, writable and the hold of a bypass as counts against the quorums, the seven journal
+states and their fixed actions, no placement over two zones after a zone loss; #1260 (journal
+health measures)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),

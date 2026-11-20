@@ -57,6 +57,18 @@ a single-writer journal batches in its client (`paros::client::Writer`), never i
 A leader may refuse a `Write` from its own fold at propose time, so a superseded leader's
 pipelined burst does not burn slots. That is an optimisation; the apply-time check is the safety.
 
+**A held answer belongs to the command, not to the slot** (decided by Pierre on 2026-11-20,
+#1232 (held writes)). The consensus leader holds the answer of each `Write` it proposed until the
+slot is applied. After a leader change, the slot of a deposed leader can choose another command
+or a `Noop`. So a leader answers a held write from the outcome of its slot only when the command
+applied at the slot is the one it proposed there. Else it answers `Unknown`, and it may answer
+`Unknown` at any time. It never answers `NotLeader` for a write that holds a slot: the caller
+would send it again, and both copies can land. A single writer resolves an `Unknown` with a
+resend at the same `expected_seq` (exactly-once, the fold judges the position); a batcher answers
+each write of the batch unanswered (at-least-once, §2.4). TLC checks the rule in
+`specs/tla/compartments/` (`AckedChosen`; the control `held_slot` loses an acked write, the
+control `held_notleader` lands a write two times) and the resend in `specs/tla/multi-writer/`.
+
 The client pipelines a single-writer journal's writes with `paros::client::Pipeline` (#597
 (several writes in flight per journal)): one writer's leadership, shared by its callers, each
 write opened at the position after the last one and sent without waiting for the answer of the
@@ -406,6 +418,26 @@ checked, each with a control that TLC breaks:
   set after the stop fails, and a deposed controller's reshape fails across the handover too.
   Controls: a successor that copies one member of the stop quorum (`close_one`,
   `close_one_term`), a frozen member that takes writes (`frozen_serves`).
+- **The offloader** (a stateless role, Pierre 2026-11-20; checked by `specs/tla/offload/`, #1256
+  (offload races and the offloader role)) offloads a retired segment in four steps: it reads the
+  segment from a replica that applied every slot up to the `next_seq` of the record, builds the
+  object with deterministic bytes, writes it with a conditional put at the key, and marks
+  `offloaded` by compare-and-set from "not offloaded and not trimmed". The races of two
+  offloaders, a lost mark, an offloader that stops between the put and the mark, and a trim that
+  comes during the upload need these rules, each with a control that TLC breaks:
+  - A put that finds an object is not a failure: the offloader reads the object and marks when it
+    holds the whole segment, whatever the release in its header. Giving up never marks after a
+    lost mark; comparing bytes never marks across a rolling upgrade.
+  - A failed mark deletes the key only when the record says trimmed (the late upload after
+    trim). A delete on any failed mark deletes the object that the other offloader marked.
+  - The trim deletes the object by its key, marked or not, and the controller scrubs: it lists
+    the store and deletes each object of a segment below the trim floor. The scrub never deletes
+    an object of a segment that is not trimmed, even with no mark: that object can be between
+    its put and its mark. A tombstone at trim was checked too; it also needs a list (a
+    controller can stop between the trim and the tombstone) and stays for good, so the design
+    takes the scrub.
+  - Offload does not need the retire: one complete copy and `F + 1` holders until the mark are
+    enough. The controller still offloads retired segments only.
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in
