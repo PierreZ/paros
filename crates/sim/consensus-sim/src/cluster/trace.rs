@@ -64,6 +64,7 @@ mod handover;
 mod leader_handoff;
 mod matchmaker;
 mod multi_paxos;
+mod node;
 mod proxy_leader;
 mod reads;
 mod rules;
@@ -926,16 +927,16 @@ impl Spec {
     #[must_use]
     pub fn check(self) -> TraceCheck {
         match self {
-            Self::MultiPaxos => spec("multi-paxos", "MultiPaxosTrace"),
+            Self::MultiPaxos => spec("node", "MultiPaxosTrace"),
             Self::ProxyLeader => spec("proxy-leader", "ProxyLeaderTrace"),
             Self::LeaderHandoff => spec("leader-handoff", "LeaderHandoffTrace"),
-            Self::Matchmaker => spec("matchmaker", "MatchmakerTrace"),
-            Self::MatchmakerGrid => spec("matchmaker", "MatchmakerGridTrace"),
-            Self::Reads => spec("reads", "ReadsTrace"),
-            Self::Truncation => spec("truncation", "TruncationTrace"),
-            Self::Compartments => spec("compartments", "CompartmentsTrace"),
-            Self::Faults => spec("truncation", "FaultsTrace"),
-            Self::Retire => spec("matchmaker", "RetireTrace"),
+            Self::Matchmaker => spec("node", "MatchmakerTrace"),
+            Self::MatchmakerGrid => spec("node", "MatchmakerGridTrace"),
+            Self::Reads => spec("node", "ReadsTrace"),
+            Self::Truncation => spec("node", "TruncationTrace"),
+            Self::Compartments => spec("node", "CompartmentsTrace"),
+            Self::Faults => spec("node", "FaultsTrace"),
+            Self::Retire => spec("node", "RetireTrace"),
             Self::Handover => spec("handover", "HandoverTrace"),
         }
     }
@@ -962,7 +963,9 @@ impl Spec {
             }
             Self::Reads => matchmaker::keeps(event) || reads::keeps(event),
             Self::Truncation => multi_paxos::keeps(event) || truncation::keeps(event),
-            Self::Compartments => multi_paxos::keeps(event) || compartments::keeps(event),
+            Self::Compartments => {
+                multi_paxos::keeps(event) || truncation::keeps(event) || compartments::keeps(event)
+            }
             Self::Faults => {
                 faults::keeps(event)
                     || (multi_paxos::keeps(event) || truncation::keeps(event))
@@ -985,7 +988,6 @@ impl Spec {
             "a trace of {self:?} holds only the events it keeps"
         );
         match self {
-            Self::MultiPaxos => multi_paxos::trace(flavor.acceptors, flavor.quorum, events),
             Self::ProxyLeader => proxy_leader::trace(flavor, events),
             Self::LeaderHandoff => {
                 assert!(
@@ -994,31 +996,6 @@ impl Spec {
                 );
                 leader_handoff::trace(flavor.acceptors, events)
             }
-            Self::Matchmaker | Self::Retire => {
-                assert!(
-                    flavor.quorum == QuorumSystem::Majority,
-                    "{self:?} runs on a majority"
-                );
-                matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
-            }
-            Self::MatchmakerGrid => {
-                assert!(
-                    matches!(flavor.quorum, QuorumSystem::Grid { .. }),
-                    "MatchmakerGridTrace runs on a grid"
-                );
-                let mut trace =
-                    matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events);
-                matchmaker::layouts(&mut trace, events);
-                grid(&mut trace, flavor.quorum);
-                trace
-            }
-            Self::Reads => {
-                assert!(
-                    flavor.quorum == QuorumSystem::Majority && flavor.replicas == 0,
-                    "ReadsTrace runs on a majority, with no replica"
-                );
-                reads::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
-            }
             Self::Handover => handover::trace(
                 flavor.matchmakers + flavor.matchmaker_spares,
                 &(0..flavor.matchmakers)
@@ -1026,20 +1003,14 @@ impl Spec {
                     .collect::<Vec<_>>(),
                 events,
             ),
-            Self::Truncation | Self::Faults => {
-                assert!(
-                    flavor.matchmakers == 0 && flavor.proxies == 0 && flavor.replicas == 0,
-                    "{self:?} runs on plain Multi-Paxos"
-                );
-                multi_paxos::trace(flavor.acceptors, flavor.quorum, events)
-            }
-            Self::Compartments => {
-                assert!(
-                    flavor.matchmakers == 0 && flavor.replicas > 0,
-                    "CompartmentsTrace runs on read replicas, with no matchmaker"
-                );
-                compartments::trace(flavor, events)
-            }
+            Self::MultiPaxos
+            | Self::Matchmaker
+            | Self::MatchmakerGrid
+            | Self::Reads
+            | Self::Truncation
+            | Self::Compartments
+            | Self::Faults
+            | Self::Retire => node::trace(flavor, events),
         }
     }
 }

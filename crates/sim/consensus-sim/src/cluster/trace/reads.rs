@@ -30,23 +30,6 @@ pub(super) fn keeps(event: &ClusterEvent) -> bool {
     )
 }
 
-/// The events of one cluster walk of a pool of `nodes` and `matchmakers`
-/// matchmakers as a trace of `ReadsTrace.tla`.
-pub(super) fn trace(nodes: u64, matchmakers: u64, events: &[ClusterEvent]) -> Trace {
-    let mut trace = matchmaker::trace(nodes, matchmakers, events);
-    let ctxs = events
-        .iter()
-        .filter_map(|event| match event {
-            ClusterEvent::ReadStart { ctx, .. } => {
-                Some(Value::Int(i64::try_from(*ctx).expect("a token")))
-            }
-            _ => None,
-        })
-        .collect();
-    trace.define("TraceCtxs", Value::Set(ctxs));
-    trace
-}
-
 impl Tracer {
     /// `basis`: the node holds a read basis it did not hold before.
     pub(super) fn basis(&mut self, batch: &Batch<'_>, events: &mut Vec<ClusterEvent>) {

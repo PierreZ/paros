@@ -26,28 +26,3 @@ pub(super) fn keeps(event: &ClusterEvent) -> bool {
     )
 }
 
-/// The events of one cluster walk as a trace of `MultiPaxosTrace.tla`, for
-/// a cluster of `acceptors` nodes under `quorum`.
-pub(super) fn trace(acceptors: u64, quorum: QuorumSystem, events: &[ClusterEvent]) -> Trace {
-    let (ballots, ranks) = ranks(events);
-    let mut sizes = Sizes::default();
-    let mut trace = Trace::new();
-    for event in events {
-        encode::write(&mut trace, &ranks, 0, &mut sizes, event);
-    }
-    trace.define(
-        "TraceAcceptors",
-        Value::Set((0..acceptors).map(|id| node(NodeId(id))).collect()),
-    );
-    trace.define("TraceCommands", sizes.commands(false));
-    trace.define("TraceNB", ranks.count());
-    trace.define("TraceNS", int(sizes.slots));
-    // The owner of each ballot, in the order of the ranks.
-    trace.define(
-        "TraceOwner",
-        Value::Seq(ballots.iter().map(|ballot| node(ballot.node)).collect()),
-    );
-    trace.define("TraceRestarts", int(sizes.restarts));
-    grid(&mut trace, quorum);
-    trace
-}

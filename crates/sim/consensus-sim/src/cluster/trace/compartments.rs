@@ -32,31 +32,6 @@ pub(super) fn keeps(event: &ClusterEvent) -> bool {
     )
 }
 
-/// The events of one cluster walk of `flavor` as a trace of
-/// `CompartmentsTrace.tla`.
-pub(super) fn trace(flavor: &Flavor, events: &[ClusterEvent]) -> Trace {
-    let mut trace = multi_paxos::trace(flavor.acceptors, flavor.quorum, events);
-    trace.define(
-        "TraceReplicas",
-        Value::Set(
-            (0..flavor.replicas)
-                .map(|i| node(NodeId(crate::cluster::REPLICA_BASE + i)))
-                .collect(),
-        ),
-    );
-    let ctxs = events
-        .iter()
-        .filter_map(|event| match event {
-            ClusterEvent::ReplicaRead { ctx, .. } => {
-                Some(Value::Int(i64::try_from(*ctx).expect("a token")))
-            }
-            _ => None,
-        })
-        .collect();
-    trace.define("TraceCtxs", Value::Set(ctxs));
-    trace
-}
-
 /// The steps of the writes of one batch of `replica` that come before the
 /// slots the batch folds (`before`: what it learned and a jump to a trim
 /// point, which the walk folds from), or after them (a compaction, which
