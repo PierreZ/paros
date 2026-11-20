@@ -41,8 +41,9 @@ And the matchmakers of `g` must not keep registering after the successor took th
    at or above `w`. It sends `Bootstrap { g + 1, target, w, H }` to **every** member of the target
    and waits for all of them: a set is chosen only once fully initialized.
 3. **Decide.** It runs single-decree Paxos with `M_g` as acceptors (`DecreePrepare`,
-   `DecreeAccept`), at a ballot strictly above the stop quorum's maximum decree promise. If a
-   competing proposal was already voted, P2c makes it propose that one.
+   `DecreeAccept`), at a ballot strictly above the decree round on the node's disk and above the
+   stop quorum's maximum decree promise. If a competing proposal was already voted, P2c makes it
+   propose that one.
 4. **Publish.** It sends `Chosen { g, successor }` to `M_g ∪ successor`, until a quorum of each
    learned it. A successor member activates its pending bootstrap; an old member records the link
    and stays frozen.
@@ -145,6 +146,8 @@ generations in one quorum.
 - One matchmaker set per tenant keeps one registry per journal (#190); the model checker asserts
   each journal's reconstruction separately.
 - The handover's decree is also what `cell init` uses to choose its plan (#277).
+- [MMP §5] does not say how a reconfigurer that restarts picks its next ballot. paros keeps the
+  decree round on the node's disk (#1229).
 - [MMP §5] lets a new node learn the current set from the name service. In paros every
   incarnation of a journal starts at its tenant's bootstrap set and walks the successor links
   forward.
@@ -152,7 +155,12 @@ generations in one quorum.
 ## 10. Pitfalls
 
 - **Decree ballot reuse.** A fresh reconfigurer reused a ballot its earlier incarnation may have
-  had a value accepted at: two values at one ballot (the handover model checker, seed 103).
+  had a value accepted at: two values at one ballot (the handover model checker, seed 103). The
+  floor of the stop quorum does not prevent it alone: a `Stopped` sent to the earlier incarnation
+  can complete the stop quorum of the later one (#1229 (a stale `Stopped` reply reuses a decree
+  ballot), `specs/tla/experiments/stale-stopped/`). The reconfigurer writes its decree round to
+  disk before the round's first request leaves (`ReconfigurerReady::round`), the rule of the
+  allocator frontier in [persist before send](persist-before-send.md).
 - **Publishing a proposal.** A successor published before it was chosen could leave two sets
   acting as `g + 1`. `Chosen` leaves only from `Publishing`.
 - **A set chosen half-initialized.** A member that never got the bootstrap would answer with an

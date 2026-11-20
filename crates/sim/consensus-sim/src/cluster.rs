@@ -286,6 +286,8 @@ pub struct Cluster {
     tracer: trace::Tracer,
     /// Each node's handover driver, by node id.
     reconfigurers: Vec<MatchmakerReconfigurer>,
+    /// Each node's decree round on disk, by node id: it survives a crash.
+    decree_rounds: Vec<u64>,
     /// The nodes the operator retired: down until it books them again.
     retired: BTreeSet<NodeId>,
     /// The reconfigurations the operator asked for: each ballot and the
@@ -657,12 +659,14 @@ impl Cluster {
             early_gc: BTreeSet::new(),
             tracer: trace::Tracer::default(),
             reconfigurers: Vec::new(),
+            decree_rounds: Vec::new(),
             retired: BTreeSet::new(),
             asked: Vec::new(),
             admitted: BTreeMap::new(),
             pool,
             flavor,
         };
+        cluster.decree_rounds = vec![0; cluster.pool.len()];
         cluster.reconfigurers = cluster
             .pool
             .iter()
@@ -930,7 +934,8 @@ impl Cluster {
             .then(|| Self::index(cx.rng().below(unsynced as u64)));
         sometimes!(keep.is_some_and(|k| k < unsynced), reach::LOST_UNSYNCED);
         self.node_mut(id).crash(mutant, keep);
-        // The reconfigurer holds no durable state: the crash loses it.
+        // The crash loses the reconfigurer; it starts again from the decree
+        // round on disk (the driver syncs it before the batch leaves).
         self.reconfigurers[Self::index(id.0)] = self.reconfigurer(id);
         // What the crash left on the disk is what the restart reads.
         let index = self.node(id).disk.hard_state().chosen_index;

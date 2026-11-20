@@ -229,7 +229,8 @@ pub struct World {
     matchmakers: Vec<MatchmakerProcess>,
     /// One handover driver per node. The reconfigurer is a **driver** object,
     /// not a role of the core's node: the node that drives a handover is the
-    /// node the operator asked, and it holds no durable state of its own.
+    /// node the operator asked. Its only durable state is its decree round,
+    /// and no level restarts a reconfigurer, so the world keeps none.
     reconfigurers: Vec<MatchmakerReconfigurer>,
     /// Per node, the prior configurations its last completed matchmaking
     /// phase reported — `H_b`. An open `Election` names them
@@ -303,7 +304,7 @@ impl World {
         let reconfigurers: Vec<MatchmakerReconfigurer> = pool
             .iter()
             .copied()
-            .map(|node| MatchmakerReconfigurer::new(node, Limits::DEFAULT))
+            .map(|node| MatchmakerReconfigurer::new(node, 0, Limits::DEFAULT))
             .collect();
         let nodes: Vec<Option<ColocatedNode>> = disks
             .iter()
