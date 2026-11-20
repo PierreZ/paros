@@ -52,7 +52,8 @@ Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
 only a resize record changes, the floor and the register across the handover; #1097 (rework
-1.8)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
+1.8); `specs/tla/handover-chain/`: three generations, clients that reach one member at a time,
+and the two fences of the state transfer; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
 read; #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to

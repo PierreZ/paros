@@ -71,13 +71,16 @@
 (* ReadAgain : TRUE = a client gets the answer of a served read, and a     *)
 (*         second read can start: `ReadSeesAcked` then also orders reads.    *)
 (*                                                                           *)
+(* LiveLeader : TRUE = `LiveSpec` makes the campaign of the last ballot     *)
+(*         fair. FALSE = a control: no leader finishes the slots.            *)
+(*                                                                           *)
 (* Not in the model: GC watermarks, matchmaker generations, the replica      *)
 (* tier, a read that expires, an acceptor that loses its disk.               *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
           Readers, Basis, Fence, Laggers, Restarters, Refuse, Hold, Learner, Q1s, Q2s,
-          Targets, Seal, ReaderGate, ReadAgain
+          Targets, Seal, ReaderGate, ReadAgain, LiveLeader
 
 ASSUME Seal \in {"quorum", "reads"}
 ASSUME ReaderGate \in {"promise", "belief"}
@@ -85,6 +88,7 @@ ASSUME Fence \in {"promise", "belief", "none"}
 ASSUME Laggers \cup Restarters \subseteq Acceptors
 ASSUME Refuse \in BOOLEAN
 ASSUME ReadAgain \in BOOLEAN
+ASSUME LiveLeader \in BOOLEAN
 \* Paxos safety rests on this: every Phase-1 quorum meets every Phase-2 quorum.
 ASSUME \A c \in Configs : \A P \in Q1s[c], C \in Q2s[c] : P \cap C # {}
 \* A reader asks a set that can hold a Phase-1 quorum.
@@ -431,6 +435,22 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+\* The read steps are fair: each asked acceptor answers, a node that did not
+\* hear probes, and an open read is served or abandoned. With LiveLeader, the
+\* campaign of the last ballot is fair too: it registers, wins and proposes
+\* every slot, and its configuration accepts. Without it, no leader finishes
+\* a slot that only a minority voted (a control). Restarts are not fair.
+LiveSpec ==
+    /\ Spec
+    /\ \A a \in Acceptors : WF_vars(PreReadAck(a)) /\ WF_vars(Probe(a))
+    /\ WF_vars(ReadServe) /\ WF_vars(ReadAbandon)
+    /\ LiveLeader =>
+          /\ \A m \in Matchmakers : WF_vars(Register(NB, m))
+          /\ WF_vars(MatchDone(NB)) /\ WF_vars(Phase1Done(NB))
+          /\ \A a \in Acceptors : WF_vars(Promise(a, NB))
+          /\ \A s \in Slots : WF_vars(\E v \in Values : Propose(NB, s, v))
+          /\ \A a \in Acceptors, s \in Slots, v \in Values : WF_vars(Accept(a, NB, s, v))
+
 Chosen(s, v) ==
     \E b \in Ballots :
         \E Q \in Q2s[cfgOf[b]] : \A a \in Q : <<a, s, b, v>> \in votes
@@ -441,6 +461,9 @@ Agreement == \A s \in Slots : \A v, w \in Values : (Chosen(s, v) /\ Chosen(s, w)
 \* The read half of linearizability: a served read covers each slot that was
 \* acked, or that an earlier read returned, before the read started.
 ReadSeesAcked == rd.state = "done" => \A s \in rd.snap : s <= rd.index
+
+\* An open read ends: it is served, or a fence or a newer basis ends it.
+ReadEnds == rd.state = "open" ~> rd.state # "open"
 
 \* Not a real invariant. TLC must find a trace where a read that started after
 \* an ack is served: this shows that the model reaches the case.
