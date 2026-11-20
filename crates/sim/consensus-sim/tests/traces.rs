@@ -8,13 +8,13 @@
 //! ([`Spec::rules`]). The knobs: `TRACE_SEEDS` (the first seeds that TLC
 //! always checks, 1), `TRACE_FROM` (the first seed, 1), `TRACE_SEARCH`
 //! (the seeds a flavor may search for its rules, 300), `TRACE_CHAOS`
-//! (chaos steps of a cell walk, 150), `TRACE_QUIET` (quiet steps of a
-//! cell walk, 10; 250 for a retiring walk), `TRACE_MAX_EVENTS` (the longest
+//! (chaos steps of a cluster walk, 150), `TRACE_QUIET` (quiet steps of a
+//! cluster walk, 10; 250 for a retiring walk), `TRACE_MAX_EVENTS` (the longest
 //! trace TLC checks, 200), and `TRACE_DUMP` (print every event of each
-//! checked cell walk).
+//! checked cluster walk).
 
 use consensus_sim::batcher::{self, BatchEvent, BatchModel, BatchMutant};
-use consensus_sim::cell::{Cell, CellEvent, Flavor, Mutant, Spec};
+use consensus_sim::cluster::{Cluster, ClusterEvent, Flavor, Mutant, Spec};
 use consensus_sim::decree::{self, DecreeEvent, DecreeModel, DecreeMutant};
 use consensus_sim::trace::{Verdict, require_tlc, spec};
 use moonpool_walk::Walk;
@@ -28,7 +28,7 @@ fn knob(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// The first seeds of a cell flavor that TLC always checks.
+/// The first seeds of a cluster flavor that TLC always checks.
 fn seeds() -> u64 {
     knob("TRACE_SEEDS", 1)
 }
@@ -114,22 +114,22 @@ fn tlc_refuses_an_acceptor_that_forgot_its_promise() {
     );
 }
 
-/// A cell walk of `chaos` chaos steps, then its quiet steps: 10, or 250
+/// A cluster walk of `chaos` chaos steps, then its quiet steps: 10, or 250
 /// for a [`Flavor::retiring`] walk. A retirement is an operator move on a
-/// calm cell: it needs a leader that stands while its GC floor becomes
+/// calm cluster: it needs a leader that stands while its GC floor becomes
 /// effective and every matchmaker checks the node, and in the chaos steps
-/// the leaders of a cell with matchmakers seldom stand that long.
-fn cell_walk_of(flavor: Flavor, chaos: u64) -> Walk<Cell> {
+/// the leaders of a cluster with matchmakers seldom stand that long.
+fn cluster_walk_of(flavor: Flavor, chaos: u64) -> Walk<Cluster> {
     let quiet = if flavor.retiring { 250 } else { 10 };
-    Walk::<Cell>::new()
+    Walk::<Cluster>::new()
         .chaos_steps(chaos)
         .quiet_steps(knob("TRACE_QUIET", quiet))
         .env_prefix(None)
-        .model(move |cx| Cell::build(flavor.clone(), cx))
+        .model(move |cx| Cluster::build(flavor.clone(), cx))
 }
 
 /// The events of one walk that `spec` keeps.
-fn kept(spec: Spec, run: &moonpool_walk::Run<Cell>) -> Vec<CellEvent> {
+fn kept(spec: Spec, run: &moonpool_walk::Run<Cluster>) -> Vec<ClusterEvent> {
     run.events().filter(|e| spec.keeps(e)).cloned().collect()
 }
 
@@ -157,7 +157,7 @@ fn accepts(spec: Spec, flavor: &Flavor) {
         if unmet.is_empty() && checked >= seeds() {
             break;
         }
-        let run = cell_walk_of(flavor.clone(), chaos)
+        let run = cluster_walk_of(flavor.clone(), chaos)
             .replay(seed)
             .unwrap_or_else(|failure| panic!("{failure}"));
         let events = kept(spec, &run);
@@ -287,17 +287,17 @@ fn tlc_accepts_the_disk_fault_walks() {
 /// The first seed in `seeds` of `flavor` with `mutant` whose walk of
 /// `chaos` chaos steps the oracles pass and `spec` refuses, with the event
 /// TLC names.
-fn first_refused_cell(
+fn first_refused_cluster(
     spec: Spec,
     flavor: &Flavor,
     mutant: Mutant,
     seeds: std::ops::RangeInclusive<u64>,
     chaos: u64,
-) -> Option<(u64, CellEvent, String)> {
+) -> Option<(u64, ClusterEvent, String)> {
     let check = spec.check();
     let flavor = flavor.clone().with(mutant);
     seeds.into_iter().find_map(|seed| {
-        let run = cell_walk_of(flavor.clone(), chaos).replay(seed).ok()?;
+        let run = cluster_walk_of(flavor.clone(), chaos).replay(seed).ok()?;
         let events = kept(spec, &run);
         match check
             .check(&spec.trace(&flavor, &events))
@@ -320,7 +320,7 @@ fn first_refused_cell(
 #[test]
 fn tlc_refuses_a_disk_that_forgets_its_votes() {
     require_tlc(&Spec::MultiPaxos.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
         Mutant::ForgetVotes,
@@ -332,7 +332,7 @@ fn tlc_refuses_a_disk_that_forgets_its_votes() {
     assert!(
         matches!(
             event,
-            CellEvent::Promise { .. } | CellEvent::Accept { .. } | CellEvent::Win { .. }
+            ClusterEvent::Promise { .. } | ClusterEvent::Accept { .. } | ClusterEvent::Win { .. }
         ),
         "seed {seed}: TLC refused {event:?}, not a step that reads the acceptor's votes"
     );
@@ -343,7 +343,7 @@ fn tlc_refuses_a_disk_that_forgets_its_votes() {
 #[test]
 fn tlc_refuses_a_promise_that_hides_its_votes() {
     require_tlc(&Spec::MultiPaxos.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
         Mutant::HideVotes,
@@ -353,7 +353,7 @@ fn tlc_refuses_a_promise_that_hides_its_votes() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::Promise { ref votes, .. } if votes.is_empty()),
+        matches!(event, ClusterEvent::Promise { ref votes, .. } if votes.is_empty()),
         "seed {seed}: TLC refused {event:?}, not a promise that hid its votes"
     );
 }
@@ -365,7 +365,7 @@ fn tlc_refuses_a_promise_that_hides_its_votes() {
 #[test]
 fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
     require_tlc(&Spec::ProxyLeader.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::ProxyLeader,
         &Flavor::proxies(),
         Mutant::KeepProxyRounds,
@@ -375,7 +375,7 @@ fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::Commit { .. }),
+        matches!(event, ClusterEvent::Commit { .. }),
         "seed {seed}: TLC refused {event:?}, not a commit"
     );
 }
@@ -386,7 +386,7 @@ fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
 #[test]
 fn tlc_refuses_a_handoff_that_drops_its_tail() {
     require_tlc(&Spec::LeaderHandoff.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::LeaderHandoff,
         &Flavor::handoff(),
         Mutant::RewindHandoff,
@@ -396,7 +396,7 @@ fn tlc_refuses_a_handoff_that_drops_its_tail() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::Relinquish { .. }),
+        matches!(event, ClusterEvent::Relinquish { .. }),
         "seed {seed}: TLC refused {event:?}, not a handoff"
     );
 }
@@ -407,7 +407,7 @@ fn tlc_refuses_a_handoff_that_drops_its_tail() {
 #[test]
 fn tlc_refuses_an_early_gc() {
     require_tlc(&Spec::Matchmaker.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::Matchmaker,
         &Flavor::matchmakers(),
         Mutant::EarlyGc,
@@ -417,7 +417,7 @@ fn tlc_refuses_an_early_gc() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::GcAsk { .. }),
+        matches!(event, ClusterEvent::GcAsk { .. }),
         "seed {seed}: TLC refused {event:?}, not a GC request"
     );
 }
@@ -431,7 +431,7 @@ fn tlc_refuses_an_early_gc() {
 #[test]
 fn tlc_refuses_a_read_fence_below_the_promise() {
     require_tlc(&Spec::Reads.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::Reads,
         &Flavor::lagging_reads(),
         Mutant::BeliefFence,
@@ -441,7 +441,7 @@ fn tlc_refuses_a_read_fence_below_the_promise() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::ReadAck { .. }),
+        matches!(event, ClusterEvent::ReadAck { .. }),
         "seed {seed}: TLC refused {event:?}, not a read answer"
     );
 }
@@ -452,7 +452,7 @@ fn tlc_refuses_a_read_fence_below_the_promise() {
 #[test]
 fn tlc_refuses_a_read_answer_that_hides_its_watermark() {
     require_tlc(&Spec::Reads.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::Reads,
         &Flavor::lagging_reads(),
         Mutant::HideWatermark,
@@ -464,7 +464,7 @@ fn tlc_refuses_a_read_answer_that_hides_its_watermark() {
     assert!(
         matches!(
             event,
-            CellEvent::ReadAck {
+            ClusterEvent::ReadAck {
                 watermark: None,
                 ..
             }
@@ -480,7 +480,7 @@ fn tlc_refuses_a_read_answer_that_hides_its_watermark() {
 #[test]
 fn tlc_refuses_a_compaction_past_the_fold() {
     require_tlc(&Spec::Truncation.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::Truncation,
         &Flavor::compaction(),
         Mutant::CompactPastFold,
@@ -490,7 +490,7 @@ fn tlc_refuses_a_compaction_past_the_fold() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::Compact { .. }),
+        matches!(event, ClusterEvent::Compact { .. }),
         "seed {seed}: TLC refused {event:?}, not a compaction"
     );
 }
@@ -501,7 +501,7 @@ fn tlc_refuses_a_compaction_past_the_fold() {
 #[test]
 fn tlc_refuses_a_replica_read_with_no_quorum() {
     require_tlc(&Spec::Compartments.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::Compartments,
         &Flavor::compartments(),
         Mutant::LocalRead,
@@ -511,7 +511,7 @@ fn tlc_refuses_a_replica_read_with_no_quorum() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::ReplicaServe { .. }),
+        matches!(event, ClusterEvent::ReplicaServe { .. }),
         "seed {seed}: TLC refused {event:?}, not a served read"
     );
 }
@@ -523,7 +523,7 @@ fn tlc_refuses_a_replica_read_with_no_quorum() {
 #[test]
 fn tlc_refuses_a_promise_that_hides_a_faulty_record() {
     require_tlc(&Spec::Faults.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::Faults,
         &Flavor::disk_faults_three(),
         Mutant::HideFaulty,
@@ -533,7 +533,7 @@ fn tlc_refuses_a_promise_that_hides_a_faulty_record() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::Page { .. }),
+        matches!(event, ClusterEvent::Page { .. }),
         "seed {seed}: TLC refused {event:?}, not a promise"
     );
 }
@@ -548,7 +548,7 @@ fn tlc_accepts_the_retirement_walks() {
 #[test]
 fn tlc_refuses_a_retirement_with_no_evidence() {
     require_tlc(&Spec::Retire.check());
-    let (seed, event, state) = first_refused_cell(
+    let (seed, event, state) = first_refused_cluster(
         Spec::Retire,
         &Flavor::retiring(),
         Mutant::RetireUnchecked,
@@ -558,7 +558,7 @@ fn tlc_refuses_a_retirement_with_no_evidence() {
     .expect("TLC refuses a seed of the mutant");
     eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
     assert!(
-        matches!(event, CellEvent::Retire { .. }),
+        matches!(event, ClusterEvent::Retire { .. }),
         "seed {seed}: TLC refused {event:?}, not a retirement"
     );
 }

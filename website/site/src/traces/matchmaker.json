@@ -33402,7 +33402,7 @@
         {
           "says": "Proposer 8 opens ballot 1.8 for bravo on acceptor 3 alone.",
           "from": 16,
-          "to": 24,
+          "to": 19,
           "question": {
             "asks": "alpha is chosen by acceptors 1 and 2. Proposer 8 asks only acceptor 3. Can it choose bravo?",
             "answers": [
@@ -33412,6 +33412,22 @@
             ],
             "right": 1,
             "why": "With no matchmaker, ballot 1.8 does not know the acceptors of ballot 1.5. Its Phase 1 meets no vote for alpha, so two values are chosen."
+          }
+        },
+        {
+          "says": "Acceptor 3 votes for bravo. Two values are chosen.",
+          "from": 19,
+          "to": 24,
+          "question": {
+            "asks": "Two values are chosen. What let it happen?",
+            "answers": [
+              "Acceptor 3 voted for bravo",
+              "Proposer 8 chose its acceptors with no matchmaker",
+              "Acceptors 1 and 2 forgot alpha"
+            ],
+            "right": 1,
+            "why": "A matchmaker tells a new ballot the acceptors of the old ballots, and its Phase 1 asks them too. With no matchmaker, ballot 1.8 asked acceptor 3 alone and met no vote for alpha.",
+            "after": true
           }
         },
         {

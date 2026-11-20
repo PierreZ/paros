@@ -96,7 +96,9 @@ the beat, the question in place of the sentence (the sentence gives the answer a
 to four answers (buttons, or the keys 1 to 4). Any answer, or "Show me", plays the beat; then
 the screen marks the right answer, the reader's answer and the reason (`why`). The answers live
 in the page only (`window.paxosStory.answers()`), and each one fires `paxos:answer` on the
-document. A page with no beats keeps the step-through alone. The story draws the recorded
+document. A "Break the rule" run ends with a "find the bug" question (`after`): its beat plays
+first, then the screen asks what went wrong in it, and an answer marks the right one with no
+second play. A page with no beats keeps the step-through alone. The story draws the recorded
 trace only; the step-through switches to the live wasm run.
 
 ## The course (`src/course.ts`)
@@ -115,6 +117,12 @@ Progress lives in the reader's browser only (`public/course.js`, `localStorage` 
 the last screen opened. No account, no server, no score. The map shows "k of n seen" per
 lesson and "Continue where you stopped", and has a button to forget the progress. Every page
 works the same when the storage is blocked.
+
+Each lesson names one TLC run of a model of `specs/tla/` (`tlc` in `src/course.ts`), and the
+map shows its count of distinct states with the day of the run (`TLC_RUN`). The figures come
+from TLC's output, never from an estimate. To refresh them, run for each lesson, in
+`specs/tla/<model>/`: `nix develop .#tla --command tlc -workers auto -deadlock -config
+<config>.cfg MC.tla`, copy "distinct states found", and change `TLC_RUN` the same day.
 
 ## Your turn (`public/lab.js`)
 

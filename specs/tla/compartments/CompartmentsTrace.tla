@@ -1,10 +1,10 @@
 -------------------------- MODULE CompartmentsTrace --------------------------
 (***************************************************************************)
 (* The trace spec of the read replica of `Compartments`, on a walk of the  *)
-(* `consensus-sim` cell with replicas (#1231 (traced walks reach the       *)
-(* rules), `crates/sim/consensus-sim/src/cell/trace/compartments.rs`).     *)
+(* `consensus-sim` cluster with replicas (#1231 (traced walks reach the    *)
+(* rules), `crates/sim/consensus-sim/src/cluster/trace/compartments.rs`).  *)
 (*                                                                         *)
-(* The log is `MultiPaxosTrace` (linked from `../multi-paxos/`), not the  *)
+(* The log is `MultiPaxosTrace` (linked from `../multi-paxos/`), not the   *)
 (* abstract log of `Compartments`: this module extends it and adds the     *)
 (* replicas. The steps are the rules of `Compartments.tla` for a replica:  *)
 (*   - "rlearn": a replica holds a value chosen at a slot, at the ballot   *)

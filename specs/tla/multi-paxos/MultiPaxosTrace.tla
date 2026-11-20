@@ -1,8 +1,8 @@
 --------------------------- MODULE MultiPaxosTrace ---------------------------
 (***************************************************************************)
 (* The trace spec of `MultiPaxos`: the model, forced to follow the events  *)
-(* that one walk of the `consensus-sim` cell recorded (#1198 (trace        *)
-(* checking), `crates/sim/consensus-sim/src/cell/trace.rs`). `l` is the    *)
+(* that one walk of the `consensus-sim` cluster recorded (#1198 (trace     *)
+(* checking), `crates/sim/consensus-sim/src/cluster/trace.rs`). `l` is the *)
 (* index of the next event.                                                *)
 (*                                                                         *)
 (* The walk records a step when a batch of a node reached its disk, and    *)

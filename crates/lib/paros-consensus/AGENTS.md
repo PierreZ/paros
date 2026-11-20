@@ -30,7 +30,7 @@ Foundations:
 - `probe.rs` → `probe!(reachable, "..")` / `probe!(sometimes, cond, "..")` → coverage probes
   (#317) behind `assertions` (first in `lib.rs`: a textual-scope macro).
 - `types.rs` → the Paxos scalars: `NodeId`, `Slot`, `Ballot`, `Value`, `Fingerprint`, and `fnv1a` with `FNV_OFFSET`, the one FNV-1a step every fingerprint and trace digest folds with.
-- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`) → `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, owned by a cell with `with_cell`, #215 (zones)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`).
+- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`) → `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, #215 (zones); it names no cell: cells are the upper stack's, #1264 (remove the cell)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`).
 - `journal.rs` + `journal/` → what the log carries, judged at apply (not Paxos):
   - `ids.rs` → `TenantId`, `JournalId`, `JournalIdentifier` (the identifier, #235), `LeaderUuid`, `Seq`.
   - `command.rs` → `Command`, `Control`, `Entry`, `command_fingerprint`.
@@ -58,7 +58,7 @@ Roles (pure tallies, no deployment knowledge):
 - `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold`, `ReadBasis`, `ReadState` → the leaderless read tally (#143) and the won leadership's configuration and fence it is judged over (#260).
 - `batcher.rs` → `Batcher`, `BatchLimits`, `Batch`, `Unbatcher` → the batcher's pure lanes (#145 (batchers)): one lane per journal, flushed at `flush_records`, before it would pass the limits, or at a tick; an empty or over-limit write goes alone; `Unbatcher::scatter` cuts a merged write's range into each write's own, densely and in order.
 - `collector.rs` → `Collector`, `GcStep` → the leader-side GC tally (#123): chosen-index reports, matchmaker acks, the effective floor. Its rule across a reconfiguration onto empty stores (`covered`: a Phase-2 quorum of `C_b` at or past the fence) has its TLA+ model in `specs/tla/truncation-reconfig/` (#1218 (truncation model, part 3)).
-- `decree.rs` → `Decree<Id, V>`, `DecreePromise`, `AcceptFold`, `DECREE_SLOT` → single-decree Paxos over the shared `Proposer` and `Acceptor` at slot zero: the matchmaker handover's successor decree (`SuccessorDecree`) and `cell init`'s plan (#277). Its TLA+ model is `specs/tla/decree/` (#1186 (rework 1.15)).
+- `decree.rs` → `Decree<Id, V>`, `DecreePromise`, `AcceptFold`, `DECREE_SLOT` → single-decree Paxos over the shared `Proposer` and `Acceptor` at slot zero: the matchmaker handover's successor decree (`SuccessorDecree`), and any one-shot decision a caller above the core runs. Its TLA+ model is `specs/tla/decree/` (#1186 (rework 1.15)).
 - `matchmaking.rs` → `Matchmaking` → the candidate's matchmaking phase; `matchmaking/probe.rs` → `MembershipProbe` (#173: at boot; #270: re-probed from outside a heard belief; #278: against a matched fact or a won leadership, late answers folded).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below); a history page (`history_page`) leaves out a belief a later registration repeats (#570 (election duel outlasts the recovery tail)), but keeps each owner's lowest registration of each configuration (PR #1064 (gone-node gap)).
 - `matchmaker/{generation,reconfigurer}.rs` → the generation machine, `MatchmakerReconfigurer`; a `Stop` and a `Bootstrap` are paged (`BootstrapPage`, #439).
@@ -105,7 +105,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
   leader_handoff,reconfiguration}.rs` drive `ColocatedNode` as a driver does. Each one asserts
   the property that it shows. A new example gets a step in the CI `examples` job, a row in
   `README.md` and in the table of `src/lib.rs`, and an item in the root `README.md`.
-- `examples/common/cluster.rs` → `Cluster`, the toy cell of the four driver examples: the
+- `examples/common/cluster.rs` → `Cluster`, the toy cluster of the four driver examples: the
   nodes, one `MemStorage` for each node, optional `Matchmaker`s with a `MemRegistry` each, and a
   wire. `Cluster::pump` is the reference driver loop (persist, send, learn, advance). A new
   example that drives `ColocatedNode` uses it and does not write a network of its own.
