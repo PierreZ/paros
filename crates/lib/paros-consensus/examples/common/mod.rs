@@ -1,5 +1,5 @@
 //! The helpers the examples share: the values, the printers, the node of
-//! the log lessons (`multi_paxos`, `acceptor_grid`), and the toy cell of the
+//! the log lessons (`multi_paxos`, `acceptor_grid`), and the toy cluster of the
 //! examples that drive `ColocatedNode` ([`cluster::Cluster`]). Each example
 //! uses a part of them.
 //!

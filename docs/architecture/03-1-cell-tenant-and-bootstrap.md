@@ -4,6 +4,11 @@
 
 ### 3.1 The cell tenant and bootstrap
 
+Cells are a concept of the layers above the journal. The consensus core and the journal know
+no cell: the journal takes an initial configuration as input, and `cell init` is the upper
+stack's way to agree on one (decided by Pierre on 2026-11-20, #1264 (remove the cell from
+paros-consensus), section 3.7).
+
 A cell's machines and bookings are the control journal of the **cell tenant**, served by the
 same `parosd`s, the same Paxos and the same stores as every tenant's journals. Its writer is the
 **cell coordinator**. The control state has three levels, each with one control journal and one

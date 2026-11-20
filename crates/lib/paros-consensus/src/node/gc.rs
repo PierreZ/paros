@@ -752,11 +752,8 @@ impl ColocatedNode {
         // becomes effective, and a move or a mode change waiting on it never
         // ends. A stable leader campaigns for nothing, so it meets the frozen
         // generation only here, and its driver finishes the handover, as a
-        // refused campaign's does. Recipe 13627598485075066090
-        // 53:11387013064857220442 on c868dac: generation 5 frozen with no
-        // successor, a journal's mode change waited on its GC watermark
-        // through the whole tail ("status: a journal the cell can hold shows
-        // healthy after chaos").
+        // refused campaign's does. Without it, a generation frozen with no
+        // successor holds the GC watermark for ever.
         if !ack.applied && ack.stopped {
             assert!(
                 ack.newer.is_none(),

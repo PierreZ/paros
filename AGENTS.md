@@ -276,7 +276,7 @@ batch) and holds **no protocol tally of its own**:
 - `membership/` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
 - `matchmaking.rs` — the candidate's matchmaking phase · `matchmaker.rs` (+ `reconfigurer.rs`)
   — the registry and its generation handover · `decree.rs` — the generic single-decree
-  Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
+  Paxos (`Decree<Id, V>`): the handover's successor, and any one-shot decision of a caller above the core
 - `proxy_leader.rs`, `replica_node.rs` — the second and third deployments
 
 Beside the roles, the **foundations**: `types.rs` (the Paxos scalars), `journal/` (what the log
