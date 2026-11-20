@@ -70,7 +70,12 @@ the prefix up to the election fence, with a control that forgets it at the win a
 that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
-more rules)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+more rules)), quorum everywhere (`specs/tla/quorum-everywhere/`: every step of the journal, the
+write, the election, the leaderless read, the seal, the retire, the offload mark, the trim and the
+matchmaker handover, waits for a quorum only and completes with F members down in every column,
+in each matchmaker set and in the replica set, with a control that blocks each step one member
+later and a control that waits for every member as a FoundationDB TLog commit; #1257 (quorum
+everywhere)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
@@ -225,6 +230,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   a final report are read by someone who has not seen your tool calls or the files you opened.
   Put the key points in the first sentences. Do not use a term you made up during the work.
   Say what you found, what you did, how you proved it, and what is next.
+- **Quorum everywhere** (Pierre, 2026-11-20, #1257): no step of the journal waits for every
+  member of a group (no full broadcast as a FoundationDB TLog commit). A new journal step gets
+  its row in `specs/tla/quorum-everywhere/`, with a control that blocks it one member later
+  (`docs/architecture/02-data-plane.md` §2.11).
 - **TLA+ is a thinking tool** (decided on 2026-11-12, #1020 (TLA+ ranked list)): when a
   protocol problem has more than one possible rule, you can write a small TLA+ model to find
   the solution, before you write Rust. Model each candidate rule as a constant, give each a
