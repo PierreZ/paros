@@ -89,7 +89,7 @@ Test only: `publish = false`, never a dependency of another crate.
     `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `JOURNAL_FOLD`, `PREFIX_SHRINKS` (the durable
     chosen prefix never shrinks: a crash may take back only what no fsync covered).
   - `journal.rs` → `JournalSpec`: the single-writer journal contract
-    (`docs/architecture/02-data-plane.md` §2.1-§2.3, §2.6) written again, folded over the
+    (`docs/journal/02-data-plane.md` §J2.1-§J2.3, §J2.6) written again, folded over the
     commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
     these rules give (so every party folds it the same way). It never calls
     `paros_consensus::journal::state`; it uses the core's types as data only.
@@ -100,7 +100,7 @@ Test only: `publish = false`, never a dependency of another crate.
   leaders, replicas, matchmakers, spares, late spares, matchmaker spares), which optional moves
   are on (`Flavor::allows`) and the `Limits` of every party (`Flavor::paged` puts every page
   at its floor, so the paging branches run). The journal's client (`Client` in `cluster.rs`)
-  pipelines its writes as the writer of `docs/architecture/02-data-plane.md` §2.2 does: it
+  pipelines its writes as the writer of `docs/journal/02-data-plane.md` §J2.2 does: it
   writes at the next position it believes free, continues from the position a refusal names,
   retries one of its last writes unchanged, and writes under a superseded uuid on purpose.
   `Mutant` is the bug of a control run: a planted driver bug that
