@@ -1,0 +1,73 @@
+# Guard mutation of the TLA+ models of specs/tla/ (#1311 (mutate spec guards),
+# `scripts/mutate-tla.py`). For each guard of each action (a conjunct that
+# changes no variable), the script writes a copy of the model with that one
+# guard set to TRUE and runs the `ci` checks of `checks.txt` on it. At least
+# one check must then fail. A guard that no check misses is a finding: the
+# guard is not necessary, or a property is missing. There is no allow list
+# (AGENTS.md, the absolute rule).
+#
+# One job for each slice of a folder. `scripts/mutate-tla-shards.txt` names
+# the folders that need more than one slice, so that each job stays in the
+# 30-minute budget. It runs each week and on demand. A pull request runs only
+# `--list` on every folder (the `spec` job of `tla.yml`), because the run of
+# every mutant takes hours of CI.
+name: TLA mutants
+
+on:
+  schedule:
+    - cron: '41 4 * * 6'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  slices:
+    runs-on: ubuntu-latest
+    outputs:
+      slices: ${{ steps.list.outputs.slices }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: List the slices of each folder of specs/tla
+        id: list
+        run: |
+          slices=$(for m in specs/tla/*/checks.txt specs/tla/experiments/*/*/checks.txt; do
+              [ -f "$m" ] || continue
+              f=$(dirname "${m#specs/tla/}")
+              n=$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)
+              n=${n:-1}
+              for i in $(seq 1 "$n"); do echo "$f $i/$n"; done
+            done | jq -R . | jq -sc .)
+          test "$slices" != "[]"
+          echo "slices=$slices" >>"$GITHUB_OUTPUT"
+
+  slice:
+    needs: slices
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: ${{ fromJSON(needs.slices.outputs.slices) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Mutate the guards of specs/tla/${{ matrix.slice }}
+        run: |
+          read -r folder shard <<<"${{ matrix.slice }}"
+          nix develop .#tla --command scripts/mutate-tla.py --shard "$shard" "$folder"
+
+  mutants:
+    needs: [slices, slice]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every slice is green
+        run: |
+          test "${{ needs.slices.result }}" = success
+          test "${{ needs.slice.result }}" = success
