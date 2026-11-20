@@ -10,7 +10,7 @@
 //!
 //! | Part | Role |
 //! |------|------|
-//! | [`cell`] | the [`Cell`](cell::Cell) model: `ColocatedNode`s, proxy leaders and replicas of one journal, one [`Flavor`](cell::Flavor) per deployment |
+//! | [`cluster`] | the [`Cluster`](cluster::Cluster) model: `ColocatedNode`s, proxy leaders and replicas of one journal, one [`Flavor`](cluster::Flavor) per deployment |
 //! | [`decree`] | single-decree Paxos (`Decree`) under the walk |
 //! | [`batcher`] | the batcher's lanes and the unbatcher under the walk |
 //! | [`oracle`] | the safety judges, written again from the papers |
@@ -25,7 +25,7 @@
 
 pub mod batcher;
 pub mod campaign;
-pub mod cell;
+pub mod cluster;
 pub mod decree;
 pub mod oracle;
 pub mod probes;

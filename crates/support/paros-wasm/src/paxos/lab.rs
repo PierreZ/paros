@@ -23,14 +23,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::paxos::action::Action;
 use crate::paxos::level::WorldKind;
-use crate::paxos::level::common::open;
+use crate::paxos::level::common::{crash, open, propose, start_election as elect};
 use crate::paxos::trace::{Lane, lane_of, lane_state, lanes, message_label};
-use crate::paxos::view::{MessageView, NodeFlavour, WorldView};
+use crate::paxos::view::{MessageView, NodeFlavour, PartyView, RoleView, WorldView};
 use crate::paxos::{ActionError, Game};
 
-/// The setup of every exercise of lesson 1: acceptors 1, 2 and 3, proposers
-/// 5 and 8, one decree.
+/// The setup of the single-decree exercises: acceptors 1, 2 and 3,
+/// proposers 5 and 8, one decree.
 const DECREE: &str = "act1/the-duel";
+
+/// The setup of the log exercises: three nodes, each an acceptor and a
+/// replica.
+const LOG: &str = "act2/steady-state";
+
+/// The grid: six acceptors in 2 rows and 3 columns.
+const GRID: &str = "act4/the-grid";
+
+/// Four nodes (node 3 outside the acceptors at first) and two matchmakers.
+const MATCHMAKERS: &str = "act4/reconfigure";
 
 /// How many moves an exercise takes at most: far above any solution, and a
 /// bound on the replay of an undo.
@@ -50,8 +60,9 @@ pub struct Exercise {
     pub done: &'static str,
     /// The setup the exercise runs on.
     level: &'static str,
-    /// The moves played before the reader's first one.
-    setup: fn() -> Vec<Action>,
+    /// The moves played before the reader's first one. They are not the
+    /// reader's: undo never takes one back.
+    setup: fn(&mut Lab),
     /// The moves other than deliver and drop, with their button text.
     extras: fn() -> Vec<(&'static str, Action)>,
     /// Whether the goal holds.
@@ -76,7 +87,7 @@ pub fn exercise(id: &str) -> Option<&'static Exercise> {
     EXERCISES.iter().find(|exercise| exercise.id == id)
 }
 
-static EXERCISES: [Exercise; 3] = [
+static EXERCISES: [Exercise; 8] = [
     Exercise {
         id: "vote-not-chosen",
         title: "A vote, not a choice",
@@ -86,7 +97,7 @@ static EXERCISES: [Exercise; 3] = [
         done: "One vote of three is not a choice. A later proposer that hears of this vote must \
                propose alpha, but it is free to choose another value when it does not hear of it.",
         level: DECREE,
-        setup: || vec![open(5, "alpha")],
+        setup: |lab| lab.act(&open(5, "alpha")),
         extras: Vec::new,
         goal: |lab| {
             let world = lab.view_of_world();
@@ -112,7 +123,7 @@ static EXERCISES: [Exercise; 3] = [
                acceptor writes to disk before it answers, and why paros refuses to boot a \
                member whose disk is empty.",
         level: DECREE,
-        setup: || vec![open(5, "alpha")],
+        setup: |lab| lab.act(&open(5, "alpha")),
         extras: || {
             vec![
                 ("Proposer 8 opens a ballot for bravo", open(8, "bravo")),
@@ -149,7 +160,7 @@ static EXERCISES: [Exercise; 3] = [
                end. paros keeps one stable leader, and a proposer that loses waits a random \
                time before it tries again.",
         level: DECREE,
-        setup: Vec::new,
+        setup: |_| {},
         extras: || {
             vec![
                 ("Proposer 5 opens a ballot for alpha", open(5, "alpha")),
@@ -185,7 +196,190 @@ static EXERCISES: [Exercise; 3] = [
             lab.settle(|m| m.from == 8 || m.to == 8);
         },
     },
+    Exercise {
+        id: "majority",
+        title: "Two of three",
+        task: "Proposer 5 asks for alpha. Get alpha chosen while acceptor 3 hears nothing: \
+               drop every message to it.",
+        rule_off: None,
+        done: "Two of three is a majority, so acceptor 3 is not needed. Any two majorities of \
+               three share an acceptor: that shared acceptor is how a later ballot finds alpha.",
+        level: DECREE,
+        setup: |lab| lab.act(&open(5, "alpha")),
+        extras: Vec::new,
+        goal: |lab| {
+            let world = lab.view_of_world();
+            world.chosen.is_some() && lab.delivered_to(3) == 0
+        },
+        solution: |lab| {
+            lab.settle(|m| m.to != 3);
+            lab.drop_all(|m| m.to == 3);
+        },
+    },
+    Exercise {
+        id: "gap",
+        title: "Fill the gap",
+        task: "Node 0 leads, and alpha is chosen at slot 0. Leave slot 1 with no vote and get a \
+               value chosen at slot 2. Then make node 1 lead. What does it put in slot 1?",
+        rule_off: None,
+        done: "A new leader cannot leave a hole: slot 2 would never be applied. It fills every \
+               slot that no promise reports with a Noop, so the log goes on.",
+        level: LOG,
+        setup: |lab| {
+            lab.act(&elect(0));
+            lab.settle(|_| true);
+            lab.act(&propose(0, "alpha"));
+            lab.settle(|_| true);
+        },
+        extras: || {
+            vec![
+                ("The client writes bravo", propose(0, "bravo")),
+                ("The client writes charlie", propose(0, "charlie")),
+                ("Node 0 crashes", crash(0)),
+                ("Node 1 starts an election", elect(1)),
+            ]
+        },
+        goal: |lab| {
+            let world = lab.view_of_world();
+            chosen_at(&world, 1, "Noop") && chosen_at_any(&world, 2)
+        },
+        solution: |lab| {
+            lab.extra("The client writes bravo");
+            lab.drop_all(|m| m.kind == "Accept");
+            lab.extra("The client writes charlie");
+            lab.settle(|m| m.to != 0 || m.kind == "Accepted");
+            lab.extra("Node 0 crashes");
+            lab.extra("Node 1 starts an election");
+            lab.settle(|_| true);
+        },
+    },
+    Exercise {
+        id: "read",
+        title: "Read without the leader",
+        task: "alpha is chosen at slot 0. A client reads from node 2. Get the read served while \
+               node 0, the leader, gets no message.",
+        rule_off: None,
+        done: "A leaderless read asks a majority of acceptors for the highest slot that each \
+               voted in, and waits until its own log covers it. No leader confirms the read.",
+        level: LOG,
+        setup: |lab| {
+            lab.act(&elect(0));
+            lab.settle(|_| true);
+            lab.act(&propose(0, "alpha"));
+            lab.settle(|_| true);
+        },
+        extras: || {
+            vec![(
+                "A client reads from node 2",
+                Action::QuorumRead {
+                    node: 2,
+                    client: None,
+                },
+            )]
+        },
+        goal: |lab| {
+            let world = lab.view_of_world();
+            lab.delivered_to(0) == 0
+                && world.clients.iter().any(|client| {
+                    client
+                        .reads
+                        .iter()
+                        .any(|read| read.node == 2 && read.served)
+                })
+        },
+        solution: |lab| {
+            lab.extra("A client reads from node 2");
+            lab.settle(|m| m.to != 0);
+            lab.drop_all(|m| m.to == 0);
+        },
+    },
+    Exercise {
+        id: "grid-column",
+        title: "A column down",
+        task: "Node 0 leads a grid of 2 rows and 3 columns, and node 3 is down. Get a value \
+               chosen anyway.",
+        rule_off: None,
+        done: "Each slot goes to one column, and a Phase 2 quorum is a full column. A node \
+               down stops the slots of its column only: a write to another column is chosen.",
+        level: GRID,
+        setup: |lab| {
+            lab.act(&elect(0));
+            lab.settle(|_| true);
+            lab.act(&crash(3));
+        },
+        extras: || {
+            vec![
+                ("The client writes alpha", propose(0, "alpha")),
+                ("The client writes bravo", propose(0, "bravo")),
+            ]
+        },
+        goal: |lab| {
+            let world = lab.view_of_world();
+            world
+                .nodes
+                .iter()
+                .any(|node| node.alive && node.accepted.iter().any(|record| record.chosen))
+        },
+        solution: |lab| {
+            lab.extra("The client writes alpha");
+            lab.settle(|_| true);
+            lab.extra("The client writes bravo");
+            lab.settle(|_| true);
+        },
+    },
+    Exercise {
+        id: "old-set",
+        title: "The old set counts",
+        task: "The operator replaced node 2 with node 3, and node 0 is down. Make node 3 the \
+               leader. Can you do it with no message to node 2?",
+        rule_off: None,
+        done: "The matchmakers report the old set and the new set, and Phase 1 needs a majority \
+               of each. Node 2 left the new set, but its promise still counts for the old one.",
+        level: MATCHMAKERS,
+        setup: |lab| {
+            lab.act(&elect(0));
+            lab.settle(|_| true);
+            lab.act(&propose(0, "alpha"));
+            lab.settle(|_| true);
+            lab.act(&Action::Reconfigure {
+                node: 0,
+                members: vec![0, 1, 3],
+                quorum: None,
+            });
+            lab.settle(|_| true);
+            lab.act(&crash(0));
+        },
+        extras: || vec![("Node 3 starts an election", elect(3))],
+        goal: |lab| {
+            lab.view_of_world()
+                .nodes
+                .iter()
+                .any(|node| node.id == 3 && node.role == Some(RoleView::Leader))
+        },
+        solution: |lab| {
+            lab.extra("Node 3 starts an election");
+            lab.settle(|_| true);
+        },
+    },
 ];
+
+/// Some node holds `value` chosen at `slot`.
+fn chosen_at(world: &WorldView, slot: u64, value: &str) -> bool {
+    world.nodes.iter().any(|node| {
+        node.accepted
+            .iter()
+            .any(|record| record.slot == slot && record.chosen && record.value == value)
+    })
+}
+
+/// Some node holds a value chosen at `slot`.
+fn chosen_at_any(world: &WorldView, slot: u64) -> bool {
+    world.nodes.iter().any(|node| {
+        node.accepted
+            .iter()
+            .any(|record| record.slot == slot && record.chosen)
+    })
+}
 
 /// How many acceptors voted for `value`. A proposer's card also lists the
 /// value it proposes, which is not a vote.
@@ -212,6 +406,9 @@ pub enum Move {
         /// The message's id on the wire.
         id: u64,
     },
+    /// Deliver every message on the wire, and the ones they send, until the
+    /// wire is empty.
+    DeliverAll,
     /// The extra move at `index` in [`LabView::extras`].
     Extra {
         /// Its index.
@@ -286,6 +483,8 @@ pub struct Lab {
     moves: Vec<Move>,
     /// The `Nack`s delivered, by receiver.
     refused: BTreeMap<u64, usize>,
+    /// The messages delivered to each node since the reader's first move.
+    delivered: BTreeMap<u64, usize>,
     said: Vec<String>,
     refusal: Option<String>,
 }
@@ -302,20 +501,33 @@ impl Lab {
     }
 
     fn start(exercise: &'static Exercise) -> Self {
-        let mut game = Game::new(exercise.level).expect("an exercise names a registered level");
-        for action in (exercise.setup)() {
-            game.act(&action)
-                .expect("the setup of an exercise is a run that works");
-        }
-        let said = texts(&game);
-        Self {
+        let game = Game::new(exercise.level).expect("an exercise names a registered level");
+        let mut lab = Self {
             exercise,
             game,
             moves: Vec::new(),
             refused: BTreeMap::new(),
-            said,
+            delivered: BTreeMap::new(),
+            said: Vec::new(),
             refusal: None,
-        }
+        };
+        (exercise.setup)(&mut lab);
+        lab.moves.clear();
+        lab.refused.clear();
+        lab.delivered.clear();
+        lab.said = texts(&lab.game);
+        lab
+    }
+
+    /// Play `action` as part of the setup.
+    ///
+    /// # Panics
+    ///
+    /// When the core refuses it: a setup is a run that works.
+    fn act(&mut self, action: &Action) {
+        self.game
+            .act(action)
+            .expect("the setup of an exercise is a run that works");
     }
 
     /// Play one move. A refused move changes nothing and says why.
@@ -348,6 +560,15 @@ impl Lab {
     }
 
     fn apply(&mut self, chosen: &Move) -> Result<(), String> {
+        if *chosen == Move::DeliverAll {
+            let mut left = MOVES;
+            while let Some(message) = self.wire().into_iter().next() {
+                assert!(left > 0, "a wire empties within {MOVES} deliveries");
+                left -= 1;
+                self.apply(&Move::Deliver { id: message.id })?;
+            }
+            return Ok(());
+        }
         let action = match chosen {
             Move::Deliver { id } => Action::Deliver { id: *id },
             Move::Drop { id } => Action::Drop { id: *id },
@@ -356,7 +577,7 @@ impl Lab {
                 .nth(*index)
                 .map(|(_, action)| action)
                 .ok_or_else(|| "This exercise has no such move.".to_string())?,
-            Move::Undo | Move::Reset => unreachable!("handled by play"),
+            Move::DeliverAll | Move::Undo | Move::Reset => unreachable!("handled above"),
         };
         let delivered = match &action {
             Action::Deliver { id } => self.wire().into_iter().find(|m| m.id == *id),
@@ -365,10 +586,13 @@ impl Lab {
         self.game
             .act(&action)
             .map_err(|error: ActionError| error.to_string())?;
-        if let Some(message) = delivered
-            && message.kind == "Nack"
-        {
-            *self.refused.entry(message.to).or_default() += 1;
+        if let Some(message) = delivered {
+            if message.to_party == PartyView::Node {
+                *self.delivered.entry(message.to).or_default() += 1;
+            }
+            if message.kind == "Nack" {
+                *self.refused.entry(message.to).or_default() += 1;
+            }
         }
         Ok(())
     }
@@ -377,6 +601,12 @@ impl Lab {
     #[must_use]
     pub fn refusals(&self, proposer: u64) -> usize {
         self.refused.get(&proposer).copied().unwrap_or(0)
+    }
+
+    /// How many messages the reader delivered to node `node`.
+    #[must_use]
+    pub fn delivered_to(&self, node: u64) -> usize {
+        self.delivered.get(&node).copied().unwrap_or(0)
     }
 
     /// Whether the goal holds.
@@ -421,11 +651,18 @@ impl Lab {
                     )
                 })
                 .collect(),
-            WorldKind::Log(_) => world
-                .chosen
-                .iter()
-                .map(|chosen| format!("{} at {}", chosen.value, chosen.ballot))
-                .collect(),
+            WorldKind::Log(_) => {
+                let mut slots: BTreeMap<u64, String> = BTreeMap::new();
+                for node in &world.nodes {
+                    for record in node.accepted.iter().filter(|record| record.chosen) {
+                        slots.insert(record.slot, record.value.clone());
+                    }
+                }
+                slots
+                    .into_iter()
+                    .map(|(slot, value)| format!("slot {slot} = {value}"))
+                    .collect()
+            }
         };
         let solved = self.solved();
         LabView {
@@ -566,6 +803,32 @@ mod tests {
         );
         assert!(lab.moves.iter().any(|m| matches!(m, Move::Extra { index } if (lab.exercise.extras)()[*index].1 == Action::Wipe { node: 2 })),
             "the solution needs the wipe");
+    }
+
+    #[test]
+    fn the_old_set_needs_node_2() {
+        let mut lab = Lab::new("old-set").expect("an exercise");
+        lab.extra("Node 3 starts an election");
+        lab.settle(|m| m.to != 2 || m.to_party != PartyView::Node);
+        lab.drop_all(|_| true);
+        assert!(
+            !lab.solved(),
+            "with no message to node 2, node 3 cannot lead: {:?}",
+            lab.view().said
+        );
+    }
+
+    #[test]
+    fn deliver_all_empties_the_wire_in_one_move() {
+        let mut lab = Lab::new("majority").expect("an exercise");
+        lab.play(&Move::DeliverAll);
+        let view = lab.view();
+        assert!(view.wire.is_empty(), "the wire is empty");
+        assert_eq!(view.moves, 1, "one move");
+        assert!(!view.solved, "acceptor 3 heard the ballot");
+        lab.play(&Move::Undo);
+        assert_eq!(lab.view().moves, 0);
+        assert!(!lab.view().wire.is_empty(), "undo puts the wire back");
     }
 
     #[test]

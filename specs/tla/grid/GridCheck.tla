@@ -5,6 +5,7 @@
 (* changes, so each invariant is checked once on each layout.              *)
 (*                                                                         *)
 (* Constants:                                                              *)
+(*   MinN   the smallest membership.                                       *)
 (*   MaxN   the largest membership.                                        *)
 (*   Slack  0: the Phase-1 count of the code. 1: a control, Phase 1 takes  *)
 (*          one acceptor less of each column.                              *)
@@ -13,7 +14,7 @@
 (***************************************************************************)
 EXTENDS Grid
 
-CONSTANTS MaxN, Slack, Full
+CONSTANTS MinN, MaxN, Slack, Full
 
 VARIABLES n, cols, acks
 
@@ -25,7 +26,7 @@ Q1 == GridQ1(M, cols, acks, Slack)
 Q2 == GridQ2(M, cols, acks)
 
 Init ==
-  /\ n \in 1..MaxN
+  /\ n \in MinN..MaxN
   /\ cols \in {c \in 1..n : n % c = 0}
   /\ acks \in 1..(n \div cols)
   /\ Full => acks = n \div cols /\ cols >= 2
@@ -33,6 +34,13 @@ Init ==
 Next == UNCHANGED vars
 
 Spec == Init /\ [][Next]_vars
+
+\* Every layout of the check tiles its members (`QuorumSystem::admits`).
+Admits == GridAdmits(M, cols, acks)
+
+\* The Phase-1 count is tight: with one acceptor less of each column, some
+\* Phase-1 quorum misses some Phase-2 quorum, on every layout.
+Tight == \E P \in GridQ1(M, cols, acks, 1), C \in Q2 : P \cap C = {}
 
 \* Paxos safety: every Phase-1 quorum meets every Phase-2 quorum
 \* (`cross_intersects`).
@@ -53,6 +61,19 @@ Tolerated ==
       b == cols * (Rows - acks + 1) - 1
   IN IF a <= b THEN a ELSE b
 ToleratedIsExact == Survives(Tolerated) /\ ~Survives(Tolerated + 1)
+
+\* #1257 (quorum everywhere): f acceptors down in every column at once leave
+\* a Phase-1 quorum and a Phase-2 quorum of some column exactly when
+\* f + 1 <= acks <= rows - f. The partitions `rows = 2F + 1, acks = F + 1`
+\* survive F down in every column; the full grid (`acks = rows`) survives no
+\* member down in every column, because a write needs a whole column.
+SurvivesPerColumn(f) ==
+  \A D \in {S \in SUBSET GridMembers(M) :
+            \A j \in 0..(cols - 1) : Cardinality(S \cap GridColumn(M, cols, j)) = f} :
+    /\ \E P \in Q1 : P \cap D = {}
+    /\ \E C \in Q2 : C \cap D = {}
+PerColumnTolerance ==
+  \A f \in 0..Rows : SurvivesPerColumn(f) <=> (f + 1 <= acks /\ acks <= Rows - f)
 
 \* Not true of every grid. Two Phase-1 quorums meet only when
 \* 2 * (rows - acks + 1) > rows: on the partitions, not on the full grid.

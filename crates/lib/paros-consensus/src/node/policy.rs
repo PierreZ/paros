@@ -261,7 +261,7 @@ impl ColocatedNode {
 
     /// Campaign now, as if the election clock had just run out:
     /// [`ColocatedNode::campaign_above`] with nothing seen. A driver calls it
-    /// to start the first election of a cell, and a test or an example calls
+    /// to start the first election of a journal, and a test or an example calls
     /// it to elect a node without a clock. A no-op on the leader.
     ///
     /// Always sound, as `campaign_above` is: a campaign costs availability

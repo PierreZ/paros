@@ -252,21 +252,31 @@ to replace the set's rule and the decree's together.
 
 ### The decree ballot must be unique across incarnations
 
-The reconfigurer holds no durable state, and that includes its decree round: a node that
-reboots comes back with a fresh reconfigurer counting from round 1 again. Its earlier
-incarnation may have taken a Phase-1 quorum at `(1, N)` and had `V1` accepted at a minority;
-the new one, proposing `V2` for the same generation, reaches a different promise quorum at
-`(1, N)` and sends `Accept(1, N, V2)` to a matchmaker that already voted `V1` at that very
+A node that reboots comes back with a fresh reconfigurer. If it counted from round 1 again, its
+earlier incarnation may have taken a Phase-1 quorum at `(1, N)` and had `V1` accepted at a
+minority; the new one, proposing `V2` for the same generation, reaches a different promise quorum
+at `(1, N)` and sends `Accept(1, N, V2)` to a matchmaker that already voted `V1` at that very
 ballot. The core asserts there (one ballot, one value — crash beats corruption); without the
 assert a later proposer's Phase 1 would see two values at one ballot and could choose the wrong
 one. The handover model checker found this on seed 103.
 
-The rule: every `Stopped` reply carries the matchmaker's current decree promise, and the
-reconfigurer opens its decree at `max(own round, max promise over the stop quorum) + 1`. That
-is enough because a value can only be accepted at a ballot that first held a *promise quorum*,
-and every promise quorum of `M_g` intersects the stop quorum — so the floor sits at or above
-every ballot the node's earlier incarnations could have had a value accepted at. Retries within
-one incarnation keep the counter; a Nack still reopens above the refusing promise.
+The rule: the reconfigurer's decree round is durable. The driver writes each new round before
+the batch that carries its first request leaves (`ReconfigurerReady::round`), and a new
+incarnation starts from the round on disk (`MatchmakerReconfigurer::new`). Decided by Pierre on
+2026-11-19, #1229 (a stale `Stopped` reply reuses a decree ballot).
+
+The rule before it was a floor: every `Stopped` reply carries the matchmaker's decree promise,
+and the decree opens at `max(own round, max promise over the stop quorum) + 1`, with nothing on
+disk. The argument was that every promise quorum of an earlier decree intersects the stop
+quorum. That holds only when each reply of the stop quorum was written after the earlier
+incarnation died. A `Stopped` carries no incarnation, so a reply sent to the earlier incarnation
+(a duplicate, or a late one) can complete the stop quorum of the later one with a floor below a
+round the earlier one used. TLC finds two values at one round in seconds
+(`specs/tla/experiments/stale-stopped/`, `stale`), and the unit test
+`a_stale_stopped_reply_does_not_reuse_a_decree_ballot` replays that schedule. The decree still
+opens above the floor: it skips rounds the matchmakers would refuse, and it is no longer what
+keeps a ballot to one value. Retries within one incarnation keep the counter; a Nack still
+reopens above the refusing promise.
 
 ### Invariant 1, and what proved it load-bearing
 

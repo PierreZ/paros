@@ -1,8 +1,8 @@
 --------------------------- MODULE MultiPaxosTrace ---------------------------
 (***************************************************************************)
 (* The trace spec of `MultiPaxos`: the model, forced to follow the events  *)
-(* that one walk of the `consensus-sim` cell recorded (#1198 (trace        *)
-(* checking), `crates/sim/consensus-sim/src/cell/trace.rs`). `l` is the    *)
+(* that one walk of the `consensus-sim` cluster recorded (#1198 (trace     *)
+(* checking), `crates/sim/consensus-sim/src/cluster/trace.rs`). `l` is the *)
 (* index of the next event.                                                *)
 (*                                                                         *)
 (* The walk records a step when a batch of a node reached its disk, and    *)
@@ -24,10 +24,19 @@
 (*     the ballot that chose it and below its promise (`mark_chosen`);     *)
 (*   - "learn": a slot entered the chosen prefix on a node's disk, or a    *)
 (*     leader names a slot it decided in the payload of its handoff;       *)
-(*   - "restart": a node booted again from its disk (`Restart`).           *)
+(*   - "restart": a node booted again from its disk, with the first slot  *)
+(*     past the chosen prefix that its disk holds (`upto`).                *)
 (*                                                                         *)
-(* "learn" and "record" are the two steps that are not steps of the       *)
-(* model. The code learns a slot from one `Commit`; the model's `CatchUp`  *)
+(* "learn", "record" and "restart" are the three steps that are not steps *)
+(* of the model. The model's `Restart` keeps every learned slot. The code *)
+(* writes its chosen index relaxed (`MustSync::Relaxed`): a crash may lose *)
+(* the writes that no fsync covered, so a node may boot with a shorter     *)
+(* prefix than it learned. The restart step is the model's `Restart` that  *)
+(* also forgets every learned slot at or above `upto`, and asks that the   *)
+(* node learned every slot below it. Forgetting a chosen value only takes  *)
+(* knowledge away: the node learns the slot again, chosen, later.          *)
+(*                                                                         *)
+(* The code learns a slot from one `Commit`; the model's `CatchUp`        *)
 (* copies every slot of a peer at once, and its `Decide` is the leader's   *)
 (* learn only. So the trace spec learns one slot, and asks only what the   *)
 (* model asks of every learn: the value is chosen (`LearnedChosen`). A     *)
@@ -58,6 +67,9 @@ TraceQ2 ==
   [s \in 0..(TraceNS - 1) |->
      IF TraceCols = 0 THEN MajorityQuorums(TraceAcceptors)
      ELSE GridQ2(TraceLayout, TraceCols, TraceAcks)]
+
+\* A grid of the run tiles its acceptors (`QuorumSystem::admits`).
+ASSUME TraceCols = 0 \/ GridAdmits(TraceLayout, TraceCols, TraceAcks)
 
 TraceInit == Init /\ l = 1
 
@@ -92,6 +104,27 @@ Record(n, b, s, v) ==
   /\ dvote' = [dvote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
   /\ UNCHANGED <<prom, dprom, learned, phase, next, front, wiped, restarts, msgs>>
 
+\* Node n boots again from its disk, with the chosen prefix below upto: the
+\* trace spec's own step, see above. It is `Restart`, and it forgets what a
+\* crash lost of the learned prefix. The campaigns of n die, and so does
+\* the ballot n led (`led`, 0 for none). The model's `Restart` kills every
+\* ballot n owns, but a leader may have handed its ballot on before the
+\* crash (the walk's handoff, which this model does not have): that ballot
+\* lives on at its successor, and the successor's restart ends it.
+TraceRestart(n, upto, led) ==
+  /\ Live(n)
+  /\ restarts < Restarts
+  /\ restarts' = restarts + 1
+  /\ \A s \in Slots : s < upto => learned[n][s] # None
+  /\ prom' = [prom EXCEPT ![n] = dprom[n]]
+  /\ vote' = [vote EXCEPT ![n] = dvote[n]]
+  /\ learned' = [learned EXCEPT ![n] = [s \in Slots |-> IF s >= upto THEN None ELSE @[s]]]
+  /\ phase' = [b \in Ballots |->
+                IF \/ Owner[b] = n /\ phase[b] = "p1"
+                   \/ b = led /\ phase[b] = "p2"
+                THEN "dead" ELSE phase[b]]
+  /\ UNCHANGED <<dprom, dvote, next, front, wiped, msgs>>
+
 Step ==
   \/ /\ e.event = "prepare" /\ IsBallot /\ IsNode("owner") /\ Has("from")
      /\ Owner[e.bal] = e.owner
@@ -117,8 +150,8 @@ Step ==
      /\ Record(e.node, e.bal, e.slot, e.val)
   \/ /\ e.event = "learn" /\ IsNode("node") /\ IsSlot /\ IsValue
      /\ Learn(e.node, e.slot, e.val)
-  \/ /\ e.event = "restart" /\ IsNode("node")
-     /\ Restart(e.node)
+  \/ /\ e.event = "restart" /\ IsNode("node") /\ Has("upto") /\ Has("led")
+     /\ TraceRestart(e.node, e.upto, e.led)
 
 TraceNext == l <= Len(Trace) /\ Step /\ l' = l + 1
 

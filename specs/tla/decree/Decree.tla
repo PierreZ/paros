@@ -31,16 +31,21 @@
 (*   Pick    "highest": the proposer takes the value of the highest vote   *)
 (*           that the promises report, else any value (P2c).               *)
 (*           "ignore": a control, the proposer takes any value.            *)
+(*   Refuse  TRUE: a wiped acceptor is refused at boot as amnesia, and it   *)
+(*           takes no step (docs/architecture/05-failure-model-and-zones.md, *)
+(*           the rule of the matchmaker handover). FALSE: it answers as     *)
+(*           Identity says.                                                *)
 (*   Wipes   how many acceptors may be wiped, each at most one time.       *)
 (*   Down    the acceptors that never take a step (liveness checks only).  *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Acceptors, Values, NB, Quorums, Phase1, Pick, Identity, Wipes, Down
+CONSTANTS Acceptors, Values, NB, Quorums, Phase1, Pick, Identity, Refuse, Wipes, Down
 
 ASSUME Phase1 \in {"quorum", "every"}
 ASSUME Pick \in {"highest", "ignore"}
 ASSUME Identity \in BOOLEAN
+ASSUME Refuse \in BOOLEAN
 ASSUME Down \subseteq Acceptors
 \* Every two quorums intersect: the majority rule of the decree.
 ASSUME \A Q, R \in Quorums : Q \cap R # {}
@@ -87,6 +92,7 @@ Prepare(b) ==
 \* Acceptor a promises ballot b and reports its vote.
 Promise(a, b) ==
   /\ a \notin Down
+  /\ Refuse => a \notin wiped
   /\ [type |-> "1a", bal |-> b] \in msgs
   /\ prom[a] < b
   /\ prom' = [prom EXCEPT ![a] = b]

@@ -49,12 +49,6 @@ pub struct AcceptorConfig<Id = NodeId> {
     /// empty is the plain arm, an unlabeled configuration. No tally reads
     /// it; [`AcceptorConfig::zone_rule`] does.
     domains: Vec<FailureDomain>,
-    /// The cell that owns the journal this configuration runs (#215
-    /// (zones), #232 (multiple cells), `docs/architecture/03-7-universe.md` §3.7): `0`
-    /// is none, the plain arm. The core never decides on it; it is bound to
-    /// the ballot like the rest, so the effective configuration names the
-    /// owning cell.
-    cell: u64,
     /// How many **proxy leaders** this configuration's leader delegates
     /// Phase 2 to (#142, Compartmentalized Paxos §3.1): `ProxyId(0..proxies)`.
     /// Zero runs every Phase 2 on the leader, the plain arm. Bound to the
@@ -80,8 +74,6 @@ struct SerdeAcceptorConfig<Id> {
     #[serde(default)]
     domains: Vec<FailureDomain>,
     #[serde(default)]
-    cell: u64,
-    #[serde(default)]
     proxies: usize,
     #[serde(default)]
     replicas: usize,
@@ -98,9 +90,7 @@ impl<Id: Copy + Ord> From<SerdeAcceptorConfig<Id>> for AcceptorConfig<Id> {
                 wire.quorum_system,
             )
         };
-        config
-            .with_cell(wire.cell)
-            .with_counts(wire.proxies, wire.replicas)
+        config.with_counts(wire.proxies, wire.replicas)
     }
 }
 
@@ -169,7 +159,6 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
             members,
             quorum_system,
             domains,
-            cell: 0,
             proxies: 0,
             replicas: 0,
         };
@@ -477,30 +466,6 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
             "a configuration labels every member or none"
         );
         &self.domains
-    }
-
-    /// This configuration owned by cell `cell` (`0`: none), every other
-    /// field unchanged (#215 (zones), `docs/architecture/03-7-universe.md` §3.7).
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    #[must_use]
-    pub fn with_cell(mut self, cell: u64) -> Self {
-        self.cell = cell;
-        assert!(
-            self.is_well_formed(),
-            "naming a cell keeps a configuration well formed"
-        );
-        self
-    }
-
-    /// The cell that owns the journal this configuration runs; `0` for
-    /// none.
-    #[must_use]
-    pub fn cell(&self) -> u64 {
-        self.cell
     }
 
     /// This configuration with `proxies` proxy leaders and `replicas`

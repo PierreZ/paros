@@ -70,8 +70,20 @@ the prefix up to the election fence, with a control that forgets it at the win a
 that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
-more rules)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
-designed again from the ground up, together with Pierre.
+more rules)), quorum everywhere (`specs/tla/quorum-everywhere/`: every step of the journal, the
+write, the election, the leaderless read, the seal, the retire, the offload mark, the trim and the
+matchmaker handover, waits for a quorum only and completes with F members down in every column,
+in each matchmaker set and in the replica set, with a control that blocks each step one member
+later and a control that waits for every member as a FoundationDB TLog commit; #1257 (quorum
+everywhere)), the grid controller (`specs/tla/grid-controller/`: its election by a term in the
+matchmaker record and the fenced `reshape(expected configuration, new grid, term)` call, with two
+candidates that race, a deposed controller that keeps calling, a crash between plan and call, a
+takeover, a lost reply and the bound `F + 1 <= acks <= rows - F`; #1259 (the fenced reshape call of
+the grid controller)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
+`step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
+`Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
+and its flight rule has a model, `specs/tla/flight-rule/`. No journal code exists yet.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
 same code: model-based trace checking (each run of the core is checked against its TLA+
@@ -90,7 +102,7 @@ branch from the runs that reach a new probe or a new edge of the core, and a gat
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
 unreached probes)). Every one of the 79 probes is reached in CI, with no list of excused probes
-(Pierre, 2026-11-19: no excuses in simulation, no allow lists; the gate has 20 minutes of CI).
+(Pierre, 2026-11-19: no excuses in simulation, no allow lists; each job of the gate has 30 minutes of CI, Pierre 2026-11-20).
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
@@ -132,10 +144,12 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `scripts/check-module-style.sh` and `scripts/check-core-layers.sh`
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
 - the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
-- the `coverage` job: the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with
-  `paros-consensus` instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
-  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`), at most 20 minutes. The `test`
-  job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
+- the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
+  instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
+  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`). Each CI job has at most 30
+  minutes, so four `coverage-shard` jobs walk a quarter of the walks each
+  (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
+  (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
@@ -193,6 +207,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   issue; a preference about how to work goes into this file. Amend the section it touches, never
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
+- **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
 - **A flaky check is a finding** (decided on 2026-11-17). A check that is red and then green
   with no change teaches you to run it again in place of a fix. Never run a check again until
   it is green, and never add a retry around it. Find the cause: a bug in the code is fixed with
@@ -225,6 +240,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   a final report are read by someone who has not seen your tool calls or the files you opened.
   Put the key points in the first sentences. Do not use a term you made up during the work.
   Say what you found, what you did, how you proved it, and what is next.
+- **Quorum everywhere** (Pierre, 2026-11-20, #1257): no step of the journal waits for every
+  member of a group (no full broadcast as a FoundationDB TLog commit). A new journal step gets
+  its row in `specs/tla/quorum-everywhere/`, with a control that blocks it one member later
+  (`docs/architecture/02-data-plane.md` §2.11).
 - **TLA+ is a thinking tool** (decided on 2026-11-12, #1020 (TLA+ ranked list)): when a
   protocol problem has more than one possible rule, you can write a small TLA+ model to find
   the solution, before you write Rust. Model each candidate rule as a constant, give each a
@@ -259,7 +278,10 @@ borrow, so a second `ready()` before `advance()` is a compile error. Persist-bef
 ordering is documented on `Ready`/`HardState`
 (`docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`). The driver that owns the core and
 does its I/O was in the removed `paros-roles` (`docs/archive/v0.2.0-alpha.1/paros-roles.md`);
-today only the examples, the model checkers and the wasm engine drive the core.
+today only the examples, the model checkers and the wasm engine drive the core. The journal's
+roles follow a different contract, the flight rule (`docs/architecture/04-roles.md` §4.2): each
+persist batch has an id and each send names the persist id it waits on, so a driver may pipeline
+and group commit. §4.2 lists every difference from `Ready`/`advance` as a change or a proposal.
 
 **One file per role; `ColocatedNode` is wiring** (timers, messages, the persist-before-send
 batch) and holds **no protocol tally of its own**:
@@ -273,7 +295,7 @@ batch) and holds **no protocol tally of its own**:
 - `membership/` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
 - `matchmaking.rs` — the candidate's matchmaking phase · `matchmaker.rs` (+ `reconfigurer.rs`)
   — the registry and its generation handover · `decree.rs` — the generic single-decree
-  Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
+  Paxos (`Decree<Id, V>`): the handover's successor, and any one-shot decision of a caller above the core
 - `proxy_leader.rs`, `replica_node.rs` — the second and third deployments
 
 Beside the roles, the **foundations**: `types.rs` (the Paxos scalars), `journal/` (what the log
@@ -315,6 +337,13 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   never implied by code being present. Every peer and client message carries a `JournalIdentifier`
   `(TenantId, JournalId)`; under that identifier the plain deployment exchanges the same
   messages and persists the same scalars.
+
+**The core is a library for everyone** (decided by Pierre on 2026-11-20,
+`docs/architecture/04-roles.md` §4.3). `paros-consensus` stays usable by other people for plain
+Multi-Paxos, single-decree Paxos and every flavor it already builds. What paros needs comes from
+optional behaviour and software composition, never from a service concept inside the core (no
+cell, no tenant policy, no `cell init`; #1264 (remove the cell from paros-consensus)). A paros
+need that composition cannot meet is a new optional behaviour, with the plain arm unchanged.
 
 ## Matchmaking, reconfiguration, GC, generations
 
@@ -389,8 +418,12 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   coordinator's `ReconfigureMatchmakers` too (#563: the node refuses an ask whose generation is
   no longer in force, so a re-ask the read left stale never starts a second handover);
   matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
-  `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop
-  quorum's maximum decree promise; any node that meets `Stopped { successor: None }` finishes
+  `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the decree
+  round on the node's disk, which the driver writes before the round's first request leaves
+  (`ReconfigurerReady::round`; decided on 2026-11-19, #1229 (a stale `Stopped` reply reuses a
+  decree ballot): a `Stopped` sent to an earlier incarnation can reach a later one, so the stop
+  quorum's maximum decree promise alone does not keep two incarnations apart), and above that
+  maximum promise, which only skips rounds the matchmakers refuse; any node that meets `Stopped { successor: None }` finishes
   the handover. `MatchmakerSet::new` / `AcceptorConfig::new` are the only constructors.
 
 Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,

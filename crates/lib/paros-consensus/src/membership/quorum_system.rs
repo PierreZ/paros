@@ -167,12 +167,12 @@ pub(super) fn column_votes<I: Ord>(
     voted
 }
 
-/// Whether every member of `cell` voted.
+/// Whether every member of `group` voted.
 pub(super) fn all_voted<'a, I: Ord + 'a>(
-    cell: impl IntoIterator<Item = &'a I>,
+    group: impl IntoIterator<Item = &'a I>,
     voters: &BTreeSet<I>,
 ) -> bool {
-    cell.into_iter().all(|m| voters.contains(m))
+    group.into_iter().all(|m| voters.contains(m))
 }
 
 impl QuorumSystem {
@@ -390,7 +390,7 @@ impl QuorumSystem {
     /// A majority admits every non-empty membership. A grid
     /// admits `n` when `rows >= 1`, `cols >= 1`, `1 <= acks <= rows` and
     /// `rows * cols == n` — the layout must tile the membership exactly, or some row or column would
-    /// be short and the set-membership predicates would answer for a cell
+    /// be short and the set-membership predicates would answer for a member
     /// that does not exist.
     ///
     /// # Panics

@@ -74,9 +74,11 @@ function mountLab(mount, engine) {
   const said = el("p", "lab-said");
   said.setAttribute("aria-live", "polite");
   const controls = el("div", "lab-controls");
+  const all = button("Deliver all");
+  all.title = "Deliver every message, and the ones they send, until the wire is empty";
   const undo = button("Undo");
   const reset = button("Start again");
-  controls.append(undo, reset);
+  controls.append(all, undo, reset);
   panel.append(head, tabs, task, ruleOff, stage, chosen, done, wireHead, wire, extrasHead, extras, said, controls);
   mount.replaceChildren(panel);
 
@@ -99,20 +101,26 @@ function mountLab(mount, engine) {
   const titles = {};
 
   function drawStage() {
+    // One row per role; a lane of an acceptor grid sits at its own cell, so
+    // the rows and columns of the grid show.
     const rows = {};
+    let cols = 0;
     view.lanes.forEach((lane, i) => {
-      const r = ROWS.indexOf(lane.role);
+      const r = ROWS.indexOf(lane.role) * 10 + (lane.cell ? lane.cell.row : 0);
+      if (lane.cell) cols = Math.max(cols, lane.cell.column + 1);
       (rows[r] = rows[r] || []).push({ lane, i });
     });
     const keys = Object.keys(rows).map(Number).sort((a, b) => a - b);
-    const w = Math.max(320, Math.max(...keys.map((k) => rows[k].length)) * 96);
+    const width = (k) => (cols && rows[k][0].lane.cell ? cols : rows[k].length);
+    const w = Math.max(320, Math.max(...keys.map(width)) * 96);
     const rowH = 104;
     const s = svg("svg", { viewBox: `0 0 ${w} ${keys.length * rowH + 4}`, class: "lab-svg", role: "img" });
     s.style.maxWidth = Math.min(w * 1.2, 560) + "px";
     const at = {};
     keys.forEach((k, r) => {
       rows[k].forEach((entry, c) => {
-        at[entry.lane.id] = { x: ((c + 0.5) / rows[k].length) * w, y: r * rowH + 26 };
+        const col = cols && entry.lane.cell ? entry.lane.cell.column : c;
+        at[entry.lane.id] = { x: ((col + 0.5) / width(k)) * w, y: r * rowH + 26 };
       });
     });
     // One faint line per message on the wire, so the reader sees who waits.
@@ -192,6 +200,7 @@ function mountLab(mount, engine) {
     if (view.refused) said.append(el("span", "chip-status gap", "refused"), document.createTextNode(" " + view.refused));
     else if (view.said.length) said.textContent = view.said.join(" ");
     undo.disabled = view.moves === 0;
+    all.disabled = !view.wire.length;
   }
 
   function show(json) {
@@ -219,7 +228,15 @@ function mountLab(mount, engine) {
     if (window.history && window.history.replaceState) window.history.replaceState(null, "", "#lab=" + id);
   }
 
+  all.addEventListener("click", () => play({ kind: "deliver_all" }));
   undo.addEventListener("click", () => play({ kind: "undo" }));
+  // A link to "#lab=<id>" (the end of a lesson's story) opens that tab.
+  window.addEventListener("hashchange", () => {
+    const to = /^#lab=([\w-]+)$/.exec(window.location.hash);
+    if (!to || !ids.includes(to[1])) return;
+    if (to[1] !== current) start(to[1]);
+    panel.scrollIntoView({ block: "start" });
+  });
   reset.addEventListener("click", () => play({ kind: "reset" }));
   // The titles of the other tabs: read once from a fresh lab of each.
   for (const id of ids) {

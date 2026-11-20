@@ -1,9 +1,10 @@
 -------------------------- MODULE ProxyLeaderTrace --------------------------
 (***************************************************************************)
 (* The trace spec of `ProxyLeader`: the model, forced to follow the events *)
-(* that one walk of the `consensus-sim` cell recorded (#1198 (trace        *)
-(* checking), `crates/sim/consensus-sim/src/cell/trace/proxy_leader.rs`).  *)
-(* `l` is the index of the next event.                                     *)
+(* that one walk of the `consensus-sim` cluster recorded (#1198 (trace     *)
+(* checking),                                                              *)
+(* `crates/sim/consensus-sim/src/cluster/trace/proxy_leader.rs`). `l` is   *)
+(* the index of the next event.                                            *)
 (*                                                                         *)
 (* The walk records a step when a batch of a node reached its disk, or     *)
 (* when a proxy sends a batch, and only when the step changes the model's  *)
@@ -25,10 +26,10 @@
 (*                                                                         *)
 (* The model's deployment is compartmentalized: leaders, proxies and       *)
 (* acceptors are three sets, and every round goes through a proxy. The     *)
-(* cell colocates a leader with an acceptor, and a leader may run a round  *)
-(* itself (`Delegation::Colocated`, the leader's take-back). So the trace  *)
-(* spec has four steps that are not steps of the model, each a step of the *)
-(* colocated deployment of `multi-paxos/`:                                 *)
+(* cluster colocates a leader with an acceptor, and a leader may run a     *)
+(* round itself (`Delegation::Colocated`, the leader's take-back). So the  *)
+(* trace spec has four steps that are not steps of the model, each a step  *)
+(* of the colocated deployment of `multi-paxos/`:                          *)
 (*   - "direct": the leader sends the `Accept` of its proposed value to    *)
 (*     the acceptors itself;                                               *)
 (*   - an "accept" with `own`: the leader records the round it opens as    *)
@@ -50,8 +51,9 @@
 (* Ballot 1 is the bootstrap: no node runs it. The model's Phase 1 of a    *)
 (* ballot asks the configurations of the lower ballots, and the code's     *)
 (* first ballot asks the bootstrap configuration; so the code's ballots    *)
-(* are ranked from 2. Each ballot runs the one configuration of the cell   *)
-(* (configuration 0): a cell without matchmakers never reconfigures.       *)
+(* are ranked from 2. Each ballot runs the one configuration of the        *)
+(* cluster (configuration 0): a cluster without matchmakers never          *)
+(* reconfigures.                                                           *)
 (***************************************************************************)
 EXTENDS ProxyLeader, Trace, Grid, Naturals, Sequences, FiniteSets, TLC
 
@@ -77,6 +79,9 @@ TraceQ2 ==
 TraceCfg == [b \in 0..TraceNB |-> 0]
 \* `Move` is on, so the first proxy of a slot is any proxy.
 TraceProxyOf == [s \in 0..(TraceNS - 1) |-> CHOOSE p \in TraceProxies : TRUE]
+
+\* A grid of the run tiles its acceptors (`QuorumSystem::admits`).
+ASSUME TraceCols = 0 \/ GridAdmits(TraceLayout, TraceCols, TraceAcks)
 
 TraceInit == Init /\ l = 1
 

@@ -1,10 +1,10 @@
-//! A toy cell for the examples that drive [`ColocatedNode`]: the nodes,
+//! A toy cluster for the examples that drive [`ColocatedNode`]: the nodes,
 //! one disk for each node, an optional set of matchmakers, and a wire.
 //!
 //! It is the smallest complete driver of the core. Read [`Cluster::pump`]
 //! first: it is the loop that every driver writes, and it obeys the one
 //! rule of the contract, **persist before send**. The rest is a network
-//! that the example controls: [`Cluster::settle`] delivers until the cell
+//! that the example controls: [`Cluster::settle`] delivers until the cluster
 //! is quiet, [`Cluster::cut`] isolates a node, and [`Cluster::crash`] and
 //! [`Cluster::restart`] stop a node and boot it again from its disk.
 //!
@@ -50,7 +50,7 @@ struct Registry {
     disk: MemRegistry,
 }
 
-/// The toy cell. See the module doc.
+/// The toy cluster. See the module doc.
 pub struct Cluster {
     /// One disk for each node. A disk outlives a crash of its node.
     disks: BTreeMap<NodeId, MemStorage>,
@@ -74,7 +74,7 @@ pub struct Cluster {
 }
 
 impl Cluster {
-    /// A cell with one node for each configuration, each on an empty disk.
+    /// A cluster with one node for each configuration, each on an empty disk.
     pub fn new(configs: impl IntoIterator<Item = Config>) -> Self {
         let mut cluster = Self {
             disks: BTreeMap::new(),
@@ -95,7 +95,7 @@ impl Cluster {
         cluster
     }
 
-    /// The same cell with `count` matchmakers, `MatchmakerId(0..count)`,
+    /// The same cluster with `count` matchmakers, `MatchmakerId(0..count)`,
     /// each on an empty registry. The node configurations must name the
     /// same set in `Config::matchmakers`.
     pub fn with_matchmakers(mut self, count: u64) -> Self {
@@ -207,7 +207,7 @@ impl Cluster {
     // ---- the network --------------------------------------------------------
 
     /// Deliver every packet in flight, and every packet that a delivery
-    /// causes, until the cell is quiet.
+    /// causes, until the cluster is quiet.
     pub fn settle(&mut self) {
         self.settle_where(|_, _, _| true);
     }
@@ -257,7 +257,7 @@ impl Cluster {
                 }
             }
         }
-        panic!("the cell did not become quiet");
+        panic!("the cluster did not become quiet");
     }
 
     /// One matchmaking request at matchmaker `to`: the same order as a
@@ -367,7 +367,7 @@ impl Cluster {
         self.tick();
     }
 
-    /// Propose `control` on the leader `id` and deliver until the cell is
+    /// Propose `control` on the leader `id` and deliver until the cluster is
     /// quiet. Returns the slot.
     pub fn control(&mut self, id: NodeId, control: Control) -> Slot {
         let ProposeResult::Accepted(slot) = self.node(id).propose_control(control) else {
@@ -378,7 +378,7 @@ impl Cluster {
     }
 
     /// Propose one `Write` on the leader `id`: `text` as one record, at
-    /// position `seq`, by the writer `writer`. Delivers until the cell is
+    /// position `seq`, by the writer `writer`. Delivers until the cluster is
     /// quiet and returns the slot.
     pub fn write(&mut self, id: NodeId, writer: LeaderUuid, seq: u64, text: &str) -> Slot {
         let entry = Entry {
@@ -428,7 +428,7 @@ impl Cluster {
         std::mem::take(&mut self.sent)
     }
 
-    /// The journal that the matchmakers file this cell under.
+    /// The journal that the matchmakers file this cluster under.
     pub fn journal_id(&mut self, id: NodeId) -> JournalId {
         self.node(id).config().journal.journal
     }

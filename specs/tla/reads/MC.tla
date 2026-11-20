@@ -68,4 +68,8 @@ TargetsLag == [c \in ConfigsLag |-> {c}]
 OnlyOwn3 == status[3] \in {"matching", "abandoned"} /\ replied[3] = {}
 
 Symmetry == Permutations(Values) \cup Permutations(Matchmakers)
+\* Each grid layout tiles its members (`QuorumSystem::admits`).
+ASSUME \A c \in ConfigsFull : GridAdmits(SeqOf(c), 2, 2)
+ASSUME \A c \in ConfigsPart : GridAdmits(SeqPart(c), 2, 2)
+
 =============================================================================

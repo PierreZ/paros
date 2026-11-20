@@ -627,13 +627,12 @@ pub enum ReconfigureReply {
         successor: Option<MatchmakerSet>,
         /// The highest decree ballot this matchmaker has promised for the
         /// frozen generation: the floor a reconfigurer opens its decree
-        /// above. A reconfigurer holds no durable state, so a rebooted
-        /// node's fresh incarnation would otherwise reuse the rounds its
-        /// earlier one minted — and a ballot must carry one value. Every
-        /// promise quorum an earlier decree at this node reached intersects
-        /// the stop quorum, so the maximum over the stop quorum is strictly
-        /// below no ballot that could ever have been accepted (the handover
-        /// model checker's finding, seed 103).
+        /// above, so its first ballot is not one the stop quorum refuses.
+        /// The floor is a liveness hint, not what keeps a ballot to one
+        /// value: a reply carries no incarnation, so a reply sent to an
+        /// earlier incarnation of a node can reach a later one. The round
+        /// on the node's disk keeps the ballots of two incarnations apart
+        /// ([`super::ReconfigurerReady::round`]).
         decree_promised: Ballot,
     },
     /// The bootstrap for `set` is durably pending here, whole or up to
