@@ -4,6 +4,9 @@
 of the plan: it changes no model of `specs/tla/`, and no rule of `paros-consensus` comes from it
 until Pierre decides. The report below goes to Pierre.
 
+**Decision**: Pierre chose the durable decree round on 2026-11-19. The rule is recorded in
+`docs/architecture/04-roles.md` (*Matchmaker sets are generations*).
+
 ## Result in short
 
 TLC reproduces the bug of #1229 with the rule of the code today: a reconfigurer that restarts
@@ -18,8 +21,9 @@ Both candidate fixes hold:
   necessary: with the nonce and no floor, a new incarnation opens at the round of the earlier
   one again (`nonce_nofloor`, violation).
 - **A decree round on disk, written before the `Prepare` of the round** (`durable`): pass. With
-  the durable round, the floor is not needed for safety (`durable_nofloor`); it only skips
-  rounds that the matchmakers would refuse.
+  the durable round, the floor is not needed for safety: `durable2a_nofloor` (the weaker write)
+  passes with no floor, and `durable_nofloor` is still running. The floor only skips rounds that
+  the matchmakers would refuse.
 - A variant of the durable round that is written only before the first `Accept` of the round
   (`durable2a`) passes too: a `Prepare` that the node sent at a round not on disk carries no
   value, so a later incarnation that uses that round again is safe.
@@ -57,7 +61,9 @@ Invariants:
 
 ## Results
 
-`restart/checks.txt`. Three matchmakers, two values, symmetry over both.
+`restart/checks.txt`. Three matchmakers, two values, symmetry over both. The `long` checks
+that say "not finished yet" were still running when this report was written; the PR of the
+fix adds their results.
 
 | Check | Rule | Constants | Result |
 |---|---|---|---|
@@ -69,15 +75,15 @@ Invariants:
 | `nonce_nofloor` | nonce, no floor | NR 2, 1 restart | `OneValuePerRound` violation |
 | `durable_reach` | durable | NR 2, 1 restart | `NoLearnAfterRestart` violation (reachable) |
 | `durable` | durable + floor | NR 2, 1 restart | pass (7,446,297 states, 6.5 min) |
-| `durable_nofloor` | durable, no floor | NR 2, 1 restart | RESULT_DURABLE_NOFLOOR |
-| `durable2a` | durable before `Accept` + floor | NR 2, 1 restart | RESULT_DURABLE2A |
-| `durable2a_nofloor` | durable before `Accept`, no floor | NR 2, 1 restart | RESULT_DURABLE2A_NOFLOOR |
-| `nonce_retry` | nonce + floor | NR 2, 1 restart, retries | RESULT_NONCE_RETRY |
-| `durable_retry` | durable + floor | NR 2, 1 restart, retries | RESULT_DURABLE_RETRY |
-| `durable2a_retry` | durable before `Accept` + floor | NR 2, 1 restart, retries | RESULT_DURABLE2A_RETRY |
-| `durable_nofloor_retry` | durable, no floor | NR 2, 1 restart, retries | RESULT_DURABLE_NOFLOOR_RETRY |
-| `nonce_two` | nonce + floor | NR 3, 2 restarts | RESULT_NONCE_TWO |
-| `durable_two` | durable + floor | NR 3, 2 restarts | RESULT_DURABLE_TWO |
+| `durable_nofloor` | durable, no floor | NR 2, 1 restart | not finished yet |
+| `durable2a` | durable before `Accept` + floor | NR 2, 1 restart | pass (7,256,239 states, 6.5 min) |
+| `durable2a_nofloor` | durable before `Accept`, no floor | NR 2, 1 restart | pass (7,143,753 states, 6.5 min) |
+| `nonce_retry` | nonce + floor | NR 2, 1 restart, retries | pass (20,921,801 states, 19 min) |
+| `durable_retry` | durable + floor | NR 2, 1 restart, retries | not finished yet |
+| `durable2a_retry` | durable before `Accept` + floor | NR 2, 1 restart, retries | not finished yet |
+| `durable_nofloor_retry` | durable, no floor | NR 2, 1 restart, retries | not finished yet |
+| `nonce_two` | nonce + floor | NR 3, 2 restarts | not finished (stopped at 44 million states, no error) |
+| `durable_two` | durable + floor | NR 3, 2 restarts | not finished yet |
 
 The trace of `stale_agreement` (depth 21) is shorter than the schedule of #1229, because the
 new incarnation needs no fresh message at all. Incarnation 0 proposes `v1`: `m1` and `m2`
