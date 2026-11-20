@@ -80,7 +80,11 @@ everywhere)), the grid controller (`specs/tla/grid-controller/`: its election by
 matchmaker record and the fenced `reshape(expected configuration, new grid, term)` call, with two
 candidates that race, a deposed controller that keeps calling, a crash between plan and call, a
 takeover, a lost reply and the bound `F + 1 <= acks <= rows - F`; #1259 (the fenced reshape call of
-the grid controller)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a write reaches only the
+replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
+leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
+segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
+reaches only the replica set of its segment)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),

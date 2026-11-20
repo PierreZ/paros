@@ -328,6 +328,25 @@ checked, each with a control that TLC breaks:
   a sealed segment (retire, offload, trim) never stops the tail (as in Delos).
 - A replica drops its copy of a segment only after the record says offloaded. The object key is
   the journal and the segment, so the record stores no location.
+- **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
+  reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
+  the whole journal the replicas therefore do not bound write throughput, as they do in
+  Compartmentalized Paxos (every replica executes every write, sections 3.3 and 8.5); inside one
+  segment they still do. Because the journal state is folded at apply (sections 2.1 and 2.2), a
+  replica of the next segment starts from the **boundary state**, the journal state at the seal.
+  The first replica of the old set that applied every slot of the segment writes it in one
+  compare-and-set at the matchmakers: `next_seq` into the segment record, and the leader uuid
+  into the journal's matchmaker record (the journal metadata, beside the controller term, and
+  later quota and offload limits; Pierre, 2026-11-20). The first leader of the next segment
+  reads that uuid and proposes it as the segment's first slot, a `Fence(uuid)` that sets the
+  leader uuid. A replica of the next segment takes `next_seq` from the segment record and the
+  uuid from that slot, so a later change of the metadata never reaches its fold. A record with
+  `next_seq` and no uuid anywhere lets a writer that a `SetLeader` of the old segment deposed
+  write again; so does a `Fence` read before the seal wrote the uuid. A reader routes a read by
+  the `seq` range of the segment records. A segment retires after `F + 1` replicas of its set
+  hold it and its boundary state is written; after that the next segment never needs its
+  slots. **Open**: the trim floor (`first_seq`) is part of the boundary state by our reading;
+  the journal state model (#1189) decides it.
 
 **A leaderless read of the tail across a reshape** (#1254 (leaderless reads across a reshape),
 checked on 2026-11-20 in `specs/tla/experiments/segments/reads/`). A reader that holds the record
