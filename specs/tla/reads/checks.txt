@@ -25,3 +25,11 @@ grid_full           violation  ci
 grid_full_static    pass       ci
 grid_full_seal      pass       ci
 grid_partitions     pass       long  120
+# A second read: a served read also covers what an earlier read returned.
+reads_plain_again        pass       ci
+# A finding, not a control: the decision hold of the planned bypass does not
+# order two reads (#1270 (bypass read order)). The rule is Open until #579.
+reads_bypass_hold_again  violation  ci
+# Two slots, and three leaderships with a reader on the middle one.
+reads_two_slots          pass       long  50
+reads_three              pass       long  50
