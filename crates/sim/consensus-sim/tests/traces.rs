@@ -8,10 +8,12 @@
 //! ([`Spec::rules`]). The knobs: `TRACE_SEEDS` (the first seeds that TLC
 //! always checks, 1), `TRACE_FROM` (the first seed, 1), `TRACE_SEARCH`
 //! (the seeds a flavor may search for its rules, 300), `TRACE_CHAOS`
-//! (chaos steps of a cell walk, 150), `TRACE_MAX_EVENTS` (the longest
+//! (chaos steps of a cell walk, 150), `TRACE_QUIET` (quiet steps of a
+//! cell walk, 10; 250 for a retiring walk), `TRACE_MAX_EVENTS` (the longest
 //! trace TLC checks, 200), and `TRACE_DUMP` (print every event of each
 //! checked cell walk).
 
+use consensus_sim::batcher::{self, BatchEvent, BatchModel, BatchMutant};
 use consensus_sim::cell::{Cell, CellEvent, Flavor, Mutant, Spec};
 use consensus_sim::decree::{self, DecreeEvent, DecreeModel, DecreeMutant};
 use consensus_sim::trace::{Verdict, require_tlc, spec};
@@ -112,11 +114,16 @@ fn tlc_refuses_an_acceptor_that_forgot_its_promise() {
     );
 }
 
-/// A cell walk of `chaos` chaos steps.
+/// A cell walk of `chaos` chaos steps, then its quiet steps: 10, or 250
+/// for a [`Flavor::retiring`] walk. A retirement is an operator move on a
+/// calm cell: it needs a leader that stands while its GC floor becomes
+/// effective and every matchmaker checks the node, and in the chaos steps
+/// the leaders of a cell with matchmakers seldom stand that long.
 fn cell_walk_of(flavor: Flavor, chaos: u64) -> Walk<Cell> {
+    let quiet = if flavor.retiring { 250 } else { 10 };
     Walk::<Cell>::new()
         .chaos_steps(chaos)
-        .quiet_steps(10)
+        .quiet_steps(knob("TRACE_QUIET", quiet))
         .env_prefix(None)
         .model(move |cx| Cell::build(flavor.clone(), cx))
 }
@@ -269,6 +276,12 @@ fn tlc_accepts_the_truncation_walks() {
 #[test]
 fn tlc_accepts_the_read_replica_walks() {
     accepts(Spec::Compartments, &Flavor::compartments_compacting());
+}
+
+#[test]
+fn tlc_accepts_the_disk_fault_walks() {
+    accepts(Spec::Faults, &Flavor::disk_faults());
+    accepts(Spec::Faults, &Flavor::disk_faults_three());
 }
 
 /// The first seed in `seeds` of `flavor` with `mutant` whose walk of
@@ -500,5 +513,183 @@ fn tlc_refuses_a_replica_read_with_no_quorum() {
     assert!(
         matches!(event, CellEvent::ReplicaServe { .. }),
         "seed {seed}: TLC refused {event:?}, not a served read"
+    );
+}
+
+/// The driver drops the faulty records from each promise: a lost value
+/// reads as no vote. The oracle sees a bug only when a candidate fills a
+/// chosen slot with a `Noop` over the hidden record; TLC refuses the
+/// promise that hid it.
+#[test]
+fn tlc_refuses_a_promise_that_hides_a_faulty_record() {
+    require_tlc(&Spec::Faults.check());
+    let (seed, event, state) = first_refused_cell(
+        Spec::Faults,
+        &Flavor::disk_faults_three(),
+        Mutant::HideFaulty,
+        1..=40,
+        150,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, CellEvent::Page { .. }),
+        "seed {seed}: TLC refused {event:?}, not a promise"
+    );
+}
+
+#[test]
+fn tlc_accepts_the_retirement_walks() {
+    accepts(Spec::Retire, &Flavor::retiring());
+}
+
+/// The control of `RetireTrace`: an operator that retires a node with no
+/// evidence. TLC refuses the retirement.
+#[test]
+fn tlc_refuses_a_retirement_with_no_evidence() {
+    require_tlc(&Spec::Retire.check());
+    let (seed, event, state) = first_refused_cell(
+        Spec::Retire,
+        &Flavor::retiring(),
+        Mutant::RetireUnchecked,
+        1..=40,
+        150,
+    )
+    .expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}\n{state}");
+    assert!(
+        matches!(event, CellEvent::Retire { .. }),
+        "seed {seed}: TLC refused {event:?}, not a retirement"
+    );
+}
+
+/// The batcher walks TLC always checks: a trace of a batcher walk costs
+/// about a second.
+const BATCHER_SEEDS: u64 = 20;
+
+/// A batcher walk with `mutant` planted.
+fn batcher_walk(mutant: BatchMutant) -> Walk<BatchModel> {
+    Walk::<BatchModel>::new()
+        .chaos_steps(60)
+        .env_prefix(None)
+        .model(move |_| BatchModel::build(mutant))
+}
+
+/// A rule of `BatcherTrace`: its name, and whether a walk meets it.
+type BatchRule = (&'static str, fn(&[BatchEvent]) -> bool);
+
+/// The rules of `BatcherTrace`: the steps some checked batcher walk must
+/// take.
+const BATCHER_RULES: &[BatchRule] = &[
+    ("a merged batch answers a write after another", |events| {
+        events.iter().any(|e| {
+            let BatchEvent::Answer { token, seq, .. } = e else {
+                return false;
+            };
+            // The write is not the first of its batch: its position is
+            // above the position of a landing of a batch that holds it.
+            events.iter().any(|f| matches!(f, BatchEvent::Flush { writes, .. } if writes.len() > 1 && writes[1..].contains(token)))
+                && *seq > 0
+        })
+    }),
+    ("a write goes alone", |events| {
+        events.iter().enumerate().any(|(i, e)| {
+            matches!(e, BatchEvent::Flush { writes, .. } if writes.len() == 1
+                && !events[..i].iter().any(|p| matches!(p, BatchEvent::Push { token } if *token == writes[0])))
+        })
+    }),
+    ("a push flushes its lane first", |events| {
+        events.windows(2).any(|w| {
+            matches!((&w[0], &w[1]), (BatchEvent::Flush { writes, .. }, BatchEvent::Push { token }) if !writes.contains(token))
+        })
+    }),
+    ("a batch lands twice", |events| {
+        let mut ids = std::collections::BTreeSet::new();
+        events
+            .iter()
+            .any(|e| matches!(e, BatchEvent::Land { id, .. } if !ids.insert(*id)))
+    }),
+    ("the batcher crashes", |events| {
+        events.iter().any(|e| matches!(e, BatchEvent::Crash))
+    }),
+    ("a writer pushes a write again", |events| {
+        let mut pushed = std::collections::BTreeSet::new();
+        events
+            .iter()
+            .any(|e| matches!(e, BatchEvent::Push { token } if !pushed.insert(*token)))
+    }),
+];
+
+/// TLC accepts the batcher walks, and the checked walks meet every rule
+/// of `BatcherTrace`.
+#[test]
+fn tlc_accepts_the_batcher_walks() {
+    let check = spec("compartments", "BatcherTrace");
+    require_tlc(&check);
+    let max_events = usize::try_from(knob("TRACE_MAX_EVENTS", 200)).expect("a size");
+    let mut unmet: Vec<_> = BATCHER_RULES.iter().collect();
+    let mut checked = 0;
+    let first = knob("TRACE_FROM", 1);
+    for seed in first..first + knob("TRACE_SEARCH", 300) {
+        if unmet.is_empty() && checked >= BATCHER_SEEDS {
+            break;
+        }
+        let run = batcher_walk(BatchMutant::None)
+            .replay(seed)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let events: Vec<BatchEvent> = run.events().cloned().collect();
+        if events.len() > max_events {
+            continue;
+        }
+        let before = unmet.len();
+        unmet.retain(|(_, met)| !met(&events));
+        if unmet.len() == before && checked >= BATCHER_SEEDS {
+            continue;
+        }
+        checked += 1;
+        eprintln!(
+            "batcher seed {seed}: {} events, {} rules met",
+            events.len(),
+            BATCHER_RULES.len() - unmet.len()
+        );
+        match check
+            .check(&batcher::trace(&events))
+            .expect("TLC gives a verdict")
+        {
+            Verdict::Accepted => {}
+            Verdict::Rejected(rejection) => panic!(
+                "batcher seed {seed}: TLC refused event {} {:?}\n{}",
+                rejection.index, events[rejection.index], rejection.state
+            ),
+            other @ Verdict::InvariantViolated { .. } => panic!("batcher seed {seed}: {other:?}"),
+        }
+    }
+    let names: Vec<&str> = unmet.iter().map(|(name, _)| *name).collect();
+    assert!(names.is_empty(), "batcher: no walk meets {names:?}");
+}
+
+/// The batcher sends a merged lane in the reverse of push order, each
+/// write with its own records. The `IN_ORDER` and `SCATTER` oracles pass;
+/// TLC refuses the flush.
+#[test]
+fn tlc_refuses_a_lane_sent_out_of_push_order() {
+    let check = spec("compartments", "BatcherTrace");
+    require_tlc(&check);
+    let refused = (1..=40).find_map(|seed| {
+        let run = batcher_walk(BatchMutant::ReverseLane).replay(seed).ok()?;
+        let events: Vec<BatchEvent> = run.events().cloned().collect();
+        match check
+            .check(&batcher::trace(&events))
+            .expect("TLC gives a verdict")
+        {
+            Verdict::Rejected(rejection) => Some((seed, events[rejection.index].clone())),
+            _ => None,
+        }
+    });
+    let (seed, event) = refused.expect("TLC refuses a seed of the mutant");
+    eprintln!("seed {seed}: TLC refused {event:?}");
+    assert!(
+        matches!(event, BatchEvent::Flush { .. }),
+        "seed {seed}: TLC refused {event:?}, not a flush"
     );
 }

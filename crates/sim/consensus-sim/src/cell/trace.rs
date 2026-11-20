@@ -12,11 +12,13 @@
 //! 2. `win` or `install`: the node became leader of its ballot by Phase 1,
 //!    with its frontier, or by a handoff. A ballot won in the batch that
 //!    prepares it (an empty `H_b`) wins just after its `prepare`;
-//! 3. `learn`: each slot that the disk's chosen prefix grew by; then
-//!    `compact` and `trim`: each floor the batch wrote;
+//! 3. `accept` and `record` (as in 5) of each vote the batch wrote before
+//!    a floor; `learn`: each slot that the disk's chosen prefix grew by;
+//!    then `compact` and `trim`: each floor the batch wrote. A floor drops
+//!    the votes below it, so a vote written before it comes first;
 //! 4. one event for each message the batch sends that changes a model:
 //!    the first `Prepare` of a ballot, the promise that raised an
-//!    acceptor, the first `Accept` of each `(ballot, slot)` (`propose`),
+//!    acceptor, each page of a promise (`page`), the first `Accept` of each `(ballot, slot)` (`propose`),
 //!    the first `Accept` of it to the acceptors (`direct`) and to each
 //!    proxy (`delegate`), a `Relinquish`. A message the batch would send
 //!    is a step even when a crash stops the send: its writes are durable;
@@ -33,7 +35,8 @@
 //! For a batch of a proxy: `fanout`, the proxy opened a round, and
 //! `commit`, the proxy decided it. For a matchmaker: `register`, a
 //! registration it did not hold before, and `gcack`, a GC request it
-//! applied. `restart` is a node that boots again from its disk, and
+//! applied. `restart` is a node that boots again from its disk, with a
+//! `rot` for each record its boot read faulty, and
 //! `crash` a proxy that lost its rounds. The driver loop records the
 //! rest itself: the reads a node opens, folds and serves, the fold of each
 //! slot the first party applies (`fold`, before the floor of its batch),
@@ -50,11 +53,13 @@
 //! `specs/tla/multi-paxos/`, `proxy_leader.rs` for `specs/tla/proxy-leader/`,
 //! `leader_handoff.rs` for `specs/tla/leader-handoff/`, `matchmaker.rs`
 //! for `specs/tla/matchmaker/`, `reads.rs` for `specs/tla/reads/`,
-//! `truncation.rs` for `specs/tla/truncation/` and `compartments.rs` for
-//! `specs/tla/compartments/`.
+//! `truncation.rs` for `specs/tla/truncation/`, `compartments.rs` for
+//! `specs/tla/compartments/` and `faults.rs` for the faulty entries of
+//! `specs/tla/truncation/FaultsTrace.tla`.
 
 mod compartments;
 mod encode;
+mod faults;
 mod leader_handoff;
 mod matchmaker;
 mod multi_paxos;
@@ -303,6 +308,35 @@ pub enum CellEvent {
     /// `node` jumped to the trim point `floor` of a peer
     /// (`WriteOp::TrimmedTo`, `TrimTo`).
     Trim { node: NodeId, floor: Slot },
+    /// The operator retired `node` on the evidence the core asks for, and
+    /// it shut down (`Shutdown`).
+    Retire { node: NodeId },
+    /// The operator booked the retired `node` again: it boots from its
+    /// disk and rejoins (`MatchPurpose::Rejoin`).
+    Rejoin { node: NodeId },
+    /// `acceptor` sent a page of its promise of `ballot`: the readable
+    /// `votes` and the `faulty` records from `from` up to `next` (none: the
+    /// last page). The first page, each continuation, and an answer again
+    /// at a ballot it promised already; each page once.
+    Page {
+        acceptor: NodeId,
+        ballot: Ballot,
+        from: Slot,
+        next: Option<Slot>,
+        votes: Vec<(Slot, Ballot, Cmd)>,
+        faulty: Vec<(Slot, Ballot)>,
+    },
+    /// The fold of `node` stops at `slot` (none: it runs to the end of the
+    /// prefix): a slot of its prefix whose value a boot lost, until a
+    /// catch-up brings it back (`Replica::fold_hole`).
+    Hole { node: NodeId, slot: Option<Slot> },
+    /// The boot of `node` read its record of `slot` faulty: the record
+    /// keeps `ballot` and lost its value (CTRL's faulty entry, `Rot`).
+    Rot {
+        node: NodeId,
+        slot: Slot,
+        ballot: Ballot,
+    },
     /// The read replica `replica` holds `cmd`, chosen at `slot` at
     /// `ballot` (`WriteOp::Learned`).
     ReplicaLearn {
@@ -397,6 +431,10 @@ pub(super) struct Tracer {
     /// The fold of each slot a party applied: the end of its records and
     /// `first_seq` after it.
     folds: Vec<(u64, u64)>,
+    /// Each page of a promise the tracer recorded.
+    pages: faults::Pages,
+    /// The fold hole of each node, as the tracer recorded it.
+    holes: BTreeMap<NodeId, Slot>,
 }
 
 impl Tracer {
@@ -405,6 +443,23 @@ impl Tracer {
     pub(super) fn batch(&mut self, batch: &Batch<'_>) -> Vec<CellEvent> {
         let mut events = Vec::new();
         self.leadership(batch, &mut events);
+        let leads = batch.leading.map(|(ballot, _, _)| ballot);
+        // A vote the batch writes before a floor is a step before the
+        // learns and the floor: a slot below a floor takes no vote.
+        let floor = batch
+            .writes
+            .iter()
+            .position(|w| matches!(w, WriteOp::Truncate { .. } | WriteOp::TrimmedTo { .. }));
+        for write in &batch.writes[..floor.unwrap_or(0)] {
+            if let WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
+                slot,
+                ballot,
+                value,
+            }) = write
+            {
+                self.vote(batch.id, leads, *slot, *ballot, Cmd::of(value), &mut events);
+            }
+        }
         for &(slot, cmd) in &batch.learned {
             events.push(CellEvent::Learn {
                 node: batch.id,
@@ -450,7 +505,7 @@ impl Tracer {
             let win = events.remove(w);
             events.insert(p, win);
         }
-        let leads = batch.leading.map(|(ballot, _, _)| ballot);
+        // The votes after the floor; `vote` skips those recorded above.
         for write in batch.writes {
             if let WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
@@ -506,15 +561,28 @@ impl Tracer {
     }
 
     /// Node `id` booted again with the chosen prefix below `upto`: it
-    /// leads nothing, and holds no read basis.
-    pub(super) fn restart(&mut self, id: NodeId, upto: Slot) -> CellEvent {
+    /// leads nothing, holds no read basis, and its boot read the records
+    /// of `faulty` faulty, each with its ballot.
+    pub(super) fn restart(
+        &mut self,
+        id: NodeId,
+        upto: Slot,
+        faulty: &[(Slot, Ballot)],
+    ) -> Vec<CellEvent> {
         let led = self.leads.remove(&id);
         self.basis.remove(&id);
-        CellEvent::Restart {
+        self.holes.remove(&id);
+        let mut events = vec![CellEvent::Restart {
             node: id,
             upto,
             led,
-        }
+        }];
+        events.extend(
+            faulty
+                .iter()
+                .map(|(slot, ballot)| self.rot(id, *slot, *ballot)),
+        );
+        events
     }
 
     /// The event of one message a node sends, if it is a step.
@@ -544,7 +612,11 @@ impl Tracer {
                 from_slot,
                 accepted,
                 ..
-            } if self.promise.get(from).is_none_or(|p| p < ballot) => {
+            } => {
+                events.extend(self.page(message));
+                if self.promise.get(from).is_some_and(|p| p >= ballot) {
+                    return;
+                }
                 self.raise(*from, *ballot);
                 events.push(CellEvent::Promise {
                     acceptor: *from,
@@ -786,6 +858,14 @@ pub enum Spec {
     /// and the read replica of `compartments/`: its learns, its walk in
     /// slot order, its boot and its leaderless read.
     Compartments,
+    /// `specs/tla/truncation/FaultsTrace.tla`: `TruncationTrace` and the
+    /// faulty entries of CTRL: a boot that reads a faulty record, the
+    /// pages of a promise, the tri-state tally and the repair probe.
+    Faults,
+    /// `specs/tla/matchmaker/RetireTrace.tla`: `MatchmakerTrace` and the
+    /// retirement: a node retires on an effective floor that no
+    /// registration above names, and a retired node rejoins.
+    Retire,
 }
 
 impl Spec {
@@ -800,6 +880,8 @@ impl Spec {
             Self::Reads => spec("reads", "ReadsTrace"),
             Self::Truncation => spec("truncation", "TruncationTrace"),
             Self::Compartments => spec("compartments", "CompartmentsTrace"),
+            Self::Faults => spec("truncation", "FaultsTrace"),
+            Self::Retire => spec("matchmaker", "RetireTrace"),
         }
     }
 
@@ -812,9 +894,18 @@ impl Spec {
             Self::ProxyLeader => proxy_leader::keeps(event),
             Self::LeaderHandoff => leader_handoff::keeps(event),
             Self::Matchmaker => matchmaker::keeps(event),
+            Self::Retire => {
+                matchmaker::keeps(event)
+                    || matches!(event, CellEvent::Retire { .. } | CellEvent::Rejoin { .. })
+            }
             Self::Reads => matchmaker::keeps(event) || reads::keeps(event),
             Self::Truncation => multi_paxos::keeps(event) || truncation::keeps(event),
             Self::Compartments => multi_paxos::keeps(event) || compartments::keeps(event),
+            Self::Faults => {
+                faults::keeps(event)
+                    || (multi_paxos::keeps(event) || truncation::keeps(event))
+                        && !matches!(event, CellEvent::Promise { .. })
+            }
         }
     }
 
@@ -841,10 +932,10 @@ impl Spec {
                 );
                 leader_handoff::trace(flavor.acceptors, events)
             }
-            Self::Matchmaker => {
+            Self::Matchmaker | Self::Retire => {
                 assert!(
                     flavor.quorum == QuorumSystem::Majority,
-                    "MatchmakerTrace runs on a majority"
+                    "{self:?} runs on a majority"
                 );
                 matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
             }
@@ -855,10 +946,10 @@ impl Spec {
                 );
                 reads::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
             }
-            Self::Truncation => {
+            Self::Truncation | Self::Faults => {
                 assert!(
                     flavor.matchmakers == 0 && flavor.proxies == 0 && flavor.replicas == 0,
-                    "TruncationTrace runs on plain Multi-Paxos"
+                    "{self:?} runs on plain Multi-Paxos"
                 );
                 multi_paxos::trace(flavor.acceptors, flavor.quorum, events)
             }

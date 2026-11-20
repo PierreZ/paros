@@ -36,9 +36,10 @@ const LOG: &[Rule] = &[
     Rule {
         name: "a promise reports a vote",
         met: |events| {
-            events
-                .iter()
-                .any(|e| matches!(e, CellEvent::Promise { votes, .. } if !votes.is_empty()))
+            events.iter().any(|e| {
+                matches!(e, CellEvent::Promise { votes, .. } | CellEvent::Page { votes, .. }
+                    if !votes.is_empty())
+            })
         },
     },
     Rule {
@@ -298,9 +299,10 @@ const TRUNCATION: &[Rule] = &[
                 let CellEvent::Compact { node, .. } = e else {
                     return false;
                 };
-                events[i..]
-                    .iter()
-                    .any(|e| matches!(e, CellEvent::Promise { acceptor, .. } if acceptor == node))
+                events[i..].iter().any(|e| {
+                    matches!(e, CellEvent::Promise { acceptor, .. } | CellEvent::Page { acceptor, .. }
+                        if acceptor == node)
+                })
             })
         },
     },
@@ -358,6 +360,72 @@ const COMPARTMENTS: &[Rule] = &[
     },
 ];
 
+/// The rules of the faulty entries of CTRL of `truncation/`.
+const FAULTS: &[Rule] = &[
+    Rule {
+        name: "a boot reads a faulty record",
+        met: |events| events.iter().any(|e| matches!(e, CellEvent::Rot { .. })),
+    },
+    Rule {
+        name: "a promise reports a faulty record",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::Page { faulty, .. } if !faulty.is_empty()))
+        },
+    },
+    Rule {
+        name: "a promise comes in pages",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, CellEvent::Page { next: Some(_), .. }))
+        },
+    },
+    Rule {
+        name: "a leader wins over a faulty report",
+        met: |events| {
+            let mut faulty = BTreeSet::new();
+            events.iter().any(|e| match e {
+                CellEvent::Page {
+                    ballot, faulty: f, ..
+                } if !f.is_empty() => {
+                    faulty.insert(*ballot);
+                    false
+                }
+                CellEvent::Win { ballot, .. } => faulty.contains(ballot),
+                _ => false,
+            })
+        },
+    },
+];
+
+/// The rules of `RetireTrace`.
+const RETIRE: &[Rule] = &[
+    Rule {
+        name: "a node retires",
+        met: |events| events.iter().any(|e| matches!(e, CellEvent::Retire { .. })),
+    },
+    Rule {
+        name: "a retired node rejoins",
+        met: |events| events.iter().any(|e| matches!(e, CellEvent::Rejoin { .. })),
+    },
+    Rule {
+        name: "a node that rejoined promises",
+        met: |events| {
+            let mut back = BTreeSet::new();
+            events.iter().any(|e| match e {
+                CellEvent::Rejoin { node } => {
+                    back.insert(*node);
+                    false
+                }
+                CellEvent::Promise { acceptor, .. } => back.contains(acceptor),
+                _ => false,
+            })
+        },
+    },
+];
+
 impl Spec {
     /// The steps of this spec that some checked walk must take.
     #[must_use]
@@ -387,6 +455,15 @@ impl Spec {
                 rules.push(RESTART);
                 rules.extend_from_slice(COMPARTMENTS);
             }
+            Self::Faults => {
+                rules.push(RESTART);
+                rules.extend_from_slice(FAULTS);
+            }
+            Self::Retire => {
+                rules.push(RESTART);
+                rules.extend_from_slice(MATCHMAKER);
+                rules.extend_from_slice(RETIRE);
+            }
         }
         rules
     }
@@ -406,6 +483,8 @@ mod tests {
             Spec::Reads,
             Spec::Truncation,
             Spec::Compartments,
+            Spec::Faults,
+            Spec::Retire,
         ] {
             assert!(spec.rules().iter().all(|rule| !rule.met(&[])), "{spec:?}");
         }

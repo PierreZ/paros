@@ -24,7 +24,8 @@
 (* A floor drops the votes and the learned values below it. The steps of  *)
 (* the log take the floor guards: a promise asks from at or above the     *)
 (* floor (`FloorGuard` = "nack"), and a vote, a record and a learn are at  *)
-(* or above it (`AcceptOutcome::BelowFloor`, `mark_chosen`). A campaign   *)
+(* or above it (`AcceptOutcome::BelowFloor`, `mark_chosen`). A restart    *)
+(* proves its prefix with the slots the node holds. A campaign            *)
 (* asks from the first slot its owner does not hold (`FirstUnchosen`).    *)
 (*                                                                         *)
 (* `FloorChosen` is the property of `Truncation`: each slot below a floor  *)
@@ -79,11 +80,10 @@ FirstUnheld(n) ==
   IF \A s \in Slots : Holds(n, s) THEN NS
   ELSE CHOOSE s \in Slots : ~Holds(n, s) /\ \A t \in Slots : t < s => Holds(n, t)
 
-\* `Prepare` of `MultiPaxos`, from the first slot the owner does not hold.
-TPrepare ==
+\* `Prepare` of `MultiPaxos`, from the slot `e.from`.
+OpenPhase1 ==
   /\ e.event = "prepare" /\ IsBallot /\ IsNode("owner") /\ Has("from")
   /\ Owner[e.bal] = e.owner
-  /\ e.from = FirstUnheld(e.owner)
   /\ LET b == e.bal
          o == e.owner
      IN /\ phase[b] = "idle"
@@ -96,7 +96,18 @@ TPrepare ==
         /\ UNCHANGED <<vote, dvote, learned, next, front, wiped, restarts>>
   /\ UNCHANGED floorVars
 
-LogStep == e.event # "prepare" /\ Guarded /\ Step /\ UNCHANGED floorVars
+\* `Prepare` of `MultiPaxos`, from the first slot the owner does not hold.
+TPrepare == OpenPhase1 /\ e.from = FirstUnheld(e.owner)
+
+LogStep == e.event \notin {"prepare", "restart"} /\ Guarded /\ Step /\ UNCHANGED floorVars
+
+\* `TraceRestart` over the slots the node holds: its durable chosen index
+\* covers its floor, and a floor drops the learned values below it.
+TRestart ==
+  /\ e.event = "restart" /\ IsNode("node") /\ Has("upto") /\ Has("led")
+  /\ \A s \in Slots : s < e.upto => Holds(e.node, s)
+  /\ Reboot(e.node, e.upto, e.led)
+  /\ UNCHANGED floorVars
 
 TFold ==
   /\ e.event = "fold" /\ IsSlot /\ Has("high") /\ Has("first")
@@ -122,7 +133,7 @@ TTrim ==
         /\ \E p \in Acceptors : floor[p] >= f
         /\ Raise(n, f)
 
-TruncNext == l <= Len(Trace) /\ (TPrepare \/ LogStep \/ TFold \/ TCompact \/ TTrim) /\ l' = l + 1
+TruncNext == l <= Len(Trace) /\ (TPrepare \/ TRestart \/ LogStep \/ TFold \/ TCompact \/ TTrim) /\ l' = l + 1
 
 TruncSpec == TruncInit /\ [][TruncNext]_<<l, vars, floorVars>>
 

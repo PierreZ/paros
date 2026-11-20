@@ -18,31 +18,20 @@ const SHIFT: i64 = 1;
 /// spec. A restart changes nothing in this model, and a leadership is a
 /// ballot's, not a node's.
 pub(super) fn keeps(event: &CellEvent) -> bool {
-    !matches!(
+    matches!(
         event,
-        CellEvent::Restart { .. }
-            | CellEvent::StepDown { .. }
-            | CellEvent::Relinquish { .. }
-            | CellEvent::Install { .. }
-            | CellEvent::Select { .. }
-            | CellEvent::Register { .. }
-            | CellEvent::GcAsk { .. }
-            | CellEvent::GcAck { .. }
-            | CellEvent::Basis { .. }
-            | CellEvent::ReadStart { .. }
-            | CellEvent::ReadAck { .. }
-            | CellEvent::ReadFold { .. }
-            | CellEvent::ReadServe { .. }
-            | CellEvent::Applied { .. }
-            | CellEvent::Fold { .. }
-            | CellEvent::Compact { .. }
-            | CellEvent::Trim { .. }
-            | CellEvent::ReplicaLearn { .. }
-            | CellEvent::ReplicaApply { .. }
-            | CellEvent::ReplicaFloor { .. }
-            | CellEvent::ReplicaBoot { .. }
-            | CellEvent::ReplicaRead { .. }
-            | CellEvent::ReplicaServe { .. }
+        CellEvent::Prepare { .. }
+            | CellEvent::Promise { .. }
+            | CellEvent::Win { .. }
+            | CellEvent::Propose { .. }
+            | CellEvent::Direct { .. }
+            | CellEvent::Delegate { .. }
+            | CellEvent::Fanout { .. }
+            | CellEvent::Commit { .. }
+            | CellEvent::Crash { .. }
+            | CellEvent::Accept { .. }
+            | CellEvent::Record { .. }
+            | CellEvent::Learn { .. }
     )
 }
 

@@ -15,7 +15,7 @@
 use moonpool_walk::{Cx, sometimes};
 use paros_consensus::{Ballot, NodeId};
 
-use super::{Cell, reach};
+use super::{Cell, CellEvent, Mutant, reach};
 
 impl Cell {
     /// Retire one node that the evidence releases, or ask the matchmakers
@@ -32,7 +32,10 @@ impl Cell {
             .filter(|site| Some(site.id) != leader && site.live.is_some())
             .map(|site| site.id)
             .collect();
-        let Some(&id) = cx.rng().pick(&candidates) else {
+        let sticky = self
+            .checking
+            .filter(|id| self.flavor.retiring && candidates.contains(id));
+        let Some(id) = sticky.or_else(|| cx.rng().pick(&candidates).copied()) else {
             return;
         };
         let heard = floor.is_none() || cx.rng().chance(1, 3);
@@ -57,14 +60,26 @@ impl Cell {
             }
             may
         };
-        if may {
+        self.checking = (!may).then_some(id);
+        if may || self.flavor.mutant == Some(Mutant::RetireUnchecked) {
             sometimes!(true, reach::RETIRED);
+            cx.record(CellEvent::Retire { node: id });
             self.retired.insert(id);
             self.crash_node(id, cx);
             cx.crashed(&super::Party::Node(id));
             return;
         }
         self.drain_node(id, cx);
+    }
+
+    /// One operator move of a [`Flavor::retiring`](super::Flavor::retiring)
+    /// walk: a reconfiguration, a retirement or a rejoin.
+    pub(super) fn operate(&mut self, cx: &mut Cx<'_, Self>) {
+        match cx.rng().below(3) {
+            0 => self.reconfigure(cx),
+            1 => self.retire(cx),
+            _ => self.rejoin(cx),
+        }
     }
 
     /// Whether a reconfiguration the operator asked for above `floor`
@@ -82,6 +97,7 @@ impl Cell {
         let retired: Vec<NodeId> = self.retired.iter().copied().collect();
         if let Some(&id) = cx.rng().pick(&retired) {
             sometimes!(true, reach::REBOOKED);
+            cx.record(CellEvent::Rejoin { node: id });
             self.retired.remove(&id);
             self.boot_node(id, true, cx);
             return;

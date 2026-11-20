@@ -111,11 +111,11 @@ Record(n, b, s, v) ==
 \* ballot n owns, but a leader may have handed its ballot on before the
 \* crash (the walk's handoff, which this model does not have): that ballot
 \* lives on at its successor, and the successor's restart ends it.
-TraceRestart(n, upto, led) ==
+\* `Reboot` is the boot; `TraceRestart` adds that n learned the prefix.
+Reboot(n, upto, led) ==
   /\ Live(n)
   /\ restarts < Restarts
   /\ restarts' = restarts + 1
-  /\ \A s \in Slots : s < upto => learned[n][s] # None
   /\ prom' = [prom EXCEPT ![n] = dprom[n]]
   /\ vote' = [vote EXCEPT ![n] = dvote[n]]
   /\ learned' = [learned EXCEPT ![n] = [s \in Slots |-> IF s >= upto THEN None ELSE @[s]]]
@@ -124,6 +124,10 @@ TraceRestart(n, upto, led) ==
                    \/ b = led /\ phase[b] = "p2"
                 THEN "dead" ELSE phase[b]]
   /\ UNCHANGED <<dprom, dvote, next, front, wiped, msgs>>
+
+TraceRestart(n, upto, led) ==
+  /\ \A s \in Slots : s < upto => learned[n][s] # None
+  /\ Reboot(n, upto, led)
 
 Step ==
   \/ /\ e.event = "prepare" /\ IsBallot /\ IsNode("owner") /\ Has("from")

@@ -294,6 +294,9 @@ pub struct Cell {
     /// The reconfigurations the operator asked for: each ballot and the
     /// members it names.
     asked: Vec<(Ballot, Vec<NodeId>)>,
+    /// The node a [`Flavor::retiring`] operator asked the matchmakers to
+    /// check, and retires on its next retire moves while it may still.
+    checking: Option<NodeId>,
     /// The late nodes each node admitted to its pool. The deployment's
     /// registry is durable: a node that boots admits them again.
     admitted: BTreeMap<NodeId, BTreeSet<NodeId>>,
@@ -348,6 +351,7 @@ impl Model for Cell {
         match action {
             Action::Tick => self.tick_all(cx),
             Action::Propose if self.flavor.compacting => self.write_and_truncate(cx),
+            Action::Propose if self.flavor.retiring && cx.rng().chance(1, 2) => self.operate(cx),
             Action::Propose => self.propose(cx),
             Action::Claim => self.claim(cx),
             Action::StepDown => self.step_down(cx),
@@ -672,6 +676,7 @@ impl Cell {
             reconfigurers: Vec::new(),
             retired: BTreeSet::new(),
             asked: Vec::new(),
+            checking: None,
             admitted: BTreeMap::new(),
             pool,
             flavor,
@@ -955,7 +960,10 @@ impl Cell {
                 .hard_state()
                 .chosen_index
                 .map_or(Slot(0), |ci| Slot(ci.0 + 1));
-            cx.record(self.tracer.restart(id, upto));
+            let faulty = paros_consensus::Storage::faulty_entries(&self.node(id).disk);
+            for event in self.tracer.restart(id, upto, &faulty) {
+                cx.record(event);
+            }
         }
         let limits = self.flavor.limits;
         let site = self.node_mut(id);
@@ -979,7 +987,11 @@ impl Cell {
             id.0,
             node.replica().chosen_index(),
         );
+        let hole = node.replica().fold_hole();
         site.live = Some(node);
+        if let Some(event) = self.tracer.hole(id, hole) {
+            cx.record(event);
+        }
         let name = format!("node {}", id.0);
         self.ledger.disk_chosen(&name, disk);
         self.drain_node(id, cx);
@@ -1200,6 +1212,14 @@ impl Cell {
             .filter(|_| self.flavor.matchmakers > 0)
             .and_then(ColocatedNode::read_basis)
             .map(|basis| (basis.since, basis.fence));
+        // A campaign of the batch starts at the hole of the fold.
+        let hole = site
+            .live
+            .as_ref()
+            .and_then(|node| node.replica().fold_hole());
+        if let Some(event) = self.tracer.hole(id, hole) {
+            cx.record(event);
+        }
         let events = self.tracer.batch(&trace::Batch {
             id,
             leading: traced.seen.leading,
@@ -2158,6 +2178,7 @@ fn plant(mutant: Option<Mutant>, batch: &mut [(Audience, Message)]) {
         Some(Mutant::HideVotes) => hide_votes(batch),
         Some(Mutant::RewindHandoff) => rewind_handoffs(batch),
         Some(Mutant::HideWatermark) => hide_watermarks(batch),
+        Some(Mutant::HideFaulty) => hide_faulty(batch),
         _ => {}
     }
 }
@@ -2233,6 +2254,16 @@ fn hide_votes(batch: &mut [(Audience, Message)]) {
     for (_, message) in batch {
         if let Message::Promise { accepted, .. } = message {
             accepted.clear();
+        }
+    }
+}
+
+/// The [`Mutant::HideFaulty`] bug: every `Promise` leaves with no faulty
+/// record.
+fn hide_faulty(batch: &mut [(Audience, Message)]) {
+    for (_, message) in batch {
+        if let Message::Promise { faulty, .. } = message {
+            faulty.clear();
         }
     }
 }

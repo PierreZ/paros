@@ -66,7 +66,24 @@ fn compaction_steered() {
 fn compartments_steered() {
     walk(
         Flavor::compartments_compacting(),
-        &[reach::COMPACTED, reach::REPLICA_APPLIED, reach::REPLICA_READ],
+        &[
+            reach::COMPACTED,
+            reach::REPLICA_APPLIED,
+            reach::REPLICA_READ,
+        ],
+    );
+}
+
+#[test]
+fn retirement_steered() {
+    walk(
+        Flavor::retiring(),
+        &[
+            reach::RECONFIGURED,
+            reach::GC_ACKED,
+            reach::RETIRED,
+            reach::REBOOKED,
+        ],
     );
 }
 

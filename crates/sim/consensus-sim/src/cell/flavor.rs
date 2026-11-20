@@ -52,6 +52,12 @@ pub struct Flavor {
     /// and an applied truncation, which a plain walk of 150 steps seldom
     /// gathers.
     pub compacting: bool,
+    /// Steered toward retirements: half the client moves are operator
+    /// moves (a reconfiguration, a retirement or a rejoin). A retirement
+    /// needs a reconfiguration, a GC floor that a matchmaker quorum acked,
+    /// a check by every matchmaker and a second retire move, which a plain
+    /// walk of 150 steps seldom gathers.
+    pub retiring: bool,
     /// Matchmakers in the matchmaker pool outside the bootstrap set, that a
     /// handover ([`Action::Handover`]) may name.
     pub matchmaker_spares: u64,
@@ -79,6 +85,7 @@ impl Flavor {
             late: 0,
             lagging_reader: false,
             compacting: false,
+            retiring: false,
             matchmaker_spares: 0,
             limits: Limits::DEFAULT,
             mutant: None,
@@ -315,6 +322,18 @@ impl Flavor {
         }
     }
 
+    /// Retirement and rejoin, steered toward retirements
+    /// ([`Flavor::retiring`]): the walk of `matchmaker/`'s retirement trace
+    /// spec.
+    #[must_use]
+    pub fn retiring() -> Self {
+        Self {
+            name: "retiring",
+            retiring: true,
+            ..Self::retirement()
+        }
+    }
+
     /// Matchmakers with reconfiguration and the matchmaker set handover
     /// (`MatchmakerReconfigurer`) over a matchmaker pool of five.
     #[must_use]
@@ -452,4 +471,15 @@ pub enum Mutant {
     /// another way than the rules give. Caught by
     /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
     CorruptTrimJump,
+    /// The driver drops the faulty records from every `Promise` it sends:
+    /// a lost value reads as no vote (`Tally = "none"` of `truncation/`).
+    /// A value is lost only when the candidate fills a chosen slot with a
+    /// `Noop` over it; the trace check refuses the first promise that hid
+    /// a faulty record (`FaultsTrace.tla`).
+    HideFaulty,
+    /// The operator retires a node with no evidence: no effective floor,
+    /// no check by the matchmakers. A retired node is only a node that
+    /// stays down, so no oracle sees it; the trace check refuses the
+    /// retirement (`RetireTrace.tla`).
+    RetireUnchecked,
 }

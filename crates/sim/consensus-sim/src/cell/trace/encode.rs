@@ -56,6 +56,7 @@ pub(super) fn write(
         .or_else(|| read(&bal, sizes, event))
         .or_else(|| floor(sizes, event))
         .or_else(|| replica(&bal, sizes, event))
+        .or_else(|| faults(&bal, ranks, shift, sizes, event))
         .expect("every event has an encoding");
     trace.event(name, fields);
 }
@@ -304,6 +305,8 @@ fn membership(bal: &impl Fn(Ballot) -> Value, event: &CellEvent) -> Option<(&'st
             matchmaker: m,
             ballot,
         } => ("gcack", vec![("mm", matchmaker(*m)), ("bal", bal(*ballot))]),
+        CellEvent::Retire { node: id } => ("retire", vec![("node", node(*id))]),
+        CellEvent::Rejoin { node: id } => ("rejoin", vec![("node", node(*id))]),
         _ => return None,
     })
 }
@@ -497,3 +500,74 @@ fn replica(
         _ => return None,
     })
 }
+
+/// The steps of the faulty entries of CTRL: a page of a promise, which
+/// reports a faulty record as a vote of the value `"lost"`, and a boot
+/// that reads a faulty record.
+fn faults(
+    bal: &impl Fn(Ballot) -> Value,
+    ranks: &Ranks,
+    shift: i64,
+    sizes: &mut Sizes,
+    event: &CellEvent,
+) -> Option<(&'static str, Fields)> {
+    Some(match event {
+        CellEvent::Page {
+            acceptor,
+            ballot,
+            from,
+            next,
+            votes,
+            faulty,
+        } => {
+            sizes.bound(*from);
+            let Value::Set(mut rep) = report(ranks, shift, sizes, votes) else {
+                unreachable!("a report is a set");
+            };
+            rep.extend(faulty.iter().map(|(s, at)| {
+                sizes.bound(Slot(s.0 + 1));
+                Value::record([
+                    ("slot", slot(*s)),
+                    ("bal", bal(*at)),
+                    ("val", Value::Str(LOST.to_owned())),
+                ])
+            }));
+            (
+                "promise",
+                vec![
+                    ("acc", node(*acceptor)),
+                    ("bal", bal(*ballot)),
+                    ("from", slot(*from)),
+                    ("upto", maybe_slot(sizes, *next)),
+                    ("rep", Value::Set(rep)),
+                ],
+            )
+        }
+        CellEvent::Hole {
+            node: id,
+            slot: hole,
+        } => (
+            "hole",
+            vec![("node", node(*id)), ("slot", maybe_slot(sizes, *hole))],
+        ),
+        CellEvent::Rot {
+            node: id,
+            slot: s,
+            ballot,
+        } => {
+            sizes.bound(Slot(s.0 + 1));
+            (
+                "rot",
+                vec![
+                    ("node", node(*id)),
+                    ("slot", slot(*s)),
+                    ("bal", bal(*ballot)),
+                ],
+            )
+        }
+        _ => return None,
+    })
+}
+
+/// The value of a faulty record in a trace: `Lost` of `Truncation.tla`.
+const LOST: &str = "lost";
