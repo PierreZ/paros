@@ -33,6 +33,9 @@ exclude_re = []
 # on the mutants that the first pass missed.
 test_package = ["paros-consensus", "consensus-sim"]
 test_tool = "nextest"
+# The workspace builds paros-consensus with `serde` on (paros-wasm asks for
+# it), so the serde code is mutated too: its tests must run.
+features = ["paros-consensus/serde"]
 additional_cargo_test_args = ["-E", "not binary(coverage) and not binary(traces)"]
 
 # The `mutants` profile of the workspace `Cargo.toml`: release code with an

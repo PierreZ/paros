@@ -15,6 +15,9 @@ exclude_re = []
 # four-core runner out of memory.
 test_package = ["paros-consensus", "consensus-sim"]
 test_tool = "nextest"
+# The workspace builds paros-consensus with `serde` on (paros-wasm asks for
+# it), so the serde code is mutated too: its tests must run.
+features = ["paros-consensus/serde"]
 additional_cargo_test_args = ["-E", "binary(traces)", "--test-threads", "2"]
 
 # The `mutants` profile of the workspace `Cargo.toml`: release code with an

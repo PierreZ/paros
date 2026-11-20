@@ -190,12 +190,15 @@ jobs:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
+      # The checkout is the merge of the pull request into the tip of main:
+      # its first parent is that tip, so the diff holds the lines the pull
+      # request brings, numbered as in the tree the mutants are built from.
+      # The base sha of the event can be older than that tip, and a diff from
+      # it would also hold what main merged since.
       - name: Run the mutants of the changed lines
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git diff "$BASE"...HEAD -- crates/lib/paros-consensus/src > pr.diff
+          git diff HEAD^1 HEAD -- crates/lib/paros-consensus/src > pr.diff
           if [ ! -s pr.diff ]; then
             echo "The pull request changes no line of paros-consensus/src."
             exit 0
