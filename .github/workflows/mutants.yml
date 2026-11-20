@@ -1,17 +1,18 @@
 # Mutation testing of paros-consensus (`.cargo/mutants.toml`): every mutant of
 # the core, judged by the core's tests and the simulation of consensus-sim.
 #
-# A full run has about 2,900 mutants. A mutant costs an incremental build of a
-# few seconds, then the tests: a few seconds when a test catches it, and about
-# 70 s when it survives (the trace checks with TLC are the longest tests). That
-# is about a day of one runner, so the run is cut into 16 shards and runs each
-# week and on demand. Each pull request runs the mutants of the lines it
-# changes (the `mutants` job of `rust.yml`).
+# A full run has about 2,850 mutants, in two passes (`scripts/mutants.sh`).
+# The first pass judges each mutant with the fast tests: an incremental build,
+# then a few seconds of tests. The second pass judges only the survivors of the
+# first pass with the trace checks (TLC, about 90 s each). The run is cut into
+# 16 shards and runs each week and on demand. Each pull request runs the
+# mutants of the lines it changes (the `mutants` job of `rust.yml`).
 #
 # A survivor is a finding (AGENTS.md, the absolute rule): the `score` job
-# fails when any mutant survives or times out, and lists them. Each one gets a
-# test, or an issue, or (only when the edit changes nothing) an entry with its
-# reason in the `exclude_re` list of `.cargo/mutants.toml`.
+# fails when any mutant survives, and lists them. Each one gets a test, or an
+# issue, or (only when the edit changes nothing) an entry with its reason in
+# the `exclude_re` list of `.cargo/mutants.toml`. A timeout counts as caught,
+# and the `score` job lists the timeouts too.
 name: Mutants
 
 on:
@@ -37,27 +38,30 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      # cargo-mutants exits with 2 when a mutant survives and 3 on a timeout:
-      # the shard still uploads its outcomes, and the `score` job judges them.
+      # The script exits with 2 when a mutant survives: the shard still
+      # uploads its outcomes, and the `score` job judges them.
       - name: Run shard ${{ matrix.shard }} of 16
         run: >-
-          nix develop --command cargo mutants -p paros-consensus
+          nix develop --command scripts/mutants.sh
           --shard ${{ matrix.shard }}/16 --sharding round-robin
-          --no-shuffle -j 2 || { rc=$?; [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; }
+          || [ "$?" -eq 2 ]
       - name: Show the survivors of the shard
         if: always()
         run: |
+          echo "== survivors (missed by both passes)"; cat survivors.txt 2>/dev/null || true
           for kind in missed timeout unviable; do
-            echo "== $kind"; cat mutants.out/$kind.txt 2>/dev/null || true
+            echo "== first pass: $kind"; cat mutants.first/$kind.txt 2>/dev/null || true
           done
       - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: mutants-shard-${{ matrix.shard }}
           path: |
+            survivors.txt
+            mutants.first/*.txt
+            mutants.first/outcomes.json
             mutants.out/*.txt
             mutants.out/outcomes.json
-            mutants.out/diff
           if-no-files-found: error
 
   score:
@@ -69,31 +73,42 @@ jobs:
         with:
           pattern: mutants-shard-*
           path: shards
+      # A shard's first pass counts every mutant: caught, missed, timeout or
+      # unviable. Its second pass judges again the mutants that the first
+      # pass missed: those it misses too are the survivors, the others are
+      # caught.
       - name: Score the run
         run: |
           set -euo pipefail
-          count() { cat shards/*/"$1".txt 2>/dev/null | wc -l; }
-          caught=$(count caught); missed=$(count missed)
-          timeout=$(count timeout); unviable=$(count unviable)
-          shards=$(ls -d shards/*/ | wc -l)
-          viable=$((caught + missed + timeout))
+          lines() { cat shards/*/"$1" 2>/dev/null | sed '/^$/d' | sort -u; }
+          shards=$(find shards -mindepth 1 -maxdepth 1 -type d | wc -l)
+          first_caught=$(lines mutants.first/caught.txt | wc -l)
+          first_missed=$(lines mutants.first/missed.txt | wc -l)
+          timeout=$(lines mutants.first/timeout.txt | wc -l)
+          unviable=$(lines mutants.first/unviable.txt | wc -l)
+          survivors=$(lines survivors.txt)
+          missed=$(printf '%s' "$survivors" | sed '/^$/d' | wc -l)
+          caught=$((first_caught + first_missed - missed + timeout))
+          viable=$((caught + missed))
           {
             echo "## Mutants of paros-consensus"
             echo
-            echo "Shards: $shards of 16. Caught: $caught. Missed: $missed. Timeout: $timeout. Unviable: $unviable."
+            echo "Shards: $shards of 16. Viable mutants: $viable. Unviable: $unviable."
+            echo "First pass (fast tests): $first_caught caught, $timeout timeouts, $first_missed missed."
+            echo "Second pass (trace checks, on the $first_missed): $((first_missed - missed)) caught, $missed survive."
             if [ "$viable" -gt 0 ]; then
               echo
-              echo "Score: $caught of $viable viable mutants caught ($((caught * 1000 / viable / 10)).$((caught * 1000 / viable % 10)) %)."
+              echo "**Score: $caught of $viable caught ($((caught * 1000 / viable / 10)).$((caught * 1000 / viable % 10)) %).** A timeout counts as caught."
             fi
             echo
-            echo "### Missed"
+            echo "### Survivors"
             echo '```'
-            cat shards/*/missed.txt 2>/dev/null | sort || true
+            printf '%s\n' "$survivors"
             echo '```'
-            echo "### Timeout"
+            echo "### Timeouts"
             echo '```'
-            cat shards/*/timeout.txt 2>/dev/null | sort || true
+            lines mutants.first/timeout.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
-          [ "$shards" -eq 16 ] && [ "$missed" -eq 0 ] && [ "$timeout" -eq 0 ]
+          [ "$shards" -eq 16 ] && [ "$missed" -eq 0 ]

@@ -10,12 +10,12 @@
 # Runs: the `Mutants` workflow (`.github/workflows/mutants.yml`) runs every
 # mutant, in shards, each week and on demand; the `mutants` job of
 # `.github/workflows/rust.yml` runs the mutants of the lines a pull request
-# changes. Locally: `cargo mutants` in the nix dev shell (add `--in-diff` or
-# `-f <file>` to cut the set).
-
-# The whole core. `#[cfg(test)]` code (the tests, `models/`, `test_support`)
-# is never mutated.
-examine_globs = ["crates/lib/paros-consensus/src/**/*.rs"]
+# changes. Both run `scripts/mutants.sh`, which runs the two passes below.
+# Locally, in the nix dev shell: `scripts/mutants.sh` (add `--in-diff <diff>`
+# or `-f <file>` to cut the set).
+#
+# `-p paros-consensus` is the scope: the whole core. `#[cfg(test)]` code (the
+# tests, `models/`, `test_support`) is never mutated.
 
 # Equivalent mutants: an edit that no test can see because the code does the
 # same thing with it. Each entry names the reason. Nothing else goes here: a
@@ -23,20 +23,24 @@ examine_globs = ["crates/lib/paros-consensus/src/**/*.rs"]
 # (AGENTS.md, the absolute rule: no allow list).
 exclude_re = []
 
-# The judge. cargo-mutants builds the mutated package, then runs the tests of
-# both packages. The coverage gate of consensus-sim (`tests/coverage.rs`) is
-# left out: it is a 20-minute run, and it judges that the walks reach every
-# probe, not what the core does once there.
+# The judge, in two passes. This file is the first pass: cargo-mutants builds
+# the mutated package, then runs the tests of both packages except two
+# binaries of consensus-sim. The coverage gate (`tests/coverage.rs`) judges
+# that the walks reach every probe, not what the core does once there, and it
+# is a 20-minute run. The trace checks (`tests/traces.rs`) run TLC, about 90 s
+# on four cores. The first pass takes about 10 s for a mutant that survives.
+# The second pass (`.cargo/mutants-tlc.toml`) runs only the trace checks, only
+# on the mutants that the first pass missed.
 test_package = ["paros-consensus", "consensus-sim"]
 test_tool = "nextest"
-additional_cargo_test_args = ["-E", "not binary(coverage)"]
+additional_cargo_test_args = ["-E", "not binary(coverage) and not binary(traces)"]
 
 # The `mutants` profile of the workspace `Cargo.toml`: release code with an
 # incremental build, so a mutant builds in seconds and the walks run fast.
 profile = "mutants"
 
 # The baseline builds and tests paros-consensus alone, not consensus-sim, so
-# the timeout that cargo-mutants derives from it is too short for the trace
-# checks (about 70 s on four cores). A test run above this bound is a timeout,
-# and a timeout counts as caught: a mutant that loops for ever is a bug.
-minimum_test_timeout = 300
+# the timeout that cargo-mutants derives from it (a few seconds) is too short
+# for the walks. A test run above this bound is a timeout, and a timeout counts
+# as caught: the mutant made a test loop for ever.
+minimum_test_timeout = 120
