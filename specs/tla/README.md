@@ -733,8 +733,10 @@ Results (`handover-chain/checks.txt`):
 | `one_state` | `OneState`, a reachability control: two members of one chosen set keep different bootstraps | violation (5.9 thousand states) |
 | `no_fence` | control: a tally counts an ack of another generation; two generations, one write, the floor | `ReadCarried` violation (43 thousand states, 14 states deep) |
 | `frozen_serves` | control: a frozen member acks; the same shape | `ReadCarried` violation (183 thousand states) |
-| `two` | the rules; two generations, one write, the floor | TWO_RESULT |
-| `chain` (`long`) | the rules; three generations, one write, no floor | CHAIN_RESULT |
+| `two` | the rules; two generations, one write, the floor | pass (337 thousand states, 25 seconds) |
+| `chain` | the rules; three generations, one write, no floor | pass (188 thousand states, 31 seconds) |
+| `chain_floor` (`long`, bounded at 30 minutes) | `chain` with the floor | no violation in 14.2 million distinct states (bounded: 30 minutes, 2 workers) |
+| `chain_two_writes` (`long`, bounded at 30 minutes) | `chain` with two writes | no violation in 12.7 million distinct states (bounded: 30 minutes, 2 workers) |
 
 The trace of `no_fence`: `X` acks a read at generation 0. `Y` and `Z` freeze, and the stop
 closes on them. Neither acked, so the bootstrap of `W` has read generation 0. The decree
@@ -1899,7 +1901,7 @@ workers):
 | `chain` | long | the rules of the code over the two reconfigurations; one slot | no violation in 10.7 million distinct states, to depth 19 (bounded: 50 minutes, 1 worker) |
 | `reach_wipe` | ci | `NoWipeAfterGc`, a reachability control: a member of `C2` is wiped after the GC forgot `C1`, once `C1` chose a slot; one wipe | violation (57 thousand states) |
 | `wipe_revote` | ci | one wipe, the wiped acceptor comes back empty as the same acceptor (`Identity = FALSE`) | `Recoverable` violation (1.5 thousand states, 8 states deep) |
-| `wipe` | long | the rules of the code and one wipe, with the identity rule | WIPE_RESULT |
+| `wipe` | ci | the rules of the code and one wipe, with the identity rule | pass (806 thousand states, 2.5 min with 2 workers) |
 
 The long checks ran once on 2026-11-19 (#1218 (truncation model, part 3)) with 4 workers;
 `fill_code` and `chain` ran on 2026-11-20 (#1230 (rules no check tests)).

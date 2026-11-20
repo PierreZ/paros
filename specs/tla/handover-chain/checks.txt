@@ -8,4 +8,7 @@ one_state          violation  ci
 no_fence           violation  ci
 frozen_serves      violation  ci
 two                pass       ci
-chain              pass       long
+chain              pass       ci
+# The chain with the floor, and with two writes: bounded runs.
+chain_floor        pass       long  30
+chain_two_writes   pass       long  30

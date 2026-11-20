@@ -26,4 +26,4 @@ chain              pass       long  50
 # takes a step again. The control: it comes back empty as the same acceptor.
 reach_wipe         violation  ci
 wipe_revote        violation  ci
-wipe               pass       long
+wipe               pass       ci
