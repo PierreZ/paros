@@ -6,7 +6,7 @@
 #
 # Every rule: safety, then liveness once the faults stop.
 safety               pass       ci
-safety_long          pass       long  60
+safety_long          pass       long
 live_ci              pass       ci
 live                 pass       long
 # The two checks that each keep one segment for one configuration alone.

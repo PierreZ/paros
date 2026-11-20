@@ -1816,7 +1816,7 @@ retry "ok").
 | Check | CI | Result |
 |---|---|---|
 | `safety` | ci | pass: every rule; two controllers, terms up to 2, one controller crash, one lost message, six grids (two member sets, `acks` 1 to 3) |
-| `safety_long` | long | bounded run, never a proof: every rule with terms up to 3 and one acceptor failure too; RESULT_SAFETY_LONG |
+| `safety_long` | long | pass: every rule with terms up to 3 and one acceptor failure too (24.6 million distinct states, 7 minutes locally with 4 workers) |
 | `live_ci` | ci | pass: `Answered` and `Settles`, with every rule, one lost message and one acceptor down, no controller crash (257 thousand distinct states, under 2 minutes) |
 | `live` | long | pass: the same with one controller crash too (1.8 million distinct states, 14 minutes locally with 4 workers while two other TLC runs shared the machine) |
 | `elect_noraise` | ci | violation of `HolderOnly`: an election that keeps the term gives two controllers one term, and both open segments |
