@@ -1,7 +1,7 @@
-//! The events of a cluster walk as a trace of
-//! `specs/tla/truncation/TruncationTrace.tla`: `MultiPaxosTrace` and the
-//! compaction floor of `specs/tla/truncation/Truncation.tla` (#1231
-//! (traced walks reach the rules)).
+//! The floor events of a cluster walk, for
+//! `specs/tla/node/TruncationTrace.tla`: the log of `MultiPaxosTrace` and
+//! the compaction floor of `specs/tla/node/Node.tla` (#1231 (traced walks
+//! reach the rules)).
 //!
 //! The floor is recorded at two seams: a batch reached the disk with a
 //! `WriteOp::Truncate` (`Compact`) or a `WriteOp::TrimmedTo` (`Trim`), and

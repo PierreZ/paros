@@ -1,7 +1,7 @@
-//! The events of a cluster walk as a trace of
-//! `specs/tla/compartments/CompartmentsTrace.tla`: `MultiPaxosTrace` and
-//! the read replica of `specs/tla/compartments/Compartments.tla` (#1231
-//! (traced walks reach the rules)).
+//! The read replica events of a cluster walk, for
+//! `specs/tla/node/CompartmentsTrace.tla`: the log of `MultiPaxosTrace`,
+//! the floors of `TruncationTrace` and the read replica of
+//! `specs/tla/node/Node.tla` (#1231 (traced walks reach the rules)).
 //!
 //! A read replica is recorded by the driver loop of the cluster
 //! (`Cluster::drain_replica`): a `WriteOp::Learned` (`ReplicaLearn`), a floor
@@ -11,11 +11,9 @@
 //! (`ReplicaRead`). The acceptors' answers (`ReadAck`) and the writes that
 //! completed (`Applied`) are the events of `reads.rs`.
 
-use moonpool_tla::Value;
 use paros_consensus::{NodeId, WriteOp};
 
-use super::{ClusterEvent, Cmd, Flavor, multi_paxos};
-use crate::trace::{Trace, node};
+use super::{ClusterEvent, Cmd};
 
 /// The replica steps of `CompartmentsTrace`.
 pub(super) fn keeps(event: &ClusterEvent) -> bool {

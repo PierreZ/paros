@@ -1,16 +1,8 @@
-//! The events of a cluster walk as a trace of
-//! `specs/tla/matchmaker/MatchmakerTrace.tla`: matchmaking, Phase 1 over
-//! every configuration of `H_b`, Phase 2 in `C_b` and the GC, on the
-//! flavors with matchmakers.
+//! The events of a cluster walk that `specs/tla/node/MatchmakerTrace.tla`
+//! keeps: matchmaking, Phase 1 over every configuration of `H_b`, Phase 2
+//! in `C_b` and the GC, on the flavors with matchmakers.
 
-use std::collections::BTreeSet;
-
-use moonpool_tla::Value;
-use paros_consensus::membership::MatchmakerId;
-use paros_consensus::{Ballot, NodeId};
-
-use super::{ClusterEvent, Sizes, encode};
-use crate::trace::{Ranks, Trace, int, node};
+use super::ClusterEvent;
 
 /// The steps of `Matchmaker.tla` and the log steps of the trace spec. A
 /// step down changes nothing in it: a leader that stepped down asks for

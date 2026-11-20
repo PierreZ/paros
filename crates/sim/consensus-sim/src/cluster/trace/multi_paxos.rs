@@ -1,15 +1,9 @@
-//! The events of a cluster walk as a trace of
-//! `specs/tla/multi-paxos/MultiPaxosTrace.tla`: the log of every flavor
-//! without matchmakers.
+//! The events of a cluster walk that `specs/tla/node/MultiPaxosTrace.tla`
+//! keeps: the log of every flavor without matchmakers.
 
-use moonpool_tla::Value;
-use paros_consensus::NodeId;
-use paros_consensus::membership::QuorumSystem;
+use super::ClusterEvent;
 
-use super::{ClusterEvent, Sizes, encode, grid, ranks};
-use crate::trace::{Trace, int, node};
-
-/// The steps of `MultiPaxos.tla`: Phase 1 and Phase 2 of the leader, the
+/// The log steps of `Node.tla`: Phase 1 and Phase 2 of the leader, the
 /// votes, the learns and the restarts. The proxy's steps and the leader's
 /// audiences are not in it: a delegated round is a round of its ballot.
 pub(super) fn keeps(event: &ClusterEvent) -> bool {

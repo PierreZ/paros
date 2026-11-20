@@ -48,14 +48,19 @@
 //! only when it changes a model's state. A message sent again is not a
 //! step.
 //!
-//! Each model reads the events it has and leaves the others out
-//! ([`Spec::keeps`]): `multi_paxos.rs` writes them for
-//! `specs/tla/multi-paxos/`, `proxy_leader.rs` for `specs/tla/proxy-leader/`,
-//! `leader_handoff.rs` for `specs/tla/leader-handoff/`, `matchmaker.rs`
-//! for `specs/tla/matchmaker/`, `reads.rs` for `specs/tla/reads/`,
-//! `truncation.rs` for `specs/tla/truncation/`, `compartments.rs` for
-//! `specs/tla/compartments/` and `faults.rs` for the faulty entries of
-//! `specs/tla/truncation/FaultsTrace.tla`.
+//! Each trace spec reads the events it has and leaves the others out
+//! ([`Spec::keeps`]). Every trace spec extends a model that TLC checks
+//! and defines no step of its own (#1306 (trace specs extend the checked
+//! model)). The eight trace specs of the log family (`MultiPaxosTrace`,
+//! `MatchmakerTrace`, `MatchmakerGridTrace`, `RetireTrace`, `ReadsTrace`,
+//! `TruncationTrace`, `FaultsTrace` and `CompartmentsTrace`) extend
+//! `specs/tla/node/Node.tla`, the implementation model of
+//! `ColocatedNode`: `node.rs` writes their constants, and
+//! `multi_paxos.rs`, `matchmaker.rs`, `reads.rs`, `truncation.rs`,
+//! `compartments.rs` and `faults.rs` record their events.
+//! `proxy_leader.rs` writes the trace of `specs/tla/proxy-leader/`,
+//! `leader_handoff.rs` of `specs/tla/leader-handoff/` and `handover.rs`
+//! of `specs/tla/handover/`.
 
 mod compartments;
 mod encode;
@@ -879,8 +884,8 @@ impl Tracer {
 /// The trace specs a cluster walk is checked against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spec {
-    /// `specs/tla/multi-paxos/MultiPaxosTrace.tla`: the log of every
-    /// flavor without matchmakers.
+    /// `specs/tla/node/MultiPaxosTrace.tla`: the log of every flavor
+    /// without matchmakers.
     MultiPaxos,
     /// `specs/tla/proxy-leader/ProxyLeaderTrace.tla`: the proxy's
     /// `Commit` rule.
@@ -888,31 +893,31 @@ pub enum Spec {
     /// `specs/tla/leader-handoff/LeaderHandoffTrace.tla`: the guards of the
     /// cooperative handoff, on a majority.
     LeaderHandoff,
-    /// `specs/tla/matchmaker/MatchmakerTrace.tla`: matchmaking, Phase 1
+    /// `specs/tla/node/MatchmakerTrace.tla`: matchmaking, Phase 1
     /// over `H_b`, Phase 2 in `C_b` and the GC, on a majority.
     Matchmaker,
-    /// `specs/tla/matchmaker/MatchmakerGridTrace.tla`: `MatchmakerTrace`
+    /// `specs/tla/node/MatchmakerGridTrace.tla`: `MatchmakerTrace`
     /// with each configuration a grid: Phase 1 over every grid of `H_b`,
     /// Phase 2 in one column of `C_b`, and each proxy's `Commit` backed by
     /// a column of `C_b`.
     MatchmakerGrid,
-    /// `specs/tla/reads/ReadsTrace.tla`: `MatchmakerTrace` and the
-    /// leaderless reads of `reads/`: the read basis of a won leadership,
+    /// `specs/tla/node/ReadsTrace.tla`: `MatchmakerTrace` and the
+    /// leaderless reads: the read basis of a won leadership,
     /// the answers and their read fence, and the served index.
     Reads,
-    /// `specs/tla/truncation/TruncationTrace.tla`: `MultiPaxosTrace` and
-    /// the compaction floor of `truncation/`: the journal fold, each
+    /// `specs/tla/node/TruncationTrace.tla`: `MultiPaxosTrace` and
+    /// the compaction floor: the journal fold, each
     /// compaction and each trim-point jump.
     Truncation,
-    /// `specs/tla/compartments/CompartmentsTrace.tla`: `MultiPaxosTrace`
-    /// and the read replica of `compartments/`: its learns, its walk in
+    /// `specs/tla/node/CompartmentsTrace.tla`: `MultiPaxosTrace`,
+    /// the floors and the read replica: its learns, its walk in
     /// slot order, its boot and its leaderless read.
     Compartments,
-    /// `specs/tla/truncation/FaultsTrace.tla`: `TruncationTrace` and the
+    /// `specs/tla/node/FaultsTrace.tla`: `TruncationTrace` and the
     /// faulty entries of CTRL: a boot that reads a faulty record, the
     /// pages of a promise, the tri-state tally and the repair probe.
     Faults,
-    /// `specs/tla/matchmaker/RetireTrace.tla`: `MatchmakerTrace` and the
+    /// `specs/tla/node/RetireTrace.tla`: `MatchmakerTrace` and the
     /// retirement: a node retires on an effective floor that no
     /// registration above names, and a retired node rejoins.
     Retire,

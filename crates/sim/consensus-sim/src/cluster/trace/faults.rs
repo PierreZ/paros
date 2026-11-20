@@ -1,6 +1,6 @@
-//! The events of a cluster walk as a trace of
-//! `specs/tla/truncation/FaultsTrace.tla`: `TruncationTrace` and the faulty
-//! entries of CTRL of `specs/tla/truncation/Truncation.tla` (#1231 (traced
+//! The faulty-entry events of a cluster walk, for
+//! `specs/tla/node/FaultsTrace.tla`: the events of `TruncationTrace` and
+//! the faulty entries of CTRL of `specs/tla/node/Node.tla` (#1231 (traced
 //! walks reach the rules)).
 //!
 //! Two seams. A boot that reads a faulty record from its disk (`Rot`): the
