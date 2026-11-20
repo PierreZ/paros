@@ -410,10 +410,12 @@ contribution from above, while Lemma 1's proof uses exact counts, which is the f
 list, so that the system and its tests know the state of every part. The other decisions of that
 day bind this section: the grid controller (section 2.12) is the journal's own elected role on
 stateless machines and also owns scrubbing; after a zone loss it holds and alerts; v1 has no
-unsafe recover; the autoscaling decisions get heavy tests. The service level objectives, the
-minimum interval between two reshapes, the suspicion windows and the cap of the rate limiter are
-**Open**: no number is set until Pierre gives one or a source gives one (the controller's crate,
-after #1189 (journal state model), decides them).
+unsafe recover; the autoscaling decisions get heavy tests. **The v1 controller has no service
+level objectives and no scaling driven by latency or load** (Pierre, 2026-11-20): it heals,
+rolls, scrubs and offloads, and it changes a count only to replace a member or a role that is
+gone. The minimum interval between two reshapes, the suspicion windows and the cap of the rate
+limiter are **Open**: no number is set until Pierre gives one or a source gives one (the
+controller's crate, after #1189 (journal state model), decides them).
 
 **Two kinds of measure.**
 
@@ -425,8 +427,10 @@ after #1189 (journal state model), decides them).
   against a threshold of its own: it crosses `membership/`, as a tally does.
 - **O, an operational signal.** A count or a time from the `Events` port of the journal's step
   contract (section 4.2, rule 5, #1255 (journal sans-IO contract)): latencies, rates, queue depths.
-  An O measure can make the controller act earlier. It never changes a quorum: a slow acceptor
-  counts as lost for a spare, never for a quorum.
+  In v1 only the O measures of liveness (`live`, `flap_rate`, `live_count`, `zone_live`) and of
+  the controller's own pace (`seal_age`, `signal_age`, `since_last_reshape`, `tokens_held`) make
+  the controller act. The O measures of latency, load and errors are shown on the status and
+  trigger nothing in v1: the table marks them "shown". An O measure never changes a quorum.
 
 **The controller decides when and where; the protocol decides whether it is safe.** Each action
 below is a request that passes the guards of its step: the fenced reshape (section 2.12), the
@@ -513,17 +517,18 @@ blocks on a slot that it cannot prove empty (#1216 (truncation model, part 2)).
 #### The catalogue
 
 P = a protocol fact; O = an operational signal. A window, a target or a rate without a number
-is **Open** (the first paragraph of this section).
+is **Open** (the first paragraph of this section). "Shown" means the status shows the measure and
+the v1 controller does not act on it.
 
 | Level | Measure | Kind | Definition | Unit | States and the fixed action |
 |---|---|---|---|---|---|
 | Acceptor | `live` | O | the acceptor answered inside the suspicion window | up, suspect, down | suspect and down count as lost for the spares |
-| Acceptor | `ack_latency` | O | p99 time from `Accept` to `Accepted`, against the median of its column | ratio | slow for N windows: counts as lost for the spare, never for a quorum |
+| Acceptor | `ack_latency` | O | p99 time from `Accept` to `Accepted`, against the median of its column | ratio | shown (no latency-driven action in v1) |
 | Acceptor | `flap_rate` | O | changes between up and down in one window | changes per window | flapping: held as suspect; replaced only after N quiet windows, longer than the minimum reshape interval |
 | Acceptor | `faulty_slots` | P | CTRL faulty records (#1216, #1263) that are not repaired | slots | above 0: a repair through the protocol (the CTRL repair probe, a chosen value written under the record's ballot in one write); stuck: alert |
 | Column | `phase2_spare` | P | `live − acks` (`has_phase2_quorum_in` on the live set) | acceptors | `>= 1` healthy; `0` AtRisk; `< 0` writes skip the column |
 | Column | `phase1_spare` | P | `live − (rows − acks + 1)` (`phase1_per_column`) | acceptors | `>= 1` healthy; `0` AtRisk; `< 0` not electable: WritesDegraded, ElectionBlocked or Stopped |
-| Column | `move_rate` | O | rounds of the column that moved to another column (#533), per round | ratio | high while `phase2_spare >= 0`: a gray failure; counts the slow members as lost |
+| Column | `move_rate` | O | rounds of the column that moved to another column (#533), per round | ratio | shown; a high rate while `phase2_spare >= 0` points to a gray failure |
 | Grid | `electable` | P | a Phase-1 quorum of every configuration of `H_b` is live (`has_phase1_quorum`) | yes, no | no: see the journal states |
 | Grid | `writable` | P | some column can choose a slot | yes, no | no: WritesBlocked or Stopped |
 | Grid | `bypass_hold` | P | the live members meet every read quorum of the configuration in force (section 2.13); equal to `writable` | yes, no | the WritesDegraded heal can run |
@@ -532,17 +537,17 @@ is **Open** (the first paragraph of this section).
 | Grid | `segments_unretired` | P | segments that are open or sealed (segment table) | segments | above 1: the Reshaping flag |
 | Grid | `seal_age` | O | time since the seal of the oldest segment that is not retired | seconds | above the stall window: ReshapeStalled |
 | Journal | `leader_known` | P | a won leadership with a fresh beat | led, electing, leaderless | leaderless while not electable: ElectionBlocked |
-| Journal | `commit_latency` | O | time from propose to chosen | seconds | above target: the cheap knob first (more batchers or proxy leaders) |
-| Journal | `open_rounds` | O | allocator frontier minus chosen prefix | slots | above target: the cheap knob first |
-| Journal | `apply_lag` | O | chosen prefix minus applied prefix at the replicas | slots | above target: add a replica to the open segment's set |
-| Journal | `election_rate` | O | won elections per window | elections per window | churning: no reshape starts |
+| Journal | `commit_latency` | O | time from propose to chosen | seconds | shown |
+| Journal | `open_rounds` | O | allocator frontier minus chosen prefix | slots | shown |
+| Journal | `apply_lag` | O | chosen prefix minus applied prefix at the replicas | slots | shown |
+| Journal | `election_rate` | O | won elections per window | elections per window | shown |
 | Matchmakers | `mm_spare` | P | live members minus a majority (`MatchmakerSet::quorum_size`) | matchmakers | `0`: a matchmaker handover; `< 0`: ControlFrozen |
 | Matchmakers | `generation_frozen` | P | a `Stopped { successor: None }` is seen, so a handover is in progress | yes, with an age | alert on age: any node that sees it finishes the handover |
 | Replicas | `holders(segment)` | P | replicas of the segment's set that hold the whole segment with a good scrub | replicas | below `F + 1`: no retire (safety); re-replicate from a holder. A found damage that is not repaired also blocks the retire (`repairs_pending`, a margin) |
 | Replicas | `boundary_written(segment)` | P | the boundary state of the seal is at the matchmakers (section 2.10) | yes, no | no while sealed: no retire; the first replica that applied every slot writes it |
-| Proxy leaders, batchers, unbatchers | `live_count`, `queue_depth`, `batch_fill`, `utilisation` | O | per process | count, entries, ratio, ratio | the inputs of the cheap knob; a role below its count is started again |
+| Proxy leaders, batchers, unbatchers | `live_count`, `queue_depth`, `batch_fill`, `utilisation` | O | per process | count, entries, ratio, ratio | a role below its count is started again (`live_count`); the others shown |
 | Offload | `offload_backlog` | P | segments that are retired and not marked offloaded | segments | late: alert; more offloaders |
-| Offload | `store_errors` | O | failed puts and reads of the object store | errors per window | above target: alert; the offloader backs off |
+| Offload | `store_errors` | O | failed puts and reads of the object store | errors per window | shown; the offloader backs off on each error |
 | Offload | `drop_before_mark` | P | a replica dropped its copy before the record said offloaded | events | must be 0: a safety alert (section 2.10) |
 | Offload | `orphan_objects` | P | objects whose segment is below the trim floor | objects | above 0: the controller's scrub deletes them (#1256 (offload races)); an object of a segment that is not trimmed is never deleted |
 | Scrub | `scrub_coverage(segment, member)` | P | share of the member's copy of the segment that a scrub read in this pass | ratio | below 1 at the end of a pass: the pass is late |
@@ -553,7 +558,7 @@ is **Open** (the first paragraph of this section).
 | Controller | `term_current` | P | the controller's term is the term of the matchmaker record | yes, no | no: stop (section 2.12) |
 | Controller | `signal_age` | O | age of the oldest input of a plan | seconds | stale: no expensive plan |
 | Controller | `since_last_reshape` | O | time since the last reshape of the journal | seconds | inside the minimum interval: no reshape |
-| Controller | `plans_refused`, `direction_changes` | O | refused calls by reason; up-then-down changes of a count | count per window | oscillation: alert; hysteresis widens |
+| Controller | `plans_refused`, `direction_changes` | O | refused calls by reason; up-then-down changes of a count | count per window | shown; a direction change in one window is an alert |
 | Controller | `tokens_held` | O | expensive actions in flight, against the per-cell cap of the rate limiter | actions | at the cap: the action waits |
 | Zone | `zone_live` | O | share of a zone's machines that answer | ratio | lost: one correlated decision for every journal of the zone, not one per journal |
 
@@ -583,8 +588,8 @@ The pure function `decide` of the controller takes the measures and returns at m
 Its tests come with its crate, after #1189, and follow the plan of the design document:
 
 1. Property tests of `decide`: every plan meets the zone rule on the new layout; no reshape
-   inside the minimum interval; the cheap knob before a reshape; no plan on stale signals or
-   while a segment is not retired; the answers are monotone, deterministic and idempotent, with
+   inside the minimum interval; no plan from a latency, load or error signal (v1); no plan on
+   stale signals or while a segment is not retired; the answers are monotone, deterministic and idempotent, with
    hysteresis.
 2. A reference `decide` written again from this section, with no shared code, compared with
    `decide` on every small view (`P <= 3`, `F <= 2`, three or four zones).
@@ -596,7 +601,8 @@ Its tests come with its crate, after #1189, and follow the plan of the design do
    faults (kills during a seal, a retire and an offload, a matchmaker loss during a reshape, a
    controller crash between plan and call, a gray acceptor, a flapping acceptor, a zone kill).
 5. Oracles, each with a planted mutant: `NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`,
-   `NO_OSCILLATION`, `CONVERGES`, `CHEAP_FIRST`, `COST_BOUND`, `FENCED`, and one that recomputes
+   `NO_OSCILLATION`, `CONVERGES`, `COST_BOUND`, `FENCED`, `NO_LOAD_PLAN` (no plan follows a
+   change of load alone), and one that recomputes
    each P measure from the walk's own state, with no shared code, and compares.
 6. A `probe!` on every branch and every refusal reason of `decide`; the coverage gate requires
    all of them, with no excused probe (the absolute rule of `AGENTS.md`).
