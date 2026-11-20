@@ -424,3 +424,46 @@ After the faults stop, every call is answered (done or refused) and every config
 reshape opened comes into force. The controller's crate (`paros-journal-control`) and its
 consensus-sim flavor (#1261 (grid controller decision tests)) come after the journal state model
 (#1189); the flavor's walk then trace-checks against this model.
+
+### 2.13 A column below quorum
+
+**A column is below quorum** when fewer than `F + 1` of its acceptors are live (the grid of
+section 2.11: `rows = 2F + 1`, `acks = F + 1`). Writes go on in the other columns (#533 (move a
+stuck round)), but no Phase-1 quorum of the grid exists, so no new leader can be elected and no
+reshape can run a full Phase 1 over the old grid. #1258 (reshape with a column below quorum)
+checked with `specs/tla/degraded-reshape/` whether the live leader can reshape away with the
+Phase-1 bypass of #579 (zero-stall reconfiguration, `specs/tla/zero-stall/`):
+
+- **With the decision hold of #579, no.** The bypass moves the leader to the new grid with no
+  Phase 1, and its writes are chosen there. But the hold acks no slot before a Phase-1 quorum of
+  the old grid promised the new ballot, and GC waits for the same. That quorum does not exist, so
+  no slot is acked and the old grid never retires.
+- **The decision hold also does not order two reads**: #1270 (a read at the bypass ballot), and a
+  read on the old basis that saw the old vote of one acceptor for a slot that the new grid chose,
+  followed by a read on the old basis at a quorum without that acceptor. Gating the read basis
+  closes the first, not the second.
+- **Two rules close both and stay live with a column below quorum**, each checked with a control
+  that TLC breaks:
+  1. The segment-record check of #1254 (section 2.10, rule 1) on each leaderless read, after the
+     acceptor answers, and no decision hold.
+  2. A hold before Phase 2: the bypassing leader sends no `Accept` at its new ballot until the
+     acceptors that promised it meet every read quorum of the old grid, which on this grid is
+     `F + 1` acceptors of one column. The fence of the code (section 2.10) then needs no matchmaker
+     read. The bypass waits one round trip to one old column, not for a full Phase 1.
+
+  **Open**: Pierre chooses between the two (or keeps "a column below quorum stops acks until a
+  member comes back"). The choice goes with the open choice of section 2.10: rule 2 fits the
+  fence of the code, rule 1 fits the record check. The journal state model (#1189) carries it.
+- **Either rule needs a live leader.** If the leader is lost while a column is below quorum, no
+  election can run, and writes stop until a member of that column comes back: the grid
+  controller holds and alerts (section 2.12).
+- **The seal end of a bypass is the bypassing leader's allocator frontier**: one above the highest
+  slot that it proposed at its old ballot. A bypass runs no Phase 1, so the end of section 2.10
+  (one above the highest vote its Phase 1 saw) is replaced by the frontier, which is never lower,
+  because a leader bypasses only after it proposed every slot that its own election recovered. An
+  end at the chosen prefix chooses two values.
+- **A heal that moves survivors to other columns is safe**: the layout is row-major over the
+  sorted members (`grid/Grid.tla`), and a move between two partitioned grids where every survivor
+  changes column keeps one value (`config-register/heal_partitioned`); with Phase 1 one acceptor
+  short in every column, TLC finds two values (`heal_partitioned_short`).
+

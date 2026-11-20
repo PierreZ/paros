@@ -54,8 +54,8 @@ a trace spec `EXTENDS` its model.
 
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
-`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and
-`proxy-leader/`.
+`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`,
+`proxy-leader/`, `quorum-everywhere/` and `degraded-reshape/`.
 
 ## Experiments
 
@@ -101,6 +101,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
+| A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done; the rule is **Open** |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -240,6 +241,12 @@ slot 1 waits for the fence Phase 1, and slot 2 is free. `{a3, a4}` choose slot 2
 The fence Phase 1 needs a Phase-1 quorum of `{a1, a2}` at ballot 2, and `a1` is gone, so slot 1
 waits for good, and the decision hold keeps slot 2 from its ack. A bypass thus needs a Phase-1
 quorum of the old configuration after the switch, as Phase 1 of an ordinary campaign does.
+
+- **With a grid column below quorum, the decision hold never acks** (#1258 (reshape with a
+  column below quorum), `degraded-reshape/`): it waits for a Phase-1 quorum of the old grid,
+  which no longer exists. The hold that gates only the acks and the read basis also misorders
+  two reads on the old basis. A hold before Phase 2 on `F + 1` of one old column, or the
+  segment-record check, closes both and stays live.
 
 Results are in `zero-stall/checks.txt` and in the design document of #579 (zero-stall
 reconfiguration).
@@ -2096,3 +2103,97 @@ The answer to #1259:
   `Plan`, `Call`, `Process`, `Receive`, `SealIn`, `Retire`) are the events a trace spec will
   follow once the consensus-sim flavor of the controller loop exists (#1261 (grid controller
   decision tests), after #1189).
+
+### `degraded-reshape/`: a reshape when a column is below quorum, for #1258 (reshape with a column below quorum)
+
+The journal grid is `Grid { rows: 2F + 1, cols: P, acks: F + 1 }` (section 2.11 of
+`docs/architecture/02-data-plane.md`). A column is below quorum when fewer than `F + 1` of its
+acceptors are live. Then no Phase-1 quorum of the grid exists, because Phase 1 needs `F + 1` of
+every column. A write still completes in another column (#533 (move a stuck round)). So no new
+leader can be elected, and a reconfiguration through a full Phase 1 is blocked. The question of
+#1258 is whether the live leader can still reshape away from that column with the Phase-1 bypass
+of `zero-stall/`, and then ack writes and retire the old grid.
+
+The model is `zero-stall/Bypass.tla` in the mode "carry" with the bypass check on, plus grid
+quorums from `grid/Grid.tla`, acceptors that crash, the seal end of design A (#1213 (segments
+experiment)), GC, and leaderless reads whose answer a client sees (`Serve`). A leader at ballot 1
+in the old grid bypasses to its ballot 2 in a new grid. A rival can lead at ballot 3. Constants:
+
+| Constant | Values |
+|---|---|
+| `Layout` | each configuration's members and grid. `LShrink`: the 3 × 2 grid of `a1`..`a6` (columns `{a1, a3, a5}` and `{a2, a4, a6}`), then the majority of the healthy column. `LSwap`: the same old grid, then the majority of `a5`, `a6` and a new `a7`: its write quorum `{a5, a7}` holds no acceptor of the healthy old column. `LSmall`: the grid 1 × 2 (`F = 0`), then a heal where the survivor changes columns. `LMaj`, `LMove`: moves between majorities of three, all live. |
+| `CanCrash`, `DownAtStart` | `a1` and `a3` crash (their column is below quorum), from the start in the checks of the degraded grid. The first ballot needs no Phase 1, so its leader leads in the old grid and writes in the healthy column. The read invariants judge every quorum, the crashed members too, so they also hold when a member comes back with its disk. |
+| `Hold` | what the leader of a ballot waits for. `phase1`: a Phase-1 quorum of each prior configuration promised its ballot (the decision hold of #579). `block`: the promises meet every read quorum of each prior configuration: on the grid, `F + 1` of one column, a Phase-2 quorum of the old grid. `block_short`: a control, one promise short of `block`. `none`. |
+| `Gate` | what the hold gates. `ack`: the acks (zero-stall today). `ack_read`: the acks and the read basis of the ballot (the option of #1270 (the hold does not order two reads)). `propose`: also the proposals: the leader sends no `Accept` at its ballot before its hold holds. |
+| `RecordCheck` | `TRUE`: after its acceptor answers, the reader asks a matchmaker majority and retries when one holds a registration of another configuration or a GC floor above its basis (rule 1 of #1254 (leaderless reads across a reshape)). |
+| `EndRule` | the end slot of the old segment, written once at the bypass. `frontier`: one above the highest slot that the leader proposed at its old ballot (its allocator frontier). `chosen`: a control, one above the chosen prefix. |
+
+The invariants: `Agreement`; `ReadSafe`, no read that can start now misses a slot that a client
+saw (a slot that a leader acked, or a slot that an earlier read returned); `ReadSafeAcked`, the
+same for the acked slots only (the property of `zero-stall/`). The liveness properties are
+`AckAfterBypass` (the bypass ballot acks a slot) and `RetireAfterBypass` (a matchmaker majority
+holds a GC floor at the bypass ballot), each under weak fairness of the protocol steps. Every
+step grows a set or moves a status, a promise or a watermark up, so every fair behavior ends in a
+state where no step is enabled, and the goals only grow. TLC checks each property as an invariant
+of those end states (`AckedAfterBypass`, `RetiredAfterBypass`), which is the same property and
+much faster than a temporal check.
+
+Not in the model: matchmaker crashes (`quorum-everywhere/` has them), matchmaker generations, the
+handoff and two bypasses in a row (`zero-stall/` has them). A read is one atomic step, as in
+`zero-stall/`. In a real read the matchmaker check of `RecordCheck` must come after the acceptor
+answers, so that a registration that an ack waited for is seen.
+
+| Check | CI | Result |
+|---|---|---|
+| `reach_degraded_ack` | ci | violation of `NoDegradedAck`: a bypass ballot acks a slot while a column of the old grid is below quorum |
+| `live_phase1_small`, `retire_phase1_small`, `live_phase1`, `retire_phase1` | ci, long | violation: with the decision hold of #579, the bypass ballot's writes are chosen in the new grid, but it never acks, and the old grid never retires (12 thousand states on `LShrink`) |
+| `live_record_small`, `live_record`, `live_record_plus` | ci | pass: with the record check and no hold, the bypass ballot acks and the old grid retires; `_plus` adds a crash in the healthy column (`F` down there) |
+| `live_block_propose_small`, `live_block_propose` | ci, long | pass: with the hold `block` before Phase 2, the same (23 thousand states, 17 minutes for the 3 × 2 grid) |
+| `safe_record` | ci | pass: `ReadSafe` on `LSwap` with the column below quorum (51 thousand states) |
+| `block_propose` | ci | pass: the same with the hold `block` before Phase 2 (28 thousand states, 7 minutes) |
+| `phase1_acked` | long | pass: the decision hold keeps `ReadSafeAcked` (it is safe, only not live) |
+| `hold_none` | ci | control: no hold, no record check; a read on the old basis misses an acked slot |
+| `block_short`, `block_propose_short` | ci | control: one promise short of `block` |
+| `phase1_ack_gate` | ci | violation: #1270 again; a read at the bypass ballot returns a slot before the hold |
+| `phase1_reads_maj`, `block_reads_maj` | ci | violation (a finding): a hold that gates the acks and the read basis still lets a read on the **old** basis return a slot that the new grid chose, from the old vote of one acceptor; a second read on the old basis, at a quorum without that acceptor, misses it (a trace of 15 states, all acceptors live) |
+| `phase1_propose_maj`, `block_propose_maj`, `safe_record_maj` | ci | pass: the hold before Phase 2, or the record check, orders those reads |
+| `agree_record`, `agree_block_propose` | ci | pass: `Agreement` and `ReadSafe` with GC and a rival ballot |
+| `seal_frontier` | ci | pass: the end at the allocator frontier (1.3 million states, 7 minutes) |
+| `seal_chosen` | ci | control: the end at the chosen prefix; a slot that the old ballot chose by a late quorum falls above the end, a rival's Phase 1 ignores its old votes, and two values are chosen |
+
+The answer to #1258:
+
+- **T1: the bypass does not rescue a column below quorum with the rule of #579.** The reading of
+  the journal design thread holds. The bypass itself works: the leader moves to the new grid with
+  no Phase 1, and its writes are chosen there. But the decision hold waits for a Phase-1 quorum of
+  the old grid, which no longer exists. So no slot is acked, GC never runs, and the old grid never
+  retires (`live_phase1`, `retire_phase1`).
+- **The decision hold has a second gap, besides #1270.** Gating the read basis of the bypass
+  ballot (the option of #1270) is not enough. A reader on the old basis can see the old vote of
+  one acceptor for a slot that the new grid chose, wait until the slot is chosen, and return it. A
+  second reader on the old basis, at a quorum without that acceptor, sees no higher promise and
+  returns less (`phase1_reads_maj`). No hold that gates only acks and reads closes this.
+- **Two rules close both gaps and stay live with a column below quorum**:
+  1. **The segment-record check** of #1254, with no hold at all (`safe_record`,
+     `safe_record_maj`, `live_record`). The reader retries when a matchmaker majority shows a
+     segment above its basis; the bypass ballot registered at a majority before it proposed.
+  2. **A hold before Phase 2 on a blocking set**: the bypassing leader sends no `Accept` at its new
+     ballot before the acceptors that promised it meet every read quorum of each prior
+     configuration. On the journal grid that is `F + 1` acceptors of one old column, which a
+     column below quorum leaves (`block_propose`, `block_propose_maj`, `live_block_propose`). The
+     fence of the code (the promise in each `PreReadAck`) then needs no matchmaker read. The
+     bypass costs one round trip to one old column before the first write, not a full Phase 1.
+     With one promise less it fails (`block_propose_short`).
+
+  Both change the rule of #579, which is not built. The choice is Pierre's (**Open**, section
+  2.13 of `docs/architecture/02-data-plane.md`).
+- **The limit of every rule.** A reshape away from a column below quorum needs a live leader: the
+  first leader after the loss cannot run Phase 1 over the old grid. If the leader is lost too, the
+  journal stops writes until a member of the column comes back, as the grid controller's "hold and
+  alert" after a zone loss says.
+- **T2: the seal end of a bypass is the bypassing leader's allocator frontier**, one above the
+  highest slot it proposed at its old ballot (`seal_frontier`). It is the end of design A when no
+  Phase 1 ran: the leader proposed each slot that its own election's Phase 1 recovered before it
+  may bypass, so the frontier is at least one above the highest vote that Phase 1 saw. An end at
+  the chosen prefix chooses two values (`seal_chosen`).
+- **T5** is in `config-register/` (`heal_partitioned`, `heal_partitioned_short`).
