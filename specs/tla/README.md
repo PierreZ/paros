@@ -101,7 +101,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
-| A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done; the rule is **Open** |
+| A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -1983,6 +1983,7 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 | `handover` | a stop quorum of `MM`; Phase 1 and Phase 2 of the successor decree in `MM2` |
 | `ctl_election` | a matchmaker majority (read the controller term); a matchmaker majority (its compare-and-set, #1259) |
 | `reshape` | a matchmaker majority (the fenced reshape call, #1259) |
+| `bypass_hold` | `acks` of one column of `Old`, with the move (the hold before Phase 2 of a bypass, #1258) |
 
 `Old` is a sealed configuration and `New` the configuration in force: `New` moves the members
 of `Old` by `Shift` places, so with `Shift = 1` each member that stays changes its column. The
@@ -2001,6 +2002,8 @@ changes nothing, and the state space stays small.
 | `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (890 thousand distinct states with the two controller steps; 12 minutes locally with 4 workers while two other TLC runs shared the machine) |
 | `quorum_majority` | ci | pass: the majority of three (`partitions = 1`, a grid 3 × 1) |
 | `write_move` | ci | pass: `F + 1` down in one column, `F` in the others; the write moves and completes |
+| `bypass_hold_move` | ci | pass: the same for the hold before Phase 2 of a bypass, in the old grid |
+| `bypass_hold_every_column` | ci | violation: `F + 1` down in every column of `Old` blocks the hold |
 | `write_every_column`, `trim_every_column` | ci | violation: `F + 1` down in every column of `New` blocks the write |
 | `election_column`, `read_column`, `seal_column` | ci | violation: `F + 1` down in one column blocks Phase 1 |
 | `retire_replica` | ci | violation: `F + 1` replicas down blocks the retire |
@@ -2188,9 +2191,10 @@ The answer to #1258:
      bypass costs one round trip to one old column before the first write, not a full Phase 1.
      With one promise less it fails (`block_propose_short`).
 
-  Both change the rule of #579, which is not built. The choice is Pierre's (**Open**, section
-  2.13 of `docs/architecture/02-data-plane.md`).
-- **The limit of every rule.** A reshape away from a column below quorum needs a live leader: the
+  Both change the rule of #579, which is not built. Pierre chose rule 2 on 2026-11-20 (section
+  2.13 of `docs/architecture/02-data-plane.md`), with the fence of the code on the read path
+  (section 2.10, #1254).
+- **The limit of the rule.** A reshape away from a column below quorum needs a live leader: the
   first leader after the loss cannot run Phase 1 over the old grid. If the leader is lost too, the
   journal stops writes until a member of the column comes back, as the grid controller's "hold and
   alert" after a zone loss says.

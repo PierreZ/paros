@@ -44,6 +44,7 @@
 (*   Extra  "none"     F down, as above.                                   *)
 (*          "column"   F + 1 down in one column, F in the others.          *)
 (*          "every_column" F + 1 down in every column of `New`.            *)
+(*          "every_old_column" F + 1 down in every column of `Old`.        *)
 (*          "mm"       F + 1 down in one matchmaker set.                   *)
 (*          "replica"  F + 1 down in the replica set.                      *)
 (*   Only              the one step to run, or "all" for every step.       *)
@@ -57,7 +58,7 @@ N == Rows * Cols
 ASSUME /\ Rows >= 1 /\ Cols >= 1 /\ Acks \in 1..Rows
        /\ F \in 0..Rows /\ Shift \in 0..N
        /\ Mode \in {"quorum", "all"}
-       /\ Extra \in {"none", "column", "every_column", "mm", "replica"}
+       /\ Extra \in {"none", "column", "every_column", "every_old_column", "mm", "replica"}
 
 (***************************************************************************)
 (* The members. Each is a pair <<kind, number>>, so the three kinds can    *)
@@ -104,7 +105,7 @@ ReadAlts(M) ==
 HoldQ == {Q \in SUBSET R : Cardinality(Q) >= F + 1}
 
 Steps == <<"write", "election", "read", "seal", "retire", "offload", "trim", "handover",
-           "ctl_election", "reshape">>
+           "ctl_election", "reshape", "bypass_hold">>
 
 \* The waits of each step, in order. A zero-arity definition: TLC computes
 \* it once.
@@ -134,7 +135,11 @@ WaitsOf == [s \in {Steps[k] : k \in DOMAIN Steps} |->
     [] s = "ctl_election" -> <<MMWait(MM), MMWait(MM)>>
     \* The fenced reshape call: one compare-and-set on the matchmaker record
     \* (#1259, `specs/tla/grid-controller/`).
-    [] s = "reshape"  -> <<MMWait(MM)>>]
+    [] s = "reshape"  -> <<MMWait(MM)>>
+    \* The hold before Phase 2 of a Phase-1 bypass (#1258,
+    \* `specs/tla/degraded-reshape/`): `F + 1` promises of one column of the
+    \* old grid, which meet every read quorum of it; a stuck column moves.
+    [] s = "bypass_hold" -> <<Phase2(OldSeq)>>]
 
 Run == IF Only = "all" THEN Steps ELSE <<Only>>
 
@@ -159,6 +164,9 @@ AccDown ==
     [] Extra = "every_column" ->
          {D \in SUBSET Acceptors :
             AccOk(D, F + 1) /\ \A c \in ColumnsOf(NewSeq) : Cardinality(D \cap c) = F + 1}
+    [] Extra = "every_old_column" ->
+         {D \in SUBSET Acceptors :
+            AccOk(D, F + 1) /\ \A c \in ColumnsOf(OldSeq) : Cardinality(D \cap c) = F + 1}
     [] OTHER -> {D \in SUBSET Acceptors :
                    AccOk(D, F) /\ \A x \in Acceptors \ D : ~AccOk(D \cup {x}, F)}
 
