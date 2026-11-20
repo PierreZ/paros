@@ -69,7 +69,7 @@ tri-state tally and the repair probe; #1017 (truncation model), #1216 (truncatio
 GC of `node/gc.rs` forgets the old configuration only once a Phase-2 quorum of the new one holds
 the prefix up to the election fence, with a control that forgets it at the win and a control
 that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
-reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold, GC after the fence
+reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold and the read prefix that it gates (#1270 (bypass read order)), GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
 more rules)), quorum everywhere (`specs/tla/quorum-everywhere/`: every step of the journal, the
 write, the election, the leaderless read, the seal, the retire, the offload mark, the trim and the
@@ -260,6 +260,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   member of a group (no full broadcast as a FoundationDB TLog commit). A new journal step gets
   its row in `specs/tla/quorum-everywhere/`, with a control that blocks it one member later
   (`docs/architecture/02-data-plane.md` §2.11).
+- **When in doubt about safety, use TLA+** (Pierre, 2026-11-20): when you are not sure that a
+  rule is safe, or that one rule also covers another case, write a TLA+ check (a check that
+  passes with the rule and a control that fails without it). Do not argue it in prose.
 - **TLA+ is a thinking tool** (decided on 2026-11-12, #1020 (TLA+ ranked list)): when a
   protocol problem has more than one possible rule, you can write a small TLA+ model to find
   the solution, before you write Rust. Model each candidate rule as a constant, give each a

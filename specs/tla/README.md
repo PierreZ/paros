@@ -184,6 +184,7 @@ Constants select the variant:
 | `CheckWm` | `TRUE`: bypass only if the highest watermark in the matchmaker answers is at most `b`. |
 | `Reads` | `TRUE`: the leader acks the chosen slots, and the model has the leaderless reads of Compartmentalized Paxos (§3.4) with the rule of `quorum_read.rs`: a reader asks a quorum of the configuration of a leadership that won, abandons the read if an answer shows a higher ballot, and reads at the highest slot voted or at the fence. |
 | `Hold` | `TRUE`: the decision hold. A leader acks no slot before a quorum of each prior configuration promised its ballot. |
+| `ReadHold` | `TRUE`: the rule of #1270 (bypass read order). A read (`ReadReturn`) counts a slot in its chosen prefix only once the ballot that chose it is covered. `FALSE`: a control. |
 | `Handoff` | `TRUE`: the cooperative handoff of DPaxos (`relinquish_to`). The node that minted a ballot hands it on one time, with its proposals and its open slots, while it leads at the ballot. The successor leads with no Phase 1. |
 | `Relinquish` | `TRUE`: a node that handed its ballot on never bypasses from it (it drops its proactive matchmaking). `FALSE`: a control, the minter still bypasses after the handoff. |
 | `SuccessorBypass` | `FALSE`: a successor never bypasses from a ballot that it did not mint. `TRUE`: a control, the successor bypasses to its own next ballot. |
@@ -194,7 +195,7 @@ Constants select the variant:
 | `RestartBypass` | `FALSE`: a restart ends every campaign and every leadership of the node, so only the incarnation that won `b` bypasses from `b`. `TRUE`: a control, the node still leads after the restart. |
 
 The invariants are `Agreement` (one value is chosen for each slot), `ReadSafe` (no leaderless
-read that starts now can miss a slot that is acked) and `WmRedundant` (when the matchmaker answers
+read that starts now can miss a slot that is acked, or a slot that an earlier read returned) and `WmRedundant` (when the matchmaker answers
 of `b2` show no registration strictly between `b` and `b2`, their highest watermark is at most `b`).
 
 The model has three or four ballots, one or three matchmakers, two values, one or two slots and
@@ -215,6 +216,7 @@ The rules of #1018 (zero-stall model, more rules), each with its check and its c
 | GC fence (I5): the leader at `b2` makes no floor effective before its fence Phase 1 ends | `gc_p212_paper`, `wm_nocheck_small` | `gc_nofence` (21 steps), `gc_early` |
 | Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff`, `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
 | Chained bypass (8.3): a second bypass waits for the fence Phase 1 of the first | `chain_small`, `chain` (7.1 million states, 5 minutes, `long`) | `chain_open_small`, `chain_open` |
+| A reader's chosen prefix waits for the fence Phase 1 of the ballot that chose the slot (#1270 (bypass read order)) | `read_carry_hold` (343 thousand states), `read_p212_hold`, and every check with `Reads` | `read_carry_no_read_hold`, `read_p212_no_read_hold`: `ReadSafe` breaks in 13 states (ballot 1 in `{a1, a2}` bypasses to ballot 3 in `{a3, a4}`, which chooses slot 1, and a read on ballot 3 returns it; a read on ballot 1 asks `{a1, a2}` and misses it) |
 | Only the incarnation that won `b` bypasses from `b` (#1230 (rules no check tests)) | `restart_bypass` (489 thousand states) | `restart_bypass_off`: Agreement breaks in 16 states (propose at `b`, restart, bypass, the proposed slot is free at `b2`, a second value is chosen) |
 
 Findings of #1018 (2026-11-19). No design decision is refuted.
@@ -724,9 +726,8 @@ Finding of #1230 (rules no check tests): `SizeKept` needs a rule that no design 
 writes. The decree runs over the old matchmakers, which do not read the control journal, so
 nothing in the handover sees a resize that the operator records after the target is named
 (`resize_during`). The model keeps the size with `ResizeGuard`: a resize waits until no target is
-named. **Open**: Pierre picks the rule (a resize waits for the handover, or the coordinator names
-a new target of the new size and the decree refuses a proposal of the old size), and
-`docs/architecture/04-roles.md` records it.
+named. This is the rule (Pierre, 2026-11-20): a resize waits for the handover
+(`docs/architecture/04-roles.md`, rule 2).
 
 Not in the model: the decree (`decree/`), lost matchmaker state, more than one journal (a
 handover is paged, #439) and the registrations, which leave with rule 1. A client step that
@@ -813,6 +814,7 @@ Constants select the rule:
 | `Q1s`, `Q2s`, `Targets` | The quorum system, for each configuration (#1102 (rework 1.13)): the Phase-1 quorums, the Phase-2 quorums, and the sets of acceptors that a reader asks. A majority asks the whole membership. A grid takes them from `grid/Grid.tla`: the partitions ask the whole membership, the full grid asks one row (`row_of`). |
 | `Seal` | `quorum`: Phase 1 takes a Phase-1 quorum of each prior configuration (the code). `reads`: a candidate rule, not in the code: Phase 1 also takes one promise in each read target of each prior configuration, so each row of an old full grid hears of the campaign. |
 | `ReadAgain` | `TRUE`: a client gets the answer of a served read (`ReadClose`), and a second read can start. `ReadSeesAcked` then also orders reads: a served read covers each slot that an earlier read returned. |
+| `ReadHold` | The candidate rules of #1270 (bypass read order): what the decision hold also gates on the read side of a ballot. `off`: nothing, the hold gates only the acks of the leader (a control). `basis`: a reader takes no read basis at a ballot before its fence Phase 1 is covered. `serve`: a reader serves a read on a basis only when the ballot is covered. `prefix`: the chosen prefix of a reader counts a slot only once the ballot that chose it is covered, so a leader sends no `Commit` of a bypass ballot before its fence Phase 1. A ballot that won by a full Phase 1 is covered when it leads, so each rule acts only on a bypass ballot. |
 | `ReaderGate` | What gates the reader itself, to open, keep and serve a read (#1228 (stale read by a lagging reader)). `promise`: the rule of `Learner` on the promise of the reader (the code: `read_basis` and `fence_quorum_reads` use the read fence). `belief`: the belief ballot of the reader alone, and the reader counts its own answer with no fence (the code before #1228), a control. |
 
 The majority checks have four acceptors, the configurations `{a1, a2, a3}` and `{a3, a4}`, the
@@ -848,7 +850,12 @@ Results (`reads/checks.txt`):
 | `reads_lag_reader`: the same, the reader is gated on its promise (the code) | pass (557 thousand states) |
 | The bypass of #579 with the decision hold | pass |
 | `reads_plain_again`: the rules of `main`, and a second read | pass (897 thousand states) |
-| `reads_bypass_hold_again`: the bypass of #579 with the decision hold, and a second read | violation, a finding (1.3 million states, 21 steps): see below |
+| `reads_bypass_hold_again`: the bypass of #579 with the decision hold, and a second read, `ReadHold = "off"` | violation (1.6 million states, 21 steps): see below |
+| `reads_bypass_hold_again_p212`: the same, `Mode = "p212"` | violation (759 thousand states, 21 steps) |
+| `reads_bypass_hold_again_basis`: `ReadHold = "basis"` | violation (1.3 million states, 22 steps): see below |
+| `reads_bypass_hold_again_serve`: `ReadHold = "serve"` | violation (1.7 million states, 22 steps) |
+| `reads_bypass_hold_again_prefix`: `ReadHold = "prefix"`, the rule | pass (3.1 million states, 1.5 minutes) |
+| `reads_bypass_hold_again_prefix_p212`: the rule, `Mode = "p212"` | pass (2.1 million states, 2 minutes) |
 | `reads_two_slots`: `reads_plain` with two slots (`long`) | no violation in 30.7 million distinct states, to depth 24 (bounded: 50 minutes, 1 worker) |
 | `reads_three`: `reads_plain` with three ballots, `OwnerParos3`, so a reader can hold the basis of the middle leadership (`long`) | no violation in 33.4 million distinct states, to depth 25 (bounded: 50 minutes, 1 worker) |
 | #890, `strict` (`main` today) | pass |
@@ -912,9 +919,20 @@ the slot is chosen and not acked (the hold). `a1` takes the basis of ballot 2, a
 and is served at index 1, and its client gets the answer. Then `a3` takes the basis of ballot 1
 from a late beat, asks `{a3, a4}`, where no one promised ballot 2, and is served at index 0. The
 hold gates only the acks of the leader, and a reader serves on any chosen slot. The code of
-today has no bypass and passes (`reads_plain_again`). **Open**: the rule for #579 (for example,
-the hold also gates the reads at a bypass ballot until its fence Phase 1 is covered); the line
-stays `violation` in `checks.txt` until Pierre chooses it.
+today has no bypass and passes (`reads_plain_again`).
+
+The rule for #579 (Pierre asked for its own check on 2026-11-20): **a reader's chosen prefix
+counts a slot only once the ballot that chose it is covered** (`ReadHold = "prefix"`). The leader
+of a bypass ballot sends no `Commit` before its fence Phase 1 has a Phase-1 quorum of each prior
+configuration, as it sends no ack. Then a read that returns the slot comes after the fence Phase
+1, and a later read on an old basis meets an acceptor that promised the bypass ballot, and ends.
+The two weaker candidates fail. A gate on the read basis (`basis`) does not help, because the
+first read need not use the bypass ballot: `a3` voted slot 1 at ballot 1, answers a read on the
+basis of ballot 1 with its watermark 1, and then `a3` and `a4` choose slot 1 at ballot 2. The
+read is served at index 1. A second read on ballot 1 asks `{a1, a2}`, which never heard of ballot
+2, and is served at index 0. A gate on the serve (`serve`) fails with the same trace. The rule
+must gate the chosen prefix, which every read uses. `zero-stall/` checks the same rule
+(`ReadHold`) with its abstract reader.
 
 Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
 leader and a reader outside its configuration whose own abandoned campaign is above it.

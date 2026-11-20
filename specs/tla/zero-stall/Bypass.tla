@@ -64,6 +64,13 @@
 (*          bypasses from b. TRUE = a control: the node still leads after    *)
 (*          the restart, with what it knew lost.                             *)
 (*                                                                           *)
+(* ReadHold : TRUE = the rule of #1270 (bypass read order): the chosen      *)
+(*          prefix of a reader counts a slot only once the ballot that      *)
+(*          chose it is covered (`Covered`), so a slot that the hold keeps  *)
+(*          from the client reaches no client through a read. FALSE = a     *)
+(*          control: a read returns a slot that a ballot chose before its   *)
+(*          fence Phase 1, and a later read on the old basis misses it.     *)
+(*                                                                           *)
 (* Gone   : the acceptors that take part in ballot 1 only: the old members  *)
 (*          of a journal move that leave after the first leadership. A       *)
 (*          liveness check uses it; every safety check has Gone = {}.        *)
@@ -75,7 +82,7 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
           Gc, CheckWm, Reads, Hold, CfgChoices, Handoff, Relinquish, HandoffCarry,
-          ChainRule, SuccessorBypass, Restarts, RestartBypass, Gone
+          ChainRule, SuccessorBypass, Restarts, RestartBypass, Gone, ReadHold
 
 Ballots == 1..NB
 Nodes   == {Owner[b] : b \in Ballots}
@@ -98,10 +105,11 @@ VARIABLES status,    \* ballot -> "matching" | "matched" | "leading" | "switched
           holder,    \* ballot -> the node that leads at it
           known,     \* node -> the <<ballot, slot, value>> proposals that it knows
           via,       \* ballot -> the ballot that its leader bypassed from, or 0
-          restarts   \* the number of restarts so far
+          restarts,  \* the number of restarts so far
+          seen       \* slots that a leaderless read returned to its client
 
 vars == <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals,
-          wm, maxwm, acked, holder, known, via, restarts>>
+          wm, maxwm, acked, holder, known, via, restarts, seen>>
 
 ext == <<holder, known, via, restarts>>
 
@@ -129,6 +137,7 @@ Init == /\ status = [b \in Ballots |-> "matching"]
         /\ known = [n \in Nodes |-> {}]
         /\ via = [b \in Ballots |-> 0]
         /\ restarts = 0
+        /\ seen = {}
 
 \* Matchmaker m registers b if it holds no ballot at or above b and b is not
 \* below its watermark. It answers with what it held and with its watermark.
@@ -141,13 +150,13 @@ Register(b, m) ==
     /\ replied' = [replied EXCEPT ![b] = @ \cup {m}]
     /\ hist' = [hist EXCEPT ![b] = @ \cup reg[m]]
     /\ maxwm' = [maxwm EXCEPT ![b] = Max({@, wm[m]})]
-    /\ UNCHANGED <<status, cfgOf, promised, votes, promises, safe, proposals, wm, acked, ext>>
+    /\ UNCHANGED <<status, cfgOf, promised, votes, promises, safe, proposals, wm, acked, seen, ext>>
 
 MatchDone(b) ==
     /\ status[b] = "matching"
     /\ 2 * Cardinality(replied[b]) > Cardinality(Matchmakers)
     /\ status' = [status EXCEPT ![b] = "matched"]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals, wm, maxwm, acked, ext>>
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals, wm, maxwm, acked, seen, ext>>
 
 \* The prior configurations: the ones at or above the highest watermark.
 PriorCfgs(b) == {r[2] : r \in {h \in hist[b] : h[1] >= maxwm[b]}}
@@ -172,7 +181,7 @@ Promise(a, b) ==
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ promises' = promises \cup
           {<<a, b, {<<w[2], w[3], w[4]>> : w \in {x \in votes : x[1] = a}}>>}
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, votes, safe, proposals, wm, maxwm, acked, ext>>
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, votes, safe, proposals, wm, maxwm, acked, seen, ext>>
 
 Reports(b) == UNION {p[3] : p \in {q \in promises : q[2] = b}}
 
@@ -188,7 +197,7 @@ Phase1Done(b) ==
     /\ Covered(b)
     /\ status' = [status EXCEPT ![b] = "leading"]
     /\ safe' = [safe EXCEPT ![b] = [s \in Slots |-> SafeAt(b, s)]]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked, ext>>
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked, seen, ext>>
 
 \* The holder of b proposes. Only one node holds b at a time: a handoff
 \* moves b with the proposals at b, and the old holder stops at once.
@@ -198,7 +207,7 @@ Propose(b, s, v) ==
     /\ safe[b][s] = Free \/ safe[b][s] = v
     /\ proposals' = proposals \cup {<<b, s, v>>}
     /\ known' = [known EXCEPT ![holder[b]] = @ \cup {<<b, s, v>>}]
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, wm, maxwm, acked,
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, wm, maxwm, acked, seen,
                    holder, via, restarts>>
 
 Accept(a, b, s, v) ==
@@ -209,7 +218,7 @@ Accept(a, b, s, v) ==
     /\ <<a, s, b, v>> \notin votes
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ votes' = votes \cup {<<a, s, b, v>>}
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promises, safe, proposals, wm, maxwm, acked, ext>>
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promises, safe, proposals, wm, maxwm, acked, seen, ext>>
 
 \* What node n knows that b proposed: its own proposals, and the proposals
 \* that a handoff gave it.
@@ -260,7 +269,7 @@ Bypass(b, b2) ==
                     THEN (IF Mode = "carry" THEN ValAt(n, b, s) ELSE Pending)
                     ELSE Free]]
     /\ via' = [via EXCEPT ![b2] = b]
-    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked,
+    /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked, seen,
                    holder, known, restarts>>
 
 \* The cooperative handoff (DPaxos, relinquish_to): the minter of b hands b
@@ -279,7 +288,7 @@ HandOn(b, n) ==
        ELSE safe' = [safe EXCEPT ![b] =
                 [s \in Slots |-> IF @[s] = Pending THEN Free ELSE @[s]]]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm,
-                   acked, via, restarts>>
+                   acked, seen, via, restarts>>
 
 \* "p212" only: the Phase 1 at the new ballot for the slots below the frontier.
 Phase1Low(b) ==
@@ -288,7 +297,7 @@ Phase1Low(b) ==
     /\ Covered(b)
     /\ safe' = [safe EXCEPT ![b] =
           [s \in Slots |-> IF safe[b][s] = Pending THEN SafeAt(b, s) ELSE safe[b][s]]]
-    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked, ext>>
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked, seen, ext>>
 
 ChosenAt(b, s) ==
     \E v \in Values :
@@ -314,7 +323,7 @@ Collect(b, m) ==
     /\ wm' = [wm EXCEPT ![m] = b]
     /\ reg' = [reg EXCEPT ![m] = {r \in @ : r[1] >= b}]
     /\ UNCHANGED <<status, cfgOf, replied, hist, promised, votes, promises, safe,
-                   proposals, maxwm, acked, ext>>
+                   proposals, maxwm, acked, seen, ext>>
 
 \* The leader of b acks slot s to its client. A leader that switched can
 \* still ack a slot that is chosen at its old ballot ("p212": the old rounds
@@ -327,7 +336,32 @@ Ack(b, s) ==
     /\ Hold => Covered(b)
     /\ acked' = acked \cup {s}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
-                   proposals, wm, maxwm, ext>>
+                   proposals, wm, maxwm, ext, seen>>
+
+\* The fence of a leadership: the highest slot that it recovered or carried.
+Fence(b) == Max({0} \cup {s \in Slots : safe[b][s] # Free})
+
+\* The vote watermark of acceptor a: the highest slot that it voted in.
+Watermark(a) == Max({0} \cup {w[2] : w \in {x \in votes : x[1] = a}})
+
+\* A leaderless read on the basis of the leadership at b ends, and its client
+\* gets the slots at or below its index. The reader asks a quorum Q of the
+\* configuration of b, none of whose members promised above b (an answer
+\* above b ends the read), and reads at the highest watermark of the answers
+\* and at the fence or above. It serves only on its chosen prefix: each slot
+\* at or below the index is chosen, with ReadHold at a covered ballot.
+ReadReturn(b, Q) ==
+    /\ Reads
+    /\ status[b] \in {"leading", "switched"}
+    /\ Q \in Quorums(cfgOf[b])
+    /\ \A a \in Q : promised[a] <= b
+    /\ LET i == Max({Fence(b)} \cup {Watermark(a) : a \in Q})
+       IN  /\ \A s \in Slots : s <= i =>
+                  \E c \in Ballots : ChosenAt(c, s) /\ (ReadHold => Covered(c))
+           /\ ~ {s \in Slots : s <= i} \subseteq seen
+           /\ seen' = seen \cup {s \in Slots : s <= i}
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
+                   proposals, wm, maxwm, acked, ext>>
 
 \* Node n restarts: it forgets what it proposed. With the rule, every
 \* campaign and every leadership of n ends ("dead"): a dead ballot proposes,
@@ -340,7 +374,7 @@ Restart(n) ==
        THEN UNCHANGED status
        ELSE status' = [b \in Ballots |-> IF holder[b] = n THEN "dead" ELSE status[b]]
     /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, safe, proposals, wm, maxwm,
-                   acked, holder, via>>
+                   acked, seen, holder, via>>
 
 Next ==
     \/ \E b \in Ballots, m \in Matchmakers : Register(b, m)
@@ -352,6 +386,7 @@ Next ==
     \/ \E b \in Ballots, n \in Nodes : HandOn(b, n)
     \/ \E b \in Ballots, m \in Matchmakers : Collect(b, m)
     \/ \E b \in Ballots, s \in Slots : Ack(b, s)
+    \/ \E b \in Ballots, Q \in SUBSET Acceptors : ReadReturn(b, Q)
     \/ \E n \in Nodes : Restart(n)
 
 Spec == Init /\ [][Next]_vars
@@ -380,21 +415,19 @@ Chosen(s, v) ==
 \* Safety: one value for each slot.
 Agreement == \A s \in Slots : \A v, w \in Values : (Chosen(s, v) /\ Chosen(s, w)) => v = w
 
-\* The fence of a leadership: the highest slot that it recovered or carried.
-Fence(b) == Max({0} \cup {s \in Slots : safe[b][s] # Free})
-
 \* A leaderless read (quorum_read.rs). A reader has the basis of a leadership
 \* that won: its configuration, its ballot, its fence. It asks a quorum of
 \* that configuration. It abandons the read if an answer shows a higher
 \* ballot. If not, it reads at the highest slot that an answer voted in, and
 \* at the fence or above.
-\* The invariant: no read that starts now can miss a slot that is acked.
+\* The invariant: no read that starts now can miss a slot that is acked, or
+\* a slot that an earlier read returned (`seen`).
 ReadSafe ==
     ~ \E b \in Ballots :
         /\ status[b] \in {"leading", "switched"}
         /\ \E Q \in Quorums(cfgOf[b]) :
               /\ \A a \in Q : promised[a] <= b
-              /\ \E s \in acked :
+              /\ \E s \in acked \cup seen :
                     /\ s > Fence(b)
                     /\ \A a \in Q : ~ \E w \in votes : w[1] = a /\ w[2] >= s
 

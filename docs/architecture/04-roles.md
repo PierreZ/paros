@@ -144,6 +144,11 @@ nothing.
 - The first write to a new set needs every new member.
 - Only a resize record changes the size (section 3.3). Rule 1 does not need the two sets to have
   the same size.
+- **A resize waits for the handover** (Pierre, 2026-11-20, #1230 (rules no check tests)). The
+  operator records a new size only while no handover target is named. The decree of a handover
+  runs over the old matchmakers, which do not read the control journal, so a size recorded after
+  the target is named would be lost: the handover would choose a set of the old size. The model
+  `handover/` checks the rule (`ResizeGuard`), and its control `resize_during` breaks `SizeKept`.
 
 The answerer rule (`odd_answerers`, a finish that proposes the members that answered, pending
 bootstraps that grow) is deleted (step 2.1).

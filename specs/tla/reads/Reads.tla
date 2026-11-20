@@ -71,6 +71,21 @@
 (* ReadAgain : TRUE = a client gets the answer of a served read, and a     *)
 (*         second read can start: `ReadSeesAcked` then also orders reads.    *)
 (*                                                                           *)
+(* ReadHold : the candidate rules of #1270 (bypass read order): what the   *)
+(*         decision hold also gates on the read side of a ballot b. Its      *)
+(*         fence Phase 1 is covered when each prior configuration has a      *)
+(*         Phase-1 quorum of promises for b (`Covered`). A ballot that won   *)
+(*         by a full Phase 1 is covered when it leads, thus a rule acts      *)
+(*         only on a ballot that a bypass opened.                            *)
+(*   "off"   = the hold gates only the acks of the leader: the finding of    *)
+(*             #1270, a control.                                             *)
+(*   "basis" = a reader takes no read basis at b before b is covered.        *)
+(*   "serve" = a reader can take the basis and open a read at b, but         *)
+(*             serves it only when b is covered.                             *)
+(*   "prefix" = the chosen prefix of a reader counts a slot only once the    *)
+(*             ballot that chose it is covered: a leader sends no `Commit`   *)
+(*             of a bypass ballot before its fence Phase 1.                  *)
+(*                                                                           *)
 (* LiveLeader : TRUE = `LiveSpec` makes the campaign of the last ballot     *)
 (*         fair. FALSE = a control: no leader finishes the slots.            *)
 (*                                                                           *)
@@ -80,7 +95,7 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
           Readers, Basis, Fence, Laggers, Restarters, Refuse, Hold, Learner, Q1s, Q2s,
-          Targets, Seal, ReaderGate, ReadAgain, LiveLeader
+          Targets, Seal, ReaderGate, ReadAgain, ReadHold, LiveLeader
 
 ASSUME Seal \in {"quorum", "reads"}
 ASSUME ReaderGate \in {"promise", "belief"}
@@ -88,6 +103,7 @@ ASSUME Fence \in {"promise", "belief", "none"}
 ASSUME Laggers \cup Restarters \subseteq Acceptors
 ASSUME Refuse \in BOOLEAN
 ASSUME ReadAgain \in BOOLEAN
+ASSUME ReadHold \in {"off", "basis", "serve", "prefix"}
 ASSUME LiveLeader \in BOOLEAN
 \* Paxos safety rests on this: every Phase-1 quorum meets every Phase-2 quorum.
 ASSUME \A c \in Configs : \A P \in Q1s[c], C \in Q2s[c] : P \cap C # {}
@@ -314,6 +330,7 @@ LearnBasis(n, b) ==
     /\ Basis = "won"
     /\ status[b] \in {"leading", "switched"}
     /\ Below(n, b)
+    /\ ReadHold = "basis" => Covered(b)
     /\ b > basis[n][1]
     /\ basis' = [basis EXCEPT ![n] = <<b, FenceOf(b)>>]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
@@ -373,11 +390,13 @@ ReadServe ==
     /\ rd.state = "open"
     /\ BasisOf(rd.node)[1] = rd.b
     /\ ReadGate(rd.node, rd.b)
+    /\ ReadHold = "serve" => Covered(rd.b)
     /\ \E Q \in Q1s[cfgOf[rd.b]] : Q \subseteq {x[1] : x \in rd.answers}
     /\ LET i == Max({x[2] : x \in rd.answers} \cup {rd.fence})
        IN  /\ \A s \in Slots : s <= i =>
-                  \E v \in Values : \E b \in Ballots : \E Q \in Q2s[cfgOf[b]] :
-                      \A a \in Q : <<a, s, b, v>> \in votes
+                  \E v \in Values : \E b \in Ballots :
+                      /\ ReadHold = "prefix" => Covered(b)
+                      /\ \E Q \in Q2s[cfgOf[b]] : \A a \in Q : <<a, s, b, v>> \in votes
            /\ rd' = [rd EXCEPT !.state = "done", !.index = i]
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
                    proposals, acked, basis, own, since, heard, returned>>
