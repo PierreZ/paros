@@ -2301,6 +2301,7 @@ The answer to #1274:
   only after the seal wrote it (`seal_long`, `boundary_early`).
 - **Open**: the leader of a fresh journal (`None` or unset). Both pass; the journal state model
   (#1189) decides.
+
 ### `offload/`: the offloader and the races of offload, for #1256
 
 In design A (`docs/architecture/02-data-plane.md` section 2.10) a sealed segment goes to an object
