@@ -19,7 +19,7 @@
 //! A write acked before the read began was chosen by a full Phase-2 quorum
 //! `Q2` of the configuration in force at some slot `s`. The read's Phase-1
 //! quorum `Q1` intersects `Q2` ([`crate::membership::QuorumSystem::cross_intersects`] —
-//! under a grid, a row meets every column in one cell), so some acceptor in
+//! under a grid, a row meets every column in one acceptor), so some acceptor in
 //! `Q1` voted `s` and its watermark is at least `s`; the maximum over `Q1`
 //! is therefore at least `s`, and the replica serves only after applying
 //! `s`. Every write acked before the read is thus visible to it, which is

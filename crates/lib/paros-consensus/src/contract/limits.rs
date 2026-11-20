@@ -1,7 +1,7 @@
 //! The **limits** a deployment runs under: the page sizes and the read
 //! window the driver picks at boot ([`Limits`]), and the ceilings each one
-//! lies under. A limit is per process and never on the wire, so a mixed
-//! cell is legal: a receiver checks a page against the ceiling, never
+//! lies under. A limit is per process and never on the wire, so a mix of
+//! limits across a pool is legal: a receiver checks a page against the ceiling, never
 //! against the sender's size.
 
 /// Maximum accepted records and faulty entries carried by one promise page —

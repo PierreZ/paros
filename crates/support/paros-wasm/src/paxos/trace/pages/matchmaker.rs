@@ -8,7 +8,7 @@
 //! The base run ends with a screen of choices; every other run ends with a
 //! way back to it.
 
-use super::{any, decree_outcome, kind, log_outcome, touches};
+use super::{any, decree_outcome, kind, log_outcome, touches, voted};
 use crate::paxos::action::{Action, BallotSpec};
 use crate::paxos::level::common::{crash, open, propose, start_election as elect};
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
@@ -54,16 +54,6 @@ fn leads(id: u64) -> impl Fn(&WorldView) -> bool {
             .nodes
             .iter()
             .any(|node| node.id == id && node.role == Some(RoleView::Leader))
-    }
-}
-
-/// Acceptor `id` of the single-decree world voted for `value`.
-fn voted(id: u64, value: &'static str) -> impl Fn(&WorldView) -> bool {
-    move |world| {
-        world
-            .nodes
-            .iter()
-            .any(|node| node.id == id && node.accepted.iter().any(|record| record.value == value))
     }
 }
 
@@ -371,6 +361,21 @@ fn skipped() -> Scenario {
              Phase 1 meets no vote for alpha, so two values are chosen.",
         )
         .play(open(8, "bravo"), "proposer 8 opens a ballot for bravo")
+        .settle(kind("Prepare"))
+        .settle(kind("Promise"));
+    run.beat("Acceptor 3 votes for bravo. Two values are chosen.")
+        .find(
+            "Two values are chosen. What let it happen?",
+            &[
+                "Acceptor 3 voted for bravo",
+                "Proposer 8 chose its acceptors with no matchmaker",
+                "Acceptors 1 and 2 forgot alpha",
+            ],
+            1,
+            "A matchmaker tells a new ballot the acceptors of the old ballots, and its Phase 1 \
+             asks them too. With no matchmaker, ballot 1.8 asked acceptor 3 alone and met no \
+             vote for alpha.",
+        )
         .settle(|message| message.kind != "Commit")
         .drop_all(kind("Commit"))
         .holds(voted(3, "bravo"), "acceptor 3 votes for bravo")

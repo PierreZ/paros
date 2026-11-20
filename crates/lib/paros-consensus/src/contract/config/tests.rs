@@ -15,18 +15,16 @@ fn three_peers() -> Config {
 }
 
 /// A plain bootstrap is the peers under the quorum system, sorted, with
-/// the cell and the role counts of the configuration. It has no labels.
+/// the role counts of the configuration. It has no labels.
 #[test]
-fn a_plain_bootstrap_carries_the_peers_cell_and_counts() {
+fn a_plain_bootstrap_carries_the_peers_and_counts() {
     let mut config = three_peers();
     config.quorum_system = QuorumSystem::grid(1, 3);
-    config.cell_id = 9;
     config.proxy_count = 2;
     config.replica_count = 3;
     let bootstrap = config.bootstrap();
     assert_eq!(bootstrap.members(), nodes([1, 2, 3]));
     assert_eq!(bootstrap.quorum_system(), QuorumSystem::grid(1, 3));
-    assert_eq!(bootstrap.cell(), 9);
     assert_eq!(bootstrap.proxy_count(), 2);
     assert_eq!(bootstrap.replica_count(), 3);
     assert!(!bootstrap.is_zoned());
@@ -44,7 +42,6 @@ fn a_labeled_bootstrap_keeps_each_peer_with_its_label() {
         FailureDomain::new("", "a"),
         FailureDomain::new("", "b"),
     ];
-    config.cell_id = 4;
     config.proxy_count = 1;
     let bootstrap = config.bootstrap();
     assert!(bootstrap.is_zoned());
@@ -61,7 +58,6 @@ fn a_labeled_bootstrap_keeps_each_peer_with_its_label() {
         bootstrap.domain_of(NodeId(2)),
         Some(&FailureDomain::new("", "b"))
     );
-    assert_eq!(bootstrap.cell(), 4);
     assert_eq!(bootstrap.proxy_count(), 1);
     assert_eq!(bootstrap.replica_count(), 0);
 }
@@ -84,7 +80,6 @@ fn the_recorded_configuration_drops_only_the_counts() {
     config.peers = nodes([1, 2, 3]);
     config.nodes = nodes([1, 2, 3, 4]);
     config.writer_mode = WriterMode::Multi;
-    config.cell_id = 7;
     config.proxy_count = 3;
     config.replica_count = 2;
 

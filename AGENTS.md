@@ -74,7 +74,10 @@ more rules)), segment replica sets (`specs/tla/segment-replicas/`: a write reach
 replica set of its segment, the boundary state of the seal in the segment record, reads routed
 to the set of the segment, retire at `F + 1` holders; #1271 (a write reaches only the replica
 set of its segment)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
-designed again from the ground up, together with Pierre.
+designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
+`step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
+`Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
+and its flight rule has a model, `specs/tla/flight-rule/`. No journal code exists yet.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
 same code: model-based trace checking (each run of the core is checked against its TLA+
@@ -265,7 +268,10 @@ borrow, so a second `ready()` before `advance()` is a compile error. Persist-bef
 ordering is documented on `Ready`/`HardState`
 (`docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`). The driver that owns the core and
 does its I/O was in the removed `paros-roles` (`docs/archive/v0.2.0-alpha.1/paros-roles.md`);
-today only the examples, the model checkers and the wasm engine drive the core.
+today only the examples, the model checkers and the wasm engine drive the core. The journal's
+roles follow a different contract, the flight rule (`docs/architecture/04-roles.md` §4.2): each
+persist batch has an id and each send names the persist id it waits on, so a driver may pipeline
+and group commit. §4.2 lists every difference from `Ready`/`advance` as a change or a proposal.
 
 **One file per role; `ColocatedNode` is wiring** (timers, messages, the persist-before-send
 batch) and holds **no protocol tally of its own**:
@@ -279,7 +285,7 @@ batch) and holds **no protocol tally of its own**:
 - `membership/` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
 - `matchmaking.rs` — the candidate's matchmaking phase · `matchmaker.rs` (+ `reconfigurer.rs`)
   — the registry and its generation handover · `decree.rs` — the generic single-decree
-  Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
+  Paxos (`Decree<Id, V>`): the handover's successor, and any one-shot decision of a caller above the core
 - `proxy_leader.rs`, `replica_node.rs` — the second and third deployments
 
 Beside the roles, the **foundations**: `types.rs` (the Paxos scalars), `journal/` (what the log
@@ -395,8 +401,12 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   coordinator's `ReconfigureMatchmakers` too (#563: the node refuses an ask whose generation is
   no longer in force, so a re-ask the read left stale never starts a second handover);
   matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
-  `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop
-  quorum's maximum decree promise; any node that meets `Stopped { successor: None }` finishes
+  `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the decree
+  round on the node's disk, which the driver writes before the round's first request leaves
+  (`ReconfigurerReady::round`; decided on 2026-11-19, #1229 (a stale `Stopped` reply reuses a
+  decree ballot): a `Stopped` sent to an earlier incarnation can reach a later one, so the stop
+  quorum's maximum decree promise alone does not keep two incarnations apart), and above that
+  maximum promise, which only skips rounds the matchmakers refuse; any node that meets `Stopped { successor: None }` finishes
   the handover. `MatchmakerSet::new` / `AcceptorConfig::new` are the only constructors.
 
 Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,

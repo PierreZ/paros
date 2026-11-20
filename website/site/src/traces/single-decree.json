@@ -28971,7 +28971,18 @@
         {
           "says": "Acceptors 2 and 3 vote for bravo. Now two values are chosen.",
           "from": 23,
-          "to": 30
+          "to": 30,
+          "question": {
+            "asks": "Two values are chosen. Which step broke Paxos?",
+            "answers": [
+              "Acceptor 2 promised ballot 1.8 as if it never voted",
+              "Acceptor 3 voted for bravo",
+              "Proposer 8 proposed bravo"
+            ],
+            "right": 0,
+            "why": "No promise reported a vote, so proposer 8 was free to propose bravo, and acceptor 3 kept its own promise. Acceptor 2 broke the rule: its vote for alpha was gone, so the two majorities met at an acceptor with no memory.",
+            "after": true
+          }
         },
         {
           "says": "A majority that forgets its vote is no longer a majority. So an acceptor keeps its disk, and paros refuses to boot a member whose disk is empty.",

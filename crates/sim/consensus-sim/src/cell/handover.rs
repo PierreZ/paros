@@ -3,8 +3,8 @@
 //! handover to a target drawn from the matchmaker pool, finishes a frozen
 //! generation it meets with no successor, adopts the set a handover chose,
 //! and tells a matchmaker left behind the set it knows (the discovery rules of
-//! `paros_consensus::models::handover`). The reconfigurer holds no
-//! durable state: a crash of its node loses it.
+//! `paros_consensus::models::handover`). The reconfigurer keeps only its
+//! decree round on disk: a crash of its node loses the rest.
 
 use moonpool_walk::{Cx, sometimes};
 use paros_consensus::matchmaker::{
@@ -19,9 +19,10 @@ use super::{Cell, Envelope, Party, Wire, reach};
 const ABANDON_TICKS: u64 = 12;
 
 impl Cell {
-    /// A fresh reconfigurer for node `id`.
+    /// A fresh reconfigurer for node `id`, from its decree round on disk.
     pub(super) fn reconfigurer(&self, id: NodeId) -> MatchmakerReconfigurer {
-        MatchmakerReconfigurer::new(id, self.flavor.limits)
+        let round = self.decree_rounds[Self::index(id.0)];
+        MatchmakerReconfigurer::new(id, round, self.flavor.limits)
     }
 
     /// A node starts a handover from the set it believes to a target drawn
@@ -57,9 +58,15 @@ impl Cell {
 
     /// Send the reconfigurer's batch of node `id`.
     pub(super) fn flush_reconfigurer(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
-        let ready = self.reconfigurers[Self::index(id.0)].ready();
+        let index = Self::index(id.0);
+        let ready = self.reconfigurers[index].ready();
+        // Persist before send: the round is on disk before its requests leave.
+        let round = ready.round();
         let requests = ready.requests().to_vec();
         ready.advance();
+        if let Some(round) = round {
+            self.decree_rounds[index] = round;
+        }
         for (to, request) in requests {
             cx.send(Envelope {
                 to: Party::Matchmaker(to),
