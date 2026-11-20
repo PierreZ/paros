@@ -33,3 +33,7 @@ reads_bypass_hold_again  violation  ci
 # Two slots, and three leaderships with a reader on the middle one.
 reads_two_slots          pass       long  50
 reads_three              pass       long  50
+# Liveness: an open read ends. The control: no leader finishes a slot that a
+# minority voted, so a read whose index is above the chosen prefix waits.
+live                     pass       ci
+live_no_leader           violation  ci

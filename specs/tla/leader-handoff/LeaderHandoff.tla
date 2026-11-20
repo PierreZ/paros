@@ -499,7 +499,6 @@ Fairness ==
   /\ \A n \in Acceptors, s \in Slots : WF_vars(Decide(n, s)) /\ WF_vars(Resend(n, s))
   /\ \A n, p \in Acceptors : WF_vars(CatchUp(n, p))
   /\ \A n \in Acceptors : WF_vars(Install(n))
-  /\ Resign => \A n \in Acceptors : WF_vars(FenceResign(n))
 
 LiveSpec == Spec /\ Fairness
 

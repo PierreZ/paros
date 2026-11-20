@@ -58,3 +58,8 @@ owner_paros         pass       long
 gc_two_slots        pass       long
 handoff_two_slots   pass       long
 chain_two_slots     pass       ci
+# Liveness: after a journal move by a bypass, every proposed slot is acked.
+# The control: the old members leave after the first leadership, so the
+# fence Phase 1 and the decision hold wait for good.
+live                     pass       ci
+live_old_gone            violation  ci

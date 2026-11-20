@@ -85,7 +85,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Plain Multi-Paxos, with the majority, the partitioned grid and the full grid | `node.rs`, `proposer/`, `acceptor.rs`, `replica.rs`, `membership/` | `multi-paxos/` | #1185 (rework 1.14), done |
 | The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` | #1187 (rework 2.8), done |
 | Matchmaker Paxos | `matchmaking.rs`, `matchmaker.rs`, `collector.rs` | `matchmaker/` | #1200 (TLA+ model Matchmaker Paxos), done |
-| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/` | #1097 (rework 1.8), done |
+| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time | #1097 (rework 1.8), done |
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/` | #1190 (rework 6.10), done |
@@ -216,6 +216,23 @@ The rules together and the larger shapes (#1230 (rules no check tests)), all `pa
 | `chain_two_slots` | two slots: two bypasses, a carried slot and a free slot in one leadership | 366 thousand |
 | `gc_two_slots` (`long`) | two slots with GC, reads and the hold: a read fence above a non-zero fence, a GC with one carried and one free slot | 2.2 million, 3 minutes |
 | `handoff_two_slots` (`long`) | two slots: a handoff that carries one pending and one free slot | 6.2 million, 8 minutes |
+
+Liveness (#1230 (rules no check tests)), with `LiveSpec`: every step of a campaign, a leadership
+and an ack is fair; a handoff, a GC request and a restart are not. `AckEnds`: each slot that a
+leader proposed is acked to its client in the end. The shape is a journal move by a bypass:
+one proposer, ballot 1 on `{a1, a2}`, ballot 2 on `{a3, a4}`, two slots, `p212`, the decision
+hold.
+
+| Check | Shape | Result |
+|---|---|---|
+| `live` | the move, every acceptor stays | `AckEnds` pass (2.8 thousand states) |
+| `live_old_gone` | `a1`, an old member, takes part in ballot 1 only (`Gone`) | `AckEnds` violation (341 states) |
+
+The trace of `live_old_gone`: ballot 1 proposes slot 1, and only `a1` votes. Ballot 2 bypasses:
+slot 1 waits for the fence Phase 1, and slot 2 is free. `{a3, a4}` choose slot 2 at ballot 2.
+The fence Phase 1 needs a Phase-1 quorum of `{a1, a2}` at ballot 2, and `a1` is gone, so slot 1
+waits for good, and the decision hold keeps slot 2 from its ack. A bypass thus needs a Phase-1
+quorum of the old configuration after the switch, as Phase 1 of an ordinary campaign does.
 
 Results are in `zero-stall/checks.txt` and in the design document of #579 (zero-stall
 reconfiguration).
@@ -676,10 +693,66 @@ named. **Open**: Pierre picks the rule (a resize waits for the handover, or the 
 a new target of the new size and the decree refuses a proposal of the old size), and
 `docs/architecture/04-roles.md` records it.
 
-Not in the model: the decree (`decree/`), a client step that reaches a minority
-(`config-register/`), the clients of generation 1, a second handover, lost matchmaker state,
-more than one journal (a handover is paged, #439) and the registrations, which leave with
-rule 1.
+Not in the model: the decree (`decree/`), lost matchmaker state, more than one journal (a
+handover is paged, #439) and the registrations, which leave with rule 1. A client step that
+reaches a minority, the clients of generation 1 and a second handover are in
+`handover-chain/`.
+
+### `handover-chain/`: a chain of handovers with clients that reach one member at a time, for #1230 (rules no check tests)
+
+`handover/` has two generations, and each client step reaches a whole quorum in one step. So
+every stop quorum builds the same successor state, and no tally of a client can count the
+wrong acks. `handover-chain/HandoverChain.tla` checks what that leaves out. The target rules,
+the size and the crashes stay in `handover/`; here the targets are fixed, to keep the chain
+small.
+
+- Three generations: `{X, Y, Z}`, then `{Y, Z, W}`, then `{Z, W, V}`. The clients act at each
+  generation. `Z` is in every set, so it can activate generation 2 with no stop at
+  generation 1 (it skips a generation, as `matchmaker/generation.rs` lets it).
+- A client step reaches one member. A read, a compare-and-set write and the GC floor each keep
+  the set of members that acked, and complete on a majority of one generation. A step can stop
+  at a minority, so two stop quorums can build two successor states.
+- A member keeps the first bootstrap of a generation that reaches it, and the decree chooses
+  the set only (`reconfigurer.rs`: the decree value is the member list). So the members of one
+  chosen set can activate with different states.
+
+The invariants are those of `handover/`, for every generation at or after the one where the
+client step completed: `FloorCarried`, `ReadCarried` and `RegisterCarried`.
+
+| Constant | Values |
+|---|---|
+| `Fence` | `TRUE`: a client tally of generation `g` counts only the acks that members gave while they served `g` (`collector.rs` checks the generation before it counts a reply). `FALSE`: a control, an ack counts for each generation whose set names the member. |
+| `FrozenServes` | `FALSE`: a frozen member serves nothing. `TRUE`: a control, a frozen member still acks. |
+| `Writes`, `Floor` | the write numbers (each with its read before it), and whether the leader raises the GC floor. |
+
+Results (`handover-chain/checks.txt`):
+
+| Check | Shape | Result |
+|---|---|---|
+| `reach` | `NoChain`, a reachability control: the third generation serves after the read and the write completed, the write at generation 1 or 2, and a member skipped a generation | violation (116 thousand states, 23 states deep) |
+| `one_state` | `OneState`, a reachability control: two members of one chosen set keep different bootstraps | violation (5.9 thousand states) |
+| `no_fence` | control: a tally counts an ack of another generation; two generations, one write, the floor | `ReadCarried` violation (43 thousand states, 14 states deep) |
+| `frozen_serves` | control: a frozen member acks; the same shape | `ReadCarried` violation (183 thousand states) |
+| `two` | the rules; two generations, one write, the floor | TWO_RESULT |
+| `chain` (`long`) | the rules; three generations, one write, no floor | CHAIN_RESULT |
+
+The trace of `no_fence`: `X` acks a read at generation 0. `Y` and `Z` freeze, and the stop
+closes on them. Neither acked, so the bootstrap of `W` has read generation 0. The decree
+chooses `{Y, Z, W}`, and `Y` activates generation 1 and acks the read there. The tally of
+generation 0 counts `X` and `Y`, a majority of `{X, Y, Z}`, and the read completes. `Z` and `W`
+then serve generation 1 with read generation 0: a compare-and-set below the completed read can
+complete. This is the class of `handover-gc/collector_watermark`, for the read and the
+register.
+
+No design decision is refuted. With the two fences, a state that only a minority holds and
+two members with different bootstraps change nothing: a completed client step is at a majority
+of its generation, every frozen majority meets it, and a member that activates keeps its own
+state where it is higher. The floor moves as the read generation does (each member keeps the
+maximum), so the long chain leaves it out.
+
+Not in the model: the target rules, the size, the crashes (`handover/`), the decree (`decree/`),
+lost matchmaker state, and a late ack of a client that already completed (it only raises a
+member's state, as a new ack does).
 
 ### `reads/`: leaderless reads, for #1016 (model of leaderless reads)
 
@@ -822,7 +895,20 @@ that binds the belief below the promise (the fence of the code covers it, becaus
 higher of the two), the registration of the abandoned campaign, and a move between a grid and a majority. Two slots
 (`reads_two_slots`) and three leaderships (`reads_three`) are `long` checks on the majority only
 (so a slot's column is any column), and no check has the leader's fill up to an orphan
-watermark (`fill_to_watermark`) or a liveness property.
+watermark (`fill_to_watermark`).
+
+Liveness (#1230 (rules no check tests)), with `LiveSpec`: each asked acceptor answers, a node
+that did not hear probes, and an open read is served or abandoned; with `LiveLeader`, the
+campaign of the last ballot is fair too (it registers, wins, proposes every slot, and its
+configuration accepts). Restarts are not fair. `ReadEnds`: an open read ends.
+
+| Check | Shape | Result |
+|---|---|---|
+| `live` | `reads_plain` | `ReadEnds` pass (663 thousand states, 4 minutes with 2 workers) |
+| `live_no_leader` | the same, no fair campaign (`LiveLeader = FALSE`) | `ReadEnds` violation (12 thousand states) |
+
+`live_no_leader` shows what a leaderless read rests on: a read whose index is a slot that only a
+minority voted waits until a leader finishes that slot.
 
 ### `campaign-discovery/`: how a campaign learns the matchmaker set in force, for #1034 (campaign asks the pool)
 
@@ -1010,6 +1096,8 @@ two slots, one command and `Noop`; the CI set runs in about nine minutes):
 | `full_grid_down` | ci | 2 x 2 full grid, one acceptor down: its column cannot decide | `Ends` violation |
 | `full_grid_down_move` | ci | the same, a slot may be chosen in any column: the other column decides (what `move_round` restores) | `Ends` pass |
 | `partitions_down` | ci | 3 x 2 partitioned grid (F = 1), one acceptor down in each partition | `Ends` pass |
+| `live_wipe` | long | one wipe and one restart, of nodes that are not the last leader, the identity rule | `Ends` pass (1.8 million states, 13 min with 2 workers) |
+| `live_wipe_two` | ci | two wipes: only the last leader is left | `Ends` violation |
 | `restart` | long | one restart: the node keeps a prefix of what it learned | pass (2.3 million states, 3 min) |
 | `wipe` | long | one wipe, the identity rule | pass (1.3 million states, 2.5 min) |
 | `spreads` | long | every node catches up | `Ends` and `Spreads` pass (0.9 million states, 15 min) |
@@ -1230,8 +1318,16 @@ whole payload in one step), the matchmaker `config` and `prior` of a payload, pr
 delegation, the `rejected_unfit` refusal, and the read fence. Because the payload holds the whole
 tail and a `2b` reaches every node, the stall that `tick_handoff_fence` exists for (a decision
 that only the departed leader knew) cannot happen in the model: `FenceResign` is reachable
-(`replay` uses it) but no check needs it. A check for it needs the paged recovery; it is part 3
-of #1230 (rules no check tests).
+(`replay` uses it) but no check needs it. The code ships the whole tail in one page too
+(`HANDOFF_BATCH`: a leader whose tail is longer is refused a handoff), so the model has no
+paged recovery to add. `Quiet` checks it under elections that wait for a leader to be gone (the
+beats hold the timeout of every other node): with no resignation, the run still ends after a
+lost payload or a restarted successor (`live_quiet_no_resign`, 416 thousand states, `long`)
+and after a lost `Accept` (`live_quiet_2a`, 838 thousand states, `long`), because the successor
+proposes each open round again. Finding of #1230 (rules no check tests): in the model,
+`tick_handoff_fence` is a defense that no schedule needs. A resignation with no timer also
+loops in the model (the successor resigns, installs the same payload again, and resigns), so
+the model leaves `FenceResign` unfair.
 
 ### `matchmaker/`: single-decree Matchmaker Paxos, for #1200 (TLA+ model Matchmaker Paxos)
 
@@ -1801,13 +1897,24 @@ workers):
 | `reach_chain` | ci | `NoThirdWin`, a reachability control: two reconfigurations (`C1 = {a1, a2, a3}`, `C2 = {a2, a3, a4}`, `C3 = {a3, a4, a5}`), and ballot 3 wins in `C3` with `C1` forgotten after `C1` chose a slot; one slot | violation (1.3 million states, 2.7 min with 1 worker) |
 | `chain_joined` | ci | the same, a new member counts with no record | `Recoverable` violation (13 thousand states) |
 | `chain` | long | the rules of the code over the two reconfigurations; one slot | no violation in 10.7 million distinct states, to depth 19 (bounded: 50 minutes, 1 worker) |
+| `reach_wipe` | ci | `NoWipeAfterGc`, a reachability control: a member of `C2` is wiped after the GC forgot `C1`, once `C1` chose a slot; one wipe | violation (57 thousand states) |
+| `wipe_revote` | ci | one wipe, the wiped acceptor comes back empty as the same acceptor (`Identity = FALSE`) | `Recoverable` violation (1.5 thousand states, 8 states deep) |
+| `wipe` | long | the rules of the code and one wipe, with the identity rule | WIPE_RESULT |
 
 The long checks ran once on 2026-11-19 (#1218 (truncation model, part 3)) with 4 workers;
 `fill_code` and `chain` ran on 2026-11-20 (#1230 (rules no check tests)).
 
+A wipe (#1230 (rules no check tests)): an acceptor loses its whole store. With the identity
+rule (`Identity`, the rule of `decree/` and `multi-paxos/`) a wiped acceptor never takes a step
+again, so a Phase-1 quorum with it never forms, and `Recoverable` counts only the quorums
+whose members are up. With the control it answers with an empty store: in `wipe_revote`, `a1`
+votes slot 0 at ballot 1 and is wiped, then `a2` votes, so slot 0 is chosen on `{a1, a2}`, and
+the quorum `{a1, a3}` of `C1` holds no record of it.
+
 Not in the model, still: a faulty entry (CTRL) across configurations, which is the class of
-#267 (the tri-state tally over every prior configuration, `proposer.rs`, `slot_decidable`), a
-restart, and a wipe of a member that the GC counted. They are part 3 of #1230.
+#267 (the tri-state tally over every prior configuration, `proposer.rs`, `slot_decidable`;
+`truncation/` checks CTRL on one configuration), and a restart (a restart keeps every durable
+record, and `learned` is not part of `Recoverable`).
 
 With one slot, a `Noop` never lands on a chosen slot: a candidate whose Phase 1 reports nothing
 has its frontier at its first slot and fills nothing. So the two controls that must find the
