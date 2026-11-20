@@ -84,7 +84,11 @@ the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a wr
 replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
 leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
 segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
-reaches only the replica set of its segment)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
+`SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
+write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
+`Truncate` in both modes, a `Fence(None)` at a seal; #1274 (multi-writer mode through
+SetLeader(None) and expected_seq)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),

@@ -133,6 +133,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
+| Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -2229,3 +2230,73 @@ The answer to #1271:
 - No decision is refuted. The model has no `Truncate`: that the trim floor (`first_seq`) is part
   of the boundary state is a reading, not a checked fact, and the journal state model (#1189)
   checks it.
+
+### `multi-writer/`: multi-writer mode through `SetLeader(None)` and `expected_seq`, for #1274
+
+Pierre decided on 2026-11-20 that `SetLeader(new, old)` may name `new = None`: the journal is
+then multi-writer, and the mode is what the last applied `SetLeader` left. There is no dedup
+table: a single writer gets exactly-once through `expected_seq`, multi-writer is at-least-once,
+and a held write is answered `Unknown` and resolved by a resend with the same `expected_seq`
+(#1232 (held writes)). No model checked the switch between modes.
+
+The log is abstract (the slots are chosen in order; `multi-paxos/` checks the agreement). Two
+clients call `SetLeader` with a fresh uuid of their own or `None` (a compare-and-set against the
+leader they read, which races with the slots in flight), send fenced writes under the uuid they
+last won (pipelined, each at the position after the last one; a deposed client keeps sending),
+send unfenced writes in any mode, and truncate up to the tail, fenced or not. A request stays in
+the network after it is proposed, so it can be proposed again in another slot: a resend, a copy
+of the transport, or a write that an old consensus leader proposed. One fold judges each slot at
+apply and records one answer; a client may never see it (the held write). The invariants judge
+every answer, so the answer to a resend is judged too. A client that sees a final refusal of a
+fenced write while the journal is multi-writer writes it again, unfenced. With `SealAt`, the slot
+`SealAt` is the first slot of the next segment: the fold of the old segment writes the boundary
+uuid into the matchmaker record after its last slot, and the first leader of the next segment
+proposes `Fence(uuid)` there (#1271 (a write reaches only the replica set of its segment)). The
+oracle `OracleAt` computes the leader at each slot from the `SetLeader` commands alone, with no
+fold and no segment, so a `Fence` with a wrong value shows.
+
+The fold of a fenced write, in this order: below `first_seq` it is `truncated`; below `next_seq`
+it is `dup` when the record there is the same write, else `taken`; a uuid that is not the
+leader is `fenced`; above `next_seq` it is `early`; else it is applied. An unfenced write is
+applied iff the leader is `None`, else `wrongmode`.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: `FenceTrue` (each record and each accepted truncate was judged under the leader that the `SetLeader` commands alone give), `AckTrue` (every `applied` or `dup` answer is the record at its `seq`), `RefusalFinal` (a `fenced` or `taken` answer to a fenced write is true now and for ever), `ExactlyOnce` (a write is at most once in the journal as a fenced record, and never both fenced and unfenced), `BasisFresh` (a writer never aims below the `next_seq` at which it started to lead), `FirstMonotone`; two clients, two writes each, two `SetLeader`, one `Truncate`, five slots, a fresh journal whose leader is `None`; 2.0 million distinct states |
+| `unset` | ci | pass: the same with a fresh journal whose leader is unset (every write and truncate refused until a `SetLeader`); 1.5 million distinct states |
+| `seal_long` | ci | pass: the same with a seal, the `Fence` at slot 4, six slots; 1.2 million distinct states |
+| `safety_long` | long | pass: six slots, no seal |
+| `reach_switch` | ci | violation: a write applied before `SetLeader(None, w)` is answered `dup` on its resend after it |
+| `reach_back` | ci | violation: after `SetLeader(w2, None)` a fenced write of `w2` is applied |
+| `reach_truncated` | ci | violation: an unfenced `Truncate` pushes a fenced write below `first_seq`, and its resend is answered `truncated` |
+| `reach_fence_none` | ci | violation: the `Fence` at the seal carries `None`, and a write after it is applied |
+| `multi_refusal` | ci | violation of `UnfencedRefusalFinal`, not a rule: an unfenced write lands from one copy while another copy is refused `wrongmode`; a resend cannot resolve an unfenced write |
+| `fence_propose` | ci | violation of `FenceTrue`: the fence is judged against the applied state at propose and not at apply; an unfenced truncate proposed while the leader is `None` lands after `SetLeader(a, None)` |
+| `fence_propose_write` | ci | violation of `FenceTrue`: the same with no truncate; a write lands under a leader that is not its own |
+| `dedup_after` | ci | violation of `RefusalFinal`: the fence comes before the position; a write applied before `SetLeader(None, a)` is refused `fenced` on its resend |
+| `dedup_after_twice` | ci | violation of `ExactlyOnce`: the same; the writer then writes it again, unfenced, and it is in the journal two times |
+| `basis_stale` | ci | violation of `BasisFresh`: a writer that won keeps the basis it had and aims at a position of the mode before |
+| `boundary_early` | ci | violation of `FenceTrue`: the first leader of the next segment reads the matchmaker record before the seal wrote the uuid, and proposes the `Fence` with the old value |
+
+The answer to #1274:
+
+- **The decisions hold.** No decision is refuted. `SetLeader(None)` and `SetLeader(new, None)`
+  switch the mode safely, with the fence judged at apply in both directions (`fence_propose`).
+- **The resend resolves a held write only if the fold judges the position before the fence.**
+  This rule is new. With it, a write in flight across `SetLeader(None, w1)` gets one of four
+  answers on a resend: `dup` (written), `fenced` or `taken` (not written, for ever), `early`
+  (resend later), or `truncated`. Without it the resend of a written write is refused, and a
+  writer that moves to unfenced writes lands it two times (`dedup_after`, `dedup_after_twice`).
+- **`truncated` is the one answer that resolves nothing**, as section 2.2 of
+  `docs/architecture/02-data-plane.md` already says. In multi-writer mode any writer may
+  truncate, so another writer can cause it (`reach_truncated`). The issue's invariant "every
+  `Unknown` resolves by a resend" holds except there.
+- **The switch back.** Only fenced writes of `w2` land after `SetLeader(w2, None)`; `w2` takes
+  its basis from the view of the answer (`basis_stale`). The journal is safe without the basis
+  rule (the position check refuses such a write); the rule makes the writer's first write land.
+- **An unfenced write cannot be resolved by a resend** (`multi_refusal`): that is the
+  at-least-once of multi-writer mode, also for a refusal.
+- **The seal.** `Fence(None)` works: the matchmaker record holds `None`, and the leader reads it
+  only after the seal wrote it (`seal_long`, `boundary_early`).
+- **Open**: the leader of a fresh journal (`None` or unset). Both pass; the journal state model
+  (#1189) decides.
