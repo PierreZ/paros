@@ -123,7 +123,9 @@ Test only: `publish = false`, never a dependency of another crate.
   and on a grid), replicas, leaderless reads, every compartment, the batcher, matchmakers with
   reconfiguration, matchmakers with every compartment, disk faults (on five and on three), retirement
   and rejoin, the matchmaker set handover, and leaderless reads on matchmakers whose pools lag
-  (`lagging-reads`, #1228 (stale read by a lagging reader)). 60 seeds each in CI; `lagging-reads`
+  (`lagging-reads`, #1228 (stale read by a lagging reader)), and Multi-Paxos on five steered
+  toward compactions (`compaction`, `Flavor::compacting`: a client claims an unclaimed journal
+  and often truncates, and the first leader that compacts steps down once). 60 seeds each in CI; `lagging-reads`
   takes 120. The `lagging-reads` walk is steered (`Flavor::lagging_reader`) and is the control of
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.
@@ -148,9 +150,9 @@ Test only: `publish = false`, never a dependency of another crate.
   matchmakers against `multi-paxos/`; the flavors with proxy leaders against `proxy-leader/`;
   the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`; the lagging
   reads against `reads/` (controls: a read fence below the promise, a hidden watermark);
-  Multi-Paxos on five against `truncation/` (control: a compaction past the fold; a compaction
-  needs a claim, accepted writes and an applied truncation, so the window starts at seed 70);
-  every compartment against `compartments/` (control: a replica read with no quorum). A cell walk has
+  the `compaction` flavor against `truncation/` (control: a compaction past the fold);
+  every compartment against `compartments/` (control: a replica read with no quorum). Every
+  control searches from seed 1, never from a seed picked by hand. A cell walk has
   150 chaos steps. Each test searches the seeds (at most 300, oracles on, no TLC) and TLC checks
   the first seed and each seed that meets a rule of the spec that no checked seed met before; a
   walk of more than 200 kept events is skipped (TLC grows faster than the trace). The test fails

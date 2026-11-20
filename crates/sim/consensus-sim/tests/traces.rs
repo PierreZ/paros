@@ -263,7 +263,7 @@ fn tlc_accepts_the_lagging_read_walks() {
 
 #[test]
 fn tlc_accepts_the_truncation_walks() {
-    accepts(Spec::Truncation, &Flavor::multi_paxos_five());
+    accepts(Spec::Truncation, &Flavor::compaction());
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn tlc_refuses_a_disk_that_forgets_its_votes() {
         Spec::MultiPaxos,
         &Flavor::multi_paxos(),
         Mutant::ForgetVotes,
-        30..=40,
+        1..=40,
         40,
     )
     .expect("TLC refuses a seed of the mutant");
@@ -350,7 +350,7 @@ fn tlc_refuses_a_proxy_that_keeps_its_rounds_across_a_crash() {
         Spec::ProxyLeader,
         &Flavor::proxies(),
         Mutant::KeepProxyRounds,
-        10..=20,
+        1..=20,
         200,
     )
     .expect("TLC refuses a seed of the mutant");
@@ -408,7 +408,7 @@ fn tlc_refuses_an_early_gc() {
 /// read only when a lagging acceptor promised a campaign that chose a
 /// write; TLC refuses the answer whose fence is below its promise. The
 /// promise passes the belief only on an acceptor whose pool lags: rare,
-/// so the window starts at the first seed that has one.
+/// so the search runs over 70 seeds.
 #[test]
 fn tlc_refuses_a_read_fence_below_the_promise() {
     require_tlc(&Spec::Reads.check());
@@ -416,7 +416,7 @@ fn tlc_refuses_a_read_fence_below_the_promise() {
         Spec::Reads,
         &Flavor::lagging_reads(),
         Mutant::BeliefFence,
-        50..=70,
+        1..=70,
         150,
     )
     .expect("TLC refuses a seed of the mutant");
@@ -457,17 +457,15 @@ fn tlc_refuses_a_read_answer_that_hides_its_watermark() {
 /// The disk compacts each truncation to the end of the chosen prefix,
 /// past the records at or above `first_seq`. The oracle sees a bug only
 /// when a reader asks that disk for a lost record; TLC refuses the
-/// compaction itself. A compaction needs a claim, accepted writes and a
-/// truncation that a node applied: rare in a walk of 150 steps, so the
-/// window starts near the first seed that compacts (77).
+/// compaction itself, on the walk steered toward compactions.
 #[test]
 fn tlc_refuses_a_compaction_past_the_fold() {
     require_tlc(&Spec::Truncation.check());
     let (seed, event, state) = first_refused_cell(
         Spec::Truncation,
-        &Flavor::multi_paxos_five(),
+        &Flavor::compaction(),
         Mutant::CompactPastFold,
-        70..=80,
+        1..=20,
         150,
     )
     .expect("TLC refuses a seed of the mutant");

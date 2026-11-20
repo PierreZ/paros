@@ -45,6 +45,13 @@ pub struct Flavor {
     /// `lost_to_a_lagging_pool`). The pools catch up when the settle rounds
     /// start.
     pub lagging_reader: bool,
+    /// Steered toward compactions: a client claims the journal before it
+    /// writes, when the journal has no leader uuid, a client often
+    /// truncates after a write, and the first leader that compacted steps
+    /// down once, so that a campaign meets the floors. A compaction needs a claim, accepted writes
+    /// and an applied truncation, which a plain walk of 150 steps seldom
+    /// gathers.
+    pub compacting: bool,
     /// Matchmakers in the matchmaker pool outside the bootstrap set, that a
     /// handover ([`Action::Handover`]) may name.
     pub matchmaker_spares: u64,
@@ -71,6 +78,7 @@ impl Flavor {
             spares: 0,
             late: 0,
             lagging_reader: false,
+            compacting: false,
             matchmaker_spares: 0,
             limits: Limits::DEFAULT,
             mutant: None,
@@ -281,6 +289,17 @@ impl Flavor {
             lagging_reader: true,
             options: &[Action::Reconfigure, Action::Admit, Action::Read],
             ..Self::matchmakers()
+        }
+    }
+
+    /// Multi-Paxos on five with truncation, steered toward compactions
+    /// ([`Flavor::compacting`]): the walk of `truncation/`'s trace spec.
+    #[must_use]
+    pub fn compaction() -> Self {
+        Self {
+            name: "compaction",
+            compacting: true,
+            ..Self::multi_paxos_five()
         }
     }
 

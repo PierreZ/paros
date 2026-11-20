@@ -47,6 +47,14 @@ fn multi_paxos_on_five_with_truncation() {
 }
 
 #[test]
+fn compaction_steered() {
+    walk(
+        Flavor::compaction(),
+        &[reach::SET_LEADER, reach::COMPACTED, reach::TRIM_JUMP],
+    );
+}
+
+#[test]
 fn leader_handoff() {
     walk(Flavor::handoff(), &[reach::HANDOFF]);
 }

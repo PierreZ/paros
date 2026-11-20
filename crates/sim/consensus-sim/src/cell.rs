@@ -239,6 +239,9 @@ pub struct Cell {
     reads: Reads,
     /// The next read token.
     next_ctx: u64,
+    /// A compacting walk stepped a leader down after it compacted
+    /// ([`Flavor::compacting`]).
+    stepped_after_compaction: bool,
     /// The next client sequence, from the client's view of the journal.
     next_seq: u64,
     /// The highest leader uuid a client used.
@@ -313,6 +316,7 @@ impl Model for Cell {
         }
         match action {
             Action::Tick => self.tick_all(cx),
+            Action::Propose if self.flavor.compacting => self.write_and_truncate(cx),
             Action::Propose => self.propose(cx),
             Action::Claim => self.claim(cx),
             Action::StepDown => self.step_down(cx),
@@ -613,6 +617,7 @@ impl Cell {
             ledger: Ledger::new(rule),
             reads: Reads::default(),
             next_ctx: 1,
+            stepped_after_compaction: false,
             next_seq: 0,
             next_uuid: 0,
             take_back_after,
@@ -998,6 +1003,7 @@ impl Cell {
                 messages: &batch,
                 matchmaking: &matchmaking,
                 gc: &gc,
+                committed: &committed,
             };
             self.trace_batch(id, traced, before, cx);
             if !self.rot_at_compaction(id, &writes, cx) {
@@ -1119,7 +1125,13 @@ impl Cell {
         let last = after.map_or(0, |s| s.0 + 1);
         let learned = (first..last)
             .filter_map(|s| {
-                let command = chosen?.get(&Slot(s))?;
+                let command = chosen?.get(&Slot(s)).or_else(|| {
+                    traced
+                        .committed
+                        .iter()
+                        .find(|(slot, ..)| slot.0 == s)
+                        .map(|(_, _, command, _)| command)
+                })?;
                 Some((Slot(s), Cmd::of(command)))
             })
             .collect();
@@ -1361,6 +1373,7 @@ impl Cell {
         if self.flavor.lagging_reader && cx.phase() == Phase::Settle {
             self.admit_all();
         }
+        self.step_down_after_compaction(cx);
         let expire_after = self.expire_after;
         for i in 0..self.proxies.len() {
             let id = ProxyId(i as u64);
@@ -1408,6 +1421,51 @@ impl Cell {
     fn pick_leader(&self, cx: &mut Cx<'_, Self>) -> Option<NodeId> {
         let leaders = self.leaders();
         cx.rng().pick(&leaders).copied()
+    }
+
+    /// The client of [`Flavor::compacting`]: it claims a journal that has
+    /// no leader uuid, else it writes, and truncates after one write in
+    /// two.
+    fn write_and_truncate(&mut self, cx: &mut Cx<'_, Self>) {
+        let unclaimed = self.leaders().iter().any(|id| {
+            self.node(*id)
+                .live
+                .as_ref()
+                .is_some_and(|node| node.replica().journal().leader.is_none())
+        });
+        if unclaimed {
+            self.claim(cx);
+            return;
+        }
+        self.propose(cx);
+        if cx.rng().chance(1, 2) {
+            self.truncate(cx);
+        }
+    }
+
+    /// The first leader that compacted in a [`Flavor::compacting`] walk
+    /// steps down, once: the next campaign asks the acceptors that
+    /// compacted, over their floors. Compactions come late in a walk, when
+    /// the client's moves have stopped, so the clock makes this move.
+    fn step_down_after_compaction(&mut self, cx: &mut Cx<'_, Self>) {
+        if !self.flavor.compacting || self.stepped_after_compaction {
+            return;
+        }
+        let compacted = self.leaders().into_iter().find(|id| {
+            self.node(*id)
+                .live
+                .as_ref()
+                .is_some_and(|node| node.acceptor().first_slot() > Slot(0))
+        });
+        if let Some(leader) = compacted {
+            self.stepped_after_compaction = true;
+            self.node_mut(leader)
+                .live
+                .as_mut()
+                .expect("a leader is up")
+                .step_down();
+            self.drain_node(leader, cx);
+        }
     }
 
     fn propose(&mut self, cx: &mut Cx<'_, Self>) {
@@ -1853,6 +1911,9 @@ struct Traced<'a> {
     messages: &'a [(Audience, Message)],
     matchmaking: &'a [MatchRequest],
     gc: &'a [GcRequest],
+    /// The slots the batch applied: a compaction in the same batch drops
+    /// them from the chosen map before the tracer reads it.
+    committed: &'a [(Slot, Ballot, Command, paros_consensus::journal::Outcome)],
 }
 
 impl Traced<'_> {
@@ -1864,6 +1925,7 @@ impl Traced<'_> {
             messages: &[],
             matchmaking: &[],
             gc: &[],
+            committed: &[],
         }
     }
 }
