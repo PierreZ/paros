@@ -243,13 +243,22 @@ TLearn ==
           /\ UNCHANGED <<lprom, lvote, lphase, lnext, lfront, lmsgs>>
   /\ UNCHANGED vars
 
-\* A node boots again from its disk: its ballots die. The walk records only
-\* what reached the disk, so memory is the disk.
+\* A node boots again from its disk: its campaigns die, and so does the
+\* ballot it led (`led`, 0 for none; a ballot it handed on lives on at its
+\* successor). The walk records only
+\* what reached the disk, so memory is the disk. The code writes its chosen
+\* index relaxed (`MustSync::Relaxed`), so a crash may lose a part of the
+\* learned prefix: the node keeps only the slots below `upto`, and it
+\* learned each of them before.
 TRestart ==
-  /\ e.event = "restart" /\ IsNode("node")
+  /\ e.event = "restart" /\ IsNode("node") /\ Has("upto") /\ Has("led")
+  /\ \A s \in Slots : s < e.upto => learned[e.node][s] # None
+  /\ learned' = [learned EXCEPT ![e.node] = [s \in Slots |-> IF s >= e.upto THEN None ELSE @[s]]]
   /\ lphase' = [b \in Ballots |->
-                  IF Owner[b] = e.node /\ lphase[b] \in {"p1", "p2"} THEN "dead" ELSE lphase[b]]
-  /\ UNCHANGED <<lprom, lvote, learned, lnext, lfront, lmsgs>>
+                  IF \/ Owner[b] = e.node /\ lphase[b] = "p1"
+                     \/ b = e.led /\ lphase[b] = "p2"
+                  THEN "dead" ELSE lphase[b]]
+  /\ UNCHANGED <<lprom, lvote, lnext, lfront, lmsgs>>
   /\ UNCHANGED vars
 
 \* The leader of ballot b asks for GC: the guard of `node/gc.rs` for a log.

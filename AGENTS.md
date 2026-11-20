@@ -90,7 +90,7 @@ branch from the runs that reach a new probe or a new edge of the core, and a gat
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
 unreached probes)). Every one of the 79 probes is reached in CI, with no list of excused probes
-(Pierre, 2026-11-19: no excuses in simulation, no allow lists; the gate has 20 minutes of CI).
+(Pierre, 2026-11-19: no excuses in simulation, no allow lists; each job of the gate has 30 minutes of CI, Pierre 2026-11-20).
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
@@ -132,10 +132,12 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `scripts/check-module-style.sh` and `scripts/check-core-layers.sh`
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
 - the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
-- the `coverage` job: the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with
-  `paros-consensus` instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
-  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`), at most 20 minutes. The `test`
-  job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
+- the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
+  instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
+  `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`). Each CI job has at most 30
+  minutes, so four `coverage-shard` jobs walk a quarter of the walks each
+  (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
+  (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
@@ -193,6 +195,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   issue; a preference about how to work goes into this file. Amend the section it touches, never
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
+- **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
 - **A flaky check is a finding** (decided on 2026-11-17). A check that is red and then green
   with no change teaches you to run it again in place of a fix. Never run a check again until
   it is green, and never add a retry around it. Find the cause: a bug in the code is fixed with
