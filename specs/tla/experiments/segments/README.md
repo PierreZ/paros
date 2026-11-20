@@ -39,12 +39,12 @@ into the log and makes each client fold it.
 
 ## Reads across a reshape
 
-`reads/` is the check of #1254 (leaderless reads across a reshape) on design A with full grids.
-Its report is `reads/README.md`. In short: the stale read is real on a full grid with no check;
-the read fence on the promise with the seal of each row (decision 31, #1209) closes it, so the
-record check of the reader adds nothing there; an acceptor of a retired segment that loses its
-state opens the case again, and the belief half of the fence (with the refusal of an acceptor
-that did not hear) or the record check closes it.
+`reads/` is the check of #1254 (leaderless reads across a reshape) on design A, on the
+partitioned grid and the full grid. Its report is `reads/README.md`. In short: the stale read is
+real with no fence; the read fence on the promise closes it (with the seal of each row of
+decision 31, #1209, on a full grid), so the record check of the reader adds nothing there; an
+acceptor of a retired segment that loses its state opens the case again, and the belief half of
+the fence (with the refusal of an acceptor that did not hear) or the record check closes it.
 
 ## The two designs
 

@@ -18,8 +18,15 @@ wipe_belief           pass       ci
 reach_stale           violation  ci
 reach_retire          violation  ci
 square_fence_only     violation  ci
-square_fence_rows     pass       long
-square_record         pass       long
+part_bare             violation  ci
+part_wipe_fence       violation  ci
+part_fence_one        pass       ci
+part_wipe_fence_one   violation  ci
+part_wipe_belief_one  pass       ci
+part_wipe_record_one  pass       ci
+part_fence            pass       long
+part_wipe_belief      pass       long
+part_wipe_record      pass       long
 fence_rows_long       pass       long
 record_long           pass       long
 column_long           pass       long
