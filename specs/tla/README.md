@@ -93,6 +93,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
+| Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -1248,7 +1249,7 @@ layout one initial state:
 
 | Check | Rule | Result |
 |---|---|---|
-| `grid` | `CrossIntersect`: every Phase-1 quorum meets every Phase-2 quorum (`cross_intersects`). `ReadsArePhase1`: each read target holds a Phase-1 quorum. `ToleratedIsExact`: `tolerated_failures`, `min(acks - 1, cols * (rows - acks + 1) - 1)`, is the largest number of failures, wherever they are, that leaves a Phase-1 and a Phase-2 quorum | pass (69 layouts) |
+| `grid` | `CrossIntersect`: every Phase-1 quorum meets every Phase-2 quorum (`cross_intersects`). `ReadsArePhase1`: each read target holds a Phase-1 quorum. `ToleratedIsExact`: `tolerated_failures`, `min(acks - 1, cols * (rows - acks + 1) - 1)`, is the largest number of failures, wherever they are, that leaves a Phase-1 and a Phase-2 quorum. `PerColumnTolerance` (#1257 (quorum everywhere)): `f` down in every column leaves both quorums exactly when `f + 1 <= acks <= rows - f` | pass (69 layouts) |
 | `grid_slack` | control: Phase 1 takes one acceptor less of each column, layouts of four members or more (on one member the empty set would be the first quorum) | `CrossIntersect` violation |
 | `grid_full_rows` | `Phase1Meets` on the full grids with two columns or more: two Phase-1 quorums meet | violation: two rows of a 2 x 2 grid do not meet |
 
@@ -1707,3 +1708,67 @@ The answer to #1218: with the rule of the code, `Recoverable` holds over the Pha
 up to `F`: it learned it (and so holds a record, `mark_chosen`) or jumped above it with
 `TrimmedTo` (and so refuses a campaign from below its floor). Each Phase-1 quorum of `C2` meets
 that Phase-2 quorum. No decision is refuted.
+
+### `quorum-everywhere/`: every journal step waits for a quorum only, for #1257 (quorum everywhere)
+
+Pierre's rule (2026-11-20): no step of the journal waits for every member of a group, as a
+FoundationDB commit waits for every TLog. The model is a liveness check. Members are down from
+the start and stay down. The journal runs its steps one after the other, and each step is a list
+of waits. A wait sends to its targets and completes when the answers hold one of its quorums. The
+quorums are the sets of `grid/Grid.tla`, so the model and the code use one layout. A Phase-2 wait
+has one alternative for each column, and it moves to the next column only when every live member
+of its column answered and the answers hold no quorum (#533 (move a stuck round)). The property
+`Done` says that every step completes, under weak fairness.
+
+| Step | Waits, in order |
+|---|---|
+| `write` | `acks` of one column of `New`, with the move |
+| `election` | a matchmaker majority; a Phase-1 quorum of `Old`; a Phase-1 quorum of `New` |
+| `read` | a Phase-1 quorum of the answers to `GridReadTargets(New)`; a matchmaker majority (the segment-record check of #1254) |
+| `seal` | a Phase-1 quorum of `Old` (the highest vote); a matchmaker majority (the compare-and-set of the end slot) |
+| `retire` | `F + 1` replicas of the segment hold it; a matchmaker majority |
+| `offload` | a matchmaker majority (the offload mark, #1256) |
+| `trim` | `acks` of one column (the decided `Truncate`); a matchmaker majority |
+| `handover` | a stop quorum of `MM`; Phase 1 and Phase 2 of the successor decree in `MM2` |
+
+`Old` is a sealed configuration and `New` the configuration in force: `New` moves the members
+of `Old` by `Shift` places, so with `Shift = 1` each member that stays changes its column. The
+down sets are the largest ones with at most `F` members down in each column of both
+configurations, in each matchmaker set and in the replica set. A wait that completes with a down
+set also completes with each smaller one, so the largest down sets are enough. An `ASSUME` checks
+that some down set has exactly `F` down in every column of both configurations at once.
+The answers come in one fixed order: a wait's guard only grows with the answers, so the order
+changes nothing, and the state space stays small.
+
+| Check | CI | Result |
+|---|---|---|
+| `quorum` | ci | pass: the grid 3 × 2 with `acks = 2`, `F = 1`, `Shift = 1` |
+| `quorum_shift_row` | ci | pass: the same with `Shift = 2` (each member keeps its column) |
+| `quorum_3x3` | ci | pass: 3 × 3, `acks = 2`, `F = 1` |
+| `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (770 thousand distinct states, about 6 minutes with 4 workers) |
+| `quorum_majority` | ci | pass: the majority of three (`partitions = 1`, a grid 3 × 1) |
+| `write_move` | ci | pass: `F + 1` down in one column, `F` in the others; the write moves and completes |
+| `write_every_column`, `trim_every_column` | ci | violation: `F + 1` down in every column of `New` blocks the write |
+| `election_column`, `read_column`, `seal_column` | ci | violation: `F + 1` down in one column blocks Phase 1 |
+| `retire_replica` | ci | violation: `F + 1` replicas down blocks the retire |
+| `<step>_mm`, for each step that asks the matchmakers | ci | violation: `F + 1` down in one matchmaker set blocks the step |
+| `<step>_all`, for each step | ci | violation: a wait that needs every target (a TLog commit) blocks with `F` down |
+| `full_grid_write` | ci | violation: the full grid (`acks = rows`) writes only with a whole column |
+
+The answer to #1257:
+
+- **Every step needs a quorum only.** With `F` down in every column of the old and the new grid,
+  `F` down in each matchmaker set and `F` down in the replica set, every step completes. Each
+  control with one member more down blocks its step, so the quorums are real, and each step that
+  waits for every target blocks, so the model sees a full broadcast.
+- **The leaderless read on a grid that is not full waits for a quorum.** `GridReadTargets` sends
+  the `PreRead` to every member, but the read completes on a Phase-1 quorum of the answers
+  (`QuorumRead`, `has_phase1_quorum_in`). So it sends to all and waits for a quorum. It is not a
+  full broadcast in the sense of the rule, and no change is necessary.
+- **The layouts that meet the rule.** `grid/GridCheck.tla` checks `PerColumnTolerance` on every
+  layout up to nine members: `f` members down in every column leave a Phase-1 quorum and a
+  Phase-2 quorum exactly when `f + 1 <= acks <= rows - f`. The partitions `rows = 2F + 1`,
+  `acks = F + 1` meet it for `F`. The full grid (`acks = rows`) survives no member down in
+  every column, because a write needs a whole column. The service offers only the majority and
+  the partitioned grid (`docs/architecture/03-4-tenant-modes.md`), so the rule holds; the full
+  grid stays a shape of `paros-consensus` and of its models, outside the journal.

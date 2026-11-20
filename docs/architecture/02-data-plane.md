@@ -331,3 +331,33 @@ checked, each with a control that TLC breaks:
 
 The rejected design is in section 11 (alternatives). The code follows once the journal state
 model (#1189) includes these rules.
+
+### 2.11 Quorum everywhere
+
+**Every step of the journal waits for a quorum only** (decided by Pierre on 2026-11-20, #1257
+(quorum everywhere), checked by `specs/tla/quorum-everywhere/`). No step waits for every member
+of a group, as a FoundationDB commit waits for every TLog. With `F` acceptors down in every column
+of the old and the new grid, `F` matchmakers down in each matchmaker set and `F` replicas down in
+a segment's replica set, each step completes:
+
+| Step | It waits for |
+|---|---|
+| Write, and the decided `Truncate` | `F + 1` acceptors of one column; a stuck round moves to the next column (#533) |
+| Election | a matchmaker majority, then `F + 1` acceptors of every column of each configuration of `H_b` |
+| Leaderless read | `F + 1` acceptors of every column of the configuration in force, then a matchmaker majority for the segment-record check (#1254) |
+| Seal | a Phase-1 quorum of the old grid, then a matchmaker majority for the compare-and-set of the end slot |
+| Retire | `F + 1` replicas of the segment, then a matchmaker majority |
+| Offload mark, record of a trim | a matchmaker majority |
+| Matchmaker set handover | a majority of the old set (the stop quorum), then a majority of the new set (the successor decree) |
+
+Each step blocks with one member more down than its quorum allows, and each step that waits for
+every target blocks with `F` down: the model sees both. On a grid that is not full the leaderless
+read sends its `PreRead` to every member, but it completes on a Phase-1 quorum of the answers
+(`QuorumRead`, `has_phase1_quorum_in`): it sends to all and waits for a quorum, so it keeps its
+targets.
+
+A grid layout meets the rule for `F` exactly when `F + 1 <= acks <= rows - F`
+(`grid/GridCheck.tla`, `PerColumnTolerance`). The partitioned grid of section 3.4
+(`rows = 2F + 1`, `acks = F + 1`) and the majority meet it. The full grid (`acks = rows`) does not:
+a write needs a whole column. The journal therefore offers only the majority and the partitioned
+grid, and a grid that the grid controller picks keeps `F + 1 <= acks <= rows - F`.
