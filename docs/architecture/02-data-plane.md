@@ -2,9 +2,12 @@
 
 ## 2. The data plane
 
-Every journal exposes four calls, in one of two **modes** fixed when the journal is created
-(decided on 2026-10-04): **single-writer**, where one leader appends under its leader uuid, and
-**multi-writer**, where anyone with access appends. Every rule below is judged at apply time, in
+Every journal exposes four calls, in one of two **modes**: **single-writer**, where one leader
+appends under its leader uuid, and **multi-writer**, where anyone with access appends. The mode
+is what the last applied `SetLeader` left: `SetLeader(None, old)` makes the journal
+multi-writer, and `SetLeader(new, None)` makes it single-writer again (decided by Pierre on
+2026-11-20, #1274 (multi-writer mode through SetLeader(None) and expected_seq); it replaces the
+mode fixed at create time of 2026-10-04). Section 2.4 has the rules of the switch. Every rule below is judged at apply time, in
 slot order, by a small per-journal state machine
 `(mode, leader_uuid, term, next_seq, first_seq)` that lives in `paros-consensus` beside the replica's
 walk.
@@ -14,7 +17,7 @@ walk.
 | `Write` | `Write(leader_uuid, expected_seq, batch) -> seq`: fenced by the leader uuid, contiguous by `expected_seq`, idempotent on retry, pipelineable. | `Write(batch) -> seq`: unfenced; the journal orders writes and assigns `seq` at apply. At-least-once on an ambiguous retry. |
 | `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and the current leader uuid, or `Truncated` when `from_seq < first_seq`. `wait_ms` is capped and floored (section 2.7); a read at the tail waits up to it. | The same. |
 | `Truncate` | `Truncate(leader_uuid, up_to_seq)`: fenced like `Write`. | `Truncate(up_to_seq)`: anyone may truncate. |
-| `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns the journal's view after it: the leader uuid, `next_seq`, `first_seq`. | Refused: a multi-writer journal has no leader. |
+| `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns the journal's view after it: the leader uuid, `next_seq`, `first_seq`. `new_uuid = None` switches to multi-writer. | The same compare-and-set with `old_uuid = None`: it switches back to single-writer. |
 
 The API is Brooker's fourth MemoryDB journal API (section 10): `set_leader_uuid(new, old)`,
 `write(payload, leader_uuid)`, `read()`, plus the expected-sequence precondition of DSQL's
@@ -164,18 +167,77 @@ the cell's `stateless` machines (section 3.4), and `Resolve` names them (section
 to a batcher it was given (`Resolved::batcher_servers`). `paros::roles::batcher::run_batcher` runs a
 batcher on its own address, in front of a fixed list of nodes.
 
-How it is built (#241, part 3). The mode is a field of the journal's `Config`, so the format
-marker records it and a restart cannot change it. `CreateJournal` carries it, and a journal
-without one is single-writer. On the wire a multi-writer call uses the same messages: a
+How it was built at the tag `v0.2.0-alpha.1` (#241, part 3), before the mode became the
+leader of the journal state (#1274, section 2.4.1): the mode was a field of the journal's
+`Config`, so the format marker recorded it and a restart could not change it. `CreateJournal`
+carried it, and a journal without one was single-writer. On the wire a multi-writer call uses the same messages: a
 `Write` or `Truncate` carries the unset leader uuid (`0`) and `expected_seq` 0, and the core
 ignores that `seq`. The mode is judged at apply, like every other rule. A call shaped for the
 other mode is refused in place with `WRONG_MODE` and the journal's view: an unfenced call on
-a single-writer journal, and a fenced call or a `SetLeader` on a multi-writer one.
+a single-writer journal, and a fenced call on a multi-writer one.
 `paros::client::multi` builds the unfenced requests, and `parosctl write --multi` and
 `parosctl truncate --multi` send them. `parosctl journal create --writers` (named `--mode` until #523) comes with the
 journal-create request to the tenant coordinator (#210, decided on 2026-10-09), not with #241. The simulation draws the mode per journal, judges every
 attempt against the same model in that mode, and a client sends the wrong-mode calls on
 purpose.
+
+#### 2.4.1 The switch between modes
+
+`SetLeader(new, old)` may name `new = None` (decided by Pierre on 2026-11-20, #1274). The
+journal state holds one leader value: a uuid (single-writer) or `None` (multi-writer). The
+compare-and-set does not change: it succeeds iff `old` is the current value and `new` is not.
+There is no dedup table and no dedup role: a single writer gets exactly-once through
+`expected_seq`, and multi-writer is at-least-once. TLC checks the rules below in
+`specs/tla/multi-writer/`, each one with a control that breaks it:
+
+- **The fence is judged at apply, in both directions.** A fenced `Write` or `Truncate` is
+  accepted only while its uuid is the leader, an unfenced one only while the leader is `None`.
+  A leader that also refuses at propose time saves slots, but a check at propose time only lets
+  a fenced write of a deposed writer land after `SetLeader(None, it)`, or an unfenced truncate
+  land after `SetLeader(u, None)` (controls `fence_propose`, `fence_propose_write`).
+- **The fold judges the position of a fenced `Write` before its fence.** In this order: below
+  `first_seq` it is `Truncated`; below `next_seq` it is `Duplicate` (with its `seq`) when the
+  record there is the same write (same uuid, same batch), else it is refused (the position is
+  taken); then a uuid that is not the leader is refused (`fenced`); above `next_seq` it is early;
+  else it is accepted. So the resend of a write that was in flight across a switch tells the
+  writer its fate: `Duplicate` means written at that `seq`; `fenced` or position taken means not
+  written, now and for ever, because uuids are fresh (section 2.3). With the fence first, the
+  resend of a write that was applied before `SetLeader(None, w)` is refused as `fenced`; the
+  writer then writes it again, unfenced, and it is in the journal two times (controls
+  `dedup_after`, `dedup_after_twice`).
+- **What a writer sees for a write in flight across `SetLeader(None, w)`.** The first answer
+  may be lost (`Unknown`, #1232 (held writes)). A resend with the same `expected_seq` gets one of
+  four answers: `Duplicate` (written), refused (not written, final), early (resend later), or
+  `Truncated`. `Truncated` leaves the fate unknown, as in section 2.2. In multi-writer mode any
+  writer may truncate (section 2.6), so a writer that is not the leader can push the position of
+  another writer's held write below `first_seq` (check `reach_truncated`). This is the only
+  case where a resend does not resolve an `Unknown`.
+- **A writer that leaves single-writer mode stays exactly-once** when it writes again, unfenced,
+  only after a final refusal: the write is then in the journal once (`ExactlyOnce` in `safety`).
+- **The switch back, `SetLeader(w2, None)`.** After it applies, only fenced writes of `w2` are
+  accepted, and unfenced writes in flight are refused `WRONG_MODE`. `w2` takes its next
+  `expected_seq` from the view of the answer (`next_seq` after the `SetLeader`), never from a
+  position it knew before, so it never aims a write at a position that the multi-writer mode
+  used (control `basis_stale`). The journal stays safe without this rule: the position check
+  refuses such a write. The rule is for the writer: its first write after the switch lands.
+- **A refusal of an unfenced write is true for that copy only.** An unfenced write has no
+  identity in the log, so a resend cannot tell the writer whether an earlier copy landed: a copy
+  can land while another copy is refused `WRONG_MODE` (check `multi_refusal`, not a rule). A
+  multi-writer writer that needs to know reads the journal.
+- **`Truncate` keeps its rules in both modes** (#228, #241, section 2.6): fenced by the uuid in
+  single-writer mode, open in multi-writer mode, judged at apply, `first_seq` monotone and
+  clamped to `next_seq`.
+- **The seal carries `None`.** The leader uuid of the boundary state (section 2.10) may be
+  `None`. The journal's matchmaker record holds it, and the first leader of the next segment
+  proposes `Fence(None)`, which makes the next segment's fold multi-writer (check `seal_long`,
+  reach `reach_fence_none`). The record needs no third value for "not written": the leader
+  reads the uuid only after the seal wrote the boundary state, the same compare-and-set that
+  writes `next_seq` into the segment record (#1271). A `Fence` read before that write lets a
+  writer of the wrong mode in (control `boundary_early`).
+
+**Open**: the leader of a fresh journal, before its first `SetLeader`: `None` (a fresh journal
+is multi-writer) or unset (every write and truncate is refused until a `SetLeader`). The model
+passes with both (`safety`, `unset`); the journal state model (#1189) decides it.
 
 ### 2.5 Reads
 

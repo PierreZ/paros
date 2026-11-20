@@ -84,7 +84,11 @@ the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a wr
 replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
 leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
 segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
-reaches only the replica set of its segment)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state
+reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
+`SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
+write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
+`Truncate` in both modes, a `Fence(None)` at a seal; #1274 (multi-writer mode through
+SetLeader(None) and expected_seq)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state
 tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty
 record, the repair of a chosen value in one write; `specs/tla/ctrl-segments/`: the copies of a
 sealed segment across retire and offload, the repair of a replica log and of an object, the

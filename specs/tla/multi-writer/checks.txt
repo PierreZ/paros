@@ -1,0 +1,29 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# SetLeader(None) and SetLeader(new, None) switch the mode; fenced and
+# unfenced writes, resends and copies, one truncate, five slots.
+safety              pass       ci
+# The same with a fresh journal whose leader is unset.
+unset               pass       ci
+# A seal: the Fence at slot 4 carries the boundary uuid, None included.
+seal_long           pass       ci
+# Six slots, no seal.
+safety_long         pass       long
+# Reach: a check that must break, so that the passing checks are not empty.
+reach_switch        violation  ci
+reach_back          violation  ci
+reach_truncated     violation  ci
+reach_fence_none    violation  ci
+# Not a rule: a refusal of an unfenced write is true for that copy only.
+multi_refusal       violation  ci
+# Controls: each one breaks the invariant of its file.
+fence_propose       violation  ci
+fence_propose_write violation  ci
+dedup_after         violation  ci
+dedup_after_twice   violation  ci
+basis_stale         violation  ci
+boundary_early      violation  ci
