@@ -8,8 +8,8 @@ use super::Action;
 
 /// One deployment of `ColocatedNode`s, and the moves a walk may make on it.
 ///
-/// Every flavor shares the same model ([`Cell`](super::Cell)); a flavor
-/// only says what the cell holds and which moves are on.
+/// Every flavor shares the same model ([`Cluster`](super::Cluster)); a flavor
+/// only says what the cluster holds and which moves are on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Flavor {
     /// The name a failure prints.
@@ -41,7 +41,7 @@ pub struct Flavor {
     /// members whose pools lag, and stays; a read goes to a lagging node,
     /// first one that promised above its belief; the lagging nodes campaign
     /// seldom and node 2 not at all; messages between the nodes that moved
-    /// and the lagging ones are lost ([`Cell`](super::Cell)'s
+    /// and the lagging ones are lost ([`Cluster`](super::Cluster)'s
     /// `lost_to_a_lagging_pool`). The pools catch up when the settle rounds
     /// start.
     pub lagging_reader: bool,
@@ -375,7 +375,7 @@ pub enum Mutant {
     /// first promise that hid a vote (`tests/traces.rs`).
     HideVotes,
     /// The driver never re-sends a leader's pending `Accept`s. Caught by the
-    /// liveness judge ([`Cell::converged`](super::Cell)).
+    /// liveness judge ([`Cluster::converged`](super::Cluster)).
     NoResend,
     /// A proxy leader crashes and the driver keeps it running with its
     /// rounds. Its later `Commit`s are backed, so the oracles pass; the

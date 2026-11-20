@@ -12,20 +12,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use paros_consensus::Ballot;
 
-use super::{CellEvent, Cmd, Spec};
+use super::{ClusterEvent, Cmd, Spec};
 
 /// A step of a trace spec that some checked walk must take.
 #[derive(Clone, Copy, Debug)]
 pub struct Rule {
     /// What the step is, in the words of the spec.
     pub name: &'static str,
-    met: fn(&[CellEvent]) -> bool,
+    met: fn(&[ClusterEvent]) -> bool,
 }
 
 impl Rule {
     /// Whether the kept events of one walk take this step.
     #[must_use]
-    pub fn met(&self, events: &[CellEvent]) -> bool {
+    pub fn met(&self, events: &[ClusterEvent]) -> bool {
         (self.met)(events)
     }
 }
@@ -38,7 +38,7 @@ const LOG: &[Rule] = &[
         met: |events| {
             events
                 .iter()
-                .any(|e| matches!(e, CellEvent::Promise { votes, .. } if !votes.is_empty()))
+                .any(|e| matches!(e, ClusterEvent::Promise { votes, .. } if !votes.is_empty()))
         },
     },
     Rule {
@@ -46,7 +46,7 @@ const LOG: &[Rule] = &[
         met: |events| {
             events
                 .iter()
-                .any(|e| matches!(e, CellEvent::Win { frontier, .. } if frontier.0 > 0))
+                .any(|e| matches!(e, ClusterEvent::Win { frontier, .. } if frontier.0 > 0))
         },
     },
     Rule {
@@ -54,7 +54,7 @@ const LOG: &[Rule] = &[
         met: |events| {
             events
                 .iter()
-                .filter(|e| matches!(e, CellEvent::Win { .. }))
+                .filter(|e| matches!(e, ClusterEvent::Win { .. }))
                 .count()
                 >= 3
         },
@@ -64,20 +64,32 @@ const LOG: &[Rule] = &[
         met: |events| {
             events
                 .iter()
-                .any(|e| matches!(e, CellEvent::Propose { cmd: Cmd::Noop, .. }))
+                .any(|e| matches!(e, ClusterEvent::Propose { cmd: Cmd::Noop, .. }))
         },
     },
     Rule {
         name: "an acceptor votes",
-        met: |events| events.iter().any(|e| matches!(e, CellEvent::Accept { .. })),
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Accept { .. }))
+        },
     },
     Rule {
         name: "a node learns a slot chosen",
-        met: |events| events.iter().any(|e| matches!(e, CellEvent::Learn { .. })),
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Learn { .. }))
+        },
     },
     Rule {
         name: "a learn records the chosen vote below the promise",
-        met: |events| events.iter().any(|e| matches!(e, CellEvent::Record { .. })),
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Record { .. }))
+        },
     },
 ];
 
@@ -87,7 +99,7 @@ const RESTART: Rule = Rule {
     met: |events| {
         events
             .iter()
-            .any(|e| matches!(e, CellEvent::Restart { .. }))
+            .any(|e| matches!(e, ClusterEvent::Restart { .. }))
     },
 };
 
@@ -96,9 +108,9 @@ const HANDOFF: &[Rule] = &[
     Rule {
         name: "a leader hands on a tail with a pending slot",
         met: |events| {
-            events
-                .iter()
-                .any(|e| matches!(e, CellEvent::Relinquish { pending, .. } if !pending.is_empty()))
+            events.iter().any(
+                |e| matches!(e, ClusterEvent::Relinquish { pending, .. } if !pending.is_empty()),
+            )
         },
     },
     Rule {
@@ -106,7 +118,7 @@ const HANDOFF: &[Rule] = &[
         met: |events| {
             events
                 .iter()
-                .any(|e| matches!(e, CellEvent::Install { .. }))
+                .any(|e| matches!(e, ClusterEvent::Install { .. }))
         },
     },
 ];
@@ -116,18 +128,22 @@ const HANDOFF: &[Rule] = &[
 const PROXY: &[Rule] = &[
     Rule {
         name: "a proxy commits a round",
-        met: |events| events.iter().any(|e| matches!(e, CellEvent::Commit { .. })),
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Commit { .. }))
+        },
     },
     Rule {
         name: "a proxy commits a round after a crash",
         met: |events| {
             let mut crashed = BTreeSet::new();
             events.iter().any(|e| match e {
-                CellEvent::Crash { proxy } => {
+                ClusterEvent::Crash { proxy } => {
                     crashed.insert(*proxy);
                     false
                 }
-                CellEvent::Commit { proxy, .. } => crashed.contains(proxy),
+                ClusterEvent::Commit { proxy, .. } => crashed.contains(proxy),
                 _ => false,
             })
         },
@@ -143,7 +159,7 @@ const MATCHMAKER: &[Rule] = &[
             events
                 .iter()
                 .filter_map(|e| match e {
-                    CellEvent::Select { config, .. } => Some(config),
+                    ClusterEvent::Select { config, .. } => Some(config),
                     _ => None,
                 })
                 .collect::<BTreeSet<_>>()
@@ -156,7 +172,7 @@ const MATCHMAKER: &[Rule] = &[
         met: |events| {
             events
                 .iter()
-                .any(|e| matches!(e, CellEvent::Prepare { prior, .. } if prior.len() >= 2))
+                .any(|e| matches!(e, ClusterEvent::Prepare { prior, .. } if prior.len() >= 2))
         },
     },
     Rule {
@@ -164,7 +180,7 @@ const MATCHMAKER: &[Rule] = &[
         met: |events| {
             let mut frontier: BTreeMap<Ballot, u64> = BTreeMap::new();
             events.iter().any(|e| match e {
-                CellEvent::Win {
+                ClusterEvent::Win {
                     ballot,
                     frontier: f,
                     ..
@@ -172,14 +188,18 @@ const MATCHMAKER: &[Rule] = &[
                     frontier.insert(*ballot, f.0);
                     false
                 }
-                CellEvent::GcAsk { ballot } => frontier.get(ballot).is_some_and(|f| *f > 0),
+                ClusterEvent::GcAsk { ballot } => frontier.get(ballot).is_some_and(|f| *f > 0),
                 _ => false,
             })
         },
     },
     Rule {
         name: "a matchmaker acks a GC request",
-        met: |events| events.iter().any(|e| matches!(e, CellEvent::GcAck { .. })),
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::GcAck { .. }))
+        },
     },
 ];
 

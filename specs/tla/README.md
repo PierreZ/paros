@@ -47,7 +47,7 @@ of `consensus-sim`. The trace specs today are:
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take
-(`Spec::rules` in `crates/sim/consensus-sim/src/cell/trace/rules.rs`, #1231 (traced walks
+(`Spec::rules` in `crates/sim/consensus-sim/src/cluster/trace/rules.rs`, #1231 (traced walks
 reach the rules)): a walk that never fills a gap leaves the gap-fill guard unjudged. A change
 of `specs/tla/` alone runs the trace checks in the `traces` job of the `TLA` workflow, because
 a trace spec `EXTENDS` its model.

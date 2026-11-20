@@ -6,7 +6,7 @@ use moonpool_tla::Value;
 use paros_consensus::membership::{MatchmakerId, ProxyId};
 use paros_consensus::{Ballot, NodeId, Slot};
 
-use super::{CellEvent, Cmd, Sizes, rank, report, slot};
+use super::{ClusterEvent, Cmd, Sizes, rank, report, slot};
 use crate::trace::{Ranks, Trace, node};
 
 /// The fields of one event.
@@ -46,7 +46,7 @@ pub(super) fn write(
     ranks: &Ranks,
     shift: i64,
     sizes: &mut Sizes,
-    event: &CellEvent,
+    event: &ClusterEvent,
 ) {
     let bal = |b: Ballot| rank(ranks, shift, b);
     let (name, fields) = leader(&bal, ranks, shift, sizes, event)
@@ -63,10 +63,10 @@ fn leader(
     ranks: &Ranks,
     shift: i64,
     sizes: &mut Sizes,
-    event: &CellEvent,
+    event: &ClusterEvent,
 ) -> Option<(&'static str, Fields)> {
     Some(match event {
-        CellEvent::Prepare {
+        ClusterEvent::Prepare {
             ballot,
             from,
             prior,
@@ -83,7 +83,7 @@ fn leader(
                 ],
             )
         }
-        CellEvent::Promise {
+        ClusterEvent::Promise {
             acceptor,
             ballot,
             from,
@@ -100,7 +100,7 @@ fn leader(
                 ],
             )
         }
-        CellEvent::Win {
+        ClusterEvent::Win {
             ballot,
             frontier,
             known,
@@ -115,7 +115,7 @@ fn leader(
                 ],
             )
         }
-        CellEvent::Propose {
+        ClusterEvent::Propose {
             by,
             ballot,
             slot: s,
@@ -132,8 +132,8 @@ fn leader(
                 ],
             )
         }
-        CellEvent::StepDown { node: id } => ("stepdown", vec![("node", node(*id))]),
-        CellEvent::Relinquish {
+        ClusterEvent::StepDown { node: id } => ("stepdown", vec![("node", node(*id))]),
+        ClusterEvent::Relinquish {
             from,
             to,
             ballot,
@@ -156,7 +156,7 @@ fn leader(
                 ],
             )
         }
-        CellEvent::Install { node: id, ballot } => {
+        ClusterEvent::Install { node: id, ballot } => {
             ("install", vec![("node", node(*id)), ("bal", bal(*ballot))])
         }
         _ => return None,
@@ -167,7 +167,7 @@ fn leader(
 fn round(
     bal: &impl Fn(Ballot) -> Value,
     sizes: &mut Sizes,
-    event: &CellEvent,
+    event: &ClusterEvent,
 ) -> Option<(&'static str, Fields)> {
     let mut at = |ballot: Ballot, s: Slot, cmd: Cmd| {
         sizes.at(s, cmd);
@@ -178,8 +178,8 @@ fn round(
         ]
     };
     Some(match event {
-        CellEvent::Direct { ballot, slot, cmd } => ("direct", at(*ballot, *slot, *cmd).to_vec()),
-        CellEvent::Delegate {
+        ClusterEvent::Direct { ballot, slot, cmd } => ("direct", at(*ballot, *slot, *cmd).to_vec()),
+        ClusterEvent::Delegate {
             ballot,
             slot,
             cmd,
@@ -188,7 +188,7 @@ fn round(
             let [b, s, v] = at(*ballot, *slot, *cmd);
             ("delegate", vec![b, s, v, ("proxy", proxy(*p))])
         }
-        CellEvent::Fanout {
+        ClusterEvent::Fanout {
             proxy: p,
             ballot,
             slot,
@@ -197,7 +197,7 @@ fn round(
             let [b, s, v] = at(*ballot, *slot, *cmd);
             ("fanout", vec![b, s, v, ("proxy", proxy(*p))])
         }
-        CellEvent::Commit {
+        ClusterEvent::Commit {
             proxy: p,
             ballot,
             slot,
@@ -206,7 +206,7 @@ fn round(
             let [b, s, v] = at(*ballot, *slot, *cmd);
             ("commit", vec![b, s, v, ("proxy", proxy(*p))])
         }
-        CellEvent::Accept {
+        ClusterEvent::Accept {
             acceptor,
             ballot,
             slot,
@@ -225,7 +225,7 @@ fn round(
                 ],
             )
         }
-        CellEvent::Record {
+        ClusterEvent::Record {
             node: id,
             ballot,
             slot,
@@ -234,7 +234,7 @@ fn round(
             let [b, s, v] = at(*ballot, *slot, *cmd);
             ("record", vec![("node", node(*id)), b, s, v])
         }
-        CellEvent::Learn {
+        ClusterEvent::Learn {
             node: id,
             slot: s,
             cmd,
@@ -257,14 +257,14 @@ fn round(
 fn fault(
     bal: &impl Fn(Ballot) -> Value,
     sizes: &mut Sizes,
-    event: &CellEvent,
+    event: &ClusterEvent,
 ) -> Option<(&'static str, Fields)> {
     Some(match event {
-        CellEvent::Crash { proxy: p } => {
+        ClusterEvent::Crash { proxy: p } => {
             sizes.crashes += 1;
             ("crash", vec![("proxy", proxy(*p))])
         }
-        CellEvent::Restart {
+        ClusterEvent::Restart {
             node: id,
             upto,
             led,
@@ -284,20 +284,23 @@ fn fault(
 }
 
 /// The steps of matchmaking and of the GC.
-fn membership(bal: &impl Fn(Ballot) -> Value, event: &CellEvent) -> Option<(&'static str, Fields)> {
+fn membership(
+    bal: &impl Fn(Ballot) -> Value,
+    event: &ClusterEvent,
+) -> Option<(&'static str, Fields)> {
     Some(match event {
-        CellEvent::Select { ballot, config: c } => {
+        ClusterEvent::Select { ballot, config: c } => {
             ("select", vec![("bal", bal(*ballot)), ("cfg", config(c))])
         }
-        CellEvent::Register {
+        ClusterEvent::Register {
             matchmaker: m,
             ballot,
         } => (
             "register",
             vec![("mm", matchmaker(*m)), ("bal", bal(*ballot))],
         ),
-        CellEvent::GcAsk { ballot } => ("gcask", vec![("bal", bal(*ballot))]),
-        CellEvent::GcAck {
+        ClusterEvent::GcAsk { ballot } => ("gcask", vec![("bal", bal(*ballot))]),
+        ClusterEvent::GcAck {
             matchmaker: m,
             ballot,
         } => ("gcack", vec![("mm", matchmaker(*m)), ("bal", bal(*ballot))]),

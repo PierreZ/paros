@@ -1,4 +1,4 @@
-//! The events of a cell walk as a trace of
+//! The events of a cluster walk as a trace of
 //! `specs/tla/proxy-leader/ProxyLeaderTrace.tla`: the proxy's `Commit`
 //! rule, on the flavors with proxy leaders.
 
@@ -7,7 +7,7 @@ use paros_consensus::NodeId;
 use paros_consensus::membership::ProxyId;
 
 use super::super::Flavor;
-use super::{CellEvent, Sizes, encode, grid, ranks};
+use super::{ClusterEvent, Sizes, encode, grid, ranks};
 use crate::trace::{Trace, int, node};
 
 /// The ballot ranks of the code start at 2: rank 1 is the bootstrap, that
@@ -17,23 +17,23 @@ const SHIFT: i64 = 1;
 /// The steps of `ProxyLeader.tla` and the colocated steps of the trace
 /// spec. A restart changes nothing in this model, and a leadership is a
 /// ballot's, not a node's.
-pub(super) fn keeps(event: &CellEvent) -> bool {
+pub(super) fn keeps(event: &ClusterEvent) -> bool {
     !matches!(
         event,
-        CellEvent::Restart { .. }
-            | CellEvent::StepDown { .. }
-            | CellEvent::Relinquish { .. }
-            | CellEvent::Install { .. }
-            | CellEvent::Select { .. }
-            | CellEvent::Register { .. }
-            | CellEvent::GcAsk { .. }
-            | CellEvent::GcAck { .. }
+        ClusterEvent::Restart { .. }
+            | ClusterEvent::StepDown { .. }
+            | ClusterEvent::Relinquish { .. }
+            | ClusterEvent::Install { .. }
+            | ClusterEvent::Select { .. }
+            | ClusterEvent::Register { .. }
+            | ClusterEvent::GcAsk { .. }
+            | ClusterEvent::GcAck { .. }
     )
 }
 
-/// The events of one cell walk of `flavor` as a trace of
+/// The events of one cluster walk of `flavor` as a trace of
 /// `ProxyLeaderTrace.tla`.
-pub(super) fn trace(flavor: &Flavor, events: &[CellEvent]) -> Trace {
+pub(super) fn trace(flavor: &Flavor, events: &[ClusterEvent]) -> Trace {
     let (ballots, ranks) = ranks(events);
     let mut sizes = Sizes::default();
     let mut trace = Trace::new();

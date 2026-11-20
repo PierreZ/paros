@@ -1,4 +1,4 @@
-//! The steps of a cell walk as events of the TLA+ models of `specs/tla/`
+//! The steps of a cluster walk as events of the TLA+ models of `specs/tla/`
 //! (#1198 (trace checking)).
 //!
 //! The [`Tracer`] watches the driver loop at three seams: a batch of a
@@ -94,9 +94,9 @@ impl Cmd {
     }
 }
 
-/// One step of a cell walk, as the walk took it.
+/// One step of a cluster walk, as the walk took it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CellEvent {
+pub enum ClusterEvent {
     /// The owner of `ballot` opened Phase 1 from slot `from` (`Prepare`),
     /// over the configurations `prior` (`H_b`; empty without matchmakers).
     Prepare {
@@ -287,11 +287,11 @@ pub(super) struct Tracer {
 impl Tracer {
     /// The events of one persisted batch of a node, in the order of the
     /// module documentation.
-    pub(super) fn batch(&mut self, batch: &Batch<'_>) -> Vec<CellEvent> {
+    pub(super) fn batch(&mut self, batch: &Batch<'_>) -> Vec<ClusterEvent> {
         let mut events = Vec::new();
         self.leadership(batch, &mut events);
         for &(slot, cmd) in &batch.learned {
-            events.push(CellEvent::Learn {
+            events.push(ClusterEvent::Learn {
                 node: batch.id,
                 slot,
                 cmd,
@@ -304,7 +304,7 @@ impl Tracer {
             if matches!(request.purpose, MatchPurpose::Register(_))
                 && self.selected.insert(request.ballot)
             {
-                events.push(CellEvent::Select {
+                events.push(ClusterEvent::Select {
                     ballot: request.ballot,
                     config: request.config.members().to_vec(),
                 });
@@ -312,7 +312,7 @@ impl Tracer {
         }
         for request in batch.gc {
             if self.gc_asked.insert(request.watermark) {
-                events.push(CellEvent::GcAsk {
+                events.push(ClusterEvent::GcAsk {
                     ballot: request.watermark,
                 });
             }
@@ -322,12 +322,12 @@ impl Tracer {
         // first.
         let win = events
             .iter()
-            .position(|e| matches!(e, CellEvent::Win { .. }));
+            .position(|e| matches!(e, ClusterEvent::Win { .. }));
         if let Some(w) = win
-            && let CellEvent::Win { ballot, .. } = events[w]
+            && let ClusterEvent::Win { ballot, .. } = events[w]
             && let Some(p) = events
                 .iter()
-                .position(|e| matches!(e, CellEvent::Prepare { ballot: b, .. } if *b == ballot))
+                .position(|e| matches!(e, ClusterEvent::Prepare { ballot: b, .. } if *b == ballot))
             && p > w
         {
             let win = events.remove(w);
@@ -350,7 +350,7 @@ impl Tracer {
     /// The leadership events of a batch: the node stopped leading the
     /// ballot it led (a `Relinquish` of the batch is that step), or it
     /// leads a new one, by Phase 1 (`Win`) or by a handoff (`Install`).
-    fn leadership(&mut self, batch: &Batch<'_>, events: &mut Vec<CellEvent>) {
+    fn leadership(&mut self, batch: &Batch<'_>, events: &mut Vec<ClusterEvent>) {
         let id = batch.id;
         let now = batch.leading.map(|(ballot, _, _)| ballot);
         let relinquishes = batch
@@ -362,7 +362,7 @@ impl Tracer {
             && !relinquishes
         {
             self.leads.remove(&id);
-            events.push(CellEvent::StepDown { node: id });
+            events.push(ClusterEvent::StepDown { node: id });
         }
         let Some((ballot, frontier, handoff)) = batch.leading else {
             return;
@@ -371,10 +371,10 @@ impl Tracer {
             return;
         }
         if handoff {
-            events.push(CellEvent::Install { node: id, ballot });
+            events.push(ClusterEvent::Install { node: id, ballot });
         } else {
             assert!(self.won.insert(ballot), "a ballot is won once");
-            events.push(CellEvent::Win {
+            events.push(ClusterEvent::Win {
                 ballot,
                 frontier,
                 known: batch.known.clone(),
@@ -384,9 +384,9 @@ impl Tracer {
 
     /// Node `id` booted again with the chosen prefix below `upto`: it
     /// leads nothing.
-    pub(super) fn restart(&mut self, id: NodeId, upto: Slot) -> CellEvent {
+    pub(super) fn restart(&mut self, id: NodeId, upto: Slot) -> ClusterEvent {
         let led = self.leads.remove(&id);
-        CellEvent::Restart {
+        ClusterEvent::Restart {
             node: id,
             upto,
             led,
@@ -400,7 +400,7 @@ impl Tracer {
         prior: &[Vec<NodeId>],
         audience: &Audience,
         message: &Message,
-        events: &mut Vec<CellEvent>,
+        events: &mut Vec<ClusterEvent>,
     ) {
         match message {
             Message::Prepare {
@@ -408,7 +408,7 @@ impl Tracer {
             } if self.prepared.insert(*ballot) => {
                 assert!(ballot.node == id, "a node prepares its own ballots");
                 self.raise(id, *ballot);
-                events.push(CellEvent::Prepare {
+                events.push(ClusterEvent::Prepare {
                     ballot: *ballot,
                     from: *from_slot,
                     prior: prior.to_vec(),
@@ -422,7 +422,7 @@ impl Tracer {
                 ..
             } if self.promise.get(from).is_none_or(|p| p < ballot) => {
                 self.raise(*from, *ballot);
-                events.push(CellEvent::Promise {
+                events.push(ClusterEvent::Promise {
                     acceptor: *from,
                     ballot: *ballot,
                     from: *from_slot,
@@ -440,7 +440,7 @@ impl Tracer {
             } => {
                 let (ballot, slot, cmd) = (*ballot, *slot, Cmd::of(command));
                 if self.proposed.insert((ballot, slot)) {
-                    events.push(CellEvent::Propose {
+                    events.push(ClusterEvent::Propose {
                         by: id,
                         ballot,
                         slot,
@@ -449,7 +449,7 @@ impl Tracer {
                 }
                 match audience.proxy() {
                     Some(proxy) if self.delegated.insert((ballot, slot, proxy)) => {
-                        events.push(CellEvent::Delegate {
+                        events.push(ClusterEvent::Delegate {
                             ballot,
                             slot,
                             cmd,
@@ -457,7 +457,7 @@ impl Tracer {
                         });
                     }
                     None if self.direct.insert((ballot, slot)) => {
-                        events.push(CellEvent::Direct { ballot, slot, cmd });
+                        events.push(ClusterEvent::Direct { ballot, slot, cmd });
                     }
                     _ => {}
                 }
@@ -478,12 +478,12 @@ impl Tracer {
                 // learn of the leader (the model's `Decide`), made before
                 // the payload that names it. The prefix learns it again
                 // later, and a model reads that second learn as no step.
-                events.extend(decided.iter().map(|(s, (_, command))| CellEvent::Learn {
+                events.extend(decided.iter().map(|(s, (_, command))| ClusterEvent::Learn {
                     node: id,
                     slot: *s,
                     cmd: Cmd::of(command),
                 }));
-                events.push(CellEvent::Relinquish {
+                events.push(ClusterEvent::Relinquish {
                     from: *from,
                     to: *to,
                     ballot: *ballot,
@@ -508,7 +508,7 @@ impl Tracer {
         slot: Slot,
         ballot: Ballot,
         cmd: Cmd,
-        events: &mut Vec<CellEvent>,
+        events: &mut Vec<ClusterEvent>,
     ) {
         let vote = (ballot, cmd);
         if self.votes.insert((id, slot), vote) == Some(vote) {
@@ -516,7 +516,7 @@ impl Tracer {
         }
         if self.promise.get(&id).is_some_and(|p| *p > ballot) {
             // No acceptor votes below its promise: this is a learn.
-            events.push(CellEvent::Record {
+            events.push(ClusterEvent::Record {
                 node: id,
                 ballot,
                 slot,
@@ -524,7 +524,7 @@ impl Tracer {
             });
         } else {
             self.raise(id, ballot);
-            events.push(CellEvent::Accept {
+            events.push(ClusterEvent::Accept {
                 acceptor: id,
                 ballot,
                 slot,
@@ -544,7 +544,7 @@ impl Tracer {
         &mut self,
         id: ProxyId,
         messages: &[(Audience, Message)],
-    ) -> Vec<CellEvent> {
+    ) -> Vec<ClusterEvent> {
         let mirror = self.proxies.entry(id).or_default();
         let mut events = Vec::new();
         for (_, message) in messages {
@@ -567,7 +567,7 @@ impl Tracer {
                         mirror.rounds.retain(|_, (at, _)| *at >= *ballot);
                     }
                     mirror.rounds.insert(*slot, round);
-                    events.push(CellEvent::Fanout {
+                    events.push(ClusterEvent::Fanout {
                         proxy: id,
                         ballot: *ballot,
                         slot: *slot,
@@ -588,7 +588,7 @@ impl Tracer {
                     }
                     mirror.rounds.remove(slot);
                     mirror.done.insert(*slot, *ballot);
-                    events.push(CellEvent::Commit {
+                    events.push(ClusterEvent::Commit {
                         proxy: id,
                         ballot: *ballot,
                         slot: *slot,
@@ -602,17 +602,17 @@ impl Tracer {
     }
 
     /// Proxy `id` crashed: it boots empty.
-    pub(super) fn proxy_crash(&mut self, id: ProxyId) -> CellEvent {
+    pub(super) fn proxy_crash(&mut self, id: ProxyId) -> ClusterEvent {
         self.proxies.insert(id, ProxyMirror::default());
-        CellEvent::Crash { proxy: id }
+        ClusterEvent::Crash { proxy: id }
     }
 
     /// Matchmaker `id` holds a registration of `ballot` that it did not
     /// hold before its step: a step the first time only.
-    pub(super) fn register(&mut self, id: MatchmakerId, ballot: Ballot) -> Option<CellEvent> {
+    pub(super) fn register(&mut self, id: MatchmakerId, ballot: Ballot) -> Option<ClusterEvent> {
         self.registered
             .insert((id, ballot))
-            .then_some(CellEvent::Register {
+            .then_some(ClusterEvent::Register {
                 matchmaker: id,
                 ballot,
             })
@@ -620,10 +620,10 @@ impl Tracer {
 
     /// Matchmaker `id` applied a GC request at `ballot`: a step the first
     /// time only.
-    pub(super) fn gc_ack(&mut self, id: MatchmakerId, ballot: Ballot) -> Option<CellEvent> {
+    pub(super) fn gc_ack(&mut self, id: MatchmakerId, ballot: Ballot) -> Option<ClusterEvent> {
         self.gc_acked
             .insert((id, ballot))
-            .then_some(CellEvent::GcAck {
+            .then_some(ClusterEvent::GcAck {
                 matchmaker: id,
                 ballot,
             })
@@ -635,7 +635,7 @@ impl Tracer {
     }
 }
 
-/// The trace specs a cell walk is checked against.
+/// The trace specs a cluster walk is checked against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spec {
     /// `specs/tla/multi-paxos/MultiPaxosTrace.tla`: the log of every
@@ -667,7 +667,7 @@ impl Spec {
     /// Whether the model of this spec has the step `event`. A step the
     /// model does not have is left out of its trace.
     #[must_use]
-    pub fn keeps(self, event: &CellEvent) -> bool {
+    pub fn keeps(self, event: &ClusterEvent) -> bool {
         match self {
             Self::MultiPaxos => multi_paxos::keeps(event),
             Self::ProxyLeader => proxy_leader::keeps(event),
@@ -684,7 +684,7 @@ impl Spec {
     /// When an event names a ballot no `Prepare` opened, or an event this
     /// spec does not keep.
     #[must_use]
-    pub fn trace(self, flavor: &Flavor, events: &[CellEvent]) -> Trace {
+    pub fn trace(self, flavor: &Flavor, events: &[ClusterEvent]) -> Trace {
         assert!(
             events.iter().all(|event| self.keeps(event)),
             "a trace of {self:?} holds only the events it keeps"
@@ -711,11 +711,11 @@ impl Spec {
 }
 
 /// The ballots that a `Prepare` opened, ranked.
-fn ranks(events: &[CellEvent]) -> (Vec<Ballot>, Ranks) {
+fn ranks(events: &[ClusterEvent]) -> (Vec<Ballot>, Ranks) {
     let ballots: BTreeSet<Ballot> = events
         .iter()
         .filter_map(|event| match event {
-            CellEvent::Prepare { ballot, .. } => Some(*ballot),
+            ClusterEvent::Prepare { ballot, .. } => Some(*ballot),
             _ => None,
         })
         .collect();
@@ -863,8 +863,8 @@ mod tests {
             gc: &[],
         };
         let events = tracer.batch(&batch);
-        assert!(matches!(events[0], CellEvent::Win { .. }));
-        assert!(matches!(events[1], CellEvent::Learn { .. }));
+        assert!(matches!(events[0], ClusterEvent::Win { .. }));
+        assert!(matches!(events[1], ClusterEvent::Learn { .. }));
         assert_eq!(tracer.batch(&batch).len(), 1, "only the learn again");
     }
 
@@ -888,9 +888,9 @@ mod tests {
             gc: &[],
         };
         let events = tracer.batch(&batch);
-        assert!(matches!(events[0], CellEvent::Propose { .. }));
-        assert!(matches!(events[1], CellEvent::Delegate { .. }));
-        assert!(matches!(events[2], CellEvent::Direct { .. }));
+        assert!(matches!(events[0], ClusterEvent::Propose { .. }));
+        assert!(matches!(events[1], ClusterEvent::Delegate { .. }));
+        assert!(matches!(events[2], ClusterEvent::Direct { .. }));
         assert_eq!(events.len(), 3);
     }
 
@@ -914,7 +914,7 @@ mod tests {
         )];
         assert!(matches!(
             tracer.proxy_batch(ProxyId(0), &commit)[..],
-            [CellEvent::Commit { .. }]
+            [ClusterEvent::Commit { .. }]
         ));
         assert!(
             tracer.proxy_batch(ProxyId(0), &commit).is_empty(),

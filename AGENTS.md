@@ -334,6 +334,13 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   `(TenantId, JournalId)`; under that identifier the plain deployment exchanges the same
   messages and persists the same scalars.
 
+**The core is a library for everyone** (decided by Pierre on 2026-11-20,
+`docs/architecture/04-roles.md` §4.3). `paros-consensus` stays usable by other people for plain
+Multi-Paxos, single-decree Paxos and every flavor it already builds. What paros needs comes from
+optional behaviour and software composition, never from a service concept inside the core (no
+cell, no tenant policy, no `cell init`; #1264 (remove the cell from paros-consensus)). A paros
+need that composition cannot meet is a new optional behaviour, with the plain arm unchanged.
+
 ## Matchmaking, reconfiguration, GC, generations
 
 - **Matchmaking, then Phase 1.** A candidate registers `(b, C_b)` at a matchmaker quorum before

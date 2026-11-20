@@ -8,9 +8,9 @@
 use moonpool_walk::{Cx, sometimes};
 use paros_consensus::{NodeId, Slot, Storage, WriteOp};
 
-use super::{Cell, reach};
+use super::{Cluster, reach};
 
-impl Cell {
+impl Cluster {
     /// Rot one readable record of one node's disk, or, aimed at the split
     /// floor, every copy of one trimmed slot.
     ///
@@ -28,7 +28,7 @@ impl Cell {
             .flat_map(|site| site.disk.faulty_entries())
             .map(|(slot, _)| slot)
             .collect();
-        // Half the rots aim at the split floor, when the cell has one.
+        // Half the rots aim at the split floor, when the cluster has one.
         let split = self.split_floor();
         if !split.is_empty() && cx.rng().chance(1, 2) {
             let slot = *cx.rng().pick(&split).expect("a split slot");

@@ -1,8 +1,8 @@
-//! The cell: `ColocatedNode`s, proxy leaders and replicas of one journal,
+//! The cluster: `ColocatedNode`s, proxy leaders and replicas of one journal,
 //! under a [`moonpool_walk`] random walk.
 //!
 //! The walk owns the network: every message in flight is an [`Envelope`],
-//! delivered in any order, dropped, or duplicated. The cell owns the
+//! delivered in any order, dropped, or duplicated. The cluster owns the
 //! parties, their disks
 //! ([`MemStorage`](paros_consensus::contract::mem_storage::MemStorage)) and
 //! the driver loop that a real deployment runs around each state machine:
@@ -47,100 +47,100 @@ use paros_consensus::{
     ReplicaNode, Slot, Value, WriteOp,
 };
 
-use crate::cell::sites::{MatchmakerSite, NodeSite, ProxySite, ReplicaSite};
+use crate::cluster::sites::{MatchmakerSite, NodeSite, ProxySite, ReplicaSite};
 use crate::oracle::ledger::Ledger;
 use crate::oracle::quorum::Phase2Rule;
 use crate::oracle::reads::Reads;
 
 pub use flavor::{Flavor, Mutant};
-pub use trace::{CellEvent, Cmd, Rule, Spec};
+pub use trace::{ClusterEvent, Cmd, Rule, Spec};
 
-/// The coverage sites of the cell. A walk names the ones its flavor must
+/// The coverage sites of the cluster. A walk names the ones its flavor must
 /// reach with [`moonpool_walk::Walk::expect_sometimes`].
 pub mod reach {
     /// A durable quorum chose a slot.
-    pub const CHOSEN: &str = "cell: a durable quorum chose a slot";
+    pub const CHOSEN: &str = "cluster: a durable quorum chose a slot";
     /// A second leadership was elected after the first.
-    pub const NEW_LEADER: &str = "cell: a node won an election above an earlier leader";
+    pub const NEW_LEADER: &str = "cluster: a node won an election above an earlier leader";
     /// A node crashed with a batch it had not persisted.
-    pub const CRASH_BEFORE_PERSIST: &str = "cell: a node crashed before its batch was durable";
+    pub const CRASH_BEFORE_PERSIST: &str = "cluster: a node crashed before its batch was durable";
     /// A node crashed after its batch was durable, before it sent it.
-    pub const CRASH_BEFORE_SEND: &str = "cell: a node crashed between persist and send";
+    pub const CRASH_BEFORE_SEND: &str = "cluster: a node crashed between persist and send";
     /// A node restarted from a disk that held a promise.
-    pub const REBOOT: &str = "cell: a node restarted from a disk with a promise";
+    pub const REBOOT: &str = "cluster: a node restarted from a disk with a promise";
     /// A party applied a write that the journal accepted.
-    pub const WRITE_APPLIED: &str = "cell: a party applied an accepted write";
+    pub const WRITE_APPLIED: &str = "cluster: a party applied an accepted write";
     /// A journal changed its leader uuid.
-    pub const SET_LEADER: &str = "cell: a SetLeader was applied";
+    pub const SET_LEADER: &str = "cluster: a SetLeader was applied";
     /// A node compacted its log below a decided `Truncate`.
-    pub const COMPACTED: &str = "cell: a node's disk dropped a truncated prefix";
+    pub const COMPACTED: &str = "cluster: a node's disk dropped a truncated prefix";
     /// A node jumped to a peer's trim point.
-    pub const TRIM_JUMP: &str = "cell: a node jumped to a trim point";
+    pub const TRIM_JUMP: &str = "cluster: a node jumped to a trim point";
     /// A leader handed its authority to a peer with rounds still open.
-    pub const HANDOFF: &str = "cell: a leader handed off with rounds in flight";
+    pub const HANDOFF: &str = "cluster: a leader handed off with rounds in flight";
     /// A proxy leader committed a slot.
-    pub const PROXY_COMMIT: &str = "cell: a proxy leader committed a slot";
+    pub const PROXY_COMMIT: &str = "cluster: a proxy leader committed a slot";
     /// A leader took back a round it delegated to a proxy.
-    pub const TAKE_BACK: &str = "cell: a leader took back a delegated round";
+    pub const TAKE_BACK: &str = "cluster: a leader took back a delegated round";
     /// A proxy crashed with rounds open.
-    pub const PROXY_CRASH: &str = "cell: a proxy crashed with rounds open";
+    pub const PROXY_CRASH: &str = "cluster: a proxy crashed with rounds open";
     /// A replica applied a slot.
-    pub const REPLICA_APPLIED: &str = "cell: a replica applied a slot";
+    pub const REPLICA_APPLIED: &str = "cluster: a replica applied a slot";
     /// A leaderless read was answered at an acceptor.
-    pub const NODE_READ: &str = "cell: a node answered a leaderless read";
+    pub const NODE_READ: &str = "cluster: a node answered a leaderless read";
     /// A leaderless read was answered at a replica.
-    pub const REPLICA_READ: &str = "cell: a replica answered a leaderless read";
+    pub const REPLICA_READ: &str = "cluster: a replica answered a leaderless read";
     /// The core's probe: a reader whose promise rose above its read basis
     /// opened no read (#1228 (stale read by a lagging reader)).
     pub const LAGGING_READER_REFUSED: &str = "quorum read: a promise above the basis opens no read";
     /// A leader started a reconfiguration.
-    pub const RECONFIGURED: &str = "cell: a leader started a reconfiguration";
+    pub const RECONFIGURED: &str = "cluster: a leader started a reconfiguration";
     /// A slot was chosen under a configuration a reconfiguration named.
-    pub const CHOSEN_RECONFIGURED: &str = "cell: a slot was chosen after a reconfiguration";
+    pub const CHOSEN_RECONFIGURED: &str = "cluster: a slot was chosen after a reconfiguration";
     /// A matchmaker applied a GC request.
-    pub const GC_ACKED: &str = "cell: a matchmaker raised its GC watermark";
+    pub const GC_ACKED: &str = "cluster: a matchmaker raised its GC watermark";
     /// A round ran on a grid column the driver named.
-    pub const NAMED_COLUMN: &str = "cell: a round ran on a column the driver named";
+    pub const NAMED_COLUMN: &str = "cluster: a round ran on a column the driver named";
     /// A write was accepted after a write of the same leader uuid was
     /// refused at the wrong position.
     pub const WRITE_AFTER_GAP: &str =
-        "cell: a write was accepted after a write at a wrong position";
+        "cluster: a write was accepted after a write at a wrong position";
     /// A retried write was acknowledged from the log.
-    pub const DUPLICATE: &str = "cell: a retried write was acknowledged as a duplicate";
+    pub const DUPLICATE: &str = "cluster: a retried write was acknowledged as a duplicate";
     /// A write under a superseded leader uuid was refused.
-    pub const FENCED: &str = "cell: a superseded writer's write was refused";
+    pub const FENCED: &str = "cluster: a superseded writer's write was refused";
     /// A `Truncate` raised `first_seq`.
-    pub const TRUNCATE_MOVED: &str = "cell: a truncate raised first_seq";
+    pub const TRUNCATE_MOVED: &str = "cluster: a truncate raised first_seq";
     /// A crash lost a write that no fsync covered. A flavor reaches it
     /// only with a chosen-index write in a batch of its own; no seed of
     /// the flavors with matchmakers, or of proxies on a grid, reached it in
     /// 60 seeds.
-    pub const LOST_UNSYNCED: &str = "cell: a crash lost a write no fsync covered";
+    pub const LOST_UNSYNCED: &str = "cluster: a crash lost a write no fsync covered";
     /// A node campaigned while a leader stood.
-    pub const USURPED: &str = "cell: a node campaigned while a leader stood";
+    pub const USURPED: &str = "cluster: a node campaigned while a leader stood";
     /// A leader missed a message that would depose it.
-    pub const DEAF_LEADER: &str = "cell: a leader missed a message that would depose it";
+    pub const DEAF_LEADER: &str = "cluster: a leader missed a message that would depose it";
     /// A leader move met a leadership that a higher ballot passed.
-    pub const PASSED_LEADER: &str = "cell: a move met a leader that a higher ballot passed";
+    pub const PASSED_LEADER: &str = "cluster: a move met a leader that a higher ballot passed";
     /// A leader moved a stuck round to another column.
-    pub const MOVED_ROUND: &str = "cell: a leader moved a stuck round to another column";
+    pub const MOVED_ROUND: &str = "cluster: a leader moved a stuck round to another column";
     /// A client sent a write again at a position it wrote before.
-    pub const RETRY: &str = "cell: a client retried a write";
+    pub const RETRY: &str = "cluster: a client retried a write";
     /// A disk lost the value of a chosen record.
-    pub const ROT_CHOSEN: &str = "cell: a disk rotted a chosen record";
+    pub const ROT_CHOSEN: &str = "cluster: a disk rotted a chosen record";
     /// A disk lost the value of a record that a peer already trimmed and
     /// that a third node lacks.
-    pub const ROT_SPLIT_FLOOR: &str = "cell: a disk rotted a record below a peer's floor";
+    pub const ROT_SPLIT_FLOOR: &str = "cluster: a disk rotted a record below a peer's floor";
     /// A scrub found a rotted record and wrote it again.
-    pub const SCRUBBED: &str = "cell: a scrub wrote a rotted record again";
+    pub const SCRUBBED: &str = "cluster: a scrub wrote a rotted record again";
     /// The operator retired a node.
-    pub const RETIRED: &str = "cell: the operator retired a node";
+    pub const RETIRED: &str = "cluster: the operator retired a node";
     /// The operator booked a retired node again.
-    pub const REBOOKED: &str = "cell: the operator booked a retired node again";
+    pub const REBOOKED: &str = "cluster: the operator booked a retired node again";
     /// A node admitted a late node to its pool.
-    pub const ADMITTED: &str = "cell: a node admitted a late node to its pool";
+    pub const ADMITTED: &str = "cluster: a node admitted a late node to its pool";
     /// A handover chose a new matchmaker set.
-    pub const HANDED_OVER: &str = "cell: a handover chose a new matchmaker set";
+    pub const HANDED_OVER: &str = "cluster: a handover chose a new matchmaker set";
 }
 
 /// How long a node waits for its leader, in ticks: drawn per election.
@@ -157,7 +157,7 @@ const REPLICA_BASE: u64 = 100;
 /// The client keeps this many of its last writes, to retry one.
 const RETRY_WINDOW: usize = 8;
 
-/// A party of the cell: what the walk crashes and restarts, and what a
+/// A party of the cluster: what the walk crashes and restarts, and what a
 /// message is addressed to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Party {
@@ -200,7 +200,7 @@ pub enum Wire {
     ReconfigureReply(ReconfigureReply),
 }
 
-/// The cell's own moves.
+/// The cluster's own moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Every party's clock moves one tick: beats, elections, re-sends.
@@ -255,8 +255,8 @@ const ACTIONS: &[Action] = &[
     Action::Usurp,
 ];
 
-/// The cell under walk. See the module documentation.
-pub struct Cell {
+/// The cluster under walk. See the module documentation.
+pub struct Cluster {
     flavor: Flavor,
     config: AcceptorConfig,
     pool: Vec<NodeId>,
@@ -298,11 +298,11 @@ pub struct Cell {
     admitted: BTreeMap<NodeId, BTreeSet<NodeId>>,
 }
 
-impl Model for Cell {
+impl Model for Cluster {
     type Msg = Envelope;
     type Node = Party;
     type Action = Action;
-    type Event = CellEvent;
+    type Event = ClusterEvent;
 
     fn new(cx: &mut Cx<'_, Self>) -> Self {
         Self::build(Flavor::multi_paxos(), cx)
@@ -330,7 +330,7 @@ impl Model for Cell {
             Action::StepDown | Action::Rot | Action::Usurp => [2, 0, 0],
             // A late node stays outside most pools for a while: a pool
             // catches up slowly, and every pool admits it once the faults
-            // stop (`Cell::calm`).
+            // stop (`Cluster::calm`).
             Action::Admit => [1, 0, 0],
         };
         match phase {
@@ -502,7 +502,7 @@ impl Model for Cell {
         // safety, and the walk judges safety through the whole lag. A
         // lagging-reader walk keeps the pools lagging through the quiet
         // phase, where leaders stand and reconfigure, and admits them when
-        // the settle rounds start (`Cell::tick_all`).
+        // the settle rounds start (`Cluster::tick_all`).
         if !self.flavor.lagging_reader {
             self.admit_all();
         }
@@ -628,8 +628,8 @@ impl Model for Cell {
     }
 }
 
-impl Cell {
-    /// The cell of `flavor`, every party up.
+impl Cluster {
+    /// The cluster of `flavor`, every party up.
     ///
     /// # Panics
     ///
@@ -641,7 +641,7 @@ impl Cell {
         let rule = Phase2Rule::new(&members, flavor.quorum);
         let take_back_after = 1 + cx.rng().below(3);
         let expire_after = 1 + cx.rng().below(BUDGET_SPREAD);
-        let mut cell = Self {
+        let mut cluster = Self {
             config,
             nodes: Vec::new(),
             proxies: Vec::new(),
@@ -666,41 +666,45 @@ impl Cell {
             pool,
             flavor,
         };
-        cell.decree_rounds = vec![0; cell.pool.len()];
-        cell.reconfigurers = cell.pool.iter().map(|id| cell.reconfigurer(*id)).collect();
-        cell.nodes = cell
+        cluster.decree_rounds = vec![0; cluster.pool.len()];
+        cluster.reconfigurers = cluster
             .pool
             .iter()
-            .map(|id| NodeSite::new(*id, cell.party_config(*id)))
+            .map(|id| cluster.reconfigurer(*id))
             .collect();
-        cell.replicas = (0..cell.flavor.replicas)
+        cluster.nodes = cluster
+            .pool
+            .iter()
+            .map(|id| NodeSite::new(*id, cluster.party_config(*id)))
+            .collect();
+        cluster.replicas = (0..cluster.flavor.replicas)
             .map(|i| {
                 let id = NodeId(REPLICA_BASE + i);
-                ReplicaSite::new(id, cell.party_config(id), cell.flavor.limits)
+                ReplicaSite::new(id, cluster.party_config(id), cluster.flavor.limits)
             })
             .collect();
-        let bootstrap = cell.bootstrap_matchmakers();
-        cell.matchmakers = cell
+        let bootstrap = cluster.bootstrap_matchmakers();
+        cluster.matchmakers = cluster
             .matchmaker_ids()
             .iter()
-            .map(|id| MatchmakerSite::new(*id, bootstrap.clone(), cell.flavor.limits))
+            .map(|id| MatchmakerSite::new(*id, bootstrap.clone(), cluster.flavor.limits))
             .collect();
-        if cell.flavor.matchmaker_spares > 0 {
-            cell.register_sibling();
+        if cluster.flavor.matchmaker_spares > 0 {
+            cluster.register_sibling();
         }
-        cell.proxies = (0..cell.flavor.proxies)
-            .map(|i| ProxySite::new(ProxyId(i), cell.config.clone()))
+        cluster.proxies = (0..cluster.flavor.proxies)
+            .map(|i| ProxySite::new(ProxyId(i), cluster.config.clone()))
             .collect();
-        for id in cell.pool.clone() {
-            cell.boot_node(id, false, cx);
+        for id in cluster.pool.clone() {
+            cluster.boot_node(id, false, cx);
         }
-        for id in cell.replica_ids() {
-            cell.drain_replica(id, cx);
+        for id in cluster.replica_ids() {
+            cluster.drain_replica(id, cx);
         }
-        cell
+        cluster
     }
 
-    /// The flavor of this cell.
+    /// The flavor of this cluster.
     #[must_use]
     pub fn flavor(&self) -> &Flavor {
         &self.flavor
@@ -803,7 +807,7 @@ impl Cell {
     }
 
     /// Send what node `id` released, less what a lagging-reader walk
-    /// loses on the way ([`Cell::lost_to_a_lagging_pool`]).
+    /// loses on the way ([`Cluster::lost_to_a_lagging_pool`]).
     fn send_from(&self, id: NodeId, out: Vec<Envelope>, cx: &mut Cx<'_, Self>) {
         for envelope in out {
             if !self.lost_to_a_lagging_pool(id, &envelope, cx) {
@@ -1383,7 +1387,7 @@ impl Cell {
     /// (a `Prepare`, an `Accept`, a `Heartbeat`, a `Nack` or a `Relinquish`
     /// above its ballot), but hears every `Commit`. So a leader learns a
     /// slot chosen above its ballot while it still leads, the window that
-    /// [`Cell::pick_leader`] meets. A lost message is a fault the contract
+    /// [`Cluster::pick_leader`] meets. A lost message is a fault the contract
     /// allows; once the faults stop, nothing is lost.
     fn deafens(&self, id: NodeId, msg: &Message) -> bool {
         if self.calmed {
@@ -1588,7 +1592,7 @@ impl Cell {
     }
 
     /// A node that does not lead campaigns while a leader stands. With
-    /// [`Cell::deafens`], the leader it deposes may go on leading for a
+    /// [`Cluster::deafens`], the leader it deposes may go on leading for a
     /// while and learn the new leader's decisions.
     fn usurp(&mut self, cx: &mut Cx<'_, Self>) {
         if self.leaders().is_empty() {
@@ -1823,7 +1827,7 @@ impl Client {
     fn write(
         &mut self,
         journal: paros_consensus::journal::state::JournalState,
-        cx: &mut Cx<'_, Cell>,
+        cx: &mut Cx<'_, Cluster>,
     ) -> Entry {
         let draw = cx.rng().below(10);
         if draw < 2

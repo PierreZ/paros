@@ -45,7 +45,7 @@ stays valid: find its file in the section map.
 8. [03-6-status.md](03-6-status.md): §3.6 Status
 9. [03-7-universe.md](03-7-universe.md): §3.7 The universe
 10. [03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md): §3.8 Identifiers; §3.9 Checkpoints; §3.10 Recovery (deferred); §3.11 Transport security
-11. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract
+11. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract; §4.3 The consensus core is a library for everyone
 12. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones
 13. [06-verification.md](06-verification.md): §6 Verification
 14. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
@@ -84,6 +84,7 @@ stays valid: find its file in the section map.
 | §4 | Roles | [04-roles.md](04-roles.md) |
 | §4.1 | How the pieces fit | [04-roles.md](04-roles.md) |
 | §4.2 | The journal's sans-IO contract | [04-roles.md](04-roles.md) |
+| §4.3 | The consensus core is a library for everyone | [04-roles.md](04-roles.md) |
 | §5 | Failure model and zones | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §6 | Verification | [06-verification.md](06-verification.md) |
 | §7 | The rework: phases and steps | [07-changes-milestones-done.md](07-changes-milestones-done.md) |
