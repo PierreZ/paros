@@ -135,6 +135,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
+| A user truncate across segments: the trim floor in the boundary state, the floor of a read from the segment in force, the floor check of an offloaded read, the trim of a sealed segment only once the floor is decided over it, the acceptors' compaction after `F + 1` replicas, the trim-point jump | the journal steps are designed, not built | `segment-truncate/` | #1276 (user truncate across segments), done |
 | Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301 (a resent write across a seal)) | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
@@ -2420,9 +2421,75 @@ The answer to #1271:
   segment never need the slots of the old one (`live_gone`).
 - **Liveness.** With `F` replicas of a set of `2F + 1` down, writes and reads of the segment end;
   a set of `F` members does not (`set_size_f`).
-- No decision is refuted. The model has no `Truncate`: that the trim floor (`first_seq`) is part
-  of the boundary state is a reading, not a checked fact, and the journal state model (#1189)
-  checks it.
+- No decision is refuted. The model has no `Truncate`; `segment-truncate/` (#1276 (user
+  truncate across segments)) checks that the trim floor (`first_seq`) is part of the boundary
+  state.
+
+### `segment-truncate/`: a user truncate across segments, for #1276
+
+Truncation is driven by the user only (no retention policy, no cursors; Pierre, 2026-11-19): a
+`Truncate` decided by Paxos and judged at apply raises `first_seq`. `truncation/` and
+`truncation-reconfig/` check it on plain Multi-Paxos and across one reconfiguration; this model
+checks it with segments (`docs/architecture/02-data-plane.md` section 2.10).
+
+The journal has a sealed segment S1 (slots `0 .. K - 1`, replica set R1) and the open segment S2
+(slots `K .. NS - 1`, replica set R2), as in `segment-replicas/`. One writer, so no leader uuid
+(`segment-replicas/` checks the writer fence). A value is a `Write` of one record or a
+`Truncate(up)`, which raises `first_seq` to `up`, clamped to `next_seq`, and never lowers it.
+A replica learns the slots of its segment from the acceptors (at or above their floor, until S1
+retires) or from a live peer, applies them in order, and compacts lazily below the slot that
+holds the record at its `first_seq`. The acceptors of a segment compact too. A laggard whose
+next slot has no source jumps to the trim point of a peer (`TrimmedTo`). The first replica of R1
+that applied S1 writes the boundary state into the record of S1. The record of S1 goes from
+sealed to retired (`RetireAt` holders), to offloaded (the object holds the whole segment; the
+replicas of R1 then drop their copy), and to trimmed from any of these three; the trim deletes
+the object by its key. A read of `seq` q takes the floor from a replica of R2 at the basis of its
+leaderless read: below it the answer is "trunc"; above it, the read goes to R2 for a slot of S2,
+to a holder in R1 for a sealed or retired S1, to the object (served by the replica of R2) for an
+offloaded S1, and is "trunc" for a trimmed S1.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: `FoldTrue`, `BoundaryTrue`, `ReadFloor` (no read returns a record below the floor decided when it started), `ReadKeep` (no record at or above the floor is lost, and "trunc" only below it), `TrimTrue` (a trimmed record is a sealed segment wholly below the floor), `Findable` (each record at or above the floor is at a live replica, the acceptors or the object), `TrimStays` (a trimmed record never becomes live again); `K = 2`, `NS = 4`, a write, `Truncate(1)`, `Truncate(2)`; one replica in R1, two in R2; @SAFETY@ |
+| `crash` | ci | pass: the safety invariants with two replicas in each set, `F = 1`, retire at `F + 1`; @CRASH@ |
+| `live_reads` | ci | pass: `Ends`: a run ends (no step is enabled) with every read served, every live replica of R2 at the end of the log, S1 offloaded or trimmed (trimmed when the floor covers it), and the object of a trimmed S1 deleted; @LIVER@ |
+| `live` | ci | pass: `Ends` with three replicas in each set and `F = 1`, no reads; @LIVE@ |
+| `reach_inside` | ci | violation: the floor lands inside S1 and a read of S1 above it is served |
+| `reach_object` | ci | violation: a read of the offloaded S1 is served from the object, with a floor above 0 |
+| `reach_trim_sealed`, `reach_trim_retired`, `reach_trim_offloaded` | ci | violation: S1 is trimmed from each of its three states |
+| `reach_seal_truncate` | ci | violation: a `Truncate` at the last slot of S1 lands in the boundary state |
+| `reach_jump` | ci | violation: a laggard jumps |
+| `nofirst` | ci | violation of `ReadFloor`: the boundary state holds `next_seq` only. S1 decides `Truncate(2)` (clamped to 1); R2 starts with `first_seq` 0 and sends a read of `seq` 0 to a holder of R1 that did not compact yet |
+| `trimstate` | ci | violation of `ReadFloor`: R2 takes `first_seq` from the trimmed segment records; S1 is not trimmed yet, so the floor is 0 |
+| `holder` | ci | violation of `ReadFloor`: the read takes the floor from the holder in R1, whose fold stops at the seal; S2 decided `Truncate(1)` |
+| `cache_unchecked` | ci | violation of `ReadFloor`: the replica of R2 serves the object of the offloaded S1 with no check of the floor; the object still holds the record below a floor inside S1 |
+| `trim_intent` | ci | violation of `ReadKeep`: S1 is trimmed once a `Truncate` that covers it exists, before it is decided; a read above the floor answers "trunc" |
+| `trim_open` | ci | violation of `Findable`: the open S2 is trimmed when its range so far is below the floor; a later write of S2 has nowhere to live |
+| `acc_floor` | ci | violation of `Ends`: the acceptors of S1 compact to the decided floor before a replica of R1 applied S1; nobody can fold S1, the boundary state is never written, and R2 never starts |
+| `nojump` | ci | violation of `Ends`: no `TrimmedTo`; a replica of R2 behind the floor waits for ever for a slot that the acceptors and its peer dropped |
+
+The answer to #1276:
+
+- **The trim floor belongs in the boundary state.** The writer of the boundary state writes
+  `first_seq` with `next_seq` into the segment record, in the same compare-and-set
+  (`nofirst`, `trimstate` fail without it). The `Open` point of section 2.10 is closed.
+- **Floor inside a segment.** A read below the floor is refused and a read above it works on
+  every holder, in each state of the segment (`reach_inside`, `reach_object`). The floor of a read
+  comes from the segment in force (`holder`), and an offloaded read checks it before it serves
+  the object or a cache (`cache_unchecked`).
+- **Floor over whole segments.** A sealed, retired or offloaded segment becomes trimmed once a
+  replica's fold has the floor at or above its last `seq`; the trim deletes the object by key; a
+  trimmed record stays trimmed. The open segment is never trimmed (`trim_open`), and a trim
+  never runs before the `Truncate` is decided (`trim_intent`). This agrees with `offload/`
+  (#1256): the scrub deletes only objects of segments below the trim floor.
+- **Truncate at a seal.** A `Truncate` at the last slot of S1 lands in the boundary state
+  (`reach_seal_truncate`); a `Truncate` at the first slots of S2 is applied by R2 on top of it.
+- **Lagging replica.** A replica behind the floor jumps to a peer's trim point and never
+  fetches a slot of a trimmed segment (`nojump`). For that, the acceptors of a segment compact
+  only to a slot that `F + 1` replicas of its set compacted to (`acc_floor`): a new rule.
+- No decision is refuted. Left out: the leader uuid and the fence (`segment-replicas/`), the
+  upload races (`offload/`), Phase 1 and the seal end (`experiments/segments/a/`); the
+  matchmakers are one atomic register.
 
 ### `multi-writer/`: multi-writer mode through `SetLeader(None)` and `expected_seq`, for #1274
 

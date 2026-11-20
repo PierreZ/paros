@@ -102,7 +102,11 @@ scrub of the objects below the trim floor, the drop after the mark; #1256 (offlo
 offloader role)), the health measures of the grid (`specs/tla/health/`: the spares of a column,
 electable, writable and the hold of a bypass as counts against the quorums, the seven journal
 states and their fixed actions, no placement over two zones after a zone loss; #1260 (journal
-health measures)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+health measures)), a user truncate across segments (`specs/tla/segment-truncate/`: the trim floor
+in the boundary state, the floor of a read from the segment in force, the floor check of an
+offloaded read, the trim of a sealed segment once the floor is decided over it, the acceptors'
+compaction after `F + 1` replicas, the trim-point jump; #1276 (user truncate across segments)).
+`specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
