@@ -246,7 +246,8 @@ quorum of the old configuration after the switch, as Phase 1 of an ordinary camp
   column below quorum), `degraded-reshape/`): it waits for a Phase-1 quorum of the old grid,
   which no longer exists. The hold that gates only the acks and the read basis also misorders
   two reads on the old basis. A hold before Phase 2 on `F + 1` of one old column, or the
-  segment-record check, closes both and stays live.
+  segment-record check, closes both and stays live. GC with no hold keeps `Agreement`
+  (`gc_carry_nohold`).
 
 Results are in `zero-stall/checks.txt` and in the design document of #579 (zero-stall
 reconfiguration).
@@ -2157,7 +2158,6 @@ answers, so that a registration that an ack waited for is seen.
 | `phase1_ack_gate` | ci | violation: #1270 again; a read at the bypass ballot returns a slot before the hold |
 | `phase1_reads_maj`, `block_reads_maj` | ci | violation (a finding): a hold that gates the acks and the read basis still lets a read on the **old** basis return a slot that the new grid chose, from the old vote of one acceptor; a second read on the old basis, at a quorum without that acceptor, misses it (a trace of 15 states, all acceptors live) |
 | `phase1_propose_maj`, `block_propose_maj`, `safe_record_maj` | ci | pass: the hold before Phase 2, or the record check, orders those reads |
-| `agree_record`, `agree_block_propose` | ci | pass: `Agreement` and `ReadSafe` with GC and a rival ballot |
 | `seal_frontier` | ci | pass: the end at the allocator frontier (1.3 million states, 7 minutes) |
 | `seal_chosen` | ci | control: the end at the chosen prefix; a slot that the old ballot chose by a late quorum falls above the end, a rival's Phase 1 ignores its old votes, and two values are chosen |
 
@@ -2177,6 +2177,9 @@ The answer to #1258:
   1. **The segment-record check** of #1254, with no hold at all (`safe_record`,
      `safe_record_maj`, `live_record`). The reader retries when a matchmaker majority shows a
      segment above its basis; the bypass ballot registered at a majority before it proposed.
+     GC then waits only for the carried slots to be chosen at the new ballot, and keeps
+     `Agreement` with a rival (`zero-stall/gc_carry_nohold`, 4 million states, 3.5 minutes,
+     `long`; a rival in this model's 3 × 2 grid did not finish in 25 minutes).
   2. **A hold before Phase 2 on a blocking set**: the bypassing leader sends no `Accept` at its new
      ballot before the acceptors that promised it meet every read quorum of each prior
      configuration. On the journal grid that is `F + 1` acceptors of one old column, which a

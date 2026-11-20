@@ -21,6 +21,8 @@ read_carry_hold    pass       ci
 gc_early           violation  ci
 gc_p212_paper      pass       long
 gc_carry_paper     pass       long
+# GC with no decision hold keeps Agreement (#1258 (reshape with a column below quorum)).
+gc_carry_nohold    pass       long
 # The GC fence (I5): the leader at b' asks for no floor before its fence Phase 1.
 gc_nofence         violation  ci
 # The bypass check with no watermark half (rule 3), GC on. With the watermark

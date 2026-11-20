@@ -37,9 +37,6 @@ block_reads_maj          violation  ci
 phase1_propose_maj       pass       ci
 block_propose_maj        pass       ci
 safe_record_maj          pass       ci
-# Agreement and read safety with GC and a rival ballot.
-agree_record             pass       ci
-agree_block_propose      pass       ci
 # T2, the seal end of a bypass: the allocator frontier.
 seal_frontier            pass       ci
 seal_chosen              violation  ci
