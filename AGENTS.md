@@ -108,7 +108,10 @@ offloaded read, the trim of a sealed segment once the floor is decided over it, 
 compaction after `F + 1` replicas, the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
 segments with an empty segment and a seal before the `Fence`; the whole boundary state, the
 leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)).
-`specs/tla/README.md` lists every flavor with its model. Then the journal is
+`specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
+inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
+the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are
+its later steps). Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
