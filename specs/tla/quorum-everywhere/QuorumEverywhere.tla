@@ -103,7 +103,8 @@ ReadAlts(M) ==
 \* The replicas that hold a sealed segment before it retires.
 HoldQ == {Q \in SUBSET R : Cardinality(Q) >= F + 1}
 
-Steps == <<"write", "election", "read", "seal", "retire", "offload", "trim", "handover">>
+Steps == <<"write", "election", "read", "seal", "retire", "offload", "trim", "handover",
+           "ctl_election", "reshape">>
 
 \* The waits of each step, in order. A zero-arity definition: TLC computes
 \* it once.
@@ -127,7 +128,13 @@ WaitsOf == [s \in {Steps[k] : k \in DOMAIN Steps} |->
     [] s = "trim"     -> <<Phase2(NewSeq), MMWait(MM)>>
     \* The handover of the matchmaker set: a stop quorum of `MM`, then the
     \* successor decree in `MM2`, Phase 1 and Phase 2.
-    [] s = "handover" -> <<MMWait(MM), MMWait(MM2), MMWait(MM2)>>]
+    [] s = "handover" -> <<MMWait(MM), MMWait(MM2), MMWait(MM2)>>
+    \* The grid controller's election: it reads the term in the matchmaker
+    \* record, then writes term + 1 by compare-and-set (#1259).
+    [] s = "ctl_election" -> <<MMWait(MM), MMWait(MM)>>
+    \* The fenced reshape call: one compare-and-set on the matchmaker record
+    \* (#1259, `specs/tla/grid-controller/`).
+    [] s = "reshape"  -> <<MMWait(MM)>>]
 
 Run == IF Only = "all" THEN Steps ELSE <<Only>>
 

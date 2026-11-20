@@ -93,7 +93,8 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
-| Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
+| Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
+| The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -1857,6 +1858,8 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 | `offload` | a matchmaker majority (the offload mark, #1256) |
 | `trim` | `acks` of one column (the decided `Truncate`); a matchmaker majority |
 | `handover` | a stop quorum of `MM`; Phase 1 and Phase 2 of the successor decree in `MM2` |
+| `ctl_election` | a matchmaker majority (read the controller term); a matchmaker majority (its compare-and-set, #1259) |
+| `reshape` | a matchmaker majority (the fenced reshape call, #1259) |
 
 `Old` is a sealed configuration and `New` the configuration in force: `New` moves the members
 of `Old` by `Shift` places, so with `Shift = 1` each member that stays changes its column. The
@@ -1872,7 +1875,7 @@ changes nothing, and the state space stays small.
 | `quorum` | ci | pass: the grid 3 × 2 with `acks = 2`, `F = 1`, `Shift = 1` |
 | `quorum_shift_row` | ci | pass: the same with `Shift = 2` (each member keeps its column) |
 | `quorum_3x3` | ci | pass: 3 × 3, `acks = 2`, `F = 1` |
-| `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (770 thousand distinct states, about 6 minutes with 4 workers) |
+| `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (890 thousand distinct states with the two controller steps; 12 minutes locally with 4 workers while two other TLC runs shared the machine) |
 | `quorum_majority` | ci | pass: the majority of three (`partitions = 1`, a grid 3 × 1) |
 | `write_move` | ci | pass: `F + 1` down in one column, `F` in the others; the write moves and completes |
 | `write_every_column`, `trim_every_column` | ci | violation: `F + 1` down in every column of `New` blocks the write |
@@ -1899,3 +1902,82 @@ The answer to #1257:
   every column, because a write needs a whole column. The service offers only the majority and
   the partitioned grid (`docs/architecture/03-4-tenant-modes.md`), so the rule holds; the full
   grid stays a shape of `paros-consensus` and of its models, outside the journal.
+
+### `grid-controller/`: the controller's election and its fenced reshape call, for #1259 (the fenced reshape call of the grid controller)
+
+Pierre's decisions (2026-11-20): the grid controller is its own role in each journal, on
+stateless machines, elected by a term in the journal's matchmaker record, and its only effect on
+the journal is `reshape(expected configuration, new grid, controller term)`, a compare-and-set
+on that record. The record is one atomic register, as in `experiments/segments/a/`: the other
+models check how a matchmaker quorum keeps such a register, and `quorum-everywhere/` checks that
+each of its writes waits for a majority only. The record holds the term, its holder and the
+segment table (each configuration: its grid, the configuration it was planned from, and a state:
+`pending`, `inforce`, `sealed`, `retired`). The seal and the retire are abstract journal steps:
+the seal needs a live Phase-1 quorum of the old grid and live Phase-1 and Phase-2 quorums of the
+new grid. A grid is one column (`GridCheck.tla` shows the bound is the same for every column
+count).
+
+A controller is stateless: a crash forgets its term and its plan. It reads the term, then writes
+term + 1 by compare-and-set on the term it read. A candidate can depose a live holder, and the
+deposed holder keeps calling with its old term until a refusal tells it. The controller may ask
+for any grid of `Grids` from the newest configuration it read, at any time: the record judges
+what gets in, not the controller. The network loses at most one request or reply, and a
+controller sends its request again while it has no answer. One acceptor of the pool fails
+(at most `F`, inside the contract).
+
+Properties: `OneFromEach` (at most one segment opens from one configuration), `HolderOnly` (only
+the holder of the current term opens a segment), `StaleNoEffect` (a request with another term
+changes nothing), `OneUnretired` (one configuration in force and at most one other not retired:
+no second reshape while a segment is not retired), `AllBounded` (every grid of the table meets
+`F + 1 <= acks <= rows - F`, #1257), `AnswerTrue` ("ok" exactly when the record took the
+request), and two liveness properties under weak fairness once the faults stop: `Answered` (every
+call is answered, done or refused) and `Settles` (every configuration that a reshape opened comes
+into force).
+
+The rules are constants; `TRUE` is the rule. `Raise` (the election writes term + 1), `TermCheck`,
+`ExpCheck` (the expected configuration is the newest of the table), `RetireGuard` (the newest is
+in force and every older one retired), `BoundGuard` (the record checks the bound itself) and
+`Idempotent` (the record keeps the identity of the request that opened each segment and answers a
+retry "ok").
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: every rule; two controllers, terms up to 2, one controller crash, one lost message, six grids (two member sets, `acks` 1 to 3) |
+| `safety_long` | long | pass: every rule with terms up to 3 and one acceptor failure too (24.6 million distinct states, 7 minutes locally with 4 workers) |
+| `live_ci` | ci | pass: `Answered` and `Settles`, with every rule, one lost message and one acceptor down, no controller crash (257 thousand distinct states, under 2 minutes) |
+| `live` | long | pass: the same with one controller crash too (1.8 million distinct states, 14 minutes locally with 4 workers while two other TLC runs shared the machine) |
+| `elect_noraise` | ci | violation of `HolderOnly`: an election that keeps the term gives two controllers one term, and both open segments |
+| `noterm`, `noterm_holder` | ci | violation of `StaleNoEffect` and `HolderOnly`: a deposed controller that read the newest configuration opens a segment with its old term |
+| `noterm_one` | ci | pass: with no term check, `OneFromEach` still holds, because the expected-configuration check refuses every stale plan |
+| `noexp_one` | ci | pass: with no expected-configuration check, `OneFromEach` still holds, because the term refuses a deposed controller and a holder has one call at a time |
+| `noexp_noterm` | ci | violation of `OneFromEach`: with both checks off, the new holder's reshape lands, then the deposed controller's call from the same configuration lands too |
+| `noexp_noidem` | ci | violation of `OneFromEach`: with no expected-configuration check and no idempotent answer, the retry of a call whose "ok" was lost opens a second segment |
+| `noretire` | ci | violation of `OneUnretired`: a second reshape while the first is pending |
+| `nobound` | ci | violation of `AllBounded`: the record takes a grid outside the bound |
+| `live_nobound` | ci | violation of `Settles`: a grid with `acks = 1` and one acceptor down never comes into force (Phase 1 needs every member), and the retire guard then blocks every later reshape |
+| `noidem` | ci | violation of `AnswerTrue`: the "ok" is lost, and the retry is refused for its expected configuration although the reshape took place |
+| `reach_<event>` | ci | violation of `NotReached`, one for each case the issue names: `lost_race` (two candidates read one term, one loses the compare-and-set), `deposed` (a candidate deposes a live holder), `stale_refused` (the deposed controller's call is refused for its term), `takeover` and `open_after_takeover` (a candidate takes the term of a crashed holder, then opens a segment), `crash_after_plan` and `open_after_crash` (a controller crashes between its plan and its call, and the journal still reshapes), `sealed_refused` (a reshape asked while a segment is sealed but not retired is refused), `ok_lost` (an "ok" is lost), `fail_after_plan` (an acceptor fails after a plan named it), `inforce_with_failed` (that grid still comes into force) |
+
+The answer to #1259:
+
+- **The model passes, and each rule has a control that breaks it.** The election must raise the
+  term; the record must check the term, the expected configuration, the retire state and the
+  bound; and it must answer a retry with the answer it gave.
+- **One claim of the issue is refuted as written.** "With no term check, two segments open from
+  one configuration" is false while the expected-configuration check holds (`noterm_one`
+  passes). The two checks overlap for `OneFromEach`: each one alone keeps it, and only with both
+  off does a configuration open twice (`noexp_noterm`). The term's own job is `HolderOnly` and
+  `StaleNoEffect`: a deposed controller that read the newest configuration passes the
+  expected-configuration check, and only the term refuses it (`noterm`).
+- **A rule that the issue did not name: an idempotent answer.** A call whose "ok" is lost is sent
+  again; without an idempotent answer the record refuses it, and the controller believes a
+  reshape failed that took place (`noidem`). The record keeps the identity of the call that
+  opened each segment (term, expected configuration, grid) and answers it "ok" again. This is a
+  proposal, **Open** until Pierre agrees (`docs/architecture/02-data-plane.md` §2.12).
+- **The bound must be a guard of the record, not only a policy of the controller.** A grid outside
+  `F + 1 <= acks <= rows - F` can open and never come into force with one acceptor down; the
+  retire guard then blocks every heal (`live_nobound`).
+- **Trace checking.** The controller has no code yet. The model's steps (`ReadTerm`, `Elect`,
+  `Plan`, `Call`, `Process`, `Receive`, `SealIn`, `Retire`) are the events a trace spec will
+  follow once the consensus-sim flavor of the controller loop exists (#1261 (grid controller
+  decision tests), after #1189).

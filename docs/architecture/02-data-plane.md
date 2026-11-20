@@ -349,6 +349,7 @@ a segment's replica set, each step completes:
 | Retire | `F + 1` replicas of the segment, then a matchmaker majority |
 | Offload mark, record of a trim | a matchmaker majority |
 | Matchmaker set handover | a majority of the old set (the stop quorum), then a majority of the new set (the successor decree) |
+| Grid controller election, reshape call | a matchmaker majority for each compare-and-set on the matchmaker record (section 2.12, #1259) |
 
 Each step blocks with one member more down than its quorum allows, and each step that waits for
 every target blocks with `F` down: the model sees both. On a grid that is not full the leaderless
@@ -361,3 +362,47 @@ A grid layout meets the rule for `F` exactly when `F + 1 <= acks <= rows - F`
 (`rows = 2F + 1`, `acks = F + 1`) and the majority meet it. The full grid (`acks = rows`) does not:
 a write needs a whole column. The journal therefore offers only the majority and the partitioned
 grid, and a grid that the grid controller picks keeps `F + 1 <= acks <= rows - F`.
+
+### 2.12 The grid controller's fenced reshape
+
+**The grid controller is its own role in each journal, elected by a term in the journal's
+matchmaker record** (decided by Pierre on 2026-11-20, #1259 (the fenced reshape call of the grid
+controller)). It runs on stateless machines; the Paxos leader does not run it. Its only effect on
+the journal is one compare-and-set on the matchmaker record:
+
+    reshape(expected configuration, new grid, controller term)
+
+The controller decides when and where; the record's guards decide whether it is safe. So the
+record trusts nothing that the controller computed. `specs/tla/grid-controller/` checks the
+election and the call with two controllers, a candidate race, a deposed controller that keeps
+calling, a crash between the plan and the call, a takeover after a crash, a lost request or
+reply, and an acceptor that fails after a plan named it. Each guard has a control that TLC
+breaks:
+
+- **The election raises the term.** A candidate reads the term, then writes term + 1 by
+  compare-and-set on the term it read; of two candidates that read the same term, one loses.
+  An election that keeps the term gives two controllers the same term, and both open segments.
+- **The call carries the term, and the record refuses any other term.** A deposed controller
+  that keeps calling changes nothing, even when its call names the configuration in force. A
+  refusal for the term tells it to stop.
+- **The expected configuration is the newest configuration of the table.** With this check, at
+  most one segment opens from one configuration, with or without the term check. A segment opens
+  twice from one configuration only when both checks are off: a deposed controller's call lands
+  after the new holder's.
+- **No reshape while a segment is not retired.** The newest configuration must be in force and
+  every older one retired, so one configuration is in force and at most one other is not retired
+  (rule 1 of the plan). A reshape asked while a segment is sealed but not retired is refused.
+- **The record checks `F + 1 <= acks <= rows - F` itself** (section 2.11). A grid outside the
+  bound can open and then never come into force: with `acks = 1` and one acceptor down, Phase 1
+  needs every member, the new configuration stays pending, and the guard above blocks every later
+  reshape, so the journal can never heal.
+- **The record answers a retry with the same answer** (a rule that the model found; **Open**
+  until Pierre agrees). The record keeps the identity of the call that opened each segment (the
+  controller term, the expected configuration and the grid), and answers a call that it already
+  took with "ok". Without it, a lost "ok" makes the retry fail its expected-configuration check,
+  and the controller is told "refused" for a reshape that took place.
+
+After the faults stop, every call is answered (done or refused) and every configuration that a
+reshape opened comes into force. The controller's crate (`paros-journal-control`) and its
+consensus-sim flavor (#1261 (grid controller decision tests)) come after the journal state model
+(#1189); the flavor's walk then trace-checks against this model.

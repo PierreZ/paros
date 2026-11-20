@@ -26,6 +26,8 @@ retire_mm           violation  ci
 offload_mm          violation  ci
 trim_mm             violation  ci
 handover_mm         violation  ci
+ctl_election_mm     violation  ci
+reshape_mm          violation  ci
 # Each step waits for every target (a FoundationDB TLog commit): F down blocks it.
 write_all           violation  ci
 election_all        violation  ci
@@ -35,6 +37,8 @@ retire_all          violation  ci
 offload_all         violation  ci
 trim_all            violation  ci
 handover_all        violation  ci
+ctl_election_all    violation  ci
+reshape_all         violation  ci
 # The full grid (acks = rows) needs a whole column to write: one down in each
 # column blocks the write.
 full_grid_write     violation  ci

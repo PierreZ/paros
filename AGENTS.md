@@ -75,7 +75,11 @@ write, the election, the leaderless read, the seal, the retire, the offload mark
 matchmaker handover, waits for a quorum only and completes with F members down in every column,
 in each matchmaker set and in the replica set, with a control that blocks each step one member
 later and a control that waits for every member as a FoundationDB TLog commit; #1257 (quorum
-everywhere)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
+everywhere)), the grid controller (`specs/tla/grid-controller/`: its election by a term in the
+matchmaker record and the fenced `reshape(expected configuration, new grid, term)` call, with two
+candidates that race, a deposed controller that keeps calling, a crash between plan and call, a
+takeover, a lost reply and the bound `F + 1 <= acks <= rows - F`; #1259 (the fenced reshape call of
+the grid controller)). `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
