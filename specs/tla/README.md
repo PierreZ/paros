@@ -2639,7 +2639,7 @@ slots, unless the name ends in `_g4` (four segments, five slots).
 | `meta_blank` | ci | violation of `AckTrue`: segment 1 takes the `SetLeader` to `u2`, segment 2 is empty, its seal writes `u1` into the metadata, and `u1` writes in segment 3 |
 | `meta_wait`, `meta_wait_gap` | ci | violation of `Ends`: segment 2 is sealed with no `Fence`, its replica has no uuid to write, and segment 3 never gets its `Fence` |
 | `meta_reach_empty`, `meta_reach_moved` | ci | violation: the same reach checks as `record_` |
-| `meta_gap_g4` | long | pass |
+| `meta_gap_g4` | long | pass (5.5 million distinct states, 3 minutes) |
 
 The answer to #1303: both places are safe and live through two seals in a row, but not with the
 same rules.
@@ -2653,7 +2653,8 @@ same rules.
   predecessor (`meta_any`), and the boundary write of a segment with no `Fence` leaves the
   metadata as it is (`meta_blank`; `meta_wait` stops the journal, unless a seal waits for the
   `Fence`, `meta_guard_live`). It also needs the `Fence` slot and, with the gap fill, the refusal
-  rule of #1302.
+  rule of #1302. Here a segment chooses at most one `Fence`; a real log with leader changes can
+  choose two copies, and then a replica must apply only the first (`fence-gap/`, #1302).
 
 What is not in the model: the crashes and the reads inside one replica set (`segment-replicas/`),
 the seal end and the agreement (`experiments/segments/a/`, `multi-paxos/`), the register across a
