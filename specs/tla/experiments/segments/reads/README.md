@@ -41,7 +41,7 @@ the configuration in force. With that fence and the refusal, `part_wipe_belief` 
 `wipe_belief` pass; on the full grid it still needs the seal of each row (`wipe_belief_noseal`
 fails).
 
-**Recommendation** (a proposal, Pierre decides): do not add rule 1 to the read path. Keep the
+**Decided** (Pierre, 2026-11-20, `docs/architecture/02-data-plane.md` §2.10): do not add rule 1 to the read path. Keep the
 fence of the code on both halves (the promise and the configuration that the acceptor heard of)
 and the refusal of an acceptor that did not hear; on a full grid, keep the seal of each row of
 #1209. Rule 1 costs a read of a matchmaker quorum for each client read, on matchmakers that the

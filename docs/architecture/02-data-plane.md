@@ -343,9 +343,13 @@ nothing while each acceptor keeps its promise. It adds safety only when an accep
 segment loses its state and answers as an empty store (`part_wipe_fence` and `wipe_fence_rows` fail
 with the promise alone); the belief half of the fence, with the refusal of an acceptor that did
 not hear what is in force, closes that case too (`part_wipe_belief`, `wipe_belief` pass).
-**Open**: Pierre chooses between the fence of the code (recommended: no matchmaker read on the
-read path) and the record check (rule 1) on each read; the journal state model (#1189) carries
-the choice.
+**Decided** (Pierre, 2026-11-20, #1254): the journal keeps the fence of the code, both halves
+(the promise and the belief ballot), with the refusal of an acceptor that did not hear what is in
+force and, on a full grid, the seal of each row. A read does not read the segment table at a
+matchmaker quorum. The journal state model (#1189) carries this rule. Across a Phase-1 bypass
+(#579) the promise fence alone is not enough, because the old acceptors never see the new ballot
+(#1258 (reshapes with a column below quorum), PR #1283). Since a read has no record check, the
+bypass closes that case with its own hold, which #1258 owns.
 
 The rejected design is in section 11 (alternatives). The code follows once the journal state
 model (#1189) includes these rules.
@@ -362,7 +366,7 @@ a segment's replica set, each step completes:
 |---|---|
 | Write, and the decided `Truncate` | `F + 1` acceptors of one column; a stuck round moves to the next column (#533) |
 | Election | a matchmaker majority, then `F + 1` acceptors of every column of each configuration of `H_b` |
-| Leaderless read | `F + 1` acceptors of every column of the configuration in force; with the segment-record check, also a matchmaker majority (#1254, **Open** in section 2.10: the fence of the code needs no matchmaker read) |
+| Leaderless read | `F + 1` acceptors of every column of the configuration in force; no matchmaker read: the fence of the code closes a reshape (#1254, decided in section 2.10) |
 | Seal | a Phase-1 quorum of the old grid, then a matchmaker majority for the compare-and-set of the end slot |
 | Retire | `F + 1` replicas of the segment, then a matchmaker majority |
 | Offload mark, record of a trim | a matchmaker majority |
