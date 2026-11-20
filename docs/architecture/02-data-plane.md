@@ -329,6 +329,24 @@ checked, each with a control that TLC breaks:
 - A replica drops its copy of a segment only after the record says offloaded. The object key is
   the journal and the segment, so the record stores no location.
 
+**A leaderless read of the tail across a reshape** (#1254 (leaderless reads across a reshape),
+checked on 2026-11-20 in `specs/tla/experiments/segments/reads/`). A reader that holds the record
+of an old segment asks the old grid. With no fence, its answers need not see a slot that the new
+grid chose, and the read is stale (controls `part_bare` on the partitioned grid, `bare` on the
+full grid). The fence of the code closes it: each `PreReadAck` carries the read fence of the
+acceptor (`wire_read_fence`: the higher of its promise and its belief ballot), and an answer above
+the record ends the read. On the partitioned grid (the default grid, section 2.11) two Phase-1
+quorums meet, so the fence alone passes (`part_fence`); on a full grid it also needs the seal of
+each row (decision 31, section 2.5, #1209; `fence_rows`). The record check that the journal design
+proposed (the reader also reads the segment table at a matchmaker quorum, rule 1 of #1254) adds
+nothing while each acceptor keeps its promise. It adds safety only when an acceptor of a retired
+segment loses its state and answers as an empty store (`part_wipe_fence` and `wipe_fence_rows` fail
+with the promise alone); the belief half of the fence, with the refusal of an acceptor that did
+not hear what is in force, closes that case too (`part_wipe_belief`, `wipe_belief` pass).
+**Open**: Pierre chooses between the fence of the code (recommended: no matchmaker read on the
+read path) and the record check (rule 1) on each read; the journal state model (#1189) carries
+the choice.
+
 The rejected design is in section 11 (alternatives). The code follows once the journal state
 model (#1189) includes these rules.
 
@@ -344,7 +362,7 @@ a segment's replica set, each step completes:
 |---|---|
 | Write, and the decided `Truncate` | `F + 1` acceptors of one column; a stuck round moves to the next column (#533) |
 | Election | a matchmaker majority, then `F + 1` acceptors of every column of each configuration of `H_b` |
-| Leaderless read | `F + 1` acceptors of every column of the configuration in force, then a matchmaker majority for the segment-record check (#1254) |
+| Leaderless read | `F + 1` acceptors of every column of the configuration in force; with the segment-record check, also a matchmaker majority (#1254, **Open** in section 2.10: the fence of the code needs no matchmaker read) |
 | Seal | a Phase-1 quorum of the old grid, then a matchmaker majority for the compare-and-set of the end slot |
 | Retire | `F + 1` replicas of the segment, then a matchmaker majority |
 | Offload mark, record of a trim | a matchmaker majority |

@@ -37,6 +37,15 @@ the segment table as one decided record. Its cost is the matchmaker writes of ea
 (cost section). B can reach a decided view with the log-claim variant, which moves the table
 into the log and makes each client fold it.
 
+## Reads across a reshape
+
+`reads/` is the check of #1254 (leaderless reads across a reshape) on design A, on the
+partitioned grid and the full grid. Its report is `reads/README.md`. In short: the stale read is
+real with no fence; the read fence on the promise closes it (with the seal of each row of
+decision 31, #1209, on a full grid), so the record check of the reader adds nothing there; an
+acceptor of a retired segment that loses its state opens the case again, and the belief half of
+the fence (with the refusal of an acceptor that did not hear) or the record check closes it.
+
 ## The two designs
 
 | | Design A: `a/SegmentsA.tla` | Design B: `b/SegmentsB.tla` |

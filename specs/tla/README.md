@@ -68,6 +68,12 @@ Each experiment has one folder for each design, with the same layout as a model,
 - `experiments/segments/`: #1213 (segments in the protocol or in storage). Design A, the segment
   table in the matchmakers (`a/`), against design B, plain Matchmaker Paxos with chunks local to
   each replica and a variant with offload claims in the log (`b/`).
+  `reads/` checks the leaderless read of the tail across a reshape on design A, on the
+  partitioned grid and the full grid, for #1254 (leaderless reads across a reshape): the read
+  fence on the promise passes (with the seal of each row of #1209 on a full grid), and the
+  record check of the reader (rule 1) passes too. An acceptor of a retired segment that loses its
+  state breaks the promise fence alone; the belief half of the fence with the refusal of an
+  acceptor that did not hear closes it, and so does the record check.
 - `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
   ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
   the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
