@@ -329,5 +329,22 @@ checked, each with a control that TLC breaks:
 - A replica drops its copy of a segment only after the record says offloaded. The object key is
   the journal and the segment, so the record stores no location.
 
+**A leaderless read of the tail across a reshape** (#1254 (leaderless reads across a reshape),
+checked on 2026-11-20 in `specs/tla/experiments/segments/reads/`). A reader that holds the record
+of an old segment asks one row of the old grid; on a full grid that row need not meet the
+Phase-1 quorum of the new grid's first leader, so with no check the read misses a slot that the
+new grid chose (control `bare`). The fence of the code closes it: each `PreReadAck` carries the
+read fence of the acceptor (`wire_read_fence`: the higher of its promise and its belief ballot),
+an answer above the record ends the read, and Phase 1 takes one promise in each row of each old
+grid (decision 31, section 2.5, #1209). The record check that the journal design proposed (the
+reader also reads the segment table at a matchmaker quorum, rule 1 of #1254) adds nothing while
+each acceptor keeps its promise (`fence_rows` passes with no record check). It adds safety only
+when an acceptor of a retired segment loses its state and answers as an empty store
+(`wipe_fence_rows` fails with the promise alone); the belief half of the fence, with the refusal
+of an acceptor that did not hear what is in force, closes that case too (`wipe_belief` passes).
+**Open**: Pierre chooses between the fence of the code (recommended: no matchmaker read on the
+read path) and the record check (rule 1) on each read; the journal state model (#1189) carries
+the choice.
+
 The rejected design is in section 11 (alternatives). The code follows once the journal state
 model (#1189) includes these rules.

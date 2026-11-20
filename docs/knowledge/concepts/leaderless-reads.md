@@ -110,6 +110,16 @@ configuration. The reader gates itself on the same fence: it counts its own wate
 ack, so a reader that promised above its basis opens no read and ends the reads it holds
 (`read_basis`, `fence_quorum_reads`; `specs/tla/reads/`, `reads_lag_reader`).
 
+**Across a reshape of the segmented journal** (design A of #1213, the segment table in the
+matchmakers), the reader holds the record of a segment in place of a read basis, and the start
+of that segment bounds the read below. On a full grid the row that it asks need not meet the
+Phase-1 quorum of the new grid's first leader; the fence closes the gap only with the seal of
+each row (decision 31, #1209). An acceptor of a retired segment that loses its state answers with
+promise 0, so the promise alone no longer fences; the belief half of the fence and the refusal of
+an acceptor that did not hear close that case
+(`specs/tla/experiments/segments/reads/`, #1254 (leaderless reads across a reshape): `fence_rows`
+and `wipe_belief` pass, `fence_only`, `seal_only` and `wipe_fence_rows` fail).
+
 ## 7. Liveness
 
 - A watermark raised by an accept that never decided makes the server wait for the next leader's

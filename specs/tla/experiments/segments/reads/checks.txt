@@ -1,0 +1,30 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+# #1254 (leaderless reads across a reshape), on design A. Report: README.md.
+bare                  violation  ci
+fence_only            violation  ci
+seal_only             violation  ci
+fence_rows            pass       ci
+record                pass       ci
+column                pass       ci
+wipe_fence_rows       violation  ci
+wipe_record           pass       ci
+wipe_column           pass       ci
+wipe_belief_noseal    violation  ci
+wipe_belief           pass       ci
+reach_stale           violation  ci
+reach_retire          violation  ci
+square_fence_only     violation  ci
+square_fence_rows     pass       long
+square_record         pass       long
+fence_rows_long       pass       long
+record_long           pass       long
+column_long           pass       long
+wipe_record_long      pass       long
+fence_rows_three      pass       long
+wipe_column_three     violation  long
+wipe_record_three     pass       long
+wipe_belief_three     pass       long

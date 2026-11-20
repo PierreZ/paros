@@ -63,6 +63,12 @@ Each experiment has one folder for each design, with the same layout as a model,
 - `experiments/segments/`: #1213 (segments in the protocol or in storage). Design A, the segment
   table in the matchmakers (`a/`), against design B, plain Matchmaker Paxos with chunks local to
   each replica and a variant with offload claims in the log (`b/`).
+  `reads/` checks the leaderless read of the tail across a reshape on design A with full grids,
+  for #1254 (leaderless reads across a reshape): the read fence on the promise with the seal of
+  each row (#1209) passes, each half alone fails, and the record check of the reader (rule 1)
+  and the read of a whole column (rule 2) pass too. An acceptor of a retired segment that loses
+  its state breaks the promise fence alone; the belief half of the fence with the refusal of an
+  acceptor that did not hear closes it, and so does the record check.
 
 ## The Paxos flavors and their models
 
