@@ -235,3 +235,6 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;
