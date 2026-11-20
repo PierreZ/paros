@@ -11,11 +11,17 @@ trim_promise     violation  ci
 compact_early    violation  ci
 watermark_votes  violation  ci
 safety           pass       ci
+recover_ignore   violation  ci
+trim_learned     violation  ci
+floor_late       violation  ci
 reach_faulty     violation  ci
 reach_block      violation  ci
 ctrl_none        violation  ci
 two_rots         violation  ci
 ctrl_one_slot    pass       ci
+ctrl_three       pass       ci
+ctrl_have        violation  ci
+rot_two          pass       ci
 ctrl_live        pass       ci
 reach_retry      violation  ci
 laggard_stuck    violation  ci
@@ -23,9 +29,10 @@ laggard          pass       ci
 reach_keep       violation  ci
 fold_slot        violation  ci
 fold_one_leader  pass       ci
+fold_mid         pass       ci
 restart          pass       long
 full             pass       long
-three_slots      pass       long
+three_slots      pass       long  60
 ctrl             pass       long
 ctrl_all         pass       long
 fold             pass       long

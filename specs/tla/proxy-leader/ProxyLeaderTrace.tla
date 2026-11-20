@@ -78,6 +78,9 @@ TraceCfg == [b \in 0..TraceNB |-> 0]
 \* `Move` is on, so the first proxy of a slot is any proxy.
 TraceProxyOf == [s \in 0..(TraceNS - 1) |-> CHOOSE p \in TraceProxies : TRUE]
 
+\* A grid of the run tiles its acceptors (`QuorumSystem::admits`).
+ASSUME TraceCols = 0 \/ GridAdmits(TraceLayout, TraceCols, TraceAcks)
+
 TraceInit == Init /\ l = 1
 
 \* A malformed event is a rejection, not a TLC error.

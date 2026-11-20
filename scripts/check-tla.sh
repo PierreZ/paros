@@ -8,6 +8,11 @@
 #   nix develop .#tla --command scripts/check-tla.sh --all    # the long ones too
 #   nix develop .#tla --command scripts/check-tla.sh reads    # one folder
 #
+# A line of `checks.txt` can end with a time bound in minutes, for a long
+# check that does not finish: `<name> pass long <minutes>`. TLC stops at the
+# bound, and the line is `ok` when no violation was found until then
+# (`bounded`). A line with no bound must finish.
+#
 # Each argument that is not `--all` names a folder of specs/tla/; with no
 # folder, every folder of a model of the plan runs. An experiment of
 # specs/tla/experiments/ runs only when it is named, for example
@@ -40,19 +45,27 @@ for dir in "${dirs[@]}"; do
     status=1
     continue
   fi
-  while read -r name expected where; do
+  while read -r name expected where bound; do
     case "$name" in '' | '#'*) continue ;; esac
     if [ "$where" != ci ] && [ "$all" = false ]; then
       continue
     fi
     meta=$(mktemp -d)
     log="$meta/tlc.log"
-    (cd "$dir" && tlc -workers "$workers" -deadlock -metadir "$meta/states" \
+    limit=()
+    if [ -n "${bound:-}" ]; then
+      limit=(timeout "${bound}m")
+    fi
+    (cd "$dir" && "${limit[@]}" tlc -workers "$workers" -deadlock -metadir "$meta/states" \
       -config "$name.cfg" MC.tla) >"$log" 2>&1 || true
     if grep -q "Model checking completed. No error has been found." "$log"; then
       got=pass
     elif grep -qE "Error: ((Invariant|Action property) .* is violated(\.| by the initial state)|Temporal properties were violated\.)" "$log"; then
       got=violation
+    elif [ -n "${bound:-}" ] && [ "$expected" = pass ] && grep -q "distinct states found" "$log" \
+      && ! grep -q "^Error:" "$log"; then
+      got=pass
+      echo "      $dir/$name: bounded, stopped after $bound min with no violation"
     else
       got=error
     fi

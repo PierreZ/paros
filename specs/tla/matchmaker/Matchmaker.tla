@@ -52,6 +52,13 @@
 (*               ballot.                                                   *)
 (*   Gc          "paper": scenarios 1 and 2. "early": the proposer asks    *)
 (*               for GC as soon as its Phase 1 is done. "off": no GC.      *)
+(*   Watermark   "max": a history keeps the entries at or above the        *)
+(*               maximum watermark of the answers. "min": it keeps those   *)
+(*               at or above the minimum, so an entry that one matchmaker  *)
+(*               of the quorum collected comes back from another.          *)
+(*   Tomb        TRUE: a matchmaker refuses a configuration that names a   *)
+(*               retired acceptor (`MatchRefusal::Retired`). FALSE: it     *)
+(*               registers it.                                             *)
 (*   Retire      "effective": an acceptor retires above an effective       *)
 (*               floor. "oneAck": the floor counts as effective at one     *)
 (*               ack. "removed": an acceptor retires when the newest       *)
@@ -64,7 +71,7 @@ CONSTANTS Acceptors,     \* the acceptor pool
           Matchmakers,
           Values,
           NB,            \* the ballots are 1..NB
-          Phase1, MatchCheck, Histories, Reconfig, Gc, Retire
+          Phase1, MatchCheck, Histories, Reconfig, Gc, Retire, Watermark, Tomb
 
 ASSUME Phase1 \in {"every", "union", "own"}
 ASSUME MatchCheck \in BOOLEAN
@@ -72,6 +79,8 @@ ASSUME Histories \in {"quorum", "one"}
 ASSUME Reconfig \in {"round", "edit"}
 ASSUME Gc \in {"paper", "early", "off"}
 ASSUME Retire \in {"effective", "oneAck", "removed", "off"}
+ASSUME Watermark \in {"max", "min"}
+ASSUME Tomb \in BOOLEAN
 \* A configuration is not empty, so {} can stand for "none yet".
 ASSUME \A c \in Configs : c # {} /\ c \subseteq Acceptors
 
@@ -82,6 +91,7 @@ Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 \* Matchmaker quorums are majorities only.
 MQuorums == Maj(Matchmakers)
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
+Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
 VARIABLES cfg,      \* ballot: its configuration, {} before matchmaking
           reg,      \* matchmaker: its registrations, a set of <<ballot, configuration>>
@@ -139,9 +149,10 @@ Init ==
 Send(m) == msgs' = msgs \cup {m}
 
 \* The history that the answers S give: their union above the maximum
-\* watermark.
+\* watermark (the minimum with the control `Watermark = "min"`).
 Union(S) ==
-  LET w == Max({r.w : r \in S} \cup {0})
+  LET w == IF S = {} THEN 0
+           ELSE IF Watermark = "max" THEN Max({r.w : r \in S}) ELSE Min({r.w : r \in S})
   IN {e[2] : e \in {e \in UNION {r.hist : r \in S} : e[1] >= w}}
 
 \* A value is chosen at ballot b once a majority of the configuration of
@@ -169,7 +180,7 @@ Register(m, b) ==
   /\ b >= wm[m]
   /\ MatchCheck => ~\E e \in reg[m] : e[1] >= b
   \* A matchmaker refuses a configuration that names a retired acceptor.
-  /\ cfg[b] \cap retired = {}
+  /\ Tomb => cfg[b] \cap retired = {}
   /\ reg' = [reg EXCEPT ![m] = @ \cup {<<b, cfg[b]>>}]
   /\ answers' = [answers EXCEPT ![b] = @ \cup
                    {[mm |-> m, hist |-> {e \in reg[m] : e[1] < b}, w |-> wm[m]]}]
@@ -307,10 +318,8 @@ Spec == Init /\ [][Next]_vars
 Agreement == \A v, w \in Values : Chosen(v) /\ Chosen(w) => v = w
 
 \* The history that the matchmaker quorum Q would give a new ballot above
-\* every registration.
-HistoryOf(Q) ==
-  LET w == Max({wm[m] : m \in Q})
-  IN {e[2] : e \in {e \in UNION {reg[m] : m \in Q} : e[1] >= w}}
+\* every registration: `Union` over the answers that Q would send it.
+HistoryOf(Q) == Union({[mm |-> m, hist |-> reg[m], w |-> wm[m]] : m \in Q})
 
 \* No retirement strands a new ballot: whatever matchmaker quorum it hears,
 \* each configuration of its history keeps a Phase-1 quorum that did not
@@ -320,9 +329,18 @@ Electable ==
 
 \* Reachability controls: each must be violated.
 NoChoice == ~\E v \in Values : Chosen(v)
-\* A value is chosen above a ballot whose configuration named an acceptor
-\* that retired.
+\* A value chosen at ballot x is chosen again at a higher ballot b in
+\* another configuration, and an acceptor that voted for it at x retired:
+\* the value moved to the new configuration and the old one shut down.
 NoChoiceAboveRetired ==
   ~\E v \in Values, b, x \in Ballots, a \in retired :
-     x < b /\ cfg[x] # {} /\ a \in cfg[x] /\ ChosenAt(b, v)
+     /\ x < b /\ matched[x] /\ cfg[b] # cfg[x]
+     /\ ChosenAt(x, v) /\ ChosenAt(b, v)
+     /\ [type |-> "2b", acc |-> a, bal |-> x, val |-> v] \in msgs
+\* A matchmaker quorum answers a ballot with an entry below the maximum
+\* watermark of its answers: the filter of `Union` drops it.
+NoDrop ==
+  ~\E b \in Ballots : \E S \in SUBSET answers[b] :
+     /\ {r.mm : r \in S} \in MQuorums
+     /\ \E r \in S, e \in UNION {x.hist : x \in S} : e[1] < r.w
 =============================================================================
