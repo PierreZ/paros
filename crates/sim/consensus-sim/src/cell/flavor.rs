@@ -303,6 +303,18 @@ impl Flavor {
         }
     }
 
+    /// Every compartment, steered toward compactions
+    /// ([`Flavor::compacting`]): the walk of the read replica's trace spec
+    /// (`compartments/`), whose replicas then move their floors.
+    #[must_use]
+    pub fn compartments_compacting() -> Self {
+        Self {
+            name: "compartments-compaction",
+            compacting: true,
+            ..Self::compartments()
+        }
+    }
+
     /// Matchmakers with reconfiguration and the matchmaker set handover
     /// (`MatchmakerReconfigurer`) over a matchmaker pool of five.
     #[must_use]
@@ -338,7 +350,9 @@ impl Flavor {
     #[must_use]
     pub fn allows(&self, action: Action) -> bool {
         match action {
-            Action::Tick | Action::Propose | Action::Claim | Action::StepDown => true,
+            Action::Tick | Action::Propose | Action::Claim | Action::StepDown | Action::Usurp => {
+                true
+            }
             Action::Handoff
             | Action::Read
             | Action::Truncate
@@ -374,7 +388,8 @@ pub enum Mutant {
     /// A disk loses the votes above its chosen prefix in a crash. Caught by
     /// [`ONE_VALUE`](crate::oracle::ledger::ONE_VALUE).
     ForgetVotes,
-    /// A crash loses the disk's last chosen-index write. Caught by
+    /// A crash loses the disk's last chosen-index write, even one an fsync
+    /// covered. Caught by
     /// [`PREFIX_SHRINKS`](crate::oracle::ledger::PREFIX_SHRINKS).
     LoseChosenIndex,
     /// The driver announces a `Commit` as soon as the leader sends an
@@ -428,4 +443,13 @@ pub enum Mutant {
     /// a record only when it asks that disk for it; the trace check
     /// refuses the compaction itself (`TruncationTrace.tla`).
     CompactPastFold,
+    /// The network rewrites the command of each `Commit` it delivers to a
+    /// replica. Caught by
+    /// [`LEARNED_CHOSEN`](crate::oracle::ledger::LEARNED_CHOSEN).
+    CorruptCommit,
+    /// The network raises the next position of the journal state that a
+    /// trim-point jump carries. The node that jumps then folds later writes
+    /// another way than the rules give. Caught by
+    /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
+    CorruptTrimJump,
 }

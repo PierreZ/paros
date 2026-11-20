@@ -13,4 +13,4 @@ gc_won_fill        violation  ci
 safety             pass       ci
 cover_joined_fill  violation  long
 three_ballots      pass       long
-two_slots          pass       long
+two_slots          pass       long  60

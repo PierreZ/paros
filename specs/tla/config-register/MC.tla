@@ -48,4 +48,7 @@ HostOne == [m \in {"m1"} |-> "a1"]
 HostThree == [m \in {"m1", "m2", "m3"} |-> IF m = "m1" THEN "a1" ELSE IF m = "m2" THEN "a2" ELSE "a3"]
 
 Symmetry == Permutations(Values)
+\* Each grid layout tiles its members (`QuorumSystem::admits`).
+ASSUME \A c \in GH : GridAdmits(SeqGH[c], 2, 2) /\ GridAdmits(SeqGH[c], 2, 1)
+
 =============================================================================

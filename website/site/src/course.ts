@@ -42,6 +42,7 @@ export const LESSONS: Lesson[] = [
     goal: "say which two sets of acceptors must share an acceptor, and count how many acceptors can fail.",
     page: "quorums",
     runs: ["majority", "break-the-rule"],
+    labs: ["majority"],
   },
   {
     id: "the-log",
@@ -49,6 +50,7 @@ export const LESSONS: Lesson[] = [
     goal: "follow one election and many writes, and say how a new leader recovers the log of a dead one.",
     page: "multi-paxos",
     runs: ["base", "leader-crash", "gap", "lost-commit", "lagging", "seam-before-sync", "seam-after-sync", "stale-nack", "stale-promise", "recovery-crash", "handoff", "handoff-lost"],
+    labs: ["gap"],
   },
   {
     id: "reads",
@@ -56,6 +58,7 @@ export const LESSONS: Lesson[] = [
     goal: "say why a read asks a quorum and not the leader, and what a node does when the log that it needs is gone.",
     page: "multi-paxos",
     runs: ["read", "read-waits", "truncate", "trimmed"],
+    labs: ["read"],
   },
   {
     id: "grids",
@@ -63,6 +66,7 @@ export const LESSONS: Lesson[] = [
     goal: "pick a write quorum and an election quorum on a grid, and say what each shape costs.",
     page: "quorums",
     runs: ["base", "election", "column-down", "stuck-column", "two-shapes", "partitions"],
+    labs: ["grid-column"],
   },
   {
     id: "compartments",
@@ -77,6 +81,7 @@ export const LESSONS: Lesson[] = [
     goal: "follow one reconfiguration, and say why the old configurations can be forgotten.",
     page: "matchmaker",
     runs: ["base", "leader-crash", "replace", "retire", "break-the-rule"],
+    labs: ["old-set"],
   },
 ];
 

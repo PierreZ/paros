@@ -58,7 +58,7 @@ NoRead == [state |-> "none", node |-> None, b |-> 0, fence |-> -1, snap |-> -1,
 MaxOf(S) == CHOOSE x \in S : \A y \in S : y <= x
 
 \* The vote watermark of acceptor a: its highest slot with a record.
-Watermark(a) == MaxOf({s \in Slots : lvote[a][s].bal > 0} \cup {-1})
+VoteMark(a) == MaxOf({s \in Slots : lvote[a][s].bal > 0} \cup {-1})
 
 ReadsInit ==
   /\ TraceInit
@@ -92,7 +92,7 @@ RReadStart ==
         /\ rbasis[n] = [bal |-> b, fence |-> e.fence]
         /\ lprom[n] <= b
         /\ Has("own") <=> n \in cfg[b]
-        /\ Has("own") => e.own = Watermark(n)
+        /\ Has("own") => e.own = VoteMark(n)
         /\ rds' = [rds EXCEPT ![e.ctx] =
                      [state |-> "open", node |-> n, b |-> b, fence |-> e.fence, snap |-> acked,
                       answers |-> IF Has("own") THEN {[acc |-> n, wm |-> e.own]} ELSE {},
@@ -101,7 +101,7 @@ RReadStart ==
 
 RReadAck ==
   /\ e.event = "readack" /\ IsNode("acc") /\ Has("ctx") /\ Has("wm") /\ Has("fence")
-  /\ e.wm = Watermark(e.acc)
+  /\ e.wm = VoteMark(e.acc)
   /\ e.fence >= lprom[e.acc]
   /\ racks' = racks \cup {[acc |-> e.acc, ctx |-> e.ctx, wm |-> e.wm, fence |-> e.fence]}
   /\ UNCHANGED <<rwon, rbasis, rds, acked>>

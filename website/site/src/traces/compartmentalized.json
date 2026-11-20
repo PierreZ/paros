@@ -8848,7 +8848,17 @@
         {
           "says": "One slot and one round of Phase 2 choose both writes.",
           "from": 3,
-          "to": 15
+          "to": 15,
+          "question": {
+            "asks": "The batcher holds two writes. How many slots of the log do they take?",
+            "answers": [
+              "One slot",
+              "Two slots, one for each write",
+              "No slot until a third write comes"
+            ],
+            "right": 0,
+            "why": "The batcher sends the two writes as one command, so node 0 gives them one slot."
+          }
         },
         {
           "says": "The batcher cuts the answer: each writer gets its own positions.",
@@ -11912,7 +11922,17 @@
         {
           "says": "A client reads from replica 1. The replica asks each acceptor for the highest slot that it voted in.",
           "from": 13,
-          "to": 20
+          "to": 20,
+          "question": {
+            "asks": "A client reads from replica 1. Who must confirm the read?",
+            "answers": [
+              "Node 0, because it leads",
+              "A majority of acceptors, with no leader",
+              "Replica 0, the other replica"
+            ],
+            "right": 1,
+            "why": "A leaderless read asks a majority of acceptors. Node 0 answers as one acceptor only."
+          }
         },
         {
           "says": "A replica serves the read once it learned the slot a majority names. No leader helps.",
@@ -18536,7 +18556,17 @@
         {
           "says": "Node 0 sends slot 1 to proxy leader 1 again on each beat. After 2 beats with no answer, it takes the slot back and sends the Accepts itself.",
           "from": 16,
-          "to": 40
+          "to": 40,
+          "question": {
+            "asks": "Proxy leader 1 is dead and holds slot 1. What happens to bravo?",
+            "answers": [
+              "bravo is lost for good",
+              "Node 0 takes slot 1 back after a few beats",
+              "An acceptor sends the Accepts in place of the proxy"
+            ],
+            "right": 1,
+            "why": "Node 0 counts the beats with no answer, then takes the slot back. An acceptor only votes."
+          }
         },
         {
           "says": "A dead proxy costs a few beats, never a value: the slot comes back to the leader.",
@@ -21527,7 +21557,17 @@
         {
           "says": "On its next beat, proxy leader 0 sends the same Accepts again. Each acceptor answers with the vote it already wrote.",
           "from": 8,
-          "to": 20
+          "to": 20,
+          "question": {
+            "asks": "No vote reached proxy leader 0. What does it do on its next beat?",
+            "answers": [
+              "It gives the slot back to node 0",
+              "It sends the same Accepts again",
+              "It asks node 0 for a newer ballot"
+            ],
+            "right": 1,
+            "why": "A re-send is safe: each acceptor answers with the vote it already wrote."
+          }
         },
         {
           "says": "A re-send is always safe: an acceptor that voted answers the same way twice.",
@@ -23786,7 +23826,17 @@
         {
           "says": "Nodes 1 and 2 promised the newer ballot, so they refuse with a Nack. The proxy closes the round and passes the Nack to node 0, and node 0 stops leading.",
           "from": 14,
-          "to": 17
+          "to": 17,
+          "question": {
+            "asks": "Nodes 1 and 2 promised a newer ballot. What happens to the Accepts at the old ballot?",
+            "answers": [
+              "Nodes 1 and 2 vote for alpha anyway",
+              "They refuse, and node 0 stops leading",
+              "The proxy sends the Accepts again at the newer ballot"
+            ],
+            "right": 1,
+            "why": "A promise forbids a vote at a lower ballot. The proxy only passes the Nack on."
+          }
         },
         {
           "says": "The proxy votes on nothing and decides nothing: it closes the round and the leader learns that it lost.",

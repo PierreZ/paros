@@ -19,9 +19,20 @@ pub(super) struct NodeSite {
     pub(super) config: Config,
     pub(super) disk: MemStorage,
     pub(super) live: Option<ColocatedNode>,
-    /// Every write the disk took, in order: what a mutant rebuilds a
-    /// damaged disk from.
-    history: Vec<WriteOp>,
+    /// Everything that changed the disk, in order: what a crash or a
+    /// mutant rebuilds the disk from.
+    history: Vec<DiskStep>,
+    /// The steps of `history` that an fsync covers: a crash keeps them.
+    synced: usize,
+}
+
+/// One change of a node's disk.
+#[derive(Clone, Debug)]
+enum DiskStep {
+    /// The disk took a write.
+    Write(WriteOp),
+    /// The disk lost the value of the record at this slot.
+    Rot(paros_consensus::Slot),
 }
 
 impl NodeSite {
@@ -32,26 +43,59 @@ impl NodeSite {
             config,
             live: None,
             history: Vec::new(),
+            synced: 0,
         }
     }
 
-    /// The disk takes one write.
+    /// The disk takes one write. It is volatile until the next
+    /// [`sync`](Self::sync).
     pub(super) fn persist(&mut self, op: &WriteOp) {
         self.disk.apply(std::slice::from_ref(op));
-        self.history.push(op.clone());
+        self.history.push(DiskStep::Write(op.clone()));
+    }
+
+    /// An fsync: every step so far survives a crash.
+    pub(super) fn sync(&mut self) {
+        self.synced = self.history.len();
+    }
+
+    /// How many writes no fsync covers yet.
+    pub(super) fn unsynced(&self) -> usize {
+        self.history.len() - self.synced
     }
 
     /// The disk loses the value of the record at `slot` and keeps its
-    /// identity. The history keeps the write: a mutant that rebuilds the
-    /// disk rebuilds it whole.
+    /// identity. A rot is damage, not a write: a crash never undoes it,
+    /// and a rebuild rots the record again.
     pub(super) fn rot(&mut self, slot: paros_consensus::Slot) {
         let _ = self.disk.rot(slot);
+        self.history.push(DiskStep::Rot(slot));
     }
 
-    /// The node crashes: its memory is gone, its disk stays, unless a
-    /// mutant damages the disk.
-    pub(super) fn crash(&mut self, mutant: Option<Mutant>) {
+    /// The node crashes: its memory is gone. The disk keeps every step an
+    /// fsync covers and the first `keep` steps after them (`None`: all of
+    /// them). The writes apply in order, so a crash keeps a prefix. A
+    /// mutant may damage the disk more.
+    pub(super) fn crash(&mut self, mutant: Option<Mutant>, keep: Option<usize>) {
         self.live = None;
+        if let Some(keep) = keep {
+            let tail = self.history.split_off(self.synced);
+            let before = tail.len();
+            let mut kept = 0;
+            for step in tail {
+                match step {
+                    DiskStep::Rot(_) => self.history.push(step),
+                    DiskStep::Write(_) if kept < keep => {
+                        kept += 1;
+                        self.history.push(step);
+                    }
+                    DiskStep::Write(_) => {}
+                }
+            }
+            if self.history.len() - self.synced < before {
+                self.rebuild();
+            }
+        }
         match mutant {
             Some(Mutant::LoseChosenIndex) => self.lose_chosen_index(),
             Some(Mutant::ForgetVotes) => self.forget_votes(),
@@ -60,16 +104,19 @@ impl NodeSite {
     }
 
     /// [`Mutant::LoseChosenIndex`]: the disk loses its last chosen-index
-    /// write, and keeps every other write.
+    /// write, even one an fsync covers, and keeps every other write.
     fn lose_chosen_index(&mut self) {
         let Some(last) = self
             .history
             .iter()
-            .rposition(|op| matches!(op, WriteOp::SetChosenIndex(_)))
+            .rposition(|step| matches!(step, DiskStep::Write(WriteOp::SetChosenIndex(_))))
         else {
             return;
         };
         self.history.remove(last);
+        if last < self.synced {
+            self.synced -= 1;
+        }
         self.rebuild();
     }
 
@@ -77,25 +124,33 @@ impl NodeSite {
     /// prefix, and loses every vote above that prefix.
     fn forget_votes(&mut self) {
         let chosen = self.disk.hard_state().chosen_index;
-        let kept: Vec<WriteOp> = self
+        let kept: Vec<DiskStep> = self
             .history
             .iter()
-            .filter(|op| match op {
-                WriteOp::Acceptor(AcceptorWrite::AppendAccepted { slot, .. }) => {
-                    chosen.is_some_and(|c| *slot <= c)
-                }
+            .filter(|step| match step {
+                DiskStep::Write(WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
+                    slot, ..
+                })) => chosen.is_some_and(|c| *slot <= c),
                 _ => true,
             })
             .cloned()
             .collect();
         self.history = kept;
+        self.synced = self.history.len();
         self.rebuild();
     }
 
     /// The disk again, from its history.
     fn rebuild(&mut self) {
         let mut disk = MemStorage::new(self.config.clone());
-        disk.apply(&self.history);
+        for step in &self.history {
+            match step {
+                DiskStep::Write(op) => disk.apply(std::slice::from_ref(op)),
+                DiskStep::Rot(slot) => {
+                    let _ = disk.rot(*slot);
+                }
+            }
+        }
         self.disk = disk;
     }
 }

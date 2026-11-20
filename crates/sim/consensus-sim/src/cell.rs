@@ -33,8 +33,10 @@ use std::fmt::Write as _;
 
 use moonpool_walk::{Cx, Model, Phase, sometimes};
 use paros_consensus::contract::message::Audience;
-use paros_consensus::contract::write::AcceptorWrite;
-use paros_consensus::journal::{Command, Control, Entry, LeaderUuid, Seq, command_fingerprint};
+use paros_consensus::contract::write::{AcceptorWrite, MustSync};
+use paros_consensus::journal::{
+    Command, Control, Entry, LeaderUuid, Outcome, Seq, command_fingerprint,
+};
 use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
@@ -99,6 +101,27 @@ pub mod reach {
     pub const GC_ACKED: &str = "cell: a matchmaker raised its GC watermark";
     /// A round ran on a grid column the driver named.
     pub const NAMED_COLUMN: &str = "cell: a round ran on a column the driver named";
+    /// A write was accepted after a write of the same leader uuid was
+    /// refused at the wrong position.
+    pub const WRITE_AFTER_GAP: &str =
+        "cell: a write was accepted after a write at a wrong position";
+    /// A retried write was acknowledged from the log.
+    pub const DUPLICATE: &str = "cell: a retried write was acknowledged as a duplicate";
+    /// A write under a superseded leader uuid was refused.
+    pub const FENCED: &str = "cell: a superseded writer's write was refused";
+    /// A `Truncate` raised `first_seq`.
+    pub const TRUNCATE_MOVED: &str = "cell: a truncate raised first_seq";
+    /// A crash lost a write that no fsync covered. A flavor reaches it
+    /// only with a chosen-index write in a batch of its own; no seed of
+    /// the flavors with matchmakers, or of proxies on a grid, reached it in
+    /// 60 seeds.
+    pub const LOST_UNSYNCED: &str = "cell: a crash lost a write no fsync covered";
+    /// A node campaigned while a leader stood.
+    pub const USURPED: &str = "cell: a node campaigned while a leader stood";
+    /// A leader missed a message that would depose it.
+    pub const DEAF_LEADER: &str = "cell: a leader missed a message that would depose it";
+    /// A leader move met a leadership that a higher ballot passed.
+    pub const PASSED_LEADER: &str = "cell: a move met a leader that a higher ballot passed";
     /// A leader moved a stuck round to another column.
     pub const MOVED_ROUND: &str = "cell: a leader moved a stuck round to another column";
     /// A client sent a write again at a position it wrote before.
@@ -131,6 +154,8 @@ const CRASH_ODDS: u64 = 150;
 const DRAIN_LIMIT: usize = 64;
 /// The first replica's id; replicas are never acceptors.
 const REPLICA_BASE: u64 = 100;
+/// The client keeps this many of its last writes, to retry one.
+const RETRY_WINDOW: usize = 8;
 
 /// A party of the cell: what the walk crashes and restarts, and what a
 /// message is addressed to.
@@ -207,6 +232,9 @@ pub enum Action {
     Admit,
     /// A node replaces the matchmaker set (`MatchmakerReconfigurer`).
     Handover,
+    /// A node that does not lead campaigns while a leader stands, as if its
+    /// election clock ran out early (`ColocatedNode::campaign`).
+    Usurp,
 }
 
 const ACTIONS: &[Action] = &[
@@ -224,6 +252,7 @@ const ACTIONS: &[Action] = &[
     Action::Rejoin,
     Action::Admit,
     Action::Handover,
+    Action::Usurp,
 ];
 
 /// The cell under walk. See the module documentation.
@@ -242,8 +271,10 @@ pub struct Cell {
     /// A compacting walk stepped a leader down after it compacted
     /// ([`Flavor::compacting`]).
     stepped_after_compaction: bool,
-    /// The next client sequence, from the client's view of the journal.
-    next_seq: u64,
+    /// The writing client of the journal.
+    client: Client,
+    /// The faults stopped (`Model::calm`): no steer drops a message.
+    calmed: bool,
     /// The highest leader uuid a client used.
     next_uuid: u128,
     /// The rounds a proxy may swallow before its leader takes them back.
@@ -297,7 +328,7 @@ impl Model for Cell {
             | Action::Retire
             | Action::Rejoin
             | Action::Handover => [2, 1, 0],
-            Action::StepDown | Action::Rot => [2, 0, 0],
+            Action::StepDown | Action::Rot | Action::Usurp => [2, 0, 0],
             // A late node stays outside most pools for a while: a pool
             // catches up slowly, and every pool admits it once the faults
             // stop (`Cell::calm`).
@@ -320,6 +351,7 @@ impl Model for Cell {
             Action::Propose => self.propose(cx),
             Action::Claim => self.claim(cx),
             Action::StepDown => self.step_down(cx),
+            Action::Usurp => self.usurp(cx),
             Action::Truncate => self.truncate(cx),
             Action::Read => self.read(cx),
             Action::Handoff => self.handoff(cx),
@@ -339,11 +371,17 @@ impl Model for Cell {
                 self.reconfigure_reply(id, reply, cx);
             }
             (Party::Node(id), wire) => {
+                let mutant = self.flavor.mutant;
                 if self.node(id).live.is_none() {
                     return;
                 }
                 if let Wire::MatchReply(reply) = &wire {
                     self.discover(id, reply, cx);
+                }
+                if let Wire::Paxos(msg) = &wire
+                    && self.deafens(id, msg)
+                {
+                    return;
                 }
                 if let Wire::Paxos(msg) = &wire
                     && let Some(event) = self.read_fold(id, msg)
@@ -352,7 +390,10 @@ impl Model for Cell {
                 }
                 let node = self.node_mut(id).live.as_mut().expect("a live node");
                 match wire {
-                    Wire::Paxos(msg) => node.step(msg),
+                    Wire::Paxos(mut msg) => {
+                        tamper(mutant, &mut msg, false);
+                        node.step(msg);
+                    }
                     Wire::MatchReply(reply) => {
                         let _ = node.on_match_reply(reply);
                     }
@@ -375,7 +416,8 @@ impl Model for Cell {
                 proxy.step(msg);
                 self.drain_proxy(id, cx);
             }
-            (Party::Replica(id), Wire::Paxos(msg)) => {
+            (Party::Replica(id), Wire::Paxos(mut msg)) => {
+                tamper(self.flavor.mutant, &mut msg, true);
                 let Some(replica) = self.replica_mut(id).live.as_mut() else {
                     return;
                 };
@@ -410,7 +452,7 @@ impl Model for Cell {
 
     fn crash(&mut self, party: &Party, cx: &mut Cx<'_, Self>) {
         match *party {
-            Party::Node(id) => self.crash_node(id),
+            Party::Node(id) => self.crash_node(id, cx),
             Party::Proxy(id) => {
                 let keep = self.flavor.mutant == Some(Mutant::KeepProxyRounds);
                 let site = self.proxy_mut(id);
@@ -460,6 +502,7 @@ impl Model for Cell {
     }
 
     fn calm(&mut self, cx: &mut Cx<'_, Self>) {
+        self.calmed = true;
         // A pool that lags the deployment's registry is a fault of the
         // walk, and it stops with the other faults. The contract of the
         // core: the driver admits to the pool (`extend_pool`) every node
@@ -618,7 +661,8 @@ impl Cell {
             reads: Reads::default(),
             next_ctx: 1,
             stepped_after_compaction: false,
-            next_seq: 0,
+            client: Client::default(),
+            calmed: false,
             next_uuid: 0,
             take_back_after,
             expire_after,
@@ -885,20 +929,33 @@ impl Cell {
 
     // ---- lifecycle --------------------------------------------------------
 
-    fn crash_node(&mut self, id: NodeId) {
+    /// Crash node `id`. When writes wait for an fsync, half the crashes
+    /// lose a suffix of them: the contract lets a relaxed batch
+    /// (`MustSync::Relaxed`) wait for the next fsync.
+    fn crash_node(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
         let mutant = self.flavor.mutant;
-        self.node_mut(id).crash(mutant);
+        let unsynced = self.node(id).unsynced();
+        let keep = (unsynced > 0 && cx.rng().chance(1, 2))
+            .then(|| Self::index(cx.rng().below(unsynced as u64)));
+        sometimes!(keep.is_some_and(|k| k < unsynced), reach::LOST_UNSYNCED);
+        self.node_mut(id).crash(mutant, keep);
         // The reconfigurer holds no durable state: the crash loses it.
         self.reconfigurers[Self::index(id.0)] = self.reconfigurer(id);
         // What the crash left on the disk is what the restart reads.
         let index = self.node(id).disk.hard_state().chosen_index;
-        self.ledger.disk_chosen(&format!("node {}", id.0), index);
+        self.ledger.crashed(&format!("node {}", id.0), index);
     }
 
     /// Boot node `id` from its disk; `again` when it ran before.
     fn boot_node(&mut self, id: NodeId, again: bool, cx: &mut Cx<'_, Self>) {
         if again {
-            cx.record(self.tracer.restart(id));
+            let upto = self
+                .node(id)
+                .disk
+                .hard_state()
+                .chosen_index
+                .map_or(Slot(0), |ci| Slot(ci.0 + 1));
+            cx.record(self.tracer.restart(id, upto));
         }
         let limits = self.flavor.limits;
         let site = self.node_mut(id);
@@ -988,7 +1045,7 @@ impl Cell {
             }
             if crash_before && !writes.is_empty() {
                 sometimes!(true, reach::CRASH_BEFORE_PERSIST);
-                self.crash_node(id);
+                self.crash_node(id, cx);
                 cx.crashed(&Party::Node(id));
                 return;
             }
@@ -1012,7 +1069,7 @@ impl Cell {
             }
             if crash_between {
                 sometimes!(true, reach::CRASH_BEFORE_SEND);
-                self.crash_node(id);
+                self.crash_node(id, cx);
                 cx.crashed(&Party::Node(id));
                 return;
             }
@@ -1186,9 +1243,16 @@ impl Cell {
                 _ => {}
             }
         }
+        let synced = MustSync::for_batch(writes) == MustSync::Sync;
+        if synced {
+            self.node_mut(id).sync();
+        }
         let hard = self.node(id).disk.hard_state();
         self.ledger.promised(id, hard.max_promised_ballot);
         self.ledger.disk_chosen(&name, hard.chosen_index);
+        if synced {
+            self.ledger.synced(&name, hard.chosen_index);
+        }
     }
 
     /// The oracles on a message that leaves `who`.
@@ -1260,10 +1324,10 @@ impl Cell {
         who: &str,
         slot: Slot,
         command: &Command,
-        outcome: &paros_consensus::journal::Outcome,
+        outcome: &Outcome,
         cx: &mut Cx<'_, Self>,
     ) {
-        self.ledger.applied(who, slot, command, outcome);
+        let before = self.ledger.applied(who, slot, command, outcome);
         self.reads.applied(slot);
         if let Some(event) = self.tracer.fold(slot, outcome) {
             cx.record(event);
@@ -1271,15 +1335,31 @@ impl Cell {
         if let Some(event) = self.tracer.applied(slot) {
             cx.record(event);
         }
+        if let Command::Write(entry) = command {
+            self.client.heard(slot, entry, outcome);
+            sometimes!(
+                matches!(outcome, Outcome::Accepted { .. }),
+                reach::WRITE_APPLIED
+            );
+            sometimes!(
+                self.client.gap_refused && matches!(outcome, Outcome::Accepted { .. }),
+                reach::WRITE_AFTER_GAP
+            );
+            sometimes!(
+                matches!(outcome, Outcome::Duplicate { .. }),
+                reach::DUPLICATE
+            );
+            sometimes!(
+                matches!(outcome, Outcome::Refused(view)
+                    if view.leader.is_some_and(|l| l != entry.leader)),
+                reach::FENCED
+            );
+        }
         sometimes!(
-            matches!(command, Command::Write(_))
-                && matches!(outcome, paros_consensus::journal::Outcome::Accepted { .. }),
-            reach::WRITE_APPLIED
+            matches!(outcome, Outcome::Trimmed(after) if after.first_seq > before.first_seq),
+            reach::TRUNCATE_MOVED
         );
-        sometimes!(
-            matches!(outcome, paros_consensus::journal::Outcome::Leader(_)),
-            reach::SET_LEADER
-        );
+        sometimes!(matches!(outcome, Outcome::Leader(_)), reach::SET_LEADER);
     }
 
     fn drain_proxy(&mut self, id: ProxyId, cx: &mut Cx<'_, Self>) {
@@ -1418,9 +1498,56 @@ impl Cell {
     }
 
     /// A leader the client reaches, and the journal as that leader folds it.
+    /// Whether the network loses `msg` on its way to node `id`, a steer of
+    /// the chaos: a leader misses every message that would depose it
+    /// (a `Prepare`, an `Accept`, a `Heartbeat`, a `Nack` or a `Relinquish`
+    /// above its ballot), but hears every `Commit`. So a leader learns a
+    /// slot chosen above its ballot while it still leads, the window that
+    /// [`Cell::pick_leader`] meets. A lost message is a fault the contract
+    /// allows; once the faults stop, nothing is lost.
+    fn deafens(&self, id: NodeId, msg: &Message) -> bool {
+        if self.calmed {
+            return false;
+        }
+        let Some(node) = self.node(id).live.as_ref() else {
+            return false;
+        };
+        if !node.is_leader() {
+            return false;
+        }
+        let ballot = match msg {
+            Message::Prepare { ballot, .. }
+            | Message::Accept { ballot, .. }
+            | Message::Heartbeat { ballot, .. }
+            | Message::Nack { ballot, .. }
+            | Message::Relinquish { ballot, .. } => *ballot,
+            _ => return false,
+        };
+        let deaf = ballot > node.ballot();
+        sometimes!(deaf, reach::DEAF_LEADER);
+        deaf
+    }
+
+    /// The leader a leader move acts on. A leadership that a higher ballot
+    /// passed (it learned a `Commit` above its ballot, and no beat or nack
+    /// demoted it yet) is a rare window that a move almost never meets by
+    /// chance, so the move takes such a leader first: the core must refuse
+    /// its proposals and record none of its rounds.
     fn pick_leader(&self, cx: &mut Cx<'_, Self>) -> Option<NodeId> {
         let leaders = self.leaders();
-        cx.rng().pick(&leaders).copied()
+        let passed: Vec<NodeId> = leaders
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.node(id)
+                    .live
+                    .as_ref()
+                    .is_some_and(|node| node.ballot() < node.hard_state().max_promised_ballot)
+            })
+            .collect();
+        sometimes!(!passed.is_empty(), reach::PASSED_LEADER);
+        let pool = if passed.is_empty() { &leaders } else { &passed };
+        cx.rng().pick(pool).copied()
     }
 
     /// The client of [`Flavor::compacting`]: it claims a journal that has
@@ -1472,31 +1599,14 @@ impl Cell {
         let Some(leader) = self.pick_leader(cx) else {
             return;
         };
-        let node = self.node(leader).live.as_ref().expect("a leader is up");
-        let journal = node.replica().journal();
-        // The writes the leader still has in flight: each may take the
-        // next position before this one applies.
-        let in_flight = (node.proposer().rounds().len() + node.delegated_rounds().len()) as u64;
-        // A client writes under the uuid it believes leads, at the next
-        // position it believes free; a wrong belief is refused at apply. A
-        // refusal names the next position, and the client learns it: a
-        // belief ahead of the view by more than the writes in flight is
-        // one the refusals corrected.
-        if self.next_seq > journal.next_seq.0 + in_flight {
-            self.next_seq = journal.next_seq.0;
-        }
-        self.next_seq = self.next_seq.max(journal.next_seq.0);
-        // A client that heard no answer sends a write again, with the same
-        // records at the same position.
-        let retry = self.next_seq > 0 && cx.rng().chance(1, 8);
-        sometimes!(retry, reach::RETRY);
-        let seq = if retry {
-            self.next_seq - 1 - cx.rng().below(self.next_seq.min(3))
-        } else {
-            self.next_seq += 1;
-            self.next_seq - 1
-        };
-        let uuid = journal.leader.unwrap_or(LeaderUuid(1));
+        let journal = self
+            .node(leader)
+            .live
+            .as_ref()
+            .expect("a leader is up")
+            .replica()
+            .journal();
+        let entry = self.client.write(journal, cx);
         let delegation = match cx.rng().below(10) {
             0..=5 => Delegation::Auto,
             6..=7 if self.flavor.proxies > 0 => {
@@ -1511,15 +1621,7 @@ impl Cell {
             _ => None,
         };
         let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
-        let result = node.propose_in(
-            Entry {
-                leader: uuid,
-                seq: Seq(seq),
-                records: vec![Value(seq.to_le_bytes().to_vec())],
-            },
-            column,
-            delegation,
-        );
+        let result = node.propose_in(entry, column, delegation);
         sometimes!(
             column.is_some() && matches!(result, ProposeResult::Accepted(_)),
             reach::NAMED_COLUMN
@@ -1668,6 +1770,31 @@ impl Cell {
             .expect("a leader is up")
             .step_down();
         self.drain_node(leader, cx);
+    }
+
+    /// A node that does not lead campaigns while a leader stands. With
+    /// [`Cell::deafens`], the leader it deposes may go on leading for a
+    /// while and learn the new leader's decisions.
+    fn usurp(&mut self, cx: &mut Cx<'_, Self>) {
+        if self.leaders().is_empty() {
+            return;
+        }
+        let others: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|s| s.live.as_ref().is_some_and(|node| !node.is_leader()))
+            .map(|s| s.id)
+            .collect();
+        let Some(&id) = cx.rng().pick(&others) else {
+            return;
+        };
+        sometimes!(true, reach::USURPED);
+        self.node_mut(id)
+            .live
+            .as_mut()
+            .expect("a live node")
+            .campaign();
+        self.drain_node(id, cx);
     }
 
     /// A leader moves the journal to a configuration drawn from the
@@ -1854,6 +1981,101 @@ impl Cell {
         let receipt = node.relinquish_to(target);
         sometimes!(receipt.is_some_and(|r| r.pending > 0), reach::HANDOFF);
         self.drain_node(leader, cx);
+    }
+}
+
+/// The client that writes the journal, as a pipelined writer does
+/// (`docs/architecture/02-data-plane.md` §2.2): it writes under the uuid it
+/// believes leads, at the next position it believes free, without waiting
+/// for the answer of the write in front. A wrong belief is refused at
+/// apply. A refusal at a wrong position names the journal's next position,
+/// and the client continues from there. It also retries one of its last
+/// writes unchanged, and writes under a superseded uuid on purpose.
+#[derive(Debug, Default)]
+struct Client {
+    /// The next position the client believes free.
+    next_seq: u64,
+    /// The highest slot whose refusal the client learned from.
+    heard: Option<Slot>,
+    /// The client's last writes, oldest first.
+    sent: Vec<Entry>,
+    /// A write of the current uuid was refused at a wrong position.
+    gap_refused: bool,
+}
+
+impl Client {
+    /// The next write, against the `journal` that the leader folds.
+    fn write(
+        &mut self,
+        journal: paros_consensus::journal::state::JournalState,
+        cx: &mut Cx<'_, Cell>,
+    ) -> Entry {
+        let draw = cx.rng().below(10);
+        if draw < 2
+            && let Some(retry) = cx.rng().pick(&self.sent)
+        {
+            sometimes!(true, reach::RETRY);
+            return retry.clone();
+        }
+        if draw == 2
+            && let Some(current) = journal.leader.filter(|u| u.0 > 1)
+        {
+            // A writer that a later `SetLeader` superseded.
+            return Self::entry(LeaderUuid(current.0 - 1), journal.next_seq.0);
+        }
+        self.next_seq = self.next_seq.max(journal.next_seq.0);
+        let entry = Self::entry(journal.leader.unwrap_or(LeaderUuid(1)), self.next_seq);
+        self.next_seq += 1;
+        if self.sent.len() == RETRY_WINDOW {
+            self.sent.remove(0);
+        }
+        self.sent.push(entry.clone());
+        entry
+    }
+
+    /// One record whose bytes name its position: a retry carries the same.
+    fn entry(leader: LeaderUuid, seq: u64) -> Entry {
+        Entry {
+            leader,
+            seq: Seq(seq),
+            records: vec![Value(seq.to_le_bytes().to_vec())],
+        }
+    }
+
+    /// A party applied `entry` at `slot` with `outcome`. A refusal at a
+    /// wrong position under the uuid in force names where the journal
+    /// stands: the client continues from there, once per slot, so a late
+    /// party's old refusal never moves it back.
+    fn heard(&mut self, slot: Slot, entry: &Entry, outcome: &Outcome) {
+        let Outcome::Refused(view) = outcome else {
+            return;
+        };
+        if view.leader != Some(entry.leader) || entry.seq == view.next_seq {
+            return;
+        }
+        self.gap_refused = true;
+        if self.heard.is_none_or(|h| slot > h) {
+            self.heard = Some(slot);
+            self.next_seq = view.next_seq.0;
+        }
+    }
+}
+
+/// The bugs of `mutant` that the network plants in a message it delivers
+/// (to a replica when `to_replica`).
+fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
+    match (mutant, msg) {
+        (Some(Mutant::CorruptCommit), Message::Commit { command, .. }) if to_replica => {
+            *command = Command::Write(Entry {
+                leader: LeaderUuid(u128::MAX),
+                seq: Seq(0),
+                records: vec![Value(b"corrupt".to_vec())],
+            });
+        }
+        (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
+            state.next_seq = Seq(state.next_seq.0 + 1);
+        }
+        _ => {}
     }
 }
 

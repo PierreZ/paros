@@ -6,7 +6,10 @@
 reach             violation  ci
 reach_sealed      violation  ci
 reach_moved       violation  ci
+reach_both        violation  ci
 code              pass       ci
+code_slots        pass       ci
+code_slots_noclose violation ci
 safety            pass       ci
 grid              pass       ci
 belief_any        violation  ci
@@ -14,6 +17,7 @@ belief_any_agree  violation  ci
 short             violation  ci
 short_agree       violation  ci
 live              pass       ci
+live_move         pass       ci
 live_nomove       violation  ci
 code_three        pass       long
 safety_three      pass       long

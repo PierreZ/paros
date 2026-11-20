@@ -13,7 +13,11 @@ Test only: `publish = false`, never a dependency of another crate.
 - **Drive the core through its public API only.** The core is never buggified and never mutated.
   The cell is a driver: it honors the driver contract (`ready`, persist the writes, send the
   messages, `advance`) and crashes a party at the two points that the contract allows (before
-  the persist, and between the persist and the send).
+  the persist, and between the persist and the send). A crash may also lose a suffix of the
+  writes that no fsync covers yet: the contract fsyncs only a batch that `MustSync::for_batch`
+  marks `Sync`, so a relaxed `SetChosenIndex` may be lost, and a node may boot with a shorter
+  chosen prefix than it learned. The trace specs follow it: a `restart` event carries `upto`,
+  and the restart step forgets the learned slots at or above it.
 - **An oracle shares no code with the code it judges** (#909 (oracles that do not judge)). The
   Phase-2 rule (`oracle/quorum.rs`) is written again from the papers. Its one link to the core is
   a test that agrees with `AcceptorConfig::has_phase2_quorum` on every subset of small systems.
@@ -65,14 +69,24 @@ Test only: `publish = false`, never a dependency of another crate.
   - `quorum.rs` → `Phase2Rule`: a majority, or `acks` votes in one column of a grid.
   - `ledger.rs` → `Ledger`: the durable votes and promises of every node, each ballot bound to
     the configuration the matchmakers registered for it. Oracles `ONE_VALUE`, `COMMIT_BACKED`,
-    `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `ONE_FOLD`, `PREFIX_SHRINKS`.
+    `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `JOURNAL_FOLD`, `PREFIX_SHRINKS` (the durable
+    chosen prefix never shrinks: a crash may take back only what no fsync covered).
+  - `journal.rs` → `JournalSpec`: the single-writer journal contract
+    (`docs/architecture/02-data-plane.md` §2.1-§2.3, §2.6) written again, folded over the
+    commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
+    these rules give (so every party folds it the same way). It never calls
+    `paros_consensus::journal::state`; it uses the core's types as data only.
   - `reads.rs` → `Reads`: `READ_SEES_WRITES`, a leaderless read sees every write that completed
     before it started.
 - `cell.rs` + `cell/` → `Cell`, the model of a deployment of `ColocatedNode`s, and its driver
   loop. `Flavor` (`cell/flavor.rs`) says what the cell holds (acceptors, quorum system, proxy
   leaders, replicas, matchmakers, spares, late spares, matchmaker spares), which optional moves
   are on (`Flavor::allows`) and the `Limits` of every party (`Flavor::paged` puts every page
-  at its floor, so the paging branches run). `Mutant` is the bug of a control run: a planted driver bug that
+  at its floor, so the paging branches run). The journal's client (`Client` in `cell.rs`)
+  pipelines its writes as the writer of `docs/architecture/02-data-plane.md` §2.2 does: it
+  writes at the next position it believes free, continues from the position a refusal names,
+  retries one of its last writes unchanged, and writes under a superseded uuid on purpose.
+  `Mutant` is the bug of a control run: a planted driver bug that
   an oracle or a trace check catches. `cell/sites.rs` holds each party with its disk. The liveness judge (`Cell::converged`): once the faults stop, one leader
   stands with no open round, and every node and replica that is not retired learned its log.
   The moves beyond the clients and the clock (#1225 (walk moves for the unreached probes)):
@@ -100,6 +114,12 @@ Test only: `publish = false`, never a dependency of another crate.
   - `cell.rs` → `Action::MoveRound` (a leader moves a stuck round to another column,
     `ColocatedNode::move_round`), and a client retry inside `Action::Propose` (the same records
     at a position written before).
+  - `cell.rs` → `Action::Usurp` (a node that does not lead campaigns while a leader stands,
+    `ColocatedNode::campaign`) and two steers for the leadership that a higher ballot passed:
+    before the faults stop, a leader misses every message that would depose it (`deafens`) but
+    hears each `Commit`, and a leader move takes such a leader first (`pick_leader`).
+  - `cell.rs` → a crash loses a suffix of the writes that no fsync covers yet, in half of the
+    crashes that have one (`LOST_UNSYNCED`).
 - `cell/trace.rs` + `cell/trace/` → `Tracer`, `CellEvent`, `Spec`: the steps of a cell walk as
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs`, `matchmaker.rs`, `reads.rs`,
@@ -138,7 +158,11 @@ Test only: `publish = false`, never a dependency of another crate.
   seeds, `EXPLORE` = 10), and CI runs it as it is. Each walk runs in a process of its own (the
   ignored test `one_walk`, started again from the same binary), one per CPU (`COVERAGE_JOBS`):
   a process has its own branch counters, so a walk branches the same way whatever runs beside
-  it. Branch coverage needs the instrumented build that CI's `coverage` job runs:
+  it. CI splits the walks over four shards, each a job of at most 30 minutes: a shard
+  (`COVERAGE_SHARD=i/4`) walks the walks whose index is `i` modulo 4 and saves what each
+  reached (`COVERAGE_SAVE`), and the `coverage` job judges the union of the saved walks
+  (`COVERAGE_FROM`), which fails when a walk is missing. Branch coverage needs the instrumented
+  build that CI's `coverage-shard` jobs run:
   `RUSTC_WRAPPER=$PWD/scripts/sancov-rustc.sh SANCOV_CRATES=paros_consensus cargo nextest run
   --release --target-dir target/sancov -p consensus-sim --test coverage --no-capture`. Without
   it, `moonpool_explorer::sancov_edges_covered_live` returns 0 and only the probes steer. The

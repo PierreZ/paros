@@ -84,7 +84,8 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
 - `src/paxos/lab.rs` → `Exercise`, `Lab`, `Move`, `LabView` (wasm `PaxosLab`) → the "your turn"
   exercises of the Paxos course: a level's world that the reader drives by hand (deliver or
   drop each message, plus the few extra moves an exercise lists), and a goal read off the
-  world. A rule that an exercise turns off is a driver move the shipped code refuses
+  world. An exercise's setup (an election, a first write) is played with the same helpers as
+  a solution and is not the reader's: undo never takes it back. A rule that an exercise turns off is a driver move the shipped code refuses
   (`Wipe`), never a change of the core, and the exercise says so (`rule_off`). Each exercise
   has a solution that a test plays, so an exercise the core no longer lets a reader solve
   fails CI. Undo is a replay: the engine draws no randomness.
@@ -102,7 +103,9 @@ The `applied` log in `world/disk.rs` is the **game's own** application stand-in,
 
 ### Changing a run
 
-1. A trace script is in `src/paxos/trace/pages.rs`. It runs on a setup of `src/paxos/level/`.
+1. A trace script is in `src/paxos/trace/pages/` (one file per page: `single_decree.rs`,
+   `multi_paxos.rs`, `matchmaker.rs`, `quorums.rs`; the compartmentalized page is
+   `trace/compart.rs`). It runs on a setup of `src/paxos/level/`.
    Add no setup for a new game level; a page that needs a new world adds its setup there.
 2. A new view field: change `src/paxos/view.rs`, rerun `paxos_traces`, commit `website/site/src/traces/`.
 3. `cargo nextest run -p paros-wasm`; then the web gates below.

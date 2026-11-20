@@ -151,7 +151,13 @@ bootstraps that grow) is deleted (step 2.1).
 **Matchmaker sets are generations** (#563): every matchmaking message is fenced by generation,
 and so is each order of the coordinator to the matchmakers (rule 3); matchmaker quorums are
 **majorities only**; the handover's decree is the shared `Proposer` + `Acceptor` over a one-slot
-log (no second Paxos kernel). A handover is paged (#439): a set keeps one register per journal of
+log (no second Paxos kernel). The node that runs the handover keeps its decree round on disk:
+it writes the round before the `Prepare` of that round leaves, and a new incarnation starts from
+the round on disk (Pierre, 2026-11-19, #1229 (a stale `Stopped` reply reuses a decree ballot)).
+A `Stopped` reply carries no incarnation, so a reply sent to an earlier incarnation can reach a
+later one, and the floor of the stop quorum alone does not keep the round above the rounds of
+the earlier incarnation (`specs/tla/experiments/stale-stopped/`). The decree still opens above
+that floor, which skips rounds that the matchmakers would refuse. A handover is paged (#439): a set keeps one register per journal of
 its tenant, so a `Stop` and its answers carry one page at a time.
 
 **GC.** A configuration is forgotten once it is sealed and its successor is in force: no future

@@ -121,11 +121,15 @@ works the same when the storage is blocked.
 A lesson can end with exercises on the live core (`labs` in `src/course.ts`). The page sets
 `lab: true` in its front matter and puts `<div data-lab="id id id">` under `## Your turn`.
 `public/lab.js` loads the `paxos` wasm bundle and runs `PaxosLab` (`paros-wasm`,
-`src/paxos/lab.rs`): one tab per exercise, the goal, the parties, the wire as a list with
-Deliver and Drop on each message (large buttons, for a phone), the extra moves of the
-exercise, what the core said about the last move, Undo and Start again. When the engine says
+`src/paxos/lab.rs`): one tab per exercise, the goal, the parties (a grid lane at its cell),
+the wire as a list with Deliver and Drop on each message (large buttons, for a phone), the
+extra moves of the exercise, what the core said about the last move, Deliver all (every
+message until the wire is empty, one move), Undo and Start again. When the engine says
 the goal holds, the page shows why it matters and the next exercise. A solved exercise is
-kept in the browser (`public/course.js`) and the map counts it. `#lab=<id>` opens a tab.
+kept in the browser (`public/course.js`) and the map counts it. `#lab=<id>` opens a tab, at
+load or later: the end of a lesson's story links to its first exercise. Lessons 1 to 5 and 7
+have exercises; the compartmentalized page runs its own driver, not a level, so lesson 6 has
+none yet.
 Without the wasm, the section says so.
 
 ## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))

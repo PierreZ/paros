@@ -30,11 +30,11 @@
 (*   - A slot with no reported vote gets any command; a slot with one gets *)
 (*     the highest reported vote again.                                    *)
 (*   - The leader delegates a slot to a proxy (`Message::Accept` with      *)
-(*     `reply_to = Party::Proxy`). It may delegate it again to another     *)
-(*     proxy (`ColocatedNode::move_round`) while no `Commit` of the slot   *)
-(*     reached it. A `Commit` can be late or lost, so the leader may move  *)
-(*     a slot that a proxy already committed: the model lets it move a     *)
-(*     slot at any time.                                                   *)
+(*     `reply_to = Party::Proxy`). With `Move`, the same round can reach   *)
+(*     a second proxy at any time: a driver can name the proxy             *)
+(*     (`Delegation::To`), and a handoff successor delegates the rounds    *)
+(*     it inherits again. `move_round` itself refuses a delegated round,  *)
+(*     so `Move` is a superset of the code for safety.                     *)
 (*   - A proxy works for the highest ballot it was handed: a higher one    *)
 (*     closes every lower round (`close_below`), a lower one is ignored.   *)
 (*     It learns the configuration from the delegation (`learn_config`:    *)
@@ -43,9 +43,11 @@
 (*   - A proxy crash loses every round: the proxy boots empty with the     *)
 (*     bootstrap configuration (nothing durable, `ProxyReady`).            *)
 (*   - A `Nack` only closes a round, so the model leaves it out: a round   *)
-(*     that stays open decides nothing more. The leader's take-back (it    *)
-(*     decides the round itself, `take_back_delegated`) is the leader's    *)
-(*     own tally of `multi-paxos/`; here a round ends at a proxy.          *)
+(*     that stays open decides nothing more.                               *)
+(*   - The take-back (`take_back_delegated`): the leader takes a stalled   *)
+(*     delegated round back, sends its `Accept` itself and decides it on   *)
+(*     a Phase-2 quorum of its ballot's configuration. It is how the code  *)
+(*     stays live when a proxy is gone.                                    *)
 (*                                                                         *)
 (* Constants:                                                              *)
 (*   Cfg     the configuration of each ballot, 0..NB (0: the bootstrap).   *)
@@ -64,15 +66,24 @@
 (*   Count   "quorum": a proxy decides on a Phase-2 quorum of votes.       *)
 (*           "short": a control, it decides one vote short of a quorum,    *)
 (*           and the learners believe the `Commit`.                        *)
-(*   Move    TRUE: the leader may delegate a slot again to another proxy.  *)
-(*           FALSE: a control, a slot only goes to `ProxyOf[s]`.           *)
+(*   Move    TRUE: a round may reach another proxy than `ProxyOf[s]`.      *)
+(*           FALSE: a slot only goes to `ProxyOf[s]`, as with              *)
+(*           `Delegation::Auto`.                                           *)
+(*   TakeBack TRUE: the leader may take a delegated round back.            *)
+(*           FALSE: a control for liveness, it never does.                 *)
+(*   CloseBelow TRUE: a higher delegation closes every lower round of the  *)
+(*           proxy (`close_below`). FALSE: a control, it closes only the  *)
+(*           round of its own slot. With `Tally = "belief"` and two slots, *)
+(*           the proxy then counts an open lower round over the new        *)
+(*           configuration.                                                *)
 (*   Crashes how many proxy crashes may happen (in the whole run).         *)
 (*   Down    the proxies that never take a step (liveness checks only).    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Leaders, Proxies, Commands, NB, NS, Owner, Cfg,
-          Members, Q1, Q2, ProxyOf, Tally, Hear, Count, Move, Crashes, Down
+          Members, Q1, Q2, ProxyOf, Tally, Hear, Count, Move, TakeBack, CloseBelow,
+          Crashes, Down
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
@@ -83,6 +94,8 @@ ASSUME Tally \in {"round", "belief"}
 ASSUME Hear \in {"delegation", "any"}
 ASSUME Count \in {"quorum", "short"}
 ASSUME Move \in BOOLEAN
+ASSUME TakeBack \in BOOLEAN
+ASSUME CloseBelow \in BOOLEAN
 ASSUME Down \subseteq Proxies
 ASSUME Owner \in [Ballots -> Leaders]
 ASSUME Cfg \in [0..NB -> Configs]
@@ -206,10 +219,10 @@ Propose(b, s, v) ==
   /\ prop' = [prop EXCEPT ![b][s] = v]
   /\ UNCHANGED <<prom, vote, phase, safe, pbal, pcfg, round, done, crashes, msgs>>
 
-\* The leader of ballot b delegates slot s to proxy p: the first time to
-\* `ProxyOf[s]` (`ProxyId::of`), and again to any proxy while no `Commit`
-\* of the slot reached it (`move_round`). The leader has no state of its
-\* own here, and a `Commit` can be late, so a move needs no condition.
+\* The leader of ballot b delegates slot s to proxy p: to `ProxyOf[s]`
+\* (`ProxyId::of`), or with `Move` to any proxy. The leader has no state of
+\* its own here, and a `Commit` can be late, so a second delegation needs no
+\* condition.
 Delegate(b, s, p) ==
   /\ phase[b] = "p2"
   /\ prop[b][s] # None
@@ -232,7 +245,8 @@ Delegated(p, m) ==
   /\ pcfg' = [pcfg EXCEPT ![p] = IF m.bal > @ THEN m.bal ELSE @]
   /\ round' = [round EXCEPT ![p] =
                  [s \in Slots |-> IF s = m.slot THEN [bal |-> m.bal, val |-> m.val]
-                                  ELSE IF @[s].bal < m.bal THEN NoRound ELSE @[s]]]
+                                  ELSE IF CloseBelow /\ @[s].bal < m.bal THEN NoRound
+                                  ELSE @[s]]]
   /\ Send([type |-> "2a", bal |-> m.bal, slot |-> m.slot, val |-> m.val])
   /\ UNCHANGED <<prom, vote, phase, safe, prop, done, crashes>>
 
@@ -280,6 +294,28 @@ Decide(p, s) ==
      /\ Send([type |-> "commit", bal |-> r.bal, slot |-> s, val |-> r.val])
      /\ UNCHANGED <<prom, vote, phase, safe, prop, pbal, pcfg, crashes>>
 
+\* The leader of ballot b takes the delegated round of slot s back
+\* (`take_back_delegated`): it sends the round's `Accept` itself.
+TakeBackRound(b, s) ==
+  /\ TakeBack
+  /\ phase[b] = "p2"
+  /\ prop[b][s] # None
+  /\ \E m \in msgs : m.type = "del" /\ m.bal = b /\ m.slot = s
+  /\ Send([type |-> "2a", bal |-> b, slot |-> s, val |-> prop[b][s]])
+  /\ UNCHANGED <<prom, vote, phase, safe, prop, pbal, pcfg, round, done, crashes>>
+
+\* The leader of ballot b decides a round it took back, on a Phase-2 quorum
+\* of its ballot's configuration (`Proposer`'s own tally), and commits it.
+LeaderDecide(b, s) ==
+  /\ TakeBack
+  /\ phase[b] = "p2"
+  /\ prop[b][s] # None
+  /\ [type |-> "2a", bal |-> b, slot |-> s, val |-> prop[b][s]] \in msgs
+  /\ ~\E m \in msgs : m.type = "commit" /\ m.bal = b /\ m.slot = s
+  /\ Counted(Cfg[b], b, s, prop[b][s])
+  /\ Send([type |-> "commit", bal |-> b, slot |-> s, val |-> prop[b][s]])
+  /\ UNCHANGED <<prom, vote, phase, safe, prop, pbal, pcfg, round, done, crashes>>
+
 \* Proxy p crashes and boots empty, with the bootstrap configuration.
 Crash(p) ==
   /\ p \notin Down
@@ -300,6 +336,7 @@ Next ==
   \/ \E p \in Proxies, b \in Ballots : Hears(p, b)
   \/ \E a \in Acceptors, b \in Ballots, s \in Slots : Accept(a, b, s)
   \/ \E p \in Proxies, s \in Slots : Decide(p, s)
+  \/ \E b \in Ballots, s \in Slots : TakeBackRound(b, s) \/ LeaderDecide(b, s)
   \/ \E p \in Proxies : Crash(p)
 
 Spec == Init /\ [][Next]_vars
@@ -309,13 +346,16 @@ Spec == Init /\ [][Next]_vars
 
 \* The last ballot NB is the leader that no higher ballot preempts. Its
 \* owner, each acceptor and each proxy that is not down keep taking their
-\* steps. A proxy in Down is gone for good.
+\* steps. A proxy in Down is gone for good; the leader does not know it, so
+\* it delegates to it too, and then takes the round back.
 Fairness ==
   /\ WF_vars(Prepare(NB))
   /\ WF_vars(Win(NB))
   /\ \A s \in Slots :
        /\ WF_vars(\E v \in Commands : Propose(NB, s, v))
-       /\ \A p \in Proxies \ Down : WF_vars(Delegate(NB, s, p))
+       /\ \A p \in Proxies : WF_vars(Delegate(NB, s, p))
+       /\ WF_vars(TakeBackRound(NB, s))
+       /\ WF_vars(LeaderDecide(NB, s))
   /\ \A a \in Acceptors :
        /\ WF_vars(Promise(a, NB))
        /\ \A s \in Slots : WF_vars(Accept(a, NB, s))
@@ -326,7 +366,8 @@ Fairness ==
 LiveSpec == Spec /\ Fairness
 
 \* Every slot gets a `Commit`, so the last leader learns it (`on_commit`):
-\* a round whose proxy is gone moves to another proxy and ends.
+\* a round whose proxy is gone is taken back by the leader, or reaches
+\* another proxy, and ends.
 Ends == <>(\A s \in Slots : Committed(s))
 
 -----------------------------------------------------------------------------
@@ -355,6 +396,9 @@ NoCommit == ~\E m \in msgs : m.type = "commit"
 \* A proxy commits a round of a ballot whose configuration a higher ballot
 \* sealed: its Phase 1 is won.
 NoSealedCommit == ~\E m \in msgs : m.type = "commit" /\ \E c \in Ballots : c > m.bal /\ phase[c] = "p2"
+\* Two proxies decide the same slot: a round reached a second proxy while
+\* the first was slow but alive.
+NoBothCommit == ~\E s \in Slots, p, q \in Proxies : p # q /\ done[p][s] # 0 /\ done[q][s] # 0
 \* A slot moves to a second proxy and that proxy decides it.
 NoMovedCommit == ~\E s \in Slots, p \in Proxies : p # ProxyOf[s] /\ done[p][s] # 0
 =============================================================================
