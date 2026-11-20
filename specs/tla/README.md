@@ -856,6 +856,8 @@ Results (`reads/checks.txt`):
 | `reads_bypass_hold_again_serve`: `ReadHold = "serve"` | violation (1.7 million states, 22 steps) |
 | `reads_bypass_hold_again_prefix`: `ReadHold = "prefix"`, the rule | pass (3.1 million states, 1.5 minutes) |
 | `reads_bypass_hold_again_prefix_p212`: the rule, `Mode = "p212"` | pass (2.1 million states, 2 minutes) |
+| `reads_bypass_hold_again_prefix_two_slots`: the rule, two slots (`long`) | no violation in 45.9 million distinct states (bounded: 30 minutes, 2 workers) |
+| `reads_bypass_hold_again_prefix_chain`: the rule, three ballots of one proposer, so two bypasses in a row (`long`) | no violation in 50.2 million distinct states (bounded: 30 minutes, 2 workers) |
 | `reads_two_slots`: `reads_plain` with two slots (`long`) | no violation in 30.7 million distinct states, to depth 24 (bounded: 50 minutes, 1 worker) |
 | `reads_three`: `reads_plain` with three ballots, `OwnerParos3`, so a reader can hold the basis of the middle leadership (`long`) | no violation in 33.4 million distinct states, to depth 25 (bounded: 50 minutes, 1 worker) |
 | #890, `strict` (`main` today) | pass |
