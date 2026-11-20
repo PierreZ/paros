@@ -83,28 +83,37 @@ ASSUME /\ Hold \in {"phase1", "block", "block_short", "none"}
 Ballots  == 1..NB
 Configs  == DOMAIN Layout
 Free     == "free"
-MemTab   == [c \in DOMAIN Layout |-> GridMembers(Layout[c].seq)]
-Mem(c)   == MemTab[c]
+Mem(c)   == GridMembers(Layout[c].seq)
 Acceptors == UNION {Mem(c) : c \in Configs}
-\* The quorums, computed once (zero-arity definitions of constants). Only
-\* the minimal quorums count: each use asks for a quorum inside a set, or for
-\* a set that meets every quorum, or for a read whose guard only weakens and
-\* whose index only grows with more answers.
+\* The quorums. Only the minimal quorums count: each use asks for a quorum
+\* inside a set, or for a set that meets every quorum, or for a read whose
+\* guard only weakens and whose index only grows with more answers. TLC
+\* evaluates these definitions again at each use, so they are built from the
+\* columns (exactly n members of each column, or of one column) and not by
+\* a filter over every subset of the members. The ASSUME below checks once
+\* that they are the minimal sets of grid/Grid.tla.
 Minimal(Qs) == {Q \in Qs : \A R \in Qs : R \subseteq Q => R = Q}
-Q1Tab    == [c \in Configs |-> Minimal(GridQ1(Layout[c].seq, Layout[c].cols, Layout[c].acks, 0))]
-Q2Tab    == [c \in Configs |-> Minimal(GridQ2(Layout[c].seq, Layout[c].cols, Layout[c].acks))]
+ColK(c, j, n) == {T \in SUBSET GridColumn(Layout[c].seq, Layout[c].cols, j) : Cardinality(T) = n}
+Cols(c) == 0..(Layout[c].cols - 1)
+\* n members of every column.
+EachCol(c, n) ==
+    {UNION {f[j] : j \in Cols(c)} :
+        f \in {g \in [Cols(c) -> UNION {ColK(c, j, n) : j \in Cols(c)}] :
+                 \A j \in Cols(c) : g[j] \in ColK(c, j, n)}}
+Need(c, slack) == GridPhase1Count(Layout[c].seq, Layout[c].cols, Layout[c].acks, slack)
+Q1(c)    == EachCol(c, Need(c, 0))
+Q2(c)    == UNION {ColK(c, j, Layout[c].acks) : j \in Cols(c)}
 \* The read quorums with one acceptor more of every column, for the control
 \* "block_short": a set that meets each of them can miss a real read quorum.
-Q1BigTab == [c \in Configs |->
-               IF Layout[c].acks >= 2
-               THEN Minimal(GridQ1(Layout[c].seq, Layout[c].cols, Layout[c].acks - 1, 0))
-               ELSE {}]
-Q1(c)    == Q1Tab[c]
-Q2(c)    == Q2Tab[c]
-Q1Big(c) == Q1BigTab[c]
+Q1Big(c) == IF Layout[c].acks >= 2 THEN EachCol(c, Need(c, 0) + 1) ELSE {}
 MajQ     == {Q \in SUBSET Matchmakers : 2 * Cardinality(Q) > Cardinality(Matchmakers)}
 
 ASSUME \A c \in Configs : GridAdmits(Layout[c].seq, Layout[c].cols, Layout[c].acks)
+ASSUME \A c \in Configs :
+         /\ Q1(c) = Minimal(GridQ1(Layout[c].seq, Layout[c].cols, Layout[c].acks, 0))
+         /\ Q2(c) = Minimal(GridQ2(Layout[c].seq, Layout[c].cols, Layout[c].acks))
+         /\ Layout[c].acks >= 2 =>
+              Q1Big(c) = Minimal(GridQ1(Layout[c].seq, Layout[c].cols, Layout[c].acks - 1, 0))
 ASSUME Hold = "block_short" => \A c \in Configs : Layout[c].acks >= 2
 \* A configuration that the ballots leave never comes back.
 ASSUME \A b1, b2, b3 \in Ballots :
