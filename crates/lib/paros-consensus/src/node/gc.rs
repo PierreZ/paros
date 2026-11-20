@@ -293,12 +293,15 @@ impl ColocatedNode {
     ///    ballot it heard (#278); it does so only from outside the belief it
     ///    replaces, so the node is outside `C_w` then too, which is what
     ///    legs 2 and 5 together need; and
-    /// 6. a matchmaker quorum of the generation in force was asked, under
-    ///    that belief, which registrations name this node
-    ///    (`registrations_checked == watermark`): a membership probe closed
-    ///    with the node outside `C_w`, and each answer's highest registration
-    ///    naming it raised the registration fence that leg 4 reads
-    ///    (#1002 (retire fence gaps)). [`ColocatedNode::check_retirement`]
+    /// 6. every matchmaker of the generation in force agreed, under that
+    ///    belief, that no registration at or above the floor names this
+    ///    node (`registrations_checked == watermark`): a membership probe
+    ///    whose answers carry `named` closed with the node outside `C_w`,
+    ///    and each answer's highest registration naming it raised the
+    ///    registration fence that leg 4 reads (#1002 (retire fence gaps)).
+    ///    Each matchmaker that agrees records the node as retired, durably,
+    ///    before it answers, and refuses every later registration that names
+    ///    it (`MatchRefusal::Retired`). [`ColocatedNode::check_retirement`]
     ///    opens that probe. Without it, leg 4 saw only this node's own
     ///    campaigns: a stale belief that *another* node registered above the
     ///    floor, naming this node, needs its promise in every later Phase 1,
@@ -307,13 +310,10 @@ impl ColocatedNode {
     ///    ([`crate::contract::WriteOp::RegistrationFence`]), so a restart does
     ///    not forget this node's own registration either (gap B).
     ///
-    /// The check reads a quorum, so two residuals stay (decided with option
-    /// (b) of #1002 on 2026-11-11). A registration that only a minority of
-    /// the matchmakers stored, outside the quorum that answered, is not
-    /// seen. A stale belief registered *after* the check is not seen either.
-    /// Both need a node that missed a reconfiguration to campaign at the
-    /// exact moment, and both cost liveness, never safety. Removing a dead
-    /// belief from the histories (option (a)) was not chosen.
+    /// The check needs every matchmaker, not a quorum: a registration that
+    /// only a minority stored is still seen, and the retired record at each
+    /// matchmaker refuses a stale belief registered after the check (the
+    /// `allTomb` rule of `specs/tla/retire-fence/`).
     ///
     /// Condition 5 closes the retirement window (#165). Conditions 2 and 4
     /// are both read off what this node *heard*, and a node can be a member
@@ -419,8 +419,8 @@ impl ColocatedNode {
     /// no probe closed under this belief yet, and the node follows with no
     /// campaign or probe open. The probe registers nothing. Each answer
     /// raises the registration fence to the highest registration that names
-    /// this node; once a quorum answered with the node still outside, the
-    /// check is done. An open probe is asked again on the node's own clock
+    /// this node; once every matchmaker of the set in force agreed with the
+    /// node still outside, the check is done. An open probe is asked again on the node's own clock
     /// (`tick`). Returns whether a probe is open after the call. A plain
     /// deployment never opens one: nothing is sent and nothing is written.
     ///
@@ -752,11 +752,8 @@ impl ColocatedNode {
         // becomes effective, and a move or a mode change waiting on it never
         // ends. A stable leader campaigns for nothing, so it meets the frozen
         // generation only here, and its driver finishes the handover, as a
-        // refused campaign's does. Recipe 13627598485075066090
-        // 53:11387013064857220442 on c868dac: generation 5 frozen with no
-        // successor, a journal's mode change waited on its GC watermark
-        // through the whole tail ("status: a journal the cell can hold shows
-        // healthy after chaos").
+        // refused campaign's does. Without it, a generation frozen with no
+        // successor holds the GC watermark for ever.
         if !ack.applied && ack.stopped {
             assert!(
                 ack.newer.is_none(),

@@ -5,20 +5,19 @@ pub const MAX_FAILURE_DOMAIN_BYTES: usize = 64;
 
 /// The **failure domain** of an acceptor (#215 (zones), `docs/architecture/05-failure-model-and-zones.md`
 /// §5): the region and the availability zone its machine stands in, as the
-/// cell's registry names them (e.g. `("eu-west-1", "eu-west-1a")`).
+/// caller names them (e.g. `("eu-west-1", "eu-west-1a")`).
 ///
 /// The core compares failure domains **for equality only**: it never parses,
 /// orders by meaning or counts them against a threshold. A domain is a
 /// label an [`AcceptorConfig`](super::AcceptorConfig) carries beside each
 /// member, bound to the ballot with the rest of the configuration, so every
-/// node that evaluates a configuration sees the same labels. The names mean
-/// the same thing universe-wide, so a move between cells compares domains
-/// correctly. An empty region is the cell's own region (one cell is one
-/// region until multi-region cells, #253).
+/// node that evaluates a configuration sees the same labels. The caller
+/// gives each name one meaning everywhere it compares two configurations.
+/// An empty region is a name like any other: the core gives it no meaning.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FailureDomain {
-    /// The region's name. Empty: the cell's own region.
+    /// The region's name. The core gives an empty name no meaning.
     pub region: String,
     /// The availability zone's name inside the region.
     pub az: String,

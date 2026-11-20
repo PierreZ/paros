@@ -51,6 +51,7 @@ pub(super) fn write(
     let bal = |b: Ballot| rank(ranks, shift, b);
     let (name, fields) = leader(&bal, ranks, shift, sizes, event)
         .or_else(|| round(&bal, sizes, event))
+        .or_else(|| fault(&bal, sizes, event))
         .or_else(|| membership(&bal, event))
         .expect("every event has an encoding");
     trace.event(name, fields);
@@ -162,7 +163,7 @@ fn leader(
     })
 }
 
-/// The steps of a round: the proxies, the votes, the learns, the crashes.
+/// The steps of a round: the proxies, the votes, the learns.
 fn round(
     bal: &impl Fn(Ballot) -> Value,
     sizes: &mut Sizes,
@@ -248,13 +249,35 @@ fn round(
                 ],
             )
         }
+        _ => return None,
+    })
+}
+
+/// The faults: a proxy crash, a node restart.
+fn fault(
+    bal: &impl Fn(Ballot) -> Value,
+    sizes: &mut Sizes,
+    event: &CellEvent,
+) -> Option<(&'static str, Fields)> {
+    Some(match event {
         CellEvent::Crash { proxy: p } => {
             sizes.crashes += 1;
             ("crash", vec![("proxy", proxy(*p))])
         }
-        CellEvent::Restart { node: id } => {
+        CellEvent::Restart {
+            node: id,
+            upto,
+            led,
+        } => {
             sizes.restarts += 1;
-            ("restart", vec![("node", node(*id))])
+            (
+                "restart",
+                vec![
+                    ("node", node(*id)),
+                    ("upto", slot(*upto)),
+                    ("led", bal(led.unwrap_or_else(Ballot::zero))),
+                ],
+            )
         }
         _ => return None,
     })

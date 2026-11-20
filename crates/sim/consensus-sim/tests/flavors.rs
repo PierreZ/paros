@@ -17,6 +17,9 @@ const COMMON: &[&str] = &[
     reach::REBOOT,
     reach::WRITE_APPLIED,
     reach::SET_LEADER,
+    reach::WRITE_AFTER_GAP,
+    reach::DUPLICATE,
+    reach::FENCED,
 ];
 
 /// Walk `flavor`; every site of [`COMMON`] and of `extra` must pass.
@@ -35,32 +38,44 @@ fn walk_seeds(flavor: Flavor, extra: &[&str], seeds: u64) {
 
 #[test]
 fn multi_paxos() {
-    walk(Flavor::multi_paxos(), &[]);
+    walk(Flavor::multi_paxos(), &[reach::LOST_UNSYNCED]);
 }
 
 #[test]
 fn multi_paxos_on_five_with_truncation() {
     walk(
         Flavor::multi_paxos_five(),
-        &[reach::COMPACTED, reach::RETRY],
+        &[
+            reach::COMPACTED,
+            reach::TRUNCATE_MOVED,
+            reach::RETRY,
+            reach::LOST_UNSYNCED,
+        ],
     );
 }
 
 #[test]
 fn leader_handoff() {
-    walk(Flavor::handoff(), &[reach::HANDOFF]);
+    walk(Flavor::handoff(), &[reach::HANDOFF, reach::LOST_UNSYNCED]);
 }
 
 #[test]
 fn grid_quorums() {
-    walk(Flavor::grid(2, 2), &[reach::NAMED_COLUMN, reach::NODE_READ]);
+    walk(
+        Flavor::grid(2, 2),
+        &[reach::NAMED_COLUMN, reach::NODE_READ, reach::LOST_UNSYNCED],
+    );
 }
 
 #[test]
 fn grid_partitions() {
     walk(
         Flavor::partitions(),
-        &[reach::NAMED_COLUMN, reach::MOVED_ROUND],
+        &[
+            reach::NAMED_COLUMN,
+            reach::MOVED_ROUND,
+            reach::LOST_UNSYNCED,
+        ],
     );
 }
 
@@ -73,6 +88,7 @@ fn proxy_leaders() {
             reach::TAKE_BACK,
             reach::PROXY_CRASH,
             reach::HANDOFF,
+            reach::LOST_UNSYNCED,
         ],
     );
 }
@@ -93,13 +109,15 @@ fn replicas() {
             reach::REPLICA_APPLIED,
             reach::REPLICA_READ,
             reach::COMPACTED,
+            reach::TRUNCATE_MOVED,
+            reach::LOST_UNSYNCED,
         ],
     );
 }
 
 #[test]
 fn leaderless_reads() {
-    walk(Flavor::reads(), &[reach::NODE_READ]);
+    walk(Flavor::reads(), &[reach::NODE_READ, reach::LOST_UNSYNCED]);
 }
 
 #[test]
@@ -113,6 +131,8 @@ fn compartments() {
             reach::NODE_READ,
             reach::HANDOFF,
             reach::COMPACTED,
+            reach::TRUNCATE_MOVED,
+            reach::LOST_UNSYNCED,
         ],
     );
 }
@@ -177,7 +197,12 @@ fn reconfigured_compartments() {
 fn disk_faults() {
     walk(
         Flavor::disk_faults(),
-        &[reach::ROT_CHOSEN, reach::SCRUBBED, reach::COMPACTED],
+        &[
+            reach::ROT_CHOSEN,
+            reach::SCRUBBED,
+            reach::COMPACTED,
+            reach::LOST_UNSYNCED,
+        ],
     );
 }
 

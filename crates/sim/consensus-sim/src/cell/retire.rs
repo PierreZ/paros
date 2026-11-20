@@ -60,7 +60,7 @@ impl Cell {
         if may {
             sometimes!(true, reach::RETIRED);
             self.retired.insert(id);
-            self.crash_node(id);
+            self.crash_node(id, cx);
             cx.crashed(&super::Party::Node(id));
             return;
         }

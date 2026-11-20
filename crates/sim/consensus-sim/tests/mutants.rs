@@ -4,8 +4,9 @@
 
 use consensus_sim::campaign::try_campaign;
 use consensus_sim::cell::{Cell, Flavor, Mutant};
+use consensus_sim::oracle::journal::JOURNAL_FOLD;
 use consensus_sim::oracle::ledger::{
-    COMMIT_BACKED, ONE_VALUE, PERSIST_BEFORE_SEND, PREFIX_SHRINKS,
+    COMMIT_BACKED, LEARNED_CHOSEN, ONE_VALUE, PERSIST_BEFORE_SEND, PREFIX_SHRINKS,
 };
 use consensus_sim::oracle::reads::READ_SEES_WRITES;
 use moonpool_walk::Walk;
@@ -58,6 +59,26 @@ fn a_lost_chosen_index_is_caught_by_the_prefix_oracle() {
 #[test]
 fn an_early_commit_is_caught_by_the_commit_oracle() {
     caught(Flavor::multi_paxos(), Mutant::EarlyCommit, 5, COMMIT_BACKED);
+}
+
+#[test]
+fn a_corrupt_commit_is_caught_by_the_learned_oracle() {
+    caught(
+        Flavor::replicas(),
+        Mutant::CorruptCommit,
+        20,
+        LEARNED_CHOSEN,
+    );
+}
+
+#[test]
+fn a_corrupt_trim_jump_is_caught_by_the_journal_rules() {
+    caught(
+        Flavor::multi_paxos_five(),
+        Mutant::CorruptTrimJump,
+        400,
+        JOURNAL_FOLD,
+    );
 }
 
 #[test]

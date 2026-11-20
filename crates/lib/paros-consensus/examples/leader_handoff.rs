@@ -2,7 +2,7 @@
 //!
 //! Run it: `cargo run -p paros-consensus --example leader_handoff`
 //!
-//! This example drives [`ColocatedNode`] with the toy cell of
+//! This example drives [`ColocatedNode`] with the toy cluster of
 //! `examples/common/cluster.rs`. Read `quickstart` first.
 //!
 //! # The problem
@@ -32,7 +32,7 @@
 //!   an ordinary election follows.
 //!
 //! A handoff that fails costs availability, never safety. If the message is
-//! lost, the cell has no leader until an election, and an election is always
+//! lost, the cluster has no leader until an election, and an election is always
 //! possible.
 //!
 //! # What the trace shows
@@ -42,7 +42,7 @@
 //!    leads at the ballot that node 1 won, and writes.
 //! 3. Node 2 may not hand the same ballot on: one hop.
 //! 4. Node 2 wins a ballot of its own and hands it to node 3, but the
-//!    message is lost. The cell has no leader. Node 1 runs an ordinary
+//!    message is lost. The cluster has no leader. Node 1 runs an ordinary
 //!    election, and nothing that was written is lost.
 //!
 //! Further reading: Nawab, Agrawal & El Abbadi, *`DPaxos`: Managing Data

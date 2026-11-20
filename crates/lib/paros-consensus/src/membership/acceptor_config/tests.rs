@@ -213,20 +213,15 @@ fn a_member_with_two_failure_domains_is_refused() {
     );
 }
 
-/// The cell and the role counts are part of the configuration. Two
-/// configurations that differ only in one of them are not equal, so a
-/// change of a count is a change of round.
+/// The role counts are part of the configuration. Two configurations that
+/// differ only in a count are not equal, so a change of a count is a change
+/// of round.
 #[test]
-fn the_cell_and_the_counts_are_part_of_the_configuration() {
+fn the_counts_are_part_of_the_configuration() {
     let plain = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority);
-    assert_eq!(plain.cell(), 0);
     assert!(!plain.has_proxies());
     assert!(!plain.has_replicas());
     assert_eq!(plain.reply_owner(Slot(4)), None);
-
-    let celled = plain.clone().with_cell(7);
-    assert_eq!(celled.cell(), 7);
-    assert_ne!(celled, plain);
 
     let counted = plain.clone().with_counts(2, 3);
     assert!(counted.has_proxies());
@@ -252,7 +247,7 @@ fn a_role_count_above_the_cap_is_refused() {
 
 /// A configuration read from the wire goes through the constructor. Its
 /// members are sorted and deduplicated, each member keeps its label, and
-/// the cell and the counts stay.
+/// the counts stay.
 #[cfg(feature = "serde")]
 #[test]
 fn a_wire_configuration_is_normalized_like_a_built_one() {
@@ -262,7 +257,6 @@ fn a_wire_configuration_is_normalized_like_a_built_one() {
         members: nodes([3, 1, 2]),
         quorum_system: QuorumSystem::Majority,
         domains: vec![domain("c"), domain("a"), domain("b")],
-        cell: 5,
         proxies: 1,
         replicas: 2,
     });
@@ -276,7 +270,6 @@ fn a_wire_configuration_is_normalized_like_a_built_one() {
             ],
             QuorumSystem::Majority,
         )
-        .with_cell(5)
         .with_counts(1, 2)
     );
 
@@ -284,7 +277,6 @@ fn a_wire_configuration_is_normalized_like_a_built_one() {
         members: nodes([2, 1, 2]),
         quorum_system: QuorumSystem::Majority,
         domains: Vec::new(),
-        cell: 0,
         proxies: 0,
         replicas: 0,
     });

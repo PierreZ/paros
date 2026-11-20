@@ -6,18 +6,25 @@
 reach                 violation  ci
 reach_gap             violation  ci
 majority              pass       ci
+three_ballots         pass       ci
+three_ballots_lowest  violation  ci
+three_ballots_restart pass       ci
+learn_record          violation  ci
+full_grid_any         pass       ci
 alloc_prefix          violation  ci
 durable_after         violation  ci
 wipe_revote           violation  ci
 live                  pass       ci
 live_down             pass       ci
+live_restart          pass       ci
 lost                  violation  ci
 gap_skip              violation  ci
 full_grid_one_column  violation  ci
 full_grid_down        violation  ci
+full_grid_down_move   pass       ci
 partitions_down       pass       ci
 restart               pass       long
 wipe                  pass       long
 spreads               pass       long
 full_grid             pass       long
-partitions            pass       long
+partitions            pass       long  50

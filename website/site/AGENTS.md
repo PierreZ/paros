@@ -96,7 +96,9 @@ the beat, the question in place of the sentence (the sentence gives the answer a
 to four answers (buttons, or the keys 1 to 4). Any answer, or "Show me", plays the beat; then
 the screen marks the right answer, the reader's answer and the reason (`why`). The answers live
 in the page only (`window.paxosStory.answers()`), and each one fires `paxos:answer` on the
-document. A page with no beats keeps the step-through alone. The story draws the recorded
+document. A "Break the rule" run ends with a "find the bug" question (`after`): its beat plays
+first, then the screen asks what went wrong in it, and an answer marks the right one with no
+second play. A page with no beats keeps the step-through alone. The story draws the recorded
 trace only; the step-through switches to the live wasm run.
 
 ## The course (`src/course.ts`)
@@ -116,16 +118,26 @@ the last screen opened. No account, no server, no score. The map shows "k of n s
 lesson and "Continue where you stopped", and has a button to forget the progress. Every page
 works the same when the storage is blocked.
 
+Each lesson names one TLC run of a model of `specs/tla/` (`tlc` in `src/course.ts`), and the
+map shows its count of distinct states with the day of the run (`TLC_RUN`). The figures come
+from TLC's output, never from an estimate. To refresh them, run for each lesson, in
+`specs/tla/<model>/`: `nix develop .#tla --command tlc -workers auto -deadlock -config
+<config>.cfg MC.tla`, copy "distinct states found", and change `TLC_RUN` the same day.
+
 ## Your turn (`public/lab.js`)
 
 A lesson can end with exercises on the live core (`labs` in `src/course.ts`). The page sets
 `lab: true` in its front matter and puts `<div data-lab="id id id">` under `## Your turn`.
 `public/lab.js` loads the `paxos` wasm bundle and runs `PaxosLab` (`paros-wasm`,
-`src/paxos/lab.rs`): one tab per exercise, the goal, the parties, the wire as a list with
-Deliver and Drop on each message (large buttons, for a phone), the extra moves of the
-exercise, what the core said about the last move, Undo and Start again. When the engine says
+`src/paxos/lab.rs`): one tab per exercise, the goal, the parties (a grid lane at its cell),
+the wire as a list with Deliver and Drop on each message (large buttons, for a phone), the
+extra moves of the exercise, what the core said about the last move, Deliver all (every
+message until the wire is empty, one move), Undo and Start again. When the engine says
 the goal holds, the page shows why it matters and the next exercise. A solved exercise is
-kept in the browser (`public/course.js`) and the map counts it. `#lab=<id>` opens a tab.
+kept in the browser (`public/course.js`) and the map counts it. `#lab=<id>` opens a tab, at
+load or later: the end of a lesson's story links to its first exercise. Lessons 1 to 5 and 7
+have exercises; the compartmentalized page runs its own driver, not a level, so lesson 6 has
+none yet.
 Without the wasm, the section says so.
 
 ## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))

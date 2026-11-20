@@ -21,8 +21,12 @@
 (* pages (`advance_recovery`). So an "accept" of the leader's own round    *)
 (* that the model already holds is no step.                                *)
 (*                                                                         *)
-(* Four steps of the code are not steps of the model, and the trace spec   *)
+(* Five steps of the code are not steps of the model, and the trace spec   *)
 (* writes each as its own step:                                            *)
+(*   - "restart": as in `multi-paxos/MultiPaxosTrace.tla`, the model's     *)
+(*     `Restart` that forgets the learned slots at or above `upto`, the    *)
+(*     prefix that a crash lost of a relaxed chosen index. The boot        *)
+(*     frontier starts at the shorter prefix;                              *)
 (*   - "win" with `known`: a new leader that already knows a slot of its   *)
 (*     recovery chosen (it decided the slot as an earlier leader, above a  *)
 (*     gap of its chosen prefix) does not propose it again                 *)
@@ -135,6 +139,25 @@ Record(n, b, s, v) ==
   /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
   /\ UNCHANGED <<prom, learned, phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
 
+\* Node n boots again with the chosen prefix below upto: the trace spec's
+\* own step, see above. It is `Restart`, and it forgets what a crash lost
+\* of the learned prefix; the boot frontier reads the shorter prefix.
+TraceRestart(n, upto) ==
+  LET kept == [s \in Slots |-> IF s >= upto THEN None ELSE learned[n][s]]
+      voted == {s \in Slots : vote[n][s].bal > 0}
+  IN /\ n \notin Steady
+     /\ restarts < Restarts
+     /\ restarts' = restarts + 1
+     /\ \A s \in Slots : s < upto => learned[n][s] # None
+     /\ learned' = [learned EXCEPT ![n] = kept]
+     /\ role' = [role EXCEPT ![n] = "follower"]
+     /\ origin' = [origin EXCEPT ![n] = "elected"]
+     /\ pend' = [pend EXCEPT ![n] = NoRounds]
+     /\ nxt' = [nxt EXCEPT ![n] =
+                  IF voted = {} THEN FirstNone(kept) ELSE Max({Max(voted) + 1, FirstNone(kept)})]
+     /\ phase' = [b \in Ballots |-> IF Owner[b] = n /\ phase[b] = "p1" THEN "dead" ELSE phase[b]]
+     /\ UNCHANGED <<prom, vote, bal, drops, lost, msgs>>
+
 Step ==
   \/ /\ e.event = "prepare" /\ IsBallot /\ IsNode("owner") /\ Has("from")
      /\ Owner[e.bal] = e.owner
@@ -180,8 +203,8 @@ Step ==
      /\ Record(e.node, e.bal, e.slot, e.val)
   \/ /\ e.event = "learn" /\ IsNode("node") /\ IsSlot /\ IsValue
      /\ Learn(e.node, e.slot, e.val)
-  \/ /\ e.event = "restart" /\ IsNode("node")
-     /\ Restart(e.node)
+  \/ /\ e.event = "restart" /\ IsNode("node") /\ Has("upto")
+     /\ TraceRestart(e.node, e.upto)
 
 TraceNext == l <= Len(Trace) /\ Step /\ l' = l + 1
 

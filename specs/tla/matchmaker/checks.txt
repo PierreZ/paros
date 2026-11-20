@@ -10,8 +10,13 @@ match_nocheck    violation  ci
 histories_one    violation  ci
 edit             violation  ci
 gc_early         violation  ci
+gc_two           pass       ci
+gc_two_early     violation  ci
+reach_drop       violation  ci
+watermark_min    violation  ci
+retire_no_tomb   violation  ci
 retire_removed   violation  ci
 retire_one_ack   violation  ci
 matchmaker       pass       ci
 matchmaker_one   pass       long
-matchmaker_long  pass       long
+matchmaker_long  pass       long  120

@@ -20,17 +20,24 @@
 //!    the node never durably accepted.
 //! 4. **What is learned was chosen** ([`LEARNED_CHOSEN`]): a value that a
 //!    party learned or applied is the value a durable quorum chose.
-//! 5. **One fold** ([`ONE_FOLD`]): every party that applies a slot gets the
-//!    same journal outcome for it.
-//! 6. **The chosen prefix never shrinks** ([`PREFIX_SHRINKS`]): a disk's
-//!    chosen index never moves back, and a party never boots below its
+//! 5. **The journal rules** ([`JOURNAL_FOLD`]): every party that applies
+//!    a slot gets the outcome that the journal contract gives the chosen
+//!    log at that slot ([`JournalSpec`]), so every party gets the same one.
+//! 6. **The durable chosen prefix never shrinks** ([`PREFIX_SHRINKS`]):
+//!    while a node runs, its disk's chosen index never moves back, and a
+//!    crash keeps every chosen index an fsync covered. A crash may lose a
+//!    chosen index that no fsync covered: `SetChosenIndex` alone is a
+//!    relaxed write (`MustSync::Relaxed`), and the node learns the slots
+//!    again. The driver also checks that a party never boots below its
 //!    disk.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_consensus::journal::{Command, Outcome, command_fingerprint};
+use paros_consensus::journal::{Command, JournalView, Outcome, command_fingerprint};
 use paros_consensus::{Ballot, NodeId, Slot};
 
+pub use super::journal::JOURNAL_FOLD;
+use super::journal::JournalSpec;
 use super::quorum::Phase2Rule;
 
 /// Oracle 1.
@@ -41,10 +48,8 @@ pub const COMMIT_BACKED: &str = "a Commit is backed by a durable Phase-2 quorum"
 pub const PERSIST_BEFORE_SEND: &str = "a vote leaves a node only once its disk holds it";
 /// Oracle 4.
 pub const LEARNED_CHOSEN: &str = "a learned value is the chosen value";
-/// Oracle 5.
-pub const ONE_FOLD: &str = "every party folds a slot to the same outcome";
 /// Oracle 6.
-pub const PREFIX_SHRINKS: &str = "the chosen prefix never shrinks";
+pub const PREFIX_SHRINKS: &str = "the durable chosen prefix never shrinks";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -63,10 +68,13 @@ pub struct Ledger {
     chosen: BTreeMap<Slot, (Ballot, u64)>,
     /// Per node, the highest promise its disk ever held.
     promises: BTreeMap<NodeId, Ballot>,
-    /// Per disk (by name), the highest chosen index it ever held.
+    /// Per disk (by name), the highest chosen index it held since its
+    /// node last crashed.
     chosen_index: BTreeMap<String, Slot>,
-    /// Per slot, the outcome the first party to apply it got.
-    outcomes: BTreeMap<Slot, (u64, Outcome)>,
+    /// Per disk (by name), the highest chosen index an fsync covered.
+    durable: BTreeMap<String, Slot>,
+    /// The journal contract, folded over the chosen log.
+    journal: JournalSpec,
 }
 
 impl Ledger {
@@ -81,7 +89,8 @@ impl Ledger {
             chosen: BTreeMap::new(),
             promises: BTreeMap::new(),
             chosen_index: BTreeMap::new(),
-            outcomes: BTreeMap::new(),
+            durable: BTreeMap::new(),
+            journal: JournalSpec::default(),
         }
     }
 
@@ -240,28 +249,65 @@ impl Ledger {
     }
 
     /// Oracles 4 and 5: `who` applied `command` at `slot` with `outcome`.
+    /// Returns the journal's view before the slot, as the rules fold it.
     ///
     /// # Panics
     ///
-    /// If the value was not chosen, or another party folded the slot to
-    /// another outcome.
-    pub fn applied(&mut self, who: &str, slot: Slot, command: &Command, outcome: &Outcome) {
+    /// If the value was not chosen, or the outcome is not the one the
+    /// journal rules give the chosen log at `slot`.
+    pub fn applied(
+        &mut self,
+        who: &str,
+        slot: Slot,
+        command: &Command,
+        outcome: &Outcome,
+    ) -> JournalView {
         self.learned(who, slot, command);
-        let print = command_fingerprint(command);
-        let first = self
-            .outcomes
-            .entry(slot)
-            .or_insert_with(|| (print, outcome.clone()));
+        let (chosen, commands) = (&self.chosen, &self.commands);
+        let (before, expected) = self.journal.judge(slot, |s| {
+            chosen.get(&s).and_then(|(_, print)| commands.get(print))
+        });
         assert!(
-            first.0 == print && first.1 == *outcome,
-            "{ONE_FOLD}: {who} folded slot {} to {outcome:?}, an earlier party to {:?}",
+            expected == outcome,
+            "{JOURNAL_FOLD}: {who} folded slot {} ({command:?}) to {outcome:?}, the rules give {expected:?} over {before:?}",
             slot.0,
-            first.1
         );
+        *before
     }
 
-    /// Oracle 6: the disk named `disk` now holds `index` as its chosen
-    /// index.
+    /// The disk named `disk` took an fsync while it held `index` as its
+    /// chosen index.
+    pub fn synced(&mut self, disk: &str, index: Option<Slot>) {
+        if let Some(index) = index {
+            let known = self.durable.entry(disk.to_owned()).or_insert(index);
+            *known = (*known).max(index);
+        }
+    }
+
+    /// Oracle 6 at a crash: the disk named `disk` holds `index` as its
+    /// chosen index after the crash.
+    ///
+    /// # Panics
+    ///
+    /// If the crash lost a chosen index an fsync covered.
+    pub fn crashed(&mut self, disk: &str, index: Option<Slot>) {
+        let durable = self.durable.get(disk).copied();
+        assert!(
+            index >= durable,
+            "{PREFIX_SHRINKS}: a crash moved {disk}'s chosen index to {index:?}, below the {durable:?} an fsync covered"
+        );
+        match index {
+            Some(index) => {
+                self.chosen_index.insert(disk.to_owned(), index);
+            }
+            None => {
+                self.chosen_index.remove(disk);
+            }
+        }
+    }
+
+    /// Oracle 6 while the disk's node runs: the disk named `disk` now holds
+    /// `index` as its chosen index.
     ///
     /// # Panics
     ///
@@ -373,19 +419,36 @@ mod tests {
     }
 
     #[test]
-    fn a_learned_value_must_be_chosen_and_fold_one_way() {
+    fn a_learned_value_must_be_chosen_and_fold_by_the_rules() {
         let mut ledger = ledger();
         let message = panics(|| ledger.learned("node 2", Slot(0), &write(1)));
         assert!(message.contains(LEARNED_CHOSEN), "{message}");
         for node in [0, 1] {
             ledger.voted(NodeId(node), Slot(0), ballot(1, 0), &write(1));
         }
-        let refused = Outcome::Refused(paros_consensus::journal::state::JournalView::default());
+        // No leader yet: the write is refused, on every party.
+        let refused = Outcome::Refused(JournalView::default());
         ledger.applied("node 0", Slot(0), &write(1), &refused);
         ledger.applied("node 1", Slot(0), &write(1), &refused);
-        let other = Outcome::Truncated(paros_consensus::journal::state::JournalView::default());
-        let message = panics(|| ledger.applied("node 2", Slot(0), &write(1), &other));
-        assert!(message.contains(ONE_FOLD), "{message}");
+        let other = Outcome::Truncated(JournalView::default());
+        let message = panics(|| {
+            ledger.applied("node 2", Slot(0), &write(1), &other);
+        });
+        assert!(message.contains(JOURNAL_FOLD), "{message}");
+    }
+
+    #[test]
+    fn a_crash_may_lose_only_what_no_fsync_covered() {
+        let mut ledger = ledger();
+        ledger.disk_chosen("node 0", Some(Slot(2)));
+        ledger.synced("node 0", Some(Slot(2)));
+        ledger.disk_chosen("node 0", Some(Slot(5)));
+        ledger.crashed("node 0", Some(Slot(3)));
+        ledger.disk_chosen("node 0", Some(Slot(3)));
+        let message = panics(|| ledger.crashed("node 0", Some(Slot(1))));
+        assert!(message.contains(PREFIX_SHRINKS), "{message}");
+        let message = panics(|| ledger.crashed("node 0", None));
+        assert!(message.contains(PREFIX_SHRINKS), "{message}");
     }
 
     #[test]

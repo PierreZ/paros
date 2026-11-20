@@ -110,13 +110,23 @@ jobs:
   # branched too. A separate target directory keeps the instrumented build
   # apart from the plain one. Every core probe must be reached: the gate has
   # no list of excused probes. Each walk runs in its own process, one per CPU,
-  # at the gate's own budget (`tests/coverage.rs`). The job has 20 minutes
-  # (Pierre, 2026-11-19). The `test` job leaves the gate out.
-  coverage:
+  # at the gate's own budget (`tests/coverage.rs`). The `test` job leaves the
+  # gate out.
+  #
+  # Each job has 30 minutes (Pierre, 2026-11-20), so the walks are split over
+  # four shards. A shard walks every fourth walk and saves what each reached
+  # (`COVERAGE_SHARD`, `COVERAGE_SAVE`). The `coverage` job judges the union
+  # of the four shards (`COVERAGE_FROM`): every probe reached, every allowed
+  # move made, no walk missing.
+  coverage-shard:
     needs: scope
     if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
@@ -126,13 +136,42 @@ jobs:
           key: sancov
           workspaces: ". -> target/sancov"
           cache-on-failure: true
-      - name: Run the coverage gate on instrumented code
+      - name: Walk one shard of the coverage gate on instrumented code
         env:
           SANCOV_CRATES: paros_consensus
+          COVERAGE_SHARD: ${{ matrix.shard }}/4
+          COVERAGE_SAVE: ${{ github.workspace }}/coverage-walks
         run: >-
           RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
           nix develop --command cargo nextest run --profile ci --release
           --target-dir target/sancov -p consensus-sim --test coverage --no-capture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-walks-${{ matrix.shard }}
+          path: coverage-walks/
+          if-no-files-found: error
+
+  coverage:
+    needs: [scope, coverage-shard]
+    if: ${{ needs.scope.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-walks-*
+          path: coverage-walks/
+          merge-multiple: true
+      - name: Judge the union of the shards
+        env:
+          COVERAGE_FROM: ${{ github.workspace }}/coverage-walks
+        run: >-
+          nix develop --command cargo nextest run --profile ci --release
+          -p consensus-sim --test coverage --no-capture
 
   # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
   # or `ColocatedNode` as a driver does, and assert the property each one shows, so running

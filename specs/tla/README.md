@@ -13,6 +13,11 @@ completely, and the simulation tests the code that ships.
 `tlc` is also in the default dev shell. CI runs the first command in the `TLA` workflow, only
 when a spec, the script or the flake changes.
 
+A long check that does not finish has a time bound in minutes as a fourth word of its line in
+`checks.txt` (`partitions pass long 50`). TLC stops at the bound, and the line is `ok` when no
+violation was found until then. A line with no bound must finish. Every bounded line is a
+bounded run, never a proof: its table line in this file says so.
+
 ## Layout
 
 Each folder is one model:
@@ -63,6 +68,10 @@ Each experiment has one folder for each design, with the same layout as a model,
 - `experiments/segments/`: #1213 (segments in the protocol or in storage). Design A, the segment
   table in the matchmakers (`a/`), against design B, plain Matchmaker Paxos with chunks local to
   each replica and a variant with offload claims in the log (`b/`).
+- `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
+  ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
+  the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
+  and a decree round on disk.
 
 ## The Paxos flavors and their models
 
@@ -86,6 +95,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
+| The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -867,7 +877,8 @@ never answers blocks Phase 1 (`init_down`), and a wiped member that answers does
 (`init_live`).
 
 Not in the model: the ballot floor of a retry (a ballot above every `Nack`), the matchmaker
-generation that fences a handover, the stop quorum that opens the handover's decree, the
+generation that fences a handover, the stop quorum that opens the handover's decree (it is in
+`experiments/stale-stopped/`, #1229 (a stale `Stopped` reply reuses a decree ballot)), the
 `cell_lost` refusal, and more than three acceptors.
 
 ### `multi-paxos/`: plain Multi-Paxos, for #1185 (rework 1.14)
@@ -890,12 +901,19 @@ the code, and a preempted ballot only stops. The model has:
 - **Phase 2** for fresh commands at the frontier (`Proposer::allocate`).
 - **Commit and catch-up.** The leader learns a slot at a Phase-2 quorum of its ballot
   (`node/learn.rs`). A node learns it from the leader's `Commit`, or catches up from any peer
-  that learned it (`node/catch_up.rs`).
-- **A restart that keeps only durable state**: the promise and the votes on disk, and what the
-  node learned. Every ballot of the node dies with it.
+  that learned it (`node/catch_up.rs`; the answer carries the peer's record of each slot).
+- **A learn is a record** (`mark_chosen`): the node raises its promise to the ballot that chose
+  the slot, and keeps the chosen value as its vote, unless it holds that value at a ballot at or
+  above. A promise raised past the ballot of a campaign of the node ends the campaign.
+- **A restart that keeps only durable state**: the promise and the votes on disk, and a prefix
+  of what the node learned. The code rebuilds the chosen prefix up to its chosen index, and a
+  relaxed write of the chosen index (`MustSync::Relaxed`) can be lost, so the kept prefix can
+  be any prefix. Every ballot of the node dies with it.
 - **The quorum system as a constant** (`membership/quorum_system.rs`): `Q1`, and `Q2` for each
   slot. `MC.tla` builds the majority and takes the grid from `grid/Grid.tla` (linked): a slot's
-  Phase 2 goes to column `slot % cols` (`GridQ2At`), and `GridQ1` elects.
+  Phase 2 goes to column `slot % cols` (`GridQ2At`), and `GridQ1` elects. The checks whose name
+  has `any` or `move` let a slot be chosen in any column (`AnyQ2`): the code can move an open
+  round to another column (`move_round`) or name its column (`propose_in`).
 
 | Constant | Values |
 |---|---|
@@ -906,41 +924,52 @@ the code, and a preempted ballot only stops. The model has:
 | `Wipes`, `Identity` | How many acceptors can lose their disk. With `Identity = TRUE`, a wiped acceptor never takes a step again: it comes back with a new node id, outside the static configuration. With `FALSE`, a control, it answers again as the old acceptor. |
 | `Learners` | The nodes that catch up. The ballot owners always learn what they decide. A node that owns no ballot only adds states when it catches up, so most checks leave it out. |
 | `Down` | The acceptors that never take a step (the liveness checks). |
+| `Pick` | `"highest"`: Phase 1 takes the report of the highest ballot at a slot (`merge_report`). `"lowest"`: a control, it takes the lowest. Two reports of different ballots at one slot need three ballots. |
+| `Restartable` | The nodes that may restart. A liveness check leaves out the owner of the last ballot, whose restart ends its ballot. |
 
 The safety invariants are `Agreement` (one command for each slot), `LearnedChosen` (what a node
-learned was chosen) and `OneProposal` (one proposal for each slot and ballot: a new leader
+learned was chosen), `OneProposal` (one proposal for each slot and ballot: a new leader
 allocates above each slot that its Phase 1 reported, so a fresh command never lands on a slot
-that its recovery proposes). A value is chosen when a Phase-2 quorum of the slot sent its `2b`
+that its recovery proposes) and `LearnRecordsHeld` (a learned slot holds its record: the
+code's assertion "a chosen slot holds its authoritative accepted record"). A value is chosen when a Phase-2 quorum of the slot sent its `2b`
 at one ballot, so a restart cannot unchoose it. The liveness property is `Ends` under
 `LiveSpec`: the last ballot is the leader that no higher ballot preempts, and it learns every
 slot below its frontier and every slot that it proposed. `Spreads` adds that each live node
 learns what that leader learned.
 
 Results (`multi-paxos/checks.txt`, three acceptors unless the line says otherwise, two ballots,
-two slots, one command and `Noop`; the CI set runs in about three minutes):
+two slots, one command and `Noop`; the CI set runs in about nine minutes):
 
 | Check | Where | Rule | Result |
 |---|---|---|---|
 | `reach` | ci | `NoChoice`, a reachability control | violation |
 | `reach_gap` | ci | `NoNoopChosen`, a reachability control: a gap fill is chosen below a chosen command | violation |
-| `majority` | ci | the rules of the code | pass (363 thousand states) |
+| `majority` | ci | the rules of the code | pass (470 thousand states) |
+| `three_ballots` | ci | three ballots, one slot, two commands: two reports of different ballots meet at one slot | pass (108 thousand states) |
+| `three_ballots_lowest` | ci | the same, Phase 1 takes the lowest reported ballot | `Agreement` violation |
+| `three_ballots_restart` | ci | the same, `a1` owns ballots 1 and 3, one restart: the old leader campaigns again over its own durable log | pass (558 thousand states) |
+| `learn_record` | ci | `NoLearnRecord`, a reachability control: a node learned a slot that it never voted for, so its record comes from the learn | violation |
+| `full_grid_any` | ci | 2 x 2 full grid, a slot chosen in any column, one slot, two commands | pass (79 thousand states) |
 | `alloc_prefix` | ci | fresh commands start at `from`, two commands | `Agreement` violation |
 | `durable_after` | ci | an acceptor answers before its write is on disk, one restart | `Agreement` violation |
 | `wipe_revote` | ci | a wiped acceptor votes again as the old one, one wipe | `Agreement` violation |
 | `live` | ci | the rules of the code | `Ends` pass |
 | `live_down` | ci | one of three acceptors down | `Ends` pass |
+| `live_restart` | ci | one restart during the run, of a node that is not the last leader | `Ends` pass (755 thousand states, 3 min) |
 | `lost` | ci | two of three acceptors down | `Ends` violation |
 | `gap_skip` | ci | no `Noop` for a gap | `Ends` violation |
 | `full_grid_one_column` | ci | 2 x 2 full grid, a Phase-1 quorum in one column | `Agreement` violation |
 | `full_grid_down` | ci | 2 x 2 full grid, one acceptor down: its column cannot decide | `Ends` violation |
+| `full_grid_down_move` | ci | the same, a slot may be chosen in any column: the other column decides (what `move_round` restores) | `Ends` pass |
 | `partitions_down` | ci | 3 x 2 partitioned grid (F = 1), one acceptor down in each partition | `Ends` pass |
-| `restart` | long | one restart | pass (1.4 million states, 2 min) |
-| `wipe` | long | one wipe, the identity rule | pass (1.0 million states, 1 min) |
+| `restart` | long | one restart: the node keeps a prefix of what it learned | pass (2.3 million states, 3 min) |
+| `wipe` | long | one wipe, the identity rule | pass (1.3 million states, 2.5 min) |
 | `spreads` | long | every node catches up | `Ends` and `Spreads` pass (0.9 million states, 15 min) |
-| `full_grid` | long | 2 x 2 full grid | pass (11.4 million states, 13 min) |
-| `partitions` | long | 3 x 2 partitioned grid | no violation in 33 million distinct states (bounded: stopped after 50 min, 21 million states left on the queue) |
+| `full_grid` | long | 2 x 2 full grid, a slot chosen in any column | pass (11.4 million states, 13 min, before the learn record and the any-column quorums) |
+| `partitions` | long, bounded 50 min | 3 x 2 partitioned grid, a slot chosen in any column | no violation in 33 million distinct states (bounded: stopped after 50 min, 21 million states left on the queue) |
 
-The long checks ran once on 2026-11-19 (#1216 (truncation model, part 2)) with 4 workers.
+The long checks ran once on 2026-11-19 (#1216 (truncation model, part 2)) with 4 workers;
+`restart` and `wipe` ran again for #1230 (rules that no check tests).
 
 The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s):
 
@@ -962,11 +991,17 @@ The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s):
   proposes slot 0 again: slot 1 is chosen and slot 0 stays a hole for good.
 - `full_grid_one_column`: a Phase-1 quorum inside one column misses the Phase-2 quorums of the
   other column, and two values are chosen at one slot.
+- `three_ballots_lowest`: ballot 1 proposes `c1` at slot 0 and only `a3` votes for it. Ballot 2
+  wins on `{a1, a2}`, hears no vote, proposes `c2`, and `{a1, a2}` choose it. Ballot 3 hears
+  `c1` at ballot 1 from `a3` and `c2` at ballot 2, takes the lower one, and `{a1, a2}` choose
+  `c1`: two values at one slot. With two ballots every report at
+  one slot has the same ballot, so the rule "the highest reported ballot wins" needs three.
 
 Not in the model: matchmakers and reconfiguration (`zero-stall/`, `config-register/`), the
 cooperative handoff (`RecoveryPolicy::Inherited`), the CTRL tri-state of a rotted record and the
 repair probe, truncation and the trim-point jump (all three in `truncation/`), the paging of a promise, the proxy leader
-(`proxy-leader/`), a leader that a restart keeps, and more than two ballots (a check with three ballots does not finish in a CI job).
+(`proxy-leader/`), and a leader that a restart keeps. Three ballots fit in CI with one slot
+(`three_ballots*`); the long checks keep two ballots and two slots.
 
 ### `proxy-leader/`: the proxy leader, for #1188 (rework 2.9)
 
@@ -989,8 +1024,13 @@ model has:
   GC). This Phase 1 is the seal of the older configurations: an acceptor that promised the new
   ballot refuses every lower `Accept`, as the seal of rule 1 does
   (`docs/architecture/04-roles.md`).
-- **The delegation** (`Message::Accept` with `reply_to = Party::Proxy`): first to `ProxyOf[s]`
-  (`ProxyId::of`), then again to any proxy while no `Commit` of the slot is out (`move_round`).
+- **The delegation** (`Message::Accept` with `reply_to = Party::Proxy`) to `ProxyOf[s]`
+  (`ProxyId::of`). With `Move`, the same round can reach a second proxy: a driver can name the
+  proxy (`Delegation::To`), and a handoff successor delegates the rounds it inherits again.
+  `move_round` itself refuses a delegated round, so `Move` is a superset of the code for safety.
+- **The take-back** (`take_back_delegated`): the leader takes a stalled delegated round back,
+  sends its `Accept` itself and decides it on a Phase-2 quorum of its ballot's configuration. It
+  is how the code stays live when a proxy is gone (`live`).
 - **The proxy of the code**: it works for the highest ballot it was handed; a higher one closes
   every lower round (`close_below`), a lower one is ignored. It learns the configuration only
   from a delegation at a higher ballot (`learn_config`). It ignores the re-delegation of a round
@@ -1001,16 +1041,18 @@ model has:
   `Accept` of a slot goes to its column, and the column decides.
 
 Not in the model: the `Nack` (it only closes a round, and a round that stays open decides
-nothing more), the leader's take-back (`take_back_delegated`: the leader decides the round with
-its own tally, which is `multi-paxos/`), the re-send beat and `expire_stale` (with no lost
-message they change nothing), and the GC of `H_b`.
+nothing more), the re-send beat and `expire_stale` (with no lost message they change nothing),
+and the GC of `H_b`. One command for each ballot and slot is assumed here (`prop[b][s]` is
+fixed); `leader-handoff/` checks it (`DurableFrontier`).
 
 | Constant | Values |
 |---|---|
 | `Tally` | `"round"`: the proxy decides a round over the configuration that the round's `Accept` carried. `"belief"`: it decides over the configuration that it believes now. |
 | `Hear` | `"delegation"`: the proxy learns a configuration only from a delegation, which closes every lower round (the code today). `"any"`: it also learns the configuration of any ballot that started, as from the register of rule 1, and keeps its rounds open. |
 | `Count` | `"quorum"`: a decision needs a Phase-2 quorum of votes. `"short"`: a control, one vote less is enough. |
-| `Move` | `TRUE`: a slot can go to another proxy. `FALSE`: a control, it only goes to `ProxyOf[s]`. |
+| `Move` | `TRUE`: a round can reach another proxy than `ProxyOf[s]`. `FALSE`: it only goes to `ProxyOf[s]`, as with `Delegation::Auto`. |
+| `TakeBack` | `TRUE`: the leader may take a delegated round back. `FALSE`: a control for liveness. |
+| `CloseBelow` | `TRUE`: a higher delegation closes every lower round of the proxy (`close_below`). `FALSE`: a control, it closes only the round of its own slot. |
 | `Crashes` | How many proxy crashes can happen in the run. |
 | `Down` | The proxies that never take a step (the liveness checks). |
 
@@ -1022,8 +1064,10 @@ higher ballot preempts, one proxy is gone for good, and every slot gets a `Commi
 
 **The code is safe, and the rule makes it safe after rule 1 too.** Today a proxy learns a
 configuration only from a delegation, and that delegation closes every lower round, so the
-configuration it believes is always the configuration of its open rounds (`code`, `Tally =
-"belief"`, passes). Rule 1 (step 2.5) lets a node learn its configuration from the register.
+configuration it believes is always the configuration of its open rounds (`code` and
+`code_slots`, `Tally = "belief"`, pass). With one slot a higher delegation replaces the only
+round anyway, so the close of the other slots is checked by `code_slots` (two slots), and its
+control `code_slots_noclose` is red. Rule 1 (step 2.5) lets a node learn its configuration from the register.
 If a proxy learns it there and keeps its rounds, a tally over its belief is unsafe
 (`belief_any`), and a tally over the round's own configuration is safe (`safety`). This is the
 change that finding 10 proposes: bind the tally of a delegated round to the configuration that
@@ -1033,7 +1077,7 @@ a delegation.
 Results (`proxy-leader/checks.txt`; three acceptors, configuration 0 is `{a1, a2, a3}` and
 configuration 1 is `{a1}`; ballot 1 is `l1`'s on configuration 0, ballot 2 is `l2`'s on
 configuration 1, ballot 3 is `l1`'s on configuration 0; two proxies; one slot and two commands
-unless the line says otherwise; the CI set runs in about 40 seconds; the long checks have no proxy
+unless the line says otherwise; the CI set runs in about 2 minutes; the long checks have no proxy
 crash and ran once on 2026-11-19 with 4 workers):
 
 | Check | Where | Rule | Result |
@@ -1041,15 +1085,19 @@ crash and ran once on 2026-11-19 with 4 workers):
 | `reach` | ci | `NoCommit`, a reachability control | violation |
 | `reach_sealed` | ci | `NoSealedCommit`, a reachability control: a proxy commits a round of a ballot that a higher ballot sealed, three ballots | violation |
 | `reach_moved` | ci | `NoMovedCommit`, a reachability control: a slot moves to the second proxy and it decides, one crash | violation |
+| `reach_both` | ci | `NoBothCommit`, a reachability control: two proxies decide the same slot (a round reached a second proxy while the first was slow but alive) | violation |
 | `code` | ci | the code: `Tally = "belief"`, `Hear = "delegation"`, one crash | pass (26 thousand states) |
+| `code_slots` | ci | the code, two slots, one command, no crash, no second proxy | pass (254 thousand states, 1 min) |
+| `code_slots_noclose` | ci | the same, a higher delegation does not close the round of the other slot | `CommitBacked` violation |
 | `safety` | ci | the rule: `Tally = "round"`, `Hear = "any"`, one crash | pass (107 thousand states) |
 | `grid` | ci | the rule, configuration 1 is the 2 x 2 full grid of `a1`..`a4`, one crash | pass (147 thousand states) |
 | `belief_any` | ci | `Tally = "belief"`, `Hear = "any"`: the proxy counts over a configuration it did not check | `CommitBacked` violation |
 | `belief_any_agree` | ci | the same | `CommitAgree` violation |
 | `short` | ci | `Count = "short"`: a `Commit` one vote short of a quorum | `CommitBacked` violation |
 | `short_agree` | ci | the same | `CommitAgree` violation |
-| `live` | ci | `p1` down, the slot moves | `Ends` pass |
-| `live_nomove` | ci | `p1` down, `Move = FALSE` | `Ends` violation |
+| `live` | ci | `p1` down, the slot only goes to `p1`, the leader takes it back (the code) | `Ends` pass |
+| `live_move` | ci | `p1` down, no take-back, the slot reaches `p2` | `Ends` pass |
+| `live_nomove` | ci | `p1` down, no take-back, the slot only goes to `p1` | `Ends` violation |
 | `code_three` | long | the code, three ballots | pass (1.5 million states, 2 min) |
 | `safety_three` | long | the rule, three ballots | pass (4.8 million states, 6 min) |
 | `slots` | long | the rule, two slots, one command: a higher delegation closes the round of the other slot | pass (12.3 million states, 14 min) |
@@ -1064,7 +1112,11 @@ The traces of the controls:
   `p1` commits `c2`. Two learners learn two values.
 - `short_agree`: ballot 2 wins on `{a1, a2}` and hears no vote. `a3` votes `c1` at ballot 1,
   and `p1` commits it one vote short of a majority. Ballot 2 then commits `c2`.
-- `live_nomove`: `p1` is gone, the slot only goes to `p1`, and no `Commit` comes.
+- `code_slots_noclose`: `p1` opens the round of ballot 1 at slot 0, then takes the delegation of
+  ballot 2 at slot 1 and believes configuration `{a1}` while its round of slot 0 stays open.
+  `a1` votes at ballot 1, and `p1` commits slot 0 on that one vote.
+- `live_nomove`: `p1` is gone, the slot only goes to `p1`, the leader never takes it back, and
+  no `Commit` comes.
 
 ### `matchmaker/`: single-decree Matchmaker Paxos, for #1200 (TLA+ model Matchmaker Paxos)
 
@@ -1107,22 +1159,36 @@ Constants select the rules. The first value of each is the rule of the paper and
 | `Reconfig` | `"round"`: Phase 2 addresses `C_b`. `"edit"`: the proposer may send its Phase 2 to another configuration, with no new ballot. |
 | `Gc` | `"paper"`: scenarios 1 and 2. `"early"`: the proposer asks for GC as soon as its Phase 1 is done. `"off"`: no GC. |
 | `Retire` | `"effective"`: an acceptor retires above an effective floor. `"oneAck"`: the floor counts as effective at one ack. `"removed"`: an acceptor retires when the newest configuration does not name it. `"off"`: no retirement. |
+| `Watermark` | `"max"`: a history keeps the entries at or above the maximum watermark of the answers. `"min"`: a control, it keeps those at or above the minimum, so an entry that one matchmaker of the quorum collected comes back from another. |
+| `Tomb` | `TRUE`: a matchmaker refuses a configuration that names a retired acceptor (`MatchRefusal::Retired`). `FALSE`: a control, it registers it. |
 
 The invariants are `Agreement` (one value is chosen) and `Electable` (whatever matchmaker
 majority a new ballot hears, each configuration of its history keeps a Phase-1 quorum that did
-not retire; the same name as in `retire-fence/`).
+not retire; the same name as in `retire-fence/`). `Electable` reads the history through
+`Union`, the rule that `CloseMatch` uses, so a wrong watermark filter breaks it
+(`watermark_min`).
+
+The watermark refusal of a matchmaker (`b` below its watermark, `BelowWatermark`) has no
+control: removing it changes no state of `gc_two`. The registration check implies it here: the
+highest ballot that closed matchmaking keeps its registration at a quorum, and the check refuses
+every lower ballot there.
 
 The pool has five acceptors and two configurations, `A = {a1, a2, a3}` and `B = {a3, a4, a5}`.
 A move from `A` to `B` replaces `a1` and `a2`, and a majority of the union, `{a3, a4, a5}`, holds
 no Phase-1 quorum of `A`. Each ballot selects `A` or `B`. Two values. The controls use one
 matchmaker where the bug does not need more, two for `histories_one` and three for
-`retire_one_ack`.
+`retire_one_ack`. The checks whose name starts with `gc_two`, and `reach_drop`, `watermark_min`
+and `retire_no_tomb`, use the smallest move, `A1 = {a1}` to `B1 = {a2}`: with it, two
+matchmakers and three ballots finish in seconds, and GC meets a real matchmaker quorum. The
+check `matchmaker` (two ballots) cannot see a GC bug: with `Gc = "early"` it still passes,
+because the floor of ballot 2 has no later ballot to hurt.
 
 Results (`matchmaker/checks.txt`):
 
 | Check | Rule | Result |
 |---|---|---|
-| `reach` | `NoChoiceAboveRetired`, a reachability control: a value is chosen above a ballot whose configuration named an acceptor that retired | violation |
+| `reach` | `NoChoiceAboveRetired`, a reachability control: a value chosen at a ballot is chosen again at a higher ballot in the other configuration, and an acceptor that voted for it at the lower ballot retired | violation |
+| `reach_drop` | `NoDrop`, a reachability control: a matchmaker quorum answers a ballot with an entry below the maximum watermark of its answers, and `Union` drops it | violation |
 | `phase1_own` | control: Phase 1 in `C_b` alone, two ballots | `Agreement` violation |
 | `phase1_union` | control: Phase 1 at a majority of the union of `H_b`, three ballots | `Agreement` violation |
 | `match_nocheck` | control: a matchmaker registers a ballot below one that it holds, two ballots | `Agreement` violation |
@@ -1131,6 +1197,10 @@ Results (`matchmaker/checks.txt`):
 | `gc_early` | control: GC as soon as Phase 1 is done, three ballots | `Agreement` violation (1.4 million states) |
 | `retire_removed` | control: an acceptor retires when the newest configuration does not name it | `Electable` violation |
 | `retire_one_ack` | control: the floor counts as effective at one ack, three matchmakers | `Electable` violation |
+| `gc_two` | the rules, two matchmakers, three ballots, the smallest move | pass: `Agreement` and `Electable` (56 thousand states) |
+| `gc_two_early` | control: `gc_two` with GC as soon as Phase 1 is done | `Agreement` violation |
+| `watermark_min` | control: a history keeps the entries above the minimum watermark, three matchmakers | `Electable` violation |
+| `retire_no_tomb` | control: a matchmaker registers a configuration that names a retired acceptor | `Electable` violation |
 | `matchmaker` | the rules, three matchmakers, two ballots | pass: `Agreement` and `Electable` (1.4 million states, 2.5 minutes) |
 | `matchmaker_one` | the rules, one matchmaker, three ballots | pass (6.2 million states, 6.5 minutes, `long`) |
 | `matchmaker_long` | the rules, three matchmakers, three ballots | no violation in 65.1 million distinct states, to depth 26 (a bounded run of 2 hours, 4 workers; `long`) |
@@ -1180,8 +1250,14 @@ layout one initial state:
 | Check | Rule | Result |
 |---|---|---|
 | `grid` | `CrossIntersect`: every Phase-1 quorum meets every Phase-2 quorum (`cross_intersects`). `ReadsArePhase1`: each read target holds a Phase-1 quorum. `ToleratedIsExact`: `tolerated_failures`, `min(acks - 1, cols * (rows - acks + 1) - 1)`, is the largest number of failures, wherever they are, that leaves a Phase-1 and a Phase-2 quorum. `PerColumnTolerance` (#1257 (quorum everywhere)): `f` down in every column leaves both quorums exactly when `f + 1 <= acks <= rows - f` | pass (69 layouts) |
-| `grid_slack` | control: Phase 1 takes one acceptor less of each column | `CrossIntersect` violation |
+| `grid_slack` | control: Phase 1 takes one acceptor less of each column, layouts of four members or more (on one member the empty set would be the first quorum) | `CrossIntersect` violation |
 | `grid_full_rows` | `Phase1Meets` on the full grids with two columns or more: two Phase-1 quorums meet | violation: two rows of a 2 x 2 grid do not meet |
+
+`grid` also checks `Tight` (with one acceptor less of each column, some Phase-1 quorum misses
+some Phase-2 quorum, on every layout: `rows - acks + 1` is the smallest count) and `Admits`
+(every layout tiles its members, `QuorumSystem::admits`). Each `MC.tla` that takes a grid from
+this module, and each trace spec, assumes `GridAdmits` of its layouts, so a layout that does not
+tile (five members on two columns) is refused before TLC runs.
 
 `Phase1Meets` is not a rule of Paxos. It is the fact that the read of `reads/grid_full` needs:
 two Phase-1 quorums of one configuration meet when `2 * (rows - acks + 1) > rows`, which holds
@@ -1331,8 +1407,9 @@ each of them:
   slot that holds the record at `first_seq`, or one past the slot when no record stays
   (`Replica::compaction_target`, `ColocatedNode::compact`). Each command is one record, and the
   model reads the fold from the chosen log: every node folds the same log. Each node compacts at
-  its own time, so the floors of the nodes differ for some time. An acceptor holds no vote and no
-  learned value below its floor.
+  its own time, so the floors of the nodes differ for some time. A compaction can also stop
+  below the target, since `ColocatedNode::compact(up_to)` clamps the floor to the driver's
+  `up_to`. An acceptor holds no vote and no learned value below its floor.
 - **The floor guard in Phase 1** (`PrepareOutcome::BelowFloor`, `node/acceptor.rs`). A campaign
   asks from its first unchosen slot. An acceptor whose floor is above that slot does not promise
   and does not move its promise, because its promise could not report the slots that it
@@ -1342,10 +1419,17 @@ each of them:
   keeps the ballot and sends a new `1a` from the new slot; the code opens the next round. With
   two ballots in the model, a new round would be the last ballot, and the check of liveness needs
   that ballot for the leader that no one preempts.
-- **The trim-point jump** (`Message::TrimmedTo`, `node/catch_up.rs`). A node that asks a peer
-  for slots below the floor of the peer jumps to that floor. The jump carries no ballot: the
-  promise does not move. A node that asks at or above the floor of the peer gets what the peer
-  learned.
+- **The trim-point jump** (`Message::TrimmedTo`, `node/catch_up.rs`). A node that meets a
+  `TrimmedTo` whose point is above its own floor jumps there, whatever its chosen prefix
+  (`on_trimmed_to`). The point is the floor of the peer, or an older floor of it: the answer can
+  arrive late, or come unasked (a follower answers a beat whose sender is below its floor,
+  `node/replication.rs`). The jump carries no ballot: the promise does not move. A node that
+  asks at or above the floor of the peer gets what the peer learned.
+- **A restart** keeps the promise and the votes (on disk before the node answers) and the floor
+  (dropped records and the new floor are one write, `WriteOp::Truncate`). It keeps a prefix of
+  what the node learned, at or above its floor: the chosen index is a relaxed write
+  (`SetChosenIndex` is not in `WriteOp::needs_sync`), so a boot can come back with a lower first
+  unchosen slot (`node/boot.rs`).
 - **The vote watermark** (`Acceptor::vote_watermark`): the last vote, faulty votes too, or the
   floor minus 1 when the acceptor holds no vote above its floor.
 - **The faulty entries of CTRL** (`Acceptor::faulty`, `read_back_log` in `node/boot.rs`). A boot
@@ -1374,9 +1458,11 @@ each of them:
 | `CompactWhen` | `"prefix"`: a node compacts once it learned every slot up to the truncation. `"learned"`: a control, it compacts once it learned the truncation alone. |
 | `FloorRule` | `"fold"`: the floor goes to the slot of the record at `first_seq`. `"slot"`: a control, the floor goes one past the slot of the truncation, whatever its position. |
 | `Watermark` | `"floor"`: the watermark counts the floor. `"votes"`: a control, it counts the retained votes only (0 for a compacted acceptor). |
-| `Tally` | `"ctrl"`: the tri-state tally. `"none"`: a control, a faulty report counts as no vote. |
+| `Tally` | `"ctrl"`: the tri-state tally. `"none"`: a control, a faulty report counts as no vote. `"have"`: a control, a faulty report qualifies as soon as one readable report exists (CTRL's Case 1 read with no ballot threshold). The two differ only when a faulty report is above a readable one, so its checks have three ballots. |
+| `TrimPoint` | `"floor"`: a `TrimmedTo` carries the floor of the peer, or an older floor of it. `"learned"`: a control, the jump goes to any point of the chosen prefix of the peer, truncated or not. |
+| `FloorWrite` | `"atomic"`: the store drops the records below a new floor and records the floor in one write. `"late"`: a control, the floor reaches the disk after the records are gone, and a restart can read the old floor. |
 | `Retry` | `"jump"`: a refused candidate asks again from its new first unchosen slot. `"none"`: a control, it never asks again. |
-| `Restarts` | How many restarts can happen in the run. The floor is durable. |
+| `Restarts` | How many restarts can happen in the run. |
 | `Faults`, `RotNodes` | How many faulty entries a boot can find in the run, and on which nodes. |
 | `Learners` | The nodes that catch up and jump. |
 
@@ -1392,9 +1478,10 @@ The invariants:
 - `FloorTruncated`: each slot below a floor is at or below a chosen truncation.
 - `FloorReleased`: each record below a floor is below `first_seq`. Only the records below
   `first_seq` may be forgotten.
-- `Recoverable`: for each chosen slot, each Phase-1 quorum has a member that holds a vote there
-  (a faulty vote blocks the tally), or a member whose floor is above the slot (and that member
-  refuses a campaign from below it).
+- `Recoverable`: for each chosen slot, each Phase-1 quorum has a member that reports a vote
+  there to a campaign from the slot (a faulty vote blocks the tally), or a member that refuses
+  that campaign (the floor guard). Without the floor guard a member whose floor is above the
+  slot promises and reports nothing (`recover_ignore`).
 - `ValueKept`: each chosen slot is below a floor, or a node can still read its value.
 - `WatermarkCovers`: the vote watermark of an acceptor is never below a slot that it voted.
 - `Ends` (liveness, `LiveSpec`): the last ballot `NB` wins, closes its repair probe and holds
@@ -1403,7 +1490,7 @@ The invariants:
   jump) and each acceptor (promise, accept).
 
 Results (`truncation/checks.txt`, three acceptors, two ballots, two slots, the values `trunc` and
-`Noop`, and `a1` and `a2` catch up, unless the line says otherwise; the CI set runs in about 4
+`Noop`, and `a1` and `a2` catch up, unless the line says otherwise; the CI set runs in about 7
 minutes with 4 workers):
 
 | Check | Where | Rule | Result |
@@ -1412,22 +1499,29 @@ minutes with 4 workers):
 | `reach_split` | ci | `NoSplitFloor`, a reachability control: one node compacted, one did not, and a slot above the floor is chosen | violation |
 | `reach_jump` | ci | `NoJump`, a reachability control: a node jumps over a slot that it never voted | violation |
 | `floor_ignore` | ci | Phase 1 ignores the floor | `NoFillChosen` violation |
-| `trim_promise` | ci | the trim jump takes the promise of the peer; one command too | `Agreement` violation (731 thousand states) |
+| `trim_promise` | ci | the trim jump takes the promise of the peer; one command too | `Agreement` violation (1.2 million states) |
 | `compact_early` | ci | a node compacts once it learned the truncation alone | `FloorChosen` violation |
 | `watermark_votes` | ci | the watermark leaves the floor out | `WatermarkCovers` violation |
 | `safety` | ci | the rules of the code | pass (1.0 million states, 1.5 min) |
+| `recover_ignore` | ci | Phase 1 ignores the floor | `Recoverable` violation |
+| `trim_learned` | ci | the jump goes past a slot of the peer's chosen prefix that no truncation covers | `FloorTruncated` violation |
+| `floor_late` | ci | the floor reaches the disk after its records are dropped; one restart | `NoFillChosen` violation |
 | `reach_faulty` | ci | `NoFaultyChosen`, a reachability control: a boot finds a chosen slot faulty; one fault | violation |
 | `reach_block` | ci | `NoBlock`, a reachability control: a repair probe opens; one fault | violation |
 | `ctrl_none` | ci | a faulty report counts as no vote; one fault | `NoFillChosen` violation |
 | `two_rots` | ci | two faults: more than the majority survives | `ValueKept` violation |
 | `ctrl_one_slot` | ci | one fault, one slot | pass (32 thousand states) |
+| `ctrl_three` | ci | one fault on `a1`, one slot, three ballots, `c1` too, no node catches up: a faulty report above a readable one | pass (687 thousand states, 2 min) |
+| `ctrl_have` | ci | the same, a faulty report qualifies beside any readable report | `Agreement` violation |
+| `rot_two` | ci | two faults, one slot, `c1` too | pass (146 thousand states): two faults cost liveness, never agreement |
 | `ctrl_live` | ci | `Ends`, one fault on `a1` or `a3`, one slot, `a2` (the last leader) catches up | pass |
 | `reach_retry` | ci | `NoRetry`, a reachability control: a refused candidate asks again; `a1` leads ballot 1 and `a3` ballot 2 | violation |
 | `laggard_stuck` | ci | `Ends`, a refused candidate never asks again; one slot, `a2` and `a3` catch up | violation |
 | `laggard` | ci | `Ends`, the retry of the code; one slot, `a2` and `a3` catch up | pass |
-| `reach_keep` | ci | `NoKeep`, a reachability control: a floor stays below a truncation that a node applied; `c1` and `cut0` too | violation |
+| `reach_keep` | ci | `NoKeep`, a reachability control: a node applied a truncation and the fold keeps its floor at or below the truncation's slot (the floor is the slot of the record at `first_seq`); one leader, three slots, `c1` and `cut1` (up to position 1), every node catches up | violation |
 | `fold_slot` | ci | the floor goes one past the truncation; `c1` and `cut0` too | `FloorReleased` violation |
 | `fold_one_leader` | ci | the fold, one ballot; `c1` and `cut0` too, every node catches up | pass (54 thousand states) |
+| `fold_mid` | ci | the fold stops in the middle of the log: one leader, three slots, `c1` and `cut1`; `a1` and `a2` catch up | pass (208 thousand states) |
 | `restart` | long | one restart | pass (4.0 million states, 6 min) |
 | `full` | long | one command too, and every node catches up | pass (13.7 million states, 32 min) |
 | `three_slots` | long | three slots | no violation in 31.8 million distinct states (bounded: stopped after 60 min, 12.3 million states left on the queue) |
@@ -1470,6 +1564,18 @@ otherwise):
   and `a3` opens ballot 2 from slot 0. `a1` compacts to floor 1, and `a2` and `a3` jump to it.
   `a1` and `a2` refuse a campaign from slot 0, and `a3` never asks again: ballot 2 never wins.
   With the retry of the code (`laggard`), `a3` asks again from slot 1 and wins.
+- `ctrl_have` (the ballot threshold of the tri-state tally, paros's own rule on top of CTRL):
+  ballot 1 (`a1`) gets `a3` to vote `trunc` at slot 0. Ballot 2 (`a2`) wins on `{a1, a2}`, and
+  `{a1, a2}` choose `c1`. `a1` boots with slot 0 faulty at ballot 2. Ballot 3 (`a3`) wins on
+  `{a1, a3}`: `a3` reports `trunc` at ballot 1, and `a1` reports a faulty vote at ballot 2. The
+  weak tally lets the faulty report qualify, proposes `trunc` at ballot 3, and `{a1, a2}`
+  choose it. The code's tally refuses `a1` (its faulty report is above the threshold 1), and the
+  slot is blocked.
+- `floor_late`: ballot 1 proposes `trunc` at slots 0 and 1, and `{a1, a3}` choose slot 0. `a1`
+  learns it and compacts to floor 1: the record of slot 0 leaves the disk. `a1` restarts before
+  the new floor is on disk, so it reads floor 0 and no vote at slot 0. Ballot 2 wins on
+  `{a1, a2}`, hears no vote at slot 0, and fills the chosen slot with a `Noop`. The store must
+  drop the records and record the floor in one write (`WriteOp::Truncate`).
 - `fold_slot`: ballot 1 chooses `c1` at slot 0 and `cut0` at slot 1. `cut0` truncates up to
   position 0, so `first_seq` stays 0 and the record of slot 0 stays. `a1` learns both slots and
   compacts one past slot 1: its floor drops a record at `first_seq`.
@@ -1487,6 +1593,11 @@ take the slots below the highest floor in its promises as decided. The code does
 promise exist: an acceptor whose floor is above the slot that the campaign asks from refuses it
 (`BelowFloor`), and the candidate catches up out of band (`TrimmedTo`) before a new campaign.
 The model checks the code's rule.
+
+The `restart` check keeps what a boot can lose: the chosen index (a prefix of what the node
+learned) and, with the control `FloorWrite = "late"`, the floor. `dprom` is gone: a promise
+reaches the disk before the node answers, so the promise on disk always equals the one in
+memory.
 
 Not in the model: a reconfiguration onto empty stores with a floor from `TrimmedTo` (step 2 of
 #1216 was only to be done if the faulty entries were cheap; they are not, as `ctrl` is a long

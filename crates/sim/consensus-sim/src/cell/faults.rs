@@ -130,7 +130,7 @@ impl Cell {
             .collect();
         for id in down {
             if self.node(id).live.is_some() {
-                self.crash_node(id);
+                self.crash_node(id, cx);
                 cx.crashed(&super::Party::Node(id));
             }
         }

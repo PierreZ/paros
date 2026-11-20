@@ -24,9 +24,16 @@
 (*   - Commit: the leader learns a slot at a Phase-2 quorum of its ballot  *)
 (*     (`node/learn.rs`); a node learns it from the leader's `Commit` or   *)
 (*     catches up from any peer that learned it (`node/catch_up.rs`).      *)
+(*   - A learn is also a record (`mark_chosen`): the node raises its       *)
+(*     promise to the ballot that chose the slot and keeps the chosen      *)
+(*     value as its vote, unless it holds that value at a ballot at or     *)
+(*     above. A promise raised past a campaign's ballot ends the campaign. *)
 (*   - A restart keeps only the durable state: the promise and the votes   *)
-(*     that reached the disk (`HardState`, `WriteOp::AppendAccepted`) and  *)
-(*     what the node learned. Every ballot the node owned dies with it.    *)
+(*     that reached the disk (`HardState`, `WriteOp::AppendAccepted`), and *)
+(*     a prefix of what the node learned. The code rebuilds the chosen     *)
+(*     prefix up to its chosen index; a relaxed write of the chosen index  *)
+(*     (`MustSync::Relaxed`) can be lost, so the kept prefix can be any    *)
+(*     prefix. Every ballot the node owned dies with it.                   *)
 (*   - The quorum system is a constant: a majority or a grid (`Q1`, `Q2`,  *)
 (*     `membership/quorum_system.rs`). A slot's Phase-2 quorums depend on  *)
 (*     the slot (`column_of`: `slot % cols` on a grid).                    *)
@@ -49,11 +56,17 @@
 (*           FALSE: a control, it answers again as the old acceptor.       *)
 (*   Down    the acceptors that never take a step (liveness checks only).  *)
 (*   Owner   the node that owns each ballot.                               *)
+(*   Pick    "highest": Phase 1 takes the report of the highest ballot at  *)
+(*           a slot (`merge_report`). "lowest": a control, it takes the    *)
+(*           lowest. Two reports of different ballots at one slot need    *)
+(*           three ballots, so the control is red only at `NB = 3`.        *)
+(*   Restartable the nodes that may restart. A liveness check leaves out   *)
+(*           the owner of the last ballot, whose restart ends its ballot.  *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Noop, NB, NS, Q1, Q2, Owner,
-          Alloc, Gap, Durable, Restarts, Wipes, Identity, Down
+          Alloc, Gap, Durable, Restarts, Wipes, Identity, Down, Pick, Restartable
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
@@ -65,6 +78,8 @@ ASSUME Gap \in {"noop", "skip"}
 ASSUME Durable \in {"before", "after"}
 ASSUME Identity \in BOOLEAN
 ASSUME Down \subseteq Acceptors
+ASSUME Pick \in {"highest", "lowest"}
+ASSUME Restartable \subseteq Acceptors
 ASSUME Learners \subseteq Acceptors
 ASSUME Noop \notin Commands
 ASSUME Owner \in [Ballots -> Acceptors]
@@ -167,11 +182,14 @@ Promise(a, b) ==
        /\ Send(PromiseMsg(a, b, m.from))
   /\ UNCHANGED <<vote, dvote, learned, phase, next, front, wiped, restarts>>
 
-\* The highest vote that the promises S report at slot s.
+\* The highest vote that the promises S report at slot s (the lowest with
+\* the control `Pick = "lowest"`).
 Top(S, s) ==
   LET rep == {m \in S : m.rep[s].bal > 0}
+      Above(m, n) == IF Pick = "highest" THEN n.rep[s].bal <= m.rep[s].bal
+                     ELSE m.rep[s].bal <= n.rep[s].bal
   IN IF rep = {} THEN NoVote
-     ELSE (CHOOSE m \in rep : \A n \in rep : n.rep[s].bal <= m.rep[s].bal).rep[s]
+     ELSE (CHOOSE m \in rep : \A n \in rep : Above(m, n)).rep[s]
 
 \* The frontier: one past the highest slot that the promises S report,
 \* never below `from`.
@@ -241,37 +259,65 @@ Persist(a) ==
 -----------------------------------------------------------------------------
 (* Commit and catch-up *)
 
+\* Node n learns value v, chosen at ballot b, at the slots L. Each learn is
+\* a record (`mark_chosen`): the promise rises to b, and the vote of each
+\* slot becomes (b, v), unless the node holds v at a ballot at or above b
+\* (a recorded ballot never falls). A promise raised past the ballot of a
+\* campaign of n ends the campaign (`become_follower`).
+\* `rec` gives the record of each slot of L: [bal, val].
+LearnAll(n, rec) ==
+  LET L == DOMAIN rec
+      top == CHOOSE x \in {rec[s].bal : s \in L} : \A s \in L : rec[s].bal <= x
+      p == IF top > prom[n] THEN top ELSE prom[n]
+      Keeps(s) == vote[n][s].val = rec[s].val /\ vote[n][s].bal >= rec[s].bal
+      nv == [s \in Slots |-> IF s \in L /\ ~Keeps(s) THEN rec[s] ELSE vote[n][s]]
+  IN /\ learned' = [learned EXCEPT ![n] = [s \in Slots |-> IF s \in L THEN rec[s].val ELSE @[s]]]
+     /\ prom' = [prom EXCEPT ![n] = p]
+     /\ dprom' = [dprom EXCEPT ![n] = Persisted(dprom[n], p)]
+     /\ vote' = [vote EXCEPT ![n] = nv]
+     /\ dvote' = [dvote EXCEPT ![n] = [s \in Slots |-> IF s \in L /\ ~Keeps(s)
+                                                      THEN Persisted(dvote[n][s], rec[s])
+                                                      ELSE dvote[n][s]]]
+     /\ phase' = [c \in Ballots |-> IF Owner[c] = n /\ phase[c] = "p1" /\ c < p
+                                    THEN "dead" ELSE phase[c]]
+
 \* The leader of ballot b learns slot s at a Phase-2 quorum and commits it.
 Decide(b, s) ==
   /\ phase[b] = "p2"
   /\ learned[Owner[b]][s] = None
   /\ \E v \in Values, Q \in Q2[s] :
        /\ \A a \in Q : [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
-       /\ learned' = [learned EXCEPT ![Owner[b]][s] = v]
-  /\ UNCHANGED <<prom, vote, dprom, dvote, phase, next, front, wiped, restarts, msgs>>
+       /\ LearnAll(Owner[b], [t \in {s} |-> [bal |-> b, val |-> v]])
+  /\ UNCHANGED <<next, front, wiped, restarts, msgs>>
 
 \* Node n catches up from peer p: it learns every slot that p learned (the
-\* leader's `Commit`, or a `CatchUpRequest` to any peer). A learned value is
-\* stable, so the model reads it from the peer and sends no message.
+\* leader's `Commit`, or a `CatchUpRequest` to any peer). The answer
+\* carries each slot's record at p (`serve_catchup`), which holds the
+\* learned value (`LearnRecordsHeld`). A learned value is stable, so the
+\* model reads it from the peer and sends no message.
 CatchUp(n, p) ==
   /\ n \in Learners
   /\ Live(n) /\ Live(p)
   /\ \E s \in Slots : learned[n][s] = None /\ learned[p][s] # None
-  /\ learned' = [learned EXCEPT ![n] = [s \in Slots |-> IF @[s] = None THEN learned[p][s] ELSE @[s]]]
-  /\ UNCHANGED <<prom, vote, dprom, dvote, phase, next, front, wiped, restarts, msgs>>
+  /\ LearnAll(n, [s \in {t \in Slots : learned[n][t] = None /\ learned[p][t] # None} |-> vote[p][s]])
+  /\ UNCHANGED <<next, front, wiped, restarts, msgs>>
 
 -----------------------------------------------------------------------------
 (* Faults *)
 
-\* Node a restarts: memory goes back to the disk, and its ballots die.
+\* Node a restarts: memory goes back to the disk, its ballots die, and it
+\* keeps a prefix of what it learned (up to its durable chosen index).
 Restart(a) ==
   /\ Live(a)
+  /\ a \in Restartable
   /\ restarts < Restarts
   /\ restarts' = restarts + 1
   /\ prom' = [prom EXCEPT ![a] = dprom[a]]
   /\ vote' = [vote EXCEPT ![a] = dvote[a]]
   /\ phase' = [b \in Ballots |-> IF Owner[b] = a /\ phase[b] \in {"p1", "p2"} THEN "dead" ELSE phase[b]]
-  /\ UNCHANGED <<dprom, dvote, learned, next, front, wiped, msgs>>
+  /\ \E k \in 0..FirstUnlearned(a) :
+       learned' = [learned EXCEPT ![a] = [s \in Slots |-> IF s < k THEN @[s] ELSE None]]
+  /\ UNCHANGED <<dprom, dvote, next, front, wiped, msgs>>
 
 \* Acceptor a loses its disk: it comes back with no promise and no vote.
 Wipe(a) ==
@@ -342,6 +388,12 @@ Agreement == \A s \in Slots, v, w \in Values : Chosen(s, v) /\ Chosen(s, w) => v
 \* What a node learned is what was chosen.
 LearnedChosen == \A n \in Acceptors, s \in Slots : learned[n][s] # None => Chosen(s, learned[n][s])
 
+\* A learned slot holds its record: the vote of the node is the learned
+\* value (the code's assertion "a chosen slot holds its authoritative
+\* accepted record", `node/learn.rs`).
+LearnRecordsHeld ==
+  \A n \in Acceptors, s \in Slots : learned[n][s] # None => vote[n][s].val = learned[n][s]
+
 \* One proposal for each slot and ballot: a new leader allocates above each
 \* slot that its Phase 1 reported, so its fresh commands never land on a
 \* slot that its recovery proposes.
@@ -350,5 +402,9 @@ OneProposal ==
 
 \* Reachability controls: each must be violated.
 NoChoice == ~\E s \in Slots, v \in Values : Chosen(s, v)
+\* A node learned a slot it never voted for: its record comes from the learn.
+NoLearnRecord == ~\E n \in Acceptors, s \in Slots :
+                   /\ learned[n][s] # None
+                   /\ \A m \in msgs : ~(m.type = "2b" /\ m.acc = n /\ m.slot = s)
 NoNoopChosen == ~\E s \in Slots : Chosen(s, Noop) /\ \E v \in Commands, t \in Slots : t > s /\ Chosen(t, v)
 =============================================================================
