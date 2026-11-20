@@ -85,7 +85,7 @@ a trace spec `EXTENDS` its model.
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
 `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`,
-`proxy-leader/`, `quorum-everywhere/` and `degraded-reshape/`.
+`proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`.
 
 ## Experiments
 
@@ -133,6 +133,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
+| The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (`next_seq` in the segment record, the leader uuid in the journal's matchmaker record, a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
 | Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
@@ -2265,6 +2266,53 @@ The answer to #1258:
   heal where `a7` replaces `a1` moves every member that stays to another column. The rule keeps
   one value (`config-register/heal_partitioned`, 32.8 million states); with Phase 1 one acceptor
   short in every column, TLC finds two (`heal_partitioned_short`).
+
+### `health/`: the health measures of a journal's grid, for #1260 (journal health measures)
+
+The grid controller acts on counts: the live acceptors of a column against a threshold
+(`docs/architecture/05-failure-model-and-zones.md` section 5.1). The protocol acts on quorums.
+This model checks that each count says what the quorums of `grid/Grid.tla` say, on every grid
+that the fenced reshape accepts (`F + 1 <= acks <= rows - F` with `F >= 1`, so `rows >= 3` and
+`2 <= acks <= rows - 1`), up to 9 acceptors, for every set of live acceptors. The state is one
+layout, one live set, a live leader or not, and a placement that meets the zone rule or not. It
+never changes, so each invariant is checked once on each state, as in `grid/`.
+
+| Constant | Values |
+|---|---|
+| `Measure` | `code`: the counts of section 5.1 (`phase1_spare = live − (rows − acks + 1)`, `phase2_spare = live − acks`, `spare` the lower). `p2_only`, `majority`, `p1_only`: controls that read a wrong threshold. |
+| `States` | `code`: the seven journal states of section 5.1. `draft`: a control, the states of the first draft (WritesDegraded and ElectionBlocked by the leader alone, no state for a grid with no writable column). |
+| `HoldSlack` | `0`: the hold of a bypass counts `acks` promises of one column. `1`: a control, one less. |
+| `Zones` | `0`: the grid checks. `2`, `3`: the zone checks, every member live and every map of up to six members to the zones. |
+
+The invariants: `ElectableMeaning`, `WritableMeaning` and `HoldMeaning` (each count against its
+quorum predicate); `HoldIsWritable` (the hold of section 2.13 can complete exactly when a column
+can write); `SpareMeaning` (a spare in every column exactly when one more loss leaves every column
+writable and an election possible); `OneState` (each live set is in exactly one state);
+`ActionCanRun` (the fixed action of each state can run, or nothing can); `PartitionedOneSpare`
+(on `rows = 2F + 1`, `acks = F + 1` the two spares are equal). The zone invariants: `NoPlacement`
+(no placement meets rule 1 of the zone rule), `ZoneMarginMeaning`, and `ZoneLossEveryColumn`
+(with row = zone on the partitioned grid, a zone loss takes every column to `spare = acks − 2`).
+
+| Check | CI | Result |
+|---|---|---|
+| `health` | ci | pass: every grid invariant (29 thousand states, about 2 minutes) |
+| `p2_only` | ci | control: electability judged on `acks` per column; `rows = 4`, `acks = 2`, a column with 2 live writes but cannot give Phase 1 |
+| `majority` | ci | control: electability judged on a majority of all members; `rows = 4`, `acks = 3`, 2 of 4 live |
+| `p1_only` | ci | control: writability judged on `rows − acks + 1`; `rows = 4`, `acks = 2` |
+| `hold_short` | ci | control: the hold with one promise less than `acks` of one column |
+| `draft_states` | ci | control: with no live acceptor, the draft puts a live leader in WritesDegraded, whose bypass hold cannot complete |
+| `draft_one_state` | ci | control: `rows = 4`, `acks = 3`, 2 of 4 live is electable and writes nowhere; the draft has no state for it |
+| `reach_writes_blocked` | ci | reached: a grid that the reshape accepts can be electable and write nowhere (WritesBlocked is not empty) |
+| `zones2` | ci | pass: no placement over two zones survives a zone, on any grid up to six acceptors; `zone_margin` says what the quorums say |
+| `zones3` | ci | pass: `zone_margin` on three zones; row = zone takes every column to the same spare at once |
+| `zones3_placeable` | ci | control: on three zones TLC finds a placement that meets the rule |
+
+The answer to #1260: the counts of the catalogue are exact on every grid inside the bound, but a
+grid that is not partitioned needs both spares of a column, and the journal states need
+WritesBlocked and Stopped beside the five of the draft. After a zone loss on three zones no heal
+can meet the zone rule, so the controller holds and alerts. The model does not check the
+controller's choice of plan; that is `decide`, tested with its crate (#1261 (grid controller
+decision tests)).
 
 ### `segment-replicas/`: a write reaches only the replica set of its segment, for #1271
 
