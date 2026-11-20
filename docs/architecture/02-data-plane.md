@@ -654,3 +654,20 @@ Phase-1 bypass of #579 (zero-stall reconfiguration, `specs/tla/zero-stall/`):
   changes column keeps one value (`config-register/heal_partitioned`); with Phase 1 one acceptor
   short in every column, TLC finds two values (`heal_partitioned_short`).
 
+### 2.14 Record headers
+
+**Every journal record carries headers** (decided by Pierre on 2026-11-20, #1299 (record headers
+from clients and from paros)). A client can give headers with its `Write`, and paros can add its
+own, for example the leader time. This is the only idea of the Apache Iggy study that paros
+takes. The headers belong to the journal record format, not to `paros-consensus`, which keeps
+carrying opaque bytes (section 4.3 of `04-roles.md`). Pierre answered three points of #1299 on
+2026-11-20:
+
+- **The leader time is a hint only.** It promises no order across a leader change or a seal,
+  enters no safety rule and needs no TLA+ invariant.
+- **It is stamped per write**, not per batch.
+- **Client headers are opaque.** The journal never reads them, and a read cannot filter on them.
+
+**Open** (#1299 decides each one): who stamps the leader time (the leader at propose or the
+batcher); the encoding, the size limits and the split between client keys and paros keys; and
+whether the headers are inside the value checksum and the offload hash.
