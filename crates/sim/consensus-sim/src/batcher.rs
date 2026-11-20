@@ -83,7 +83,7 @@ pub enum BatchAction {
     Retry,
 }
 
-/// One step of the batcher walk, for `specs/tla/compartments/BatcherTrace.tla`.
+/// One step of the batcher walk, for `specs/tla/batcher/BatcherTrace.tla`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BatchEvent {
     /// A writer made the write `token`: `count` records and `bytes` bytes

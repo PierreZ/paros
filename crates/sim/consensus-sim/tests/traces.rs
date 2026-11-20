@@ -682,7 +682,7 @@ const BATCHER_RULES: &[BatchRule] = &[
 /// of `BatcherTrace`.
 #[test]
 fn tlc_accepts_the_batcher_walks() {
-    let check = spec("compartments", "BatcherTrace");
+    let check = spec("batcher", "BatcherTrace");
     require_tlc(&check);
     let max_events = usize::try_from(knob("TRACE_MAX_EVENTS", 200)).expect("a size");
     let mut unmet: Vec<_> = BATCHER_RULES.iter().collect();
@@ -731,7 +731,7 @@ fn tlc_accepts_the_batcher_walks() {
 /// TLC refuses the flush.
 #[test]
 fn tlc_refuses_a_lane_sent_out_of_push_order() {
-    let check = spec("compartments", "BatcherTrace");
+    let check = spec("batcher", "BatcherTrace");
     require_tlc(&check);
     let refused = (1..=40).find_map(|seed| {
         let run = batcher_walk(BatchMutant::ReverseLane).replay(seed).ok()?;

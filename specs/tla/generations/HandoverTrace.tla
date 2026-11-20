@@ -18,7 +18,7 @@
 (*     registers a ballot or raises its floor (`Register`, `GcAck`).       *)
 (* The walk's sibling journal is its own: the trace holds one journal.     *)
 (***************************************************************************)
-EXTENDS Generations, Trace, TLC
+EXTENDS Generations, Trace, Sequences, TLC
 
 VARIABLE l
 

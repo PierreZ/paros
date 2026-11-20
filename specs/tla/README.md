@@ -34,57 +34,58 @@ the rule prevents. A model with no control proves little.
 A model may also have a trace spec, `<Name>Trace.tla` and `<Name>Trace.cfg`: the model, forced
 to follow the events of one run of the code (#1198 (trace checking)). It is not in `checks.txt`:
 `crates/sim/consensus-sim/tests/traces.rs` runs it with TLC, through moonpool-tla, on the walks
-of `consensus-sim`. The trace specs today are:
+of `consensus-sim`.
+
+**Every trace spec extends a model that TLC checks, and defines no step of its own** (#1306
+(trace specs extend the checked model)). A step of the code that the model does not have is a
+step of the model, with a check and a control in its `checks.txt`, never a step of the trace
+spec. A trace spec only binds each event to an action of its model, with the arguments of the
+event, and checks what the event observes (the votes a promise reports, the frontier of a win,
+a watermark). An event that changes nothing (a slot learned again) is a stutter. So the spec
+that judges the code is the spec that TLC checks, and a trace check never accepts a step that
+no checked model takes. The trace specs today are:
 
 - `decree/DecreeTrace`: the decree walk.
-- `multi-paxos/MultiPaxosTrace`: the log of every cell flavor without matchmakers.
+- `node/`: the implementation model of `ColocatedNode`, `Node.tla`: the log (Phase 1 from the
+  first slot the owner does not hold, the frontier, the recovery with the `Noop` gap fill, the
+  learns and the records of a learn, a restart that loses a suffix of the chosen index),
+  matchmaking, the GC, the retirement and the rejoin, the quorums of a configuration (a
+  majority or a grid), the compaction floor and the trim jump, the faulty entries of CTRL with
+  the pages of a promise, the tri-state tally and the repair probe, the read replica, the
+  leaderless reads and the proxy's `Commit` rule. `NodeTrace.tla` binds the events of a walk to
+  its actions, and eight thin trace specs extend it, one for each family of walks:
+  `MultiPaxosTrace` (every cluster flavor without matchmakers), `MatchmakerTrace` (the flavor
+  with matchmakers), `ReadsTrace` (the lagging-reads flavor), `TruncationTrace` (the
+  `compaction` flavor), `CompartmentsTrace` (every compartment, and its `compaction` steer),
+  `FaultsTrace` (`disk-faults` and `disk-faults-3`), `RetireTrace` (`retiring`) and
+  `MatchmakerGridTrace` (`reconfiguring`). Each sets the bounds of the model from the events of
+  its walk (`crates/sim/consensus-sim/src/cluster/trace/node.rs`).
 - `proxy-leader/ProxyLeaderTrace`: the proxy's `Commit` rule, on the flavors with proxy leaders.
+  The colocated steps (the leader's own promise, an `Accept` it sends itself, its own vote, the
+  record of a learn) are steps of `ProxyLeader.tla` (`Colocated = TRUE`).
 - `leader-handoff/LeaderHandoffTrace`: the guards of the cooperative handoff, on the handoff
-  flavor.
-- `matchmaker/MatchmakerTrace`: matchmaking, Phase 1 over every configuration of `H_b`, Phase 2
-  in `C_b` and the GC, on the flavor with matchmakers. The model decides one value; the trace
-  spec takes its matchmaking and GC, and writes the log as its own steps.
-- `reads/ReadsTrace`: `MatchmakerTrace` and the leaderless reads (the read basis of a won
-  leadership, the read fence of each answer, the served index), on the lagging-reads flavor.
-- `truncation/TruncationTrace`: `MultiPaxosTrace` and the compaction floor (the journal fold,
-  each compaction against `first_seq`, the trim jump, the floor guards, a restart that holds
-  the slots below its floor), on the `compaction` flavor (Multi-Paxos on five, steered toward
-  compactions).
-- `compartments/CompartmentsTrace`: `MultiPaxosTrace` and the read replica (its learns, its walk
-  in slot order, its floors, its boot and its leaderless read), on the every-compartment flavor.
-- `compartments/BatcherTrace`: the batcher and the unbatcher (each push fits the lane, a batch is
-  the whole lane in push order or one write alone, the unbatcher cuts the range in batch order),
-  on the batcher walk. The walk has no Paxos under the batcher, so this spec states the batcher
-  rules of `Compartments.tla` and does not extend it.
-- `truncation/FaultsTrace`: `TruncationTrace` and the faulty entries of CTRL (a boot that reads
-  a record faulty, the pages of a promise with their faulty reports, the tri-state tally of the
-  win, the repair probe), on the flavors `disk-faults` and `disk-faults-3`.
-- `matchmaker/RetireTrace`: `MatchmakerTrace` and the retirement (a node retires on an effective
-  floor that no registration at or above names, a retired node takes no step, and a rejoin
-  books it again), on the `retiring` flavor.
-- `matchmaker/MatchmakerGridTrace`: `MatchmakerTrace` with each configuration a grid (a win
-  needs a Phase-1 quorum of every grid of `H_b`, a value is chosen in one column of `C_b`) and
-  each proxy's `Commit` backed by a column of `C_b`, on the steered `reconfiguring` flavor
-  (matchmakers and every compartment).
-- `handover/HandoverTrace`: the matchmaker set handover over a chain of generations (a member
-  freezes, a member of a proposed set holds its whole bootstrap, a member of the old set votes
-  in the successor decree, a member of the chosen set activates with its bootstrap), with the
-  registrations and the GC acks of one journal, on the `handover` flavor. It states its rules
-  for many generations and does not extend `Handover.tla`, which hands generation 0 over once.
+  flavor. A win that skips a learned slot, a step down, a learn of one slot, a record and a
+  restart that loses a suffix of the chosen index are steps of `LeaderHandoff.tla`.
+- `generations/HandoverTrace`: the matchmaker set handover over a chain of generations, with
+  the registrations and the GC acks of one journal, on the `handover` flavor. `Generations.tla`
+  closes a bootstrap over a majority of the old generation that froze, and checks that every
+  floor and every registration a majority held reaches each later generation.
+- `batcher/BatcherTrace`: the batcher and the unbatcher, on the batcher walk. `Batcher.tla` has
+  the walk's network (a batch lands whole, maybe twice, with no Paxos under it) and checks that
+  each answer holds its own records and that a batch keeps push order.
 
-A trace spec that extends the trace spec of another model links that model's modules into its
-folder, as `reads/` links `matchmaker/`.
+Merging `leader-handoff/` and `proxy-leader/` into the node model is the next step of #1306.
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take
 (`Spec::rules` in `crates/sim/consensus-sim/src/cluster/trace/rules.rs`, #1231 (traced walks
 reach the rules)): a walk that never fills a gap leaves the gap-fill guard unjudged. A change
-of `specs/tla/` alone runs the trace checks in the `traces` job of the `TLA` workflow, because
-a trace spec `EXTENDS` its model.
+of `specs/tla/` alone also runs the trace checks, in the `traces` job of the `TLA` workflow: a
+change of a model changes what its trace specs accept.
 
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
-`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`,
+`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `node/`,
 `proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`.
 
 ## Experiments
@@ -122,10 +123,11 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Plain Multi-Paxos, with the majority, the partitioned grid and the full grid | `node.rs`, `proposer/`, `acceptor.rs`, `replica.rs`, `membership/` | `multi-paxos/` | #1185 (rework 1.14), done |
 | The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` | #1187 (rework 2.8), done |
 | Matchmaker Paxos | `matchmaking.rs`, `matchmaker.rs`, `collector.rs` | `matchmaker/` | #1200 (TLA+ model Matchmaker Paxos), done |
-| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time | #1097 (rework 1.8), done |
+| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time; `generations/` for the chain of handovers that the code runs, with the registrations and the floor of a journal | #1097 (rework 1.8), done |
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
-| The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/` | #1190 (rework 6.10), done |
+| The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/`; `batcher/` for the batcher walk | #1190 (rework 6.10), done |
+| `ColocatedNode` as one implementation model: the log, matchmaking, the GC and the retirement, the floor and CTRL, the read replica, the leaderless reads and the proxy `Commit`, as the code runs them together | `node.rs` and the roles it wires | `node/`, which the log-family trace specs extend | #1306 (trace specs extend the checked model), done |
 | Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |

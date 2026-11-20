@@ -54,8 +54,6 @@
 (* each other value is a control that `checks.txt` shows TLC refuses.      *)
 (*   Alloc       "frontier": fresh commands start at the frontier.         *)
 (*               "prefix": they start at the campaign's first slot.        *)
-(*   Gap         "noop": a gap below the frontier gets a `Noop`. "skip":   *)
-(*               it gets nothing.                                          *)
 (*   Pick        "highest": the recovery takes the highest reported vote.  *)
 (*               "lowest": it takes the lowest.                            *)
 (*   Phase1      "every": a Phase-1 quorum of each configuration of `H_b`. *)
@@ -104,7 +102,7 @@ CONSTANTS Acceptors, Learners, Commands, Noop, NB, NS, Owner,
           P1Quorums(_), P2Quorums(_),
           Replicas, Ctxs,
           Restarts, Faults, MaxPos, Paged, Floors, Proxies, Reads,
-          Alloc, Gap, Pick, Phase1, MatchCheck, Gone, Gc, Retire,
+          Alloc, Pick, Phase1, MatchCheck, Gone, Gc, Retire,
           FloorGuard, CompactWhen, Release, TrimPoint, Watermark, Tally, RecordAt,
           RepRead, Fence, Commit
 
@@ -120,7 +118,6 @@ ASSUME Matchmaking \in BOOLEAN /\ Paged \in BOOLEAN /\ MatchCheck \in BOOLEAN
 ASSUME Floors \in BOOLEAN /\ Proxies \in BOOLEAN /\ Reads \in BOOLEAN
 ASSUME Static \subseteq Acceptors /\ \A c \in Configs : c # {} /\ c \subseteq Acceptors
 ASSUME Alloc \in {"frontier", "prefix"}
-ASSUME Gap \in {"noop", "skip"}
 ASSUME Pick \in {"highest", "lowest"}
 ASSUME Phase1 \in {"every", "own"}
 ASSUME Gone \in {"owner", "any"}
@@ -441,7 +438,7 @@ Win(b) ==
            lo == CampaignFrom(b)
            f == Frontier(S, lo)
            open == {s \in lo..(f - 1) : ~Decidable(b, S, s)}
-           fill == {s \in (lo..(f - 1)) \ open : Gap = "noop" \/ Top(S, s).bal > 0}
+           fill == (lo..(f - 1)) \ open
        IN /\ Owner[b] \in acc
           /\ Phase1Quorum(b, acc)
           /\ front' = [front EXCEPT ![b] = f]
@@ -939,5 +936,6 @@ NoRecordAbove == ~\E n \in Acceptors, s \in Slots :
                    /\ \A m \in msgs : ~(m.type = "2b" /\ m.acc = n /\ m.slot = s /\ m.bal = vote[n][s].bal)
 NoServe == \A c \in Ctxs : rds[c].state # "done" /\ rrds[c].state # "done"
 NoRetire == retired = {}
+NoNoopChosen == ~\E s \in Slots : Chosen(s, Noop)
 NoBlockedFill == ~\E s \in Slots, n \in Acceptors : Faulty(vote[n][s]) /\ IsChosen(s)
 =============================================================================

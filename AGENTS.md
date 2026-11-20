@@ -121,11 +121,14 @@ faults on, with moonpool-walk, moonpool #554, a seeded random walk over the sans
 machines), and coverage-driven simulation (the seeds are steered toward the branches not yet
 reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
 crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
-walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
-`leader-handoff/`, `matchmaker/` (with the retirement, and on grids with every compartment), `reads/` (the read basis and the read fence), `truncation/`
-(the compaction floor and the trim jump, and the faulty entries of CTRL with the tri-state tally),
-`compartments/` (the read replica and the batcher) and `handover/` (the matchmaker set handover) (#1198 (trace checking),
-`tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
+walks)). Trace checking is there for every walk (#1198 (trace checking), `tests/traces.rs`), and every
+trace spec extends a model that TLC checks and defines no step of its own (#1306 (trace specs
+extend the checked model)): `decree/`; `node/`, the implementation model of `ColocatedNode` (the
+log, matchmaking, the GC and the retirement, grids, the compaction floor and the trim jump, the
+faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads and the
+proxy `Commit`), which eight trace specs extend; `proxy-leader/`; `leader-handoff/`;
+`generations/` (the chain of matchmaker set handovers); and `batcher/`. Merging `proxy-leader/`
+and `leader-handoff/` into `node/` is the next step of #1306. Each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
 rules)). Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
