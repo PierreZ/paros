@@ -60,7 +60,7 @@
 //! `compartments.rs` and `faults.rs` record their events.
 //! `proxy_leader.rs` writes the trace of `specs/tla/proxy-leader/`,
 //! `leader_handoff.rs` of `specs/tla/leader-handoff/` and `handover.rs`
-//! of `specs/tla/handover/`.
+//! of `specs/tla/generations/`.
 
 mod compartments;
 mod encode;
@@ -495,21 +495,27 @@ impl Tracer {
         self.leadership(batch, &mut events);
         let leads = batch.leading.map(|(ballot, _, _)| ballot);
         // A vote the batch writes before a floor is a step before the
-        // learns and the floor: a slot below a floor takes no vote.
+        // learns and the floor: a slot below a floor takes no vote. Every
+        // vote but the leader's own round (a record of a learn, an `Accept`
+        // of a peer's round) is a step before the learns too: a node learns
+        // a value it holds. The leader's own round follows the `Win` or the
+        // `Propose` of its batch.
         let floor = batch
             .writes
             .iter()
             .position(|w| matches!(w, WriteOp::Truncate { .. } | WriteOp::TrimmedTo { .. }));
-        for write in &batch.writes[..floor.unwrap_or(0)] {
+        for (i, write) in batch.writes.iter().enumerate() {
             if let WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
                 ballot,
                 value,
             }) = write
+                && (floor.is_some_and(|f| i < f) || leads != Some(*ballot))
             {
                 self.vote(batch.id, leads, *slot, *ballot, Cmd::of(value), &mut events);
             }
         }
+        Self::trims(batch, &mut events);
         for &(slot, cmd) in &batch.learned {
             events.push(ClusterEvent::Learn {
                 node: batch.id,
@@ -517,8 +523,7 @@ impl Tracer {
                 cmd,
             });
         }
-        // A floor drops what the node learned below it.
-        Self::floors(batch, &mut events);
+        Self::compactions(batch, &mut events);
         for (audience, message) in batch.messages {
             self.message(batch.id, &batch.prior, audience, message, &mut events);
         }
@@ -921,7 +926,7 @@ pub enum Spec {
     /// retirement: a node retires on an effective floor that no
     /// registration above names, and a retired node rejoins.
     Retire,
-    /// `specs/tla/handover/HandoverTrace.tla`: the matchmaker set
+    /// `specs/tla/generations/HandoverTrace.tla`: the matchmaker set
     /// handover over many generations: each freeze, bootstrap, decree vote
     /// and activation, and the registrations and floors it carries.
     Handover,
@@ -942,7 +947,7 @@ impl Spec {
             Self::Compartments => spec("node", "CompartmentsTrace"),
             Self::Faults => spec("node", "FaultsTrace"),
             Self::Retire => spec("node", "RetireTrace"),
-            Self::Handover => spec("handover", "HandoverTrace"),
+            Self::Handover => spec("generations", "HandoverTrace"),
         }
     }
 

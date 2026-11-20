@@ -23,19 +23,29 @@ pub(super) fn keeps(event: &ClusterEvent) -> bool {
 }
 
 impl Tracer {
-    /// `compact` and `trim`: each floor that the batch wrote.
-    pub(super) fn floors(batch: &Batch<'_>, events: &mut Vec<ClusterEvent>) {
+    /// `trim`: each trim point that the batch jumped to. A jump comes
+    /// before the learns of its batch: the node learns from the point on.
+    pub(super) fn trims(batch: &Batch<'_>, events: &mut Vec<ClusterEvent>) {
         for op in batch.writes {
-            match op {
-                WriteOp::Truncate { first, .. } => events.push(ClusterEvent::Compact {
-                    node: batch.id,
-                    floor: *first,
-                }),
-                WriteOp::TrimmedTo { point, .. } => events.push(ClusterEvent::Trim {
+            if let WriteOp::TrimmedTo { point, .. } = op {
+                events.push(ClusterEvent::Trim {
                     node: batch.id,
                     floor: *point,
-                }),
-                _ => {}
+                });
+            }
+        }
+    }
+
+    /// `compact`: each compaction that the batch wrote. A compaction comes
+    /// after the learns of its batch: it drops what the node learned below
+    /// it.
+    pub(super) fn compactions(batch: &Batch<'_>, events: &mut Vec<ClusterEvent>) {
+        for op in batch.writes {
+            if let WriteOp::Truncate { first, .. } = op {
+                events.push(ClusterEvent::Compact {
+                    node: batch.id,
+                    floor: *first,
+                });
             }
         }
     }

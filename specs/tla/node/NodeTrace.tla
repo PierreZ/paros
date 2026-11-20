@@ -161,7 +161,7 @@ TReadServe ==
 \* An answer to a read, with the watermark the code sent.
 TReadAck ==
   /\ e.event = "readack" /\ IsNode("acc") /\ Has("ctx") /\ e.ctx \in Ctxs /\ Has("wm")
-  /\ Has("fence") /\ e.fence \in 0..NB
+  /\ Has("fence") /\ e.fence \in -1..NB
   /\ e.wm = VoteWatermark(e.acc)
   /\ ReadAck(e.acc, e.ctx, e.fence)
 

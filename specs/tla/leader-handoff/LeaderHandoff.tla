@@ -34,8 +34,18 @@
 (*   - A learn is a record (`mark_chosen`): the node raises its promise to *)
 (*     the ballot that chose the slot and keeps the chosen value as its    *)
 (*     vote, unless it holds that value at a ballot at or above.           *)
+(*   - A node also learns one slot at a time (`Learn`, from a `Commit` or  *)
+(*     a catch-up page), once it holds the chosen value as its record, and *)
+(*     keeps a chosen value as its record below its promise (`Record`,     *)
+(*     `mark_chosen`).                                                     *)
+(*   - A new leader does not propose again a slot of its recovery that it  *)
+(*     already learned (`close_phase1` with `is_chosen`).                  *)
 (*   - A handoff leader whose learned prefix does not reach its frontier   *)
-(*     can resign (`tick_handoff_fence`).                                  *)
+(*     can resign (`tick_handoff_fence`). Any leader may step down         *)
+(*     (`StepDown`: a higher promise, `CheckQuorum`, `step_down`).         *)
+(*   - A restart keeps the promise and the votes, and a prefix of the      *)
+(*     learned slots: the chosen index is a relaxed write, so a crash may  *)
+(*     lose a suffix of it (`MustSync::Relaxed`).                          *)
 (*   - A beat at a ballot at or above the promise of a leader makes it a   *)
 (*     follower (`on_heartbeat`). `BeatGuard` keeps a leader that holds    *)
 (*     the same ballot, the guard that `on_accept` has.                    *)
@@ -176,12 +186,6 @@ FirstNone(f) ==
 
 FirstUnlearned(n) == FirstNone(learned[n])
 
-\* The frontier that a boot computes: one past the highest vote on disk,
-\* never below the first unlearned slot.
-BootFrontier(n) ==
-  LET voted == {s \in Slots : vote[n][s].bal > 0}
-  IN IF voted = {} THEN FirstUnlearned(n) ELSE Max({Max(voted) + 1, FirstUnlearned(n)})
-
 \* A leader that can exercise its ballot: no higher promise passed it
 \* (`record_own_round` refuses a round below the promise).
 Effective(n) == role[n] = "leader" /\ prom[n] = bal[n]
@@ -216,6 +220,12 @@ LearnRecs(n, rec) ==
   IN [p |-> IF top > prom[n] THEN top ELSE prom[n],
       v |-> [s \in Slots |-> IF s \in L /\ ~Keeps(s) THEN rec[s] ELSE vote[n][s]],
       l |-> [s \in Slots |-> IF s \in L THEN rec[s].val ELSE learned[n][s]]]
+
+\* A value is chosen at slot s and ballot b once a Phase-2 quorum of the
+\* slot voted for it at b.
+ChosenAt(b, s, v) ==
+  \E Q \in Q2[s] : \A a \in Q : [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
+Chosen(s, v) == \E b \in Ballots : ChosenAt(b, s, v)
 
 -----------------------------------------------------------------------------
 (* Phase 1, as in multi-paxos/ *)
@@ -257,7 +267,8 @@ Frontier(S, from) ==
   IN IF h = {} THEN from ELSE Max(h) + 1
 
 \* The owner of ballot b wins Phase 1 and leads. Each slot from `from` to
-\* the frontier gets the highest reported vote or a `Noop`.
+\* the frontier that the owner did not learn gets the highest reported
+\* vote or a `Noop`; a slot it learned gets no round (`close_phase1`).
 Win(b) ==
   LET o == Owner[b] IN
   /\ phase[b] = "p1"
@@ -269,7 +280,7 @@ Win(b) ==
        /\ LET from == (CHOOSE m \in msgs : m.type = "1a" /\ m.bal = b).from
               f == Frontier(S, from)
               R == [s \in Slots |->
-                      IF s >= from /\ s < f
+                      IF s >= from /\ s < f /\ learned[o][s] = None
                       THEN (IF Top(S, s).bal > 0 THEN Top(S, s).val ELSE Noop)
                       ELSE None]
           IN /\ nxt' = [nxt EXCEPT ![o] = f]
@@ -356,6 +367,23 @@ CatchUp(n, p) ==
         /\ prom' = [prom EXCEPT ![n] = r.p]
   /\ UNCHANGED <<phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
 
+\* Node n learns that v is chosen at slot s, one slot (`on_commit`, a page
+\* of a catch-up). It holds v as its record already: the record of a learn
+\* reaches the disk before the learn.
+Learn(n, s, v) ==
+  /\ learned[n][s] = None
+  /\ Chosen(s, v)
+  /\ vote[n][s].val = v
+  /\ learned' = [learned EXCEPT ![n][s] = v]
+  /\ UNCHANGED <<prom, vote, phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
+
+\* Node n keeps the value v chosen at ballot b as its record of slot s
+\* (`mark_chosen`). It is no vote: it sends no 2b.
+Record(n, b, s, v) ==
+  /\ ChosenAt(b, s, v)
+  /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
+  /\ UNCHANGED <<prom, learned, phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>
+
 -----------------------------------------------------------------------------
 (* The handoff *)
 
@@ -425,6 +453,15 @@ FenceResign(n) ==
   /\ pend' = [pend EXCEPT ![n] = NoRounds]
   /\ UNCHANGED <<prom, vote, learned, phase, bal, nxt, restarts, drops, lost, msgs>>
 
+\* Leader n stops leading: on a higher promise, on `CheckQuorum`, or when
+\* its driver asks (`step_down`). It keeps its frontier.
+StepDown(n) ==
+  /\ role[n] = "leader"
+  /\ role' = [role EXCEPT ![n] = "follower"]
+  /\ origin' = [origin EXCEPT ![n] = "elected"]
+  /\ pend' = [pend EXCEPT ![n] = NoRounds]
+  /\ UNCHANGED <<prom, vote, learned, phase, bal, nxt, restarts, drops, lost, msgs>>
+
 -----------------------------------------------------------------------------
 (* Beats *)
 
@@ -449,18 +486,25 @@ OnBeat(n) ==
 -----------------------------------------------------------------------------
 (* Faults *)
 
-\* Node n restarts: it keeps its promise, its votes and what it learned. It
-\* boots a follower, its campaign dies, and its frontier comes from disk.
-Restart(n) ==
-  /\ n \notin Steady
-  /\ restarts < Restarts
-  /\ restarts' = restarts + 1
-  /\ role' = [role EXCEPT ![n] = "follower"]
-  /\ origin' = [origin EXCEPT ![n] = "elected"]
-  /\ pend' = [pend EXCEPT ![n] = NoRounds]
-  /\ nxt' = [nxt EXCEPT ![n] = BootFrontier(n)]
-  /\ phase' = [b \in Ballots |-> IF Owner[b] = n /\ phase[b] = "p1" THEN "dead" ELSE phase[b]]
-  /\ UNCHANGED <<prom, vote, learned, bal, drops, lost, msgs>>
+\* Node n restarts: it keeps its promise and its votes, and the learned
+\* slots below `upto`, a prefix it learned (the chosen index is a relaxed
+\* write: a crash may lose a suffix of it). It boots a follower, its
+\* campaign dies, and its frontier comes from disk.
+Restart(n, upto) ==
+  LET kept == [s \in Slots |-> IF s >= upto THEN None ELSE learned[n][s]]
+      voted == {s \in Slots : vote[n][s].bal > 0}
+  IN /\ n \notin Steady
+     /\ restarts < Restarts
+     /\ restarts' = restarts + 1
+     /\ \A s \in Slots : s < upto => learned[n][s] # None
+     /\ learned' = [learned EXCEPT ![n] = kept]
+     /\ role' = [role EXCEPT ![n] = "follower"]
+     /\ origin' = [origin EXCEPT ![n] = "elected"]
+     /\ pend' = [pend EXCEPT ![n] = NoRounds]
+     /\ nxt' = [nxt EXCEPT ![n] =
+                  IF voted = {} THEN FirstNone(kept) ELSE Max({Max(voted) + 1, FirstNone(kept)})]
+     /\ phase' = [b \in Ballots |-> IF Owner[b] = n /\ phase[b] = "p1" THEN "dead" ELSE phase[b]]
+     /\ UNCHANGED <<prom, vote, bal, drops, lost, msgs>>
 
 \* A message is lost.
 Drop ==
@@ -478,7 +522,10 @@ Next ==
   \/ \E n \in Acceptors, s \in Slots : Resend(n, s) \/ Decide(n, s)
   \/ \E a \in Acceptors, b \in Ballots, s \in Slots : Accept(a, b, s)
   \/ \E n, p \in Acceptors : CatchUp(n, p) \/ Relinquish(n, p)
-  \/ \E n \in Acceptors : Install(n) \/ FenceResign(n) \/ Beat(n) \/ OnBeat(n) \/ Restart(n)
+  \/ \E n \in Acceptors : Install(n) \/ FenceResign(n) \/ Beat(n) \/ OnBeat(n) \/ StepDown(n)
+  \/ \E n \in Acceptors, upto \in 0..NS : Restart(n, upto)
+  \/ \E n \in Acceptors, s \in Slots, v \in Values : Learn(n, s, v)
+  \/ \E n \in Acceptors, b \in Ballots, s \in Slots, v \in Values : Record(n, b, s, v)
   \/ Drop
 
 Spec == Init /\ [][Next]_vars
@@ -514,9 +561,6 @@ Ends == <>[]Settled
 -----------------------------------------------------------------------------
 (* Safety *)
 
-ChosenAt(b, s, v) ==
-  \E Q \in Q2[s] : \A a \in Q : [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
-Chosen(s, v) == \E b \in Ballots : ChosenAt(b, s, v)
 
 \* One command for each slot: no chosen value is lost across a handoff.
 Agreement == \A s \in Slots, v, w \in Values : Chosen(s, v) /\ Chosen(s, w) => v = w

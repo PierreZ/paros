@@ -86,7 +86,8 @@
 (*   RepRead     "quorum": a replica serves on a Phase-1 quorum of         *)
 (*               answers. "one": on one answer.                            *)
 (*   Fence       "promise": a read answer's fence is at or above the       *)
-(*               promise. "none": it is any ballot.                        *)
+(*               promise, or none on a plain deployment. "none": it is     *)
+(*               any ballot, or none.                                      *)
 (*   Commit      "backed": a proxy commits a chosen value. "any": any.     *)
 (* `Learners` are the nodes that learn and keep records of a learn: every  *)
 (* node in a trace; a check may leave out a node that owns no ballot.      *)
@@ -776,9 +777,10 @@ VoteWatermark(a) ==
   IF Watermark = "floor" /\ floor[a] - 1 > TopVote(a) THEN floor[a] - 1 ELSE TopVote(a)
 
 \* Acceptor a answers read c with its vote watermark and its read fence,
-\* at or above its promise (`PreReadAck`).
+\* at or above its promise (`PreReadAck`). A plain deployment sends no
+\* fence (-1): it never reconfigures.
 ReadAck(a, c, fence) ==
-  /\ Fence = "promise" => fence >= prom[a]
+  /\ Fence = "promise" => IF Matchmaking THEN fence >= prom[a] ELSE fence = -1
   /\ racks' = racks \cup {[acc |-> a, ctx |-> c, wm |-> VoteWatermark(a), fence |-> fence]}
   /\ UNCHANGED <<logVars, mmVars, floorVars, repVars, rbasis, rds, acked>>
 
@@ -871,7 +873,7 @@ Next ==
   \/ \E r \in Replicas, from \in 0..NS : RBoot(r, from)
   \/ \E r \in Replicas, c \in Ctxs : RRead(r, c)
   \/ \E r \in Replicas, c \in Ctxs, i \in -1..(NS - 1) : RServe(r, c, i)
-  \/ \E a \in Acceptors, c \in Ctxs, fence \in 0..NB : ReadAck(a, c, fence)
+  \/ \E a \in Acceptors, c \in Ctxs, fence \in -1..NB : ReadAck(a, c, fence)
   \/ \E n \in Acceptors, b \in Ballots : Basis(n, b)
   \/ \E n \in Acceptors, c \in Ctxs : ReadStart(n, c) \/ ReadServe(n, c)
   \/ \E n, a \in Acceptors, c \in Ctxs : ReadFold(n, a, c)

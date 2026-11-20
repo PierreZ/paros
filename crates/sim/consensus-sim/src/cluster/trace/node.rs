@@ -65,7 +65,9 @@ pub(super) fn trace(flavor: &Flavor, events: &[ClusterEvent]) -> Trace {
                 configs.insert(encode::config(config));
                 layouts.insert(layout(config));
             }
-            ClusterEvent::ReadStart { ctx, .. } | ClusterEvent::ReplicaRead { ctx, .. } => {
+            ClusterEvent::ReadStart { ctx, .. }
+            | ClusterEvent::ReplicaRead { ctx, .. }
+            | ClusterEvent::ReadAck { ctx, .. } => {
                 ctxs.insert(Value::Int(i64::try_from(*ctx).expect("a token")));
             }
             _ => {}
