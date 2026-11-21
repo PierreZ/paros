@@ -107,7 +107,10 @@ in the boundary state, the floor of a read from the segment in force, the floor 
 offloaded read, the trim of a sealed segment once the floor is decided over it, the acceptors'
 compaction after `F + 1` replicas, the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
 segments with an empty segment and a seal before the `Fence`; the whole boundary state, the
-leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)).
+leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), the seal
+end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1
+that reads the old grid below the end keeps one value; #1313 (the seal end against a CTRL faulty
+record)).
 `specs/tla/README.md` lists every flavor with its model. Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
