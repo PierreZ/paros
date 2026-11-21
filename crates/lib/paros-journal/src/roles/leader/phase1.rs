@@ -172,15 +172,20 @@ impl Phase1 {
                     .iter()
                     .any(|segment| segment.reads(slot) && segment.acceptors().any(|a| a == *node))
             };
-            for (slot, (ballot, command)) in &report.votes {
-                if reads(*slot) && top.get(slot).is_none_or(|(b, _)| ballot > b) {
-                    top.insert(*slot, (*ballot, command.clone()));
-                }
+            // The highest ballot at each slot. Two votes at one ballot carry
+            // one command (P2c), so a tie keeps either.
+            for (slot, vote) in report.votes.iter().filter(|(slot, _)| reads(**slot)) {
+                top.entry(*slot)
+                    .and_modify(|held| {
+                        *held = std::cmp::max_by_key(held.clone(), vote.clone(), |v| v.0);
+                    })
+                    .or_insert_with(|| vote.clone());
             }
-            for (slot, ballot) in &report.faulty {
-                if reads(*slot) && rotted.get(slot).is_none_or(|b| ballot > b) {
-                    rotted.insert(*slot, *ballot);
-                }
+            for (slot, ballot) in report.faulty.iter().filter(|(slot, _)| reads(**slot)) {
+                rotted
+                    .entry(*slot)
+                    .and_modify(|held| *held = (*held).max(*ballot))
+                    .or_insert(*ballot);
             }
         }
         let blocked: Vec<Slot> = rotted

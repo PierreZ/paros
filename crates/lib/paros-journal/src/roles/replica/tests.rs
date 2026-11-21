@@ -120,6 +120,7 @@ fn the_first_segment_folds_from_the_fresh_journal() {
     assert_eq!(replica.id(), ME);
     assert_eq!(replica.segment(), SegmentId(1));
     assert_eq!(replica.front(), None);
+    assert_eq!(replica.start(), None);
     assert!(
         replica.tick().is_empty(),
         "a replica with no base asks nothing"
@@ -301,6 +302,7 @@ fn a_later_segment_folds_from_the_boundary_of_the_one_before() {
         Some(Leader::Uuid(LeaderUuid(7)))
     );
     assert_eq!(second.front(), Some(Slot(1)));
+    assert_eq!(second.start(), Some(Slot(1)));
 }
 
 #[test]
@@ -461,4 +463,60 @@ fn a_fresh_journal_has_no_uuid() {
         Leader::Uuid(LeaderUuid(1)),
         ReplicaDisk::default(),
     );
+}
+
+#[test]
+fn a_later_segment_takes_no_base_without_the_record_before() {
+    // Only the first segment of the journal folds from the fresh journal: a
+    // segment whose record before is missing waits.
+    let state = BoundaryState::fresh(Leader::Unset);
+    let chain = reshape(
+        &sealed(0)
+            .apply(&Change::Boundary {
+                segment: SegmentId(1),
+                state,
+            })
+            .and_then(|value| {
+                value.apply(&Change::Retire {
+                    segment: SegmentId(1),
+                    holders: 2,
+                    unrepaired_damage: false,
+                })
+            })
+            .expect("the boundary and the retire"),
+    )
+    .apply(&Change::Seal {
+        segment: SegmentId(2),
+        end: Slot(0),
+    })
+    .expect("the second seal");
+    let gap: BTreeMap<SegmentId, SegmentRecord> = chain
+        .segments()
+        .iter()
+        .filter(|(id, _)| **id != SegmentId(2))
+        .map(|(id, record)| (*id, record.clone()))
+        .collect();
+    let value = RegisterValue::from_parts(chain.term(), gap);
+    let mut replica = SegmentReplica::recover(
+        NodeId(31),
+        SegmentId(3),
+        nodes(&[31, 32, 33]),
+        Leader::Unset,
+        ReplicaDisk::default(),
+    );
+    assert_eq!(replica.observe(&value), Vec::new());
+    assert_eq!(replica.front(), None);
+    // With the record before, it takes its base.
+    let mut whole = replica.clone();
+    let _ = whole.observe(&chain);
+    assert_eq!(whole.front(), None, "segment 2 has no boundary state yet");
+}
+
+#[test]
+#[should_panic(expected = "never passes the end")]
+fn the_front_never_passes_the_end() {
+    let mut replica = based();
+    replica.step(LEADER, commit(1, 0, claim(7)));
+    replica.end = Some(Slot(0));
+    replica.assert_invariants();
 }

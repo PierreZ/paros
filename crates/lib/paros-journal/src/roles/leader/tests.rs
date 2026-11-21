@@ -661,3 +661,72 @@ fn a_leader_stopped_by_its_driver_answers_unknown() {
     assert_eq!(replies(&effects), vec![(4, Reply::Unknown)]);
     assert_eq!(*leader.phase(), LeaderPhase::Stopped);
 }
+
+#[test]
+fn a_retired_segment_is_not_read() {
+    let sealed = two_segments()
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(0),
+        })
+        .expect("the seal");
+    let state = crate::fold::BoundaryState::fresh(crate::command::Leader::Unset);
+    let retired = sealed
+        .apply(&Change::Boundary {
+            segment: SegmentId(1),
+            state,
+        })
+        .and_then(|value| {
+            value.apply(&Change::Retire {
+                segment: SegmentId(1),
+                holders: 2,
+                unrepaired_damage: false,
+            })
+        })
+        .expect("the retire");
+    let (leader, effects) = campaign(&retired, 3, 2, 0);
+    assert_eq!(
+        sends(&effects)
+            .into_iter()
+            .map(|(to, _)| to)
+            .collect::<Vec<_>>(),
+        nodes(&[4, 5, 6]),
+        "only the grid in force is asked"
+    );
+    assert_eq!(leader.segments().len(), 1);
+}
+
+#[test]
+fn a_refusal_at_its_own_ballot_does_not_stop_the_leader() {
+    let mut leader = open_leader();
+    leader.step(
+        NodeId(1),
+        Message::Nack {
+            ballot: ballot(2),
+            promised: ballot(2),
+        },
+    );
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(0) });
+}
+
+#[test]
+#[should_panic(expected = "only an open leader chooses")]
+fn a_leader_in_phase_one_has_no_chosen_slot() {
+    let (mut leader, _) = campaign(&one_segment(), 2, 1, 0);
+    leader.unapplied.insert(
+        Slot(0),
+        Unapplied {
+            segment: SegmentId(1),
+            command: Command::Noop,
+        },
+    );
+    leader.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "in one write")]
+fn a_pending_segment_follows_one_with_no_end() {
+    let (mut leader, _) = campaign(&two_segments(), 2, 2, 0);
+    leader.segments[0].end = Some(Slot(3));
+    leader.assert_invariants();
+}

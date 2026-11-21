@@ -96,20 +96,3 @@ pub enum Message {
         from: Slot,
     },
 }
-
-impl Message {
-    /// The name of the message's kind, for a trace or a metric.
-    #[must_use]
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::Prepare { .. } => "prepare",
-            Self::Promise { .. } => "promise",
-            Self::Nack { .. } => "nack",
-            Self::Accept { .. } => "accept",
-            Self::Accepted { .. } => "accepted",
-            Self::Commit { .. } => "commit",
-            Self::Applied { .. } => "applied",
-            Self::Pull { .. } => "pull",
-        }
-    }
-}

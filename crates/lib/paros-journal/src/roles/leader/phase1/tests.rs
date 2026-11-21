@@ -142,14 +142,19 @@ fn an_old_grid_is_read_below_its_end_and_the_new_grid_everywhere() {
     let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
     for node in [1, 2, 4, 5] {
         let votes: &[(u64, u64, u8)] = match node {
-            1 => &[(4, 1, 1)],
-            4 => &[(1, 2, 2)],
+            // A stray vote of the old grid at the end itself, at a higher
+            // ballot, is not a vote of segment 1 either.
+            1 => &[(3, 9, 1), (4, 1, 1)],
+            4 => &[(1, 2, 2), (3, 2, 3)],
             _ => &[],
         };
         phase1.fold(NodeId(node), Slot(0), page(votes, &[], None));
     }
     let close = phase1.close(&segments).expect("a quorum");
-    assert_eq!(close.safe, BTreeMap::from([(Slot(1), noop_or(2))]));
+    assert_eq!(
+        close.safe,
+        BTreeMap::from([(Slot(1), noop_or(2)), (Slot(3), noop_or(3))])
+    );
 }
 
 #[test]
@@ -224,4 +229,35 @@ fn a_cursor_that_does_not_move_is_refused() {
 #[should_panic(expected = "at least one segment")]
 fn phase_one_reads_a_segment() {
     let _ = Phase1::new(ballot(5), Slot(0), &[]);
+}
+
+#[test]
+fn the_highest_faulty_ballot_of_the_quorum_blocks() {
+    let segments = [segment(1, &[1, 2, 3], Some(0), None)];
+    let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
+    phase1.fold(NodeId(1), Slot(0), page(&[(1, 3, 1)], &[(1, 2)], None));
+    phase1.fold(NodeId(2), Slot(0), page(&[], &[(1, 4)], None));
+    phase1.fold(NodeId(3), Slot(0), page(&[], &[(1, 1)], None));
+    let close = phase1.close(&segments).expect("a quorum");
+    assert_eq!(
+        close.blocked,
+        vec![Slot(1)],
+        "the faulty ballot 4 is above the vote at 3"
+    );
+    assert_eq!(close.safe, BTreeMap::new());
+}
+
+#[test]
+fn a_faulty_entry_the_segment_does_not_read_blocks_nothing() {
+    let segments = [
+        segment(1, &[1, 2, 3], Some(0), Some(3)),
+        segment(2, &[4, 5, 6], Some(3), None),
+    ];
+    let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
+    phase1.fold(NodeId(1), Slot(0), page(&[], &[(3, 4), (5, 4)], None));
+    for node in [2, 4, 5] {
+        phase1.fold(NodeId(node), Slot(0), page(&[], &[], None));
+    }
+    let close = phase1.close(&segments).expect("a quorum");
+    assert_eq!(close.blocked, Vec::<Slot>::new());
 }

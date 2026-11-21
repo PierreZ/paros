@@ -501,10 +501,13 @@ impl<T> JournalLeader<T> {
     }
 
     /// The segment before the leader's own, when the leader's is pending.
+    /// The seal writes the end of the one and the start of the other in
+    /// one write, so the leader's segment is pending exactly while the one
+    /// before has no end ([`Self::assert_invariants`]).
     fn before_own(&self) -> Option<SegmentId> {
         let own = self.segments.last()?;
         let before = self.segments.iter().rev().nth(1)?;
-        (own.start.is_none() && before.end.is_none()).then_some(before.id)
+        own.start.is_none().then_some(before.id)
     }
 
     fn after_promise(&mut self) -> Vec<LeaderEffect<T>> {
@@ -676,6 +679,12 @@ impl<T> JournalLeader<T> {
                 .is_some_and(|s| s.id == self.campaign.segment),
             "the leader's own segment is the last it reads"
         );
+        if let [.., before, own] = &self.segments[..] {
+            assert!(
+                own.start.is_none() == before.end.is_none(),
+                "the seal ends the segment before and starts the next in one write"
+            );
+        }
         if let LeaderPhase::Open { start } = self.phase {
             assert!(
                 self.segments.last().is_some_and(|s| s.start == Some(start)),
