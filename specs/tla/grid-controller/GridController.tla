@@ -156,10 +156,9 @@ Init ==
 (***************************************************************************)
 (* The election.                                                           *)
 (***************************************************************************)
-\* A controller reads the term and becomes a candidate. It may do so in any
-\* state: from "down" it is a restart, and from "cand" or "lead" it drops
-\* what it held, as a crash does. Its requests in flight stay in flight.
+\* A candidate reads the term.
 ReadTerm(c) ==
+  /\ ctl[c].st = "idle"
   /\ term < MaxTerm
   /\ ctl' = [ctl EXCEPT ![c] = [Idle EXCEPT !.st = "cand", !.seen = term]]
   /\ UNCHANGED <<term, holder, top, rec, st, reqs, reps, failed, crashes, losses, ev>>
@@ -370,6 +369,21 @@ Settles == \A g \in Gens : st[g] = "pending" ~> st[g] # "pending"
 \* grid, even of a grid that meets the bound.
 SettlesBounded ==
   \A g \in Gens : st[g] = "pending" /\ Bounded(rec[g].grid) ~> st[g] # "pending"
+
+\* A controller's life: a holder gives up the lead only when a refusal for
+\* its term tells it, or at a crash (it keeps calling until then); only a
+\* candidate becomes the holder; a candidate goes back to idle only when it
+\* lost the compare-and-set; a controller that is down only restarts.
+CtlSteps ==
+  [][\A c \in Ctrls :
+       LET s == ctl[c].st
+           s2 == ctl'[c].st
+       IN /\ s = "lead" /\ s2 # "lead" =>
+               \/ crashes' > crashes
+               \/ \E m \in reps \ reps' : m.c = c /\ m.ans = "term"
+          /\ s2 = "lead" /\ s # "lead" => s = "cand"
+          /\ s = "cand" /\ s2 = "idle" => term # ctl[c].seen
+          /\ s = "down" => s2 \in {"down", "idle"}]_vars
 
 \* Each configuration of the table moves one way, one state at a time:
 \* none, pending, in force, sealed, retired.

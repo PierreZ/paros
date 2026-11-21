@@ -92,8 +92,8 @@
 (*   Held      what a deposed leader answers for a held batch.             *)
 (*             "unknown": `Unknown`, or `ok` when the chosen command at   *)
 (*             the slot is the batch (the rule, #1232).                    *)
-(*             "slot": a control, it answers from the outcome of the slot, *)
-(*             whatever command the slot chose.                            *)
+(*             "slot": a control, it answers `Unknown`, or `ok` from the   *)
+(*             outcome of the slot, whatever command the slot chose.       *)
 (*             "notleader": a control, it answers `NotLeader`, and the     *)
 (*             batcher follows the hint and sends the batch again.         *)
 (***************************************************************************)
@@ -404,16 +404,12 @@ Answer(h) ==
 \* A deposed leader answers the batch of held answer h (#1232).
 AnswerDeposed(h) ==
   /\ deposed' = deposed \ {h}
-  /\ CASE Held = "unknown" ->
-            \/ replies' = replies \cup {[id |-> h.id, kind |-> "unknown", seq |-> 0, from |-> "deposed"]}
-            \/ /\ PrefixChosen(h.s)
-               /\ chosen[h.s] = h.id
-               /\ replies' = replies \cup {OkReply(h, "deposed")}
-       [] Held = "slot" ->
-            /\ PrefixChosen(h.s)
-            /\ replies' = replies \cup {OkReply(h, "deposed")}
-       [] Held = "notleader" ->
-            replies' = replies \cup {[id |-> h.id, kind |-> "notleader", seq |-> 0, from |-> "deposed"]}
+  /\ IF Held = "notleader"
+     THEN replies' = replies \cup {[id |-> h.id, kind |-> "notleader", seq |-> 0, from |-> "deposed"]}
+     ELSE \/ replies' = replies \cup {[id |-> h.id, kind |-> "unknown", seq |-> 0, from |-> "deposed"]}
+          \/ /\ PrefixChosen(h.s)
+             /\ Held = "slot" \/ chosen[h.s] = h.id
+             /\ replies' = replies \cup {OkReply(h, "deposed")}
   /\ UNCHANGED <<prop, open, chosen, frontier, held, copies, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, batches, reqs, ranges, ambiguous>>
   /\ Unchanged_replicas

@@ -280,8 +280,7 @@ Latest(g) == CHOOSE h \in 1..(g - 1) : rec[h] # None /\ \A k \in (h + 1)..(g - 1
 \* once, so a later read changes nothing.
 TakeBase(g) ==
   /\ IF ~Meta /\ BaseFrom = "latest"
-     THEN /\ base[g] = None
-          /\ \E h \in 1..(g - 1) : rec[h] # None
+     THEN /\ \E h \in 1..(g - 1) : rec[h] # None
           /\ base' = [base EXCEPT ![g] = rec[Latest(g)]]
      ELSE base' = [base EXCEPT ![g] = rec[g - 1]]
   /\ UNCHANGED <<chosen, cur, st, en, applied, rec, meta, fread, acked>>

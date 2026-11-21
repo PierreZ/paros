@@ -1683,7 +1683,7 @@ reported a vote), or, above the new frontier, it is free again. The model has:
 | `Read` | `"quorum"`: the leaderless read (the code). `"local"`: a control, the replica serves from its prefix with no watermarks. |
 | `RQ` | The sets that close a read: a majority of the acceptors (the code), or the control `WithReplicas`, where a read replica counts as a voter and answers with its own prefix. |
 | `LeaderMax`, `BatchMax` | The leader's record limit and the batcher's limit before it hears the leader's. With 3, the merged batch of `w1` (one record) and `w2` (two records) fits; with 2, the leader refuses it. |
-| `Held` | What a deposed leader answers for a held batch. `"unknown"`: `Unknown`, or `ok` when the slot chose the batch (the rule, #1232). `"slot"`: a control, it answers from the outcome of the slot, whatever the slot chose. `"notleader"`: a control, it answers `NotLeader`, and the batcher follows the hint and sends the batch again (§2.4). |
+| `Held` | What a deposed leader answers for a held batch. `"unknown"`: `Unknown`, or `ok` when the slot chose the batch (the rule, #1232). `"slot"`: a control, it answers `Unknown`, or `ok` from the outcome of the slot, whatever the slot chose. `"notleader"`: a control, it answers `NotLeader`, and the batcher follows the hint and sends the batch again (§2.4). |
 | `Copies` | How many times in a run the transport may deliver a batch one more time. 0 in every check but `copies` and `copies_onerange`. |
 | `Leaders`, `Restarts` | How many leader changes and replica restarts can happen. The batcher can stop for good at any time: no step of the batcher is fair, so a behaviour in which it takes no more step is that stop. |
 | `MaxSends` | The ids of the batches. The rule sends each write in one batch, and again alone after a `TooLarge`, so no check of the rule sends more (`TypeOK`). The controls that send a batch again (`resend_ambiguous`, `held_notleader`) bound their search with the constraint `SendBound`. |
@@ -2217,9 +2217,7 @@ count).
 
 A controller is stateless: a crash forgets its term and its plan. It reads the term, then writes
 term + 1 by compare-and-set on the term it read. A candidate can depose a live holder, and the
-deposed holder keeps calling with its old term until a refusal tells it. A controller may start a
-campaign in any state: from `down` it is a restart, from `cand` or `lead` it drops what it held,
-as a crash does. The controller may ask
+deposed holder keeps calling with its old term until a refusal tells it. The controller may ask
 for any grid of `Grids` from the newest configuration it read, at any time: the record judges
 what gets in, not the controller. The network loses at most one request or reply, and a
 controller sends its request again while it has no answer. One acceptor of the pool fails
@@ -2242,7 +2240,7 @@ retry "ok").
 
 | Check | CI | Result |
 |---|---|---|
-| `safety` | ci | pass: every rule, `PlanOnlyLead` (only a holder has a plan) and `Chain` (each configuration of the table moves one way, one state at a time); two controllers, terms up to 2, one controller crash, one lost message, six grids (two member sets, `acks` 1 to 3) |
+| `safety` | ci | pass: every rule, `PlanOnlyLead` (only a holder has a plan), `Chain` (each configuration of the table moves one way, one state at a time) and `CtlSteps` (a holder gives up the lead only on a refusal for its term or a crash, only a candidate becomes the holder, a candidate goes back to idle only when it lost the compare-and-set, a controller that is down only restarts); two controllers, terms up to 2, one controller crash, one lost message, six grids (two member sets, `acks` 1 to 3) |
 | `safety_long` | long | pass: every rule with terms up to 3 and one acceptor failure too (24.6 million distinct states, 7 minutes locally with 4 workers) |
 | `live_ci` | ci | pass: `Answered` and `Settles`, with every rule, one lost message and one acceptor down, no controller crash (257 thousand distinct states, under 2 minutes) |
 | `live` | long | pass: the same with one controller crash too (1.8 million distinct states, 14 minutes locally with 4 workers while two other TLC runs shared the machine) |
