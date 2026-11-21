@@ -125,6 +125,22 @@ impl ColocatedNode {
                     chosen,
                 },
             );
+        } else if let Some(basis) =
+            config.filter(|c| self.promise_is_own_unprepared() && !c.contains(me))
+        {
+            // Option (b) of #890 (learner above the leader): the promise
+            // above this beat is only this node's own campaign, which the
+            // matchmakers refused before any `Prepare` left. No acceptor
+            // heard of it, so it chose nothing, and this node is outside the
+            // leader's configuration: the beat is a read basis
+            // (`reader_fence`). The beat is still not followed and not
+            // acked: the promise stands.
+            probe!(reachable, "beat: a stranded learner takes the read basis");
+            self.learn_read_basis(basis, ballot, fence);
+            assert!(
+                self.acceptor.promised() > ballot,
+                "the exception leaves the promise above the beat"
+            );
         }
         // Commit-replay catch-up reconciles the sender's advertised contiguous
         // chosen prefix (`commit`) against ours, in **both** directions. It is

@@ -80,6 +80,18 @@ sequenceDiagram
   the reads it holds: "reads are unavailable during a campaign, never stale" (`quorum_read.rs`
   module doc). The gate is the promise, not the belief: a server whose pool lags ignores the
   configuration of a campaign it promised (#1228 (stale read by a lagging reader)).
+- **A learner above the leader** (#890 (learner above the leader), option (b), decided by Pierre
+  on 2026-11-12). A node outside the leader's configuration campaigns on a stale belief, promises
+  its own ballot, and the matchmakers refuse the campaign (`StaleConfiguration`) before any
+  `Prepare` leaves. Its promise now sits above the leader for good, so the strict gate would
+  leave it with no basis until the next leader change. The exception: when the only promise
+  above the basis is this node's own campaign that sent no `Prepare`, and the node is outside
+  the basis's configuration, the gate is the belief ballot alone (`reader_fence`), and a beat
+  below the promise still gives the basis. The beat is not followed and not acked. That campaign
+  chose nothing, and the node does not answer its own read, so the answers of the basis's
+  quorum carry every fence (`specs/tla/reads/`, `learner_own`; the control `learner_own_serves`
+  shows the read that the strict rule refuses). A restart forgets whether its last campaign
+  prepared, so a rebooted node takes the strict rule again.
 - **A rebooted acceptor** on a matchmaker deployment answers no `PreRead` until it has heard what
   configuration is in force. The reads model shows that this refusal is not necessary for safety
   under the promise fence (`specs/tla/reads/`, `reboot_promise_open`, #1099 (rework 1.10)): it

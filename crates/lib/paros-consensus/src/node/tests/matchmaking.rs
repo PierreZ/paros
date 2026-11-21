@@ -30,7 +30,7 @@ fn prepares(msgs: &[(NodeId, Message)]) -> Vec<NodeId> {
 
 /// A registered reply from `mm` for `ballot`, hand-built (the wire shape,
 /// independent of any registry instance).
-fn registered(
+pub(super) fn registered(
     mm: u64,
     ballot: Ballot,
     history: &[(Ballot, AcceptorConfig)],
@@ -45,7 +45,7 @@ fn registered(
 
 /// A registered reply carrying an explicit ledger (beliefs and
 /// reconfigurations).
-fn registered_with(
+pub(super) fn registered_with(
     mm: u64,
     ballot: Ballot,
     history: BTreeMap<Ballot, Registration>,
@@ -117,7 +117,7 @@ fn belief(ballot: Ballot, members: &[u64]) -> (Ballot, Registration) {
 }
 
 /// A ledger entry that was a reconfiguration request.
-fn reconfigured(ballot: Ballot, members: &[u64]) -> (Ballot, Registration) {
+pub(super) fn reconfigured(ballot: Ballot, members: &[u64]) -> (Ballot, Registration) {
     (ballot, Registration::reconfiguration(cfg(members)))
 }
 
