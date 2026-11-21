@@ -525,7 +525,9 @@ Record(n, b, s, v) ==
                  repVars, readVars>>
 
 \* Node n learns that v is chosen at slot s: a `Commit`, a catch-up, or the
-\* payload of a handoff taught it. A slot below its floor is not learned.
+\* payload of a handoff taught it. A slot below its floor is not learned. It
+\* holds v as its record already: the record of a learn reaches the disk in
+\* the same batch, before the learn (`mark_chosen`).
 Learn(n, s, v) ==
   /\ n \in Learners
   /\ Live(n)
@@ -533,6 +535,7 @@ Learn(n, s, v) ==
   /\ learned[n][s] = None
   /\ \A t \in Slots : t < s => Holds(n, t)
   /\ Chosen(s, v)
+  /\ vote[n][s].val = v
   /\ learned' = [learned EXCEPT ![n][s] = v]
   /\ UNCHANGED <<prom, vote, phase, next, front, won, msgs, restarts, mmVars, floorVars,
                  repVars, readVars>>
@@ -923,6 +926,12 @@ Agreement == \A s \in Slots, v, w \in Values : Chosen(s, v) /\ Chosen(s, w) => v
 
 \* What a node learned is chosen.
 LearnedChosen == \A n \in Acceptors, s \in Slots : learned[n][s] # None => Chosen(s, learned[n][s])
+
+\* A learned slot holds its record (`mark_chosen`), or a faulty copy of it
+\* that a boot read (`Rot`).
+LearnRecordsHeld ==
+  \A n \in Acceptors, s \in Slots :
+    learned[n][s] # None => vote[n][s].val \in {learned[n][s], Lost}
 
 \* One proposal for each slot and ballot.
 OneProposal ==
