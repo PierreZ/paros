@@ -85,6 +85,9 @@ jobs:
       # #730 (paros-consensus rework): foundations <- roles <- deployments.
       - name: Check the paros-consensus layers
         run: scripts/check-core-layers.sh
+      # docs/journal/04-roles.md §J4.3: no runtime, I/O or storage dependency in the pure crates.
+      - name: Check the pure crates' dependencies
+        run: nix develop --command scripts/check-core-deps.sh
 
   test:
     needs: scope
