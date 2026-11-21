@@ -110,7 +110,11 @@ segments with an empty segment and a seal before the `Fence`; the whole boundary
 leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), the seal
 end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1
 that reads the old grid below the end keeps one value; #1313 (the seal end against a CTRL faulty
-record)), the heal of a sealed segment's replica set
+record)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state tally on a grid and across the
+configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen
+value in one write; `specs/tla/ctrl-segments/`: the copies of a sealed segment across retire and
+offload, the repair of a replica log and of an object, the data-loss report; #1263 (CTRL recovery
+in the journal)), the heal of a sealed segment's replica set
 (`specs/tla/re-replication/`: a new replica counts only on its own complete copy from a full
 member of the set, the new set written by compare-and-set on the version of the register, a "done"
 report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
@@ -212,15 +216,17 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
-  demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
-  for an edit that changes nothing, with its reason.
+  demand, and fails on any survivor. A timeout counts as caught, and so does a test that
+  earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit
+  that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
-  TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder)
+  TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder, and the trace checks of consensus-sim in four
+  `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout))
 
 A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`,
 Markdown, `docs/`, `specs/`) runs only the `wasm` job of `rust.yml`; a push to `main` runs

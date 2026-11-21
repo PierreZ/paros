@@ -65,18 +65,56 @@ is still live. Each rule is in the section that the table names.
 
 A disk can return a record that fails its checksum. The core handles this on plain Multi-Paxos
 with the faulty entries of CTRL and the tri-state tally (`specs/tla/truncation/`, #1216
-(truncation model, part 2)). #1263 (CTRL recovery in the journal) checks the same rules on a
-grid and across segments, in two models that PR #1293 adds (`specs/tla/ctrl-grid/`,
-`specs/tla/ctrl-segments/`). **That PR is open.** Its rules move into this section when it
-merges, and it does not add a section to `docs/architecture/`. The PR reports these results:
+(truncation model, part 2)). **A damaged record is repaired by CTRL, whoever finds it** (#1263
+(CTRL recovery in the journal), checked on 2026-11-20 by `specs/tla/ctrl-grid/` and
+`specs/tla/ctrl-segments/`). The grid controller owns the scrub (§J6): it schedules a read of
+every copy (the acceptor records, the replica logs, the offloaded objects), and the roles that
+hold the data read them back with their checksums. Each rule has a control that TLC breaks:
 
-- The tally needs a Phase-1 quorum of qualifying answers of every configuration of `H_b`, through
-  `membership/`, and blocks on a slot that it cannot prove empty. A loss report is always true.
-- A scrub and a boot give the same faulty record, with its ballot kept. A repair writes a chosen
-  value under that ballot, in one write.
-- A sealed segment retires at `F + 1` holders; the guard "no retire while a found damage is not
-  repaired" is not needed for safety, and Pierre kept it as a margin on 2026-11-20 (§J5.2).
-- v1 has no unsafe recover (§J6.2).
+- **The tri-state tally asks a Phase-1 quorum of every configuration of `H_b`, never a count.**
+  At a slot with a faulty report, the threshold is the highest readable report. An answer
+  qualifies unless it is a faulty report above it. The slot is decided only when the qualifying
+  answers hold a Phase-1 quorum of each configuration of `H_b` (`slot_decidable` calls
+  `has_phase1_quorum` for each `prior` configuration); otherwise it goes to the repair probe. On
+  a grid this is `rows - acks + 1` qualifying answers of every column. A majority of the members
+  fills a chosen slot with a `Noop` on a grid (`grid4_majority`). A tally that asks only the
+  configuration of its ballot fills a slot of a sealed segment that a faulty record of the old
+  grid holds (`two_current`). A threshold one above the highest readable report loses a chosen
+  value (`plus_one`, and `truncation/ctrl_plus_one`).
+- **A scrub and a boot give the same faulty record.** A damaged record keeps its ballot and
+  loses its value, whoever reads it. A scrub that drops the damaged record, so that the slot
+  reads as a slot with no vote, chooses two values (`damage_drop`).
+- **A repair writes a chosen value.** The journal keeps no record in memory, so an acceptor
+  cannot write the record again from its own copy. It writes the value that a node learned (a
+  replica, or the leader) under the ballot that the faulty record keeps. A value copied from a
+  peer's vote that is not known to be chosen loses a chosen value (`repair_peer`). With no repair
+  at all the journal stays safe (`repair_none`): the repair adds a copy, it never decides.
+- **A repair replaces the damaged record in one write.** A repair that deletes the record first
+  and writes the new one after is safe while the acceptor answers nothing between the two
+  (`drop_first_up`), but a restart between the two forgets the repair, and the slot reads as a
+  slot with no vote (`drop_first`).
+- **A sealed segment retires at `F + 1` replica holders, and a repair never needs the retired
+  grid** (§J5.2). A found damaged replica log is repaired from a live peer of its set, from the
+  grid until the retire, or from the object once offloaded. A damaged copy is one of the `F`
+  failed copies of the survive promise until its repair, so `F + 1` holders always leave one
+  good copy to repair from. A retire at `F` holders loses a slot (`retire_f`, `live_retire_f`).
+- **The retire does not count a replica whose damage a scrub found and no repair fixed.** This
+  is a margin, not a safety rule: the retire stays safe without it (`retire_any` passes with a
+  damaged counted replica). **Decided** (Pierre, 2026-11-20): keep the guard, because a disk
+  that rots once often fails again soon.
+- **The offloader puts only a log that passes its checksum, and a replica drops its copy only
+  after the record says offloaded** (§J3.1). A put of a log that it did not check makes a rotted
+  copy the only one once the replicas drop (`upload_any`). A drop before the mark loses the
+  segment with no fault (`drop_retired`).
+- **A damaged object is replaced from a replica, or reported as data loss.** While a replica of
+  the set holds a good log, a good copy exists to replace the object. Once no replica holds the
+  segment, a damaged object is data loss: outside the survive promise, reported, never recovered
+  in an unsafe way (§J6.2, Pierre, 2026-11-20). A loss report is always true: no good copy is
+  left (`object`, `live_object`, `reach_loss`). The model replaces the object in one step. The
+  offloader's conditional put never replaces an object, and no rule deletes the object of a
+  segment that is not trimmed (`offload/`, #1256 (offload races and the offloader role)).
+  **Open**: how a replace works (a delete that the mark fences) is for the offload design, with
+  its own check (§J3.1).
 
 **The seal end counts a faulty vote** (#1313 (the seal end against a CTRL faulty record),
 `specs/tla/seal-ctrl/`): the end is the frontier of the sealer's Phase 1 over the old grid, and the
