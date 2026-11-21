@@ -28,6 +28,10 @@ dependency (`docs/journal/04-roles.md` §J4.3).
 have examples"). They import `paros::` paths only, never a layer crate, so they show what a
 program that depends on `paros` alone writes. `examples/journal.rs` runs one journal in one
 process on the in-memory backends: three acceptors, three replicas, one leader, one writer.
+`examples/tokio_tasks.rs` runs the same journal on three tokio tasks of a `LocalSet`, with a
+transport over tokio channels and a clock on `tokio::time` written in the example: it shows what a
+program writes to bring its own runtime. tokio is a dev-dependency of `paros` only; the library
+depends on no runtime.
 Each new example joins the `examples` job of `.github/workflows/rust.yml`.
 
 The journal layers of the old design were removed on 2026-11-19. They are at the git tag

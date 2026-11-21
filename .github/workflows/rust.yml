@@ -288,7 +288,8 @@ jobs:
   # `paros-journal` (`crates/lib/paros-journal/examples/`, #1370 (journal examples)) and of
   # `paros-journal-io` (#1329) do the same for the journal fold and for the journal roles on
   # the traits and the driver, with backends in memory and a storage written by hand. The
-  # example of the facade `paros` runs a journal through `paros::` paths alone. Every composing
+  # examples of the facade `paros` run a journal through `paros::` paths alone, in one process
+  # (`journal`) and on three tokio tasks (`tokio_tasks`; tokio is a dev-dependency of the facade). Every composing
   # crate has examples (`scripts/check-examples.sh`). They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
   examples:
@@ -323,12 +324,18 @@ jobs:
         run: nix develop --command cargo run -p paros-consensus --example reconfiguration
       - name: Run the journal example fold
         run: nix develop --command cargo run -p paros-journal --example fold
+      - name: Run the journal example register
+        run: nix develop --command cargo run -p paros-journal --example register
       - name: Run the journal example in_memory
         run: nix develop --command cargo run -p paros-journal-io --example in_memory
       - name: Run the journal example custom_storage
         run: nix develop --command cargo run -p paros-journal-io --example custom_storage
+      - name: Run the journal example multi_writer
+        run: nix develop --command cargo run -p paros-journal-io --example multi_writer
       - name: Run the facade example journal
         run: nix develop --command cargo run -p paros --example journal
+      - name: Run the facade example tokio_tasks
+        run: nix develop --command cargo run -p paros --example tokio_tasks
       # nextest runs no doc test, so the examples of the rustdoc run here.
       - name: Run the doc examples
         run: nix develop --command cargo test --doc -p paros-consensus -p paros-journal-io

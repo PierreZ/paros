@@ -22,5 +22,11 @@ paros-consensus = { workspace = true, features = ["tracing", "assertions", "serd
 paros-journal = { workspace = true }
 paros-journal-io = { workspace = true }
 
+# The examples only. A program brings its own runtime; the example
+# `tokio_tasks` shows one. The library itself depends on no runtime
+# (`scripts/check-core-deps.sh` checks the facade's normal dependencies).
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
+
 [lints]
 workspace = true

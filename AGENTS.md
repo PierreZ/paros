@@ -226,9 +226,10 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
-  the journal examples: `cargo run -p paros-journal --example fold` and
-  `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`; #1370 (journal
-  examples)), and the facade example: `cargo run -p paros --example journal`
+  the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
+  `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
+  `multi_writer`; #1370 (journal examples)), and the facade examples:
+  `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
 - `scripts/check-examples.sh`: every composing crate has an example, and the `examples` job runs
   each one (the workflow rule "Composing crates have examples" below)
 - the doc examples: `cargo test --doc -p paros-consensus -p paros-journal-io` (nextest runs no
@@ -665,18 +666,20 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
   fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
   journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
-  Its example `fold` (`examples/`) drives the fold alone.
+  Its examples (`examples/`): `fold` drives the fold alone, `register` the compare-and-sets of the
+  matchmaker register.
 - `crates/lib/paros-journal-io` — the journal's IO side, pure (#1329): the four traits a backend
   implements (`Storage`, `Transport`, `Clock`, `Register`), the on-disk format (`layout`), the
   pure `Host` that serves many roles of many journals in one process, the generic `Driver` under
   the flight rule (group commit, held sends), the `Events` port, backends in memory (`mem`) and
-  the contract suites (`contract`). Its examples `in_memory` and `custom_storage` run the roles
-  on it.
+  the contract suites (`contract`). Its examples `in_memory`, `custom_storage` and `multi_writer`
+  run the roles on it.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
   `paros::journal`, `paros::journal_io`). A program depends on `paros` alone. Wasm-safe and provider-free
   with its default features; it is where moonpool's storage and network get bundled, behind a
-  feature, once the adapter exists (#1330). Its example `journal` (`examples/`) runs a journal in
-  one process through `paros::` paths alone.
+  feature, once the adapter exists (#1330). Its examples (`examples/`) run a journal through
+  `paros::` paths alone: `journal` in one process, `tokio_tasks` on three tokio tasks that talk
+  over channels (tokio is a dev-dependency only).
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
   segments, the walk of the matchmaker register across handovers, the walk of the journal
   roles and the walk of the generic driver of `paros-journal-io` on three processes, with oracles that share no
