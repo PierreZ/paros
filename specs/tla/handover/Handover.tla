@@ -269,10 +269,9 @@ Decide(p) ==
                    props, boot, readDone, done, floors>>
 
 \* A member of the chosen set activates with its bootstrap (only a member of
-\* the set holds one). It keeps its own floor, read generation and register
+\* the set holds one, and a bootstrap names a proposal, so the decree chose). It keeps its own floor, read generation and register
 \* if they are higher. Activating again changes nothing.
 Activate(m) ==
-    /\ chosen # None
     /\ <<m, chosen>> \in boot
     /\ LET s == chosen[2] IN
        /\ gen' = [gen EXCEPT ![m] = 1]
