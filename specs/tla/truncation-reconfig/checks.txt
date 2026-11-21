@@ -27,3 +27,5 @@ chain              pass       long  50
 reach_wipe         violation  ci
 wipe_revote        violation  ci
 wipe               pass       ci
+# A wiped owner that opens its ballot (Prepare) shows only with two values.
+wipe_cmd           pass       ci

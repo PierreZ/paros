@@ -20,7 +20,10 @@ property. There is no allow list (the absolute rule of AGENTS.md).
     nix develop .#tla --command scripts/mutate-tla.py --shard 2/3 truncation
 
 `--shard i/n` takes the i-th of n slices of the mutants of the folders named
-(1-based). Exit status: 0 when every mutant is caught, 1 when one survives,
+(1-based). `--grep REGEX` judges only the guards whose
+`module:line action: text` (as `--list` prints it) matches REGEX, before the
+slices are taken: use it to judge again the survivors of a folder after a fix.
+Exit status: 0 when every mutant is caught, 1 when one survives,
 2 on an error of the tool (a mutant that does not parse, a check that does not
 give its expected result on the tree as it is).
 
@@ -471,6 +474,8 @@ def main() -> None:
     ap.add_argument("--timeout-min", type=float, default=TIMEOUT_MIN, help="seconds")
     ap.add_argument("--timeout-factor", type=float, default=TIMEOUT_FACTOR)
     ap.add_argument("--out", type=Path, help="append one line per mutant to this file")
+    ap.add_argument("--grep", help="judge only the guards whose `module:line action: text` "
+                                   "matches this regular expression")
     ap.add_argument("--skip", type=Path,
                     help="a file of an earlier --out: leave out the mutants it judged")
     args = ap.parse_args()
@@ -496,6 +501,10 @@ def main() -> None:
                 done.add((parts[1], parts[2]))
         guards = [g for g in guards
                   if (f"{g.module.relative_to(SPECS)}:{g.line} {g.definition}", g.text) not in done]
+    if args.grep:
+        pat = re.compile(args.grep)
+        guards = [g for g in guards
+                  if pat.search(f"{g.module.relative_to(SPECS)}:{g.line} {g.definition}: {g.text}")]
     guards = guards[idx - 1 :: count]
 
     if args.list:

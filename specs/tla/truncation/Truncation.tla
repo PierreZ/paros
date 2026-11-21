@@ -262,16 +262,17 @@ Prepare(b) ==
      /\ SendAll({[type |-> "1a", bal |-> b, from |-> f], PromiseMsg(o, b, f)})
      /\ UNCHANGED <<vote, floor, dfloor, learned, next, blocked, restarts, faults>>
 
-\* A floor refused the campaign of ballot b (an acceptor above whose floor
-\* it asks has not promised it), and a jump or a catch-up since moved the
-\* first unchosen slot of its owner: the owner asks again from there.
+\* A jump or a catch-up moved the first unchosen slot of the owner of
+\* ballot b during its Phase 1: the owner asks again from there. It does so
+\* when a floor refused the campaign (an acceptor above whose floor it asks
+\* has not promised it), but the model lets it ask again at any such time:
+\* a `1a` from a later slot is safe whenever it is sent.
 AskAgain(b) ==
   LET o == Owner[b]
       f == FirstUnchosen(o)
   IN /\ Retry = "jump"
      /\ phase[b] = "p1"
      /\ prom[o] = b
-     /\ \E a \in Acceptors : prom[a] < b /\ from[b] < floor[a]
      /\ f > from[b]
      /\ from' = [from EXCEPT ![b] = f]
      /\ SendAll({[type |-> "1a", bal |-> b, from |-> f], PromiseMsg(o, b, f)})
@@ -327,13 +328,12 @@ Refill(S, b, s) ==
   [type |-> "2a", bal |-> b, slot |-> s,
    val |-> IF Top(S, s).bal > 0 THEN Top(S, s).val ELSE Noop]
 
-\* The owner of ballot b wins Phase 1 on the promises S, its own among
-\* them, and a Phase-1 quorum. It proposes again each slot that the tally
+\* The owner of ballot b wins Phase 1 on the promises S of a Phase-1
+\* quorum; its own promise need not be among them. It proposes again each slot that the tally
 \* decides; the others go to the repair probe.
 Win(b) ==
   /\ phase[b] = "p1"
   /\ \E S \in PromiseSets(b) :
-       /\ Owner[b] \in {m.acc : m \in S}
        /\ \E Q \in Q1 : Q \subseteq {m.acc : m \in S}
        /\ LET f == Frontier(S, from[b])
               open == {s \in from[b]..(f - 1) : ~Decidable(S, s)}
@@ -377,7 +377,6 @@ Accept(a, b, s) ==
   /\ s >= floor[a]
   /\ \E m \in msgs :
        /\ m.type = "2a" /\ m.bal = b /\ m.slot = s
-       /\ vote[a][s] # [bal |-> b, val |-> m.val]
        /\ prom' = [prom EXCEPT ![a] = b]
        /\ vote' = [vote EXCEPT ![a][s] = [bal |-> b, val |-> m.val]]
        /\ Send([type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> m.val])
