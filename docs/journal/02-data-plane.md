@@ -115,7 +115,7 @@ taken", and a writer that writes it again lands it two times (controls `seal_loc
 apply would wait for another replica set. A digest of the last writes in the boundary state is
 safe only while it covers the writer's whole pipeline (`seal_digest`).
 
-**Open** (#1320 (the wire shape that resolves a `Below` answer), decided with #1189): how the
+**Open** (#1320 (the wire shape that resolves a `Below` answer); Pierre picks): how the
 client resolves `Below`. The model resolves it with the writer uuid and the write of the record
 at that position, which a `Read` does not return today. The options are a `Resolve` call that a
 replica of the old segment judges against its stored entry, a field of `Read` with the writer
@@ -281,9 +281,11 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   `boundary_early`). The record needs no third value for "not written": a replica of the next
   segment starts only from a written record.
 
-**Open**: the leader of a fresh journal, before its first `SetLeader`: `None` (a fresh journal
-is multi-writer) or unset (every write and truncate is refused until a `SetLeader`). The model
-passes with both (`safety`, `unset`); the journal state model (#1189) decides it.
+**The leader of a fresh journal is unset**, as §J2.3 says: every write and truncate is refused
+until a `SetLeader`. A fresh journal that is multi-writer (`None`) is safe too. `multi-writer/`
+passes with both (`safety`, `unset`), and so does the composed model `journal-state/` across three
+segments (`chain` starts unset, `chain_fresh_none` starts at `None`; #1189 (the journal state
+model)). The choice is not a safety rule: a change to `None` needs no new check.
 
 ### J2.5 Reads
 

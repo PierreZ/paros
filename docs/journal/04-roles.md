@@ -93,6 +93,12 @@ durable; the acceptor crashes, forgets the promise and votes for the lower ballo
 chosen; the higher ballot counted the lost promise and chooses a second value). The checks run
 in CI with two ballots and one crash, and with three ballots and two crashes (`flight_wide`).
 
+*The order of an acceptor's writes* (#1309 (the state is the disk), `specs/tla/journal-state/`).
+An `Accept` that raises the promise writes the promise and the vote in one batch, or the promise
+in a batch before the vote. A vote that is durable before its promise breaks safety: the acceptor
+crashes, starts again with its old promise, and takes a lower ballot's `Accept` over a vote that
+was chosen (control `order_vote_first`).
+
 **Rule 2: every input is recorded.** A restart is `Input::Recovered(state)`. A read from storage
 is an effect, and its result comes back as an input. `now` comes with every input, timers are
 `Effect::SetTimer` and `Input::TimerFired`, and the driver draws every random value and passes

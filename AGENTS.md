@@ -114,7 +114,11 @@ record)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state tally on a 
 configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen
 value in one write; `specs/tla/ctrl-segments/`: the copies of a sealed segment across retire and
 offload, the repair of a replica log and of an object, the data-loss report; #1263 (CTRL recovery
-in the journal)).
+in the journal)), the journal v1 composed (`specs/tla/journal-state/`: three segments, the seal,
+register writes that are partial or done, the boundary state, a replica set per segment, the fold
+with `Below`, retire, trim; the acceptors' state is a memory, a queue of writes and a disk, with a
+crash between two writes, and an `Accept` that raises the promise writes the promise first or in
+the same write; #1189 (the journal state model), #1309 (the state is the disk)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are

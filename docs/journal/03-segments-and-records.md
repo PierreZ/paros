@@ -220,13 +220,13 @@ not hear what is in force, closes that case too (`part_wipe_belief`, `wipe_belie
 **Decided** (Pierre, 2026-11-20, #1254): the journal keeps the fence of the code, both halves
 (the promise and the belief ballot), with the refusal of an acceptor that did not hear what is in
 force and, on a full grid, the seal of each row. A read does not read the segment table at a
-matchmaker quorum. The journal state model (#1189) carries this rule. Across a Phase-1 bypass
+matchmaker quorum. The journal state model (`journal-state/`, #1189) has no leaderless read: the
+rule stays checked by `reads/` and `experiments/segments/reads/`. Across a Phase-1 bypass
 (#579) the promise fence alone is not enough, because the old acceptors never see the new ballot
 (#1258 (reshapes with a column below quorum), PR #1283). Since a read has no record check, the
 bypass closes that case with its own hold, §J5.5: the bypassing leader sends no `Accept` at its new ballot until its promises meet every read quorum of the old grid.
 
-The rejected design is in architecture §11 (alternatives). The code follows once the journal state
-model (#1189) includes these rules.
+The rejected design is in architecture §11 (alternatives). The code follows these models.
 
 ### J3.4 The journal's matchmaker register
 
@@ -235,8 +235,10 @@ model (#1189) includes these rules.
 This section lists every record that the matchmakers of a journal hold, who writes each one, the
 guard of each compare-and-set, and the TLA+ model that checks each rule (#1315 (bring docs and
 models in step with the v1 scope); Pierre agreed on 2026-11-20 to this page). The rules are in
-§J3.1 to §J3.3, §J5.1, §J5.5 and §J6.1; this section collects them in one place. The journal state model (#1189)
-takes the register as one variable, with the fields below.
+§J3.1 to §J3.3, §J5.1, §J5.5 and §J6.1; this section collects them in one place. The journal state model
+(`journal-state/`, #1189) holds the seal end, the boundary state, `retired` and `trimmed` of each
+segment, and the configuration that each ballot registers; it leaves out the controller term and
+the matchmaker set handover (`grid-controller/`, `segment-records/`).
 
 #### What the register is
 
@@ -257,10 +259,11 @@ frozen member takes no write (`specs/tla/segment-records/`, controls `close_one`
 registration matchmaker of the Matchmaker Paxos paper stays in `paros-consensus` for the users
 of the library (architecture §4.3), with what it builds today. The register of the journal is a second
 role beside it, which a caller opts into. The handover (`matchmaker/reconfigurer.rs`) must then
-carry the value of this register too. **Open** (#1189 decides): whether the register role lives
+carry the value of this register too. **Open** (#1325 (the matchmaker register as an optional role) decides): whether the register role lives
 in `paros-consensus` as an optional role or in a journal crate that composes the handover of the
 core; and how the rework steps 2.3 to 2.5 (architecture §7), which turn the core's matchmaker into a
-register, change with this decision.
+register, change with this decision. It is a question of crates, not of safety: `journal-state/`
+(#1189) holds the register as one value and is the same either way.
 
 #### The records
 
@@ -274,12 +277,12 @@ opens the segment to its trim. A segment is the run of slots of one configuratio
 | New segment: its grid, in state `pending` | the grid controller, by `reshape(expected configuration, new grid, term)` | The term is the term of the register (`TermCheck`); the expected configuration is the newest of the table (`ExpCheck`); the newest configuration is in force and every older one is retired (`RetireGuard`); the grid is a v1 grid (`BoundGuard`, below); a call that the register already took gets "ok" again (`Idempotent`) | `grid-controller/` (controls `noterm`, `noexp_noterm`, `noretire`, `nobound`, `live_nobound`, `noidem`); `segment-records/` (`control`) |
 | Identity of the opening call: term, expected configuration, grid | the grid controller, in the same write | Written once, with the new segment. The register compares a retry with it | `grid-controller/` (`noidem`, `noexp_noidem`) |
 | Release number of the segment | the writer of the new segment | Written once, with the new segment. A role refuses a release it does not know (upgrade minimum of v1, Pierre, 2026-11-19, journal design) | no model: the field enters no safety rule |
-| Replica set of the segment | **Open** (#1189): the reshape call of §J6.1 names a grid only, and the journal v1 plan lists the replica set as a field of the record. A re-replication of a sealed segment changes it (decision 4 of §J1.1) | **Open**: the guard of a change of the set is the result of #1314 (re-replication of a sealed segment's replica set) | `segment-replicas/` checks a fixed set; #1314 (running) checks a change |
+| Replica set of the segment | the grid controller, in the reshape call that opens the segment: the call names the grid and the replica set of the new segment, in the same write. A re-replication of a sealed segment changes it later (decision 4 of §J1.1) | Written with the new segment, under the guards of the reshape call. The guard of a later change of the set is the result of #1314 (re-replication of a sealed segment's replica set) | `journal-state/` (each segment's set comes with its reshape; `retire_early`, `Readable`); `segment-replicas/` checks a fixed set; #1314 checks a change |
 | Seal end of the predecessor; the predecessor becomes `sealed` and the new segment `in force` | the first leader of the new configuration, after its Phase 1 over the old and the new grid | Written once, by compare-and-set from "no end". The end is one above the highest slot where its Phase 1 saw a vote in the old grid. A CTRL faulty vote counts, so the end is the frontier of that Phase 1 over the old grid (#1313 (the seal end against a CTRL faulty record), §J3.1) | `experiments/segments/a/` (the end, `end_uncommitted_*`); `seal-ctrl/` (`end_readable`, `wait_cover`, `end_readable_cover`); `segment-records/` (`seal`, `SealOnce`); `grid-controller/` (`SealIn`) |
 | Boundary state of a sealed segment: `next_seq`, `first_seq` and the writer uuid | the first replica of the segment's set that applied every slot of the segment | Written once, by compare-and-set from "no boundary", in one write with all three fields. The value is the fold at the end of the segment. A replica of the next segment starts from the record of the segment just before it, never from the newest record | `segment-replicas/` (`boundary_early`, `boundary_seq`, `retire_norecord`); `segment-truncate/` (`nofirst`, `trimstate`); `seal-chain/` (`record_latest`, `record_reach_empty`) |
 | `retired` | the leader | From `sealed`, once `F + 1` replicas of the set hold the segment and the boundary state is written. A found damage that is not repaired also blocks it (a margin, Pierre, 2026-11-20, #1263). The old acceptors stop only after this write is done | `segment-replicas/` (`retire_early`, `retire_norecord`); `segment-records/` (`seal`, `RetireKept`); `ctrl-segments/` (`retire_f`, `live_retire_f`; the margin: `retire_any` passes) |
 | `offloaded` | the offloader (after v1) | From "not offloaded and not trimmed". In v1 the state and the read path that checks it exist, and nothing writes it (§J3.1) | `offload/`; `segment-records/` (`offload`, `drop_read`); `ctrl-segments/` (`upload_any`, `drop_retired`) |
-| `trimmed` | **Open** (#1189 names the writer) | From `sealed`, `retired` or `offloaded`, once a replica's fold has `first_seq` at or above the last `seq` of the segment. Never from the open segment, never on the intent to truncate, and a trimmed record never becomes live again | `segment-truncate/` (`trim_open`, `trim_intent`, `TrimStays`) |
+| `trimmed` | a replica of the segment's set whose fold has `first_seq` at or above the last `seq` of the segment, by compare-and-set (#1189) | From `sealed`, `retired` or `offloaded`, once a replica's fold has `first_seq` at or above the last `seq` of the segment. Never from the open segment, never on the intent to truncate, and a trimmed record never becomes live again | `segment-truncate/` (`trim_open`, `trim_intent`, `TrimStays`); `journal-state/` (`trim_open`, `TrimStays`, `reach_trim_retired`) |
 
 **The v1 grids** (decided by Pierre on 2026-11-20, #1315, decision 5). The register takes only
 the partitioned grid: `rows = 2F + 1`, `acks = F + 1`, with one or more columns. The majority is
@@ -288,8 +291,8 @@ the case of one column. `grid-controller/` checks the wider bound
 
 **What the register does not hold.** The configuration register of `config-register/` and
 `handover/` (the configurations of the core's rule 1, architecture §4.1) is not modelled together with
-the segment records: no model holds both. The journal state model (#1189) holds them as one
-register.
+the segment records with its handover. `journal-state/` (#1189) holds the configuration of each
+ballot and the segment records as one register, with no handover.
 
 #### The events of a segment, and the one meaning of "in force"
 
@@ -331,10 +334,13 @@ steps depend on the rule:
 - **The seal end** is written once: two first leaders that race to seal write one end, and
   every serving majority returns that end or none (`segment-records/`, `seal`, `SealOnce`).
 - **A replica of the next segment** starts from the boundary state in the record of the segment
-  just before it. **Not proved**: that this replica must act on a boundary write done at a
-  majority, and not on a read alone. `segment-records/` has no boundary write, and
-  `segment-replicas/` and `seal-chain/` hold the register as one atomic value. The journal state
-  model (#1189) checks it, with `drop_read` as the control.
+  just before it. **It may act on a boundary write that is still partial** (`journal-state/`,
+  `register_bound_read` passes): the boundary state is a function of the chosen log up to a
+  done end, so every write of it carries the same value. **The end is the step that must be done**:
+  a replica that stops, or a leader that opens, at a partial end can write the boundary state at
+  the wrong end, when another sealer then writes a different end that is done (control
+  `end_read`, `RecordTrue` fails). So a replica stops at an end, and a leader opens its segment,
+  only on an end write seen done.
 - **A controller** acts on its own election write and its own reshape call. A refusal for the
   term tells it to stop (`grid-controller/`).
 

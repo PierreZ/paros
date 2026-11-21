@@ -34,6 +34,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | CTRL on a grid and across segments | §J5.3 | `ctrl-grid/`, `ctrl-segments/` | #1263 (CTRL recovery in the journal) |
 | The seal end against a faulty record: a faulty vote counts | §J3.1, §J5.3 | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record) |
 | Re-replication of a sealed segment | §J5.2 | open | #1314 (re-replication of a sealed segment's replica set) |
+| The rules composed across three segments, with the acceptors' disk and the write orders | §J7.2 | `journal-state/` | #1189 (the journal state model), #1309 (the state is the disk) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
 | The controller's election and fenced reshape | §J6.1 | `grid-controller/` | #1259 (the fenced reshape call of the grid controller) |
 | The health measures and the journal states | §J6.2 | `health/`; its v1 switch is #1319 (a v1 switch in health/) | #1260 (journal health measures) |
@@ -43,11 +44,31 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 **#1189 (the journal state model) composes the rules above** into one model: at least three
 segments, the rules of chapters J2 to J6 with the control of each, and reach checks for the
 seams between them (the consolidated v1 plan, section 8). Its state is the disk, and its
-messages come from the disk (#1309 (the state is the disk)). It decides the points that these
-files mark **Open** for #1189: the leader of a fresh journal (§J2.4.1), the wire shape of `Below`
-with #1320 (the wire shape that resolves a `Below` answer) (§J2.2), the writers of the replica set and of `trimmed` (§J3.4), and that a replica
-of the next segment acts on a boundary write seen done (§J3.4). It is step 2 of the build
+messages come from the disk (#1309 (the state is the disk)). It is step 2 of the build
 (section J8), after this chapter and before any journal code.
+
+**The model is `specs/tla/journal-state/`** (its section in `specs/tla/README.md` lists every
+check). Three segments, Paxos inside each one, the seal by the first leader of the next grid,
+register writes that are partial and can be lost, the boundary state, a replica set for each
+segment, the journal fold with `Below`, retire, trim and the reshape guard. Each acceptor keeps
+a memory, a queue of writes and a disk, and can crash between two writes. The CI set takes about
+13 minutes. Every check gives its expected result, and no decision of these files is refuted.
+What it decided:
+
+- **The leader of a fresh journal** stays unset; `None` is safe too (§J2.4.1).
+- **The writer of the replica set** is the reshape call, with the grid (§J3.4).
+- **The writer of `trimmed`** is a replica whose fold reached the end of the segment (§J3.4).
+- **The boundary write** may be acted on while partial; the seal end only once done (§J3.4,
+  control `end_read`).
+- **The write orders of an acceptor** (§J4.2, #1309): a promise and a vote are sent only once
+  their write is durable (controls `reply_mem1b`, `reply_mem2b`), and an `Accept` that raises
+  the promise writes the promise before the vote or in the same write. The vote first is unsafe
+  (control `order_vote_first`: after a crash, the acceptor takes a lower ballot over a chosen
+  vote).
+
+It leaves **Open** the wire shape of `Below` (#1320 (the wire shape that resolves a `Below`
+answer), §J2.2: the model resolves it with the record at the position, as `multi-writer/` does)
+and where the register role lives (#1325, §J3.4).
 
 ### J7.3 `journal-sim`
 

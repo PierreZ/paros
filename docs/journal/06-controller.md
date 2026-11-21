@@ -30,6 +30,8 @@ the journal is one compare-and-set on the matchmaker record:
 
     reshape(expected configuration, new grid, controller term)
 
+The new grid names the acceptors of the new segment and its replica set, so the record of the
+segment gets both in one write (§J3.4; `specs/tla/journal-state/`, #1189 (the journal state model)).
 The controller decides when and where; the record's guards decide whether it is safe. So the
 record trusts nothing that the controller computed. `specs/tla/grid-controller/` checks the
 election and the call with two controllers, a candidate race, a deposed controller that keeps
