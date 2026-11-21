@@ -291,3 +291,39 @@ test("/consensus/driver/: the Ready widget elects a leader and commits a write",
   await expect(node0.locator(".lab-state")).toContainText("1 chosen");
   w.check();
 });
+
+// Every exercise of the journal fold lab (public/journal-lab.js), solved by
+// clicks on its call buttons. A call is named by its data-call key (`A:write`,
+// `seal`, from `Call::key` in crates/support/paros-wasm/src/journal/world.rs);
+// the calls follow the `solution` of each exercise in
+// crates/support/paros-wasm/src/journal/lab.rs.
+const JOURNAL_EXERCISES = {
+  "journal-duplicate": ["A:write-lost", "A:resend"],
+  "journal-fenced": ["B:read", "B:set-leader", "A:write"],
+  "journal-multi": ["A:set-multi", "B:write-open", "C:write-open"],
+  "journal-below": ["A:write-lost", "seal", "A:resend", "A:resolve"],
+  "journal-truncated": ["A:write-lost", "A:read", "A:truncate", "A:resend"],
+};
+
+for (const [id, keys] of Object.entries(JOURNAL_EXERCISES)) {
+  test(`/journal/calls/: the journal exercise "${id}" is solved by its calls`, async ({ page }) => {
+    const w = watch(page);
+    await page.goto(`journal/calls/#lab=${id}`);
+    const lab = page.locator("#your-turn-lab");
+    await expect(lab.locator(".lab-tab.now")).toBeVisible();
+    await expect(lab.locator(".chip-status.accent").first()).toHaveText("live");
+    const done = lab.locator(".lab-done");
+    await expect(done).toBeHidden();
+    for (const key of keys) {
+      await lab.locator(`.lab-extras button[data-call="${key}"]`).click();
+      await expect(lab.locator(".jlab-answer .chip-status.gap", { hasText: "refused" })).toHaveCount(0);
+    }
+    await expect(done, "the page says the goal holds").toBeVisible();
+    await expect(done).not.toBeEmpty();
+    await expect(lab.locator(".lab-tab.now .lab-tab-n")).toHaveText("✓");
+    // Undo takes the last call back, and the goal no longer holds.
+    await lab.getByRole("button", { name: "Undo" }).click();
+    await expect(done).toBeHidden();
+    w.check();
+  });
+}

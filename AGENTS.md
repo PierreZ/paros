@@ -650,8 +650,9 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   against the TLA+ models with TLC (moonpool-tla), and the coverage gate over every core probe
   (exploration with moonpool-walk, branch coverage with moonpool-explorer's sancov reader). On
   `paros-consensus` only.
-- `crates/support/paros-wasm` — the site's wasm tool (#540): feature `paxos`, the engine of the
-  step-through diagrams of the Paxos pages (#811), on `paros-consensus` only.
+- `crates/support/paros-wasm` — the site's wasm tools (#540): feature `paxos`, the engine of the
+  step-through diagrams of the Paxos pages (#811), on `paros-consensus` only; feature `journal`,
+  the fold lab of the Journal pages (#1363), on `paros-journal` only.
 
 Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`; `specs/tla/experiments/`
 holds the models that compare candidate designs before Pierre decides, such as the segments
@@ -659,7 +660,7 @@ experiment of #1213 (segments in the protocol or in storage) and its check of le
 across a reshape, #1254), `website/site/` (the website,
 Astro, one style for every page; `website/site/AGENTS.md`, the `update-the-site` skill),
 `website/shared/` (the design system: tokens, fonts, logo), `scripts/build-wasm.sh` (builds the
-wasm and stages it for the site), `docs/architecture/` (the target design of the service), `docs/journal/` (the target
+two wasm bundles and stages them for the site), `docs/architecture/` (the target design of the service), `docs/journal/` (the target
 design of the journal v1: every journal rule, its model and the build steps; its `README.md`
 is the map), `docs/knowledge/`
 (the Paxos knowledge base: one card per concept paros uses, #745), `docs/analysis/` (design
