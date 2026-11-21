@@ -26,12 +26,12 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | Segments in the matchmakers, the seal end, the gap fill | §J3.1 | `experiments/segments/a/` | #1213 (segments in the protocol or in storage), #1233 (segments gap fill) |
 | A write reaches only the replica set of its segment; retire at `F + 1` holders | §J3.1 | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment) |
 | The whole boundary state in the segment record; two seals in a row | §J3.1 | `seal-chain/` | #1303 (two seals in a row) |
-| A user truncate across segments | §J3.2 | `segment-truncate/` | #1276 (user truncate across segments); #1321 (make `crash_all` and `live_all` finish) |
+| A user truncate across segments; the acceptors' floor for each segment | §J3.2 | `segment-truncate/` | #1276 (user truncate across segments); #1318 (`acc_grid`); #1321 (make `crash_all` and `live_all` finish) |
 | A leaderless read of the tail across a reshape | §J3.3 | `experiments/segments/reads/` | #1254 (leaderless reads across a reshape) |
 | Segment records across a matchmaker set handover; act on a write seen done | §J3.4 | `segment-records/` | #1275 (segment records across a matchmaker handover) |
 | The register as a compare-and-set at a majority of one generation | §J3.4 | `cas-register/`, `handover/` | PR #1064 (gone-node gap), #1097 (rework 1.8) |
 | The offloader and the races of offload (after v1) | §J3.1 | `offload/` | #1256 (offload races and the offloader role) |
-| Quorum everywhere and the grid bound | §J5.1 | `quorum-everywhere/`, `grid/` | #1257 (quorum everywhere); #1318 (two rows **Not proved**) |
+| Quorum everywhere and the grid bound | §J5.1 | `quorum-everywhere/`, `grid/` | #1257 (quorum everywhere); #1318 (the rows of the boundary write and the acceptor compaction) |
 | CTRL on a grid and across segments | §J5.3 | `ctrl-grid/`, `ctrl-segments/` | #1263 (CTRL recovery in the journal) |
 | The seal end against a faulty record: a faulty vote counts | §J3.1, §J5.3 | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record) |
 | Re-replication of a sealed segment | §J3.1, §J5.2 | `re-replication/`, its row in `quorum-everywhere/` | #1314 (re-replication of a sealed segment's replica set) |

@@ -24,7 +24,9 @@
 (*   - a leaderless read sends to `GridReadTargets` and waits for a        *)
 (*     Phase-1 quorum of the answers (`QuorumRead`, `has_phase1_quorum_in`). *)
 (* Matchmaker quorums are majorities. A segment retires after `F + 1`      *)
-(* replicas of its replica set hold it; a heal copies it from one.         *)
+(* replicas of its replica set hold it; a heal copies it from one; the    *)
+(* boundary write starts at one replica that applied it; the acceptors of  *)
+(* a segment compact after `F + 1` replicas of its set report.             *)
 (*                                                                         *)
 (* The journal holds two configurations: `Old`, a sealed segment, and      *)
 (* `New`, the configuration in force. `New` is `Old` with the members      *)
@@ -108,8 +110,8 @@ HoldQ == {Q \in SUBSET R : Cardinality(Q) >= F + 1}
 \* that holds it whole (#1314, `specs/tla/re-replication/`).
 CopyQ == {Q \in SUBSET R : Cardinality(Q) >= 1}
 
-Steps == <<"write", "election", "read", "seal", "retire", "offload", "trim", "handover",
-           "ctl_election", "reshape", "bypass_hold", "heal">>
+Steps == <<"write", "election", "read", "seal", "boundary", "retire", "offload", "trim",
+           "compact", "handover", "ctl_election", "reshape", "bypass_hold", "heal">>
 
 \* The waits of each step, in order. A zero-arity definition: TLC computes
 \* it once.
@@ -124,6 +126,13 @@ WaitsOf == [s \in {Steps[k] : k \in DOMAIN Steps} |->
     \* The sealing leader's Phase 1 in the old grid finds the highest vote;
     \* the end slot is written once by compare-and-set at the matchmakers.
     [] s = "seal"     -> <<Phase1(OldSeq), MMWait(MM)>>
+    \* The boundary write (#1318, `docs/journal/03-segments-and-records.md`
+    \* §J3.1): the first replica of the old set that applied every slot of
+    \* the sealed segment writes `next_seq`, `first_seq` and the writer uuid
+    \* into the segment record by compare-and-set. Any live member of the set
+    \* can be that replica, so the first wait needs one member; then the
+    \* compare-and-set waits for a matchmaker majority.
+    [] s = "boundary" -> <<<<Alt(R, CopyQ)>>, MMWait(MM)>>
     \* F + 1 replicas hold the sealed segment, then a matchmaker quorum
     \* acks its retirement.
     [] s = "retire"   -> <<<<Alt(R, HoldQ)>>, MMWait(MM)>>
@@ -131,6 +140,13 @@ WaitsOf == [s \in {Steps[k] : k \in DOMAIN Steps} |->
     [] s = "offload"  -> <<MMWait(MM)>>
     \* The decided `Truncate` (a Phase-2 round), then the record of the trim.
     [] s = "trim"     -> <<Phase2(NewSeq), MMWait(MM)>>
+    \* The acceptor compaction (#1276 rule 5, #1318, §J3.2): the replicas of
+    \* the segment's set report their compaction point to the leader side,
+    \* which counts `F + 1` of them with a `membership/` predicate on the
+    \* replica set, as `collector.rs` counts the GC acks. Then it sends the
+    \* floor to the acceptors. That send waits for no answer: each acceptor
+    \* compacts when the floor reaches it, so it is not a wait.
+    [] s = "compact"  -> <<<<Alt(R, HoldQ)>>>>
     \* The handover of the matchmaker set: a stop quorum of `MM`, then the
     \* successor decree in `MM2`, Phase 1 and Phase 2.
     [] s = "handover" -> <<MMWait(MM), MMWait(MM2), MMWait(MM2)>>
