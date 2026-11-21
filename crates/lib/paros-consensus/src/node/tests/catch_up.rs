@@ -608,6 +608,44 @@ fn a_stalled_pull_asks_the_whole_pool_after_the_fallback() {
     }
 }
 
+/// The pull count belongs to one chosen index: a follower that learns a slot
+/// between two pulls starts the count over and keeps asking the sender.
+#[test]
+fn a_pull_at_a_new_chosen_index_starts_the_count_over() {
+    let mut n = node(1, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    let pulls = |n: &mut ColocatedNode| -> Vec<NodeId> {
+        n.step(Message::Heartbeat {
+            from: NodeId(0),
+            ballot: ballot(1, 0),
+            commit: Some(Slot(5)),
+            config: None,
+            fence: None,
+            gc_floor: None,
+        });
+        drain(n)
+            .into_iter()
+            .filter(|(_, m)| matches!(m, Message::CatchUpRequest { .. }))
+            .map(|(to, _)| to)
+            .collect()
+    };
+    for _ in 0..crate::node::PULL_FALLBACK_BEATS {
+        assert_eq!(pulls(&mut n), vec![NodeId(0)]);
+    }
+    n.step(Message::Commit {
+        from: Party::Node(NodeId(0)),
+        ballot: ballot(1, 0),
+        slot: Slot(0),
+        command: ucmd(7, 7, 1),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(n.hard_state().chosen_index, Some(Slot(0)));
+    for _ in 0..crate::node::PULL_FALLBACK_BEATS {
+        assert_eq!(pulls(&mut n), vec![NodeId(0)], "the count started over");
+    }
+    assert!(pulls(&mut n).len() > 1, "the fallback still comes");
+}
+
 /// A follower ahead of a beat replays what the sender misses, from one past
 /// the sender's chosen index; a beat at its own chosen index asks nothing.
 #[test]

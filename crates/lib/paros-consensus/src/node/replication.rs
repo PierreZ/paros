@@ -185,7 +185,9 @@ impl ColocatedNode {
     /// changes only who answers.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0)))]
     fn pull_gap(&mut self, from: NodeId, ci: Option<Slot>) {
-        if self.pull_beats == 0 || self.pull_index != ci {
+        // The count belongs to one chosen index: a pull at another index
+        // starts it over. At a count of zero the index is only overwritten.
+        if self.pull_index != ci {
             self.pull_index = ci;
             self.pull_beats = 0;
         }
