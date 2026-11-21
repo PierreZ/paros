@@ -268,7 +268,9 @@ jobs:
 
   # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
   # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
-  # them is a test of the public API's shape as much as of the protocol. They are linted under the
+  # them is a test of the public API's shape as much as of the protocol. The examples of
+  # `paros-journal` (`crates/lib/paros-journal/examples/`, #1370 (journal examples)) do the
+  # same for the journal fold and the journal roles, with storage written by hand. They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
   examples:
     needs: scope
@@ -300,6 +302,10 @@ jobs:
         run: nix develop --command cargo run -p paros-consensus --example leader_handoff
       - name: Run reconfiguration
         run: nix develop --command cargo run -p paros-consensus --example reconfiguration
+      - name: Run the journal example fold
+        run: nix develop --command cargo run -p paros-journal --example fold
+      - name: Run the journal example in_memory
+        run: nix develop --command cargo run -p paros-journal --example in_memory
       # nextest runs no doc test, so the examples of the rustdoc run here.
       - name: Run the doc examples
         run: nix develop --command cargo test --doc -p paros-consensus

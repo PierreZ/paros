@@ -22,6 +22,13 @@ the code, and change the section in the same PR when a rule changes.
 
 Each module keeps its unit tests in `<module>/tests.rs`.
 
+`examples/` (#1370 (journal examples)): `fold` (the fold alone) and `in_memory` (the roles in one
+process, with a key-value store in memory, an adapter for each role and the flight rule, written
+by hand). Shared code is in `examples/common/mod.rs`. Each example asserts its result and runs in
+the `examples` job of CI; `README.md` lists them in reading order. An example uses no crate from
+outside the workspace (`scripts/check-core-deps.sh`). A change to a role's effects or its disk
+updates `in_memory` in the same PR.
+
 ## Rules
 
 - **Journal only.** The core is not generic over the command (Pierre, 2026-11-20, §J4.3): the
@@ -51,6 +58,7 @@ Each module keeps its unit tests in `<module>/tests.rs`.
 
 ## Gates
 
-`cargo nextest run -p paros-journal -p journal-sim`, `cargo clippy --all-targets -- -D warnings`,
+`cargo nextest run -p paros-journal -p journal-sim`, `cargo run -p paros-journal --example fold`
+and `--example in_memory`, `cargo clippy --all-targets -- -D warnings`,
 `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-journal --no-deps` and
 `cargo check --target wasm32-unknown-unknown -p paros-journal`, all in `nix develop`.

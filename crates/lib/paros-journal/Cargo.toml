@@ -2,6 +2,7 @@
 name = "paros-journal"
 description = "The pure journal core of paros: the journal fold, the segment records, the codec and the record headers. Sans-IO, no clock, no randomness"
 version.workspace = true
+readme = "README.md"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
