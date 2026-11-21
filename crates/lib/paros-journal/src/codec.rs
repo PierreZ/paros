@@ -1,5 +1,6 @@
 //! The **codec** of the journal: the bytes of its commands, records,
-//! segment records and boundary states, on the wire and on disk (the core
+//! segment records, boundary states and role messages ([`message`]), on the
+//! wire and on disk (the core
 //! owns the on-disk format, `docs/journal/04-roles.md` §J4.2, rule 4).
 //!
 //! **Every encoding starts with a header**: the release number (`u16`) and
@@ -13,7 +14,8 @@
 //! The format, all integers little endian:
 //!
 //! - header: `release: u16`, `kind: u8` (1 command, 2 record, 3 segment
-//!   record, 4 boundary state); then the value, then nothing.
+//!   record, 4 boundary state, 5 role message); then the value, then
+//!   nothing.
 //! - a byte string: `len: u32`, then the bytes.
 //! - a list: `count: u32`, then the items.
 //! - an option: `0` for none, or `1` then the value.
@@ -40,6 +42,10 @@ use crate::command::{Command, Fence, Header, Headers, Leader, Record, Write};
 use crate::fold::BoundaryState;
 use crate::segment::{Grid, OpeningCall, SegmentId, SegmentRecord, SegmentState};
 
+pub mod message;
+
+pub use message::{decode_message, encode_message};
+
 /// A **release number** of the journal's formats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Release(pub u16);
@@ -52,6 +58,7 @@ const COMMAND: u8 = 1;
 const RECORD: u8 = 2;
 const SEGMENT: u8 = 3;
 const BOUNDARY: u8 = 4;
+const MESSAGE: u8 = 5;
 
 /// The paros header key of the leader time.
 const LEADER_TIME: u16 = 1;

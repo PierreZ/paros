@@ -22,7 +22,8 @@
 //! refused at a `Register` move, and every role then observes the value.
 //! The walk retires a sealed segment whose boundary state is written once
 //! `F + 1` replicas of its set hold it (the leader's retire is a later rule
-//! group of #1326).
+//! group of #1326). Every delivered message crosses its bytes (the codec of
+//! #1391 (role message codec)): the receiver steps what the decoder gives.
 //!
 //! The clients: three writers write, resend, write at old positions,
 //! switch the journal to multi-writer and back, and truncate, as in the
@@ -406,6 +407,16 @@ impl Model for RolesModel {
 
     fn deliver(&mut self, envelope: Envelope, cx: &mut Cx<'_, Self>) {
         let Envelope { from, to, message } = envelope;
+        // The receiver gets the message that its bytes decode to (#1391
+        // (role message codec)), and it must be the message that was sent.
+        let bytes = paros_journal::encode_message(&message);
+        let message = match paros_journal::decode_message(&bytes) {
+            Ok(decoded) => {
+                assert_eq!(decoded, message, "a message crosses its bytes unchanged");
+                decoded
+            }
+            Err(e) => panic!("{message:?} does not decode from its bytes: {e:?}"),
+        };
         if let Some(node) = self.acceptors.get_mut(&to) {
             if let Some(role) = &mut node.role {
                 let effects = role.step(from, message);

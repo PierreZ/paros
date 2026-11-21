@@ -44,7 +44,7 @@ pub mod resolve;
 pub mod roles;
 pub mod segment;
 
-pub use codec::{DecodeError, RELEASE, Release};
+pub use codec::{DecodeError, RELEASE, Release, decode_message, encode_message};
 pub use command::{Command, Fence, Header, Headers, Leader, Record, Write};
 pub use fold::{Answer, BoundaryState, JournalState, JournalView};
 pub use held::{Held, Reply};

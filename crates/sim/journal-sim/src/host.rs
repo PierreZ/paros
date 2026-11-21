@@ -5,7 +5,9 @@
 //! a disk that survives a crash and fails some commits inside the contract
 //! (a failed commit may or may not have written its batch), a transport
 //! whose messages go through the walk's mailbox (lost, repeated and
-//! reordered), a clock that the walk moves, and the journal's register.
+//! reordered) as bytes ([`Envelope::encode`], so every message that the
+//! roles send crosses the byte codec of #1391 (role message codec) and the
+//! receiver gets what the decoder gives back), a clock that the walk moves, and the journal's register.
 //! Process `p` serves acceptor `p` and replica `10 + p` of segment 1, and,
 //! after a campaign on it, leader `100 + p`. A crash drops the driver and
 //! keeps the disk; a restart is a new driver on the same disk, and the
@@ -208,7 +210,13 @@ impl Transport for Wire {
             }
             _ => {}
         }
-        self.outbox.borrow_mut().push(envelope);
+        // A process sends bytes: the message that arrives is the one the
+        // decoder gives back, and it must be the message that was sent.
+        let bytes = envelope.encode();
+        let decoded = Envelope::decode(&bytes)
+            .unwrap_or_else(|e| panic!("{envelope:?} does not decode from its bytes: {e:?}"));
+        assert_eq!(decoded, envelope, "a message crosses its bytes unchanged");
+        self.outbox.borrow_mut().push(decoded);
     }
 
     fn receive(&mut self) -> Option<Envelope> {
