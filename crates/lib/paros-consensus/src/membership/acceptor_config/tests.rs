@@ -285,3 +285,23 @@ fn a_wire_configuration_is_normalized_like_a_built_one() {
         AcceptorConfig::new(nodes([1, 2]), QuorumSystem::Majority)
     );
 }
+
+/// Only a sorted, deduplicated membership that the quorum system admits,
+/// with a domain for each member or none, is well formed. The constructor
+/// normalizes, so the bad shapes are built by hand here.
+#[test]
+fn only_a_normalized_configuration_is_well_formed() {
+    let raw = |members: &[u64], domains: usize| AcceptorConfig {
+        members: nodes(members.iter().copied()),
+        quorum_system: QuorumSystem::Majority,
+        domains: vec![FailureDomain::new("", "a"); domains],
+        proxies: 0,
+        replicas: 0,
+    };
+    assert!(raw(&[1, 2, 3], 0).is_well_formed());
+    assert!(raw(&[1, 2, 3], 3).is_well_formed());
+    assert!(!raw(&[1, 1, 2], 0).is_well_formed(), "duplicated");
+    assert!(!raw(&[2, 1, 3], 0).is_well_formed(), "unsorted");
+    assert!(!raw(&[1, 2, 3], 2).is_well_formed(), "a domain short");
+    assert!(!raw(&[], 0).is_well_formed(), "empty");
+}

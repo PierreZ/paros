@@ -85,3 +85,22 @@ fn partitions_are_judged_per_partition() {
     );
     assert!(!config.zone_rule().holds());
 }
+
+/// Losing a domain must leave both an election and a decision possible:
+/// a column that waits for every accept elects without any zone but
+/// decides only with all of them.
+#[test]
+fn a_zone_loss_that_keeps_only_elections_loses_the_quorum() {
+    let config = zoned(
+        &[(1, "a"), (2, "b"), (3, "c")],
+        QuorumSystem::Grid {
+            rows: 3,
+            cols: 1,
+            acks: 3,
+        },
+    );
+    assert_eq!(
+        config.zone_rule(),
+        ZoneRule::LosesQuorum(FailureDomain::new("", "a"))
+    );
+}

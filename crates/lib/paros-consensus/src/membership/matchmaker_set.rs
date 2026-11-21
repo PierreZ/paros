@@ -23,9 +23,10 @@ impl MatchmakerGeneration {
     pub fn next(self) -> Self {
         let next = Self(self.0.saturating_add(1));
         assert!(next >= self, "a generation never moves back");
-        if self.0 < u64::MAX {
-            assert!(next > self, "a successor generation is strictly newer");
-        }
+        assert!(
+            self.0 == u64::MAX || next > self,
+            "a successor generation is strictly newer"
+        );
         next
     }
 }
@@ -291,6 +292,32 @@ mod tests {
         let set = MatchmakerSet::from(wire);
         assert_eq!(set.generation, MatchmakerGeneration(4));
         assert_eq!(set.members(), [1, 2, 3].map(MatchmakerId).as_slice());
+    }
+
+    /// Only a non-empty, sorted and deduplicated membership is well formed.
+    /// The constructor normalizes, so the bad shapes are built by hand here.
+    #[test]
+    fn only_a_sorted_deduplicated_nonempty_set_is_well_formed() {
+        let raw = |members: &[u64]| MatchmakerSet {
+            generation: MatchmakerGeneration(0),
+            members: members.iter().copied().map(MatchmakerId).collect(),
+        };
+        assert!(raw(&[1]).is_well_formed());
+        assert!(raw(&[1, 2, 3]).is_well_formed());
+        assert!(!raw(&[]).is_well_formed(), "empty");
+        assert!(!raw(&[2, 1]).is_well_formed(), "unsorted");
+        assert!(!raw(&[1, 1]).is_well_formed(), "duplicated");
+    }
+
+    /// A generation's successor is one above it, and the last generation
+    /// saturates.
+    #[test]
+    fn a_generation_moves_up_by_one() {
+        assert_eq!(MatchmakerGeneration(0).next(), MatchmakerGeneration(1));
+        assert_eq!(
+            MatchmakerGeneration(u64::MAX).next(),
+            MatchmakerGeneration(u64::MAX)
+        );
     }
 
     /// A set with no matchmaker can never form a quorum. The wire path
