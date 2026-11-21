@@ -117,6 +117,19 @@ an action of the model. The checked walks meet 9 named rules, a forged `Bootstra
 the control (the oracles pass it, TLC refuses the decree before every bootstrap), and TLC refuses
 23 named edits of the recorded walks.
 
+**The live trace check** (#1310 (check long runs live), `tests/live.rs`). A long run writes more
+events than one TLC run can follow (one behaviour holds at most 65,535 states), and a check after
+the run sees a divergence only when the run ends. moonpool-tla's `Live` checks the events while
+the run writes them, in chunks on a thread of its own: each chunk starts from every model state
+at which the chunk before it ended, so the chunks check what one TLC run over the whole trace
+would check, with no limit on the length. The first chunk that no behaviour matches stops the
+check, and the run stops with it. The fold walk has an events port for it
+(`FoldModel::build_reported`, the walk's form of `Events`, rule 5 of §J4.2): it reports its fresh
+journal, then each event as it records it. Its long shape (`Shape::LONG`) seals up to 200
+segments. In CI one long walk (about 7,000 events, 199 seals) is checked live, and the trace
+control (`BelowInSegment`) is stopped at its first wrong answer, before the walk ends. Each night
+the `Journal live` workflow checks one fold walk with no end live for four hours.
+
 ### J7.4 The whole journal under moonpool-sim
 
 A moonpool-sim of the whole journal runs the driver, the adapter, many journals in one process,
@@ -124,6 +137,14 @@ disk faults inside the contract, machine and zone loss, the controller and clien
 (#1330 (paros-journal-moonpool)). Every input is recorded (§J4.2, rule 2), so a red run replays.
 A contract suite certifies a backend's API only; crash safety is claimed only on a disk that can
 inject faults (Pierre, 2026-11-19).
+
+Its `Events` port feeds the live trace check of §J7.3, so a run of many hours is judged against
+#1189 while it runs (#1310 (check long runs live)). The driver reports each write before it makes
+it (announce, make, confirm): after a kill, only the last announced write is uncertain, and the
+report at restart decides. A control tears a persist batch during a reconfiguration (as E3 of
+etcd-raft, a lost commit index across a membership change), and the live check must refuse it.
+**Open**: these three parts need the driver; #1329 (paros-journal-io) and #1330
+(paros-journal-moonpool) build them.
 
 ### J7.5 The controller's `decide`
 
