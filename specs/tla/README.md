@@ -99,7 +99,7 @@ no checked model takes. The trace specs today are:
   the walk's network (a batch lands whole, maybe twice, with no Paxos under it) and checks that
   each answer holds its own records and that a batch keeps push order.
 
-Merging `leader-handoff/` and `proxy-leader/` into the node model is the next step of #1306.
+Merging `leader-handoff/` and `proxy-leader/` into the node model is #1343 (merge proxy and handoff into the node model).
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take

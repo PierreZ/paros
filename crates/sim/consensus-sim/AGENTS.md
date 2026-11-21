@@ -254,5 +254,5 @@ Every cluster flavor has a trace spec (#1198 (trace checking), #1231 (traced wal
 rules)). A spec judges the steps of its own model: `MatchmakerGridTrace` judges the
 matchmaking, the log, the GC and the proxy `Commit` of the walk with every compartment, and
 the proxy rounds across a crash and the guards of a handoff are judged by `proxy-leader/` and
-`leader-handoff/` on their own walks. Merging those two models into `node/` is the next step of
-#1306 (trace specs extend the checked model).
+`leader-handoff/` on their own walks. Merging those two models into `node/` is #1343 (merge proxy and
+handoff into the node model).

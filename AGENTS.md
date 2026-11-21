@@ -142,7 +142,7 @@ log, matchmaking, the GC and the retirement, grids, the compaction floor and the
 faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads and the
 proxy `Commit`), which eight trace specs extend; `proxy-leader/`; `leader-handoff/`;
 `generations/` (the chain of matchmaker set handovers); and `batcher/`. Merging `proxy-leader/`
-and `leader-handoff/` into `node/` is the next step of #1306. Each trace spec names the steps its checked walks must take (a `Noop` gap
+and `leader-handoff/` into `node/` is #1343 (merge proxy and handoff into the node model). Each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
 rules)). The trace checks are tested too: each trace spec must refuse about 20 named edits of
