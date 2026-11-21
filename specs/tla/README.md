@@ -987,7 +987,7 @@ Results (`reads/checks.txt`):
 | `grid_full_static`: the full grid, no change of members | pass (588 thousand states, 35 seconds) |
 | `grid_full_seal`: the full grid, a change of members, `Seal = "reads"` | pass (1.6 million states, 1.5 minutes) |
 | `grid_full_seal_others`: `Seal = "others"`, the seal of each configuration of `H_b` other than `C_b` (the code, #1209) | pass (1.9 million states, 1.5 minutes) |
-| `grid_full_seal_others3`: `grid_full_seal_others` with three ballots of two proposers, `OwnerParos3` (`long`) | O3RESULT |
+| `grid_full_seal_others3`: `grid_full_seal_others` with three ballots of two proposers, `OwnerParos3` (`long`) | no violation in 16.1 million distinct states (bounded: 30 minutes, 2 workers) |
 | `grid_partitions`: the partitions, a change of members | no violation in 71.2 million distinct states, to depth 23 (a bounded run of 2 hours, 2 workers; `long`) |
 
 The trace of `grid_full` is the stale read that `quorum_read.rs` names (a row "wholly unaware of
