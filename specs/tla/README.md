@@ -2537,8 +2537,10 @@ offloaded S1, and is "trunc" for a trimmed S1.
 | `trim_open` | ci | violation of `Findable`: the open S2 is trimmed when its range so far is below the floor; a later write of S2 has nowhere to live |
 | `acc_floor` | ci | violation of `Ends`: the acceptors of S1 compact to the decided floor before a replica of R1 applied S1; nobody can fold S1, the boundary state is never written, and R2 never starts |
 | `nojump` | ci | violation of `Ends`: no `TrimmedTo`; a replica of R2 behind the floor waits for ever for a slot that the acceptors and its peer dropped |
-| `crash_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (23.5 million distinct states, depth 26, 3.76 million states left on the queue), no violation; run of the second Fable review of the journal plan, 2026-11-20. A cut that finishes is #1321 |
-| `live_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (16.7 million distinct states, depth 20, 6.2 million states left and growing), no violation; `Ends` is checked as an invariant on a prefix of the state space only. Same run, same issue |
+| `crash_cut` | long | pass: the safety invariants of `crash` (two replicas in each set, `F = 1`, retire at `F + 1`, one read of `seq` 0) with all three values, cut by the state constraint `Budget` to at most two writes, one `Truncate(1)` and one `Truncate(2)`; the budget is `NS` values, so every run still fills the log. 6.0 million distinct states, depth 38, about 7 minutes with 4 workers (#1321) |
+| `live_cut` | long | pass: `Ends` of `live` with three replicas in R1 and in R2, `F = 1` and crashes, no reads, all three values with the same `Budget`. A state inside `Budget` with a slot left can always choose a value that stays inside it, so each end that TLC judges is a true end of the spec, not an end that the cut makes. 45.7 million distinct states, depth 46, about 91 minutes with 4 workers (#1321) |
+| `crash_all` | long | pass, bounded: does not finish; TLC stops after 40 minutes. The second Fable review of the journal plan (2026-11-20) ran it for 38 minutes with 2 workers: 23.5 million distinct states, depth 26, 3.76 million states left on the queue, no violation. `crash_cut` is its cut that finishes |
+| `live_all` | long | pass, bounded: does not finish; TLC stops after 40 minutes. Same run: 16.7 million distinct states, depth 20, 6.2 million states left and growing, no violation; `Ends` is checked on a prefix of the state space only. `live_cut` is its cut that finishes |
 
 The answer to #1276:
 
