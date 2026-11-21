@@ -355,9 +355,11 @@ impl ColocatedNode {
                 .copied()
                 .filter(|m| !matchmakers.contains(*m))
                 .collect();
-            if !outside.is_empty() {
-                probe!(reachable, "node: a campaign asks the pool outside its set");
-            }
+            probe!(
+                sometimes,
+                !outside.is_empty(),
+                "node: a campaign asks the pool outside its set"
+            );
             for matchmaker in outside {
                 self.pending_match_requests
                     .push((matchmaker, request.clone()));
@@ -427,9 +429,11 @@ impl ColocatedNode {
                     .copied()
                     .filter(|m| !matchmakers.contains(*m)),
             );
-            if asked.len() > members {
-                probe!(reachable, "node: a probe asks the pool outside its set");
-            }
+            probe!(
+                sometimes,
+                asked.len() > members,
+                "node: a probe asks the pool outside its set"
+            );
         }
         for matchmaker in asked {
             self.pending_match_requests
@@ -1045,25 +1049,18 @@ impl ColocatedNode {
             MatchStep::Registered {
                 remaining: m.remaining(matchmakers),
             }
-        } else if let Some((newest, config)) = m
-            .stale_belief()
-            .filter(|(newest, config)| *newest > floor || honored.as_ref() == Some(config))
-        {
+        } else if let Some((newest, config)) = m.stale_belief().filter(|(newest, config)| {
+            // At the floor itself the fact is the one the belief
+            // matched or the won leadership's own: never a missed
+            // reconfiguration, and only the honored one is kept.
+            newest.cmp(&floor).is_gt() || honored.as_ref() == Some(config)
+        }) {
             if newest <= floor {
                 probe!(
                     reachable,
                     "matchmaking: a campaign adopts a reconfiguration its won leadership ran"
                 );
-                // The fact this belief matched is one the won leadership
-                // never ran: no late probe answer revives it (#278).
-                let refuted = self.belief_fact;
-                if refuted > newest {
-                    probe!(
-                        reachable,
-                        "matchmaking: a campaign refutes a reconfiguration a late probe answer named"
-                    );
-                    self.refuted_fact = self.refuted_fact.max(refuted);
-                }
+                self.refute_belief_fact(newest);
             }
             // Stale belief: the quorum's histories name a
             // reconfiguration to a configuration other than the
@@ -1236,7 +1233,13 @@ impl ColocatedNode {
         let Some(check) = self.retire_check.as_mut() else {
             return;
         };
-        if check.tag() != tag || !matchmakers.contains(matchmaker) {
+        // `on_match_reply` hands an outsider's answer to
+        // `fold_outside_answer`: only a member of the set reaches here.
+        assert!(
+            matchmakers.contains(matchmaker),
+            "a retirement check folds only a member's answer"
+        );
+        if check.tag() != tag {
             return;
         }
         if named.is_some() {
@@ -1272,6 +1275,26 @@ impl ColocatedNode {
         );
     }
 
+    /// A campaign adopts the reconfiguration at `newest` that its won
+    /// leadership ran: the fact this belief matched, when above it, is one
+    /// that leadership never ran, so no late probe answer revives it (#278).
+    /// The matched fact never sits at `newest` itself: one ballot binds one
+    /// configuration, and the belief is not the adopted one.
+    fn refute_belief_fact(&mut self, newest: Ballot) {
+        let refuted = self.belief_fact;
+        if refuted.cmp(&newest).is_gt() {
+            probe!(
+                reachable,
+                "matchmaking: a campaign refutes a reconfiguration a late probe answer named"
+            );
+            self.refuted_fact = self.refuted_fact.max(refuted);
+        }
+        assert!(
+            self.refuted_fact >= refuted || refuted <= newest,
+            "a refuted fact is kept"
+        );
+    }
+
     /// A probe answer named `named`, the highest registration at that
     /// matchmaker, at or above its watermark, whose configuration names this
     /// node (#1002 (retire fence gaps)): every later Phase 1 needs this
@@ -1282,13 +1305,11 @@ impl ColocatedNode {
         let Some(named) = named else {
             return;
         };
-        let fence = self.registration_fence;
-        if named > fence {
-            probe!(
-                reachable,
-                "matchmaking: a probe answer names a registration that names the node"
-            );
-        }
+        probe!(
+            sometimes,
+            named > self.registration_fence,
+            "matchmaking: a probe answer names a registration that names the node"
+        );
         self.fence_registration(named);
         assert!(
             self.registration_fence >= named,
@@ -1369,12 +1390,14 @@ impl ColocatedNode {
     /// If the fold moves the belief backwards or leaves a member without a
     /// campaign (a programmer error, never an operating condition).
     fn fold_late_probe_answer(&mut self, effective: Option<(Ballot, AcceptorConfig)>) -> MatchStep {
-        let me = self.config.id;
-        // Wire input: an answer that cannot move the belief, or one that
-        // lands after the node moved on, is ignored whole.
-        let outside = self.belief_source == BeliefSource::Heard && !self.acceptors.contains(me);
-        let idle =
-            self.role == NodeRole::Follower && self.matchmaking.is_none() && self.probe.is_none();
+        // A closed probe's tag is kept only while its node is an idle
+        // follower outside the belief it heard: a campaign, a fresh probe
+        // and an adopted belief each drop it (`assert_fact_invariants`). So
+        // only the answer itself decides here.
+        assert!(
+            self.closed_probe.is_some() && self.role == NodeRole::Follower,
+            "a late probe answer reaches an idle follower"
+        );
         let floor = self.probe_floor();
         let newer = effective
             .as_ref()
@@ -1384,19 +1407,20 @@ impl ColocatedNode {
         let refuted = effective
             .as_ref()
             .is_some_and(|(ballot, _)| *ballot <= self.refuted_fact);
-        if newer && refuted {
-            probe!(
-                reachable,
-                "matchmaking: a late probe answer names a refuted reconfiguration"
-            );
-        }
+        probe!(
+            sometimes,
+            newer && refuted,
+            "matchmaking: a late probe answer names a refuted reconfiguration"
+        );
         let newer = newer && !refuted;
         // The closing probe's #189 guard: a configuration naming a node this
         // pool has not admitted yet is not adopted.
         let drawn = effective
             .as_ref()
             .is_some_and(|(_, config)| config.is_drawn_from(&self.pool));
-        if !outside || !idle || !newer || !drawn {
+        // Wire input: an answer that cannot move the belief is ignored
+        // whole.
+        if !newer || !drawn {
             return MatchStep::Ignored;
         }
         let since = self.acceptors_since;
@@ -1573,10 +1597,9 @@ impl ColocatedNode {
     /// forever (replay-recipe 9659811566879741864
     /// 314278:14017104087104089761 on b0ccf25).
     fn fold_late_refusal(&mut self, answer: Answer) -> MatchStep {
-        let idle = self.role == NodeRole::Follower
-            && self.matchmaking.is_none()
-            && self.probe.is_none()
-            && self.proposer.election().is_none();
+        // A follower holds no matchmaking phase and no election
+        // (`assert_role_invariants`).
+        let idle = self.role == NodeRole::Follower && self.probe.is_none();
         let Answer::Refused(refusal) = answer else {
             return MatchStep::Ignored;
         };
@@ -1584,12 +1607,13 @@ impl ColocatedNode {
             return MatchStep::Ignored;
         }
         let believed = self.deployment_matchmakers().generation;
-        let successor = match refusal {
-            MatchRefusal::Stopped {
-                successor: Some(set),
-            } => set,
-            MatchRefusal::Generation { current } if current.generation > believed => current,
-            _ => return MatchStep::Ignored,
+        // `learn_matchmakers` takes only a set later than the believed one.
+        let (MatchRefusal::Stopped {
+            successor: Some(successor),
+        }
+        | MatchRefusal::Generation { current: successor }) = refusal
+        else {
+            return MatchStep::Ignored;
         };
         if !self.learn_matchmakers(&successor) {
             return MatchStep::Ignored;
@@ -1703,16 +1727,12 @@ impl ColocatedNode {
             | MatchRefusal::Retired { .. }
             | MatchRefusal::Rejoined { .. } => {}
         }
-        let believed = self.matchmakers.as_ref().map(|set| set.generation);
+        // `learn_matchmakers` takes only a set later than the believed one.
         let successor = match &refusal {
             MatchRefusal::Stopped {
                 successor: Some(set),
-            } => Some(set.clone()),
-            MatchRefusal::Generation { current }
-                if believed.is_some_and(|believed| current.generation > believed) =>
-            {
-                Some(current.clone())
             }
+            | MatchRefusal::Generation { current: set } => Some(set.clone()),
             _ => None,
         };
         self.become_follower(None);

@@ -172,12 +172,19 @@ impl ColocatedNode {
     /// Queue the GC requests once the condition holds. Idempotent; a no-op
     /// on a non-leader or a plain deployment.
     pub(super) fn try_gc(&mut self) {
-        if self.role != NodeRole::Leader || !self.config.has_matchmakers() {
-            return;
-        }
         if self.gc.as_ref().is_none_or(Collector::requested) || !self.gc_covered() {
             return;
         }
+        // An open campaign lives only on a leader of a matchmaker deployment
+        // (`assert_invariants`), so no other node gets here.
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader requests a GC floor"
+        );
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment requests a GC floor"
+        );
         if let Some(gc) = self.gc.as_mut() {
             gc.request();
         }
@@ -437,7 +444,8 @@ impl ColocatedNode {
             assert!(self.probe.is_none(), "a plain deployment never probes");
             return false;
         }
-        let idle = self.role == NodeRole::Follower && self.matchmaking.is_none();
+        // A follower holds no matchmaking phase (`assert_invariants`).
+        let idle = self.role == NodeRole::Follower;
         let asking = self
             .retire_check
             .as_ref()
@@ -496,12 +504,11 @@ impl ColocatedNode {
         // opened is staged by the first probe, and a node that heard its
         // belief on the wire may campaign before that probe: such a rejoin
         // is open on a candidate too.
-        if self.probe.is_some() || self.retire_check.is_some() {
-            assert!(
-                self.role == NodeRole::Follower,
-                "a retirement check runs on a follower"
-            );
-        }
+        assert!(
+            self.role == NodeRole::Follower
+                || (self.probe.is_none() && self.retire_check.is_none()),
+            "a retirement check runs on a follower"
+        );
         self.probe.is_some() || self.retire_check.is_some() || rejoining
     }
 
@@ -597,9 +604,7 @@ impl ColocatedNode {
             return;
         }
         let before = self.gc_floor_heard;
-        if before.is_none_or(|heard| floor > heard) {
-            self.gc_floor_heard = Some(floor);
-        }
+        self.gc_floor_heard = before.max(Some(floor));
         assert!(self.gc_floor_heard >= before, "a heard floor never falls");
         assert!(
             self.gc_floor_heard.is_some_and(|heard| heard >= floor),
