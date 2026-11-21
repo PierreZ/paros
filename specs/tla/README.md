@@ -43,6 +43,25 @@ that `Inv` covers: `decree/` with no wipe or with a wiped acceptor that takes no
 covered), `multi-paxos/` with `Durable = "before"` and `Identity = TRUE`. A pass of a
 `multi-paxos/` check says that no drawn state breaks `Inv` in one step; it is not a proof.
 
+## Proofs
+
+A proof holds at every size: every number of acceptors, values and ballots, and every quorum
+system whose quorums intersect. A proof is a module `<Model>Proof.tla` beside its model, checked
+by TLAPS (`nix develop .#proofs --command scripts/check-proofs.sh`; CI's `proofs` job of the
+`TLA` workflow proves every obligation again, with no cache). This is step 2 of #1307.
+
+| Model | Proof | What it proves |
+|---|---|---|
+| `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 642 obligations, Z3 and Zenon, about 2 minutes |
+
+The TLAPS of nixpkgs (1.4.5) has no Isabelle and no LS4. So a proof uses no induction lemma (they
+need Isabelle), and the last step of `Safety` (`Spec => []Agreement`), the TLA rule INV1 applied
+to the three theorems, is `PROOF OMITTED`: LS4, the PTL backend, is the one tool that checks it.
+The constant facts that a proof uses are named `ASSUME`s of the model (`AcceptorsFinite`,
+`QuorumsType`, `NoneNotValue` and others), so TLC checks them on each configuration. A proof has a
+control too: remove a guard that the proof needs (for example `prom[a] <= b` in `Accept`) and
+TLAPS fails.
+
 ## Guard mutation
 
 `scripts/mutate-tla.py` tests the checks of each model (#1311 (mutate spec guards)). A guard is
