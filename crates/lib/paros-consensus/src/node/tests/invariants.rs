@@ -221,3 +221,25 @@ fn a_stale_trim_point_never_rewinds_a_frontier() {
         "a stale trim point writes nothing"
     );
 }
+
+// ---- corrupted node state ---------------------------------------------------
+
+/// The registration fence never passes the membership fence: a node state
+/// that breaks it trips `assert_invariants`.
+#[test]
+#[should_panic(expected = "the membership fence covers the registration fence")]
+fn a_registration_fence_above_the_membership_fence_trips_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.registration_fence = ballot(3, 1);
+    n.assert_invariants();
+}
+
+/// A plain deployment never matches a reconfiguration fact: a node state that
+/// holds one trips `assert_invariants`.
+#[test]
+#[should_panic(expected = "a plain deployment matches no reconfiguration fact")]
+fn a_plain_deployment_with_a_reconfiguration_fact_trips_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.belief_fact = ballot(3, 1);
+    n.assert_invariants();
+}
