@@ -47,16 +47,20 @@ covered), `multi-paxos/` with `Durable = "before"` and `Identity = TRUE`. A pass
 
 A proof holds at every size: every number of acceptors, values and ballots, and every quorum
 system whose quorums intersect. A proof is a module `<Model>Proof.tla` beside its model, checked
-by TLAPS (`nix develop .#proofs --command scripts/check-proofs.sh`; CI's `proofs` job of the
-`TLA` workflow proves every obligation again, with no cache). This is step 2 of #1307.
+by TLAPS (`nix develop .#proofs --command scripts/check-proofs.sh`; CI's `proofs` jobs of the
+`TLA` workflow prove every obligation again, with no cache, one job for each `*Proof.tla`
+module). A long proof is split into several `*Proof.tla` modules so that each module fits the 30
+minutes of a job; the module that extends them all is the map of the proof. This is step 2 of
+#1307.
 
 | Model | Proof | What it proves |
 |---|---|---|
 | `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 679 obligations, Z3 and Zenon, about 2 minutes |
+| `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Persist`, `Restart`, `Wipe`) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,283 obligations, Z3 and Zenon, at most 6 minutes for each module |
 
 The TLAPS of nixpkgs (1.4.5) has no Isabelle and no LS4. So a proof uses no induction lemma (they
 need Isabelle; a least or highest member of a set of naturals comes from `WFMin`, which is first
-order, as `MinExists` and `MaxExists` of `DecreeProof.tla` do), and the last step of `Safety` (`Spec => []Agreement`), the TLA rule INV1 applied
+order, as `MinExists` and `MaxExists` of `DecreeProof.tla` and `MultiPaxosFactsProof.tla` do), and the last step of `Safety` (`Spec => []Agreement`), the TLA rule INV1 applied
 to the three theorems, is `PROOF OMITTED`: LS4, the PTL backend, is the one tool that checks it.
 The constant facts that a proof uses are named `ASSUME`s of the model (`AcceptorsFinite`,
 `QuorumsType`, `NoneNotValue` and others), so TLC checks them on each configuration. A proof has a
