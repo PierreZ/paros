@@ -1107,8 +1107,11 @@ impl Replica {
             _ => 0..0,
         };
         let at_floor = |position: Seq| position < self.base.next_seq || held.contains(&position.0);
-        let mut pinned = self.floor == self.folded
-            || (self.state.first_seq < self.state.next_seq && at_floor(self.state.first_seq));
+        // The journal's first record pins the floor slot that holds it. An
+        // empty journal pins nothing this way: its first position is its
+        // next one, past the base and past every record the folded floor
+        // slot accepted.
+        let mut pinned = self.floor == self.folded || at_floor(self.state.first_seq);
         if self.mode == WriterMode::Single {
             for (slot, command) in self.chosen.range(self.floor..self.folded) {
                 let Some(entry) = command.write() else {
