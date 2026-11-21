@@ -20,6 +20,14 @@ draft_states          violation  ci
 draft_one_state       violation  ci
 # Reached: a grid that the reshape accepts can be electable and write nowhere.
 reach_writes_blocked  violation  ci
+# V1 (#1319): the partitioned grid only and no bypass. The states are a
+# partition, each action can run (WritesDegraded needs a column that can
+# write, not a bypass hold), the two spares are one number, and WritesBlocked
+# is empty (the same invariant as reach_writes_blocked).
+v1                    pass       ci
+# Control: the draft states on the v1 grids. A live leader with no column
+# that can write is in WritesDegraded, and it cannot write.
+v1_draft              violation  ci
 # Zones: no placement over two zones survives a zone (hold and alert after a
 # zone loss on three zones); zone_margin says what the quorums say; with
 # row = zone a zone loss takes every column to the same spare at once.

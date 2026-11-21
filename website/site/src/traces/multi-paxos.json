@@ -2395,6 +2395,11 @@
               "label": "A read waits for a slot",
               "run": "read-waits",
               "beat": 0
+            },
+            {
+              "label": "Break the rule: skip Phase 1",
+              "run": "break-the-rule",
+              "beat": 0
             }
           ]
         }
@@ -54074,6 +54079,3099 @@
         }
       ],
       "outcome": "Nodes 0, 1, 2: slot 0 = alpha, slot 1 = bravo."
+    },
+    {
+      "id": "break-the-rule",
+      "label": "Break the rule: skip Phase 1",
+      "fork": 8,
+      "start": [
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ]
+      ],
+      "start_logs": [
+        [],
+        [],
+        []
+      ],
+      "start_nodes": [
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        }
+      ],
+      "steps": [
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "node 0 starts an election",
+          "phase": null,
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 0 starts an election. Node 0 wants to lead at ballot 1.0. It starts Phase 1.",
+          "notes": [
+            "Node 0's election timeout fires. It waited long enough without hearing from a leader. A timeout is not a safety decision. A timeout costs one round and nothing more.",
+            "Node 0 becomes a candidate at ballot 1.0: it wants the whole log suffix.",
+            "Node 0 raises its durable promise from 0.0 to 1.0. The promise is durable before anything leaves.",
+            "Node 0 campaigns at ballot 1.0. It sends one Prepare to 2 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 0 asks 2 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
+          ],
+          "fields": [],
+          "voice": "",
+          "state": [
+            [
+              "candidate 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ],
+          "wire": [
+            {
+              "id": 1,
+              "from": "n0",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Prepare 1.0",
+          "phase": "prepare",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 1 promises ballot 1.0. From now on, it refuses every lower ballot.",
+          "notes": [
+            "Node 1 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
+            "Node 1 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
+          "state": [
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ],
+          "message": 1,
+          "wire": [
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "Prepare 1.0",
+          "phase": "prepare",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 2 promises ballot 1.0. From now on, it refuses every lower ballot.",
+          "notes": [
+            "Node 2 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
+            "Node 2 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
+          "state": [
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ],
+          "message": 2,
+          "wire": [
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 0 asks Node 1 for the chosen slots that Node 0 does not have yet.",
+          "notes": [
+            "Node 1 receives a catch-up request from node 0: it is missing everything from slot 0."
+          ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
+          "state": [
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ],
+          "message": 3,
+          "wire": [
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n2",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 0 asks Node 2 for the chosen slots that Node 0 does not have yet.",
+          "notes": [
+            "Node 2 receives a catch-up request from node 0: it is missing everything from slot 0."
+          ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
+          "state": [
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ],
+          "message": 4,
+          "wire": [
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n0",
+          "label": "Promise 1.0",
+          "phase": "promise",
+          "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 1. Node 0 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 1.0.",
+          "notes": [
+            "Node 0 receives a Promise for ballot 1.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
+            "Node 0 is the leader at ballot 1.0. A promise quorum answered its Prepare. No ballot below 1.0 can decide anything now, and node 0 may run Phase 2 alone."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n0",
+            "ballot": "1.0",
+            "members": [
+              "n0",
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [],
+            [],
+            []
+          ],
+          "message": 5,
+          "wire": [
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n0",
+          "label": "Promise 1.0",
+          "phase": "promise",
+          "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 2.",
+          "notes": [
+            "Node 0 receives a Promise for ballot 1.0 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n0",
+            "ballot": "1.0",
+            "members": [
+              "n0",
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [],
+            [],
+            []
+          ],
+          "message": 6,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "the client writes alpha",
+          "phase": null,
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "The client writes alpha.",
+          "notes": [
+            "Client 7 asks node 0 to get alpha chosen. The leader gives it the next free slot, 0, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 0 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
+            "Node 0 proposes alpha for slot 0 at ballot 1.0, to 2 acceptors. No second Phase 1 is needed. The ballot it holds already covers the whole log suffix."
+          ],
+          "fields": [],
+          "voice": "",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [],
+            []
+          ],
+          "wire": [
+            {
+              "id": 7,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n0",
+          "to": "n2",
+          "label": "Accept 1.0 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "The Accept from Node 0 to Node 2 is lost. Node 2 does not get it.",
+          "notes": [
+            "Accept alpha at 1.0 for slot 0 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha in slot 0 at ballot 1.0.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [],
+            []
+          ],
+          "message": 8,
+          "wire": [
+            {
+              "id": 7,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n0",
+          "to": "n1",
+          "label": "Accept 1.0 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 1 votes for alpha in slot 0 at ballot 1.0.",
+          "notes": [
+            "Node 1 receives Accept 1.0 for slot 0, carrying alpha. Its promise was 1.0. It holds nothing at slot 0.",
+            "Node 1 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha in slot 0 at ballot 1.0.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            []
+          ],
+          "message": 7,
+          "wire": [
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n0",
+          "label": "Accepted 1.0 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 0 gets a vote from Node 1. A majority of the acceptors voted for it, so slot 0 = alpha is chosen. No later ballot can change it.",
+          "notes": [
+            "Node 0 receives an Accepted for slot 0 at 1.0 from node 1. Its round for that slot held 1 vote before this one.",
+            "Slot 0 is chosen. 2 of the 3 acceptors voted for alpha at ballot 1.0. A Phase-2 quorum here is 2 of 3. This decision is final. No later ballot can decide this slot differently.",
+            "Node 0 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I voted for your value in slot 0 at ballot 1.0. It is on my disk.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n0",
+            "ballot": "1.0",
+            "slot": 0,
+            "members": [
+              "n0",
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            []
+          ],
+          "message": 9,
+          "wire": [
+            {
+              "id": 10,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 10
+            },
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n0",
+          "to": "n1",
+          "label": "Commit 1.0 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "The Commit from Node 0 to Node 1 is lost. Node 1 does not get it.",
+          "notes": [
+            "Commit slot 0 = alpha at 1.0 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Slot 0 is chosen: alpha.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            []
+          ],
+          "message": 10,
+          "wire": [
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n0",
+          "to": "n2",
+          "label": "Commit 1.0 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "The Commit from Node 0 to Node 2 is lost. Node 2 does not get it.",
+          "notes": [
+            "Commit slot 0 = alpha at 1.0 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Slot 0 is chosen: alpha.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            []
+          ],
+          "message": 11,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "node 2 skips Phase 1",
+          "phase": null,
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 2.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 2 skips Phase 1.",
+          "notes": [
+            "Node 2 skips Phase 1. It sends Accepts for slot 0 with bravo at ballot 2.2 to every node, and it asked no acceptor what it voted. paros has no such path: the engine writes these messages, as a leader with this bug would."
+          ],
+          "fields": [],
+          "voice": "",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            []
+          ],
+          "wire": [
+            {
+              "id": 12,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accept",
+              "label": "Accept 2.2 · slot 0",
+              "fan": 12
+            },
+            {
+              "id": 13,
+              "from": "n2",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 2.2 · slot 0",
+              "fan": 12
+            },
+            {
+              "id": 14,
+              "from": "n2",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 2.2 · slot 0",
+              "fan": 12
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n2",
+          "to": "n0",
+          "label": "Accept 2.2 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 2.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "The Accept from Node 2 to Node 0 is lost. Node 0 does not get it.",
+          "notes": [
+            "Accept bravo at 2.2 for slot 0 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "2.2 (round 2, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Please vote for bravo in slot 0 at ballot 2.2.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            []
+          ],
+          "message": 12,
+          "wire": [
+            {
+              "id": 13,
+              "from": "n2",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 2.2 · slot 0",
+              "fan": 12
+            },
+            {
+              "id": 14,
+              "from": "n2",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 2.2 · slot 0",
+              "fan": 12
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n1",
+          "label": "Accept 2.2 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 2.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 1 votes for bravo in slot 0 at ballot 2.2.",
+          "notes": [
+            "Node 1 receives Accept 2.2 for slot 0, carrying bravo. Its promise was 1.0. It holds alpha at ballot 1.0 for slot 0.",
+            "Node 1 raises its durable promise from 1.0 to 2.2. The promise is durable before anything leaves.",
+            "Node 1 replaces its record for slot 0. It held alpha at ballot 1.0, and it now holds bravo at ballot 2.2. The record at the higher ballot replaces the record at the lower one, and that rule makes a restart safe."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "2.2 (round 2, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Please vote for bravo in slot 0 at ballot 2.2.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 2.2"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            []
+          ],
+          "message": 13,
+          "wire": [
+            {
+              "id": 14,
+              "from": "n2",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 2.2 · slot 0",
+              "fan": 12
+            },
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n2",
+              "phase": "accepted",
+              "label": "Accepted 2.2 · slot 0",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2",
+              "writes": [
+                "promise 2.2",
+                "slot 0: vote bravo at 2.2"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n2",
+          "label": "Accept 2.2 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 2.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 2 votes for bravo in slot 0 at ballot 2.2.",
+          "notes": [
+            "Node 2 receives Accept 2.2 for slot 0, carrying bravo. Its promise was 1.0. It holds nothing at slot 0.",
+            "Node 2 raises its durable promise from 1.0 to 2.2. The promise is durable before anything leaves.",
+            "Node 2 records slot 0 = bravo at ballot 2.2. The vote is durable before the Accepted that reports it leaves."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "2.2 (round 2, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Please vote for bravo in slot 0 at ballot 2.2.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 2.2"
+            ],
+            [
+              "promise 2.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 14,
+          "wire": [
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n2",
+              "phase": "accepted",
+              "label": "Accepted 2.2 · slot 0",
+              "fan": 15
+            },
+            {
+              "id": 16,
+              "from": "n2",
+              "to": "n2",
+              "phase": "accepted",
+              "label": "Accepted 2.2 · slot 0",
+              "fan": 16
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2",
+              "writes": [
+                "promise 2.2",
+                "slot 0: vote bravo at 2.2"
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "Accepted 2.2 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "stage": {
+            "title": "Phase 2 · ballot 2.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 2 gets a vote from Node 1.",
+          "notes": [
+            "Node 2 receives an Accepted for slot 0 at 2.2 from node 1. It has no open round for that slot, so no tally counts the vote."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "2.2 (round 2, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I voted for your value in slot 0 at ballot 2.2. It is on my disk.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 2.2"
+            ],
+            [
+              "promise 2.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n2",
+            "ballot": "2.2",
+            "slot": 0,
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 15,
+          "wire": [
+            {
+              "id": 16,
+              "from": "n2",
+              "to": "n2",
+              "phase": "accepted",
+              "label": "Accepted 2.2 · slot 0",
+              "fan": 16
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n2",
+          "label": "Accepted 2.2 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "stage": {
+            "title": "Phase 2 · ballot 2.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 2 gets a vote from Node 2. It already counted an answer from this sender for this ballot, so it ignores this copy.",
+          "notes": [
+            "Node 2 receives an Accepted for slot 0 at 2.2 from node 2. It has no open round for that slot, so no tally counts the vote."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "2.2 (round 2, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I voted for your value in slot 0 at ballot 2.2. It is on my disk.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 2.2"
+            ],
+            [
+              "promise 2.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n2",
+            "ballot": "2.2",
+            "slot": 0,
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 16,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2"
+            }
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "node 2 starts an election",
+          "phase": null,
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 3.2",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 2 starts an election. Node 2 wants to lead at ballot 3.2. It starts Phase 1.",
+          "notes": [
+            "Node 2's election timeout fires. It waited long enough without hearing from a leader. A timeout is not a safety decision. A timeout costs one round and nothing more.",
+            "Node 2 becomes a candidate at ballot 3.2: it wants the whole log suffix.",
+            "Node 2 raises its durable promise from 2.2 to 3.2. The promise is durable before anything leaves.",
+            "Node 2 campaigns at ballot 3.2. It sends one Prepare to 2 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 2 asks 2 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
+          ],
+          "fields": [],
+          "voice": "",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 2.2"
+            ],
+            [
+              "candidate 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "wire": [
+            {
+              "id": 17,
+              "from": "n2",
+              "to": "n0",
+              "phase": "prepare",
+              "label": "Prepare 3.2",
+              "fan": 17
+            },
+            {
+              "id": 18,
+              "from": "n2",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 3.2",
+              "fan": 17
+            },
+            {
+              "id": 19,
+              "from": "n2",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 19
+            },
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 19
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "3.2",
+              "promise": "3.2",
+              "writes": [
+                "promise 3.2"
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n2",
+          "to": "n0",
+          "label": "Prepare 3.2",
+          "phase": "prepare",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 3.2",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "The Prepare from Node 2 to Node 0 is lost. Node 0 does not get it.",
+          "notes": [
+            "Prepare at 3.2 for slots from 0 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "3.2 (round 3, node 2)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 3.2. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 2.2"
+            ],
+            [
+              "candidate 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 17,
+          "wire": [
+            {
+              "id": 18,
+              "from": "n2",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 3.2",
+              "fan": 17
+            },
+            {
+              "id": 19,
+              "from": "n2",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 19
+            },
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 19
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.2",
+              "promise": "2.2"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n1",
+          "label": "Prepare 3.2",
+          "phase": "prepare",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 3.2",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 1 promises ballot 3.2. From now on, it refuses every lower ballot.",
+          "notes": [
+            "Node 1 receives Prepare 3.2 for every slot from 0. Its promise was 2.2. It holds 1 accepted record to report.",
+            "Node 1 raises its durable promise from 2.2 to 3.2, and reports the 1 value it accepted. A new leader must re-propose that report. It must not overwrite it."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "3.2 (round 3, node 2)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 3.2. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "candidate 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 18,
+          "wire": [
+            {
+              "id": 19,
+              "from": "n2",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 19
+            },
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 19
+            },
+            {
+              "id": 21,
+              "from": "n1",
+              "to": "n2",
+              "phase": "promise",
+              "label": "Promise 3.2",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2",
+              "writes": [
+                "promise 3.2"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n2",
+          "to": "n0",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 3.2",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "The CatchUpRequest from Node 2 to Node 0 is lost. Node 0 does not get it.",
+          "notes": [
+            "Catch me up from slot 0 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "candidate 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 19,
+          "wire": [
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 19
+            },
+            {
+              "id": 21,
+              "from": "n1",
+              "to": "n2",
+              "phase": "promise",
+              "label": "Promise 3.2",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n1",
+          "label": "CatchUpRequest",
+          "phase": "catchup",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 3.2",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 2 asks Node 1 for the chosen slots that Node 2 does not have yet.",
+          "notes": [
+            "Node 1 receives a catch-up request from node 2: it is missing everything from slot 0."
+          ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "candidate 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 20,
+          "wire": [
+            {
+              "id": 21,
+              "from": "n1",
+              "to": "n2",
+              "phase": "promise",
+              "label": "Promise 3.2",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "Promise 3.2",
+          "phase": "promise",
+          "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 3.2",
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
+          },
+          "says": "Node 2 gets a promise for ballot 3.2 from Node 1. Node 2 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 3.2.",
+          "notes": [
+            "Node 2 receives a Promise for ballot 3.2 from node 1. The Promise reports the 1 accepted value it holds at or above the slot the Prepare asked about.",
+            "Node 2 is the leader at ballot 3.2. A promise quorum answered its Prepare. No ballot below 3.2 can decide anything now, and node 2 may run Phase 2 alone.",
+            "Node 2 replaces its record for slot 0. It held bravo at ballot 2.2, and it now holds bravo at ballot 3.2. The record at the higher ballot replaces the record at the lower one, and that rule makes a restart safe.",
+            "Node 2 proposes bravo for slot 0 at ballot 3.2, to 2 acceptors. No second Phase 1 is needed. The ballot it holds already covers the whole log suffix."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "3.2 (round 3, node 2)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "slot 0 = bravo at 2.2"
+            }
+          ],
+          "voice": "I promise ballot 3.2. My votes: slot 0 = bravo at 2.2.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "leader 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "promises",
+            "at": "n2",
+            "ballot": "3.2",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 21,
+          "wire": [
+            {
+              "id": 22,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accept",
+              "label": "Accept 3.2 · slot 0",
+              "fan": 22
+            },
+            {
+              "id": 23,
+              "from": "n2",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 3.2 · slot 0",
+              "fan": 22
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "3.2",
+              "promise": "3.2",
+              "writes": [
+                "slot 0: vote bravo at 3.2"
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n2",
+          "to": "n0",
+          "label": "Accept 3.2 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 3.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "The Accept from Node 2 to Node 0 is lost. Node 0 does not get it.",
+          "notes": [
+            "Accept bravo at 3.2 for slot 0 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "3.2 (round 3, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Please vote for bravo in slot 0 at ballot 3.2.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "leader 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 22,
+          "wire": [
+            {
+              "id": 23,
+              "from": "n2",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 3.2 · slot 0",
+              "fan": 22
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n1",
+          "label": "Accept 3.2 · slot 0",
+          "phase": "accept",
+          "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 3.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 1 votes for bravo in slot 0 at ballot 3.2.",
+          "notes": [
+            "Node 1 receives Accept 3.2 for slot 0, carrying bravo. Its promise was 3.2. It holds bravo at ballot 2.2 for slot 0.",
+            "Node 1 replaces its record for slot 0. It held bravo at ballot 2.2, and it now holds bravo at ballot 3.2. The record at the higher ballot replaces the record at the lower one, and that rule makes a restart safe."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "3.2 (round 3, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Please vote for bravo in slot 0 at ballot 3.2.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "leader 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
+          ],
+          "message": 23,
+          "wire": [
+            {
+              "id": 24,
+              "from": "n1",
+              "to": "n2",
+              "phase": "accepted",
+              "label": "Accepted 3.2 · slot 0",
+              "fan": 24
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2",
+              "writes": [
+                "slot 0: vote bravo at 3.2"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n1",
+          "to": "n2",
+          "label": "Accepted 3.2 · slot 0",
+          "phase": "accepted",
+          "reply": true,
+          "stage": {
+            "title": "Phase 2 · ballot 3.2",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 2 gets a vote from Node 1. A majority of the acceptors voted for it, so slot 0 = bravo is chosen. No later ballot can change it. Two values are chosen for slot 0: alpha and bravo. Paxos says this never happens.",
+          "notes": [
+            "Node 2 receives an Accepted for slot 0 at 3.2 from node 1. Its round for that slot held 1 vote before this one.",
+            "Slot 0 is chosen. 2 of the 3 acceptors voted for bravo at ballot 3.2. A Phase-2 quorum here is 2 of 3. This decision is final. No later ballot can decide this slot differently.",
+            "Node 2 applies slot 0 = bravo. Its contiguous prefix now ends at slot 0."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "3.2 (round 3, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I voted for your value in slot 0 at ballot 3.2. It is on my disk.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "leader 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 0 = bravo"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n2",
+            "ballot": "3.2",
+            "slot": 0,
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ]
+          ],
+          "broken": "Two values are chosen for slot 0: alpha and bravo. Paxos says this never happens.",
+          "message": 24,
+          "wire": [
+            {
+              "id": 25,
+              "from": "n2",
+              "to": "n0",
+              "phase": "commit",
+              "label": "Commit 3.2 · slot 0",
+              "fan": 25
+            },
+            {
+              "id": 26,
+              "from": "n2",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 3.2 · slot 0",
+              "fan": 25
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        },
+        {
+          "kind": "drop",
+          "from": "n2",
+          "to": "n0",
+          "label": "Commit 3.2 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "The Commit from Node 2 to Node 0 is lost. Node 0 does not get it.",
+          "notes": [
+            "Commit slot 0 = bravo at 3.2 is lost. The protocol must treat a lost message and a partition the same way."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "3.2 (round 3, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Slot 0 is chosen: bravo.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "leader 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 0 = bravo"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ]
+          ],
+          "broken": "Two values are chosen for slot 0: alpha and bravo. Paxos says this never happens.",
+          "message": 25,
+          "wire": [
+            {
+              "id": 26,
+              "from": "n2",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 3.2 · slot 0",
+              "fan": 25
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n2",
+          "to": "n1",
+          "label": "Commit 3.2 · slot 0",
+          "phase": "commit",
+          "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 1 learns that slot 0 = bravo is chosen.",
+          "notes": [
+            "Node 1 receives a Commit: slot 0 is chosen as bravo at ballot 3.2. It held bravo at 3.2 there.",
+            "Node 1 learns that slot 0 is chosen as bravo at ballot 3.2.",
+            "Node 1 applies slot 0 = bravo. Its contiguous prefix now ends at slot 0."
+          ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "3.2 (round 3, node 2)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Slot 0 is chosen: bravo.",
+          "state": [
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 3.2"
+            ],
+            [
+              "leader 3.2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 0 = bravo"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ]
+          ],
+          "broken": "Two values are chosen for slot 0: alpha and bravo. Paxos says this never happens.",
+          "message": 26,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "3.2",
+              "promise": "3.2"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "3.2",
+              "promise": "3.2"
+            }
+          ]
+        }
+      ],
+      "beats": [
+        {
+          "says": "The rule: a new leader runs Phase 1 before it sends an Accept, and it proposes again every value that Phase 1 reports. Here node 2 breaks it.",
+          "from": 0,
+          "to": 0
+        },
+        {
+          "says": "Node 0 leads. The client writes alpha, and nodes 0 and 1 vote for it: alpha is chosen at slot 0. Node 2 hears nothing, and every Commit is lost.",
+          "from": 0,
+          "to": 13
+        },
+        {
+          "says": "Node 2 skips Phase 1. It sends Accepts for slot 0 with bravo at its next ballot, 2.2, and it asks no acceptor what it voted. Node 0 is cut off.",
+          "from": 13,
+          "to": 19,
+          "question": {
+            "asks": "Node 1 voted for alpha at ballot 1.0. Now an Accept for bravo at ballot 2.2 comes from node 2. What does node 1 do?",
+            "answers": [
+              "It refuses: it already voted for alpha",
+              "It votes for bravo: 2.2 is above its promise",
+              "It asks node 2 to run Phase 1 first"
+            ],
+            "right": 1,
+            "why": "An acceptor judges an Accept by its promise only. It cannot see that Phase 1 was skipped: Phase 1 is the duty of the proposer."
+          }
+        },
+        {
+          "says": "Node 2 starts an election and wins with nodes 1 and 2. Both report bravo, the vote at the highest ballot, so node 2 proposes bravo again and it is chosen.",
+          "from": 19,
+          "to": 30,
+          "question": {
+            "asks": "Node 0 holds alpha chosen at slot 0, and nodes 1 and 2 hold bravo. What broke Paxos?",
+            "answers": [
+              "Node 1 voted for bravo after it voted for alpha",
+              "Node 2 sent Accepts with no Phase 1, so it never heard of alpha",
+              "Node 0 lost its Commits"
+            ],
+            "right": 1,
+            "why": "An acceptor may vote again at a higher ballot: that is Paxos. Phase 1 at ballot 2.2 would have reached node 1, which voted for alpha, and node 2 would have proposed alpha.",
+            "after": true
+          }
+        },
+        {
+          "says": "A stable leader may skip Phase 1 only because its one Phase 1 covered every slot. A node that skips it for a slot it never prepared overwrites a chosen value.",
+          "from": 30,
+          "to": 30,
+          "choices": [
+            {
+              "label": "Choose another fault",
+              "run": "base",
+              "beat": 7
+            }
+          ]
+        }
+      ],
+      "chapters": [
+        {
+          "title": "node 0 starts an election",
+          "at": 1
+        },
+        {
+          "title": "the client writes alpha",
+          "at": 8
+        },
+        {
+          "title": "node 2 skips Phase 1",
+          "at": 14
+        },
+        {
+          "title": "node 2 starts an election",
+          "at": 20
+        }
+      ],
+      "outcome": "Node 0: slot 0 = alpha. Nodes 1, 2: slot 0 = bravo."
     }
   ]
 }

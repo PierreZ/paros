@@ -186,6 +186,18 @@ const EXERCISES = [
     id: "grid-column",
     moves: [["extra", "The client writes alpha"], ["settle", {}], ["extra", "The client writes bravo"], ["settle", {}]],
   },
+  {
+    page: "paxos/compartmentalized/",
+    id: "proxy-down",
+    moves: [
+      ["extra", "The client writes bravo"],
+      ["settle", {}],
+      ["extra", "Node 0 beats"],
+      ["settle", {}],
+      ["extra", "Node 0 beats"],
+      ["settle", {}],
+    ],
+  },
   { page: "paxos/matchmaker/", id: "old-set", moves: [["extra", "Node 3 starts an election"], ["settle", {}]] },
 ];
 
@@ -289,5 +301,102 @@ test("/consensus/driver/: the Ready widget elects a leader and commits a write",
   await node0.getByRole("button", { name: "write" }).click();
   await widget.getByRole("button", { name: "deliver all" }).click();
   await expect(node0.locator(".lab-state")).toContainText("1 chosen");
+  w.check();
+});
+
+// Every exercise of the journal fold lab (public/journal-lab.js), solved by
+// clicks on its call buttons. A call is named by its data-call key (`A:write`,
+// `seal`, from `Call::key` in crates/support/paros-wasm/src/journal/world.rs);
+// the calls follow the `solution` of each exercise in
+// crates/support/paros-wasm/src/journal/lab.rs.
+const JOURNAL_EXERCISES = {
+  "journal-duplicate": ["A:write-lost", "A:resend"],
+  "journal-fenced": ["B:read", "B:set-leader", "A:write"],
+  "journal-multi": ["A:set-multi", "B:write-open", "C:write-open"],
+  "journal-below": ["A:write-lost", "seal", "A:resend", "A:resolve"],
+  "journal-truncated": ["A:write-lost", "A:read", "A:truncate", "A:resend"],
+};
+
+for (const [id, keys] of Object.entries(JOURNAL_EXERCISES)) {
+  test(`/journal/calls/: the journal exercise "${id}" is solved by its calls`, async ({ page }) => {
+    const w = watch(page);
+    await page.goto(`journal/calls/#lab=${id}`);
+    const lab = page.locator("#your-turn-lab");
+    await expect(lab.locator(".lab-tab.now")).toBeVisible();
+    await expect(lab.locator(".chip-status.accent").first()).toHaveText("live");
+    const done = lab.locator(".lab-done");
+    await expect(done).toBeHidden();
+    for (const key of keys) {
+      await lab.locator(`.lab-extras button[data-call="${key}"]`).click();
+      await expect(lab.locator(".jlab-answer .chip-status.gap", { hasText: "refused" })).toHaveCount(0);
+    }
+    await expect(done, "the page says the goal holds").toBeVisible();
+    await expect(done).not.toBeEmpty();
+    await expect(lab.locator(".lab-tab.now .lab-tab-n")).toHaveText("✓");
+    // Undo takes the last call back, and the goal no longer holds.
+    await lab.getByRole("button", { name: "Undo" }).click();
+    await expect(done).toBeHidden();
+    w.check();
+  });
+}
+
+// Every exercise of the register lab (/journal/matchmakers/) and of the record
+// lab (/journal/segments/), both in public/register-lab.js, solved by clicks
+// on its moves. A move is named by its data-key (`P>m1:deliver`, `seal:1`),
+// from `World::actions` in crates/support/paros-wasm/src/journal/register.rs
+// and records.rs; the keys follow the `solution` of each exercise there.
+const REGISTER_EXERCISES = {
+  "journal/matchmakers/": {
+    panel: "#your-turn-register",
+    exercises: {
+      "register-down": ["P:elect", "P>m1:deliver", "P>m2:deliver", "P>m1:deliver", "P>m2:deliver"],
+      "register-race": ["P:elect", "Q:elect", "P>m1:deliver", "P>m2:deliver", "Q>m2:deliver", "Q>m3:deliver",
+        "P>m1:deliver", "P>m2:deliver", "Q>m2:deliver", "Q>m3:deliver"],
+      "register-minority": ["P:elect", "P>m1:deliver", "P>m2:deliver", "P>m1:lose", "P>m2:drop", "P>m3:drop",
+        "Q:elect", "Q>m2:deliver", "Q>m3:deliver", "Q>m2:deliver", "Q>m3:deliver"],
+      "register-refused": ["Q:elect", "Q>m2:deliver", "Q>m3:deliver", "Q>m2:deliver", "Q>m3:deliver",
+        "P:reshape", "P>m1:deliver", "P>m3:deliver"],
+    },
+  },
+  "journal/segments/": {
+    panel: "#your-turn-records",
+    exercises: {
+      "records-retire": ["reshape", "seal:1", "boundary:1", "retire:1:2"],
+      "records-trim": ["reshape", "seal:1", "boundary:1", "truncate", "trim:1"],
+      "records-third": ["reshape", "seal:1", "boundary:1", "retire:1:2", "reshape"],
+    },
+  },
+};
+
+for (const [path, { panel, exercises }] of Object.entries(REGISTER_EXERCISES)) {
+  for (const [id, keys] of Object.entries(exercises)) {
+    test(`/${path}: the exercise "${id}" is solved by its moves`, async ({ page }) => {
+      const w = watch(page);
+      await page.goto(`${path}#lab=${id}`);
+      const lab = page.locator(panel);
+      await expect(lab.locator(".lab-tab.now")).toBeVisible();
+      await expect(lab.locator(".chip-status.accent").first()).toHaveText("live");
+      const done = lab.locator(".lab-done");
+      await expect(done).toBeHidden();
+      for (const key of keys) {
+        await lab.locator(`.lab-extras button[data-key="${key}"]`).click();
+        await expect(lab.locator(".rlab-refused")).toHaveCount(0);
+      }
+      await expect(done, "the page says the goal holds").toBeVisible();
+      await expect(done).not.toBeEmpty();
+      await expect(lab.locator(".lab-tab.now .lab-tab-n")).toHaveText("✓");
+      await lab.getByRole("button", { name: "Undo" }).click();
+      await expect(done).toBeHidden();
+      w.check();
+    });
+  }
+}
+
+test("/journal/segments/: a refused move names the guard of the record", async ({ page }) => {
+  const w = watch(page);
+  await page.goto("journal/segments/#lab=records-retire");
+  const lab = page.locator("#your-turn-records");
+  await lab.locator('.lab-extras button[data-key="seal:1"]').click();
+  await expect(lab.locator(".rlab-refused")).toContainText("NoSuccessor");
   w.check();
 });

@@ -438,3 +438,33 @@ fn a_campaign_with_an_unstaged_rejoin_stages_it_on_a_retired_refusal() {
     );
     assert_eq!(rejoins, 3, "every matchmaker is asked to drop its record");
 }
+
+/// Node 0 leads `deployed_cluster`, then learns slot 40 chosen at a ballot
+/// above its own through a `Commit`: it still leads, with its promise past
+/// its ballot, until a deposing message arrives.
+fn passed_leader() -> ([ColocatedNode; 5], Ballot) {
+    let (mut nodes, _) = deployed_cluster();
+    let mine = nodes[0].ballot();
+    nodes[0].step(Message::Commit {
+        from: Party::Node(NodeId(1)),
+        ballot: ballot(mine.round + 5, 1),
+        slot: Slot(40),
+        command: ucmd(1, 1, 9),
+    });
+    nodes[0].ready().advance();
+    assert!(nodes[0].is_leader(), "a Commit does not depose the leader");
+    assert!(nodes[0].hard_state().max_promised_ballot > mine);
+    assert_eq!(nodes[0].ballot(), mine);
+    (nodes, mine)
+}
+
+/// A leadership whose promise a later ballot passed holds nothing worth
+/// moving: a reconfiguration is refused as unsettled.
+#[test]
+fn a_leader_whose_promise_was_passed_refuses_a_reconfiguration() {
+    let (mut nodes, _) = passed_leader();
+    assert_eq!(
+        nodes[0].reconfigure(&cfg(&[0, 1])),
+        ReconfigureResult::Refused(ReconfigureRefusal::Unsettled)
+    );
+}

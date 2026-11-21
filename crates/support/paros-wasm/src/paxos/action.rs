@@ -220,6 +220,18 @@ pub enum Action {
         /// The node whose disk is erased.
         node: u64,
     },
+    /// `node` sends an `Accept` for `slot` with `value` to every node at its
+    /// next ballot, with no Phase 1: the bug of the Multi-Paxos "Break the
+    /// rule" run. The engine writes these messages; `paros-consensus` has
+    /// no path that sends them.
+    SkipPhase1 {
+        /// The node that skips Phase 1.
+        node: u64,
+        /// The slot it writes.
+        slot: u64,
+        /// The command text.
+        value: String,
+    },
     /// Drop a matchmaker's volatile role, keeping its registry.
     ///
     /// A matchmaker is not a node — it holds no log and votes on no slot, and
@@ -371,6 +383,9 @@ impl Action {
                 format!("rot the record of node {node} for slot {slot}")
             }
             Action::Wipe { node } => format!("erase the disk of node {node}"),
+            Action::SkipPhase1 { node, slot, value } => {
+                format!("make node {node} send Accepts for slot {slot} with {value} and no Phase 1")
+            }
             Action::CrashMatchmaker { matchmaker } => format!("crash matchmaker {matchmaker}"),
             Action::RestartMatchmaker { matchmaker } => format!("restart matchmaker {matchmaker}"),
             Action::Reconfigure { node, members, .. } => {
@@ -577,6 +592,14 @@ mod tests {
                 "rot the record of node 1 for slot 5",
             ),
             (Action::Wipe { node: 1 }, "erase the disk of node 1"),
+            (
+                Action::SkipPhase1 {
+                    node: 2,
+                    slot: 0,
+                    value: "bravo".into(),
+                },
+                "make node 2 send Accepts for slot 0 with bravo and no Phase 1",
+            ),
             (
                 Action::Compact { node: 1, up_to: 6 },
                 "compact node 1 before seq 6",

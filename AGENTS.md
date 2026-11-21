@@ -74,7 +74,7 @@ that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold and the read prefix that it gates (#1270 (bypass read order)), GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
 more rules)), quorum everywhere (`specs/tla/quorum-everywhere/`: every step of the journal, the
-write, the election, the leaderless read, the seal, the retire, the offload mark, the trim and the
+write, the election, the leaderless read, the seal, the boundary write, the retire, the offload mark, the trim, the acceptor compaction and the
 matchmaker handover, waits for a quorum only and completes with F members down in every column,
 in each matchmaker set and in the replica set, with a control that blocks each step one member
 later and a control that waits for every member as a FoundationDB TLog commit; #1257 (quorum
@@ -107,7 +107,7 @@ states and their fixed actions, no placement over two zones after a zone loss; #
 health measures)), a user truncate across segments (`specs/tla/segment-truncate/`: the trim floor
 in the boundary state, the floor of a read from the segment in force, the floor check of an
 offloaded read, the trim of a sealed segment once the floor is decided over it, the acceptors'
-compaction after `F + 1` replicas, the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
+compaction after `F + 1` replicas with a floor kept for each segment (#1318), the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
 segments with an empty segment and a seal before the `Fence`; the whole boundary state, the
 leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), the seal
 end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1
@@ -128,8 +128,10 @@ removed replica that comes back during the heal; #1314 (re-replication of a seal
 replica set)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
-the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are
-its later steps). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
+the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). The decree's
+`Inv` is also proved with TLAPS at every size (`specs/tla/decree/DecreeProof.tla`,
+`scripts/check-proofs.sh` in `nix develop .#proofs`, the `proofs` job of the `TLA` workflow;
+`specs/tla/README.md`, "Proofs"). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
 journal's matchmaker register with its writer, its guard and the models that check it (#1315). Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
@@ -161,10 +163,11 @@ walks)). Trace checking is there for every walk (#1198 (trace checking), `tests/
 trace spec extends a model that TLC checks and defines no step of its own (#1306 (trace specs
 extend the checked model)): `decree/`; `node/`, the implementation model of `ColocatedNode` (the
 log, matchmaking, the GC and the retirement, grids, the compaction floor and the trim jump, the
-faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads and the
-proxy `Commit`), which eight trace specs extend; `proxy-leader/`; `leader-handoff/`;
-`generations/` (the chain of matchmaker set handovers); and `batcher/`. Merging `proxy-leader/`
-and `leader-handoff/` into `node/` is #1343 (merge proxy and handoff into the node model). Each trace spec names the steps its checked walks must take (a `Noop` gap
+faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads, the
+rounds of the proxy leaders and the cooperative handoff; #1343 (merge proxy and handoff into the
+node model)), which ten trace specs extend; `generations/` (the chain of matchmaker set
+handovers); and `batcher/`. `proxy-leader/` and `leader-handoff/` stay as design models with
+their own checks, the liveness checks too. Each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
 rules)). The trace checks are tested too: each trace spec must refuse about 20 named edits of
@@ -219,7 +222,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `-p paros-journal`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
-- the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
+- the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
+  and the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `in_memory`;
+  #1370 (journal examples))
 - the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
 - the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
   instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
@@ -637,6 +642,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
   fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
   journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
+  Its examples (`examples/`, listed in its `README.md`) drive the fold and the roles with
+  storage written by hand.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
   `paros::journal`). A program depends on `paros` alone. Wasm-safe and provider-free.
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
@@ -652,8 +659,9 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   against the TLA+ models with TLC (moonpool-tla), and the coverage gate over every core probe
   (exploration with moonpool-walk, branch coverage with moonpool-explorer's sancov reader). On
   `paros-consensus` only.
-- `crates/support/paros-wasm` — the site's wasm tool (#540): feature `paxos`, the engine of the
-  step-through diagrams of the Paxos pages (#811), on `paros-consensus` only.
+- `crates/support/paros-wasm` — the site's wasm tools (#540): feature `paxos`, the engine of the
+  step-through diagrams of the Paxos pages (#811), on `paros-consensus` only; feature `journal`,
+  the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal` only.
 
 Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`; `specs/tla/experiments/`
 holds the models that compare candidate designs before Pierre decides, such as the segments
@@ -661,7 +669,7 @@ experiment of #1213 (segments in the protocol or in storage) and its check of le
 across a reshape, #1254), `website/site/` (the website,
 Astro, one style for every page; `website/site/AGENTS.md`, the `update-the-site` skill),
 `website/shared/` (the design system: tokens, fonts, logo), `scripts/build-wasm.sh` (builds the
-wasm and stages it for the site), `docs/architecture/` (the target design of the service), `docs/journal/` (the target
+two wasm bundles and stages them for the site), `docs/architecture/` (the target design of the service), `docs/journal/` (the target
 design of the journal v1: every journal rule, its model and the build steps; its `README.md`
 is the map), `docs/knowledge/`
 (the Paxos knowledge base: one card per concept paros uses, #745), `docs/analysis/` (design

@@ -28,6 +28,8 @@ use super::content::{self, Field};
 use super::story::{self, Beats, Durable, Flight, NodeState};
 use super::words::{self, Stage};
 use super::{Chapter, Lane, LogCell, Scenario, Step, Tally, Trace, message_label};
+
+pub(crate) mod desk;
 use crate::paxos::view::{RoleView, message_view, show_ballot, show_role, value_text};
 
 /// The acceptors. Node 0 leads.
@@ -397,41 +399,47 @@ impl Run {
     ) {
         let mut moved = 0;
         while self.wire.front().is_some_and(|next| !stop(&next.message)) {
-            let Some(Wired {
-                id,
-                from,
-                to,
-                message,
-                ..
-            }) = self.wire.pop_front()
-            else {
+            let Some(wired) = self.wire.pop_front() else {
                 break;
             };
             moved += 1;
             assert!(moved <= BUDGET, "a run settles");
-            let lost = loses(from, to, &message) || !self.up(to);
-            if !lost {
-                match to {
-                    Who::Node(id) => {
-                        self.nodes[usize::try_from(id).expect("a small id")].step(message.clone());
-                    }
-                    Who::Proxy(id) => {
-                        if let Some(proxy) = &mut self.proxies[usize::try_from(id).expect("small")]
-                        {
-                            proxy.step(message.clone());
-                        }
-                    }
-                    Who::Replica(rank) => {
-                        self.replicas[usize::try_from(rank).expect("a small rank")]
-                            .step(message.clone());
-                    }
-                    Who::Batcher => unreachable!("nobody sends to the batcher on the wire"),
+            let lose = loses(wired.from, wired.to, &wired.message);
+            self.carry(wired, lose);
+        }
+    }
+
+    /// Hand one message, taken off the wire, to its receiver, or lose it:
+    /// when `dropped` says so, or when the receiver is down.
+    fn carry(&mut self, wired: Wired, dropped: bool) {
+        let Wired {
+            id,
+            from,
+            to,
+            message,
+            ..
+        } = wired;
+        let lost = dropped || !self.up(to);
+        if !lost {
+            match to {
+                Who::Node(id) => {
+                    self.nodes[usize::try_from(id).expect("a small id")].step(message.clone());
                 }
-                self.drain(to);
+                Who::Proxy(id) => {
+                    if let Some(proxy) = &mut self.proxies[usize::try_from(id).expect("small")] {
+                        proxy.step(message.clone());
+                    }
+                }
+                Who::Replica(rank) => {
+                    self.replicas[usize::try_from(rank).expect("a small rank")]
+                        .step(message.clone());
+                }
+                Who::Batcher => unreachable!("nobody sends to the batcher on the wire"),
             }
-            if self.recording {
-                self.record(id, from, to, &message, lost);
-            }
+            self.drain(to);
+        }
+        if self.recording {
+            self.record(id, from, to, &message, lost);
         }
     }
 
@@ -492,7 +500,7 @@ impl Run {
             };
         }
         let (wire, nodes) = self.story_state();
-        self.steps.push(Step {
+        self.push(Step {
             message: Some(id),
             wire,
             nodes,
@@ -515,10 +523,55 @@ impl Run {
         });
     }
 
+    /// Keep a step. A step on which a replica and an acceptor hold two values
+    /// for one slot is broken, and the first such step says so.
+    fn push(&mut self, mut step: Step) {
+        step.broken = self.broken();
+        let was_broken = self.steps.last().is_some_and(|last| last.broken.is_some());
+        if let Some(broken) = &step.broken
+            && !was_broken
+        {
+            step.says.push(' ');
+            step.says.push_str(broken);
+        }
+        self.steps.push(step);
+    }
+
+    /// Two values chosen for one slot: one that a node learned and one that
+    /// a replica learned. Only the "Break the rule" run gets there, with a
+    /// `Commit` that the driver writes.
+    fn broken(&self) -> Option<String> {
+        (0..SLOTS).map(Slot).find_map(|slot| {
+            let mut values: Vec<String> = Vec::new();
+            let learned = self
+                .nodes
+                .iter()
+                .map(|node| node.replica().chosen_at(slot))
+                .chain(
+                    self.replicas
+                        .iter()
+                        .map(|replica| replica.replica().chosen_at(slot)),
+                );
+            for command in learned.flatten() {
+                let text = cell(slot, command, true).value;
+                if !values.contains(&text) {
+                    values.push(text);
+                }
+            }
+            (values.len() > 1).then(|| {
+                format!(
+                    "Two values are chosen for slot {}: {}. Paxos says this never happens.",
+                    slot.0,
+                    values.join(" and ")
+                )
+            })
+        })
+    }
+
     /// An event step: something a party does on its own.
     fn event(&mut self, label: &str, says: String) {
         let (wire, nodes) = self.story_state();
-        self.steps.push(Step {
+        self.push(Step {
             message: None,
             wire,
             nodes,
@@ -684,6 +737,12 @@ impl Run {
                     let mut lines = vec![learned(
                         replica.and_then(|replica| replica.replica().chosen_index()),
                     )];
+                    lines.extend(replica.map_or_default(|replica| {
+                        waiting(replica)
+                            .into_iter()
+                            .map(|slot| format!("holds slot {}, waits", slot.0))
+                            .collect::<Vec<_>>()
+                    }));
                     lines.extend(self.reads[index].iter().cloned());
                     lines
                 }
@@ -791,6 +850,16 @@ impl Run {
 
     /// The client (or the batcher) hands node 0 a write.
     fn write(&mut self, records: &[&str], delegation: Delegation) -> Slot {
+        self.try_write(records, delegation)
+            .unwrap_or_else(|result| panic!("the leader admits the write: {result:?}"))
+    }
+
+    /// Hand node 0 a write; the core's answer when it does not admit it.
+    fn try_write(
+        &mut self,
+        records: &[&str],
+        delegation: Delegation,
+    ) -> Result<Slot, ProposeResult> {
         let result = self.nodes[0].propose_in(
             Entry {
                 leader: paros_consensus::journal::LeaderUuid::UNSET,
@@ -804,20 +873,27 @@ impl Run {
             delegation,
         );
         let ProposeResult::Accepted(slot) = result else {
-            panic!("the leader admits the write: {result:?}");
+            return Err(result);
         };
         self.drain(Who::Node(0));
-        slot
+        Ok(slot)
     }
 
-    /// A client writes `value` to node 0, and the run settles.
+    /// A client writes `value` to node 0.
     fn client_writes(&mut self, value: &str) -> Slot {
+        self.try_client_writes(value)
+            .unwrap_or_else(|result| panic!("the leader admits the write: {result:?}"))
+    }
+
+    /// A client writes `value` to node 0; the core's answer when node 0 does
+    /// not admit it.
+    fn try_client_writes(&mut self, value: &str) -> Result<Slot, ProposeResult> {
         let delegation = if self.split() {
             Delegation::Auto
         } else {
             Delegation::Colocated
         };
-        let slot = self.write(&[value], delegation);
+        let slot = self.try_write(&[value], delegation)?;
         let says = if self.split() {
             let proxy = ProxyId::of(slot, PROXIES).expect("proxies");
             format!(
@@ -832,7 +908,7 @@ impl Run {
             )
         };
         self.event(&format!("the client writes {value}"), says);
-        slot
+        Ok(slot)
     }
 
     /// Two writers send to the batcher, which sends one write to node 0.
@@ -877,7 +953,7 @@ impl Run {
         let slot = self.write(&refs, Delegation::Auto);
         let proxy = ProxyId::of(slot, PROXIES).expect("proxies");
         let (wire, nodes) = self.story_state();
-        self.steps.push(Step {
+        self.push(Step {
             message: None,
             wire,
             nodes,
@@ -953,6 +1029,43 @@ impl Run {
         );
     }
 
+    /// Proxy leader `proxy` has a bug: it sends a `Commit` for `slot` with
+    /// `value` to the replicas before a majority voted. `ProxyLeader` sends a
+    /// `Commit` only on a Phase-2 quorum, so the driver writes this one; the
+    /// replicas that learn it are the shipped code.
+    fn forge_commit(&mut self, proxy: u64, slot: Slot, value: &str) {
+        let message = Message::Commit {
+            from: paros_consensus::contract::Party::Proxy(ProxyId(proxy)),
+            ballot: self.nodes[0].ballot(),
+            slot,
+            command: Command::Write(Entry {
+                leader: paros_consensus::journal::LeaderUuid::UNSET,
+                seq: Seq(0),
+                records: vec![Value(value.as_bytes().to_vec())],
+            }),
+        };
+        let fan = self.next_id;
+        for rank in 0..REPLICAS as u64 {
+            self.wire.push_back(Wired {
+                id: self.next_id,
+                fan,
+                from: Who::Proxy(proxy),
+                to: Who::Replica(rank),
+                message: message.clone(),
+            });
+            self.next_id += 1;
+        }
+        self.event(
+            &format!("proxy leader {proxy} commits after one vote"),
+            format!(
+                "Proxy leader {proxy} has one vote of three for slot {}, and it sends a Commit \
+                 to the replicas anyway. paros has no such path: the driver writes this \
+                 Commit, as a proxy leader with this bug would.",
+                slot.0
+            ),
+        );
+    }
+
     /// Open a beat of the story at the next step.
     fn story(&mut self, says: &str) -> &mut Self {
         self.beats.open(self.steps.len(), says);
@@ -968,6 +1081,13 @@ impl Run {
     /// Ask a question before the open beat plays.
     fn ask(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) -> &mut Self {
         self.beats.ask(asks, answers, right, why);
+        self
+    }
+
+    /// Ask what went wrong in the open beat, after it played: the "find the
+    /// bug" question of the "Break the rule" run.
+    fn find(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) -> &mut Self {
+        self.beats.find(asks, answers, right, why);
         self
     }
 
@@ -1045,6 +1165,10 @@ impl Run {
         } else {
             format!("Chosen: {outcome}.")
         };
+        let outcome = match self.broken() {
+            Some(broken) => format!("{broken} {outcome}"),
+            None => outcome,
+        };
         Scenario {
             chapters,
             id: id.to_string(),
@@ -1061,6 +1185,20 @@ impl Run {
             steps: self.steps,
         }
     }
+}
+
+/// The chosen slots a replica holds above its chosen prefix: it learned
+/// them out of order, and it applies them only once the slots below are
+/// chosen too.
+fn waiting(replica: &ReplicaNode) -> Vec<Slot> {
+    let prefix = replica.replica().chosen_index();
+    replica
+        .replica()
+        .chosen()
+        .keys()
+        .copied()
+        .filter(|slot| prefix.is_none_or(|prefix| *slot > prefix))
+        .collect()
 }
 
 fn learned(index: Option<Slot>) -> String {
@@ -1183,7 +1321,8 @@ fn base() -> Scenario {
         .choice("A read with no leader", "read", 0)
         .choice("A proxy leader crashes", "proxy-crash", 0)
         .choice("A vote to a proxy is lost", "lost-vote", 0)
-        .choice("A proxy meets a newer ballot", "proxy-nack", 0);
+        .choice("A proxy meets a newer ballot", "proxy-nack", 0)
+        .choice("Break the rule: commit after one vote", "break-the-rule", 0);
     run.finish("base", "Proxy leaders and replicas")
 }
 
@@ -1413,6 +1552,105 @@ fn proxy_nack() -> Scenario {
     run.finish("proxy-nack", "What if a proxy meets a newer ballot?")
 }
 
+/// Break the rule: proxy leader 0 sends a `Commit` after one vote of three.
+/// The replicas learn alpha, and the acceptors later choose bravo for the
+/// same slot.
+fn break_the_rule() -> Scenario {
+    let mut run = Run::new(Layout::Compartmentalized);
+    run.story(
+        "The rule: a proxy leader sends a Commit only when a majority of the acceptors voted. \
+         Here proxy leader 0 breaks it.",
+    );
+    run.story(
+        "The client writes alpha at slot 0. Proxy leader 0 sends the Accepts, and only node 0 \
+         gets one.",
+    );
+    run.client_writes("alpha");
+    run.settle(|_, to, message| {
+        matches!(message, Message::Accept { .. }) && matches!(to, Who::Node(id) if id != 0)
+    });
+    run.holds(
+        |run| run.chosen().is_empty(),
+        "one vote of three chooses nothing",
+    );
+    run.story("Proxy leader 0 sends a Commit for alpha to the replicas after one vote.");
+    run.forge_commit(0, Slot(0), "alpha");
+    run.settle(|_, _, _| false);
+    run.holds(
+        |run| {
+            run.replicas
+                .iter()
+                .all(|replica| replica.replica().chosen_index() == Some(Slot(0)))
+        },
+        "both replicas learn alpha at slot 0",
+    );
+    run.story(
+        "Node 2 starts an election. Node 0 and the replicas are cut off. Nodes 1 and 2 never \
+         voted for alpha, so node 2 never hears of it.",
+    );
+    run.nodes[2].set_election_timeout(1);
+    run.nodes[2].tick();
+    run.drain(Who::Node(2));
+    run.event(
+        "node 2 starts an election",
+        "Node 2 starts an election with a newer ballot.".to_string(),
+    );
+    let cut_off = |from: Who, to: Who, _: &Message| {
+        [from, to]
+            .iter()
+            .any(|who| *who == Who::Node(0) || matches!(who, Who::Replica(_)))
+    };
+    run.settle(cut_off);
+    run.holds(|run| run.nodes[2].is_leader(), "node 2 leads");
+    run.story("The client writes bravo to node 2. It goes to slot 0, and nodes 1 and 2 choose it.")
+        .find(
+            "The replicas hold alpha at slot 0, and the acceptors chose bravo there. What broke \
+             Paxos?",
+            &[
+                "Node 2 did not wait for node 0",
+                "Proxy leader 0 sent a Commit after one vote of three",
+                "Node 2 gave bravo a slot that alpha held",
+            ],
+            1,
+            "Only node 0 voted for alpha, so alpha was not chosen, and slot 0 was free. The \
+             bug is the Commit: a replica trusts it, because it counts no vote of its own.",
+        );
+    let result = run.nodes[2].propose_in(
+        Entry {
+            leader: paros_consensus::journal::LeaderUuid::UNSET,
+            seq: Seq(0),
+            records: vec![Value(b"bravo".to_vec())],
+        },
+        None,
+        Delegation::Colocated,
+    );
+    assert_eq!(
+        result,
+        ProposeResult::Accepted(Slot(0)),
+        "node 2 gives bravo slot 0"
+    );
+    run.drain(Who::Node(2));
+    run.event(
+        "the client writes bravo",
+        "A client writes bravo to node 2. Node 2 gives it slot 0 and sends the Accepts itself."
+            .to_string(),
+    );
+    run.settle(cut_off);
+    run.holds(
+        |run| run.chosen().iter().any(|line| line == "slot 0 = bravo"),
+        "the acceptors choose bravo at slot 0",
+    );
+    run.holds(
+        |run| run.broken().is_some(),
+        "two values are chosen for slot 0",
+    );
+    run.back(
+        "A proxy leader is safe only because it counts a majority before it commits. A \
+         replica learns what it is told and votes on nothing.",
+    );
+    run.finish("break-the-rule", "Break the rule: commit after one vote")
+}
+
 /// The page: the compartmentalized deployment and its cases.
 pub(super) fn trace() -> Trace {
     super::assemble(
@@ -1427,6 +1665,7 @@ pub(super) fn trace() -> Trace {
             proxy_crash(),
             lost_vote(),
             proxy_nack(),
+            break_the_rule(),
         ],
     )
 }

@@ -21,6 +21,11 @@ noexp_noidem         violation  ci
 noretire             violation  ci
 nobound              violation  ci
 live_nobound         violation  ci
+# The bound for liveness: one failure blocks a seal into a grid outside the
+# bound (its Phase-1 quorum, its Phase-2 quorum), and out of it.
+live_nobound_p1      violation  ci
+live_nobound_p2      violation  ci
+live_nobound_old     violation  ci
 noidem               violation  ci
 # Reachability: the model reaches each case of #1259.
 reach_lost_race            violation  ci

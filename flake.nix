@@ -109,6 +109,13 @@
         devShells.tla = pkgs.mkShell {
           buildInputs = [ pkgs.tlaplus pkgs.python3 ];
         };
+
+        # TLAPS, the TLA+ proof system, with Z3 (its default SMT backend), for
+        # the proofs of specs/tla/ (`nix develop .#proofs --command
+        # scripts/check-proofs.sh`, #1307 (inductive invariants, then proofs)).
+        devShells.proofs = pkgs.mkShell {
+          buildInputs = [ pkgs.tlaps pkgs.z3 ];
+        };
       }
     );
 }

@@ -369,11 +369,10 @@ impl Matchmaking {
         // claim 4 found the wedge on seed 8 once its tail raised floors
         // between pages.
         if let Some(expected) = self.page_next.get(&matchmaker) {
-            let at_cursor = page.from_ballot == *expected;
-            let cursor_collected =
-                page.from_ballot > *expected && page.from_ballot == page.gc_watermark;
-            if !at_cursor && !cursor_collected {
-                return false;
+            match page.from_ballot.cmp(expected) {
+                std::cmp::Ordering::Equal => {}
+                std::cmp::Ordering::Greater if page.from_ballot == page.gc_watermark => {}
+                _ => return false,
             }
             // Either way a later page never starts below the cursor owed.
             assert!(
@@ -385,18 +384,17 @@ impl Matchmaking {
         // its page: an entry above the request's ballot would merely add a
         // configuration to `H_b`, which Phase 1 covering more than it must
         // is always safe. A page with a cursor carries at least one
-        // registration: the sender's page size is its own tunable under
-        // `REGISTRY_PAGE` (#338), so a full page is not a size to check.
+        // registration, and its cursor lies above the last one (so above
+        // `from_ballot` too): the sender's page size is its own tunable
+        // under `REGISTRY_PAGE` (#338), so a full page is not a size to
+        // check.
         page.history.len() <= REGISTRY_PAGE
             && page.history.keys().all(|b| *b >= page.from_ballot)
             && page.next_from_ballot.is_none_or(|next| {
-                !page.history.is_empty()
-                    && next > page.from_ballot
-                    && page
-                        .history
-                        .keys()
-                        .next_back()
-                        .is_none_or(|last| next > *last)
+                page.history
+                    .keys()
+                    .next_back()
+                    .is_some_and(|last| next > *last)
             })
     }
 

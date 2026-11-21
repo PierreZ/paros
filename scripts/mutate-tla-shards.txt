@@ -5,7 +5,7 @@
 # (guards x minutes of the folder's checks) / 40: a mutant that survives runs
 # every check of its folder. A slice that its budget cuts reports `unfinished`
 # mutants: give its folder more slices. GitHub runs at most 256 slices.
-abandoned-ballot 1
+abandoned-ballot 2
 campaign-discovery 1
 cas-register 1
 cell-control 2
@@ -17,7 +17,7 @@ decree 2
 degraded-reshape 7
 flight-rule 1
 grid 0
-grid-controller 2
+grid-controller 4
 handover 5
 handover-chain 1
 handover-gc 1
@@ -31,7 +31,7 @@ proxy-leader 1
 quorum-everywhere 3
 reads 28
 retire-fence 18
-seal-chain 1
+seal-chain 3
 seal-ctrl 7
 segment-records 5
 segment-replicas 19

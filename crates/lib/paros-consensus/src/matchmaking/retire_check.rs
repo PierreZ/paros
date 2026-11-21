@@ -294,4 +294,22 @@ mod tests {
         assert!(!check.agree(MatchmakerId(1), g(0)));
         assert!(!check.all_agreed(&set(0, &[1, 2])));
     }
+    #[test]
+    fn a_rejoin_tallies_every_matchmaker_of_its_generation() {
+        let tag = Ballot {
+            round: 2,
+            node: crate::types::NodeId(1),
+        };
+        let mut rejoin = RejoinCheck::new(tag, 3, g(4));
+        assert_eq!(rejoin.generation(), g(4));
+        assert_eq!(rejoin.incarnation(), 3);
+        assert_eq!(rejoin.tag(), tag);
+        let matchmakers = set(4, &[1, 2]);
+        assert!(!rejoin.all_agreed(&matchmakers));
+        assert!(rejoin.agree(MatchmakerId(1), g(4)));
+        assert!(!rejoin.all_agreed(&matchmakers), "one answer of two");
+        assert_eq!(rejoin.unanswered(&matchmakers), vec![MatchmakerId(2)]);
+        assert!(rejoin.agree(MatchmakerId(2), g(4)));
+        assert!(rejoin.all_agreed(&matchmakers));
+    }
 }

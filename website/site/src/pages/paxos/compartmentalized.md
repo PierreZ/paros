@@ -3,6 +3,7 @@ layout: ../../layouts/Doc.astro
 kicker: Paxos
 section: paxos/
 trace: compartmentalized
+lab: true
 title: Compartmentalized Paxos
 description: Split the leader into roles that scale on their own.
 ---
@@ -30,17 +31,30 @@ the log and vote on nothing. Then choose a case:
 - **A vote to a proxy is lost**: the proxy leader sends its Accepts again on its next beat.
 - **A proxy meets a newer ballot**: the acceptors refuse with a `Nack`. The proxy leader
   closes the round and passes the `Nack` to node 0, which stops leading.
+- **Break the rule**: a proxy leader sends a `Commit` after one vote of three. The replicas
+  learn a value that the acceptors never chose. Then find the bug.
 
 The leader handoff (`Relinquish`) is on the [Multi-Paxos](../multi-paxos/) page.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
+
+## Your turn
+
+Now you are the network. Deliver or drop each message, and reach the goal of each exercise.
+The leader, the proxy leaders and the replicas of `paros-consensus` run in this page and decide
+everything else. "Deliver all" delivers every message on the wire, and the messages they send,
+until the wire is empty.
+
+<div data-lab="proxy-down lost-votes replica-waits"><p class="aside">The exercises need JavaScript.</p></div>
 
 ## The rule
 
 **Only the leader gives out slots at its ballot. The other roles move work, not
 decisions.** A proxy leader counts votes but casts none. A replica learns but votes on
 nothing. A batcher joins writes before they get a slot. So the safety of Multi-Paxos does not
-change, and a crashed proxy leader or replica loses nothing.
+change, and a crashed proxy leader or replica loses nothing. The run "Break the rule" shows
+why a proxy leader counts a majority before its `Commit`: a replica trusts each `Commit` and
+counts no vote.
 
 ## In paros
 

@@ -21,7 +21,7 @@ free slot. A `Commit` tells the followers which slots are chosen, and the heartb
 far the log is chosen. The story ends with a choice of faults: a leader crash, a lost slot,
 lost Commits, a node that falls behind, a leader that stops before or after its disk write,
 an old leader, a second crash during a recovery, a node that misses a truncation, a handoff,
-and reads. Continue plays the next screen, and "Show each message" opens the
+reads, and "Break the rule", where a node skips Phase 1. Continue plays the next screen, and "Show each message" opens the
 step-through.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
@@ -39,7 +39,8 @@ message on the wire, and the messages they send, until the wire is empty.
 **A new leader proposes again every value that its Phase 1 reports, and it fills a slot with
 no reported value with a no-op.** So a value that a dead leader got chosen stays in its slot,
 and the log has no hole. The run "What if a slot is lost with the leader?" shows the
-no-op.
+no-op. The run "Break the rule" shows a node that sends Accepts with no Phase 1: it never
+hears of the chosen value, and two values are chosen for one slot.
 
 ## In paros
 

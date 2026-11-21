@@ -101,6 +101,7 @@ pub(super) fn multi_paxos() -> Trace {
             handoff(),
             handoff_lost(),
             read_waits(),
+            break_the_rule(),
         ],
     )
 }
@@ -172,7 +173,8 @@ fn base() -> Scenario {
     .choice("A node misses a truncation", "trimmed", 0)
     .choice("Hand the leadership on", "handoff", 0)
     .choice("The handoff is lost", "handoff-lost", 0)
-    .choice("A read waits for a slot", "read-waits", 0);
+    .choice("A read waits for a slot", "read-waits", 0)
+    .choice("Break the rule: skip Phase 1", "break-the-rule", 0);
     run.finish("base", "No fault", log_outcome)
 }
 
@@ -769,4 +771,95 @@ fn read_waits() -> Scenario {
         "What if a read meets an open slot?",
         log_outcome,
     )
+}
+
+/// Break the rule: node 2 skips Phase 1 and sends Accepts for slot 0, where
+/// alpha is chosen. The engine writes these Accepts (`Action::SkipPhase1`);
+/// the acceptors that judge them are the shipped code.
+fn break_the_rule() -> Scenario {
+    let mut run = Recorder::new(LEVEL);
+    run.beat(
+        "The rule: a new leader runs Phase 1 before it sends an Accept, and it proposes again \
+         every value that Phase 1 reports. Here node 2 breaks it.",
+    );
+    run.beat(
+        "Node 0 leads. The client writes alpha, and nodes 0 and 1 vote for it: alpha is chosen \
+         at slot 0. Node 2 hears nothing, and every Commit is lost.",
+    )
+    .play(elect(0), "node 0 starts an election")
+    .settle(any)
+    .play(propose(0, "alpha"), "the client writes alpha")
+    .drop_all(|message| message.kind == "Accept" && message.to == 2)
+    .settle(|message| message.kind != "Commit")
+    .drop_all(kind("Commit"))
+    .holds(chosen_at(0, "alpha"), "alpha is chosen at slot 0");
+    run.beat(
+        "Node 2 skips Phase 1. It sends Accepts for slot 0 with bravo at its next ballot, 2.2, \
+         and it asks no acceptor what it voted. Node 0 is cut off.",
+    )
+    .ask(
+        "Node 1 voted for alpha at ballot 1.0. Now an Accept for bravo at ballot 2.2 comes \
+         from node 2. What does node 1 do?",
+        &[
+            "It refuses: it already voted for alpha",
+            "It votes for bravo: 2.2 is above its promise",
+            "It asks node 2 to run Phase 1 first",
+        ],
+        1,
+        "An acceptor judges an Accept by its promise only. It cannot see that Phase 1 was \
+         skipped: Phase 1 is the duty of the proposer.",
+    )
+    .play(
+        Action::SkipPhase1 {
+            node: 2,
+            slot: 0,
+            value: "bravo".to_string(),
+        },
+        "node 2 skips Phase 1",
+    )
+    .settle_dropping(touches(0))
+    .holds(voted_at(1, 0, "bravo"), "node 1 votes for bravo at slot 0");
+    run.beat(
+        "Node 2 starts an election and wins with nodes 1 and 2. Both report bravo, the vote at \
+         the highest ballot, so node 2 proposes bravo again and it is chosen.",
+    )
+    .find(
+        "Node 0 holds alpha chosen at slot 0, and nodes 1 and 2 hold bravo. What broke Paxos?",
+        &[
+            "Node 1 voted for bravo after it voted for alpha",
+            "Node 2 sent Accepts with no Phase 1, so it never heard of alpha",
+            "Node 0 lost its Commits",
+        ],
+        1,
+        "An acceptor may vote again at a higher ballot: that is Paxos. Phase 1 at ballot 2.2 \
+         would have reached node 1, which voted for alpha, and node 2 would have proposed \
+         alpha.",
+    )
+    .play(elect(2), "node 2 starts an election")
+    .settle_dropping(touches(0))
+    .holds(chosen_at(0, "alpha"), "node 0 holds alpha chosen at slot 0")
+    .holds(chosen_at(0, "bravo"), "node 2 holds bravo chosen at slot 0");
+    back(
+        &mut run,
+        "A stable leader may skip Phase 1 only because its one Phase 1 covered every slot. A \
+         node that skips it for a slot it never prepared overwrites a chosen value.",
+    );
+    run.finish(
+        "break-the-rule",
+        "Break the rule: skip Phase 1",
+        log_outcome,
+    )
+}
+
+/// Node `id` holds a vote for `value` at `slot`.
+fn voted_at(id: u64, slot: u64, value: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world.nodes.iter().any(|node| {
+            node.id == id
+                && node
+                    .accepted
+                    .iter()
+                    .any(|record| record.slot == slot && record.value == value)
+        })
+    }
 }

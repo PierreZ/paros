@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Build the Paxos wasm and stage it at /paxos/wasm/
+      - name: Build the wasm tools and stage them at /paxos/wasm/ and /journal/wasm/
         run: nix develop --command scripts/build-wasm.sh
       - name: Build the site (Astro, #810 (website redo 1/4))
         id: site

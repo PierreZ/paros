@@ -13,7 +13,8 @@
 # change of the code. Each CI job has at most 30 minutes, so `traces` runs in
 # four shards (nextest `--partition count:i/4`: the tests in name order, dealt
 # out in turn). Each shard runs a quarter of the tests and every test runs in
-# one shard (#1340 (the traces job reaches its timeout)).
+# one shard (#1340 (the traces job reaches its timeout)). The job `proofs`
+# checks the TLAPS proofs of specs/tla/ (`scripts/check-proofs.sh`).
 name: TLA
 
 on:
@@ -22,6 +23,7 @@ on:
     paths:
       - "specs/tla/**"
       - "scripts/check-tla.sh"
+      - "scripts/check-proofs.sh"
       - "scripts/mutate-tla.py"
       - "flake.nix"
       - "flake.lock"
@@ -31,6 +33,7 @@ on:
     paths:
       - "specs/tla/**"
       - "scripts/check-tla.sh"
+      - "scripts/check-proofs.sh"
       - "scripts/mutate-tla.py"
       - "flake.nix"
       - "flake.lock"
@@ -101,8 +104,20 @@ jobs:
           -p consensus-sim -p journal-sim --test traces --test register_traces --test roles_traces --test live
           --partition count:${{ matrix.shard }}/4
 
+  # The TLAPS proofs (`*Proof.tla`, #1307 (inductive invariants, then
+  # proofs)): every obligation is proved again, with no cache.
+  proofs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Check the TLAPS proofs of specs/tla
+        run: nix develop .#proofs --command scripts/check-proofs.sh
+
   tlc:
-    needs: [specs, spec, traces]
+    needs: [specs, spec, traces, proofs]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -111,3 +126,4 @@ jobs:
           test "${{ needs.specs.result }}" = success
           test "${{ needs.spec.result }}" = success
           test "${{ needs.traces.result }}" = success
+          test "${{ needs.proofs.result }}" = success

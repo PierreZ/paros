@@ -70,7 +70,7 @@ export const LESSONS: Lesson[] = [
     title: "Many values: the log and its leader",
     goal: "follow one election and many writes, and say how a new leader recovers the log of a dead one.",
     page: "multi-paxos",
-    runs: ["base", "leader-crash", "gap", "lost-commit", "lagging", "seam-before-sync", "seam-after-sync", "stale-nack", "stale-promise", "recovery-crash", "handoff", "handoff-lost"],
+    runs: ["base", "leader-crash", "gap", "lost-commit", "lagging", "seam-before-sync", "seam-after-sync", "stale-nack", "stale-promise", "recovery-crash", "handoff", "handoff-lost", "break-the-rule"],
     labs: ["gap"],
     tlc: { model: "multi-paxos", config: "majority", states: 362774, checks: "no two commands are chosen at one slot, with three acceptors, two slots and two ballots" },
   },
@@ -97,7 +97,8 @@ export const LESSONS: Lesson[] = [
     title: "Split the leader",
     goal: "name each role of a compartmentalized journal, and say what breaks when it stops.",
     page: "compartmentalized",
-    runs: ["colocated", "base", "batcher", "read", "proxy-crash", "lost-vote", "proxy-nack"],
+    runs: ["colocated", "base", "batcher", "read", "proxy-crash", "lost-vote", "proxy-nack", "break-the-rule"],
+    labs: ["proxy-down", "lost-votes", "replica-waits"],
     tlc: { model: "compartments", config: "batch", states: 14154, checks: "each write of a batch gets one range of the log, in order, with a leader change and a batcher that stops" },
   },
   {

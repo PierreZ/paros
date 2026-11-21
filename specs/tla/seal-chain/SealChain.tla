@@ -59,13 +59,13 @@
 (*             segment is chosen (candidate 1 of #1303). FALSE: a seal at  *)
 (*             any time.                                                   *)
 (*   GapFill   FALSE: in "meta", the first slot of a segment is its        *)
-(*             `Fence`. TRUE: a `Noop` (the gap fill of a lost `Fence`), a *)
-(*             command pipelined behind it, or a `Noop` anywhere may come  *)
-(*             first, and the `Fence` comes later; a replica refuses every *)
-(*             `Write`, `Truncate` and `SetLeader` of its segment until it *)
-(*             applied a `Fence` (#1302 (Fence slot against the gap        *)
-(*             fill), candidate 1). In "record", a `Noop` may take any     *)
-(*             slot.                                                       *)
+(*             `Fence`. TRUE: a `Noop` (the gap fill of a lost `Fence`) or *)
+(*             a command pipelined behind it may come first, and the       *)
+(*             `Fence` comes later; a replica refuses every `Write`,       *)
+(*             `Truncate` and `SetLeader` of its segment until it applied  *)
+(*             a `Fence` (#1302 (Fence slot against the gap fill),         *)
+(*             candidate 1). A `Noop` may take any other slot in every     *)
+(*             check: the gap fill of an election is always possible.     *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -204,35 +204,32 @@ Init ==
 FenceFirst == Meta /\ ~GapFill /\ cur > 1 /\ Frontier = st[cur]
 
 \* The leader of the open segment chooses the next slot: a command, or a
-\* `Noop` of the gap fill.
+\* `Noop` of the gap fill, in any slot. Once every slot is chosen
+\* (`Frontier = NS`), the step changes nothing.
 Choose(v) ==
-  /\ Frontier < NS
   /\ ~FenceFirst
-  /\ v = Noop => GapFill
   /\ chosen' = [chosen EXCEPT ![Frontier] = v]
   /\ UNCHANGED <<cur, st, en, applied, base, rec, meta, fread, acked>>
 
 \* ("meta") The first leader of a segment above the first reads the uuid in
-\* the journal metadata, once.
+\* the journal metadata. A second read is the same as a first read at that
+\* time, which the rule allows too.
 ReadMeta ==
   /\ Meta
   /\ cur > 1
-  /\ fread[cur] = None
   /\ CASE FenceRead = "rec" -> rec[cur - 1] # None
        [] FenceRead = "any" -> meta # None
        [] FenceRead = "stale" -> TRUE
   /\ fread' = [fread EXCEPT ![cur] = IF meta = None THEN U0 ELSE meta]
   /\ UNCHANGED <<chosen, cur, st, en, applied, base, rec, meta, acked>>
 
-\* ("meta") It proposes `Fence(uuid)`: at the first slot, or later with the
-\* gap fill, while its segment has no `Fence`.
+\* ("meta") It proposes `Fence(uuid)` while its segment has no `Fence`. Only
+\* a leader that read the uuid has one (`ReadMeta`: "meta", above the first
+\* segment). With no gap fill, no slot of the segment is chosen before its
+\* `Fence` (`FenceFirst`), so the `Fence` takes the first slot.
 ChooseFence ==
-  /\ Meta
-  /\ cur > 1
-  /\ Frontier < NS
   /\ fread[cur] # None
   /\ ~Fenced(cur)
-  /\ GapFill \/ Frontier = st[cur]
   /\ chosen' = [chosen EXCEPT ![Frontier] = Fence(fread[cur])]
   /\ UNCHANGED <<cur, st, en, applied, base, rec, meta, fread, acked>>
 
@@ -248,8 +245,8 @@ Seal ==
   /\ UNCHANGED <<chosen, applied, base, rec, meta, fread, acked>>
 
 \* The replica set of a segment applies its next slot and answers its writer.
+\* Only a segment that opened has a boundary state (`TakeBase`).
 Apply(g) ==
-  /\ g <= cur
   /\ Ready(g)
   /\ Front(g) < Top(g)
   /\ applied' = [applied EXCEPT ![g] = @ + 1]
@@ -257,9 +254,9 @@ Apply(g) ==
   /\ UNCHANGED <<chosen, cur, st, en, base, rec, meta, fread>>
 
 \* The first replica of a sealed segment that applied every slot writes the
-\* boundary state, once, by compare-and-set at the matchmakers.
+\* boundary state, once, by compare-and-set at the matchmakers. Only a sealed
+\* segment has an end (`en`).
 WriteRecord(g) ==
-  /\ g < cur
   /\ rec[g] = None
   /\ Ready(g)
   /\ Front(g) = en[g]
@@ -277,15 +274,15 @@ WriteRecord(g) ==
 \* The highest segment below g whose record is written.
 Latest(g) == CHOOSE h \in 1..(g - 1) : rec[h] # None /\ \A k \in (h + 1)..(g - 1) : rec[k] = None
 
-\* The replica set of a segment above the first takes its boundary state.
+\* The replica set of a segment above the first that opened (`Next` takes g
+\* in 2..cur) reads its boundary state. With "pred", it reads the record of
+\* g - 1: None (no state yet) until that record is written, which happens
+\* once, so a later read changes nothing.
 TakeBase(g) ==
-  /\ 1 < g /\ g <= cur
-  /\ base[g] = None
   /\ IF ~Meta /\ BaseFrom = "latest"
      THEN /\ \E h \in 1..(g - 1) : rec[h] # None
           /\ base' = [base EXCEPT ![g] = rec[Latest(g)]]
-     ELSE /\ rec[g - 1] # None
-          /\ base' = [base EXCEPT ![g] = rec[g - 1]]
+     ELSE base' = [base EXCEPT ![g] = rec[g - 1]]
   /\ UNCHANGED <<chosen, cur, st, en, applied, rec, meta, fread, acked>>
 
 Next ==
@@ -293,7 +290,8 @@ Next ==
   \/ ReadMeta
   \/ ChooseFence
   \/ Seal
-  \/ \E g \in Segs : Apply(g) \/ WriteRecord(g) \/ TakeBase(g)
+  \/ \E g \in Segs : Apply(g) \/ WriteRecord(g)
+  \/ \E g \in 2..cur : TakeBase(g)
 
 Spec == Init /\ [][Next]_vars
 

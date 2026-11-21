@@ -34,10 +34,15 @@
 (*   Zones       0: the grid checks, every live set. Z > 0: the zone       *)
 (*               checks, every member live and every map of the members to *)
 (*               Z zones.                                                  *)
+(*   V1          TRUE: the v1 scope of #1315. Only the partitioned grid    *)
+(*               (`rows = 2F + 1`, `acks = F + 1`; the majority is one     *)
+(*               column), and no bypass of section J5.5, so WritesDegraded *)
+(*               holds and alerts. FALSE: every grid of the bound and the  *)
+(*               bypass hold, the design for after v1.                     *)
 (***************************************************************************)
 EXTENDS Grid
 
-CONSTANTS MinN, MaxN, Measure, States, HoldSlack, Zones
+CONSTANTS MinN, MaxN, Measure, States, HoldSlack, Zones, V1
 
 VARIABLES n, cols, acks, live, leader, placeable, zone
 
@@ -55,6 +60,8 @@ Init ==
   /\ cols \in {c \in 1..n : n % c = 0 /\ n \div c >= 3}
   \* The bound of the fenced reshape for some F >= 1: 2 <= acks <= rows - 1.
   /\ acks \in 2..(n \div cols - 1)
+  \* The v1 grids: the partitioned grid only, rows = 2F + 1 and acks = F + 1.
+  /\ V1 => n \div cols = 2 * acks - 1
   /\ IF Zones = 0
      THEN /\ live \in SUBSET Members
           /\ leader \in BOOLEAN
@@ -177,19 +184,22 @@ OneState == Cardinality(StateSet) = 1
 \* The fixed action of each state can run, or nothing can run.
 \*   AtRisk, AtRiskUnplaceable: the data plane serves, and a heal reshape
 \*     can run its full Phase 1 over the old grid.
-\*   WritesDegraded: the live leader serves, and its bypass hold (section
-\*     2.13) can complete; no election can run.
+\*   WritesDegraded: no election can run. The live leader writes on in the
+\*     columns that can write. In v1 it holds and alerts, so a column that
+\*     can write is all it needs. After v1 a heal by the bypass of section
+\*     J5.5 runs, and its hold can complete.
 \*   ElectionBlocked: no election can run, so no leader and no reshape: hold.
 \*   WritesBlocked: no column can write, but an election and so a heal
 \*     reshape can run.
-\*   Stopped: no election, no write and no bypass hold: hold and page.
+\*   Stopped: no election, no write (and after v1 no bypass hold): hold and
+\*     page.
 ActionCanRun ==
   /\ Healthy => ElectableP(live) /\ WritableP(live)
   /\ (AtRisk \/ AtRiskUnplaceable) => ElectableP(live) /\ WritableP(live)
-  /\ WritesDegraded => ~ElectableP(live) /\ HoldP(live)
+  /\ WritesDegraded => ~ElectableP(live) /\ IF V1 THEN WritableP(live) ELSE HoldP(live)
   /\ ElectionBlocked => ~ElectableP(live)
   /\ WritesBlocked => ElectableP(live) /\ ~WritableP(live)
-  /\ Stopped => ~ElectableP(live) /\ ~WritableP(live) /\ ~HoldP(live)
+  /\ Stopped => ~ElectableP(live) /\ ~WritableP(live) /\ (V1 \/ ~HoldP(live))
 
 \* On the partitioned grid (rows = 2F + 1, acks = F + 1) the two spares are
 \* one number, so the catalogue can show one spare per column.
@@ -230,7 +240,9 @@ ZoneLossEveryColumn ==
   (Zones = Rows /\ Rows = 2 * acks - 1 /\ RowIsZone) =>
     \A d \in ZoneIds, j \in Cols : Spare(Members \ InZone(d), j) = acks - 2
 
-\* A reached state: some grid of the check is electable but writes nowhere.
-\* A control (`reach_writes_blocked`) shows that WritesBlocked is not empty.
+\* No grid of the check is electable and writes nowhere: WritesBlocked is
+\* empty. It holds on the v1 grids (`v1`), where a Phase-1 quorum holds
+\* `acks` acceptors of every column. Without V1 it is a reached state
+\* (`reach_writes_blocked`): WritesBlocked is not empty on the wider grids.
 NoWritesBlocked == ~(ElectableP(live) /\ ~WritableP(live))
 =============================================================================

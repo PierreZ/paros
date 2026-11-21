@@ -79,8 +79,9 @@ with the v1 scope)) cuts this section for v1: v1 grids are the partitioned grid 
 (`rows = 2F + 1`, `acks = F + 1`, the majority being one column), so the two spares of a column
 are one number and WritesBlocked is not a v1 state; the bypass of §J5.5 is out of v1, so
 WritesDegraded holds and alerts; the Offload rows of the catalogue are for after v1. The model
-`specs/tla/health/` still checks the wider grids and the bypass hold, a superset of v1; its
-`V1` switch is #1319 (a v1 switch in health/). The other decisions of that
+`specs/tla/health/` checks v1 with its `V1` switch (the `v1` check, #1319 (a v1 switch in
+health/); "Which checks cover v1" below), and keeps its other checks, on the wider grids and the
+bypass hold, as the design for after v1. The other decisions of that
 day bind this section: the grid controller (§J6.1) is the journal's own elected role on
 stateless machines and also owns scrubbing; after a zone loss it holds and alerts; v1 has no
 unsafe recover; the autoscaling decisions get heavy tests. **The v1 controller has no service
@@ -176,6 +177,27 @@ no writable column. TLC breaks both: with no column that can write, a live leade
 in WritesDegraded, whose bypass hold cannot complete (`draft_states`), and an electable grid with
 no writable column had no state (`draft_one_state`). The table above adds WritesBlocked and
 Stopped.
+
+**Which checks cover v1** (#1319 (a v1 switch in health/)). The constant `V1` of
+`specs/tla/health/` keeps only the v1 grids (the partitioned grid, `rows = 2F + 1` and
+`acks = F + 1`, the majority being one column) and the v1 actions (no bypass). The `v1` check
+runs it on every v1 grid up to 9 acceptors and every set of live members (5 thousand states):
+
+- the counts say what the quorums say (`ElectableMeaning`, `WritableMeaning`, `SpareMeaning`);
+- the states are a partition (`OneState`);
+- the action of each state can run (`ActionCanRun`): WritesDegraded needs only a column that can
+  write, because v1 holds and alerts and runs no bypass;
+- the two spares of a column are one number (`PartitionedOneSpare`), so the status shows one
+  spare per column;
+- WritesBlocked is empty (`NoWritesBlocked`): on a v1 grid a Phase-1 quorum holds `acks` members
+  of every column, so an electable grid can write in every column. Without `V1` the same
+  invariant fails (`reach_writes_blocked`), so the state stays in the table for after v1.
+
+The control `v1_draft` runs the states of the first draft on the v1 grids: a live leader with no
+column that can write falls in WritesDegraded and cannot write, and `ActionCanRun` fails. The
+zone checks (`zones2`, `zones3`) hold on every grid, the v1 grids among them. Every other check
+of the folder (`health`, the controls of a wrong threshold, `hold_short`, `draft_states`,
+`draft_one_state`) is the design for after v1.
 
 Beside the grid state, three flags change what the controller may start. Each one comes from a
 rule that a TLA+ model checked:
