@@ -7,26 +7,28 @@
 # therefore depend on nothing that does I/O or schedules work: no async runtime
 # (tokio, compio, smol, ...), no storage engine, no network or file crate.
 #
-# Two checks, on the normal dependencies only (dev and build dependencies are
-# free):
+# Three checks (build dependencies are free):
 # - With no feature on, a pure crate depends on workspace crates only.
 # - With every feature on, it depends on workspace crates and on the crates of
 #   its observation features only (`serde`, `tracing`, `assertions`). These
 #   features only observe: they decide nothing and do no I/O.
+# - The examples of a pure crate build with its dev-dependencies, and they are
+#   the proof that a program uses the crate with no runtime (#1370 (journal
+#   examples)). So with no feature on, its normal and dev dependencies
+#   together are workspace crates only.
 #
 # The facade `paros` is checked with its default features: an adapter (the
 # moonpool host, #1330 (paros-journal-moonpool)) is an optional feature of the
 # facade, off by default, and lives in its own crate.
 #
-# A new pure crate of the journal (paros-journal-io, paros-journal-control, the
-# client) joins PURE in the pull request that creates it. A crate that does I/O
+# A new pure crate of the journal (paros-journal-control, the client) joins PURE in the pull request that creates it. A crate that does I/O
 # (an adapter such as paros-journal-moonpool) never joins it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 root="$(pwd)"
 
-PURE=(paros-consensus paros-journal paros-journal-control)
+PURE=(paros-consensus paros-journal paros-journal-control paros-journal-io)
 FACADE=paros
 
 # The crates that the observation features of the pure crates pull in.
@@ -47,6 +49,7 @@ OBSERVATION=(
 )
 
 # Prints one line per crate outside the workspace: "name version".
+# The edge kinds are `normal` unless the caller adds `-e dev`.
 external_deps() {
   cargo tree -q -e normal --prefix none -f '{p}' "$@" |
     sed 's/ (\*)$//' |
@@ -69,6 +72,12 @@ for crate in "${PURE[@]}"; do
   if [ -n "$bare" ]; then
     echo "check-core-deps: $crate with no feature depends on a crate outside the workspace:" >&2
     echo "$bare" | sed 's/^/  /' >&2
+    status=1
+  fi
+  examples="$(external_deps -e dev -p "$crate" --no-default-features)"
+  if [ -n "$examples" ]; then
+    echo "check-core-deps: the examples of $crate build with a crate outside the workspace:" >&2
+    echo "$examples" | sed 's/^/  /' >&2
     status=1
   fi
 done

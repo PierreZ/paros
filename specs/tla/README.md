@@ -43,6 +43,26 @@ that `Inv` covers: `decree/` with no wipe or with a wiped acceptor that takes no
 covered), `multi-paxos/` with `Durable = "before"` and `Identity = TRUE`. A pass of a
 `multi-paxos/` check says that no drawn state breaks `Inv` in one step; it is not a proof.
 
+## Proofs
+
+A proof holds at every size: every number of acceptors, values and ballots, and every quorum
+system whose quorums intersect. A proof is a module `<Model>Proof.tla` beside its model, checked
+by TLAPS (`nix develop .#proofs --command scripts/check-proofs.sh`; CI's `proofs` job of the
+`TLA` workflow proves every obligation again, with no cache). This is step 2 of #1307.
+
+| Model | Proof | What it proves |
+|---|---|---|
+| `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 679 obligations, Z3 and Zenon, about 2 minutes |
+
+The TLAPS of nixpkgs (1.4.5) has no Isabelle and no LS4. So a proof uses no induction lemma (they
+need Isabelle; a least or highest member of a set of naturals comes from `WFMin`, which is first
+order, as `MinExists` and `MaxExists` of `DecreeProof.tla` do), and the last step of `Safety` (`Spec => []Agreement`), the TLA rule INV1 applied
+to the three theorems, is `PROOF OMITTED`: LS4, the PTL backend, is the one tool that checks it.
+The constant facts that a proof uses are named `ASSUME`s of the model (`AcceptorsFinite`,
+`QuorumsType`, `NoneNotValue` and others), so TLC checks them on each configuration. A proof has a
+control too: remove a guard that the proof needs (for example `prom[a] <= b` in `Accept`) and
+TLAPS fails.
+
 ## Guard mutation
 
 `scripts/mutate-tla.py` tests the checks of each model (#1311 (mutate spec guards)). A guard is
@@ -103,20 +123,19 @@ no checked model takes. The trace specs today are:
   matchmaking, the GC, the retirement and the rejoin, the quorums of a configuration (a
   majority or a grid), the compaction floor and the trim jump, the faulty entries of CTRL with
   the pages of a promise, the tri-state tally and the repair probe, the read replica, the
-  leaderless reads and the proxy's `Commit` rule. `NodeTrace.tla` binds the events of a walk to
-  its actions, and eight thin trace specs extend it, one for each family of walks:
-  `MultiPaxosTrace` (every cluster flavor without matchmakers), `MatchmakerTrace` (the flavor
+  leaderless reads, the rounds of the proxy leaders (a delegation, the fan-out, the `Commit` on
+  a Phase-2 quorum of the round's configuration, the close of a round on a relayed `Nack` or an
+  eviction, a crash) and the cooperative handoff (a leadership as a state of a node, the payload,
+  the install behind the promise guard and the frontier guard, the frontier read from disk, a
+  step down of any cause). `NodeTrace.tla` binds the events of a walk to its actions, and ten
+  thin trace specs extend it, one for each family of walks: `MultiPaxosTrace` (every cluster
+  flavor without matchmakers), `ProxyLeaderTrace` (the flavors with proxy leaders),
+  `LeaderHandoffTrace` (the handoff flavor), `MatchmakerTrace` (the flavor
   with matchmakers), `ReadsTrace` (the lagging-reads flavor), `TruncationTrace` (the
   `compaction` flavor), `CompartmentsTrace` (every compartment, and its `compaction` steer),
   `FaultsTrace` (`disk-faults` and `disk-faults-3`), `RetireTrace` (`retiring`) and
   `MatchmakerGridTrace` (`reconfiguring`). Each sets the bounds of the model from the events of
   its walk (`crates/sim/consensus-sim/src/cluster/trace/node.rs`).
-- `proxy-leader/ProxyLeaderTrace`: the proxy's `Commit` rule, on the flavors with proxy leaders.
-  The colocated steps (the leader's own promise, an `Accept` it sends itself, its own vote, the
-  record of a learn) are steps of `ProxyLeader.tla` (`Colocated = TRUE`).
-- `leader-handoff/LeaderHandoffTrace`: the guards of the cooperative handoff, on the handoff
-  flavor. A win that skips a learned slot, a step down, a learn of one slot, a record and a
-  restart that loses a suffix of the chosen index are steps of `LeaderHandoff.tla`.
 - `generations/HandoverTrace`: the matchmaker set handover over a chain of generations, with
   the registrations and the GC acks of one journal, on the `handover` flavor. `Generations.tla`
   closes a bootstrap over a majority of the old generation that froze, and checks that every
@@ -133,7 +152,11 @@ no checked model takes. The trace specs today are:
   the answer `Res`, a `seal` event is `Bound`, and a `resolve` event is `ResolveOn` on the
   boundary of its sealed segment. It defines no rule of its own.
 
-Merging `leader-handoff/` and `proxy-leader/` into the node model is #1343 (merge proxy and handoff into the node model).
+`proxy-leader/` and `leader-handoff/` stay as the design models of their rules, with their
+liveness checks; `node/` has the same safety rules as constants, each with its control in
+`node/checks.txt` (#1343 (merge proxy and handoff into the node model)). The beat guard, the fence
+resignation and the pending slots that a successor proposes again are rules of liveness: in
+`node/` a leader may step down at any time, so `leader-handoff/` keeps their checks.
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take
@@ -186,7 +209,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/`; `batcher/` for the batcher walk | #1190 (rework 6.10), done |
-| `ColocatedNode` as one implementation model: the log, matchmaking, the GC and the retirement, the floor and CTRL, the read replica, the leaderless reads and the proxy `Commit`, as the code runs them together | `node.rs` and the roles it wires | `node/`, which the log-family trace specs extend | #1306 (trace specs extend the checked model), done |
+| `ColocatedNode` as one implementation model: the log, the handoff, the rounds of the proxy leaders, matchmaking, the GC and the retirement, the floor and CTRL, the read replica and the leaderless reads, as the code runs them together | `node.rs`, `proxy_leader.rs` and the roles they wire | `node/`, which every trace spec of a cluster walk but `generations/` extends | #1306 (trace specs extend the checked model), #1343 (merge proxy and handoff into the node model), done |
 | Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
@@ -2570,8 +2593,10 @@ offloaded S1, and is "trunc" for a trimmed S1.
 | `acc_floor` | ci | violation of `Ends`: the acceptors of S1 compact to the decided floor before a replica of R1 applied S1; nobody can fold S1, the boundary state is never written, and R2 never starts |
 | `acc_grid` | ci | violation of `Findable` (#1318): the top slot of S1 was proposed again in the grid of S2 (`Reprop = 1`), and the acceptors of that grid keep one floor, counted on R2. r1 applies S1 and writes the boundary state, r1 stops, r4 and r5 start, the floor of the grid rises to `K`, and the slot is at no live replica of R1 and at no acceptor. With the floor kept for each segment (`AccKey = "segment"`, every other check) the slot follows the floor and the retire of S1 |
 | `nojump` | ci | violation of `Ends`: no `TrimmedTo`; a replica of R2 behind the floor waits for ever for a slot that the acceptors and its peer dropped |
-| `crash_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (23.5 million distinct states, depth 26, 3.76 million states left on the queue), no violation; run of the second Fable review of the journal plan, 2026-11-20. A cut that finishes is #1321 |
-| `live_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (16.7 million distinct states, depth 20, 6.2 million states left and growing), no violation; `Ends` is checked as an invariant on a prefix of the state space only. Same run, same issue |
+| `crash_cut` | long | pass: the safety invariants of `crash` (two replicas in each set, `F = 1`, retire at `F + 1`, one read of `seq` 0) with all three values, cut by the state constraint `Budget` to at most two writes, one `Truncate(1)` and one `Truncate(2)`; the budget is `NS` values, so every run still fills the log. 6.0 million distinct states, depth 38, about 7 minutes with 4 workers (#1321) |
+| `live_cut` | long | pass: `Ends` of `live` with three replicas in R1 and in R2, `F = 1` and crashes, no reads, all three values with the same `Budget`. A state inside `Budget` with a slot left can always choose a value that stays inside it, so each end that TLC judges is a true end of the spec, not an end that the cut makes. 45.7 million distinct states, depth 46, about 91 minutes with 4 workers (#1321) |
+| `crash_all` | long | pass, bounded: does not finish; TLC stops after 40 minutes. The second Fable review of the journal plan (2026-11-20) ran it for 38 minutes with 2 workers: 23.5 million distinct states, depth 26, 3.76 million states left on the queue, no violation. `crash_cut` is its cut that finishes |
+| `live_all` | long | pass, bounded: does not finish; TLC stops after 40 minutes. Same run: 16.7 million distinct states, depth 20, 6.2 million states left and growing, no violation; `Ends` is checked on a prefix of the state space only. `live_cut` is its cut that finishes |
 
 The answer to #1276:
 

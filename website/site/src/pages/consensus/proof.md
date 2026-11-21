@@ -32,8 +32,8 @@ A walk is a `Flavor` of `consensus-sim` (`cluster/flavor.rs`), or its own walk w
 |---|---|---|---|
 | Single decree | `decree/` | `decree/DecreeTrace.tla` | the decree walk (`src/decree.rs`) |
 | Multi-Paxos on a majority, a grid, partitions | `multi-paxos/`, `node/` | `node/MultiPaxosTrace.tla` | `multi_paxos`, `multi_paxos_five`, `grid`, `partitions` |
-| Leader handoff | `leader-handoff/` | `leader-handoff/LeaderHandoffTrace.tla` | `handoff` |
-| Proxy leaders | `proxy-leader/` | `proxy-leader/ProxyLeaderTrace.tla` | `proxies`, `proxies_on_grid`, `compartments` |
+| Leader handoff | `leader-handoff/`, `node/` | `node/LeaderHandoffTrace.tla` | `handoff` |
+| Proxy leaders | `proxy-leader/`, `node/` | `node/ProxyLeaderTrace.tla` | `proxies`, `proxies_on_grid`, `compartments` |
 | Batchers | `batcher/` | `batcher/BatcherTrace.tla` | the batcher walk (`src/batcher.rs`) |
 | Replicas and the read replica | `compartments/`, `node/` | `node/CompartmentsTrace.tla` | `replicas`, `compartments_compacting` |
 | Leaderless reads | `reads/`, `node/` | `node/ReadsTrace.tla` | `reads`, `lagging_reads` |
@@ -45,7 +45,8 @@ A walk is a `Flavor` of `consensus-sim` (`cluster/flavor.rs`), or its own walk w
 
 `decree/` and `multi-paxos/` also have an inductive invariant `Inv`: TLC checks that one step
 from a state where `Inv` holds goes to a state where it holds (every such state for the decree,
-drawn states for Multi-Paxos). Proofs are the later steps of that work. `specs/tla/README.md` lists every
+drawn states for Multi-Paxos). TLAPS proves the decree's `Inv` at every size
+(`decree/DecreeProof.tla`); a proof for Multi-Paxos is a later step. `specs/tla/README.md` lists every
 model with its checks and its controls.
 
 ## What it gives

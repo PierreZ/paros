@@ -48,7 +48,35 @@ reach_serve      violation  ci
 # is checked by reads/ (see `Fence` in Node.tla).
 reads_plain1     pass       ci
 reads_watermark  violation  ci
-# The `Commit` of a proxy leader.
+# The rounds of a proxy leader: a delegation, the fan-out, the `Commit`, a
+# close on a `Nack` or an eviction, a crash. Each control breaks one rule of
+# `proxy-leader/` and a proxy commits a value that is not chosen: one vote
+# short of a quorum; over the configuration of the highest ballot it heard
+# (from any ballot that started, or from a delegation that left a lower
+# round open), on a move to {a1}. `proxy_shrink1` decides one slot over
+# that move; `proxy_shrink` decides two, so a lower round stays open while
+# the belief moves (about 20 minutes on four cores).
 proxies          pass       ci
+proxy_crash      pass       ci
+proxy_shrink1    pass       ci
+proxy_shrink     pass       long
 proxies2         pass       long
-commit_any       violation  ci
+proxy_short      violation  ci
+proxy_belief     violation  ci
+proxy_noclose    violation  ci
+# The cooperative handoff: one hop, the frontier guard, the frontier that a
+# leader records as it opens each round, the promise guard, the record of a
+# round outside every quorum of the ballot, the step down with the payload,
+# the named successor, and a record that never lowers a leader's own round.
+# Each control turns one rule off.
+handoff            pass       ci
+handoff_long       pass       long
+reach_handoff      violation  ci
+two_hops           violation  ci
+replay             violation  ci
+volatile_frontier  violation  ci
+promise_guard_off  violation  ci
+record_outside     violation  ci
+keep_leading       violation  ci
+any_target         violation  ci
+keep_lower         violation  ci

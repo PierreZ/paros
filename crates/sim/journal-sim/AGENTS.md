@@ -7,7 +7,8 @@ across seals, `SetLeader` with `None`, truncates, crashes of the replica that re
 and the `Resolve` call that settles each `Below`. A second walk drives the journal's matchmaker
 register across handovers of the set (#1325). A third walk drives the journal roles
 (`paros_journal::roles`, #1326): acceptors, leaders and segment replicas with disks, over a chain
-of segments. Test only: `publish = false`.
+of segments. A fourth walk runs the generic driver of `paros-journal-io` (#1329) on three processes.
+Test only: `publish = false`.
 
 ## Map
 
@@ -40,6 +41,10 @@ of segments. Test only: `publish = false`.
   one), its oracles (`FENCED`, `BOUNDED_RESHAPE_RATE`, `COST_BOUND`, `NO_OSCILLATION`,
   `BOUNDED_IN_FLIGHT`, `CONVERGES`), its reach sites and its planted mutants (`ControllerMutant`).
   `tests/controller.rs` also requires every `probe!` of the role (`role::PROBES`).
+- `src/host.rs`: the driver walk (`HostModel`, #1329): three processes, each a `Driver` of
+  `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
+  walk's mailbox, crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
+  `FLIGHT`, `ANSWER`), its reach sites and its planted mutants (`HostMutant`). `tests/host.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/register.rs`: the events of a register walk as a trace of

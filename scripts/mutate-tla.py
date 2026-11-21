@@ -305,10 +305,10 @@ def read_checks(folder: str) -> list[Check]:
 
 
 def own_modules(folder: str) -> list[Path]:
-    """The modules of a folder that are not links and not trace specs."""
+    """The modules of a folder that are not links, trace specs or proofs."""
     out = []
     for p in sorted((SPECS / folder).glob("*.tla")):
-        if p.is_symlink() or p.name.endswith("Trace.tla"):
+        if p.is_symlink() or p.name.endswith(("Trace.tla", "Proof.tla")):
             continue
         out.append(p)
     return out
@@ -484,7 +484,8 @@ def main() -> None:
     guards: list[Guard] = []
     for f in folders:
         mods = own_modules(f)
-        acts = action_names([p for p in (SPECS / f).glob("*.tla") if not p.name.endswith("Trace.tla")])
+        acts = action_names([p for p in (SPECS / f).glob("*.tla")
+                             if not p.name.endswith(("Trace.tla", "Proof.tla"))])
         for m in mods:
             guards.extend(scan(m, acts))
     if args.skip:

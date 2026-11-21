@@ -50,6 +50,7 @@ dependencies = [
  "moonpool-walk",
  "paros-journal",
  "paros-journal-control",
+ "paros-journal-io",
 ]
 
 [[package]]
@@ -109,6 +110,7 @@ version = "0.2.0"
 dependencies = [
  "paros-consensus",
  "paros-journal",
+ "paros-journal-io",
 ]
 
 [[package]]
@@ -132,6 +134,14 @@ name = "paros-journal-control"
 version = "0.2.0"
 dependencies = [
  "moonpool-assertions",
+ "paros-consensus",
+ "paros-journal",
+]
+
+[[package]]
+name = "paros-journal-io"
+version = "0.2.0"
+dependencies = [
  "paros-consensus",
  "paros-journal",
 ]

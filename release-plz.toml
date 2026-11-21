@@ -1,8 +1,9 @@
 # Release-plz configuration.
 #
-# Three crates are public: `paros-consensus` (the sans-IO Paxos core, a library
+# Four crates are public: `paros-consensus` (the sans-IO Paxos core, a library
 # for everyone, docs/architecture/04-roles.md §4.3), `paros-journal` (the pure
-# journal core) and `paros` (the facade a program depends on). They share one version (`version_group`), one tag and
+# journal core), `paros-journal-io` (the journal's traits and driver) and
+# `paros` (the facade a program depends on). They share one version (`version_group`), one tag and
 # one GitHub release, `v{{ version }}`, on the `paros` package.
 #
 # Nothing publishes by itself. A push to `main` only opens or updates the
@@ -37,7 +38,7 @@ features_always_increment_minor = true
 name = "paros"
 version_group = "paros"
 changelog_path = "CHANGELOG.md"
-changelog_include = ["paros-consensus", "paros-journal"]
+changelog_include = ["paros-consensus", "paros-journal", "paros-journal-io"]
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 git_release_enable = true
@@ -52,6 +53,12 @@ git_release_enable = false
 
 [[package]]
 name = "paros-journal"
+version_group = "paros"
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "paros-journal-io"
 version_group = "paros"
 git_tag_enable = false
 git_release_enable = false

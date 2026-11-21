@@ -70,6 +70,8 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal --no-deps
       - name: Check the grid controller's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal-control --no-deps
+      - name: Check the journal IO crate's rustdoc links
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal-io --no-deps
 
   fmt:
     needs: scope
@@ -206,7 +208,7 @@ jobs:
           -p consensus-sim --test coverage --no-capture
 
   # Mutation testing of the lines a pull request changes in paros-consensus,
-  # in paros-journal and in paros-journal-control
+  # in paros-journal, in paros-journal-control and in paros-journal-io
   # (`.cargo/mutants.toml`, `scripts/mutants.sh`): each mutant of a changed
   # line must be caught by the core's tests or the simulation (the fast tests
   # first, then the trace checks for the mutants they miss). A survivor fails
@@ -238,7 +240,7 @@ jobs:
         run: |
           earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
           sudo "$earlyoom" -m 8 -s 100 -r 0 \
-            --prefer '^(paros_consensu|consensus_sim|paros_journal|journal_sim|flavors|walks|mutants|traces|coverage)' \
+            --prefer '^(paros_consensu|consensus_sim|paros_journal|journal_sim|flavors|walks|mutants|traces|coverage|host)' \
             --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
             > earlyoom.log 2>&1 &
       - name: Run the mutants of the changed lines
@@ -273,6 +275,17 @@ jobs:
             exit 0
           fi
           nix develop --command scripts/mutants.sh --control --in-diff control.diff
+      # The same for the journal's traits and driver (`scripts/mutants.sh
+      # --journal-io`): its unit tests and the driver walk of journal-sim.
+      - name: Run the mutants of the changed lines of paros-journal-io
+        run: |
+          set -euo pipefail
+          git diff HEAD^1 HEAD -- crates/lib/paros-journal-io/src > journal-io.diff
+          if [ ! -s journal-io.diff ]; then
+            echo "The pull request changes no line of paros-journal-io/src."
+            exit 0
+          fi
+          nix develop --command scripts/mutants.sh --journal-io --in-diff journal-io.diff
       - name: Show the survivors
         if: failure()
         run: |
@@ -281,7 +294,10 @@ jobs:
 
   # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
   # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
-  # them is a test of the public API's shape as much as of the protocol. They are linted under the
+  # them is a test of the public API's shape as much as of the protocol. The examples of
+  # `paros-journal` (`crates/lib/paros-journal/examples/`, #1370 (journal examples)) and of
+  # `paros-journal-io` (#1329) do the same for the journal fold and for the journal roles on
+  # the traits and the driver, with backends in memory and a storage written by hand. They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
   examples:
     needs: scope
@@ -313,9 +329,15 @@ jobs:
         run: nix develop --command cargo run -p paros-consensus --example leader_handoff
       - name: Run reconfiguration
         run: nix develop --command cargo run -p paros-consensus --example reconfiguration
+      - name: Run the journal example fold
+        run: nix develop --command cargo run -p paros-journal --example fold
+      - name: Run the journal example in_memory
+        run: nix develop --command cargo run -p paros-journal-io --example in_memory
+      - name: Run the journal example custom_storage
+        run: nix develop --command cargo run -p paros-journal-io --example custom_storage
       # nextest runs no doc test, so the examples of the rustdoc run here.
       - name: Run the doc examples
-        run: nix develop --command cargo test --doc -p paros-consensus
+        run: nix develop --command cargo test --doc -p paros-consensus -p paros-journal-io
 
   # The sans-IO core and the library facade stay portable to wasm32: paros-consensus
   # is zero-dep/std-only. The browser build itself is the `wasm` job.
@@ -337,6 +359,8 @@ jobs:
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal
       - name: Build paros-journal-control (the grid controller) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal-control
+      - name: Build paros-journal-io (the journal's traits and driver) for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal-io
       - name: Build paros (the library facade) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
       # The two public crates (`release-plz.toml`) build as crates.io builds
