@@ -2,7 +2,7 @@
 
 The paros website (#810 (website redo 1/4), plan approved by Pierre on 2026-10-31). One Astro
 app, one style for every page. Build: `npm ci && npm run build` (output in `dist/`), preview:
-`npm run dev`. The live parts need the wasm first: `scripts/build-wasm.sh` stages
+`npm run dev`, tests: `npm run check-links` and `npm test` (see "Tests"). The live parts need the wasm first: `scripts/build-wasm.sh` stages
 `paros-consensus` into `public/paxos/wasm/`.
 
 ## What the site is for
@@ -159,3 +159,30 @@ A widget holds no protocol logic: every fact comes from the core. No bench figur
 performance numbers on the site (Pierre, 2026-10-31). The widgets that ran the playground engine
 (simulation, same-code, swarm, durable-writes, fsync, dogfooding) are at the tag
 `v0.2.0-alpha.1` (`docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md`).
+
+## Tests (#1362 (browser smoke test and link check))
+
+`.github/workflows/pages.yml` runs both on each pull request that touches the site,
+`paros-wasm`, `paros-consensus`, `paros-journal` or the Cargo files, and before each deploy.
+Both run on the built site, so build the wasm and the site first.
+
+- **Link check**, `npm run check-links` (`scripts/check-links.mjs`, in `nix develop`): every
+  `href` and `src` of `dist/`. A link inside the site names a file of `dist/`, and its
+  `#anchor` names an `id` of that page (`#run=…` and `#lab=…` are addresses that a script
+  reads). A link to this repository on GitHub (`blob/<ref>/…`, `tree/<ref>/…`) names a file
+  or folder that exists at that ref (the working tree for `main`, `git ls-tree` for a tag),
+  and its anchor on a Markdown file names a heading there, as GitHub writes the anchor
+  (`§J4.2 The journal's sans-IO contract` is `#j42-the-journals-sans-io-contract`). Links to
+  other sites are not fetched. A broken link is fixed; there is no list of links to skip.
+- **Browser smoke test**, `npm test` (`tests/smoke.spec.mjs`, Playwright, Chromium only, in
+  `nix develop .#site`: the flake gives the browser of nixpkgs's `playwright-driver`, and
+  `@playwright/test` in `package.json` has its exact version; bump both together).
+  `scripts/serve.mjs` serves `dist/` at `/paros/`. The test fails on a console error or
+  warning, an uncaught exception, a failed request or an answer of 400 or more on any page,
+  and on a page wider than 390 px at 390 px. On each page with a trace, the step-through
+  must switch to the live wasm run (the chip says "live"), every story must reach its last
+  screen, and every "What if" run its last step. One exercise of each lesson is solved by
+  clicks on Deliver and Drop (the rows carry `data-kind`, `data-from` and `data-to`, from
+  `WireMessage` in `paros-wasm`), and the page must say the goal holds. The quorum picker,
+  the `quorums` widget and the `Ready` widget must answer. A new live part gets its test in
+  the same pull request. No test is skipped, and a red run is not run again (`AGENTS.md`).

@@ -246,6 +246,11 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `cargo check --target wasm32-unknown-unknown -p paros`
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
+- the site (`.github/workflows/pages.yml`, on pull requests that touch the site, `paros-wasm`,
+  `paros-consensus`, `paros-journal` or the Cargo files): `scripts/build-wasm.sh`, the Astro
+  build, the link check of the built site (`npm run check-links`) and the browser smoke test
+  of its live parts (`nix develop .#site --command npm test`, Playwright and Chromium;
+  `website/site/AGENTS.md`, "Tests")
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder, and the trace checks of consensus-sim and journal-sim in four
   `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); the job of each folder also checks that
