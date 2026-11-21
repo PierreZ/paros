@@ -33,7 +33,8 @@ after FoundationDB's `LocalGenerationReg`.
 
 The register is an **optional role**. The registration matchmaker of the paper stays in
 `paros-consensus`, unchanged, for every user of the library. The journal opts into the register
-beside it (decided on 2026-11-20). Where its code lives is **Open**: #1325 decides.
+beside it (decided on 2026-11-20). Its code lives in `paros-journal`, by composition: it uses the
+core's acceptor and single-decree Paxos, and the core does not change (#1325).
 
 ## What it holds
 
@@ -90,4 +91,11 @@ This window comes only with a heal in v1, and it is accepted for v1 (§J3.4).
 - `paros-consensus`: the registration matchmaker and its generation handover,
   `Matchmaker` and `MatchmakerReconfigurer`
   ([`matchmaker/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-consensus/src/matchmaker)).
-- Not built yet: the register role (#1325).
+- [`paros-journal`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-journal): the
+  register role
+  ([`register/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-journal/src/register):
+  `RegisterValue` and each `Change` with its guard, `RegisterMember`, `RegisterCall` and the set
+  handover `RegisterHandover`).
+- [`journal-sim`](https://github.com/PierreZ/paros/tree/main/crates/sim/journal-sim): the walk of
+  the register across handovers, and the trace check of each walk against
+  [`segment-records/RegisterTrace.tla`](https://github.com/PierreZ/paros/blob/main/specs/tla/segment-records/RegisterTrace.tla).
