@@ -42,7 +42,7 @@ stays valid: find its file in the section map.
 
 ## Files, in order
 
-1. [01-goal.md](01-goal.md): §1 Goal; §1.1 The eight root rules
+1. [01-goal.md](01-goal.md): §1 Goal; §1.1 The goals and the root rules
 2. [02-data-plane.md](02-data-plane.md): §2 The data plane (links to `docs/journal/`)
 3. [02-1-journal-register.md](02-1-journal-register.md): §2.16 The journal's matchmaker register (a link to `docs/journal/`)
 4. [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md): §3 The control plane; §3.1 The cell tenant and bootstrap
@@ -53,7 +53,7 @@ stays valid: find its file in the section map.
 9. [03-6-status.md](03-6-status.md): §3.6 Status
 10. [03-7-universe.md](03-7-universe.md): §3.7 The universe
 11. [03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md): §3.8 Identifiers; §3.9 Checkpoints; §3.10 Recovery (deferred); §3.11 Transport security
-12. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract (a link); §4.3 The consensus core is a library for everyone
+12. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract (a link); §4.3 The consensus core is a library for everyone; §4.4 The layers of the service
 13. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones; §5.1 Journal health (a link)
 14. [06-verification.md](06-verification.md): §6 Verification
 15. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
@@ -65,7 +65,7 @@ stays valid: find its file in the section map.
 | Section | Title | File |
 |---|---|---|
 | §1 | Goal | [01-goal.md](01-goal.md) |
-| §1.1 | The eight root rules | [01-goal.md](01-goal.md) |
+| §1.1 | The goals and the root rules | [01-goal.md](01-goal.md) |
 | §2 | The data plane (moved to journal §J2) | [02-data-plane.md](02-data-plane.md) |
 | §2.1 | Positions (moved to journal §J2.1) | [02-data-plane.md](02-data-plane.md) |
 | §2.2 | Single-writer writes and fencing (moved to journal §J2.2) | [02-data-plane.md](02-data-plane.md) |
@@ -99,6 +99,7 @@ stays valid: find its file in the section map.
 | §4.1 | How the pieces fit | [04-roles.md](04-roles.md) |
 | §4.2 | The journal's sans-IO contract (moved to journal §J4.2) | [04-roles.md](04-roles.md) |
 | §4.3 | The consensus core is a library for everyone | [04-roles.md](04-roles.md) |
+| §4.4 | The layers of the service | [04-roles.md](04-roles.md) |
 | §5 | Failure model and zones | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §5.1 | Journal health (moved to journal §J6.2) | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §6 | Verification | [06-verification.md](06-verification.md) |

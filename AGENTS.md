@@ -189,6 +189,28 @@ is the journal v1, `docs/journal/`** (Pierre, 2026-11-20): the journal alone, wi
 plane, segments, roles, quorums, controller, verification and build steps. The journal rules of
 `docs/architecture/` moved there; each moved architecture section keeps its heading and a link.
 
+## The goals
+
+Pierre, 2026-11-22. The goals say what paros is for and how it is built; a rule of this file
+or of `docs/` is a consequence of one of them (`docs/architecture/01-goal.md` §1.1).
+
+| # | Goal | In short |
+|---|---|---|
+| 1 | **A journal service for tenants** | Four calls: `Write`, `Read`, `Truncate`, `SetLeader`. A durable, ordered, fenced log. paros owns the log, never the state. |
+| 2 | **The cell heals with nobody watching** | After the faults stop, each journal and each set is whole again within one bound, or reports a true reason. |
+| 3 | **paros eats its own food** | State is in journals, who acts is an election on a journal, agreement is a Paxos flavor of the core. The control plane gets no call that a tenant does not have. |
+| 4 | **One shape at every level** | Universe, cell and tenant are each a control journal, a pure fold and one coordinator. Levels talk only through records. |
+| 5 | **The person says what, the system says where** | A person types names and what a journal must survive. The system chooses machines and ids, and refuses what it cannot place. |
+| 6 | **Everything can move** | A namespace moves to another cell with no change of protocol, and a cell is rolled out by evacuation. |
+| 7 | **Layers that stand alone** | Each layer is a crate that a program that is not paros can use alone. A layer depends only on the layers below it. The core has no tenant. |
+| 8 | **Every role is a pure actor** | A deterministic step, persist before send, a refusal is data. I/O is only in adapters. So each layer has its model, its walk and its trace check. |
+| 9 | **Proved before built** | No code before its TLA+ model, and no excuse in simulation. |
+| 10 | **Everything simulates, and it runs in the browser** | Every layer, and the whole service, runs in the deterministic simulation. The same code compiles to wasm and runs in a browser. |
+
+The features of the service at the tag stay; its structure changes (goals 7 and 8,
+`docs/architecture/04-roles.md` §4.4). When you add a crate, ask: can a program that is not
+paros use it alone?
+
 ## Who owns the code
 
 This codebase is yours: how it's built is your call, and you'll keep building on it. When you
@@ -491,7 +513,9 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   step 0.12 of the rework). Grids, matchmakers, proxies and replicas are **configuration data**,
   never implied by code being present. Every peer and client message carries a `JournalIdentifier`
   `(TenantId, JournalId)`; under that identifier the plain deployment exchanges the same
-  messages and persists the same scalars.
+  messages and persists the same scalars. The tenant leaves the core (Pierre, 2026-11-22): a crate
+  that wraps the core adds it, and the core will carry one journal id (#1402 (remove the tenant
+  from the core)); the code still carries the pair until then.
 
 **The core is a library for everyone** (decided by Pierre on 2026-11-20,
 `docs/architecture/04-roles.md` §4.3). `paros-consensus` stays usable by other people for plain
