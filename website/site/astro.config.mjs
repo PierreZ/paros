@@ -38,7 +38,6 @@ const redirects = {
   "/docs/quickstart": "/parosd/",
   "/docs/reference": "/parosd/",
   "/docs/playground": "/parosd/",
-  "/engineering/simulation": "/engineering/",
   "/engineering/same-code": "/engineering/",
   "/engineering/swarm": "/engineering/",
   "/engineering/durable-writes": "/engineering/",

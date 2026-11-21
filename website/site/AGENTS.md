@@ -3,7 +3,7 @@
 The paros website (#810 (website redo 1/4), plan approved by Pierre on 2026-10-31). One Astro
 app, one style for every page. Build: `npm ci && npm run build` (output in `dist/`), preview:
 `npm run dev`, tests: `npm run check-links` and `npm test` (see "Tests"). The live parts need the wasm first: `scripts/build-wasm.sh` stages
-`paros-consensus` into `public/paxos/wasm/`.
+`paros-consensus` into `public/paxos/wasm/` and `paros-journal` into `public/journal/wasm/`.
 
 ## What the site is for
 
@@ -21,7 +21,7 @@ in the repository; the old service is named only as "at the tag". No long book p
 | `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
 | `/consensus/` | `src/pages/consensus/*` | the `paros-consensus` library (#1349 (Consensus, Journal and parosd page groups)): what the crate is and each flavor with its type and example (`index.astro`), the driver loop with the `Ready` widget (`driver.md`, the former Engineering page "The sans-IO core"), the four deployments (`deployments.md`), how it is checked (`proof.md`). Each Paxos page's "In paros" section links its Consensus page, and back |
 | `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | how paros is made safe (#1361 (safety case)): the safety case (`index.astro`: one row per safety claim of `paros-consensus` and of the journal, with its model and invariant, trace spec, walk and oracle, the controls and mutants that must die, and its state: checked, model only or open, with the issue; the open rows stay), one page each for TLA+ models (`tla.md`), simulation (`simulation.md`) and mutants and assertions (`mutants.md`), and grid quorums with its live widget. A figure on these pages comes from a dated run, with its date |
-| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, and the controller. Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule |
+| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, and the controller. Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule. The calls page has the fold lab ("Your turn", below) |
 | `/parosd/` | `src/pages/parosd/index.astro` | the service around the journal: what it will be, that it is rebuilt, and how to run the version before the rewrite at the tag |
 
 The top bar (`src/nav.ts`) is `Paxos · Consensus · Journal · parosd · Engineering` (#1349).
@@ -144,6 +144,17 @@ have exercises; the compartmentalized page runs its own driver, not a level, so 
 none yet.
 Without the wasm, the section says so.
 
+The Journal pages have their own "Your turn" (#1363 (journal fold lab)): `lab: journal` in the
+front matter loads `public/journal-lab.js` (and `course.js`, for the solved marks), and
+`<div data-journal-lab="id id id">` mounts it. It loads the `journal` wasm bundle
+(`public/journal/wasm/`, staged by `scripts/build-wasm.sh`, gitignored) and runs `JournalLab`
+(`paros-wasm`, `src/journal/lab.rs`): three writers, the view of the segment in force, each
+segment with its records, each writer's belief, the calls of the exercise as buttons (each
+with `data-call`, `A:write`, `seal`), and what `paros-journal` answered with its row of the
+answers table of §J2. Every answer comes from `JournalState::apply` or `resolve`; the page holds
+no journal rule. Each call is one decided slot, applied at once: the page says that no
+consensus, network, disk or clock runs there. `/journal/calls/` has five exercises.
+
 ## Live widgets (#812 (website redo 3/4), #951 (live Engineering pages))
 
 The grid quorums page of Engineering and the driver page of Consensus show something live; the safety case and the technique pages hold no widget. A page sets `widget: true` in its front matter
@@ -183,6 +194,8 @@ Both run on the built site, so build the wasm and the site first.
   must switch to the live wasm run (the chip says "live"), every story must reach its last
   screen, and every "What if" run its last step. One exercise of each lesson is solved by
   clicks on Deliver and Drop (the rows carry `data-kind`, `data-from` and `data-to`, from
-  `WireMessage` in `paros-wasm`), and the page must say the goal holds. The quorum picker,
+  `WireMessage` in `paros-wasm`), and the page must say the goal holds. Every exercise of the
+  journal fold lab is solved by clicks on its calls (`data-call`), and Undo takes the goal
+  back. The quorum picker,
   the `quorums` widget and the `Ready` widget must answer. A new live part gets its test in
   the same pull request. No test is skipped, and a red run is not run again (`AGENTS.md`).

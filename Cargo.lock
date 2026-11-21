@@ -132,6 +132,7 @@ version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "paros-consensus",
+ "paros-journal",
  "serde",
  "serde_json",
  "wasm-bindgen",
