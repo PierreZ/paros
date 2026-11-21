@@ -6,6 +6,7 @@
 # Design B: plain Matchmaker Paxos, chunks local to each replica, and the
 # variant with offload claims in the log. Report: ../README.md.
 plain              pass       ci
+chain              pass       ci
 plain_visible      violation  ci
 plain_onehome      violation  ci
 claims             pass       ci
@@ -18,6 +19,7 @@ retire_early       violation  ci
 trim_nocheck       violation  ci
 reads              pass       ci
 reads_fence        pass       ci
+fence_ballots      pass       ci
 reach_read_old     violation  ci
 read_nofence       violation  ci
 reads_view         violation  ci

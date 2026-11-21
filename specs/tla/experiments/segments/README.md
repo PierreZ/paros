@@ -196,16 +196,21 @@ the values and the replicas. TLC 2.19; the times are on 2 workers.
 
 | Configuration | Ballots | A distinct states | B distinct states |
 |---|---|---|---|
-| Every rule on, storage on (A `safety`, B `plain` with fixed chunks) | 3 / 2 | 306,812 | 158,422 |
-| Every rule on, storage on (B `plain_long`) | 3 | | 5,264,806 (22 min) |
-| B with log claims, free cuts (`claims`, `claims_long`) | 2 / 3 | | 96,713 / 3,039,127 (31 min) |
-| Tail reader, storage off (`reads`, `reads_long`) | 2 / 3 | 58,933 / 1,702,536 | 65,074 / 1,950,482 |
-| Tail reader with the read fence of paros (B `reads_fence`, `reads_fence_long`) | 2 / 3 | | 63,049 / 1,901,777 |
-| Bounded Phase 1 with the gap fill, three acceptors for each grid, no storage (`end_voted_below_three`) | 2 | 1,215,762 (8 min) | |
+| Every rule on, storage on (A `safety`, B `plain` with fixed chunks) | 3 / 2 | 414,366 | 170,632 |
+| Every rule on, storage on (B `plain_long`) | 3 | | 5,543,044 (32 min) |
+| B with log claims, free cuts (`claims`, `claims_long`) | 2 / 3 | | 119,254 / 3,703,149 (41 min) |
+| Two reshapes, one slot, every rule on, no reader (`chain`) | 3 | 27,469 | 54,640 |
+| Tail reader, storage off (`reads`, `reads_long`) | 2 / 3 | 47,555 / 1,376,662 | 52,166 / 1,544,882 |
+| Tail reader with the read fence of paros (B `reads_fence`, `reads_fence_long`; `fence_ballots`: one slot) | 2 / 3 | | 50,163 / 1,497,611; 21,521 |
+| Bounded Phase 1 with the gap fill, three acceptors for each grid, no storage (`end_voted_below_three`) | 2 | 1,219,086 (13 min) | |
+
+The counts are those of the models after the guard changes of #1345 (guards that survive
+mutation, section "Guard mutation" below); the times are on 2 workers that shared the machine
+with other runs.
 
 The earlier version of this report said that B is about 25 times larger than A because each
 replica cuts its chunks where it likes. The cuts are not the main cause: with fixed chunks, B
-still has 158,422 states at two ballots (227,778 with free cuts). The gap review reads the cause
+still had 158,422 states at two ballots (227,778 with free cuts), before the guard changes of #1345. The gap review reads the cause
 as B offloading at any time while A offloads only after retire; that is a reading, not a
 measurement. Three runs did not finish, and
 they are not in `checks.txt`: A with three acceptors for each grid and three ballots (19.4
@@ -216,12 +221,76 @@ worker each).
 The CI set of each folder is its own CI job. The `long` checks run with
 `scripts/check-tla.sh --all`.
 
+## Guard mutation
+
+`scripts/mutate-tla.py` (#1311 (mutate spec guards)) sets each guard of each action to `TRUE`
+and runs the `ci` checks; one check must fail. The first runs found 77 guards of `a/`, `b/` and
+`reads/` that every check accepted (#1345 (guards that survive mutation)). Each one now has a
+check that needs it, or it is gone with its reason in a comment of the spec. No result of the
+experiment changed, and no decision is refuted.
+
+New checks:
+
+- `chain` in each folder: two reshapes (three configurations) and one slot. It reaches a second
+  successor that tries to register before the first has a start or a leader, a second seal, and
+  the retire of the middle configuration. `OneSuccessor` is plan rule 1 (one configuration in
+  force and at most one successor), and `RetiredPrefix` (`reads/`) says that GC forgets the
+  oldest configuration first.
+- `b/fence_ballots`: the read rule of paros with three ballots and one slot, so the basis of a
+  read must be a leadership of the cached configuration that finished Phase 1.
+- New invariants: `LeaderHasSegment` (a leader writes only in a configuration that has a
+  start), `ConsumedChosen` (the consumer reads only chosen slots), `NoObjectBelowFloor` (A) and
+  `NoUploadBelowFloor` (B, an action property: no write to the store holds a trimmed slot, the
+  late upload after trim), `ObjectsComplete` (B: an object holds the chosen bytes of its whole
+  range), and a `TypeOK` of B where only the variant has claims.
+
+Guards that are gone, with the reason:
+
+- A ballot registers once: the order of registration (`c < b` for every registered `c`) already
+  stops `c = b`. `g <= NG` is the range of `g` in `Next`.
+- A second Phase 1 of a ballot needs a quorum that did not promise it yet, and it is a Phase 1 as
+  safe as the first. Phase 1 always takes a quorum of the ballot's own configuration (in
+  `H_b`), so a ballot of a retired configuration cannot win with no quorum.
+- The seal of `g - 1` needs no check that `g - 1` has a start: `g` registered only once it had one.
+- An `Accept` at a vote that the acceptor has, a `Drop` of nothing, a mark of an offloaded record,
+  a put of an object again, a `Fetch` of the cached record and a `Refresh` with
+  `Fence = "config"` change nothing.
+- An acceptor of a retired configuration takes an `Accept` in A and B: retire lets it stop, and
+  the checks hold when it does not, because its promise to the successor's Phase 1 stops the old
+  ballots. (`reads/` keeps the guard: there an acceptor out of every running configuration can
+  lose its state, and its empty promise would let an old ballot choose again.)
+- A leader proposes at its next slot, the lowest that it may write (the allocator frontier of
+  the core), as a step and not as a guard. A leader that proposes in any order passes A's
+  `safety` too, at twice the states (633,418).
+- `Apply` and `Consume` need no bound at `NS`: no slot above it is chosen. The consumer needs no
+  floor check: `TrimCheck` keeps the cursor at or above the floor (`CursorSafe`). B's trim needs
+  no replica count: with `TrimCheck` the consumer read each slot below the trim point.
+- A trim in A at or below the floor moves only the records below it (an empty segment): the
+  floor takes the maximum. B's `Retire` of a configuration that is not live changes nothing.
+- The tail reader (`Reader`) is a switch of `Next`, as `Storage` is. A reader may drop a read and
+  start again at any time, and an answer after a read is done is a later answer, so `ReadFresh`
+  needs no phase guard. In `reads/`, a second answer of an acceptor is a later answer.
+- B: a chunk has a length of at least one slot (no `cut < hi` guard); the claims run with free
+  cuts; a claim below the floor wins nothing that is uploaded; an object exists only for a
+  winning claim, so a drop needs no check of the claim.
+- The tail read of A and B counts a vote at each member of its quorum as a choice, so it needs
+  one acceptor for each configuration (`ASSUME`). With one acceptor, B's fence read needs no
+  check that the quorum did not promise past the basis, and the read of every live configuration
+  takes `Q` as the quorum of the cached one.
+- `reads/`: retire keeps only its order (the oldest first). The successor's first Phase 1
+  stops every older ballot of the sealed configuration (a Phase-1 quorum meets every Phase-2
+  quorum), so the reads need no part of the condition of the paper, and an earlier retire gives
+  them more cases. Design A checks that condition against the replicas (`Readable`,
+  `retire_early`). A wipe of an empty store loses only the belief, and only `Belief` sets it to
+  0. A fetch or a start of a read at any time is a newer record or a newer read.
+
 ## Limits of the experiment
 
 - One acceptor for each configuration in the CI set. The three-acceptor checks of A are `long`,
   with storage off and one reshape; the full A and B with three acceptors do not finish.
-- Two configurations only, so plan rule 1 (one in force plus at most one successor) is never
-  stressed by a third reshape, and A's `OneHome` cannot fail (one sealed segment).
+- Two configurations in every check but `chain`. `chain` has three configurations with one slot
+  and checks plan rule 1 (`OneSuccessor`); with more slots, a third reshape is not checked, and
+  A's `OneHome` sees at most two sealed segments.
 - No reader of old data runs while a replica drops its copy, the record is marked or trim runs:
   `Readable` checks that the bytes are somewhere, not that a reader finds them during the move.
 - `NoStrandedHole` is a safety form of a liveness property; neither model checks liveness under
