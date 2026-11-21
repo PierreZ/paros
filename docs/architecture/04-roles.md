@@ -200,3 +200,55 @@ arm stays unchanged. This extends "plain Multi-Paxos is a shape of the core" of 
 every flavor.
 
 **How the journal applies the rule** (the journal fold stays out of the core; the journal's register is an optional role; Pierre, 2026-11-20, #1315 (bring docs and models in step with the v1 scope)) is in [docs/journal/04-roles.md](../journal/04-roles.md) §J4.3.
+
+### 4.4 The layers of the service
+
+**The service is a stack of layers, and each layer is a crate that stands alone** (Pierre,
+2026-11-21 and 2026-11-22; goals 7, 8 and 10 of section 1.1). The features of the service at the tag
+`v0.2.0-alpha.1` stay. Its structure changes: the old crates were cut by kind of code (one wire
+crate, one model crate, one knob struct and one observation trait for every layer), and the new
+crates are cut by layer of meaning. Each layer owns its messages, its knobs, its events, its
+model and its walk. The test for each crate is: can a program that is not paros use it alone?
+Nothing of this section is built before the journal v1 is done (#1323 (build the paros journal
+v1)). The crate names are **Open**.
+
+These points are decided:
+
+- **A role is an actor.** A role (an acceptor, a leader, a coordinator, the frontend) is a pure
+  `step` under the flight rule of the journal ([docs/journal/04-roles.md](../journal/04-roles.md)
+  §J4.2): a send waits for the persist batch that it names, the step reads no clock and draws no
+  random number, and a refusal is data. One host of actors serves every role of a process.
+- **The frontend is a role like the others.** It has no layer and no crate of its own.
+- **The election over a journal is its own crate.** It is the `SetLeader` compare-and-set of
+  section 3.3, and a user can elect a leader with it as the coordinators do.
+- **One crate for each control level** (universe, cell, tenant), and each coordinator is a pure
+  state machine as the journal roles are.
+- **The core has no tenant.** `paros-consensus` and `paros-journal` know no tenant. A crate that
+  wraps them adds the tenant by composition (#1402 (remove the tenant from the core), section
+  3.8).
+- **The service wire.** The pure crates define their messages as Rust types. protobuf over
+  moonpool RPC is in the adapter only. A gRPC frontend comes later, for integrations that do not
+  use the simulation.
+- **The host of actors is pure and stays in paros. The actors over the RPC go to moonpool.** The
+  pure host holds the role contract, the flight rule and the group commit, with no runtime. The
+  layer over moonpool RPC is generic: an activation registers a dynamic endpoint, a deactivation
+  drops it (a role that placement released stays active until its protocol guard holds: a
+  released acceptor answers until `may_retire` holds), one well-known directory for each process names its active actors with their
+  references, and a caller resolves again when a reference is refused. The paros adapter joins the
+  two.
+- **A reference changes at each restart; a few services are fixed.** A dynamic reference of
+  moonpool RPC names one incarnation of a process, so a message for an old activation never
+  reaches a new one. A service is fixed (well-known) when a caller must reach it with an address
+  only: the directory of a machine, the bootstrap and the admission of a machine, the frontend
+  service for clients, and the health and inspect calls. Every journal role, coordinator and
+  controller is dynamic. A reference is not a credential: the right stays with the token at the
+  frontend (section 3.5), and the fences stay with the terms and the ballots.
+
+- **Everything simulates and compiles to wasm** (goal 10). Each pure layer builds for
+  `wasm32-unknown-unknown`, as `paros-consensus` and `paros-journal` do today, and the whole
+  service runs in the deterministic simulation and in a browser. A crate that cannot build for
+  wasm is a finding: `paros-authz-biscuit` does not build for it today.
+
+**Open**: the layer table, the cut of the old tenant coordinator between the journal's grid
+controller and the cell, and the placement port between them. They are proposals until Pierre
+agrees.
