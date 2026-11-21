@@ -19,6 +19,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | The flight rule of the sans-IO contract | §J4.2 | `flight-rule/` | #1255 (journal sans-IO contract) |
 | Held writes: `Unknown`, never `NotLeader` (`AckedChosen`) | §J2.2 | `compartments/` | #1232 (held writes) |
 | Multi-writer mode through `SetLeader(None)`, position before fence, the resend across a seal (`Below`) | §J2.2, §J2.4.1 | `multi-writer/` | #1274 (multi-writer mode), #1301 (a resent write across a seal) |
+| The `Resolve` call that settles `Below` | §J2.2 | `journal-state/` | #1320 (the wire shape that resolves a `Below` answer) |
 | Leaderless reads: the read fence on the promise and the belief ballot | §J2.5 | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), #1228 (stale read by a lagging reader) |
 | The row seal of a full grid (not a v1 grid) | §J2.5 | `reads/` (`grid_full_seal`) | #1102 (rework 1.13), #1209 (seal each row of a full grid) |
 | Truncation on plain Multi-Paxos: the floor, the trim-point jump | §J2.6 | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2) |
@@ -66,9 +67,12 @@ What it decided:
   (control `order_vote_first`: after a crash, the acceptor takes a lower ballot over a chosen
   vote).
 
-It leaves **Open** the wire shape of `Below` (#1320 (the wire shape that resolves a `Below`
-answer), §J2.2: the model resolves it with the record at the position, as `multi-writer/` does)
-and where the register role lives (#1325, §J3.4).
+- **The resolve of `Below`** (§J2.2, #1320 (the wire shape that resolves a `Below` answer),
+  Pierre's option (a)): a `Resolve(uuid, expected_seq, write)` that a replica of the old segment
+  judges with the compare of apply, once its fold covers the position (controls `resolve_uuid`,
+  `resolve_early`).
+
+It leaves **Open** where the register role lives (#1325, §J3.4).
 
 ### J7.3 `journal-sim`
 

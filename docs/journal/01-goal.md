@@ -10,7 +10,7 @@ of **Compartmentalized Paxos** and changes its acceptor grid with **Matchmaker P
 non-negotiable, and so is reconfiguration (Pierre, 2026-11-19).
 
 **Four calls make the data plane**: `Write`, `Read`, `Truncate` and `SetLeader(new, old)`
-(section J2). A journal is in one of two modes: single-writer, where one writer holds a leader
+(section J2), with `Resolve`, the client's recovery call for a `Below` answer (§J2.2, #1320). A journal is in one of two modes: single-writer, where one writer holds a leader
 uuid and gets exactly-once writes through `expected_seq`, and multi-writer, where any writer
 appends at-least-once (§J2.4). The client is a pure state machine with no network (Pierre,
 2026-11-19); the process that hosts it does the network.

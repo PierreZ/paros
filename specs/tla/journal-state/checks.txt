@@ -38,10 +38,13 @@ retire_early        violation  ci
 reshape_noguard     violation  ci
 lookup_local        violation  ci
 trim_open           violation  ci
+resolve_uuid        violation  ci
+resolve_early       violation  ci
 # Reach: a check that must break, so that the passing checks are not empty.
 reach_crash         violation  ci
 reach_third         violation  ci
 reach_below         violation  ci
+reach_resolve       violation  ci
 reach_lost_end      violation  ci
 reach_repropose     violation  ci
 reach_trim_retired  violation  ci

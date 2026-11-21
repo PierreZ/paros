@@ -47,6 +47,9 @@ SToNoneFresh == Script(ToNoneFresh)
 STrunc == Script(Trunc)
 SMove == Script(Move)
 STwo == Script(Two)
+\* The claim of u1, its write at position 0, and at the third slot a resend
+\* of it or another write of u1 at position 0 (not a resend).
+SResendOther == Script(<<{SL(u1, Unset)}, {W(u1, 0, 1)}, {W(u1, 0, 1), W(u1, 0, 2)}>>)
 \* One unfenced write at each of two slots (L0 = None).
 \* The claim of u1 and its write.
 SClaimWrite == Script(<<{SL(u1, Unset)}, {W(u1, 0, 1)}>>)

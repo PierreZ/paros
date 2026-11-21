@@ -76,6 +76,12 @@
 (*   Lookup   "below": the fold answers `Below` for a fenced write whose   *)
 (*            position is in an older segment. "local": it answers from    *)
 (*            the records of its own segment only (position taken).        *)
+(*   Resolve  "write": a client that got `Below` sends                     *)
+(*            Resolve(uuid, expected_seq, write) to a replica of the old   *)
+(*            segment, whose fold covers the position; the replica judges  *)
+(*            it with the compare of apply (#1320). "uuid": it compares    *)
+(*            the uuid only. "early": a replica of the old segment answers *)
+(*            before its fold covers the position.                         *)
 (*   TrimRule "sealed": a segment is trimmed once its end is done and a    *)
 (*            fold has `first_seq` at or above its last `seq`. "open": the *)
 (*            open segment can be trimmed too, on its range so far.        *)
@@ -105,7 +111,7 @@ CONSTANTS
   Partial,                \* TRUE: a register write can be partial and lost
   GenOK,                  \* the pairs <<ballot, configuration>> that may register
   Reply1b, Reply2b, WriteOrder, EndRule, EndAct, BoundAct, GapFill,
-  RetireRule, ReshapeGuard, Lookup, TrimRule
+  RetireRule, ReshapeGuard, Lookup, Resolve, TrimRule
 
 ASSUME G \in Nat /\ G >= 1 /\ NS \in Nat /\ NS >= 1 /\ NB \in Nat /\ NB >= 1
 ASSUME MaxCrash \in Nat /\ RetireAt \in Nat /\ RetireAt >= 1
@@ -117,6 +123,7 @@ ASSUME EndAct \in {"done", "read"} /\ BoundAct \in {"done", "read"}
 ASSUME GapFill \in BOOLEAN /\ ReshapeGuard \in BOOLEAN
 ASSUME RetireRule \in {"full", "early"}
 ASSUME Lookup \in {"below", "local"}
+ASSUME Resolve \in {"write", "uuid", "early"}
 ASSUME TrimRule \in {"sealed", "open"}
 
 Gens == 1..G
@@ -162,12 +169,13 @@ VARIABLES
   rapp,    \* replica -> how many slots of its segment it applied
   rbase,   \* replica -> the boundary state it started from, or None
   rstart,  \* replica -> the start slot of its segment when it started, or None
-  acked    \* slot -> the answer that a replica gave, or None
+  acked,   \* slot -> the answer that a replica gave, or None
+  resolved \* slot -> the answer to the Resolve of a `Below`, or None
 
 reg == <<top, rend, rbound, rret, rtrim, bgen>>
 ldr == <<bst, bsafe, bend, blo, bstart, prop>>
 acc == <<mprom, mvote, pend, dprom, dvote, crashes, p1b, sent2b>>
-rep == <<rapp, rbase, rstart, acked>>
+rep == <<rapp, rbase, rstart, acked, resolved>>
 vars == <<reg, ldr, acc, rep>>
 
 (***************************************************************************)
@@ -286,6 +294,7 @@ Init ==
   /\ rbase = [r \in Replicas |-> IF r \in RepOf[1] THEN Empty ELSE None]
   /\ rstart = [r \in Replicas |-> IF r \in RepOf[1] THEN 0 ELSE None]
   /\ acked = [s \in Slots |-> None]
+  /\ resolved = [s \in Slots |-> None]
 
 (***************************************************************************)
 (* The grid controller: the fenced reshape (section J6.1) opens the next   *)
@@ -530,7 +539,7 @@ Apply(r) ==
   /\ OnDisk(s) \/ \E q \in RepOf[g] \ {r} : rbase[q] # None /\ Front(q) > s
   /\ rapp' = [rapp EXCEPT ![r] = @ + 1]
   /\ acked' = [acked EXCEPT ![s] = Res(rbase[r], StateOf(r), ChosenVal(s))]
-  /\ UNCHANGED <<reg, ldr, acc, rbase, rstart>>
+  /\ UNCHANGED <<reg, ldr, acc, rbase, rstart, resolved>>
 
 \* A replica that applied every slot of its sealed segment writes the
 \* boundary state, by compare-and-set from "no boundary".
@@ -562,7 +571,40 @@ TakeBase(r) ==
   /\ StartKnown(g)
   /\ rbase' = [rbase EXCEPT ![r] = rbound[g - 1].v]
   /\ rstart' = [rstart EXCEPT ![r] = Start(g)]
-  /\ UNCHANGED <<reg, ldr, acc, rapp, acked>>
+  /\ UNCHANGED <<reg, ldr, acc, rapp, acked, resolved>>
+
+(***************************************************************************)
+(* Resolve (section J2.2, #1320). A client whose fenced write got `Below`  *)
+(* sends Resolve(uuid, expected_seq, write) to a replica of the segment    *)
+(* that holds the position. A sealed segment does not change, so the       *)
+(* replica judges the resend with the compare of apply, once its fold      *)
+(* covers the position: written ("dup") when the record there is this      *)
+(* write of this uuid, else not written ("taken"). A replica whose fold    *)
+(* has first_seq above the position answers "trunc" (`Truncated`).         *)
+(***************************************************************************)
+ResolveAt(r, v) ==
+  LET st == StateOf(r) IN
+  IF v.e < st.first THEN "trunc"
+  ELSE IF Resolve = "uuid"
+       THEN IF \E x \in st.recs : x[1] = v.e /\ x[2] = v.u THEN "dup" ELSE "taken"
+       ELSE IF <<v.e, v.u, v.id>> \in st.recs THEN "dup" ELSE "taken"
+
+\* The replica can judge: its fold is below the position (truncated), or
+\* it is a replica of the segment of the position and its fold covers it.
+Covers(r, e) ==
+  /\ rbase[r] # None
+  /\ StartKnown(GenOf(r))
+  /\ ~rtrim[GenOf(r)]
+  /\ \/ e < StateOf(r).first
+     \/ /\ rbase[r].next <= e
+        /\ IF Resolve = "early" THEN TRUE ELSE e < StateOf(r).next
+
+ResolveBelow(s, r) ==
+  /\ acked[s] = "below"
+  /\ resolved[s] = None
+  /\ Covers(r, ChosenVal(s).e)
+  /\ resolved' = [resolved EXCEPT ![s] = ResolveAt(r, ChosenVal(s))]
+  /\ UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked>>
 
 (***************************************************************************)
 (* Retire and trim (sections J3.1, J3.2, J3.4).                            *)
@@ -604,6 +646,7 @@ Next ==
   \/ \E p \in Gens : EndDone(p) \/ EndLost(p) \/ BoundDone(p) \/ BoundLost(p) \/ Retire(p)
   \/ \E r \in Replicas : Apply(r) \/ BoundWrite(r) \/ TakeBase(r)
   \/ \E p \in Gens, r \in Replicas : Trim(p, r)
+  \/ \E s \in Slots, r \in Replicas : ResolveBelow(s, r)
 
 Spec == Init /\ [][Next]_vars
 
@@ -624,6 +667,13 @@ AckTrue == \A s \in Slots : acked[s] # None =>
   /\ s < Frontier
   /\ \/ acked[s] = TrueRes(s)
      \/ acked[s] = "below" /\ TrueRes(s) \in {"dup", "taken"}
+
+\* The answer to a Resolve is the answer of the fold of the whole log at the
+\* slot of the write ("dup": written, "taken": not written), or `Truncated`
+\* once the floor of the journal is above the position.
+ResolveTrue == \A s \in Slots : resolved[s] # None =>
+  \/ resolved[s] = TrueRes(s)
+  \/ resolved[s] = "trunc" /\ ChosenVal(s).e < Truth(Frontier).first
 
 \* Each replica's fold is the fold of the whole log at its front.
 OneFold == \A r \in Replicas : rbase[r] # None =>
@@ -662,6 +712,12 @@ Readable == \A s \in Slots :
 \* A written seal end never changes.
 EndOnce == [][\A p \in Gens : Done(rend[p]) => rend'[p] = rend[p]]_vars
 
+\* A `Resolve` only reads: a step that answers one changes nothing else, not
+\* the register (the seal end, the boundary state), not a vote, and not the
+\* log of a replica. The sealed segment stays as it was.
+ResolveReadOnly == [][(\E s \in Slots : resolved'[s] # resolved[s]) =>
+                        UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked>>]_vars
+
 \* A trimmed record stays trimmed.
 TrimStays == [][\A p \in Gens : rtrim[p] => rtrim'[p]]_vars
 
@@ -685,6 +741,8 @@ NoThird == ~(G >= 3 /\ Done(rend[2]) /\ \E s \in Slots :
                s >= rend[2].v /\ acked[s] = "ok")
 \* A resend across a seal answered `Below`.
 NoBelow == \A s \in Slots : acked[s] # "below"
+\* A resend across a seal answered `Below`, then resolved as written.
+NoResolveDup == \A s \in Slots : resolved[s] # "dup"
 \* A seal end lost, and a different end written.
 NoLostEnd == ~\E b, c \in Ballots :
   /\ bend[b] # None /\ bend[c] # None /\ bend[b] # bend[c]

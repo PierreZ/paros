@@ -3007,6 +3007,9 @@ model)), and its acceptors keep their state on disk, with a crash between any tw
 - **The journal fold** (§J2): `Write(u, e)` (fenced at the position `e`, or unfenced),
   `Truncate(u, up)` and `SetLeader(new, old)` with `new = None`, judged at apply, the position
   before the fence, and `Below` for a fenced write whose position is in an older segment.
+- **`Resolve`** (§J2.2, #1320 (the wire shape that resolves a `Below` answer)): the client sends
+  `Resolve(uuid, expected_seq, write)` to a replica of the old segment, which judges it with the
+  compare of apply once its fold covers the position (`Resolve`).
 - **Retire and trim** (§J3.1, §J3.2): retire once the boundary is done and `RetireAt` replicas
   hold every slot; trim once a fold has `first_seq` at or above the last `seq` of a sealed
   segment.
@@ -3018,8 +3021,9 @@ Safety: `Agreement`; `SealedFrozen` (a sealed grid chooses nothing at or above i
 `AckTrue` (each answer is the answer of the fold of the whole log, or `Below` where the whole log
 says `Duplicate` or position taken); `OneFold` (each replica's fold is the fold of the whole log at
 its front); `RecordTrue` (a done boundary state is the journal state at the end); `NoMoveBack`;
-`OneUnretired`; `Readable` (every record at or above the floor has a live copy: a disk quorum of
-a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `TrimStays`.
+`OneUnretired`; `ResolveTrue` (the answer to a `Resolve` is the answer of the whole log at the
+slot of the write, or `Truncated` once the floor is above the position); `Readable` (every record at or above the floor has a live copy: a disk quorum of
+a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `TrimStays`, `ResolveReadOnly` (a `Resolve` changes nothing but its answer).
 Liveness: `Ends` (the chosen log has no hole and every chosen slot is answered).
 
 | Check | CI | Result |
@@ -3040,7 +3044,9 @@ Liveness: `Ends` (the chosen log has no hole and every chosen slot is answered).
 | `reshape_noguard` | ci | violation of `OneUnretired` |
 | `lookup_local` | ci | violation of `AckTrue`: the resend of a written write across a seal is answered "position taken" |
 | `trim_open` | ci | violation of `Ends`: the open segment is trimmed on its range so far, and its later writes are never answered |
-| `reach_crash`, `reach_third`, `reach_below`, `reach_lost_end`, `reach_repropose`, `reach_trim_retired`, `reach_moved` | ci | violation: a value chosen after a crash between writes; a write acked in the third segment; a resend across a seal answered `Below`; a partial end lost and another end done; a slot of the old segment chosen in the new grid; a retired segment trimmed; a `SetLeader` in an earlier segment and the deposed writer refused in a later one |
+| `resolve_uuid` | ci | violation of `ResolveTrue`: the `Resolve` compares the uuid only; `u1` wrote another write at position 0, and its resend is resolved "written" |
+| `resolve_early` | ci | violation of `ResolveTrue`: a replica of the old segment answers before its fold covers the position, and a written write is resolved "not written" |
+| `reach_crash`, `reach_third`, `reach_below`, `reach_resolve`, `reach_lost_end`, `reach_repropose`, `reach_trim_retired`, `reach_moved` | ci | violation: a value chosen after a crash between writes; a write acked in the third segment; a resend across a seal answered `Below`; a `Below` resolved "written"; a partial end lost and another end done; a slot of the old segment chosen in the new grid; a retired segment trimmed; a `SetLeader` in an earlier segment and the deposed writer refused in a later one |
 
 **The write orders** (#1309). Each row is one order of writes and sends, and what the model
 shows. The model covers the acceptors' writes and the register; the replicas' and the
