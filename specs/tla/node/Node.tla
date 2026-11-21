@@ -632,14 +632,21 @@ ProxyCommit(b, s, v) ==
 
 F(s) == fold[s + 1]
 
+\* The end of the records of the slots folded so far: `next_seq`.
+NextSeq == Max({0} \cup {F(s).high : s \in 0..(Len(fold) - 1)})
+
 \* The fold of slot s by the first party that applied it: the end of its
-\* records (`high`, 0 for none) and `first_seq` after it, which never goes
-\* down. The fold is an input of this model: the replica's journal fold.
+\* records (`high`, 0 for none) and `first_seq` after it. The records of a
+\* slot end at or above `next_seq`, and `first_seq` never goes down nor past
+\* `next_seq`. The fold is an input of this model: the replica's journal
+\* fold.
 Fold(s, high, first) ==
   /\ Floors
   /\ s = Len(fold)
   /\ IsChosen(s)
+  /\ high = 0 \/ high >= NextSeq
   /\ first >= IF fold = <<>> THEN 0 ELSE F(Len(fold) - 1).first
+  /\ first <= Max({NextSeq, high})
   /\ fold' = Append(fold, [high |-> high, first |-> first])
   /\ UNCHANGED <<logVars, mmVars, floor, rotted, hole, faults, repVars, readVars>>
 
@@ -732,11 +739,20 @@ RRaise(r, f) ==
   /\ rnext' = [rnext EXCEPT ![r] = IF @ < f THEN f ELSE @]
   /\ UNCHANGED <<logVars, mmVars, floorVars, rrds, readVars>>
 
-\* Replica r compacts below a slot its walk folded.
-RCompact(r, f) == f <= rnext[r] /\ RRaise(r, f)
+\* With the floors on, each record below floor f is below `first_seq` at a
+\* slot below u that the journal folded (the release of `Released`).
+RReleased(f, u) ==
+  \/ ~Floors
+  \/ Release = "none"
+  \/ /\ f <= Len(fold)
+     /\ \E t \in 0..(u - 1) : t < Len(fold) /\ \A s \in 0..(f - 1) : F(s).high <= F(t).first
 
-\* Replica r jumps to a trim point.
-RTrim(r, f) == RRaise(r, f)
+\* Replica r compacts below a slot its walk folded.
+RCompact(r, f) == f <= rnext[r] /\ RReleased(f, rnext[r]) /\ RRaise(r, f)
+
+\* Replica r jumps to a trim point: the floor of a peer, which compacted by
+\* the same rule, so the fold released each record below it.
+RTrim(r, f) == RReleased(f, Len(fold)) /\ RRaise(r, f)
 
 \* Replica r boots again and folds its prefix again from its disk: its walk
 \* is at `from`, it holds every slot below, and its open reads end.

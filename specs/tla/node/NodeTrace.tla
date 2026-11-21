@@ -76,6 +76,15 @@ TraceInit == Init /\ l = 1
 
 \* A malformed event is a rejection, not a TLC error.
 Has(f) == f \in DOMAIN e
+
+\* Whether an event before the current one is a `name` event that agrees
+\* with the current one on each field of `fs`. The walk records some steps
+\* once only (the first `propose` of a (ballot, slot)): a second record of such a step is no step of the run.
+TracedBefore(name, fs) ==
+  \E j \in 1..(l - 1) :
+    /\ Trace[j].event = name
+    /\ \A f \in fs : f \in DOMAIN Trace[j] /\ f \in DOMAIN e /\ Trace[j][f] = e[f]
+
 IsNode(f) == Has(f) /\ e[f] \in Acceptors
 IsMatchmaker == Has("mm") /\ e.mm \in Matchmakers
 IsBallot == Has("bal") /\ e.bal \in Ballots
@@ -124,6 +133,7 @@ TPrepare ==
 
 TPropose ==
   /\ e.event = "propose" /\ IsBallot /\ IsSlot /\ IsValue
+  /\ ~TracedBefore("propose", {"bal", "slot"})
   /\ \/ Allocate(e.bal, e.slot, e.val)
      \/ Probe(e.bal, e.slot, e.val)
      \/ /\ [type |-> "2a", bal |-> e.bal, slot |-> e.slot, val |-> e.val] \in msgs

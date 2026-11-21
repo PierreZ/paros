@@ -19,3 +19,9 @@ init_revote      pass       ci
 init_revote_two  violation  ci
 init_down        violation  ci
 init_live        pass       ci
+# Inv is inductive (#1307 (inductive invariants, then proofs)): TLC starts
+# from every state where Inv holds and checks Inv after one step. Its
+# control: a proposer that ignores the reported votes breaks Inv in one step.
+inductive        pass       ci
+inductive_three  pass       ci
+inductive_ignore violation  ci

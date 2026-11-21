@@ -13,8 +13,11 @@
 (*     own first acceptor, so this is `Prepare` and the owner's `Promise`  *)
 (*     in one step;                                                        *)
 (*   - "promise": an acceptor raised its promise and reported its votes at *)
-(*     or above `from` (`Promise`); the report must be the model's votes;  *)
-(*   - "win": the owner won Phase 1 (`Win`);                               *)
+(*     or above `from` (`Promise`); the report must be the model's votes,  *)
+(*     and `from` the one of the ballot's "prepare";                       *)
+(*   - "win": the owner won Phase 1 (`Win`), with the frontier of its      *)
+(*     allocator: one past the highest slot at or above `from` that the    *)
+(*     promises report, or `from`;                                         *)
 (*   - "propose": the leader picked the value of a slot (`Propose`);       *)
 (*   - "delegate": the leader handed the round of a slot to a proxy        *)
 (*     (`Delegate`);                                                       *)
@@ -60,6 +63,20 @@ VARIABLE l
 
 e == Trace[l]
 
+\* The first slot of the campaign of ballot b: the `from` of its
+\* "prepare", the only event that opens b.
+CampaignFrom(b) ==
+  LET j == CHOOSE j \in 1..(l - 1) : Trace[j].event = "prepare" /\ Trace[j].bal = b
+  IN Trace[j].from
+
+Opened(b) == \E j \in 1..(l - 1) : Trace[j].event = "prepare" /\ Trace[j].bal = b
+
+\* The frontier of a win of ballot b, from the values it must propose.
+WinFrontier(b) ==
+  LET f == CampaignFrom(b)
+      h == {s \in Slots : s >= f /\ safe'[b][s] # None}
+  IN IF h = {} THEN f ELSE (CHOOSE s \in h : \A t \in h : t <= s) + 1
+
 \* The quorums of the run: a majority, or the grid of `TraceCols` columns
 \* and `TraceAcks` acks over the acceptors in row-major order. A driver may
 \* name the column of a round (`propose_in`), so a slot's Phase-2 quorum is
@@ -103,11 +120,13 @@ Step ==
      /\ Owner[e.bal] = e.owner
      /\ PrepareOwn(e.bal)
   \/ /\ e.event = "promise" /\ IsNode("acc") /\ IsBallot /\ Has("from") /\ Has("rep")
+     /\ Opened(e.bal) /\ CampaignFrom(e.bal) = e.from
      /\ Promise(e.acc, e.bal)
      /\ \A s \in Slots : s >= e.from => vote[e.acc][s] = Reported(s)
      /\ \A r \in e.rep : r.slot \in Slots /\ r.slot >= e.from
-  \/ /\ e.event = "win" /\ IsBallot
+  \/ /\ e.event = "win" /\ IsBallot /\ Has("front") /\ Opened(e.bal)
      /\ Win(e.bal)
+     /\ e.front = WinFrontier(e.bal)
   \/ /\ e.event = "propose" /\ IsBallot /\ IsSlot /\ IsValue
      /\ Propose(e.bal, e.slot, e.val)
   \/ /\ e.event = "direct" /\ IsBallot /\ IsSlot /\ IsValue

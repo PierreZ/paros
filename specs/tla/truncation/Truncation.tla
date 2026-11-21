@@ -77,7 +77,9 @@
 (*               report qualifies as soon as one readable report exists    *)
 (*               (CTRL's Case 1 read with no ballot threshold). The two    *)
 (*               differ only when a faulty report is above a readable one: *)
-(*               three ballots.                                            *)
+(*               three ballots. "plus_one": a control, the threshold is    *)
+(*               one above the highest readable report (#1263 (CTRL        *)
+(*               recovery in the journal), item 5).                        *)
 (*   TrimPoint   "floor": a `TrimmedTo` carries the floor of the peer, or  *)
 (*               an older floor of it (a late or pushed answer). "learned":*)
 (*               a control, the jump goes past any slot the peer holds.    *)
@@ -110,7 +112,7 @@ ASSUME TrimPromise \in {"keep", "copy"}
 ASSUME CompactWhen \in {"prefix", "learned"}
 ASSUME FloorRule \in {"fold", "slot"}
 ASSUME Watermark \in {"floor", "votes"}
-ASSUME Tally \in {"ctrl", "none", "have"}
+ASSUME Tally \in {"ctrl", "none", "have", "plus_one"}
 ASSUME TrimPoint \in {"floor", "learned"}
 ASSUME FloorWrite \in {"atomic", "late"}
 ASSUME Retry \in {"jump", "none"}
@@ -310,8 +312,8 @@ Decidable(S, s) ==
   \/ Tally = "none"
   \/ Tally = "have" /\ Top(S, s).bal > 0
   \/ ~\E m \in S : Faulty(m.rep[s])
-  \/ \E Q \in Q1 :
-       Q \subseteq {m.acc : m \in {n \in S : ~(Faulty(n.rep[s]) /\ n.rep[s].bal > Top(S, s).bal)}}
+  \/ LET thr == IF Tally = "plus_one" THEN Top(S, s).bal + 1 ELSE Top(S, s).bal
+     IN \E Q \in Q1 : Q \subseteq {m.acc : m \in {n \in S : ~(Faulty(n.rep[s]) /\ n.rep[s].bal > thr)}}
 
 \* The frontier: one past the highest slot that the promises S report,
 \* faulty reports too, never below `f`.

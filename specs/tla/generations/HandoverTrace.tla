@@ -25,6 +25,16 @@ VARIABLE l
 e == Trace[l]
 Has(f) == f \in DOMAIN e
 
+\* Whether an event before the current one is a `name` event that agrees
+\* with the current one on each field of `fs`. The walk records some steps
+\* once only (a registration and a GC ack of a (matchmaker, ballot), a
+\* decree vote when the vote of the matchmaker changes): a second record of such a step is no step of the run.
+TracedBefore(name, fs) ==
+  \E j \in 1..(l - 1) :
+    /\ Trace[j].event = name
+    /\ \A f \in fs : f \in DOMAIN Trace[j] /\ f \in DOMAIN e /\ Trace[j][f] = e[f]
+
+
 \* Every set of the pool may be a target.
 TraceTargets == SUBSET TraceMatchmakers \ {{}}
 
@@ -43,12 +53,15 @@ Step ==
   \/ /\ e.event = "boot" /\ IsMatchmaker /\ IsGen /\ IsSet /\ IsState
      /\ Boot(e.mm, e.gen, e.set, e.wm, e.regs)
   \/ /\ e.event = "vote" /\ IsMatchmaker /\ IsGen /\ IsSet /\ Has("bal") /\ e.bal \in Decrees
+     /\ ~TracedBefore("vote", {"mm", "gen", "bal"})
      /\ Vote(e.mm, e.gen, e.bal, e.set)
   \/ /\ e.event = "activate" /\ IsMatchmaker /\ IsGen /\ IsSet /\ IsState
      /\ Activate(e.mm, e.gen, e.set, e.wm, e.regs)
   \/ /\ e.event = "register" /\ IsMatchmaker /\ IsBallot
+     /\ ~TracedBefore("register", {"mm", "bal"})
      /\ Register(e.mm, e.bal)
   \/ /\ e.event = "gcack" /\ IsMatchmaker /\ IsBallot
+     /\ ~TracedBefore("gcack", {"mm", "bal"})
      /\ GcAck(e.mm, e.bal)
 
 TraceNext == l <= Len(Trace) /\ Step /\ l' = l + 1

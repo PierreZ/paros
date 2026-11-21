@@ -13,6 +13,8 @@
 //! This module holds what every flavor shares: the check of a spec folder,
 //! the rank of a ballot, and the names of nodes and values.
 
+pub mod mutate;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 

@@ -17,7 +17,7 @@ place. The Paxos ballot fences machines; the leader uuid fences clients. The two
   before the request updates the database. Chubby aborts a request if mastership changed, with a
   global **epoch number**: "all DB operations are made conditional on it".
 - A lease-based fence ([MemoryDB §4.1.3]) depends on clocks. paros enforces no lease
-  (`docs/architecture/02-data-plane.md` §2.3).
+  (`docs/journal/02-data-plane.md` §J2.3).
 
 ## 2. Model
 
@@ -119,7 +119,7 @@ sequenceDiagram
 | The state machine | `paros-consensus/src/journal/state.rs`: `JournalState`, `JournalView`, `Outcome`, `WriterMode` |
 | The fold at apply | `paros-consensus/src/replica.rs` |
 | The writer | `paros-client/src/writer.rs`: `Writer`; `paros-client/src/pipeline.rs`: `Pipeline` |
-| The decision | `docs/architecture/02-data-plane.md` §2.2–§2.4 |
+| The decision | `docs/journal/02-data-plane.md` §J2.2–§2.4 |
 
 **Sim gates and oracles:**
 

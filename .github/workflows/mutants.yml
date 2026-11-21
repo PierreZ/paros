@@ -5,7 +5,7 @@
 # The first pass judges each mutant with the fast tests: an incremental build,
 # then a few seconds of tests. The second pass judges only the survivors of the
 # first pass with the trace checks (TLC, about 90 s each). The run is cut into
-# 24 shards and runs each week and on demand. Each pull request runs the
+# 48 shards and runs each week and on demand. Each pull request runs the
 # mutants of the lines it changes (the `mutants` job of `rust.yml`).
 #
 # A survivor is a finding (AGENTS.md, the absolute rule): the `score` job
@@ -40,8 +40,9 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - run: nix develop --command cargo --version
 
-  # With 16 shards, a shard took 3.5 to more than 5 hours and four shards
-  # hit the timeout. With 24 shards, a shard has about 3.5 hours of work.
+  # A shard has about 60 mutants for the first pass, then runs the trace
+  # checks once without a mutant (about 20 minutes) and once for each mutant
+  # that the first pass missed (about 17 minutes each, a handful a shard).
   shard:
     needs: devshell
     runs-on: ubuntu-latest
@@ -49,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
     steps:
       - uses: actions/checkout@v7
       # Each cargo-mutants worker builds the workspace in a copy of its own,
@@ -67,16 +68,35 @@ jobs:
       # `shard.done` marks a shard whose two passes ran to the end: the
       # `score` job counts only those shards, because a shard that was cut
       # has first-pass misses that no second pass judged.
-      - name: Run shard ${{ matrix.shard }} of 24
+      - name: Run shard ${{ matrix.shard }} of 48
+        # The memory and disk lines every five minutes show what a runner
+        # that the host shuts down ran out of.
+        # A mutant can make a test allocate without end (a loop that never
+        # stops pushing): the host then shuts the whole runner down, and the
+        # shard is lost. earlyoom, from the flake's nixpkgs, sends SIGTERM to
+        # a test binary when less than 8 % of the memory is free. The test
+        # fails, so the mutant is caught, by the same reasoning as a timeout:
+        # the unmutated suite stays far below that bound. The build tools and
+        # the runner are never chosen. `earlyoom.log` names each process that
+        # it stops.
         run: |
+          earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
+          sudo "$earlyoom" -m 8 -s 100 -r 0 \
+            --prefer '^(paros_consensu|consensus_sim|flavors|mutants|traces|coverage)' \
+            --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
+            2>&1 | tee earlyoom.log > /dev/null &
+          (while sleep 300; do echo "== $(date -u +%H:%M) $(free -m | awk '/Mem:/ {print "mem used " $3 " of " $2 " MB"}'), $(df -h / | awk 'NR==2 {print "disk used " $3 " of " $2}')"; done) &
           nix develop --command scripts/mutants.sh \
-            --shard ${{ matrix.shard }}/24 --sharding round-robin \
+            --shard ${{ matrix.shard }}/48 --sharding round-robin \
             || [ "$?" -eq 2 ]
           touch shard.done
       - name: Show the survivors of the shard
         if: always()
         run: |
           df -h / /tmp
+          echo "== processes that earlyoom stopped"; grep -i 'sending SIG' earlyoom.log || true
+          echo "== mutants with a test stopped by a signal"
+          grep -l -E 'SIGTERM|SIGKILL' mutants.first/log/*.log mutants.out/log/*.log 2>/dev/null || true
           echo "== survivors (missed by both passes)"; cat survivors.txt 2>/dev/null || true
           for kind in missed timeout unviable; do
             echo "== first pass: $kind"; cat mutants.first/$kind.txt 2>/dev/null || true
@@ -87,6 +107,7 @@ jobs:
           name: mutants-shard-${{ matrix.shard }}
           path: |
             shard.done
+            earlyoom.log
             survivors.txt
             mutants.first/*.txt
             mutants.first/outcomes.json
@@ -127,7 +148,7 @@ jobs:
           {
             echo "## Mutants of paros-consensus"
             echo
-            echo "Shards that ran to the end: $shards of 24. Viable mutants: $viable. Unviable: $unviable."
+            echo "Shards that ran to the end: $shards of 48. Viable mutants: $viable. Unviable: $unviable."
             if [ -n "$cut" ]; then
               echo "Shards cut or failed (left out of the score): $(printf '%s' "$cut" | paste -sd, -)."
             fi
@@ -148,4 +169,4 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
-          [ "$shards" -eq 24 ] && [ "$missed" -eq 0 ]
+          [ "$shards" -eq 48 ] && [ "$missed" -eq 0 ]

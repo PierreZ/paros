@@ -28,6 +28,13 @@ by admin calls and `cell init` as a single-decree Paxos (2026-10-09); the journa
 configuration redesign (2026-10-28). Where an older decision and a decision of the rework
 disagree, the rework wins, and these files say so where it matters.
 
+**The journal has its own map** (#1332 (journal architecture docs), 2026-11-20):
+[`docs/journal/`](../journal/README.md) is the one home of every rule of the journal v1. The
+journal rules of §2, §2.16, §4.2, §5.1 and the journal part of §4.3 moved there; each moved
+section keeps its heading here with a link to its new home, and the section map below names it.
+These files keep the service around the journal: cells, tenants, machines, coordinators,
+placement, the frontend, the resolver and the universe.
+
 This folder holds one file per chapter; section 3 has one file per subsection. Read the files in
 the order below. The section numbers did not change when the single `docs/architecture.md` was
 split (#675), so a reference such as "§3.7" anywhere in the repository, in an issue or in a PR
@@ -36,21 +43,22 @@ stays valid: find its file in the section map.
 ## Files, in order
 
 1. [01-goal.md](01-goal.md): §1 Goal; §1.1 The eight root rules
-2. [02-data-plane.md](02-data-plane.md): §2 The data plane
-3. [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md): §3 The control plane; §3.1 The cell tenant and bootstrap
-4. [03-2-machines.md](03-2-machines.md): §3.2 Machines
-5. [03-3-coordinators-and-placement.md](03-3-coordinators-and-placement.md): §3.3 Control planes, recovery and placement
-6. [03-4-tenant-modes.md](03-4-tenant-modes.md): §3.4 Journal configuration
-7. [03-5-frontend-and-resolver.md](03-5-frontend-and-resolver.md): §3.5 The frontend and the resolver
-8. [03-6-status.md](03-6-status.md): §3.6 Status
-9. [03-7-universe.md](03-7-universe.md): §3.7 The universe
-10. [03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md): §3.8 Identifiers; §3.9 Checkpoints; §3.10 Recovery (deferred); §3.11 Transport security
-11. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract; §4.3 The consensus core is a library for everyone
-12. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones
-13. [06-verification.md](06-verification.md): §6 Verification
-14. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
-15. [10-sources.md](10-sources.md): §10 Sources
-16. [11-alternatives.md](11-alternatives.md): §11 Alternatives considered
+2. [02-data-plane.md](02-data-plane.md): §2 The data plane (links to `docs/journal/`)
+3. [02-1-journal-register.md](02-1-journal-register.md): §2.16 The journal's matchmaker register (a link to `docs/journal/`)
+4. [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md): §3 The control plane; §3.1 The cell tenant and bootstrap
+5. [03-2-machines.md](03-2-machines.md): §3.2 Machines
+6. [03-3-coordinators-and-placement.md](03-3-coordinators-and-placement.md): §3.3 Control planes, recovery and placement
+7. [03-4-tenant-modes.md](03-4-tenant-modes.md): §3.4 Journal configuration
+8. [03-5-frontend-and-resolver.md](03-5-frontend-and-resolver.md): §3.5 The frontend and the resolver
+9. [03-6-status.md](03-6-status.md): §3.6 Status
+10. [03-7-universe.md](03-7-universe.md): §3.7 The universe
+11. [03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md): §3.8 Identifiers; §3.9 Checkpoints; §3.10 Recovery (deferred); §3.11 Transport security
+12. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract (a link); §4.3 The consensus core is a library for everyone
+13. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones; §5.1 Journal health (a link)
+14. [06-verification.md](06-verification.md): §6 Verification
+15. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
+16. [10-sources.md](10-sources.md): §10 Sources
+17. [11-alternatives.md](11-alternatives.md): §11 Alternatives considered
 
 ## Section map
 
@@ -58,17 +66,23 @@ stays valid: find its file in the section map.
 |---|---|---|
 | §1 | Goal | [01-goal.md](01-goal.md) |
 | §1.1 | The eight root rules | [01-goal.md](01-goal.md) |
-| §2 | The data plane | [02-data-plane.md](02-data-plane.md) |
-| §2.1 | Positions | [02-data-plane.md](02-data-plane.md) |
-| §2.2 | Single-writer writes and fencing | [02-data-plane.md](02-data-plane.md) |
-| §2.3 | Leadership | [02-data-plane.md](02-data-plane.md) |
-| §2.4 | Multi-writer journals | [02-data-plane.md](02-data-plane.md) |
-| §2.5 | Reads | [02-data-plane.md](02-data-plane.md) |
-| §2.6 | Truncation | [02-data-plane.md](02-data-plane.md) |
-| §2.7 | Limits | [02-data-plane.md](02-data-plane.md) |
-| §2.8 | Underneath | [02-data-plane.md](02-data-plane.md) |
-| §2.9 | Store durability | [02-data-plane.md](02-data-plane.md) |
-| §2.10 | Segments | [02-data-plane.md](02-data-plane.md) |
+| §2 | The data plane (moved to journal §J2) | [02-data-plane.md](02-data-plane.md) |
+| §2.1 | Positions (moved to journal §J2.1) | [02-data-plane.md](02-data-plane.md) |
+| §2.2 | Single-writer writes and fencing (moved to journal §J2.2) | [02-data-plane.md](02-data-plane.md) |
+| §2.3 | Leadership (moved to journal §J2.3) | [02-data-plane.md](02-data-plane.md) |
+| §2.4 | Multi-writer journals (moved to journal §J2.4) | [02-data-plane.md](02-data-plane.md) |
+| §2.5 | Reads (moved to journal §J2.5) | [02-data-plane.md](02-data-plane.md) |
+| §2.6 | Truncation (moved to journal §J2.6) | [02-data-plane.md](02-data-plane.md) |
+| §2.7 | Limits (moved to journal §J2.7) | [02-data-plane.md](02-data-plane.md) |
+| §2.8 | Underneath (moved to journal §J2.9) | [02-data-plane.md](02-data-plane.md) |
+| §2.9 | Store durability (moved to journal §J2.10) | [02-data-plane.md](02-data-plane.md) |
+| §2.10 | Segments (moved to journal §J3.1 to §J3.3) | [02-data-plane.md](02-data-plane.md) |
+| §2.11 | Quorum everywhere (moved to journal §J5.1) | [02-data-plane.md](02-data-plane.md) |
+| §2.12 | The grid controller's fenced reshape (moved to journal §J6.1) | [02-data-plane.md](02-data-plane.md) |
+| §2.13 | A column below quorum (moved to journal §J5.5) | [02-data-plane.md](02-data-plane.md) |
+| §2.14 | Record headers (moved to journal §J2.8) | [02-data-plane.md](02-data-plane.md) |
+| §2.15 | The v1 scope of the journal (moved to journal §J1.1) | [02-data-plane.md](02-data-plane.md) |
+| §2.16 | The journal's matchmaker register (moved to journal §J3.4) | [02-1-journal-register.md](02-1-journal-register.md) |
 | §3 | The control plane | [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md) |
 | §3.1 | The cell tenant and bootstrap | [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md) |
 | §3.2 | Machines | [03-2-machines.md](03-2-machines.md) |
@@ -83,9 +97,10 @@ stays valid: find its file in the section map.
 | §3.11 | Transport security | [03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md) |
 | §4 | Roles | [04-roles.md](04-roles.md) |
 | §4.1 | How the pieces fit | [04-roles.md](04-roles.md) |
-| §4.2 | The journal's sans-IO contract | [04-roles.md](04-roles.md) |
+| §4.2 | The journal's sans-IO contract (moved to journal §J4.2) | [04-roles.md](04-roles.md) |
 | §4.3 | The consensus core is a library for everyone | [04-roles.md](04-roles.md) |
 | §5 | Failure model and zones | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
+| §5.1 | Journal health (moved to journal §J6.2) | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §6 | Verification | [06-verification.md](06-verification.md) |
 | §7 | The rework: phases and steps | [07-changes-milestones-done.md](07-changes-milestones-done.md) |
 | §8 | Milestones | [07-changes-milestones-done.md](07-changes-milestones-done.md) |

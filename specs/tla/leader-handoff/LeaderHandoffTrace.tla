@@ -42,6 +42,15 @@ VARIABLE l
 
 e == Trace[l]
 
+\* Whether an event before the current one is a `name` event that agrees
+\* with the current one on each field of `fs`. The walk records some steps
+\* once only (the first `Accept` of a (ballot, slot)): a second record of
+\* such a step is no step of the run.
+TracedBefore(name, fs) ==
+  \E j \in 1..(l - 1) :
+    /\ Trace[j].event = name
+    /\ \A f \in fs : f \in DOMAIN Trace[j] /\ f \in DOMAIN e /\ Trace[j][f] = e[f]
+
 TraceQ1 == MajorityQuorums(TraceAcceptors)
 TraceQ2 == [s \in 0..(TraceNS - 1) |-> MajorityQuorums(TraceAcceptors)]
 TraceBallots == 1..TraceNB
@@ -87,6 +96,7 @@ Step ==
      /\ Win(e.bal)
      /\ nxt'[Owner[e.bal]] = e.front
   \/ /\ e.event = "propose" /\ IsNode("by") /\ IsBallot /\ IsSlot /\ IsValue
+     /\ ~TracedBefore("propose", {"bal", "slot"})
      /\ \/ /\ bal[e.by] = e.bal
            /\ nxt[e.by] = e.slot
            /\ e.val \in Commands
@@ -97,6 +107,7 @@ Step ==
      /\ \/ /\ Accept(e.acc, e.bal, e.slot)
            /\ vote'[e.acc][e.slot] = [bal |-> e.bal, val |-> e.val]
         \/ /\ e.own
+           /\ ~TracedBefore("accept", {"acc", "bal", "slot"})
            /\ vote[e.acc][e.slot] = [bal |-> e.bal, val |-> e.val]
            /\ UNCHANGED vars
   \/ /\ e.event = "relinquish" /\ IsNode("from") /\ IsNode("to") /\ IsBallot

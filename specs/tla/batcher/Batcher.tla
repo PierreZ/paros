@@ -156,10 +156,12 @@ Before(x, i, t) ==
   ELSE LET lane == lanes[writes[t].jr]
        IN Records(SelectSeq(lane, LAMBDA u : u # t))
 
-\* A writer hears the range of write t: at position seq, n records.
+\* A writer hears the range of write t: at position seq, n records. A copy
+\* of an answer heard before changes nothing: it is no step.
 Answer(t, seq, n) ==
   /\ Made(t)
   /\ n = writes[t].n
+  /\ [tok |-> t, seq |-> seq, n |-> n] \notin answers
   /\ \E x \in landed : \E i \in 1..Len(batches[x.id].ws) :
        /\ batches[x.id].ws[i] = t
        /\ seq = x.seq + Before(x, i, t)

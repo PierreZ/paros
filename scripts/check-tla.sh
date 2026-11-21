@@ -13,6 +13,11 @@
 # bound, and the line is `ok` when no violation was found until then
 # (`bounded`). A line with no bound must finish.
 #
+# A line can also end with `seed=<n>`: TLC runs with `-seed <n>`. A check
+# whose initial states are random draws (`RandomElement`, the inductive checks
+# of multi-paxos/, #1307) gives the seed, so that each run draws the same
+# states.
+#
 # Each argument that is not `--all` names a folder of specs/tla/; with no
 # folder, every folder of a model of the plan runs. An experiment of
 # specs/tla/experiments/ runs only when it is named, for example
@@ -45,8 +50,16 @@ for dir in "${dirs[@]}"; do
     status=1
     continue
   fi
-  while read -r name expected where bound; do
+  while read -r name expected where rest; do
     case "$name" in '' | '#'*) continue ;; esac
+    bound=""
+    seed=()
+    for field in $rest; do
+      case "$field" in
+        seed=*) seed=(-seed "${field#seed=}") ;;
+        *) bound="$field" ;;
+      esac
+    done
     if [ "$where" != ci ] && [ "$all" = false ]; then
       continue
     fi
@@ -57,7 +70,7 @@ for dir in "${dirs[@]}"; do
       limit=(timeout "${bound}m")
     fi
     (cd "$dir" && "${limit[@]}" tlc -workers "$workers" -deadlock -metadir "$meta/states" \
-      -config "$name.cfg" MC.tla) >"$log" 2>&1 || true
+      "${seed[@]}" -config "$name.cfg" MC.tla) >"$log" 2>&1 || true
     if grep -q "Model checking completed. No error has been found." "$log"; then
       got=pass
     elif grep -qE "Error: ((Invariant|Action property) .* is violated(\.| by the initial state)|Temporal properties were violated\.)" "$log"; then

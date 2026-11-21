@@ -142,6 +142,10 @@ pub struct BatchModel {
     landed: BTreeMap<Token, u64>,
     /// Each batch sent, by number: its journal and its writes.
     sent: Vec<Batch<Token>>,
+    /// The answers heard: a write and its position. The network duplicates
+    /// answers; a copy changes nothing, so the trace records the first copy
+    /// only (a trace records only the steps that change the model's state).
+    heard: BTreeSet<(Token, u64)>,
     mutant: BatchMutant,
 }
 
@@ -223,7 +227,9 @@ impl Model for BatchModel {
         match message {
             BatchMsg::Batch { id, batch } => self.land(id, &batch, cx),
             BatchMsg::Answer { token, seq, count } => {
-                cx.record(BatchEvent::Answer { token, seq, count });
+                if self.heard.insert((token, seq)) {
+                    cx.record(BatchEvent::Answer { token, seq, count });
+                }
                 let write = &self.writes[&token];
                 assert!(
                     count == write.records.len() as u64,
@@ -300,6 +306,7 @@ impl BatchModel {
             journals: BTreeMap::new(),
             landed: BTreeMap::new(),
             sent: Vec::new(),
+            heard: BTreeSet::new(),
             mutant,
         }
     }

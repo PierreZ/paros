@@ -4,7 +4,7 @@
 #   scripts/mutants.sh [ARGS...]
 #
 # ARGS go to the first pass and cut the set of mutants, for example
-# `--shard 3/24 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.
+# `--shard 3/48 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.
 #
 # 1. The first pass runs every mutant against the fast tests: the tests of
 #    paros-consensus and of consensus-sim, without the coverage gate and the
@@ -65,10 +65,20 @@ while IFS= read -r name; do
 done < mutants.first/missed.txt
 
 echo "Second pass: $((${#filters[@]} / 2)) survivors of the first pass, against the trace checks."
-# The baseline of cargo-mutants builds paros-consensus alone, which has no
-# trace check to run, so this pass skips it (the first pass ran one) and sets
-# its own timeout.
-run --config .cargo/mutants-tlc.toml --baseline skip --timeout 400 -j 1 "${filters[@]}"
+# A timeout counts as caught, so the timeout of this pass comes from a run of
+# the same trace checks on the unmutated tree (the filter of
+# `.cargo/mutants-tlc.toml`): three times its time, and at
+# least 60 s. With a fixed timeout below that time, every mutant timed out
+# and was counted as caught. The run also proves that the trace checks pass
+# without a mutant, so a mutant that fails them is caught by its own change.
+start=$(date +%s)
+cargo nextest run --cargo-profile mutants --features paros-consensus/serde \
+  -p paros-consensus -p consensus-sim \
+  -E 'binary(traces) and not test(edited) and not test(no_record)' --test-threads 2
+baseline=$(($(date +%s) - start))
+timeout=$((baseline * 3 > 60 ? baseline * 3 : 60))
+echo "Second pass: the unmutated trace checks took ${baseline} s; the timeout of a mutant is ${timeout} s."
+run --config .cargo/mutants-tlc.toml --baseline skip --timeout "$timeout" -j 1 "${filters[@]}"
 
 # cargo-mutants 27.1 keeps the struct-field deletions of the package whatever
 # `--re` says, so the second pass can test mutants that the first pass caught.
