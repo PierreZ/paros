@@ -148,7 +148,9 @@ re-replication) and the driver (#1329) are not built yet. The grid controller's 
 `crates/lib/paros-journal-control` (`decide`: heal, repair, re-replicate, or hold and alert, with
 a probe on every branch; #1328 (paros-journal-control), #1261 (grid controller decision tests)),
 judged by `journal-sim`'s sweep of every small view against a reference `decide` that shares no
-code with it; the controller role and its walk are not built yet.
+code with it. The controller role (`paros_journal_control::role`) is walked by `journal-sim`'s
+controller walk with two controllers and traced against `specs/tla/grid-controller/ControllerTrace.tla`;
+the moonpool-sim scenarios wait for the driver.
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
 2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
 the build steps of #1323 (build the paros journal v1). Start there for any journal work.
@@ -243,8 +245,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`scripts/mutants.sh --journal`: the tests of `paros-journal` and the walks of `journal-sim`,
   then the trace checks of `journal-sim`; `.cargo/mutants-journal.toml`,
   `.cargo/mutants-journal-tlc.toml`), and one pass on the changed lines of
-  `crates/lib/paros-journal-control/src` (`scripts/mutants.sh --control`: its unit tests and
-  `journal-sim`'s sweep of the controller's decisions; `.cargo/mutants-control.toml`). A
+  `crates/lib/paros-journal-control/src` (`scripts/mutants.sh --control`: its unit tests,
+  `journal-sim`'s sweep of the controller's decisions and its controller walks;
+  `.cargo/mutants-control.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that

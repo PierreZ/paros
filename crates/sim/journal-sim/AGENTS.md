@@ -33,15 +33,26 @@ of segments. Test only: `publish = false`.
   with its `ControlMutant`; `reference` is `decide` written again from §J6.2, with no code of
   `paros-journal-control`. `tests/control.rs` also requires every `probe!` of `decide`
   (`PROBES`), through `campaign::try_sites`.
+- `src/controller.rs`: the walk of the controller role (`ControllerModel`, #1261, §J6.2 test 3):
+  controllers that race, crash and get deposed, lost requests and replies, failing acceptors, and
+  the journal's seal and retire, over an atomic register. Its shapes (`TRACED`, `WIDE` with stale
+  views and recoveries, `MANY`: four journals on one shared machine and a token with a cap of
+  one), its oracles (`FENCED`, `BOUNDED_RESHAPE_RATE`, `COST_BOUND`, `NO_OSCILLATION`,
+  `BOUNDED_IN_FLIGHT`, `CONVERGES`), its reach sites and its planted mutants (`ControllerMutant`).
+  `tests/controller.rs` also requires every `probe!` of the role (`role::PROBES`).
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/register.rs`: the events of a register walk as a trace of
   `specs/tla/segment-records/RegisterTrace.tla`, and the named edits of its recorded traces.
+- `src/trace/controller.rs`: the events of a controller walk as a trace of
+  `specs/tla/grid-controller/ControllerTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/mutate.rs`: the named edits of recorded traces (#1308 (mutate recorded traces)).
 - `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/roles.rs` (the roles walks and
   their mutants); `tests/register.rs` (the register
   walks and their mutants) and `tests/register_traces.rs` (the register trace check, its rules,
-  its control `ForgedBootstrap` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
+  its control `ForgedBootstrap` and its edits); `tests/controller.rs` (the controller walks, their
+  mutants and the role's probes) and `tests/controller_traces.rs` (the controller trace check, its
+  rules, its control `ElectNoCas` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
   long fold walk checked live through its events port by moonpool-tla's `Live`, and the control
   `BelowInSegment` stopped at its first wrong answer; `LIVE_MINUTES` runs one walk with no end for
   that long (the `Journal live` workflow, four hours each night).
@@ -61,8 +72,8 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
   the checked model)): each event applies the model's operators (`Res`, `Step`, `Bound`,
   `CoversOn`, `ResolveOn`). A step of the code that the model does not have becomes a step of the
   model, with its check, in the same PR.
-- **`RegisterTrace` extends `SegmentRecords.tla`** in the same way: each event is an action of
-  the model.
+- **`RegisterTrace` extends `SegmentRecords.tla`**, and **`ControllerTrace` extends
+  `GridController.tla`**, in the same way: each event is an action of the model.
 - **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register: the
   oracles pass it, TLC refuses it) and **refuses the edits** of the recorded walks at the edited event or after it: at least 20 edits
   with a place. A new event kind gets its edits in the same PR.

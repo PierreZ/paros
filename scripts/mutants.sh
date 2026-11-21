@@ -9,9 +9,9 @@
 # tests and by journal-sim (`.cargo/mutants-journal.toml`, then
 # `.cargo/mutants-journal-tlc.toml`).
 #
-# `--control` runs one pass on paros-journal-control, judged by its unit tests
-# and by journal-sim's sweep of the controller's decisions
-# (`.cargo/mutants-control.toml`): the controller has no trace check yet.
+# `--control` runs one pass on paros-journal-control, judged by its unit tests,
+# by journal-sim's sweep of the controller's decisions and by its controller
+# walks (`.cargo/mutants-control.toml`).
 #
 # ARGS go to the first pass and cut the set of mutants, for example
 # `--shard 3/48 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.

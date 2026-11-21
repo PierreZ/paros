@@ -340,10 +340,33 @@ The tests as built: the unit tests of the crate; tests 1, 2, 5 (the oracles that
 judge: `NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`, `FENCED`, `NO_STALE_PLAN`, `NO_SUSPECT_REPLACED`,
 `IDEMPOTENT`, `MONOTONE` and `SAME_AS_REFERENCE`, each with a planted mutant) and 6 run in
 `journal-sim`'s `tests/control.rs` over every small view (`P <= 3`, `F <= 2`, no zones or three or
-four zones: about 390 thousand views); `scripts/mutants.sh --control` leaves no survivor. Tests 3
-and 4, and the oracles of a run (`NO_OSCILLATION`, `CONVERGES`, `COST_BOUND`, and the
-many-journals scenario of #1261 with `BOUNDED_IN_FLIGHT`), come with the controller role and its
-walk.
+four zones: about 390 thousand views); `scripts/mutants.sh --control` leaves no survivor.
+
+The controller role as built (`role.rs`): a `Controller` holds its standing (idle, campaigning,
+or holding a term) and the reshape call in flight, and nothing else, so a restart is a new
+`Controller` (`grid-controller/`: a crash forgets the term and the plan). It runs no register
+operation. It gives the driver the change to run (`Elect`, or the `Reshape` of its call) and
+takes back the outcome (done, refused, or no answer). It gives the call in flight again until the
+call is answered, and plans nothing else meanwhile; a refusal for the term, or a view of another
+term, makes it idle. The driver decides when to send a call again: after a timeout, it reports
+"no answer" and sends the same call, which the register answers "ok" if it already took it.
+
+Test 3 runs in `journal-sim`'s controller walk (`src/controller.rs`, `tests/controller.rs`):
+controllers that race, crash between plan and call, and get deposed; lost requests and replies;
+acceptors that fail (and recover, in the wide shape); views that read the register late; the
+journal's seal and retire. Its oracles share no code with the controller: `FENCED`,
+`BOUNDED_RESHAPE_RATE`, `COST_BOUND` (a reshape replaces only members that failed),
+`NO_OSCILLATION` (a removed member comes back only after it recovered), `BOUNDED_IN_FLIGHT` and
+`CONVERGES` (once the faults stop, each journal has one live controller and its newest segment in
+force on live members only, every older one retired). Each oracle catches its planted mutant of
+the driver. The many-journals shape of #1261 has four journals whose grids share one machine,
+which dies, and a token with a cap of one for all of them. The walks reach every `probe!` of the
+role. TLC checks the traced walks against `ControllerTrace.tla`, which extends
+`GridController.tla` (`tests/controller_traces.rs`), refuses the control `ElectNoCas` (a campaign
+with no compare, which the oracles pass) and refuses every edit of the recorded traces at or
+after the edited event. The model has the step `Stand` for this: a holder with no plan that reads
+another term stops, as `decide` does first. Test 4 (the moonpool-sim scenario library) waits for
+the driver (#1329, #1330).
 
 **Proposals of the build, for Pierre's review** (each is a reading of this chapter, not a
 decision of Pierre):
