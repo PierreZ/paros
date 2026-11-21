@@ -237,3 +237,25 @@ fn a_single_writer_journal_refuses_a_multi_writer_call() {
     assert!(matches!(outcomes[2], Outcome::WrongMode(_)));
     assert_eq!(state.next_seq, Seq(0));
 }
+
+#[test]
+#[should_panic(expected = "a journal's first position never passes its next one")]
+fn a_first_position_past_the_next_fails_the_invariants() {
+    let state = JournalState {
+        first_seq: Seq(3),
+        next_seq: Seq(2),
+        ..JournalState::default()
+    };
+    state.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "a multi-writer journal never gains a leader")]
+fn a_multi_writer_journal_with_a_leader_fails_its_mode() {
+    let state = JournalState {
+        leader: Some(LeaderUuid(1)),
+        term: 1,
+        ..JournalState::default()
+    };
+    state.assert_mode(WriterMode::Multi, &Outcome::Noop);
+}

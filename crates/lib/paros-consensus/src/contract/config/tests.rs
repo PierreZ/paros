@@ -113,3 +113,16 @@ fn with_peers_sorts_and_deduplicates() {
     // A second call replaces the membership.
     assert_eq!(config.with_peers(nodes([9])).peers, nodes([9]));
 }
+
+/// Proxies and replicas are opt-in counts: none by default, any count
+/// above zero runs the tier.
+#[test]
+fn proxies_and_replicas_run_from_a_count_of_one() {
+    let mut config = three_peers();
+    assert!(!config.has_proxies());
+    assert!(!config.has_replicas());
+    config.proxy_count = 1;
+    config.replica_count = 1;
+    assert!(config.has_proxies());
+    assert!(config.has_replicas());
+}

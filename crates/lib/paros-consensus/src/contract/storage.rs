@@ -43,11 +43,9 @@ pub trait Storage {
     /// trim-point jump) dropped them. Read once at construction: the journal
     /// fold starts from it at the floor and replays the retained log, so a
     /// restart after truncation reaches the state of a node that never
-    /// restarted. Defaults to the journal's birth: a storage that has never
-    /// truncated has nothing sealed.
-    fn sealed_state(&self) -> JournalState {
-        JournalState::default()
-    }
+    /// restarted. A storage that has never truncated has nothing sealed: it
+    /// returns the journal's birth, `JournalState::default()`.
+    fn sealed_state(&self) -> JournalState;
 
     /// The **recoverable faulty entries** the boot scan classified (Stage 8,
     /// CTRL): retained log slots whose accepted *value* is lost but whose
@@ -56,8 +54,8 @@ pub trait Storage {
     /// core reports each as `faulty(ballot)` in its Promise tri-state (never as
     /// "nothing accepted here" — the CTRL Figure-2 bug class) and repairs it in
     /// place from peers. A record whose identity is *also* lost must not appear
-    /// here: it is unidentifiable and stays a crash at the scan. Defaults to
-    /// empty: a storage that cannot rot has nothing faulty.
+    /// here: it is unidentifiable and stays a crash at the scan. A storage
+    /// that cannot rot has nothing faulty: it returns an empty list.
     ///
     /// **`faulty` may never count toward the none-tally.** This is CTRL
     /// §5.1.1's first known-fatal mutation, and it was proven load-bearing by
@@ -72,26 +70,20 @@ pub trait Storage {
     /// The mutation's other fate is the boot read-back's completeness assert:
     /// when the withheld record's hole lands *below* the chosen prefix, the
     /// node refuses to boot at all, before the misreport can reach a Promise.
-    fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
-        Vec::new()
-    }
+    fn faulty_entries(&self) -> Vec<(Slot, Ballot)>;
 
     /// The durable **registration fence** (#1002 (retire fence gaps)): the
     /// highest ballot of a matchmaker registration this node knows names it
     /// ([`crate::contract::WriteOp::RegistrationFence`]). Read once at
     /// construction: a restarted node keeps refusing to retire below a
-    /// registration it sent or heard of before the restart. Defaults to
-    /// `Ballot::zero()`: a plain deployment never writes it, and a store that
-    /// never held one has nothing to fence.
-    fn registration_fence(&self) -> Ballot {
-        Ballot::zero()
-    }
+    /// registration it sent or heard of before the restart. A plain
+    /// deployment never writes it, and a store that never held one returns
+    /// `Ballot::zero()`: nothing to fence.
+    fn registration_fence(&self) -> Ballot;
 
     /// The durable **retire mark** (#1002 (retire fence gaps), #1037 (rejoin),
     /// [`crate::contract::WriteOp::RetireMark`]). Read once at construction.
-    /// Defaults to incarnation 0, unchecked: a plain deployment never writes
-    /// it.
-    fn retire_mark(&self) -> RetireMark {
-        RetireMark::default()
-    }
+    /// A plain deployment never writes it, and a store that never held one
+    /// returns `RetireMark::default()`: incarnation 0, unchecked.
+    fn retire_mark(&self) -> RetireMark;
 }

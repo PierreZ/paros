@@ -690,10 +690,13 @@ impl Replica {
                     if self.mode == WriterMode::Multi {
                         return None;
                     }
+                    // A write at or past the journal's position when it
+                    // folded (accepted, or refused ahead) is held at its own
+                    // slot or above (`slot_holding`), never below `first`:
+                    // only a retry below that position can pull the floor.
                     let entry = command.write()?;
                     let at = self.state_at(*slot);
-                    (entry.seq >= at.first_seq && entry.seq < at.next_seq)
-                        .then(|| self.slot_holding(entry.seq))
+                    (entry.seq >= at.first_seq).then(|| self.slot_holding(entry.seq))
                 })
                 .min()
                 .unwrap_or(first);
@@ -840,17 +843,12 @@ impl Replica {
         }
         // Postconditions: the page never passes the fold's head, and honours
         // its bounds — the byte budget may be exceeded only by a lone record.
-        if from < state.next_seq {
-            assert!(
-                page.next() <= state.next_seq,
-                "a read page ends at or below the journal's next position"
-            );
-        } else {
-            assert!(
-                page.records.is_empty(),
-                "a read at the end returns no record"
-            );
-        }
+        // A read at or past the end returns no record: its page ends where
+        // it starts.
+        assert!(
+            page.next() <= state.next_seq.max(from),
+            "a read page ends at or below the journal's next position"
+        );
         assert!(
             page.records.len() <= limit,
             "a read page honours its record limit"
@@ -904,9 +902,9 @@ impl Replica {
         assert!(slot >= self.folded, "a folded slot is never relearned");
         let folded = self.folded;
         self.chosen.insert(slot, command.clone());
-        if slot == self.folded && slot < self.first_unchosen() {
-            self.refold();
-        }
+        // The fold resumes from its head through every chosen slot it now
+        // holds: a no-op unless `slot` filled the head.
+        self.refold();
         assert!(
             self.chosen.contains_key(&slot),
             "a learned slot is held chosen"
@@ -978,16 +976,12 @@ impl Replica {
             };
             self.fold_one(slot, &command);
         }
+        // The loop stops at `end` or at a hole: `assert_invariants` checks
+        // the hole.
         assert!(
             self.folded <= end,
             "a refold never passes the chosen prefix"
         );
-        if self.folded < end {
-            assert!(
-                !self.chosen.contains_key(&self.folded),
-                "a refold stops only at a hole"
-            );
-        }
     }
 
     /// Walk the contiguous chosen prefix forward, folding and surfacing each
@@ -1113,15 +1107,20 @@ impl Replica {
             _ => 0..0,
         };
         let at_floor = |position: Seq| position < self.base.next_seq || held.contains(&position.0);
-        let mut pinned = self.floor == self.folded
-            || (self.state.first_seq < self.state.next_seq && at_floor(self.state.first_seq));
+        // The journal's first record pins the floor slot that holds it. An
+        // empty journal pins nothing this way: its first position is its
+        // next one, past the base and past every record the folded floor
+        // slot accepted.
+        let mut pinned = self.floor == self.folded || at_floor(self.state.first_seq);
         if self.mode == WriterMode::Single {
             for (slot, command) in self.chosen.range(self.floor..self.folded) {
                 let Some(entry) = command.write() else {
                     continue;
                 };
+                // A write at or past the journal's position when it folded
+                // reads no earlier record, and its own record is retained.
                 let at = self.state_at(*slot);
-                if entry.seq < at.first_seq || entry.seq >= at.next_seq {
+                if entry.seq < at.first_seq {
                     continue;
                 }
                 assert!(
@@ -1185,9 +1184,7 @@ impl Replica {
     pub fn trim_to(&mut self, point: Slot, sealed: JournalState) -> JournalState {
         assert!(point.0 > 0, "a trim point has a chosen slot below it");
         let boundary = Slot(point.0 - 1);
-        if self.chosen_index.is_none_or(|ci| ci < boundary) {
-            self.chosen_index = Some(boundary);
-        }
+        self.chosen_index = self.chosen_index.max(Some(boundary));
         let base = if self.folded >= point {
             self.state_at(point)
         } else {
