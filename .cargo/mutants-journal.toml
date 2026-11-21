@@ -1,0 +1,18 @@
+# cargo-mutants over paros-journal, the first pass (`scripts/mutants.sh
+# --journal`). `.cargo/mutants.toml` says how the two passes run; this file
+# and `.cargo/mutants-journal-tlc.toml` are the same two passes for the
+# journal core.
+#
+# The judge: the unit tests of paros-journal and the walks of journal-sim
+# (the oracles and their controls). The trace checks of journal-sim run in the
+# second pass, only on the mutants that this pass missed.
+
+# Equivalent mutants only, each with its reason (AGENTS.md, the absolute
+# rule: no allow list).
+exclude_re = []
+
+test_package = ["paros-journal", "journal-sim"]
+test_tool = "nextest"
+additional_cargo_test_args = ["-E", "not binary(traces)"]
+profile = "mutants"
+minimum_test_timeout = 120

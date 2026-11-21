@@ -22,6 +22,8 @@ const WRITTEN: Answer = Answer::Written {
 fn a_slot_that_applied_the_proposal_answers_it() {
     let mut held = Held::new();
     held.hold(Slot(4), "a", write(1));
+    assert!(!held.is_empty());
+    assert_eq!(held.len(), 1);
     let reply = held.applied(Slot(4), &write(1), &WRITTEN);
     assert_eq!(reply, Some(("a", Reply::Answer(WRITTEN))));
     assert!(held.is_empty());

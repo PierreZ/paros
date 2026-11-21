@@ -201,6 +201,7 @@ jobs:
           -p consensus-sim --test coverage --no-capture
 
   # Mutation testing of the lines a pull request changes in paros-consensus
+  # and in paros-journal
   # (`.cargo/mutants.toml`, `scripts/mutants.sh`): each mutant of a changed
   # line must be caught by the core's tests or the simulation (the fast tests
   # first, then the trace checks for the mutants they miss). A survivor fails
@@ -231,6 +232,18 @@ jobs:
             exit 0
           fi
           nix develop --command scripts/mutants.sh --in-diff pr.diff
+      # The same for the journal core (`scripts/mutants.sh --journal`): its
+      # unit tests and the walks of journal-sim, then the trace checks of
+      # journal-sim for the mutants they miss.
+      - name: Run the mutants of the changed lines of paros-journal
+        run: |
+          set -euo pipefail
+          git diff HEAD^1 HEAD -- crates/lib/paros-journal/src > journal.diff
+          if [ ! -s journal.diff ]; then
+            echo "The pull request changes no line of paros-journal/src."
+            exit 0
+          fi
+          nix develop --command scripts/mutants.sh --journal --in-diff journal.diff
       - name: Show the survivors
         if: failure()
         run: cat survivors.txt 2>/dev/null || true

@@ -73,7 +73,7 @@ impl BoundaryState {
             first_seq: Seq(0),
             leader,
         };
-        state.assert_valid();
+        assert!(state.is_valid(), "a fresh boundary state is valid");
         state
     }
 
@@ -102,17 +102,6 @@ impl BoundaryState {
             );
         }
         follows
-    }
-
-    /// # Panics
-    ///
-    /// When the state is not well formed.
-    fn assert_valid(&self) {
-        assert!(
-            self.first_seq <= self.next_seq,
-            "a journal's first position never passes its next one"
-        );
-        assert!(self.leader.is_valid(), "the unset uuid never leads");
     }
 }
 
@@ -216,7 +205,10 @@ impl JournalState {
     /// When `boundary` is not well formed.
     #[must_use]
     pub fn from_boundary(boundary: BoundaryState) -> Self {
-        boundary.assert_valid();
+        assert!(
+            boundary.is_valid(),
+            "a fold starts from a valid boundary state"
+        );
         let state = Self {
             leader: boundary.leader,
             next_seq: boundary.next_seq,
@@ -267,6 +259,10 @@ impl JournalState {
 
     /// The boundary state at this point: what the replica writes into the
     /// segment record once it applied every slot of a sealed segment.
+    ///
+    /// # Panics
+    ///
+    /// When the state is not well formed (see [`Self::assert_invariants`]).
     #[must_use]
     pub fn boundary(&self) -> BoundaryState {
         let boundary = BoundaryState {
@@ -274,7 +270,7 @@ impl JournalState {
             first_seq: self.first_seq,
             leader: self.leader,
         };
-        boundary.assert_valid();
+        assert!(boundary.is_valid(), "a fold's boundary state is valid");
         boundary
     }
 

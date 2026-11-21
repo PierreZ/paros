@@ -245,3 +245,57 @@ fn from_parts_refuses_fields_that_disagree() {
         "a boundary before the seal"
     );
 }
+
+#[test]
+fn a_grid_of_f_2_has_columns_of_5() {
+    let grid = Grid::new(2, vec![nodes(&[1, 2, 3, 4, 5])]).expect("a v1 grid");
+    assert_eq!((grid.f(), grid.rows(), grid.acks()), (2, 5, 3));
+}
+
+#[test]
+fn from_parts_refuses_a_replica_named_twice() {
+    let record = sealed();
+    let parts = |replicas: Vec<NodeId>| {
+        SegmentRecord::from_parts(
+            record.id(),
+            record.release(),
+            record.opening().clone(),
+            replicas,
+            SegmentState::Sealed,
+            Some(Slot(5)),
+            Some(Slot(9)),
+            None,
+        )
+    };
+    assert_eq!(
+        parts(nodes(&[10, 10, 11])).err(),
+        Some(RecordRefusal::Replicas)
+    );
+    assert_eq!(parts(Vec::new()).err(), Some(RecordRefusal::Replicas));
+}
+
+#[test]
+fn an_empty_segment_ends_at_its_start() {
+    let record = sealed();
+    assert!(
+        SegmentRecord::from_parts(
+            record.id(),
+            record.release(),
+            record.opening().clone(),
+            record.replicas().to_vec(),
+            SegmentState::Sealed,
+            Some(Slot(5)),
+            Some(Slot(5)),
+            None,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+#[should_panic(expected = "a segment has replicas")]
+fn the_invariants_see_no_replica() {
+    let mut record = sealed();
+    record.replicas.clear();
+    record.assert_invariants();
+}

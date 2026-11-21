@@ -413,14 +413,12 @@ impl<'a> In<'a> {
         Ok(head.to_vec())
     }
 
-    /// A count of items, each of at least `min` bytes: a count that the
-    /// bytes left cannot hold is refused before anything is read.
-    fn count(&mut self, min: usize) -> Result<usize, DecodeError> {
-        let count = self.u32_len()?;
-        if count.saturating_mul(min) > self.rest.len() {
-            return Err(DecodeError::Short);
-        }
-        Ok(count)
+    /// A count of items. The decoder allocates nothing for the count: it
+    /// reads each item from the bytes that are there, so a count that the
+    /// bytes cannot hold ends in [`DecodeError::Short`] at the first item
+    /// that is missing.
+    fn count(&mut self) -> Result<usize, DecodeError> {
+        self.u32_len()
     }
 
     fn option<T>(
@@ -470,7 +468,7 @@ impl<'a> In<'a> {
                     },
                     tag => return Err(DecodeError::Tag { what: "fence", tag }),
                 };
-                let count = self.count(MIN_RECORD)?;
+                let count = self.count()?;
                 let records = (0..count)
                     .map(|_| self.record())
                     .collect::<Result<Vec<_>, _>>()?;
@@ -513,7 +511,7 @@ impl<'a> In<'a> {
                 other => return Err(DecodeError::ParosKey(other)),
             }
         }
-        let count = self.count(2 * size_of::<u32>())?;
+        let count = self.count()?;
         for _ in 0..count {
             let key = self.bytes()?;
             let value = self.bytes()?;
@@ -524,7 +522,7 @@ impl<'a> In<'a> {
     }
 
     fn nodes(&mut self) -> Result<Vec<NodeId>, DecodeError> {
-        let count = self.count(size_of::<u64>())?;
+        let count = self.count()?;
         (0..count).map(|_| self.u64().map(NodeId)).collect()
     }
 
@@ -537,7 +535,7 @@ impl<'a> In<'a> {
         let term = self.u64()?;
         let expected = self.option("expected segment", |input| input.u64().map(SegmentId))?;
         let f = self.u8()?;
-        let columns = self.count(size_of::<u32>())?;
+        let columns = self.count()?;
         let columns = (0..columns)
             .map(|_| self.nodes())
             .collect::<Result<Vec<_>, _>>()?;
@@ -583,10 +581,6 @@ impl<'a> In<'a> {
         }
     }
 }
-
-/// The fewest bytes of an encoded record: no paros header, no client
-/// header, an empty payload.
-const MIN_RECORD: usize = size_of::<u16>() + 2 * size_of::<u32>();
 
 #[cfg(test)]
 mod tests;

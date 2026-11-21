@@ -460,11 +460,58 @@ fn a_fresh_journal_has_no_writer() {
 }
 
 #[test]
-#[should_panic(expected = "first position never passes")]
-fn a_boundary_with_its_floor_above_its_tail_is_refused() {
+fn applied_names_the_answers_that_move_the_state() {
+    let view = JournalState::from_boundary(BoundaryState::fresh(Leader::Multi)).view();
+    for moved in [
+        Answer::Written {
+            seq: Seq(0),
+            count: 1,
+        },
+        Answer::LeaderSet(view),
+        Answer::Trimmed(view),
+    ] {
+        assert!(moved.applied(), "{moved:?} moves the state");
+    }
+    for kept in [Answer::Noop, Answer::Fenced(view), Answer::Below(view)] {
+        assert!(!kept.applied(), "{kept:?} moves nothing");
+    }
+}
+
+#[test]
+#[should_panic(expected = "a fold starts from a valid boundary state")]
+fn a_boundary_with_its_floor_above_its_next_is_refused() {
     let _ = JournalState::from_boundary(BoundaryState {
         next_seq: Seq(1),
         first_seq: Seq(2),
-        leader: Leader::Unset,
+        leader: Leader::Multi,
     });
+}
+
+#[test]
+#[should_panic(expected = "first position never passes")]
+fn the_invariants_see_a_floor_above_next() {
+    let mut state = JournalState::from_boundary(BoundaryState::fresh(Leader::Multi));
+    state.first_seq = Seq(1);
+    state.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "a segment starts at or below")]
+fn the_invariants_see_a_start_above_next() {
+    let mut state = JournalState::from_boundary(BoundaryState::fresh(Leader::Multi));
+    state.start_seq = Seq(1);
+    state.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "next_seq never decreases")]
+fn the_transition_check_sees_next_seq_go_back() {
+    let before = JournalState::from_boundary(BoundaryState {
+        next_seq: Seq(3),
+        first_seq: Seq(0),
+        leader: Leader::Multi,
+    });
+    let mut after = before;
+    after.next_seq = Seq(2);
+    after.assert_transition(&before, &Answer::Noop);
 }

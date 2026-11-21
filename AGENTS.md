@@ -227,7 +227,11 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
   pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
-  the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
+  the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). The
+  same job runs the two passes on the changed lines of `crates/lib/paros-journal/src`
+  (`scripts/mutants.sh --journal`: the tests of `paros-journal` and the walks of `journal-sim`,
+  then the trace checks of `journal-sim`; `.cargo/mutants-journal.toml`,
+  `.cargo/mutants-journal-tlc.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
