@@ -124,13 +124,21 @@ no checked model takes. The trace specs today are:
 - `batcher/BatcherTrace`: the batcher and the unbatcher, on the batcher walk. `Batcher.tla` has
   the walk's network (a batch lands whole, maybe twice, with no Paxos under it) and checks that
   each answer holds its own records and that a batch keeps push order.
+- `journal-state/FoldTrace`: the journal fold of `paros-journal`, on the fold walk of
+  `journal-sim` (#1324 (paros-journal)). `Journal.tla` holds the fold as operators (`Res`,
+  `Step`, `Bound`, `CoversOn`, `ResolveOn`), not as one action, because each replica of the
+  composed model folds its own segment. So `FoldTrace` keeps the state of one replica's fold
+  (the state, the boundary of the segment in force, the boundary of each sealed segment and the
+  `Below` answers not yet resolved) and applies those operators: an `apply` event is `Step` with
+  the answer `Res`, a `seal` event is `Bound`, and a `resolve` event is `ResolveOn` on the
+  boundary of its sealed segment. It defines no rule of its own.
 
 Merging `leader-handoff/` and `proxy-leader/` into the node model is #1343 (merge proxy and handoff into the node model).
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take
 (`Spec::rules` in `crates/sim/consensus-sim/src/cluster/trace/rules.rs`, #1231 (traced walks
-reach the rules)): a walk that never fills a gap leaves the gap-fill guard unjudged. A change
+reach the rules); `RULES` in `crates/sim/journal-sim/tests/traces.rs`): a walk that never fills a gap leaves the gap-fill guard unjudged. A change
 of `specs/tla/` alone also runs the trace checks, in the `traces` job of the `TLA` workflow (four
 shards): a change of a model changes what its trace specs accept.
 
@@ -196,7 +204,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | CTRL in the journal: the tri-state tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen value in one write | `proposer.rs` (`slot_decidable`), `acceptor.rs`; the scrub and the repair are designed, not built | `ctrl-grid/` | #1263 (CTRL recovery in the journal), done |
 | CTRL across segments: the copies of a sealed segment across retire and offload, the repair of a replica log and of an object, the data-loss report | the journal steps are designed, not built | `ctrl-segments/` | #1263 (CTRL recovery in the journal), done |
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
-| The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | not built (the journal core, #1324 to #1326) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
+| The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the roles are not built (#1325, #1326) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |

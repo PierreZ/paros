@@ -1,6 +1,6 @@
 [package]
 name = "paros"
-description = "Paxos in Rust: the library. One crate a program depends on; today it holds the sans-IO consensus core (`paros::consensus`)"
+description = "Paxos in Rust: the library. One crate a program depends on; today it holds the sans-IO consensus core (`paros::consensus`) and the pure journal core (`paros::journal`)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,11 +14,12 @@ readme = "../../../README.md"
 exclude = ["AGENTS.md", "CLAUDE.md"]
 
 # The facade: each layer is its own crate, and this crate re-exports each one
-# as a module. Today there is one layer, the sans-IO core. The journal layers
-# that sat above it were removed on 2026-11-19; they are at the tag
+# as a module: the sans-IO consensus core, and the pure core of the journal v1
+# (`docs/journal/`). The journal layers of the old design are at the tag
 # `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/).
 [dependencies]
 paros-consensus = { workspace = true, features = ["tracing", "assertions", "serde"] }
+paros-journal = { workspace = true }
 
 [lints]
 workspace = true

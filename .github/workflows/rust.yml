@@ -66,6 +66,8 @@ jobs:
         run: nix develop --command cargo clippy --all-targets -- --deny warnings
       - name: Check the core's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-consensus --no-deps
+      - name: Check the journal core's rustdoc links
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal --no-deps
 
   fmt:
     needs: scope
@@ -199,6 +201,7 @@ jobs:
           -p consensus-sim --test coverage --no-capture
 
   # Mutation testing of the lines a pull request changes in paros-consensus
+  # and in paros-journal
   # (`.cargo/mutants.toml`, `scripts/mutants.sh`): each mutant of a changed
   # line must be caught by the core's tests or the simulation (the fast tests
   # first, then the trace checks for the mutants they miss). A survivor fails
@@ -220,6 +223,19 @@ jobs:
       # request brings, numbered as in the tree the mutants are built from.
       # The base sha of the event can be older than that tip, and a diff from
       # it would also hold what main merged since.
+      # A mutant can make a test allocate without end (a decoder that reads
+      # no byte for each item of a list): the host then shuts the whole runner
+      # down. earlyoom sends SIGTERM to a test binary when less than 8 % of
+      # the memory is free, so the test fails and the mutant is caught, as in
+      # the `Mutants` workflow (`mutants.yml`). The build tools and the runner
+      # are never chosen.
+      - name: Start earlyoom
+        run: |
+          earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
+          sudo "$earlyoom" -m 8 -s 100 -r 0 \
+            --prefer '^(paros_consensu|consensus_sim|paros_journal|journal_sim|flavors|walks|mutants|traces|coverage)' \
+            --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
+            > earlyoom.log 2>&1 &
       - name: Run the mutants of the changed lines
         run: |
           set -euo pipefail
@@ -229,9 +245,23 @@ jobs:
             exit 0
           fi
           nix develop --command scripts/mutants.sh --in-diff pr.diff
+      # The same for the journal core (`scripts/mutants.sh --journal`): its
+      # unit tests and the walks of journal-sim, then the trace checks of
+      # journal-sim for the mutants they miss.
+      - name: Run the mutants of the changed lines of paros-journal
+        run: |
+          set -euo pipefail
+          git diff HEAD^1 HEAD -- crates/lib/paros-journal/src > journal.diff
+          if [ ! -s journal.diff ]; then
+            echo "The pull request changes no line of paros-journal/src."
+            exit 0
+          fi
+          nix develop --command scripts/mutants.sh --journal --in-diff journal.diff
       - name: Show the survivors
         if: failure()
-        run: cat survivors.txt 2>/dev/null || true
+        run: |
+          echo "== processes that earlyoom stopped"; grep -i 'sending SIG' earlyoom.log || true
+          cat survivors.txt 2>/dev/null || true
 
   # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
   # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
@@ -287,6 +317,8 @@ jobs:
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-consensus --no-default-features
       - name: Check paros-consensus with the serde derives on (no crate enables the feature)
         run: nix develop --command cargo check -p paros-consensus --features serde
+      - name: Build paros-journal (the journal core) for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal
       - name: Build paros (the library facade) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
       # The two public crates (`release-plz.toml`) build as crates.io builds
