@@ -29,6 +29,14 @@ A check of a mutant that runs longer than `TIMEOUT_FACTOR` times its baseline
 (at least `TIMEOUT_MIN` seconds) is stopped and counts as caught: the guard
 bounds the state space of the check, as for the `Mutants` workflow of the core
 (a timeout counts as caught). The report names such mutants apart.
+
+`--budget` bounds a run in seconds, for a CI job: a mutant whose checks the
+budget cuts is `unfinished`, never caught, and the run fails. The fix is more
+slices. `--baseline-out` times every check once (one job for each folder in
+CI), and `--baseline-from` gives those times to the slices, so that a slice
+spends its budget on mutants. `--workers` is the number of mutants judged at
+once; each TLC gets an equal share of the CPUs, so a baseline and the slices
+that use it must run with the same `--workers`.
 """
 
 import argparse
@@ -46,7 +54,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPECS = ROOT / "specs" / "tla"
-TIMEOUT_FACTOR = 5
+TIMEOUT_FACTOR = 3
 TIMEOUT_MIN = 60
 
 
@@ -335,7 +343,7 @@ def run_tlc(tree: Path, check: Check, timeout: float | None) -> tuple[str, float
     t0 = time.monotonic()
     try:
         p = subprocess.run(
-            ["tlc", "-workers", "1", "-deadlock", "-metadir", meta + "/states",
+            ["tlc", "-workers", str(TLC_WORKERS), "-deadlock", "-metadir", meta + "/states",
              "-config", check.name + ".cfg", "MC.tla"],
             cwd=tree / check.folder, capture_output=True, text=True, timeout=timeout,
             env=java_env(meta),
@@ -373,6 +381,8 @@ def ensure_baseline(c: Check) -> str:
     """
     with c.lock:
         if c.baseline is None:
+            if DEADLINE is not None and DEADLINE <= time.monotonic():
+                return ""
             got, took, _ = run_tlc(BASE_TREE, c, None)
             c.baseline = took
             c.base_result = got
@@ -385,6 +395,8 @@ def ensure_baseline(c: Check) -> str:
 BASE_TREE: Path
 TIMEOUT_MIN_S = TIMEOUT_MIN
 TIMEOUT_FACTOR_X = TIMEOUT_FACTOR
+TLC_WORKERS = 1
+DEADLINE: float | None = None
 
 
 def judge(guard: Guard, checks: list[Check], scratch: Path) -> tuple[str, str]:
@@ -396,8 +408,15 @@ def judge(guard: Guard, checks: list[Check], scratch: Path) -> tuple[str, str]:
             bad = ensure_baseline(c)
             if bad:
                 return "tool-error", bad
+            if c.baseline is None:
+                return "unfinished", "the budget of the run ended"
             limit = max(TIMEOUT_MIN_S, TIMEOUT_FACTOR_X * c.baseline)
-            got, _, log = run_tlc(tree, c, limit)
+            left = None if DEADLINE is None else DEADLINE - time.monotonic()
+            if left is not None and left <= 0:
+                return "unfinished", "the budget of the run ended"
+            got, _, log = run_tlc(tree, c, limit if left is None else min(limit, left))
+            if got == "timeout" and left is not None and left < limit:
+                return "unfinished", f"the budget of the run ended in {c.folder}/{c.name}"
             if got == "parse":
                 tail = "\n".join(log.splitlines()[-15:])
                 return "tool-error", f"{c.folder}/{c.name}: the mutant does not parse\n{tail}"
@@ -428,14 +447,23 @@ def parses(guard: Guard, scratch: Path) -> str:
 
 
 def main() -> None:
-    global BASE_TREE, TIMEOUT_MIN_S, TIMEOUT_FACTOR_X
+    global BASE_TREE, TIMEOUT_MIN_S, TIMEOUT_FACTOR_X, TLC_WORKERS, DEADLINE
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folders", nargs="*", help="folders of specs/tla/ (default: every folder)")
     ap.add_argument("--list", action="store_true", help="print the guards, run nothing")
     ap.add_argument("--parse", action="store_true",
                     help="check that each mutant parses (SANY), run no check")
     ap.add_argument("--shard", default="1/1", help="i/n: the i-th of n slices of the mutants")
-    ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
+    ap.add_argument("--workers", type=int, default=os.cpu_count() or 1,
+                    help="mutants judged at once; each TLC gets an equal share of the CPUs")
+    ap.add_argument("--budget", type=float,
+                    help="seconds: start no check after this; a mutant cut is `unfinished`")
+    ap.add_argument("--baseline-out", type=Path,
+                    help="time every check of the folders and their users, write them here, "
+                         "judge no mutant")
+    ap.add_argument("--baseline-from", type=Path, action="append", default=[],
+                    help="a file of --baseline-out: the times of the checks, timed again "
+                         "only when missing")
     ap.add_argument("--timeout-min", type=float, default=TIMEOUT_MIN, help="seconds")
     ap.add_argument("--timeout-factor", type=float, default=TIMEOUT_FACTOR)
     ap.add_argument("--out", type=Path, help="append one line per mutant to this file")
@@ -443,6 +471,7 @@ def main() -> None:
                     help="a file of an earlier --out: leave out the mutants it judged")
     args = ap.parse_args()
     TIMEOUT_MIN_S, TIMEOUT_FACTOR_X = args.timeout_min, args.timeout_factor
+    TLC_WORKERS = max(1, (os.cpu_count() or 1) // args.workers)
 
     folders = args.folders or folders_all()
     idx, count = (int(x) for x in args.shard.split("/"))
@@ -480,9 +509,33 @@ def main() -> None:
         print(f"{len(guards)} mutants, {len(errors)} do not parse")
         sys.exit(2 if errors else 0)
     BASE_TREE = copy_tree(scratch / "base")
+    t0 = time.monotonic()
+    if args.budget is not None:
+        DEADLINE = t0 + args.budget
+    if args.baseline_out:
+        # The checks of each folder named and of each folder that links one of its modules.
+        need = sorted({u for f in folders for m in own_modules(f) for u in users(m)} | set(folders))
+        bad = []
+        with args.baseline_out.open("w") as fh:
+            for f in need:
+                for c in read_checks(f):
+                    got, took, _ = run_tlc(BASE_TREE, c, None)
+                    print(f"baseline {f}/{c.name}: {got} in {took:.0f}s", flush=True)
+                    fh.write(f"{f}\t{c.name}\t{got}\t{took:.1f}\n")
+                    if got != c.expected:
+                        bad.append(f"{f}/{c.name}: expected {c.expected}, got {got}")
+        shutil.rmtree(scratch, ignore_errors=True)
+        for b in bad:
+            print("FAIL  baseline " + b, file=sys.stderr)
+        sys.exit(2 if bad else 0)
     need = sorted({u for g in guards for u in users(g.module)})
     checks = {f: read_checks(f) for f in need}
-    t0 = time.monotonic()
+    for path in args.baseline_from:
+        for line in path.read_text().splitlines():
+            f, name, got, took = line.split("\t")
+            for c in checks.get(f, []):
+                if c.name == name:
+                    c.baseline, c.base_result = float(took), got
 
     def plan(g: Guard) -> list[Check]:
         out = []
@@ -491,7 +544,7 @@ def main() -> None:
             out.extend(sorted(checks[u], key=lambda c: c.expected != "pass"))
         return out
 
-    results = {"caught": 0, "caught-timeout": 0, "survived": 0, "tool-error": 0}
+    results = {"caught": 0, "caught-timeout": 0, "survived": 0, "unfinished": 0, "tool-error": 0}
     lines = []
     with concurrent.futures.ThreadPoolExecutor(args.workers) as ex:
         futs = {ex.submit(judge, g, plan(g), scratch): g for g in guards}
@@ -517,7 +570,7 @@ def main() -> None:
             print(f"  {verdict:10} {where}: /\\ {text}")
     if results["tool-error"]:
         sys.exit(2)
-    if results["survived"]:
+    if results["survived"] or results["unfinished"]:
         sys.exit(1)
 
 

@@ -709,3 +709,131 @@ survived	experiments/segments/b/SegmentsB.tla:310 Trim	\A s \in 1..(f - 1) : Rep
 survived	experiments/segments/b/SegmentsB.tla:319 Consume	cursor >= floor	every check gives its expected result
 survived	experiments/segments/b/SegmentsB.tla:330 ReadStart	rst = " "	every check gives its expected result
 survived	experiments/segments/b/SegmentsB.tla:366 ReadAsk	\A a \in Q : prom[a] <= b	every check gives its expected result
+caught	degraded-reshape/Degraded.tla:311 Collect	GcReady(b)	degraded-reshape/safe_record: violation, expected pass. Error: Invariant ReadSafe is violated.
+caught	degraded-reshape/Degraded.tla:323 Ack	ChosenAt(b, s)	degraded-reshape/safe_record: violation, expected pass. Error: Invariant ReadSafe is violated.
+caught	degraded-reshape/Degraded.tla:239 Propose	~ \E p \in proposals : p[1] = b /\ p[2] = s	degraded-reshape/seal_frontier: violation, expected pass. Error: Invariant Agreement is violated.
+caught	degraded-reshape/Degraded.tla:230 Phase1Done	Covered(b)	degraded-reshape/safe_record: violation, expected pass. Error: Invariant ReadSafe is violated.
+caught-timeout	degraded-reshape/Degraded.tla:247 Accept	a \in Mem(CfgOf[b])	degraded-reshape/safe_record ran past 613s
+survived	grid-controller/GridController.tla:305 Fail	a \notin failed	every check gives its expected result
+caught-timeout	grid-controller/GridController.tla:166 Elect	ctl[c].st = " "	grid-controller/live_ci ran past 811s
+caught-timeout	grid-controller/GridController.tla:191 Plan	top < NG	grid-controller/live_ci ran past 811s
+caught-timeout	grid-controller/GridController.tla:283 Restart	ctl[c].st = " "	grid-controller/live_ci ran past 811s
+survived	handover/Handover.tla:190 RaiseSurvive	size > Cardinality(M0)	every check gives its expected result
+survived	handover/Handover.tla:164 Gc	<<1, 0>> \notin floors	every check gives its expected result
+caught	leader-handoff/LeaderHandoff.tla:432 Beat	Effective(n)	leader-handoff/safety: violation, expected pass. Error: Invariant TypeOK is violated.
+caught	leader-handoff/LeaderHandoff.tla:326 Accept	prom[a] <= b	leader-handoff/safety_elect: violation, expected pass. Error: Invariant OwnRecorded is violated.
+caught	leader-handoff/LeaderHandoff.tla:233 Prepare	prom[o] < b	leader-handoff/safety_elect: violation, expected pass. Error: Invariant LeaderFrontier is violated.
+caught	leader-handoff/LeaderHandoff.tla:370 Relinquish	Effective(n)	leader-handoff/safety: violation, expected pass. Error: Invariant OneHolder is violated.
+caught-timeout	leader-handoff/LeaderHandoff.tla:467 Drop	drops < Drops	leader-handoff/safety ran past 1078s
+caught	leader-handoff/LeaderHandoff.tla:293 Allocate	s < NS	leader-handoff/safety: violation, expected pass. Error: Invariant TypeOK is violated.
+caught	leader-handoff/LeaderHandoff.tla:392 Install	PromiseGuard => m.bal >= prom[t]	leader-handoff/safety_elect: violation, expected pass. Error: Invariant LeaderFrontier is violated.
+caught	handover/Handover.tla:222 Stop	issued # 0	handover/handover: error, expected pass. Error: TLC threw an unexpected exception.
+caught	leader-handoff/LeaderHandoff.tla:391 Install	m.type = " " /\ (Named => m.to = t)	leader-handoff/safety: error, expected pass. Error: TLC threw an unexpected exception.
+caught	leader-handoff/LeaderHandoff.tla:264 Win	prom[o] = b	leader-handoff/safety_elect: violation, expected pass. Error: Invariant LeaderFrontier is violated.
+caught	quorum-everywhere/QuorumEverywhere.tla:236 Move	Cur.to \ down \subseteq answered	quorum-everywhere/quorum: violation, expected pass. Error: Temporal properties were violated.
+caught-timeout	reads/Reads.tla:175 MatchDone	status[b] = " "	reads/reads_plain ran past 258s
+survived	handover/Handover.tla:288 Activate	<<m, chosen>> \in boot	every check gives its expected result
+survived	handover/Handover.tla:278 Decide	\E Q \in Majorities(M0) : \A m \in Q : up[m]	every check gives its expected result
+caught	leader-handoff/LeaderHandoff.tla:328 Accept	m.type = " " /\ m.bal = b /\ m.slot = s	leader-handoff/safety: error, expected pass. Error: TLC threw an unexpected exception.
+caught-timeout	leader-handoff/LeaderHandoff.tla:243 Promise	prom[a] < b	leader-handoff/safety ran past 740s
+caught	multi-paxos/MultiPaxos.tla:302 CatchUp	\E s \in Slots : learned[n][s] = None /\ learned[p][s] # None	multi-paxos/majority: error, expected pass. Error: TLC threw an unexpected exception.
+caught	multi-paxos/MultiPaxos.tla:327 Wipe	Cardinality(wiped) < Wipes	multi-paxos/three_ballots: violation, expected pass. Error: Invariant Inv is violated.
+survived	handover/Handover.tla:141 Read	<<w, 0>> \notin readDone	every check gives its expected result
+survived	handover/Handover.tla:251 Close	chosen = None	every check gives its expected result
+caught	leader-handoff/LeaderHandoff.tla:340 Decide	\A a \in Q : [type |-> " ", acc |-> a, bal |-> bal[n], slot |-> s, val |-> v] \in msgs	leader-handoff/safety: violation, expected pass. Error: Invariant LearnedChosen is violated.
+caught	leader-handoff/LeaderHandoff.tla:394 Install	FrontierGuard => m.nxt >= nxt[t]	leader-handoff/safety: violation, expected pass. Error: Invariant OneProposal is violated.
+caught	leader-handoff/LeaderHandoff.tla:268 Win	\E Q \in Q1 : Q \subseteq {m.acc : m \in S}	leader-handoff/safety_elect: violation, expected pass. Error: Invariant LeaderFrontier is violated.
+survived	handover/Handover.tla:262 Bootstrap	p \in props	every check gives its expected result
+caught	leader-handoff/LeaderHandoff.tla:372 Relinquish	OneHop => origin[n] = " "	leader-handoff/safety: violation, expected pass. Error: Invariant OneHolder is violated.
+caught	quorum-everywhere/QuorumEverywhere.tla:223 Complete	HasQuorum	quorum-everywhere/election_column: pass, expected violation.
+caught	leader-handoff/LeaderHandoff.tla:308 AllocateStale	s < NS	leader-handoff/safety_elect: violation, expected pass. Error: Invariant TypeOK is violated.
+caught-timeout	leader-handoff/LeaderHandoff.tla:456 Restart	restarts < Restarts	leader-handoff/safety ran past 1214s
+caught	multi-paxos/MultiPaxos.tla:290 Decide	\A a \in Q : [type |-> " ", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs	multi-paxos/majority: violation, expected pass. Error: Invariant LearnedChosen is violated.
+caught-timeout	multi-paxos/MultiPaxos.tla:314 Restart	restarts < Restarts	multi-paxos/majority ran past 632s
+survived	handover/Handover.tla:274 Decide	chosen = None	every check gives its expected result
+caught-timeout	multi-paxos/MultiPaxos.tla:300 CatchUp	n \in Learners	multi-paxos/majority ran past 624s
+caught	multi-paxos/MultiPaxos.tla:313 Restart	a \in Restartable	multi-paxos/live_restart: violation, expected pass. Error: Temporal properties were violated.
+survived	handover/Handover.tla:153 Write	<<w, 0>> \notin done	every check gives its expected result
+survived	handover/Handover.tla:200 Issue	chosen = None	every check gives its expected result
+caught	reads/Reads.tla:394 ReadServe	\E Q \in Q1s[cfgOf[rd.b]] : Q \subseteq {x[1] : x \in rd.answers}	reads/reads_plain: violation, expected pass. Error: Invariant ReadSeesAcked is violated.
+caught-timeout	reads/Reads.tla:407 Restart	a \in Restarters	reads/reads_plain ran past 201s
+caught	reads/Reads.tla:331 LearnBasis	status[b] \in {" ", " "}	reads/reads_plain: violation, expected pass. Error: Invariant ReadSeesAcked is violated.
+caught	reads/Reads.tla:348 ReadStart	BasisOf(n)[1] > 0	reads/reads_plain: error, expected pass. Error: TLC threw an unexpected exception.
+caught	quorum-everywhere/QuorumEverywhere.tla:215 Answer	~Finished	quorum-everywhere/quorum: error, expected pass. Error: TLC threw an unexpected exception.
+caught	reads/Reads.tla:381 ReadAbandon	rd.state = " "	reads/learner_own: error, expected pass. Error: TLC threw an unexpected exception.
+caught	retire-fence/Retire.tla:181 Register	\A t \in tomb[m] : t[1] \notin cfgOf[b]	retire-fence/ask_all_tomb: violation, expected pass. Error: Invariant Electable is violated.
+survived	retire-fence/Retire.tla:404 RefuseRetired	Abandon	every check gives its expected result
+caught	retire-fence/Retire.tla:390 Crash	Cardinality(crashed) < Crashes	retire-fence/ask_all_tomb: violation, expected pass. Error: Invariant Electable is violated.
+caught	reads/Reads.tla:390 ReadServe	rd.state = " "	reads/reads_plain: error, expected pass. Error: TLC threw an unexpected exception.
+caught	reads/Reads.tla:266 Bypass	status[b2] = " "	reads/reads_bypass_hold: violation, expected pass. Error: Invariant ReadSeesAcked is violated.
+caught	reads/Reads.tla:318 Ack	Hold => Covered(b)	reads/reads_bypass_hold: violation, expected pass. Error: Invariant ReadSeesAcked is violated.
+caught-timeout	reads/Reads.tla:421 Probe	~ heard[a]	reads/reads_plain ran past 156s
+caught	reads/Reads.tla:317 Ack	\E v \in Values : \E Q \in Q2s[cfgOf[b]] : \A a \in Q : <<a, s, b, v>> \in votes	reads/reads_plain: violation, expected pass. Error: Invariant ReadSeesAcked is violated.
+caught	reads/Reads.tla:265 Bypass	status[b] = " "	reads/reads_bypass_hold: violation, expected pass. Error: Invariant ReadSeesAcked is violated.
+caught	reads/Reads.tla:243 Accept	promised[a] <= b	reads/reads_plain: violation, expected pass. Error: Invariant ReadSeesAcked is violated.
+caught	reads/Reads.tla:433 ReadClose	ReadAgain	reads/reads_bypass_hold: violation, expected pass. Error: Invariant ReadSeesAcked is violated.
+caught	retire-fence/Retire.tla:328 Retire	Asked(n, w)	retire-fence/ask_all_tomb: violation, expected pass. Error: Invariant Electable is violated.
+caught-timeout	retire-fence/Retire.tla:301 SendAsk	MayRetire(n, w)	retire-fence/rejoin_reach ran past 114s
+survived	retire-fence/Retire.tla:169 Reconfigure	c # belief[n][2]	every check gives its expected result
+survived	retire-fence/Retire.tla:359 RejoinOne	Rejoin # " "	every check gives its expected result
+caught	retire-fence/Retire.tla:240 Gc	wm[m] < b	retire-fence/ask_all_tomb: violation, expected pass. Error: Invariant Electable is violated.
+caught	segment-replicas/SegmentReplicas.tla:310 Serve	applied[rd[s].rep] >= rd[s].basis	segment-replicas/safety: violation, expected pass. Error: Invariant ReadTrue is violated.
+caught	retire-fence/Retire.tla:251 Effective	\E Q \in MMQuorums : \A m \in Q : wm[m] >= b	retire-fence/ask_all_tomb: violation, expected pass. Error: Invariant Electable is violated.
+caught	segment-replicas/SegmentReplicas.tla:287 StartRead	acked[s] # None	segment-replicas/safety: error, expected pass. Error: The first argument of >= should be an integer, but instead it is:
+caught	segment-replicas/SegmentReplicas.tla:319 Retire	Cardinality(Holders) >= RetireAt	segment-replicas/live: violation, expected pass. Error: Temporal properties were violated.
+caught-timeout	segment-records/SegmentRecords.tla:262 Decide	\A m \in T : <<m, s>> \in boot	segment-records/seal ran past 1134s
+caught	seal-ctrl/SealCtrl.tla:132 Prepare	phase[b] = " "	seal-ctrl/safety: violation, expected pass. Error: Invariant Agreement is violated.
+caught-timeout	seal-ctrl/SealCtrl.tla:144 Promise	Gen[b] = 2	seal-ctrl/safety ran past 60s
+survived	retire-fence/Retire.tla:260 Restart	n \notin retired \cup crashed	every check gives its expected result
+caught	segment-replicas/SegmentReplicas.tla:306 Serve	rd[s] # None	segment-replicas/safety: error, expected pass. Error: TLC threw an unexpected exception.
+caught	segment-replicas/SegmentReplicas.tla:252 WriteRecord	Boundary # " " => Front(p) = K	segment-replicas/safety: violation, expected pass. Error: Invariant RecordTrue is violated.
+survived	retire-fence/Retire.tla:299 SendAsk	Ask # " "	every check gives its expected result
+caught	retire-fence/Retire.tla:312 AskOne	\A r \in reg[m] : ~ (r[1] > w /\ n \in r[2])	retire-fence/ask_all_tomb: violation, expected pass. Error: Invariant Electable is violated.
+caught	segment-replicas/SegmentReplicas.tla:289 StartRead	rd[s] = None	segment-replicas/live: violation, expected pass. Error: Temporal properties were violated.
+survived	retire-fence/Retire.tla:302 SendAsk	<<n, w, inc[n]>> \notin asks	every check gives its expected result
+caught	segment-replicas/SegmentReplicas.tla:297 Reroute	rd[s] # None	segment-replicas/safety: error, expected pass. Error: TLC threw an unexpected exception.
+caught	segment-replicas/SegmentReplicas.tla:327 Crash	Cardinality(down \cap Set(SetOf(r))) < F	segment-replicas/live: violation, expected pass. Error: Temporal properties were violated.
+caught	segment-replicas/SegmentReplicas.tla:288 StartRead	acked[s] >= 0	segment-replicas/safety: violation, expected pass. Error: Invariant ReadTrue is violated.
+caught	segment-replicas/SegmentReplicas.tla:299 Reroute	rd[s].rep \in down	segment-replicas/live: violation, expected pass. Error: Temporal properties were violated.
+caught	segment-replicas/SegmentReplicas.tla:334 Vanish	retired	segment-replicas/live_gone: violation, expected pass. Error: Temporal properties were violated.
+caught	segment-truncate/SegmentTruncate.tla:336 TrimS2	TrimOpen	segment-truncate/safety: violation, expected pass. Error: Invariant TrimTrue is violated.
+caught	segment-truncate/SegmentTruncate.tla:301 Retire	Cardinality(Holders \ down) >= RetireAt	segment-truncate/crash: violation, expected pass. Error: Invariant Findable is violated.
+caught	segment-truncate/SegmentTruncate.tla:298 Retire	state[1] = " "	segment-truncate/safety: violation, expected pass. Error: Action property TrimStays is violated.
+caught	segment-truncate/SegmentTruncate.tla:314 Drop	r \in R1	segment-truncate/safety: violation, expected pass. Error: Invariant ReadKeep is violated.
+caught	segment-truncate/SegmentTruncate.tla:328 Trim	CASE TrimWhen = " " -> FloorCovers(bnd.next) [] TrimWhen = " " -> \E v \in Vals : v.op = " " /\ v.up >= bnd.next	segment-truncate/safety: violation, expected pass. Error: Invariant TrimTrue is violated.
+caught	segment-truncate/SegmentTruncate.tla:307 Offload	state[1] = " "	segment-truncate/safety: violation, expected pass. Error: Action property TrimStays is violated.
+caught	segment-truncate/SegmentTruncate.tla:327 Trim	bnd # None	segment-truncate/safety: error, expected pass. Error: TLC threw an unexpected exception.
+caught	segment-truncate/SegmentTruncate.tla:353 StartRead	q < Truth(Frontier).next	segment-truncate/safety: error, expected pass. Error: The first argument of < should be an integer, but instead it is:
+caught	segment-truncate/SegmentTruncate.tla:344 DeleteObject	state[1] = " "	segment-truncate/safety: violation, expected pass. Error: Invariant Findable is violated.
+caught	segment-truncate/SegmentTruncate.tla:315 Drop	state[1] \in {" ", " "}	segment-truncate/safety: violation, expected pass. Error: Invariant Findable is violated.
+caught	segment-truncate/SegmentTruncate.tla:373 Serve	rd[q] # None	segment-truncate/safety: error, expected pass. Error: TLC threw an unexpected exception.
+survived	truncation-reconfig/TruncationReconfig.tla:305 Decide	phase[b] = " "	every check gives its expected result
+caught	truncation-reconfig/TruncationReconfig.tla:337 TrimTo	FirstUnchosen(n) < floor[p]	truncation-reconfig/safety: violation, expected pass. Error: Invariant Recoverable is violated.
+survived	truncation-reconfig/TruncationReconfig.tla:321 CatchUp	n \in Learners	every check gives its expected result
+survived	truncation-reconfig/TruncationReconfig.tla:324 CatchUp	new # {}	every check gives its expected result
+caught	segment-truncate/SegmentTruncate.tla:396 Crash	Cardinality(down \cap Set(SetOf(r))) < F	segment-truncate/safety: violation, expected pass. Error: Invariant Findable is violated.
+caught	segment-truncate/SegmentTruncate.tla:281 WriteBoundary	Front(p) = K	segment-truncate/safety: violation, expected pass. Error: Invariant BoundaryTrue is violated.
+survived	experiments/segments/a/SegmentsA.tla:368 Trim	f > floor	every check gives its expected result
+survived	experiments/segments/a/SegmentsA.tla:380 Consume	cursor >= floor	every check gives its expected result
+survived	experiments/segments/a/SegmentsA.tla:391 ReadStart	rst = " "	every check gives its expected result
+caught	segment-truncate/SegmentTruncate.tla:380 Serve	applied[t] >= rd[q].basis	segment-truncate/safety: violation, expected pass. Error: Invariant ReadFloor is violated.
+caught-timeout	experiments/stale-stopped/restart/StaleStopped.tla:131 Stopped	~\E m \in msgs : m.type = " " /\ m.acc = a /\ m.inc = i	experiments/stale-stopped/restart/nonce ran past 884s
+caught	segment-truncate/SegmentTruncate.tla:360 Reroute	rd[q] # None	segment-truncate/safety: error, expected pass. Error: TLC threw an unexpected exception.
+caught	experiments/stale-stopped/restart/StaleStopped.tla:210 Accept	m.type = " " /\ m.bal = b	experiments/stale-stopped/restart/nonce: error, expected pass. Error: TLC threw an unexpected exception.
+caught	experiments/stale-stopped/restart/StaleStopped.tla:223 Learn	\E Q \in Quorums : \A a \in Q : \E m \in msgs : m.type = " " /\ m.acc = a /\ m.bal = round	experiments/stale-stopped/restart/nonce: violation, expected pass. Error: Invariant LearnOnlyChosen is violated.
+caught-timeout	experiments/stale-stopped/restart/StaleStopped.tla:114 Start	phase = " "	experiments/stale-stopped/restart/nonce ran past 1236s
+survived	experiments/segments/b/SegmentsB.tla:381 ReadAgain	rst = " "	every check gives its expected result
+survived	experiments/segments/b/SegmentsB.tla:372 ReadAsk	Qs[rview] = Q	every check gives its expected result
+survived	experiments/segments/b/SegmentsB.tla:329 ReadStart	Reader	every check gives its expected result
+caught-timeout	truncation/Truncation.tla:286 Promise	blocked[b] # {}	truncation/safety ran past 1188s
+caught-timeout	truncation-reconfig/TruncationReconfig.tla:257 Win	phase[b] = " "	truncation-reconfig/safety ran past 397s
+caught-timeout	experiments/segments/reads/SegmentReads.tla:397 ReadAsk	a \in rT	experiments/segments/reads/fence_rows ran past 100s
+caught-timeout	experiments/segments/reads/SegmentReads.tla:342 Probe	known[a] = 0	experiments/segments/reads/part_wipe_belief_one ran past 81s
+survived	experiments/segments/reads/SegmentReads.tla:359 Fetch	rview # InForce	every check gives its expected result
+survived	experiments/segments/reads/SegmentReads.tla:398 ReadAsk	a \notin rasked	every check gives its expected result
+survived	experiments/segments/reads/SegmentReads.tla:396 ReadAsk	rst = " "	every check gives its expected result
+caught	experiments/segments/reads/SegmentReads.tla:434 ReadServe	ReadRule = " " => rok	experiments/segments/reads/record: violation, expected pass. Error: Invariant ReadFresh is violated.
+caught	experiments/segments/reads/SegmentReads.tla:421 RecordCheck	Complete	experiments/segments/reads/wipe_record: violation, expected pass. Error: Invariant ReadFresh is violated.
+survived	experiments/segments/reads/SegmentReads.tla:419 RecordCheck	rst = " "	every check gives its expected result
+caught	segment-truncate/SegmentTruncate.tla:355 StartRead	Ready(t)	segment-truncate/safety: error, expected pass. Error: TLC threw an unexpected exception.
+caught	segment-truncate/SegmentTruncate.tla:265 JumpTo	Front(r) < End(SetOf(r))	segment-truncate/safety: error, expected pass. Error: TLC threw an unexpected exception.
