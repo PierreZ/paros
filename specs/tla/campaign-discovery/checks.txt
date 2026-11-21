@@ -8,3 +8,9 @@ believed_only_wide          violation  ci
 outsider_registers          violation  ci
 discover                    pass       ci
 discover_wide               pass       ci
+# Liveness: once the handovers stop, the candidate believes the generation
+# in force. With the believed set only, a candidate whose set left is stuck
+# (the witness; in the wide chain TLC finds no stuck run).
+discover_live               pass       ci
+discover_wide_live          pass       ci
+believed_only_live          violation  ci

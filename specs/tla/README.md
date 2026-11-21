@@ -563,7 +563,8 @@ a live Phase-1 quorum (FoundationDB's kill policy).
 |---|---|---|
 | `reach` | a value chosen after a reconfiguration and a crash | violation (12 thousand states) |
 | `nocheck` | the CAS with no read generation, two ballots | `Agreement` violation (480 thousand states) |
-| `cas` | the CAS, two ballots, one crash | pass: `Agreement` and `Electable` (2.5 million states) |
+| `cas` | the CAS, two ballots, one crash; any acceptor may vote in Phase 2 (a vote is for the value Phase 1 made safe) | pass: `Agreement`, `Electable` and `GenUp`, the generations of a matchmaker never go down (7.7 million states) |
+| `one` | one matchmaker, one configuration, three ballots, two crashes: the kill policy of `Crash` (#1345 (TLA+ guard survivors)) | pass: `Agreement`, `Electable` and `GenUp` (6.8 million states) |
 | `cas_long` | the same with three ballots, one matchmaker | `Agreement` violation (803 thousand states, a 25-state trace): ballot 1 chooses a value in A; ballot 2 writes B in force and stops before Phase 2; ballot 3 reads B, runs Phase 1 in B only, and chooses a second value. A one-slot register takes force before the new configuration holds the chosen values. `config-register/` is the corrected design |
 
 The comparison with paros's registrations (`retire-fence/`, `crash_all_tomb`): with a register,
@@ -628,7 +629,9 @@ Each control turns off one rule, and each one fails:
 | `release_early` | control: a machine releases once a majority holds a successor that does not name it, before the switch | `Electable` violation (1 thousand states) |
 | `mixed` | control: a machine releases on a majority of different writes, each with no successor and not naming it; three matchmakers, one crash | `Electable` violation (19 million states, `long`) |
 | `live_mm_small` | control: one matchmaker on a machine that can die (the matchmakers survive no loss, the journal survives one) | `Wins` violation (40 thousand states) |
-| `agree` | the rule, three ballots, one matchmaker, stores released | pass: `Agreement` and `Electable` (4.0 million states, 3.5 minutes) |
+| `live_mm_stay` | control: the same with one configuration: a read needs a live matchmaker (with the crash guard of `Read` off, the check passes) | `Wins` violation (10 thousand states) |
+| `agree` | the rule, three ballots, one matchmaker, stores released | pass: `Agreement`, `Electable` and `GenUp` (4.0 million states, 3.5 minutes) |
+| `agree_mm3_small` | the rule, three matchmakers, two ballots, no crash: a read or a write that skips a majority shows only with three matchmakers (#1345 (TLA+ guard survivors)) | pass: `Agreement`, `Electable` and `GenUp` (5.2 million states, 3.5 minutes) |
 | `resize` | the rule, a move from three acceptors to five, two ballots | pass (460 thousand states) |
 | `agree_mm3` | the rule, three matchmakers on three machines, one crash, two ballots | pass (26 million states, 20 minutes, `long`) |
 | `partitioned` | the rule, the partitioned layouts, seven acceptors, two ballots | pass (21 million states, 17 minutes, `long`) |
@@ -686,6 +689,7 @@ It carries the TLA+ gates of phases 3, 4 and 5.
 | `safety_small` | the rules, three machines, both sets on all three, a candidate that deposes a live coordinator | pass: every invariant (59 thousand states) |
 | `live` | `LiveSpec`, four machines and a new id: a coordinator serves again, each set heals or reports "cannot place", and the registry names no dead id | pass (129 thousand states) |
 | `safety` | the rules, four machines and a new id, three terms, a campaign only after the lease | pass: every invariant (129 thousand states) |
+| `wipe_two` | `safety_small` with two wipes: the kill policy of `Wipe` stops the second wipe in a set of three (#1345 (TLA+ guard survivors)) | pass: every invariant |
 
 `safety` with a candidate that deposes a live coordinator, on four machines, did not finish in 30
 minutes (28 million states, no violation); `safety_small` checks that case on three machines.
@@ -1119,6 +1123,11 @@ Results (`campaign-discovery/checks.txt`):
 | Re-ask the believed set only | `Witness`, `Wide` | violation (`NotStuck`) |
 | Register any campaign (control) | `Witness` | violation (`RegInForce`) |
 | Re-ask the pool too (#1034) | `Witness`, `Wide` | pass |
+| Re-ask the pool too, liveness (`LearnsInForce`: the belief ends at the generation in force, under weak fairness) | `Witness`, `Wide` | pass |
+| Re-ask the believed set only, liveness | `Witness` | violation (`LearnsInForce`) |
+
+Each safety check also judges `BeliefForward`: a belief never goes back to an earlier
+generation (#1345 (TLA+ guard survivors)).
 
 With three sets of three in `Wide`, the believed-only rule passes: one member of the first set
 stays in every set and tells the candidate. The stall needs a chain whose set in force shares no
@@ -2109,7 +2118,8 @@ workers):
 | `chain` | long | the rules of the code over the two reconfigurations; one slot | no violation in 10.7 million distinct states, to depth 19 (bounded: 50 minutes, 1 worker) |
 | `reach_wipe` | ci | `NoWipeAfterGc`, a reachability control: a member of `C2` is wiped after the GC forgot `C1`, once `C1` chose a slot; one wipe | violation (57 thousand states) |
 | `wipe_revote` | ci | one wipe, the wiped acceptor comes back empty as the same acceptor (`Identity = FALSE`) | `Recoverable` violation (1.5 thousand states, 8 states deep) |
-| `wipe` | ci | the rules of the code and one wipe, with the identity rule | pass (806 thousand states, 2.5 min with 2 workers) |
+| `wipe` | ci | the rules of the code and one wipe, with the identity rule | pass (1.0 million states) |
+| `wipe_cmd` | ci | `wipe` with a command as well as the truncate: with two values, a wiped owner that opens its ballot with an empty store breaks a chosen slot (#1345 (TLA+ guard survivors)) | pass (1.3 million states, 6 min with 2 workers) |
 
 The long checks ran once on 2026-11-19 (#1218 (truncation model, part 3)) with 4 workers;
 `fill_code` and `chain` ran on 2026-11-20 (#1230 (rules no check tests)).
@@ -2822,6 +2832,7 @@ heals).
 | `tomb` | ci | pass: the trim writes a tombstone at the key and nobody scrubs, while no controller stops |
 | `safety_np2_l1` | long | pass: two segments of one slot, trimmed in order; 8,636,080 distinct states, about 40 minutes locally |
 | `safety_np2` | long | pass, bounded at 40 minutes: two segments of two slots |
+| `trim_order` | ci | pass: two segments of one slot, two replicas, no crash, safety only: the trims keep the segments a prefix (`TrimPrefix`, #1345 (TLA+ guard survivors)); 63 thousand distinct states |
 | `reach_duplicate` | ci | violation: a put finds the object of the other offloader |
 | `reach_lateupload` | ci | violation: a put lands after the trim and its delete |
 | `reach_stopbeforemark` | ci | violation: an offloader stops with its object in the store and no mark |

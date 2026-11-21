@@ -6,4 +6,5 @@
 reach      violation  ci
 nocheck    violation  ci
 cas        pass       ci
+one        pass       ci
 cas_long   violation  long

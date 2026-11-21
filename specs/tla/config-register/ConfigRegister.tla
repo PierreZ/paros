@@ -264,6 +264,10 @@ Chosen(v) == \E b \in Ballots : phase[b] \in {"p2", "switch", "done"} /\ ChosenA
 
 Agreement == \A v, w \in Values : Chosen(v) /\ Chosen(w) => v = w
 
+\* The generations of a matchmaker never go down: a write below the write
+\* generation would bring back an older configuration.
+GenUp == [][\A m \in Matchmakers : rg'[m] >= rg[m] /\ wg'[m] >= wg[m]]_vars
+
 \* Whatever a matchmaker majority answers, each configuration in it still
 \* has a live Phase-1 quorum.
 Electable == \A r \in Answers : Live(r[1]) /\ IF r[2] = None THEN TRUE ELSE Live(r[2])
