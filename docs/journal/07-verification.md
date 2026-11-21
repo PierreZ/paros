@@ -91,6 +91,17 @@ with the steps of the journal core and the roles, in the same pull requests (#13
 - A coverage gate over every journal probe, with no excused probe, inside the CI budget of 30
   minutes per job (shards if needed; Pierre, 2026-11-20).
 
+**What it holds today** (#1324 (paros-journal)): the walk of the journal fold over a chain of
+segments (`src/fold.rs`). Three writers write, resend across seals and under deposed uuids,
+switch the journal to multi-writer and back, truncate, and settle each `Below` with `Resolve`;
+the replica of the segment in force crashes and refolds from the boundary state. Four oracles
+judge it against `Truth`, the fold of the whole log written again with no segment (`FOLD`,
+`VIEW`, `RESOLVE` and `REFOLD`, the walk forms of `AckTrue`, `OneFold` and `ResolveTrue`), each
+with its planted mutant. TLC checks each walk against `journal-state/FoldTrace.tla`, which
+extends `Journal.tla` and binds each event to the model's fold operators; the checked walks meet
+16 named rules, a planted `Below` in the segment in force is the control, and TLC refuses 24
+named edits of the recorded walks. The probes and the coverage gate come with the roles (#1326).
+
 ### J7.4 The whole journal under moonpool-sim
 
 A moonpool-sim of the whole journal runs the driver, the adapter, many journals in one process,

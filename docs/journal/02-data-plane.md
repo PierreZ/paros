@@ -8,8 +8,9 @@
 `v0.2.0-alpha.1`: names of the form `paros::client::…`, `paros::roles::…`, `DriverTunables`,
 `PAROS_*`, `parosctl` and the simulation's BUGGIFY knobs. That code is not in the tree
 (`docs/archive/v0.2.0-alpha.1/README.md`). The rule is the target; the name is a pointer to the
-old code. The v1 names come with the journal crates: the fold and the codec with #1324
-(paros-journal), the client with #1331 (the pure journal client).
+old code. The v1 names come with the journal crates: the fold, the segment record and the codec
+are in `paros-journal` (#1324 (paros-journal), `crates/lib/paros-journal/`), the client comes with
+#1331 (the pure journal client).
 
 Every journal exposes four calls (and the recovery call `Resolve` of §J2.2), in one of two **modes**: **single-writer**, where one leader
 appends under its leader uuid, and **multi-writer**, where anyone with access appends. The mode
@@ -17,8 +18,10 @@ is what the last applied `SetLeader` left: `SetLeader(None, old)` makes the jour
 multi-writer, and `SetLeader(new, None)` makes it single-writer again (decided by Pierre on
 2026-11-20, #1274 (multi-writer mode through SetLeader(None) and expected_seq); it replaces the
 mode fixed at create time of 2026-10-04). §J2.4 has the rules of the switch. Every rule below is judged at apply time, in
-slot order, by a small per-journal state machine
-`(mode, leader_uuid, term, next_seq, first_seq)` beside the replica's walk. **The journal fold
+slot order, by a small per-journal state machine beside the replica's walk:
+`paros_journal::JournalState`, which holds the leader value (unset, a uuid, or `None` for
+multi-writer), `next_seq`, `first_seq` and the first position of the segment in force (§J3.1).
+The fold holds no term (§J2.3). **The journal fold
 lives in the journal crates, not in `paros-consensus`** (decided by Pierre on 2026-11-20, #1315
 (bring docs and models in step with the v1 scope), decision 2): `SetLeader(None)`, the unset
 leader, the order "position before fence" and the answer `Below` change no type of the core. The
@@ -51,7 +54,9 @@ means that a resend of the same write gets the same answer for ever.
 | `Below` | fenced `Write` | no | The position is in an older segment: the client sends `Resolve` to a replica of that segment to learn the fate | §J2.2 |
 | written with `seq`, not written, or `Truncated` | `Resolve` | yes, except `Truncated` | A replica of the old segment judged the resent write against the record at its position, with the compare of `apply_write` | §J2.2 |
 | `Unknown` | `Write` | no | A deposed leader held the write and cannot tell its fate. The client resends the same write at the same `expected_seq` | §J2.2 |
-| `WRONG_MODE` | `Write`, `Truncate` | yes for that copy | The call is shaped for the other mode | §J2.4.1 |
+| `WRONG_MODE` | `Write`, `Truncate` | yes for that copy | The call is shaped for the other mode: an unfenced call while a uuid leads or the leader is unset, a fenced `Truncate` while the journal is multi-writer | §J2.4.1 |
+| `Empty` | `Write` | yes | The write holds no record. It takes a slot and no `seq` | §J2.1 |
+| `Reserved` | `Upgrade` | yes for that release | The `Upgrade` command is reserved: release 1 refuses it at apply (§J1.1) | §J2.8 |
 | `TooLarge` | `Write` | yes for that node | The batch is over the limits of the node; the write is in no slot | §J2.7 |
 | `busy` | `Write` | no | Admission control; the write is in no slot | §J2.7 |
 | unserved | `Read` | no | This server cannot produce the page; ask another server | §J2.5 |
@@ -184,14 +189,17 @@ can continue the sequence. Every tailer learns the leader changed in-band, witho
 leadership term, never per process: a process that wins again draws a new uuid, which fences its
 own older in-flight writes. It is not a secret and not an authentication token; the frontend
 decides who may touch a tenant at all (architecture §3.5), the leader uuid decides which of the
-tenant's clients holds the pen. The core keeps a hidden term counter beside it, raised by every
-`SetLeader`, that never reaches a data-plane reply (only an operator's `Inspect` shows it).
+tenant's clients holds the pen. The journal fold (`paros-journal`) keeps no term: no rule of
+the fold reads one, and a data-plane reply never shows one. `specs/tla/journal-state/` has no term
+either. (The core's own fold, `journal/state.rs` of `paros-consensus`, keeps a hidden term counter
+for the users of the library; the journal does not use that fold, §J4.3.) **Open** (#1326 (the
+journal roles over the core) decides): whether an operator's `Inspect` of the journal shows a
+count of won `SetLeader` calls.
 
 **The journal trusts its clients to draw fresh uuids** (decided on 2026-10-09, #241). A
 `SetLeader` is refused only when `old_uuid` is not the current leader, when `new_uuid` is the
 current one, or when it is the unset uuid; a uuid that led before and is named again wins. The
-journal keeps no history of past uuids: the term counter alone cannot tell a reinstated uuid from a
-fresh one, and remembering every uuid that ever led would grow the state each trim point carries.
+journal keeps no history of past uuids: remembering every uuid that ever led would grow the state each trim point carries.
 Since every call names both `old_uuid` and `new_uuid`, a client that reinstates a former leader's
 uuid (an `A → B → A` sequence) does so deliberately, and only its own in-flight writes under that
 uuid are at stake. `paros::client::Writer` derives a new uuid for every term from a random seed.
@@ -430,9 +438,18 @@ carrying opaque bytes (architecture §4.3). Pierre answered three points of #129
 - **In v1 paros adds only the leader time**, and keeps a reserved key space for later paros
   headers (approved by Pierre on 2026-11-20).
 
+**The encoding of release 1** (#1324 (paros-journal), `paros_journal::codec`). A record holds
+two sections of headers, then its payload. The paros section is the reserved key space: a list of
+fields, each a `u16` key and a byte string. Key 1 is the leader time, 8 bytes. A decoder refuses
+a paros key that its release does not know, so a new paros header comes with a new release. The
+client section is a list of key-value pairs of byte strings, opaque. **The leader time is not part
+of the identity of a write**: the compare of `Duplicate` and of `Resolve` reads the fence, the
+client headers and the payload of each record, so a resend with a new leader time is the same
+write.
+
 **Open** (#1299 decides each one): who stamps the leader time (the leader at propose or the
-batcher); the encoding, the size limits and the exact reserved key space; and
-whether the headers are inside the value checksum and the offload hash.
+batcher) and its unit; the size limits of the headers (§J2.7); and whether the headers are inside
+the value checksum and the offload hash.
 
 ### J2.9 Underneath
 

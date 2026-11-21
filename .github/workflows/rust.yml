@@ -66,6 +66,8 @@ jobs:
         run: nix develop --command cargo clippy --all-targets -- --deny warnings
       - name: Check the core's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-consensus --no-deps
+      - name: Check the journal core's rustdoc links
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal --no-deps
 
   fmt:
     needs: scope
@@ -287,6 +289,8 @@ jobs:
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-consensus --no-default-features
       - name: Check paros-consensus with the serde derives on (no crate enables the feature)
         run: nix develop --command cargo check -p paros-consensus --features serde
+      - name: Build paros-journal (the journal core) for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal
       - name: Build paros (the library facade) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
 

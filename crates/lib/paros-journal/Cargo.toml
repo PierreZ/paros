@@ -1,0 +1,22 @@
+[package]
+name = "paros-journal"
+description = "The pure journal core of paros: the journal fold, the segment records, the codec and the record headers. Sans-IO, no clock, no randomness"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude = ["AGENTS.md", "CLAUDE.md"]
+
+# The journal composes the consensus core and adds no concept to it
+# (docs/journal/04-roles.md §J4.3). It uses the core's identifiers (`Seq`,
+# `LeaderUuid`, `NodeId`, `Slot`) as data only, with the core's optional
+# features off, so this crate stays dependency-free and wasm-safe.
+[dependencies]
+paros-consensus = { workspace = true }
+
+[lints]
+workspace = true

@@ -270,7 +270,10 @@ models in step with the v1 scope); Pierre agreed on 2026-11-20 to this page). Th
 §J3.1 to §J3.3, §J5.1, §J5.5 and §J6.1; this section collects them in one place. The journal state model
 (`journal-state/`, #1189) holds the seal end, the boundary state, `retired` and `trimmed` of each
 segment, and the configuration that each ballot registers; it leaves out the controller term and
-the matchmaker set handover (`grid-controller/`, `segment-records/`).
+the matchmaker set handover (`grid-controller/`, `segment-records/`). The types of the segment
+record, its states and the guard of each compare-and-set of this section are
+`paros_journal::segment` (#1324 (paros-journal)); the register that holds them is #1325 (the
+matchmaker register as an optional role).
 
 #### What the register is
 
