@@ -94,41 +94,44 @@ configuration 2 is `{a2, a3}`, configuration 3 is `{a3, a4}`. The partitioned gr
 smallest, 3 x 1 with acks 2 (`QuorumSystem::partitions(1, 1)`, the default grid of the journal: a
 majority of three); configuration 1 is `{a1, a2, a3}`, configuration 2 is `{a2, a3, a4}`. The
 2 x 2 full grid of `reads/`. Two slots unless the row says one, one value and the `Noop`, one
-reshape and two ballots unless the row says more. TLC 2.19, 2 workers.
+reshape and two ballots unless the row says more. TLC 2.19, one worker (with more workers the
+count of a violation depends on the order of the search).
 
 | Check | Grid | Fence | Seal rows | Rule | Wipe | Result |
 |---|---|---|---|---|---|---|
-| `bare` (rule 3 of #1254, the control) | 2 x 1 | no | no | row | no | violation (5,677 states) |
-| `fence_only` | 2 x 1 | promise | no | row | no | violation (6,296 states) |
-| `seal_only` | 2 x 1 | no | yes | row | no | violation (2,666 states) |
-| `fence_rows` (the code with #1209) | 2 x 1 | promise | yes | row | no | pass (54,192 states, 9 s) |
-| `record` (rule 1 alone) | 2 x 1 | no | no | record | no | pass (273,706 states, 36 s) |
-| `column` (rule 2) | 2 x 1 | promise | no | column | no | pass (176,870 states, 23 s) |
-| `wipe_fence_rows` | 2 x 1 | promise | yes | row | yes | violation (9,083 states) |
-| `wipe_record` | 2 x 1 | no | no | record | yes | pass (295,104 states, 40 s) |
-| `wipe_column` | 2 x 1 | promise | no | column | yes | pass (191,534 states, 27 s) |
-| `wipe_belief_noseal` | 2 x 1 | promise and belief | no | row | yes | violation (6,927 states) |
-| `wipe_belief` (the whole fence of the code) | 2 x 1 | promise and belief | yes | row | yes | pass (87,368 states) |
-| `part_bare` | 3 x 1 | no | no | row | no | violation (27,728 states) |
-| `part_wipe_fence` | 3 x 1 | promise | no | row | yes | violation (149,727 states, 52 s) |
-| `part_fence_one` (the code), one slot | 3 x 1 | promise | no | row | no | pass (99,273 states, 14 s) |
-| `part_wipe_fence_one`, one slot | 3 x 1 | promise | no | row | yes | violation (40,145 states) |
-| `part_wipe_belief_one`, one slot | 3 x 1 | promise and belief | no | row | yes | pass (151,103 states, 20 s) |
-| `part_wipe_record_one`, one slot | 3 x 1 | no | no | record | yes | pass (166,957 states, 22 s) |
-| `reach_stale`: a read that started on a stale record, after configuration 2 chose a slot, is served | 2 x 1 | promise | yes | row | no | violation, as it must (5,145 states) |
-| `reach_retire`: configuration 1 retires after configuration 2 chose a slot | 2 x 1 | promise | yes | row | no | violation, as it must (709 states) |
-| `square_fence_only` | 2 x 2 | promise | no | row | no | violation (109,259 states) |
+| `bare` (rule 3 of #1254, the control) | 2 x 1 | no | no | row | no | violation (7,009 states) |
+| `fence_only` | 2 x 1 | promise | no | row | no | violation (7,144 states) |
+| `seal_only` | 2 x 1 | no | yes | row | no | violation (3,049 states) |
+| `fence_rows` (the code with #1209) | 2 x 1 | promise | yes | row | no | pass (97,737 states) |
+| `record` (rule 1 alone) | 2 x 1 | no | no | record | no | pass (534,078 states) |
+| `column` (rule 2) | 2 x 1 | promise | no | column | no | pass (416,905 states) |
+| `wipe_fence_rows` | 2 x 1 | promise | yes | row | yes | violation (10,564 states) |
+| `wipe_record` | 2 x 1 | no | no | record | yes | pass (603,790 states) |
+| `wipe_column` | 2 x 1 | promise | no | column | yes | pass (482,900 states) |
+| `wipe_belief_noseal` | 2 x 1 | promise and belief | no | row | yes | violation (10,073 states) |
+| `wipe_belief` (the whole fence of the code) | 2 x 1 | promise and belief | yes | row | yes | pass (180,892 states) |
+| `part_bare` | 3 x 1 | no | no | row | no | violation (38,659 states) |
+| `part_wipe_fence` | 3 x 1 | promise | no | row | yes | violation (171,131 states) |
+| `part_fence_one` (the code), one slot | 3 x 1 | promise | no | row | no | pass (199,683 states) |
+| `part_wipe_fence_one`, one slot | 3 x 1 | promise | no | row | yes | violation (55,606 states) |
+| `part_wipe_belief_one`, one slot | 3 x 1 | promise and belief | no | row | yes | pass (404,772 states) |
+| `part_wipe_record_one`, one slot | 3 x 1 | no | no | record | yes | pass (356,978 states) |
+| `reach_stale`: a read that started on a stale record, after configuration 2 chose a slot, is served | 2 x 1 | promise | yes | row | no | violation, as it must (5,512 states) |
+| `reach_retire`: configuration 1 retires after configuration 2 chose a slot | 2 x 1 | promise | yes | row | no | violation, as it must (773 states) |
+| `square_fence_only` | 2 x 2 | promise | no | row | no | violation (120,130 states) |
+| `chain` (the code with #1209), two reshapes, three ballots, one slot | 2 x 1 | promise | yes | row | no | pass (281,221 states) |
 
 The long checks (`scripts/check-tla.sh --all`):
 
 | Check | Grid | Fence | Seal rows | Rule | Wipe | Result |
 |---|---|---|---|---|---|---|
-| `wipe_column_three`: three configurations, three ballots | 2 x 1 | promise | no | column | yes | violation (1.5 million states, 4 min) |
-| `part_fence`: two slots | 3 x 1 | promise | no | row | no | pass (6.3 million states, 39 min) |
-| `fence_rows_long`: three ballots | 2 x 1 | promise | yes | row | no | pass (1.7 million states, 12 min) |
-| `fence_rows_three`: three configurations, three ballots | 2 x 1 | promise | yes | row | no | pass (5.2 million states, 11 min on 4 workers) |
+| `wipe_column_three`: three configurations, three ballots | 2 x 1 | promise | no | column | yes | violation (2.2 million states, 6 min) |
+| `part_fence`: two slots | 3 x 1 | promise | no | row | no | pass (14.9 million states, 38 min) |
+| `fence_rows_long`: three ballots | 2 x 1 | promise | yes | row | no | pass (3.6 million states, 14 min) |
+| `fence_rows_three`: three configurations, three ballots | 2 x 1 | promise | yes | row | no | pass (15.3 million states, 48 min) |
 
-Seven passing runs did not finish in 45 minutes on 2 workers. They are bounded results, not
+Seven passing runs did not finish in 45 minutes on 2 workers (runs of the model before the guard
+changes of #1345 (guards that survive mutation), which only add behaviours). They are bounded results, not
 checks, and they are not in `checks.txt`: TLC found no violation in the states that it explored.
 
 | Run | Grid | Rules | Explored with no violation |

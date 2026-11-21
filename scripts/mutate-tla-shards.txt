@@ -40,6 +40,6 @@ truncation 6
 truncation-reconfig 4
 zero-stall 17
 experiments/segments/a 2
-experiments/segments/b 1
-experiments/segments/reads 4
+experiments/segments/b 2
+experiments/segments/reads 6
 experiments/stale-stopped/restart 8
