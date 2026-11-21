@@ -11,8 +11,9 @@ register across handovers of the set (#1325). Test only: `publish = false`.
 
 - `src/oracle.rs`: `Truth`, the fold of the whole log written again from
   `docs/journal/02-data-plane.md`, with no segment. It shares no code with `paros_journal::fold`.
-- `src/fold.rs`: the walk (`FoldModel`), its two shapes (`Shape::TRACED`, small enough for TLC;
-  `Shape::WIDE`), its oracles (`FOLD`, `VIEW`, `RESOLVE`, `REFOLD`), its reach sites and its
+- `src/fold.rs`: the walk (`FoldModel`), its shapes (`Shape::TRACED`, small enough for TLC;
+  `Shape::WIDE`; `Shape::LONG`, the traced walk over 200 segments for the live check), its events
+  port (`FoldModel::build_reported`, `Reported`), its oracles (`FOLD`, `VIEW`, `RESOLVE`, `REFOLD`), its reach sites and its
   planted mutants (`FoldMutant`).
 - `src/register.rs` (+ `src/register/order.rs`): the walk of the matchmaker register
   (`RegisterModel`, #1325) across handovers of the set, its shapes (`TRACED`, `WIDE`), its oracles
@@ -24,7 +25,10 @@ register across handovers of the set (#1325). Test only: `publish = false`.
 - `src/trace/mutate.rs`: the named edits of recorded traces (#1308 (mutate recorded traces)).
 - `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/register.rs` (the register
   walks and their mutants) and `tests/register_traces.rs` (the register trace check, its rules,
-  its control `ForgedBootstrap` and its edits).
+  its control `ForgedBootstrap` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
+  long fold walk checked live through its events port by moonpool-tla's `Live`, and the control
+  `BelowInSegment` stopped at its first wrong answer; `LIVE_MINUTES` runs one walk with no end for
+  that long (the `Journal live` workflow, four hours each night).
 
 ## Rules
 

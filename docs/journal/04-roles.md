@@ -132,7 +132,8 @@ its meaning: a batch is durable or not, never torn. A contract suite certifies t
 crash safety is claimed only on a faultable disk (decided by Pierre on 2026-11-19).
 
 **Rule 5: two ports.** `Events` carries the recorded (input, effects) pair of each `Host` step,
-after durability. The trace check reads it, and so does the grid controller, for its signals.
+after durability. The trace check reads it, live and chunk by chunk (moonpool-tla `Live`,
+§J7.3, #1310 (check long runs live)), and so does the grid controller, for its signals.
 `Assignments` says which journals and roles the process serves, and which it stops.
 
 *Why.* The trace check and the controller then read the same record that replay uses, and no

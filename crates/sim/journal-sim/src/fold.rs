@@ -114,14 +114,16 @@ pub mod reach {
     pub const WIDE: &[&str] = &[BATCH, EMPTY, RESERVED];
 }
 
-/// What the walk's clients may send.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What the walk's clients may send, and how many segments it may seal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
     /// Writes of several records (the model's write holds one record, so a
     /// traced walk has none).
     pub batches: bool,
     /// Empty writes and `Upgrade` commands (not in the model).
     pub extras: bool,
+    /// The most segments of one walk: the walk stops sealing at this count.
+    pub segments: usize,
 }
 
 impl Shape {
@@ -130,11 +132,20 @@ impl Shape {
     pub const TRACED: Self = Self {
         batches: false,
         extras: false,
+        segments: 4,
     };
     /// Everything.
     pub const WIDE: Self = Self {
         batches: true,
         extras: true,
+        segments: 4,
+    };
+    /// A long traced walk, for the live trace check (`tests/live.rs`): what
+    /// [`TRACED`](Self::TRACED) sends, over many segments, so that the
+    /// segments sealed early are still asked when the walk is far past them.
+    pub const LONG: Self = Self {
+        segments: 200,
+        ..Self::TRACED
     };
 }
 
@@ -192,6 +203,23 @@ pub enum FoldEvent {
     },
 }
 
+/// What the events port of the fold walk carries (rule 5 of
+/// `docs/journal/04-roles.md` §J4.2, `Events`): the fresh journal first,
+/// then each event in the order the walk records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reported {
+    /// The leader value of the fresh journal.
+    Fresh(Leader),
+    /// One event.
+    Event(FoldEvent),
+}
+
+/// The events port of a fold walk.
+pub type Port = std::sync::mpsc::SyncSender<Reported>;
+
+/// The message of a walk that stops because its live trace check stopped.
+pub const STOPPED: &str = "the live trace check stopped the walk";
+
 /// The moves of the fold walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FoldAction {
@@ -219,8 +247,6 @@ pub enum FoldAction {
     Extra,
 }
 
-/// The most segments of one walk.
-const MAX_SEGMENTS: usize = 4;
 /// The writers of the walk.
 const WRITERS: usize = 3;
 
@@ -268,6 +294,9 @@ impl Segment {
 /// The fold walk.
 pub struct FoldModel {
     shape: Shape,
+    /// The events port: each recorded event also goes there, for a live
+    /// trace check. `None` for a walk checked after it ends.
+    port: Option<Port>,
     mutant: FoldMutant,
     truth: Truth,
     segments: Vec<Segment>,
@@ -466,6 +495,7 @@ impl FoldModel {
         };
         Self {
             shape,
+            port: None,
             mutant,
             truth: Truth::new(fresh),
             segments: vec![Segment::new(BoundaryState::fresh(fresh))],
@@ -475,6 +505,40 @@ impl FoldModel {
             belows: Vec::new(),
             deposed: BTreeMap::new(),
         }
+    }
+
+    /// The walk of [`build`](Self::build), with an events port: it reports
+    /// its fresh journal, then each event as it records it, so that a live
+    /// trace check judges the walk while it runs.
+    ///
+    /// # Panics
+    ///
+    /// When the port is closed: the live check stopped, and the walk stops
+    /// with it.
+    pub fn build_reported(
+        shape: Shape,
+        mutant: FoldMutant,
+        port: Port,
+        cx: &mut Cx<'_, Self>,
+    ) -> Self {
+        let mut model = Self::build(shape, mutant, cx);
+        assert!(
+            port.send(Reported::Fresh(model.fresh())).is_ok(),
+            "{STOPPED}"
+        );
+        model.port = Some(port);
+        model
+    }
+
+    /// Record `event`, and report it on the port.
+    fn emit(&self, event: FoldEvent, cx: &mut Cx<'_, Self>) {
+        if let Some(port) = &self.port {
+            assert!(
+                port.send(Reported::Event(event.clone())).is_ok(),
+                "{STOPPED}"
+            );
+        }
+        cx.record(event);
     }
 
     /// The leader value of the fresh journal, by its name in a trace.
@@ -680,11 +744,14 @@ impl FoldModel {
                 "{FOLD}: {command:?} answered {answer:?}, the whole log says {verdict}"
             );
             self.observe(&command, &answer);
-            cx.record(FoldEvent::Apply {
-                command: command.clone(),
-                answer: name,
-                state,
-            });
+            self.emit(
+                FoldEvent::Apply {
+                    command: command.clone(),
+                    answer: name,
+                    state,
+                },
+                cx,
+            );
             if name == "below"
                 && let Command::Write(write) = command
             {
@@ -739,7 +806,7 @@ impl FoldModel {
     }
 
     fn seal(&mut self, cx: &mut Cx<'_, Self>) {
-        if self.segments.len() >= MAX_SEGMENTS {
+        if self.segments.len() >= self.shape.segments {
             return;
         }
         let segment = self.current();
@@ -754,9 +821,12 @@ impl FoldModel {
         } else {
             fold.boundary()
         };
-        cx.record(FoldEvent::Seal {
-            state: (boundary.leader, boundary.next_seq.0, boundary.first_seq.0),
-        });
+        self.emit(
+            FoldEvent::Seal {
+                state: (boundary.leader, boundary.next_seq.0, boundary.first_seq.0),
+            },
+            cx,
+        );
         self.segments.push(Segment::new(boundary));
         self.check();
     }
@@ -810,11 +880,14 @@ impl FoldModel {
             reach::RESOLVED_WRITTEN
         );
         sometimes!(answer == ResolveAnswer::NotWritten, reach::RESOLVED_NOT);
-        cx.record(FoldEvent::Resolve {
-            segment: index + 1,
-            write,
-            answer,
-        });
+        self.emit(
+            FoldEvent::Resolve {
+                segment: index + 1,
+                write,
+                answer,
+            },
+            cx,
+        );
         self.belows.remove(pick);
     }
 }
