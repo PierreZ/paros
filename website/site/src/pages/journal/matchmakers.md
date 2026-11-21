@@ -3,6 +3,7 @@ layout: ../../layouts/Doc.astro
 kicker: Journal
 section: journal/
 status: journal
+lab: register
 title: Matchmakers and the register
 description: Each journal has its own matchmaker set, and the set holds one compare-and-set register with the segment records and the controller term. A step acts only on a write it saw done.
 ---
@@ -82,6 +83,17 @@ With no reshape in flight, the data plane serves under its leader, and reads go 
 no matchmaker. Between a seal and its boundary write, acked writes stop until a majority is back.
 This window comes only with a heal in v1, and it is accepted for v1 (§J3.4).
 
+## Your turn
+
+Run the register by hand. Two controllers, P and Q, open operations on three matchmakers, m1,
+m2 and m3. Deliver each read and each write, lose its reply on the way back, drop it, or stop a
+matchmaker. `paros-journal` runs in this page, compiled to wasm: each matchmaker is a
+`RegisterMember`, each operation a `RegisterCall`, and the guard of each change is
+`RegisterValue::apply`. One matchmaker set runs here, with no handover, disk or clock. A
+stopped matchmaker keeps what it took.
+
+<div data-register-lab="register-down register-race register-minority register-refused"></div>
+
 ## In paros
 
 - [`paros-journal`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-journal): the
@@ -99,3 +111,5 @@ This window comes only with a heal in v1, and it is accepted for v1 (§J3.4).
 - [`journal-sim`](https://github.com/PierreZ/paros/tree/main/crates/sim/journal-sim): the walk of
   the register across handovers, and the trace check of each walk against
   [`segment-records/RegisterTrace.tla`](https://github.com/PierreZ/paros/blob/main/specs/tla/segment-records/RegisterTrace.tla).
+- [`paros-wasm`](https://github.com/PierreZ/paros/tree/main/crates/support/paros-wasm), feature
+  `journal`: the exercises above, a driver of the register with no rule of its own.

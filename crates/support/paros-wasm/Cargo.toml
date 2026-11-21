@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The site's wasm tools: the Paxos step-through engine on paros-consensus (`paxos`), the journal fold lab on paros-journal (`journal`)"
+description = "The site's wasm tools: the Paxos step-through engine on paros-consensus (`paxos`), the journal labs on paros-journal (`journal`)"
 publish = false
 
 [lib]
@@ -22,7 +22,7 @@ default = ["paxos", "journal"]
 # The Paxos step-through engine (#308, #811): `paros-consensus` driven by hand, and
 # nothing else.
 paxos = ["dep:paros-consensus", "dep:serde", "dep:serde_json"]
-# The journal fold lab (#1363): `paros-journal` driven by hand, and nothing
+# The journal labs (#1363, #1364): `paros-journal` driven by hand, and nothing
 # else.
 journal = ["dep:paros-journal", "dep:serde", "dep:serde_json"]
 

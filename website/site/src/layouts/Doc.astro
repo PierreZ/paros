@@ -111,9 +111,10 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
     {trace && <script is:inline src={url("story.js")} />}
     {trace && <script is:inline src={url("steps.js")} />}
     {widget && <script is:inline type="module" src={url("engineering.js")} />}
-    {fm.lab && fm.lab !== "journal" && <script is:inline type="module" src={url("lab.js")} />}
-    {fm.lab === "journal" && !trace && <script is:inline src={url("course.js")} />}
+    {fm.lab && fm.lab !== "journal" && fm.lab !== "register" && <script is:inline type="module" src={url("lab.js")} />}
+    {(fm.lab === "journal" || fm.lab === "register") && !trace && <script is:inline src={url("course.js")} />}
     {fm.lab === "journal" && <script is:inline type="module" src={url("journal-lab.js")} />}
+    {fm.lab === "register" && <script is:inline type="module" src={url("register-lab.js")} />}
     {(prev || next) && (
       <nav class="pager label" aria-label="Next and previous pages">
         {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}

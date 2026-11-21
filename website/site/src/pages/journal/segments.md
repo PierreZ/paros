@@ -3,6 +3,7 @@ layout: ../../layouts/Doc.astro
 kicker: Journal
 section: journal/
 status: journal
+lab: register
 title: Segments
 description: A segment is the run of slots of one acceptor grid. A reshape opens one, the first leader of the new grid seals the old one, and the boundary state carries the journal across.
 ---
@@ -109,6 +110,18 @@ record ends the read, so a read never misses a slot that the new grid chose. The
 this fence of the code, and a read does not read the segment records at a matchmaker quorum
 (§J3.3, `specs/tla/experiments/segments/reads/`).
 
+## Your turn
+
+Move the records of the segments by hand. Each button is one compare-and-set on the value of the
+register, `RegisterValue::apply` of `paros-journal`, compiled to wasm: its guard runs, and a
+refused move names its refusal. Here each move is a write already done at a majority; the
+[Matchmakers](../matchmakers/#your-turn) page runs the reads and writes behind it. In this lab
+each segment takes four slots before its seal, one record per slot, and the controller holds
+term 1. A seal puts the next segment in force in the same write, so `put_in_force` is no button
+of its own.
+
+<div data-record-lab="records-retire records-trim records-third"></div>
+
 ## In paros
 
 - [`paros-journal`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-journal):
@@ -120,4 +133,6 @@ this fence of the code, and a read does not read the segment records at a matchm
   from the boundary state.
 - Rules: §J3.1 to §J3.3 of [`03-segments-and-records.md`](https://github.com/PierreZ/paros/blob/main/docs/journal/03-segments-and-records.md).
   The composed model is [`journal-state/`](https://github.com/PierreZ/paros/tree/main/specs/tla/journal-state).
-- Not built yet: the seal, retire and trim of the journal roles (#1326).
+- [`paros-wasm`](https://github.com/PierreZ/paros/tree/main/crates/support/paros-wasm), feature
+  `journal`: the exercises above, a driver of the register value with no rule of its own.
+- Not built yet: the retire and the trim of the journal roles (#1326).

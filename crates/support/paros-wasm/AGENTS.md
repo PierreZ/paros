@@ -16,7 +16,8 @@ clippy and nextest cover both); each wasm bundle is built alone with `--no-defau
   delivers, drops, copies, ticks, crashes and proposes. Add no level. The design of the game is
   `docs/analysis/play/game-plan.md`, a record.
 - `journal` → `src/journal.rs` + `src/journal/` → the fold lab of the site's `/journal/calls/`
-  page (#1363 (journal fold lab)). Depends on `paros-journal` only (which takes
+  page (#1363 (journal fold lab)), and the register and record labs of `/journal/matchmakers/`
+  and `/journal/segments/` (#1364 (register and segment record lab)). Depends on `paros-journal` only (which takes
   `paros-consensus` with its features off). Bundle `paros_journal_lab`, staged into
   `website/site/public/journal/wasm/`.
 - `playground` was removed on 2026-11-19 with the journal layers. It is at the tag
@@ -125,7 +126,7 @@ The `applied` log in `world/disk.rs` is the **game's own** application stand-in,
   and matchmaker ids are different spaces (`MessageView::from_party` / `to_party`).
 - `# Panics` on anything that asserts; `#[must_use]` on accessors (pedantic).
 
-## `journal`: the fold lab of the Journal pages
+## `journal`: the labs of the Journal pages
 
 **The rule** is the same: the module is a driver of `paros-journal` and holds no journal rule.
 Every answer comes from `JournalState::apply` or `resolve`; the module builds the commands and
@@ -144,6 +145,22 @@ decided slot, applied at once.
 - `src/journal/lab/tests.rs` → each solution reaches its goal, and every sequence of up to five
   calls of every exercise trips no assertion of the core (an abort in wasm). The browser
   smoke test plays the same solutions by `data-call` (`Call::key`): change both together.
+- `src/journal/keyed.rs` → `Exercise`, `Lab`, `Move`, `LabView`, `World` → the shell of an
+  exercise whose moves are named by a key: the world lists the moves open now (`Action`, with
+  its `key` and its `group`), the reader plays one by its key. Undo is a replay.
+  `check_exercises` (tests) plays each solution and walks every sequence of open moves.
+- `src/journal/register.rs` → `Register` (wasm `RegisterLab`) → two controllers (P, Q) and
+  three matchmakers (m1 to m3) of one set. Each matchmaker is a `RegisterMember`, each
+  operation a `RegisterCall`; the reader delivers a request (`P>m1:deliver`), loses its reply
+  (`:lose`), drops it (`:drop`), or stops and restarts a matchmaker. A controller opens an
+  operation one round above the highest it knows (its last, or the one a conflict named), and
+  its reshape carries the term it saw done for its own `Elect`. Four exercises.
+- `src/journal/records.rs` → `Records` (wasm `RecordLab`) → one register value; each move is
+  one `RegisterValue::apply` (`reshape`, `seal:1`, `boundary:1`, `retire:1:2`, `trim:1`), and a
+  refused move shows its `ChangeRefusal`. The lab picks four slots per segment, one record per
+  slot, controller term 1; `truncate` raises the fold floor to the highest boundary
+  `next_seq`. Three exercises. The browser smoke test plays the solutions of both labs by
+  `data-key`: change both together.
 
 ## Tests & gates
 

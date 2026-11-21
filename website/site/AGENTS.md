@@ -21,7 +21,7 @@ in the repository; the old service is named only as "at the tag". No long book p
 | `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
 | `/consensus/` | `src/pages/consensus/*` | the `paros-consensus` library (#1349 (Consensus, Journal and parosd page groups)): what the crate is and each flavor with its type and example (`index.astro`), the driver loop with the `Ready` widget (`driver.md`, the former Engineering page "The sans-IO core"), the four deployments (`deployments.md`), how it is checked (`proof.md`). Each Paxos page's "In paros" section links its Consensus page, and back |
 | `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | how paros is made safe (#1361 (safety case)): the safety case (`index.astro`: one row per safety claim of `paros-consensus` and of the journal, with its model and invariant, trace spec, walk and oracle, the controls and mutants that must die, and its state: checked, model only or open, with the issue; the open rows stay), one page each for TLA+ models (`tla.md`), simulation (`simulation.md`) and mutants and assertions (`mutants.md`), and grid quorums with its live widget. A figure on these pages comes from a dated run, with its date |
-| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, and the controller. Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule. The calls page has the fold lab ("Your turn", below) |
+| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, and the controller. Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule. The calls page has the fold lab, the matchmakers page the register lab and the segments page the record lab ("Your turn", below) |
 | `/parosd/` | `src/pages/parosd/index.astro` | the service around the journal: what it will be, that it is rebuilt, and how to run the version before the rewrite at the tag |
 
 The top bar (`src/nav.ts`) is `Paxos · Consensus · Journal · parosd · Engineering` (#1349).
@@ -155,6 +155,15 @@ answers table of §J2. Every answer comes from `JournalState::apply` or `resolve
 no journal rule. Each call is one decided slot, applied at once: the page says that no
 consensus, network, disk or clock runs there. `/journal/calls/` has five exercises.
 
+The Matchmakers and Segments pages share a third "Your turn" (#1364 (register and segment
+record lab)): `lab: register` loads `public/register-lab.js` (and `course.js`) on the same
+`journal` bundle. `<div data-register-lab="id id">` mounts `RegisterLab` (two controllers and
+three matchmakers of the register; each read and write is delivered, its reply lost, or
+dropped, and a matchmaker can stop), and `<div data-record-lab="id id">` mounts `RecordLab`
+(the strip of the segment records, each move a button). Each move is a button with `data-key`
+(`P>m1:deliver`, `seal:1`), from the engine's list of the moves open now; a refused move shows
+the refusal of the guard.
+
 ## Live widgets (#812 (website redo 3/4), #951 (live Engineering pages))
 
 The grid quorums page of Engineering and the driver page of Consensus show something live; the safety case and the technique pages hold no widget. A page sets `widget: true` in its front matter
@@ -195,7 +204,7 @@ Both run on the built site, so build the wasm and the site first.
   screen, and every "What if" run its last step. One exercise of each lesson is solved by
   clicks on Deliver and Drop (the rows carry `data-kind`, `data-from` and `data-to`, from
   `WireMessage` in `paros-wasm`), and the page must say the goal holds. Every exercise of the
-  journal fold lab is solved by clicks on its calls (`data-call`), and Undo takes the goal
-  back. The quorum picker,
+  journal fold lab is solved by clicks on its calls (`data-call`), and every exercise of the
+  register and record labs by clicks on its moves (`data-key`); Undo takes the goal back. The quorum picker,
   the `quorums` widget and the `Ready` widget must answer. A new live part gets its test in
   the same pull request. No test is skipped, and a red run is not run again (`AGENTS.md`).

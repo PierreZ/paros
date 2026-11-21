@@ -652,7 +652,7 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   `paros-consensus` only.
 - `crates/support/paros-wasm` — the site's wasm tools (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only; feature `journal`,
-  the fold lab of the Journal pages (#1363), on `paros-journal` only.
+  the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal` only.
 
 Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`; `specs/tla/experiments/`
 holds the models that compare candidate designs before Pierre decides, such as the segments
