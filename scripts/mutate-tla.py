@@ -62,8 +62,8 @@ TIMEOUT_MIN = 60
 # Lexing: blank out comments and strings, keep every column.
 
 
-def blank(text: str) -> str:
-    """The text with comments and string literals replaced by spaces."""
+def blank(text: str, strings: bool = True) -> str:
+    """The text with comments (and string literals when `strings`) replaced by spaces."""
     out = list(text)
     i, n, depth = 0, len(text), 0
     while i < n:
@@ -92,8 +92,9 @@ def blank(text: str) -> str:
             j = i + 1
             while j < n and text[j] != '"':
                 j += 1 if text[j] != "\\" else 2
-            for k in range(i + 1, min(j, n)):
-                out[k] = " "
+            if strings:
+                for k in range(i + 1, min(j, n)):
+                    out[k] = " "
             i = j + 1
         else:
             i += 1
@@ -200,6 +201,7 @@ def scan(path: Path, actions: set[str]) -> list[Guard]:
     """The guards of the actions of one module."""
     text = path.read_text()
     clean = blank(text)
+    shown = blank(text, strings=False)
     guards = []
     for d in definitions(clean):
         body = clean[d.start : d.end]
@@ -229,7 +231,7 @@ def scan(path: Path, actions: set[str]) -> list[Guard]:
                     begin,
                     end,
                     clean.count("\n", 0, pos) + 1,
-                    " ".join(item.split()),
+                    " ".join(shown[begin:end].split()),
                 )
             )
     return guards
