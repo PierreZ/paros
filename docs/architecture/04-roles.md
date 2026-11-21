@@ -249,6 +249,26 @@ These points are decided:
   service runs in the deterministic simulation and in a browser. A crate that cannot build for
   wasm is a finding: `paros-authz-biscuit` does not build for it today.
 
-**Open**: the layer table, the cut of the old tenant coordinator between the journal's grid
-controller and the cell, and the placement port between them. They are proposals until Pierre
+- **The actor layer is built in moonpool from the start** (Pierre, 2026-11-22). The registry of
+  activations, the well-known directory and the cache that resolves again are moonpool code.
+  They are not built in the paros adapter first.
+- **The cut of the old tenant coordinator** (Pierre, 2026-11-22: "The cut is good"). The loop
+  that changes the membership of one journal (book, reconfigure, wait for the GC watermark,
+  release) is the work of the grid controller of that journal
+  ([docs/journal/06-controller.md](../journal/06-controller.md)). The questions that the loop
+  asks are questions of the whole cell, and the cell answers them through a **placement port**:
+  which member must leave (its machine drains, is slow, is held for maintenance or is gone),
+  where a new member goes, and how many moves run at one time. A grant of the port is also the
+  token of the rate limit of the cell. "Gone" is a durable record of the cell, not the memory of
+  one coordinator. The sets of a tenant, the frontends of a tenant, the move of a tenant between
+  cells and the `Configure` of a tenant stay with the tenant and the cell.
+- **The placement across cells is the one of section 3.7** (Pierre, 2026-11-22: "follow the hash
+  assignment" of his post "Notes about cell-based architecture"). The override table is read
+  first, then the hash of the name gives a bucket, and a fixed table gives the cell of each
+  bucket. The hash, the two tables and their fold are pure and belong to the universe layer. The
+  frontend and the resolver are the thin router and serve from the last directory they read. A
+  tenant keeps its registration record in the universe directory: it is one write at creation,
+  and it is where the fold checks the `TenantId` (section 3.8).
+
+**Open**: the layer table and the calls of the placement port. They are proposals until Pierre
 agrees.
