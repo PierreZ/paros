@@ -103,20 +103,19 @@ no checked model takes. The trace specs today are:
   matchmaking, the GC, the retirement and the rejoin, the quorums of a configuration (a
   majority or a grid), the compaction floor and the trim jump, the faulty entries of CTRL with
   the pages of a promise, the tri-state tally and the repair probe, the read replica, the
-  leaderless reads and the proxy's `Commit` rule. `NodeTrace.tla` binds the events of a walk to
-  its actions, and eight thin trace specs extend it, one for each family of walks:
-  `MultiPaxosTrace` (every cluster flavor without matchmakers), `MatchmakerTrace` (the flavor
+  leaderless reads, the rounds of the proxy leaders (a delegation, the fan-out, the `Commit` on
+  a Phase-2 quorum of the round's configuration, the close of a round on a relayed `Nack` or an
+  eviction, a crash) and the cooperative handoff (a leadership as a state of a node, the payload,
+  the install behind the promise guard and the frontier guard, the frontier read from disk, a
+  step down of any cause). `NodeTrace.tla` binds the events of a walk to its actions, and ten
+  thin trace specs extend it, one for each family of walks: `MultiPaxosTrace` (every cluster
+  flavor without matchmakers), `ProxyLeaderTrace` (the flavors with proxy leaders),
+  `LeaderHandoffTrace` (the handoff flavor), `MatchmakerTrace` (the flavor
   with matchmakers), `ReadsTrace` (the lagging-reads flavor), `TruncationTrace` (the
   `compaction` flavor), `CompartmentsTrace` (every compartment, and its `compaction` steer),
   `FaultsTrace` (`disk-faults` and `disk-faults-3`), `RetireTrace` (`retiring`) and
   `MatchmakerGridTrace` (`reconfiguring`). Each sets the bounds of the model from the events of
   its walk (`crates/sim/consensus-sim/src/cluster/trace/node.rs`).
-- `proxy-leader/ProxyLeaderTrace`: the proxy's `Commit` rule, on the flavors with proxy leaders.
-  The colocated steps (the leader's own promise, an `Accept` it sends itself, its own vote, the
-  record of a learn) are steps of `ProxyLeader.tla` (`Colocated = TRUE`).
-- `leader-handoff/LeaderHandoffTrace`: the guards of the cooperative handoff, on the handoff
-  flavor. A win that skips a learned slot, a step down, a learn of one slot, a record and a
-  restart that loses a suffix of the chosen index are steps of `LeaderHandoff.tla`.
 - `generations/HandoverTrace`: the matchmaker set handover over a chain of generations, with
   the registrations and the GC acks of one journal, on the `handover` flavor. `Generations.tla`
   closes a bootstrap over a majority of the old generation that froze, and checks that every
@@ -133,7 +132,11 @@ no checked model takes. The trace specs today are:
   the answer `Res`, a `seal` event is `Bound`, and a `resolve` event is `ResolveOn` on the
   boundary of its sealed segment. It defines no rule of its own.
 
-Merging `leader-handoff/` and `proxy-leader/` into the node model is #1343 (merge proxy and handoff into the node model).
+`proxy-leader/` and `leader-handoff/` stay as the design models of their rules, with their
+liveness checks; `node/` has the same safety rules as constants, each with its control in
+`node/checks.txt` (#1343 (merge proxy and handoff into the node model)). The beat guard, the fence
+resignation and the pending slots that a successor proposes again are rules of liveness: in
+`node/` a leader may step down at any time, so `leader-handoff/` keeps their checks.
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take
@@ -186,7 +189,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/`; `batcher/` for the batcher walk | #1190 (rework 6.10), done |
-| `ColocatedNode` as one implementation model: the log, matchmaking, the GC and the retirement, the floor and CTRL, the read replica, the leaderless reads and the proxy `Commit`, as the code runs them together | `node.rs` and the roles it wires | `node/`, which the log-family trace specs extend | #1306 (trace specs extend the checked model), done |
+| `ColocatedNode` as one implementation model: the log, the handoff, the rounds of the proxy leaders, matchmaking, the GC and the retirement, the floor and CTRL, the read replica and the leaderless reads, as the code runs them together | `node.rs`, `proxy_leader.rs` and the roles they wire | `node/`, which every trace spec of a cluster walk but `generations/` extends | #1306 (trace specs extend the checked model), #1343 (merge proxy and handoff into the node model), done |
 | Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |

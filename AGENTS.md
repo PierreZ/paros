@@ -160,10 +160,11 @@ walks)). Trace checking is there for every walk (#1198 (trace checking), `tests/
 trace spec extends a model that TLC checks and defines no step of its own (#1306 (trace specs
 extend the checked model)): `decree/`; `node/`, the implementation model of `ColocatedNode` (the
 log, matchmaking, the GC and the retirement, grids, the compaction floor and the trim jump, the
-faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads and the
-proxy `Commit`), which eight trace specs extend; `proxy-leader/`; `leader-handoff/`;
-`generations/` (the chain of matchmaker set handovers); and `batcher/`. Merging `proxy-leader/`
-and `leader-handoff/` into `node/` is #1343 (merge proxy and handoff into the node model). Each trace spec names the steps its checked walks must take (a `Noop` gap
+faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads, the
+rounds of the proxy leaders and the cooperative handoff; #1343 (merge proxy and handoff into the
+node model)), which ten trace specs extend; `generations/` (the chain of matchmaker set
+handovers); and `batcher/`. `proxy-leader/` and `leader-handoff/` stay as design models with
+their own checks, the liveness checks too. Each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
 rules)). The trace checks are tested too: each trace spec must refuse about 20 named edits of

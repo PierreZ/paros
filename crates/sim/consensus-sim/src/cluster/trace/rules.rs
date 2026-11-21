@@ -124,8 +124,9 @@ const HANDOFF: &[Rule] = &[
     },
 ];
 
-/// `ProxyLeaderTrace`: a proxy's commit, and a commit of a proxy that
-/// crashed before and lost its rounds.
+/// `ProxyLeaderTrace`: a proxy's commit, a commit of a proxy that crashed
+/// before and lost its rounds, and a round a proxy closes on a `Nack` or an
+/// eviction.
 const PROXY: &[Rule] = &[
     Rule {
         name: "a proxy commits a round",
@@ -147,6 +148,14 @@ const PROXY: &[Rule] = &[
                 ClusterEvent::Commit { proxy, .. } => crashed.contains(proxy),
                 _ => false,
             })
+        },
+    },
+    Rule {
+        name: "a proxy closes a round with no decision",
+        met: |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, ClusterEvent::Close { .. }))
         },
     },
 ];

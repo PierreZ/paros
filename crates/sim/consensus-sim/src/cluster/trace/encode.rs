@@ -210,6 +210,10 @@ fn round(
             let [b, s, v] = at(*ballot, *slot, *cmd);
             ("commit", vec![b, s, v, ("proxy", proxy(*p))])
         }
+        ClusterEvent::Close { proxy: p, slot: s } => {
+            sizes.bound(Slot(s.0 + 1));
+            ("close", vec![("proxy", proxy(*p)), ("slot", slot(*s))])
+        }
         ClusterEvent::Accept {
             acceptor,
             ballot,
