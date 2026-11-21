@@ -24,6 +24,15 @@ of segments. Test only: `publish = false`.
   grid; `WIDE`, two columns and promise pages of two), its oracles (`AGREE`, `SEALED`, `FOLD`,
   `VIEW`, `BOUNDARY`, `RESOLVE`; the truth is `Truth` over the chosen log), its reach sites and
   its planted mutants (`RolesMutant`). Its trace check against `Journal.tla` is not built yet.
+- `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
+  controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
+  `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each
+  column, the candidates, the leader, and mixed signals: about 390 thousand views); `check`
+  judges each decision with the oracles (`NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`, `FENCED`,
+  `NO_STALE_PLAN`, `NO_SUSPECT_REPLACED`, `IDEMPOTENT`, `MONOTONE`, `SAME_AS_REFERENCE`), each
+  with its `ControlMutant`; `reference` is `decide` written again from §J6.2, with no code of
+  `paros-journal-control`. `tests/control.rs` also requires every `probe!` of `decide`
+  (`PROBES`), through `campaign::try_sites`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/register.rs`: the events of a register walk as a trace of
