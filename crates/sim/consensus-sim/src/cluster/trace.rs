@@ -962,7 +962,11 @@ impl Spec {
             }
             Self::Reads => matchmaker::keeps(event) || reads::keeps(event),
             Self::Truncation => multi_paxos::keeps(event) || truncation::keeps(event),
-            Self::Compartments => multi_paxos::keeps(event) || compartments::keeps(event),
+            Self::Compartments => {
+                multi_paxos::keeps(event)
+                    || compartments::keeps(event)
+                    || matches!(event, ClusterEvent::Fold { .. })
+            }
             Self::Faults => {
                 faults::keeps(event)
                     || (multi_paxos::keeps(event) || truncation::keeps(event))
@@ -984,7 +988,7 @@ impl Spec {
             events.iter().all(|event| self.keeps(event)),
             "a trace of {self:?} holds only the events it keeps"
         );
-        match self {
+        let mut trace = match self {
             Self::MultiPaxos => multi_paxos::trace(flavor.acceptors, flavor.quorum, events),
             Self::ProxyLeader => proxy_leader::trace(flavor, events),
             Self::LeaderHandoff => {
@@ -1040,7 +1044,9 @@ impl Spec {
                 );
                 compartments::trace(flavor, events)
             }
-        }
+        };
+        crate::trace::whole(&mut trace);
+        trace
     }
 }
 

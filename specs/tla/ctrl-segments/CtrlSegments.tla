@@ -237,7 +237,7 @@ RepairRep(r, s) ==
 \* The replace of a damaged object, from a good replica log, in one step.
 \* The conditional put of the offloader never replaces an object, so how a
 \* replace works (a delete that the mark fences) is Open for the offload
-\* design (02-data-plane.md section 2.10).
+\* design (docs/journal/03-segments-and-records.md §J3.1).
 RepairObj(s) ==
   /\ <<Obj, s>> \in found
   /\ ReplicaGood(s)

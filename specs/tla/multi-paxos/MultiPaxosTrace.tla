@@ -65,6 +65,15 @@ VARIABLE l
 
 e == Trace[l]
 
+\* Whether an event before the current one is a `name` event that agrees
+\* with the current one on each field of `fs`. The walk records some steps
+\* once only (the first `Accept` of a (ballot, slot)): a second record of
+\* such a step is no step of the run.
+TracedBefore(name, fs) ==
+  \E j \in 1..(l - 1) :
+    /\ Trace[j].event = name
+    /\ \A f \in fs : f \in DOMAIN Trace[j] /\ f \in DOMAIN e /\ Trace[j][f] = e[f]
+
 \* The quorums of the run: a majority, or the grid of `TraceCols` columns
 \* and `TraceAcks` acks over the acceptors in row-major order. A driver may
 \* name the column of a round (`propose_in`), so a slot's Phase-2 quorum is
@@ -156,6 +165,7 @@ Step ==
      /\ Win(e.bal)
      /\ front'[e.bal] = e.front
   \/ /\ e.event = "propose" /\ IsBallot /\ IsSlot /\ IsValue
+     /\ ~TracedBefore("propose", {"bal", "slot"})
      /\ \/ /\ next[e.bal] = e.slot
            /\ Allocate(e.bal, e.val)
         \/ /\ [type |-> "2a", bal |-> e.bal, slot |-> e.slot, val |-> e.val] \in msgs
@@ -177,4 +187,35 @@ TraceSpec == TraceInit /\ [][TraceNext]_<<l, vars>>
 \* Violated exactly when a behaviour matched every event: the trace is
 \* accepted.
 TraceUnfinished == l <= Len(Trace)
+
+\* The node whose batch wrote the event ev ("none" for another event).
+HasField(ev, f) == f \in DOMAIN ev
+NodeOf(ev) ==
+  CASE HasField(ev, "event") /\ ev.event \in {"learn", "record", "restart", "compact", "trim"}
+         /\ HasField(ev, "node") -> ev.node
+    [] HasField(ev, "event") /\ ev.event \in {"accept", "promise"} /\ HasField(ev, "acc") -> ev.acc
+    [] HasField(ev, "event") /\ ev.event = "propose" /\ HasField(ev, "by") -> ev.by
+    [] HasField(ev, "event") /\ ev.event = "prepare" /\ HasField(ev, "owner") -> ev.owner
+    [] OTHER -> "none"
+
+\* The vote of slot s on node n (its "accept" or its "record") is a later
+\* event of the batch that the trace is in: every event up to it is of n
+\* or of no node. The code writes a learn and the vote that holds it in one
+\* batch, and the trace has them as two events, with the floors and the
+\* messages of the batch between them. A prefix of the trace that ends
+\* inside the batch (`TraceLength` counts the events of the whole trace)
+\* cuts it: the rest of the batch may hold the vote.
+RecordAhead(n, s) ==
+  \/ \E j \in l..Len(Trace) :
+       /\ NodeOf(Trace[j]) = n /\ Trace[j].event \in {"record", "accept"}
+       /\ HasField(Trace[j], "slot") /\ Trace[j].slot = s
+       /\ \A i \in l..(j - 1) : NodeOf(Trace[i]) \in {n, "none"}
+  \/ /\ Len(Trace) < TraceLength
+     /\ \A i \in l..Len(Trace) : NodeOf(Trace[i]) \in {n, "none"}
+
+\* `LearnRecordsHeld` of the model, at every state of the trace where the
+\* batch of a learn is whole: a learned slot holds its record.
+TraceLearnRecordsHeld ==
+  \A n \in Acceptors, s \in Slots :
+    learned[n][s] # None /\ ~RecordAhead(n, s) => vote[n][s].val = learned[n][s]
 =============================================================================

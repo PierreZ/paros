@@ -11,14 +11,21 @@
 # (AGENTS.md, the absolute rule: no allow list).
 exclude_re = []
 
-# Two TLC runs at a time: each one is a JVM, and more of them at once ran a
-# four-core runner out of memory.
 test_package = ["paros-consensus", "consensus-sim"]
 test_tool = "nextest"
 # The workspace builds paros-consensus with `serde` on (paros-wasm asks for
 # it), so the serde code is mutated too: its tests must run.
 features = ["paros-consensus/serde"]
-additional_cargo_test_args = ["-E", "binary(traces)", "--test-threads", "2"]
+# The tests that edit recorded traces (`tlc_refuses_the_edited_*`) and the
+# controls of `TraceLearnRecordsHeld` (`tlc_sees_a_learn_with_no_record_*`)
+# judge the trace specs, not the core: a mutant of the core changes the
+# walks they start from, never what TLC must refuse. They are left out here.
+# Two TLC runs at a time: each one is a JVM, and more of them at once ran a
+# four-core runner out of memory.
+additional_cargo_test_args = [
+  "-E", "binary(traces) and not test(edited) and not test(no_record)",
+  "--test-threads", "2",
+]
 
 # The `mutants` profile of the workspace `Cargo.toml`: release code with an
 # incremental build, so a mutant builds in seconds and the walks run fast.

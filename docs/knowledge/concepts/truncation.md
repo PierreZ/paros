@@ -125,7 +125,7 @@ The compaction floor and the GC watermark never wait on each other: one is per n
 | The floor ops | `paros-consensus/src/acceptor/retention.rs`: `Acceptor::truncate`, `Acceptor::trim_to` |
 | The jump | `paros-consensus/src/node/catch_up.rs`: `serve_catchup`, `on_trimmed_to` |
 | The client | `paros-client/src/lib.rs`: `truncate`; `paros-client/src/checkpoint.rs`: `Checkpointer`, `truncate_to` |
-| The decision | `docs/architecture/02-data-plane.md` §2 |
+| The decision | `docs/journal/02-data-plane.md` §J2 |
 
 **Sim gates and oracles** (`paros-sim/src/audit/node.rs` unless named):
 

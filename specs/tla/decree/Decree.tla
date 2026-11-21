@@ -173,6 +173,73 @@ Agreement == \A v, w \in Values : Chosen(v) /\ Chosen(w) => v = w
 \* Liveness: a decree with a live quorum ends.
 Ends == <>(\E v \in Values : Chosen(v))
 
+-----------------------------------------------------------------------------
+(* The inductive invariant (#1307 (inductive invariants, then proofs)).    *)
+(*                                                                         *)
+(* `Inv` holds in every initial state, and every step from a state where   *)
+(* `Inv` holds goes to a state where `Inv` holds. `Inv` implies            *)
+(* `Agreement`, so `Agreement` holds in every reachable state, with no     *)
+(* bound on the run. It is the invariant of Lamport's proved `Paxos.tla`   *)
+(* (tlaplus/Examples), with the wipe: a wiped acceptor never takes a step  *)
+(* again (`Refuse` and `Identity`), so it counts as one that will not      *)
+(* vote. `MC.tla` (`IndInit`) and `inductive.cfg` check it with TLC on a   *)
+(* bounded instance: TLC starts from every state of that instance where    *)
+(* `Inv` holds and checks `Inv` after one step.                            *)
+(***************************************************************************)
+
+VotedFor(a, b, v) == [type |-> "2b", acc |-> a, bal |-> b, val |-> v] \in msgs
+
+\* Acceptor a did not vote at ballot c, and it never will: its promise is
+\* above c, or it is wiped and never votes again.
+WontVoteIn(a, c) ==
+  /\ \A v \in Values : ~VotedFor(a, c, v)
+  /\ prom[a] > c \/ (Refuse /\ Identity /\ a \in wiped)
+
+\* No value other than v is chosen or can be chosen at a ballot below b: a
+\* quorum voted v or will not vote at each such ballot.
+SafeAt(b, v) ==
+  \A c \in 1..(b - 1) : \E Q \in Quorums : \A a \in Q : VotedFor(a, c, v) \/ WontVoteIn(a, c)
+
+\* The state of an acceptor: its vote is its highest vote, and its promise
+\* is at or above it. A wiped acceptor has an empty disk.
+AccInv ==
+  \A a \in Acceptors :
+    IF a \in wiped
+    THEN prom[a] = 0 /\ vbal[a] = 0 /\ vval[a] = None
+    ELSE /\ vbal[a] <= prom[a]
+         /\ (vbal[a] = 0) = (vval[a] = None)
+         /\ vbal[a] > 0 => VotedFor(a, vbal[a], vval[a])
+         /\ \A c \in (vbal[a] + 1)..NB, v \in Values : ~VotedFor(a, c, v)
+
+\* What each message says is true.
+MsgInv ==
+  \A m \in msgs :
+    /\ m.type = "1b" =>
+         /\ [type |-> "1a", bal |-> m.bal] \in msgs
+         /\ m.acc \notin wiped => m.bal <= prom[m.acc]
+         /\ m.vbal < m.bal
+         /\ (m.vbal = 0) = (m.vval = None)
+         /\ m.vbal > 0 => VotedFor(m.acc, m.vbal, m.vval)
+         /\ \A c \in (m.vbal + 1)..(m.bal - 1), v \in Values : ~VotedFor(m.acc, c, v)
+    /\ m.type = "2a" =>
+         /\ SafeAt(m.bal, m.val)
+         /\ \A n \in msgs : n.type = "2a" /\ n.bal = m.bal => n = m
+    /\ m.type = "2b" =>
+         /\ [type |-> "2a", bal |-> m.bal, val |-> m.val] \in msgs
+         /\ m.acc \notin wiped => m.bal <= prom[m.acc]
+
+Inv ==
+  /\ TypeOK
+  /\ Cardinality(wiped) <= Wipes
+  /\ AccInv
+  /\ MsgInv
+
+\* The invariant holds for the configurations where a wiped acceptor takes
+\* no step: no wipe, or `Refuse` and `Identity`. With `Refuse = FALSE`, a
+\* wiped acceptor answers Phase 1 with an empty report, and `Phase1 =
+\* "every"` alone keeps `Agreement` (`init.cfg`); `Inv` does not cover it.
+InvApplies == Wipes = 0 \/ (Refuse /\ Identity)
+
 \* Reachability controls: each must be violated.
 NoChoice == ~\E v \in Values : Chosen(v)
 NoChoiceAfterWipe == ~(wiped # {} /\ \E v \in Values, b \in Ballots : ChosenAt(b, v) /\ b > 1)

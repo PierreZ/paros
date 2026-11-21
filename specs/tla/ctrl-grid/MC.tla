@@ -6,7 +6,7 @@ EXTENDS CtrlGrid, Grid, TLC
 \* configurations set.
 CONSTANTS a1, a2, a3, a4, a5, a6, c1, c2
 
-\* The default grid of the journal (02-data-plane.md section 2.11) with
+\* The partitioned grid of the journal (docs/journal §J5.1) with
 \* F = 1: two columns of 2F + 1 = 3 acceptors, a write on F + 1 = 2 of one
 \* column, Phase 1 on 3 - 2 + 1 = 2 of every column. Row-major: column 0 is
 \* a1, a3, a5 and column 1 is a2, a4, a6.

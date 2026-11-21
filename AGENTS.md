@@ -83,11 +83,11 @@ takeover, a lost reply and the bound `F + 1 <= acks <= rows - F`; #1259 (the fen
 the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a write reaches only the
 replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
 leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
-segment), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
+segment; the uuid part is superseded by `seal-chain/`), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
 reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
 `SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
 write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
-`Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301
+`Truncate` in both modes, a `Fence(None)` at a seal (superseded by the uuid in the segment record of `seal-chain/`), a resend across a seal answered `below` (#1301
 (a resent write across a seal)); #1274 (multi-writer mode through SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
 (`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
 segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
@@ -107,16 +107,26 @@ in the boundary state, the floor of a read from the segment in force, the floor 
 offloaded read, the trim of a sealed segment once the floor is decided over it, the acceptors'
 compaction after `F + 1` replicas, the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
 segments with an empty segment and a seal before the `Fence`; the whole boundary state, the
-leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state
-tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty
-record, the repair of a chosen value in one write; `specs/tla/ctrl-segments/`: the copies of a
-sealed segment across retire and offload, the repair of a replica log and of an object, the
-data-loss report; #1263 (CTRL recovery in the journal)).
-`specs/tla/README.md` lists every flavor with its model. Then the journal is
+leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), the seal
+end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1
+that reads the old grid below the end keeps one value; #1313 (the seal end against a CTRL faulty
+record)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state tally on a grid and across the
+configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen
+value in one write; `specs/tla/ctrl-segments/`: the copies of a sealed segment across retire and
+offload, the repair of a replica log and of an object, the data-loss report; #1263 (CTRL recovery
+in the journal)).
+`specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
+inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
+the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are
+its later steps). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
+journal's matchmaker register with its writer, its guard and the models that check it (#1315). Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
-`Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
+`Assignments` ports) is `docs/journal/04-roles.md` §J4.2 (#1255 (journal sans-IO contract)),
 and its flight rule has a model, `specs/tla/flight-rule/`. No journal code exists yet.
+**`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
+2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
+the build steps of #1323 (build the paros journal v1). Start there for any journal work.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
 same code: model-based trace checking (each run of the core is checked against its TLA+
@@ -132,7 +142,9 @@ walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `prox
 `tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
-rules)). Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
+rules)). The trace checks are tested too: each trace spec must refuse about 20 named edits of
+its recorded walks at the edited event or after it (#1308 (mutate recorded traces),
+`trace/mutate.rs`). Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
@@ -141,7 +153,10 @@ unreached probes)). Every one of the 79 probes is reached in CI, with no list of
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
-of the code today: most of what it names is at the tag, not in the tree.
+of the code today: most of what it names is at the tag, not in the tree. **The first step to it
+is the journal v1, `docs/journal/`** (Pierre, 2026-11-20): the journal alone, with its data
+plane, segments, roles, quorums, controller, verification and build steps. The journal rules of
+`docs/architecture/` moved there; each moved architecture section keeps its heading and a link.
 
 ## Who owns the code
 
@@ -186,6 +201,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
+- the edits of recorded traces (#1308 (mutate recorded traces)), in release in the
+  `trace-edits` job: `cargo nextest run --release -p consensus-sim --test traces -E
+  'test(edited) | test(no_record)'`. The `test` job leaves them out.
 - the `mutants` job (pull requests only): cargo-mutants on the lines of
   `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
   pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
@@ -247,8 +265,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 ## Workflow rules
 
 - **Record what the user decides, in the same session.** A design decision or preference the
-  user states (what paros is, how it behaves) goes into `docs/architecture/`, dated and with its
-  issue; a preference about how to work goes into this file. Amend the section it touches, never
+  user states (what paros is, how it behaves) goes into `docs/journal/` when it is a journal
+  rule, else into `docs/architecture/`, dated and with its issue; a preference about how to work goes into this file. Amend the section it touches, never
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
@@ -287,7 +305,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Quorum everywhere** (Pierre, 2026-11-20, #1257): no step of the journal waits for every
   member of a group (no full broadcast as a FoundationDB TLog commit). A new journal step gets
   its row in `specs/tla/quorum-everywhere/`, with a control that blocks it one member later
-  (`docs/architecture/02-data-plane.md` §2.11).
+  (`docs/journal/05-quorums-and-failures.md` §J5.1).
 - **When in doubt about safety, use TLA+** (Pierre, 2026-11-20): when you are not sure that a
   rule is safe, or that one rule also covers another case, write a TLA+ check (a check that
   passes with the rule and a control that fails without it). Do not argue it in prose.
@@ -326,7 +344,7 @@ ordering is documented on `Ready`/`HardState`
 (`docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`). The driver that owns the core and
 does its I/O was in the removed `paros-roles` (`docs/archive/v0.2.0-alpha.1/paros-roles.md`);
 today only the examples, the model checkers and the wasm engine drive the core. The journal's
-roles follow a different contract, the flight rule (`docs/architecture/04-roles.md` §4.2): each
+roles follow a different contract, the flight rule (`docs/journal/04-roles.md` §J4.2): each
 persist batch has an id and each send names the persist id it waits on, so a driver may pipeline
 and group commit. §4.2 lists every difference from `Ready`/`advance` as a change or a proposal.
 
@@ -488,7 +506,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 - **The leader uuid is the writer fence** (#241): `SetLeader(new, old)` is a compare-and-set,
   `Write` and `Truncate` carry the uuid, and the core's term counter never reaches a data-plane
   reply (a client sees `JournalView`; an operator's `Inspect` shows the term). The journal trusts its clients to draw fresh uuids (decided on
-  2026-10-09): a reinstated uuid wins (`docs/architecture/02-data-plane.md` §2.3).
+  2026-10-09): a reinstated uuid wins (`docs/journal/02-data-plane.md` §J2.3).
 - **A trim-point jump** (`Message::TrimmedTo`) recovers a below-floor node: it carries a floor
   and the journal state, no bytes and **no ballot**; the promise never moves.
 - **Cooperative handoff** (`DPaxos`, `relinquish_to`): abdication is synchronous with the
@@ -562,7 +580,9 @@ experiment of #1213 (segments in the protocol or in storage) and its check of le
 across a reshape, #1254), `website/site/` (the website,
 Astro, one style for every page; `website/site/AGENTS.md`, the `update-the-site` skill),
 `website/shared/` (the design system: tokens, fonts, logo), `scripts/build-wasm.sh` (builds the
-wasm and stages it for the site), `docs/architecture/` (the target design), `docs/knowledge/`
+wasm and stages it for the site), `docs/architecture/` (the target design of the service), `docs/journal/` (the target
+design of the journal v1: every journal rule, its model and the build steps; its `README.md`
+is the map), `docs/knowledge/`
 (the Paxos knowledge base: one card per concept paros uses, #745), `docs/analysis/` (design
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,

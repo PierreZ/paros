@@ -85,7 +85,7 @@ message of such a batch waits for the flush ("only from a batch that does not ra
 promise", the `split_early` doc).
 
 **The journal's flight rule** (#1255 (journal sans-IO contract),
-`docs/architecture/04-roles.md` §4.2). The journal's roles replace the one batch in flight
+`docs/journal/04-roles.md` §J4.2). The journal's roles replace the one batch in flight
 with ids: each persist batch has an id, each send names the persist id it waits on, and the
 driver transmits a send only once that batch is durable. The driver may then pipeline and group
 commit. A reply that writes nothing (a second copy of a `Prepare` at the promised ballot) waits
@@ -141,7 +141,7 @@ crash. paros quarantines a journal on a storage fault and re-opens it later
 | The durable scalars and their contract | `paros-consensus/src/contract/hard_state.rs`: `HardState` |
 | The write ops and the fsync rule | `paros-consensus/src/contract/write.rs`: `WriteOp`, `AcceptorWrite`, `MustSync::for_batch`, `WriteOp::needs_sync` |
 | The leader's early send | `paros-roles/src/node/ready.rs`: `split_early`, `send_early` |
-| The journal's flight rule (not built) | `docs/architecture/04-roles.md` §4.2; the model `specs/tla/flight-rule/` |
+| The journal's flight rule (not built) | `docs/journal/04-roles.md` §J4.2; the model `specs/tla/flight-rule/` |
 
 The rule is stated in the `Ready` doc (the five steps) and the `HardState` doc (the durability
 contract). `docs/analysis/go-raft/etcd-raft-sans-io-patterns.md` §2 compares the shape with
