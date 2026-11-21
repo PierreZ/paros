@@ -184,6 +184,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
+- the edits of recorded traces (#1308 (mutate recorded traces)), in release in the
+  `trace-edits` job: `cargo nextest run --release -p consensus-sim --test traces -E
+  'test(edited) | test(no_record)'`. The `test` job leaves them out.
 - the `mutants` job (pull requests only): cargo-mutants on the lines of
   `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
   pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of

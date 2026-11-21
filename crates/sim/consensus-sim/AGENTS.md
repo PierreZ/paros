@@ -218,7 +218,8 @@ Test only: `publish = false`, never a dependency of another crate.
   that breaks there counts as a refusal. `MultiPaxosTrace`, `TruncationTrace`,
   `CompartmentsTrace` and `LeaderHandoffTrace` check `TraceLearnRecordsHeld` (a learned slot
   holds its vote once the batch of the learn is whole), with a control that drops the record of
-  a learn (`tlc_sees_a_learn_with_no_record_*`). A retiring or a reconfiguring walk has 250 quiet steps, the others
+  a learn (`tlc_sees_a_learn_with_no_record_*`). CI runs both in release in the `trace-edits`
+job of `rust.yml`, not in the debug `test` job. A retiring or a reconfiguring walk has 250 quiet steps, the others
   10: a retirement needs a leader that stands while its GC floor becomes effective, and a
   delegated round under a new configuration needs a leadership of it that settles. Every
   control searches from seed 1, never from a seed picked by hand. A cluster walk has
