@@ -1,20 +1,39 @@
-# The folders of specs/tla/ whose guard mutation needs more than one job of 30
-# minutes (`.github/workflows/tla-mutants.yml`): <folder> <number of jobs>.
-cell-control 1
-config-register 4
-degraded-reshape 8
-experiments/segments/reads 1
-experiments/stale-stopped/restart 9
-handover 1
-leader-handoff 14
+# The number of slices (CI jobs of 30 minutes) for the guard mutation of each
+# folder of specs/tla/ (`.github/workflows/tla-mutants.yml`): <folder> <slices>.
+# A folder that is not listed has no guard and no slice. The numbers are about
+# (guards x minutes of the folder's checks) / 40: a mutant that survives runs
+# every check of its folder. A slice that its budget cuts reports `unfinished`
+# mutants: give its folder more slices. GitHub runs at most 256 slices.
+abandoned-ballot 1
+campaign-discovery 1
+cas-register 1
+cell-control 2
+compartments 3
+config-register 5
+decree 1
+degraded-reshape 7
+flight-rule 1
+grid-controller 2
+handover-chain 1
+handover-gc 1
+handover 5
+leader-handoff 12
 matchmaker 3
-multi-paxos 16
-quorum-everywhere 1
-reads 43
-retire-fence 25
-segment-records 4
-segment-replicas 27
-segment-truncate 45
-truncation 6
+multi-paxos 14
+multi-writer 1
+offload 1
+proxy-leader 1
+quorum-everywhere 3
+reads 28
+retire-fence 18
+seal-chain 1
+segment-records 5
+segment-replicas 19
+segment-truncate 29
 truncation-reconfig 4
-zero-stall 27
+truncation 6
+zero-stall 17
+experiments/segments/a 2
+experiments/segments/b 1
+experiments/segments/reads 4
+experiments/stale-stopped/restart 8

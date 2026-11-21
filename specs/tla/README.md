@@ -18,6 +18,32 @@ A long check that does not finish has a time bound in minutes as a fourth word o
 violation was found until then. A line with no bound must finish. Every bounded line is a
 bounded run, never a proof: its table line in this file says so.
 
+## Guard mutation
+
+`scripts/mutate-tla.py` tests the checks of each model (#1311 (mutate spec guards)). A guard is
+a conjunct of an action that changes no variable: a `/\` item of a definition that primes a
+variable, with no prime, no `UNCHANGED` and no call of an action. For each guard, the script
+sets that one item to `TRUE` in a copy of the specs and runs the `ci` checks of `checks.txt` on
+the copy, the `pass` lines first. The mutant is caught when one check does not give its listed
+result; a check of each folder that links the module counts too. A check that runs past 3 times
+its time on the specs as they are (at least 60 seconds) is stopped, and the mutant counts as
+caught: the guard bounds the state space of the check.
+
+A mutant that every check accepts is a survivor. The guard is not necessary, or a property is
+missing. Remove the guard, or add the check that fails without it (often a liveness check, or a
+control). There is no allow list.
+
+    nix develop .#tla --command scripts/mutate-tla.py decree            # every guard of a folder
+    nix develop .#tla --command scripts/mutate-tla.py --list decree     # the guards only
+    nix develop .#tla --command scripts/mutate-tla.py --parse decree    # each mutant parses
+
+The `spec` job of the `TLA` workflow runs `--parse` on each folder. The `TLA mutants` workflow
+runs every mutant each week and on demand, in slices of 30 minutes
+(`scripts/mutate-tla-shards.txt`), and its `report` job lists the survivors. The `--help` of the
+script names the other options (`--shard`, `--budget`, `--baseline-out`, `--baseline-from`,
+`--out`, `--skip`). The trace specs (`*Trace.tla`) are not mutated: `checks.txt` does not run
+them.
+
 ## Layout
 
 Each folder is one model:
