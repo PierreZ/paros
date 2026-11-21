@@ -3,10 +3,16 @@
 #
 #   scripts/mutants.sh [ARGS...]
 #   scripts/mutants.sh --journal [ARGS...]
+#   scripts/mutants.sh --journal-io [ARGS...]
 #
 # `--journal` runs the same two passes on paros-journal, judged by its unit
 # tests and by journal-sim (`.cargo/mutants-journal.toml`, then
 # `.cargo/mutants-journal-tlc.toml`).
+#
+# `--journal-io` runs one pass on paros-journal-io, judged by its unit tests
+# and by the driver walk of journal-sim (`.cargo/mutants-journal-io.toml`).
+# The driver has no trace check yet, so there is no second pass: a mutant
+# that the first pass misses survives.
 #
 # ARGS go to the first pass and cut the set of mutants, for example
 # `--shard 3/48 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.
@@ -46,6 +52,11 @@ if [ "${1:-}" = "--journal" ]; then
   second=.cargo/mutants-journal-tlc.toml
   baseline_args=(-p paros-journal -p journal-sim
     -E '(binary(traces) | binary(register_traces)) and not test(edited)')
+elif [ "${1:-}" = "--journal-io" ]; then
+  shift
+  crate=paros-journal-io
+  first=.cargo/mutants-journal-io.toml
+  second=
 fi
 
 # cargo-mutants exits with 2 when a mutant is missed and 3 on a timeout; both
@@ -70,6 +81,16 @@ if [ ! -d mutants.out ]; then
 fi
 rm -rf mutants.first
 cp -r mutants.out mutants.first
+
+if [ -z "$second" ]; then
+  cp mutants.first/missed.txt survivors.txt 2>/dev/null || true
+  echo "Survivors: $(wc -l < survivors.txt)."
+  cat survivors.txt
+  if [ -s survivors.txt ]; then
+    exit 2
+  fi
+  exit 0
+fi
 
 if [ ! -s mutants.first/missed.txt ]; then
   echo "First pass: no mutant missed. The second pass has nothing to run."
