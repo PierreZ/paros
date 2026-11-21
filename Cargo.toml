@@ -2,12 +2,14 @@
 members = ["crates/*/*"]
 resolver = "3"
 
-# One line per dependency the workspace shares. Nothing is published to
-# crates.io for now: every crate is `publish = false`. The code removed on
-# 2026-11-19 is at the tag `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/).
+# One line per dependency the workspace shares. `paros-consensus`,
+# `paros-journal` and `paros` are published to crates.io by release-plz (`release-plz.toml`), at one
+# version; the `version` below is what a published `paros` resolves, and
+# release-plz moves it with each release. The code removed on 2026-11-19 is at
+# the tag `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/).
 [workspace.dependencies]
-paros-consensus = { path = "crates/lib/paros-consensus", default-features = false }
-paros-journal = { path = "crates/lib/paros-journal" }
+paros-consensus = { path = "crates/lib/paros-consensus", version = "0.2.0", default-features = false }
+paros-journal = { path = "crates/lib/paros-journal", version = "0.2.0" }
 
 
 [workspace.package]
@@ -16,6 +18,7 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/PierreZ/paros"
 authors = ["Pierre Zemb <contact@pierrezemb.fr>"]
+homepage = "https://pierrez.github.io/paros/"
 keywords = ["paxos", "consensus", "distributed-systems", "replication"]
 categories = ["algorithms", "network-programming"]
 

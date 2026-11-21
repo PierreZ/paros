@@ -258,8 +258,22 @@ everything. Rust 2024 edition, toolchain pinned in `rust-toolchain.toml` (incl.
 `wasm32-unknown-unknown`), clippy pedantic on (`[workspace.lints]`). The whole workspace passes
 pedantic with no lint allowed (Pierre, 2026-11-19): fix the code, never add `#[allow(clippy::..)]`.
 When a lint is wrong for one item, write `#[expect(clippy::<lint>, reason = "..")]` on that item
-and name it in the PR description. Nothing is published to
-crates.io: every crate is `publish = false`, and there is no release workflow.
+and name it in the PR description.
+
+**Releases** (Pierre, 2026-11-21: release-plz back on, publish more often; he decides when).
+`release-plz.toml` and `.github/workflows/release-plz.yml`. The public crates are
+`paros-consensus`, `paros-journal` and `paros`, at one version (`version_group`), one `v{version}` tag and one
+draft GitHub release. release-plz creates and writes every changelog; none is written by hand.
+`consensus-sim`, `journal-sim` and `paros-wasm` stay `publish = false`. A push to `main`
+only opens or updates the release pull request. **Nothing publishes by itself**: only Pierre
+merges a release pull request, and only Pierre starts the `release` job (workflow_dispatch),
+which publishes. An agent never merges a release pull request and never starts that job. A new
+public crate (for example `parosd`) gets the crates.io metadata, a `version` on
+its workspace dependency line, and a `[[package]]` entry in the `paros` group of
+`release-plz.toml`, in the PR that creates it. The `portability` job checks that the public
+crates package and build as crates.io builds them (`cargo publish --dry-run --workspace`): each
+git dependency is replaced by its `version`, so a moonpool pin that needs an API not yet on
+crates.io turns that job red until moonpool publishes it.
 
 ## Environment & Nix
 
@@ -301,6 +315,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
+- **release-plz writes every changelog** (Pierre, 2026-11-21). Never create or edit a
+  `CHANGELOG.md` by hand. release-plz creates each one from the commit messages in the release
+  pull request, so the commit message is where a change is described.
 - **A flaky check is a finding** (decided on 2026-11-17). A check that is red and then green
   with no change teaches you to run it again in place of a fix. Never run a check again until
   it is green, and never add a retry around it. Find the cause: a bug in the code is fixed with

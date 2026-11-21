@@ -321,6 +321,11 @@ jobs:
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal
       - name: Build paros (the library facade) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
+      # The two public crates (`release-plz.toml`) build as crates.io builds
+      # them: from the packaged files, with each git dependency replaced by its
+      # `version` (moonpool-assertions from crates.io). Nothing is uploaded.
+      - name: Package the public crates as crates.io builds them
+        run: nix develop --command cargo publish --dry-run --workspace --locked
 
   # The site's wasm tool (#540): `paros-wasm`, built for wasm32-unknown-unknown
   # (`paxos`: the step-through engine on paros-consensus). Then the step-through
