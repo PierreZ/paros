@@ -44,7 +44,8 @@ if [ "${1:-}" = "--journal" ]; then
   crate=paros-journal
   first=.cargo/mutants-journal.toml
   second=.cargo/mutants-journal-tlc.toml
-  baseline_args=(-p paros-journal -p journal-sim -E 'binary(traces) and not test(edited)')
+  baseline_args=(-p paros-journal -p journal-sim
+    -E '(binary(traces) | binary(register_traces)) and not test(edited)')
 fi
 
 # cargo-mutants exits with 2 when a mutant is missed and 3 on a timeout; both

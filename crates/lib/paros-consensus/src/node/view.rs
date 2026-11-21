@@ -88,12 +88,10 @@ impl ColocatedNode {
     pub fn election_elapsed(&self) -> u64 {
         // A leader's election clock is stopped at zero: only a follower or a
         // candidate counts toward a timeout.
-        if self.role == NodeRole::Leader {
-            assert!(
-                self.election_elapsed == 0,
-                "a leader's election clock is stopped"
-            );
-        }
+        assert!(
+            self.role != NodeRole::Leader || self.election_elapsed == 0,
+            "a leader's election clock is stopped"
+        );
         self.election_elapsed
     }
 

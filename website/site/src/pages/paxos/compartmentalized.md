@@ -54,3 +54,4 @@ and serves reads.
   ([`replica_node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/replica_node.rs)), the leaderless read
   ([`quorum_read.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/quorum_read.rs)). The story runs these roles in the
   browser.
+- Consensus: [the deployments](../../consensus/deployments/#proxyleader) show `ProxyLeader` and `ReplicaNode`, each its own process.

@@ -17,6 +17,9 @@
 //! - [`segment`]: the record that the journal's matchmakers hold for each
 //!   segment, with the guard of each of its compare-and-sets
 //!   (`docs/journal/03-segments-and-records.md` §J3.4).
+//! - [`register`]: the journal's matchmaker register, an optional role
+//!   beside the core's registration matchmaker: its value, its members,
+//!   its operations and its handover (§J3.4, #1325).
 //! - [`command`]: the commands of the journal and its records with their
 //!   headers (§J2.8).
 //! - [`codec`]: the bytes of each of these, with a release number in every
@@ -36,6 +39,7 @@ pub mod codec;
 pub mod command;
 pub mod fold;
 pub mod held;
+pub mod register;
 pub mod resolve;
 pub mod segment;
 

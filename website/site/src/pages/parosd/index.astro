@@ -1,0 +1,37 @@
+---
+// parosd (#1349 (website page groups), group 3): what the service will be, that
+// it is rebuilt on the journal v1, and how to run the version before the
+// rewrite at the tag. Its other pages wait until its design is written again.
+import Doc from "../../layouts/Doc.astro";
+import { REPO, url } from "../../nav";
+const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
+---
+<Doc title="parosd" kicker="parosd · rewrite in progress" section="parosd/" siblings={[]}
+  description="The journal service: one binary on N machines that serves journals to many tenants and heals itself. It is being rebuilt on the journal v1.">
+  <div class="callout status" data-tag="being rebuilt">
+    <p>parosd is being rebuilt from the ground up, on top of the <a href={url("journal/")}>journal
+    v1</a>. Its design will be written again after the journal. Until then, this page is the only
+    parosd page.</p>
+  </div>
+
+  <h2 id="what">What it will be</h2>
+  <p>One binary, <code>parosd</code>, on N machines of a cell. It serves journals to many tenants
+  over the four calls of the journal: <code>Write</code>, <code>Read</code>, <code>Truncate</code>
+  and <code>SetLeader</code>. When a disk or a machine is lost, the cell heals through
+  reconfiguration, with no operator call. Cells sit in a universe, and a tenant lives in one
+  cell.</p>
+  <p>paros eats its own food: the state of the service lives in journals, who acts is decided by <code>SetLeader</code> on a journal, and agreement comes from the Paxos flavors that <code>paros-consensus</code> builds. There is no external coordination service to run. The target
+  design is <a href={`${REPO}/tree/main/docs/architecture`}><code>docs/architecture/</code></a>;
+  most of what it names is at the tag below, not in the tree.</p>
+
+  <h2 id="before">The version before the rewrite</h2>
+  <p>A first version ran: a daemon on each machine, a CLI, many cells, Biscuit tokens and a
+  deterministic simulation with faults on. It showed where its foundations were too weak, so paros
+  started again from the consensus core. The whole first version stays at the git tag <a href={TAG}><code>v0.2.0-alpha.1</code></a>: <code>parosd</code>, <code>parosctl</code>, <code>paros-bench</code>, the Docker Compose demo and the simulation. To run it:</p>
+  <pre><code>git clone https://github.com/PierreZ/paros && cd paros
+git checkout v0.2.0-alpha.1
+docker compose up -d --build
+docker compose run --rm init
+docker compose run --rm parosctl tenant create acme</code></pre>
+  <p>Its <code>DEMO.md</code> is the walk-through. A recap of each removed crate is in <a href={`${REPO}/tree/main/docs/archive/v0.2.0-alpha.1`}><code>docs/archive/v0.2.0-alpha.1/</code></a>.</p>
+</Doc>

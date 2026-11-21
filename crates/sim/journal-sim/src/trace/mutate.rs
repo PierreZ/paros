@@ -27,7 +27,8 @@ pub struct Mutant {
     pub trace: Trace,
 }
 
-type Find = fn(&[Value]) -> Option<(usize, Vec<Value>)>;
+/// Where an edit goes in the events of a trace, and the edited events.
+pub type Find = fn(&[Value]) -> Option<(usize, Vec<Value>)>;
 
 /// A named edit of a recorded trace.
 pub struct Edit {
@@ -43,6 +44,12 @@ impl std::fmt::Debug for Edit {
 }
 
 impl Edit {
+    /// The edit `name`, placed by `find`.
+    #[must_use]
+    pub const fn new(name: &'static str, find: Find) -> Self {
+        Self { name, find }
+    }
+
     /// The edit at its first place in `trace`, or `None`.
     ///
     /// # Panics
@@ -92,34 +99,34 @@ pub fn edits() -> &'static [Edit] {
     EDITS
 }
 
-fn fields(event: &Value) -> &BTreeMap<String, Value> {
+pub(crate) fn fields(event: &Value) -> &BTreeMap<String, Value> {
     let Value::Record(fields) = event else {
         panic!("an event is a record");
     };
     fields
 }
 
-fn text<'a>(event: &'a Value, name: &str) -> &'a str {
+pub(crate) fn text<'a>(event: &'a Value, name: &str) -> &'a str {
     match fields(event).get(name) {
         Some(Value::Str(s)) => s,
         _ => "",
     }
 }
 
-fn num(event: &Value, name: &str) -> Option<i64> {
+pub(crate) fn num(event: &Value, name: &str) -> Option<i64> {
     match fields(event).get(name) {
         Some(Value::Int(n)) => Some(*n),
         _ => None,
     }
 }
 
-fn with(event: &Value, name: &str, value: Value) -> Value {
+pub(crate) fn with(event: &Value, name: &str, value: Value) -> Value {
     let mut changed = fields(event).clone();
     changed.insert(name.to_owned(), value);
     Value::Record(changed)
 }
 
-fn is(event: &Value, kind: &str) -> bool {
+pub(crate) fn is(event: &Value, kind: &str) -> bool {
     text(event, "event") == kind
 }
 
@@ -128,7 +135,7 @@ fn applied(event: &Value, res: &str) -> bool {
 }
 
 /// Replace the first event that `pick` selects with `change` of it.
-fn change_first(
+pub(crate) fn change_first(
     events: &[Value],
     pick: impl Fn(&[Value], usize) -> bool,
     change: impl Fn(&Value) -> Value,

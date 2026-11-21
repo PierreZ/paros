@@ -2,11 +2,12 @@
 name = "paros-consensus"
 description = "Sans-IO Multi-Paxos state machine core: no I/O, no clock, no randomness, zero dependencies"
 version.workspace = true
-publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 # Agent notes stay in the repository, out of the published crate.
@@ -39,6 +40,10 @@ tracing = ["dep:tracing"]
 # evaluated. A probe and a simulation `assert_reachable!` with the same
 # message share one slot, so never reword a probe's message.
 assertions = ["dep:moonpool-assertions"]
+
+# docs.rs documents every feature, `serde` too.
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }

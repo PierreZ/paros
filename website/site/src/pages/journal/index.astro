@@ -1,42 +1,133 @@
 ---
-// The journal service: what is coming, and where the old one is (2026-11-19).
+// The journal v1 in one screen (#1349 (website page groups), group 2): what it
+// is, its scope, its roles and crates, and how it is checked. Each rule lives in
+// docs/journal/; this page explains and links it.
 import Doc from "../../layouts/Doc.astro";
-import { REPO } from "../../nav";
-const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
+import { REPO, url } from "../../nav";
+const J = `${REPO}/blob/main/docs/journal`;
+const TLA = `${REPO}/tree/main/specs/tla`;
 ---
-<Doc title="The journal service" kicker="Journal · rewrite in progress" section="journal/" siblings={[]}
-  description="Ordered, durable logs for many tenants, on Paxos. paros is rewriting it from the ground up, on stronger foundations.">
+<Doc title="The journal" kicker="Journal · v1" section="journal/" status="journal"
+  description="One ordered, durable log for each journal id. Paxos chooses every record, and the acceptors change with no stop.">
+
+  <div class="strip" aria-label="The journal v1 in figures">
+    <div><span class="k">Calls</span><span class="v">4</span></div>
+    <div><span class="k">Writer modes</span><span class="v">2</span></div>
+    <div><span class="k">Waits for</span><span class="v">a quorum</span></div>
+    <div><span class="k">Before code</span><span class="v">TLA+</span></div>
+  </div>
+
   <h2 id="what">What it is</h2>
-  <p>The goal of paros is a journal service: ordered, durable logs for many tenants on a cell of
-  machines. Paxos chooses every record. The data plane has four calls: <code>Write</code>,
-  <code>Read</code>, <code>Truncate</code> and <code>SetLeader</code>. The control plane is made of
-  paros journals, elections and Paxos flavors too, so there is no external coordination service
-  to run.</p>
+  <p>A journal is one ordered log. A writer appends batches of opaque records, and readers read
+  them in order. Paxos orders the data itself, in every slot, not only the metadata. The journal
+  uses the roles of <a href={url("paxos/compartmentalized/")}>Compartmentalized Paxos</a>, and
+  changes its acceptors with <a href={url("paxos/matchmaker/")}>Matchmaker Paxos</a>. One
+  consensus leader orders the whole journal, so the throughput of that leader is the limit of v1
+  (<a href={`${J}/01-goal.md`}>§J1</a>).</p>
+  <p>The journal knows ids only. Each journal has its own matchmaker set, its own controller and
+  its own table of segments. Names, tenants and cells belong to the service above it, <a href={url("parosd/")}>parosd</a>. The journal is a library first: one process can host many
+  journals.</p>
 
-  <h2 id="now">Being rewritten</h2>
-  <p>A first version ran: a daemon on each machine, a CLI, many cells, Biscuit tokens and a
-  deterministic simulation with faults on. It taught a lot, and it showed where its foundations
-  were too weak. So paros starts again from the bottom:</p>
-  <ol>
-    <li><b>The consensus core first.</b> <code>paros-consensus</code> holds every Paxos role as a
-      sans-IO state machine. Each flavor that it builds gets a TLA+ model before anything is built
-      on it.</li>
-    <li><b>Then the judges of the core.</b> Model-based trace checking (each run of the code is
-      checked against its TLA+ model), deterministic simulation testing (a seed is a run, faults
-      on), and coverage-driven simulation that steers the seeds toward the paths not yet run.</li>
-    <li><b>Then the journal</b>, designed again on top of the proved core.</li>
+  <div class="arch" role="img" aria-label="One journal. A client sends its calls to the leader. The leader gives each write a slot, and proxy leaders send Phase 2 to the acceptor grid of the segment in force. The chosen slots go to the replica set of that segment, which applies them and serves reads. Beside it, the matchmakers of the journal hold the configuration of each ballot and the register of segment records. The controller writes to the register only, with its fenced reshape call.">
+    <div class="cellframe">
+      <span class="cellname">one journal</span>
+      <div class="box">client <small>Write · Read · Truncate · SetLeader</small></div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="box lead">leader <small>gives each write a slot</small></div>
+        <div class="box side">matchmakers <small>configurations · segment records</small></div>
+        <div class="box side">controller <small>heal · scrub · alert</small></div>
+      </div>
+      <div class="arrow">▼ <small>Phase 2, through proxy leaders</small></div>
+      <div class="box">acceptor grid <small>of the segment in force</small></div>
+      <div class="arrow">▼ <small>chosen</small></div>
+      <div class="box">replica set <small>applies in slot order · serves reads</small></div>
+    </div>
+  </div>
+
+  <h2 id="scope">The v1 scope</h2>
+  <p>The scope comes from the reviews of the journal plan (<a href={`${J}/01-goal.md`}>§J1.1</a>).
+  Each line has its page.</p>
+  <ul>
+    <li><b>Four calls</b>: <code>Write</code>, <code>Read</code>, <code>Truncate</code> and <code>SetLeader(new, old)</code>. A single writer gets exactly-once writes; with no leader the
+      journal is multi-writer and at-least-once. <a href={url("journal/calls/")}>The calls</a>.</li>
+    <li><b>Segments</b>: a segment is the run of slots of one acceptor grid. Only a reshape opens
+      one. The first leader of the new grid seals the old one. <a href={url("journal/segments/")}>Segments</a>.</li>
+    <li><b>Segment records in the matchmakers</b>: one record per segment, changed only by a
+      compare-and-set at a majority. <a href={url("journal/matchmakers/")}>Matchmakers and the register</a>.</li>
+    <li><b>Quorum everywhere</b>: no step waits for every member of a group. The grids are the
+      majority and the partitioned grid. <a href={url("journal/quorums-and-failures/")}>Quorums and failures</a>.</li>
+    <li><b>A controller that heals</b>: it replaces lost members and scrubs the copies. In every
+      other case it holds and alerts. <a href={url("journal/controller/")}>The controller</a>.</li>
+  </ul>
+  <p><b>Out of v1</b> (<a href={`${J}/01-goal.md`}>§J1.2</a>): the Phase-1 bypass, the offloader,
+  segment rolls on size or age, grids other than the two above, rolling upgrades, a dedup table,
+  a second leader, and an unsafe recover. Their rules stay in the docs for the day they come back.</p>
+
+  <h2 id="roles">The roles</h2>
+  <p>Each role is a pure state machine. The journal composes the roles of <code>paros-consensus</code> and adds no journal concept to it
+  (<a href={`${J}/04-roles.md`}>§J4.1, §J4.3</a>).</p>
+  <table>
+    <thead><tr><th>Role</th><th>Job</th></tr></thead>
+    <tbody>
+      <tr><td>Batcher, unbatcher</td><td>Multi-writer only: put many writes in one slot, then give each write its own positions.</td></tr>
+      <tr><td>Leader</td><td>Gives each command a slot, holds each answer until its slot applies, seals the old segment.</td></tr>
+      <tr><td>Proxy leader</td><td>Runs Phase 2 of one slot on one column of the grid.</td></tr>
+      <tr><td>Acceptor</td><td>The grid of one segment. Default: one column of three, a plain majority.</td></tr>
+      <tr><td>Replica</td><td>Applies the slots of its segment in order, folds the journal state, serves reads.</td></tr>
+      <tr><td>Matchmaker</td><td>Keeps the configuration of each ballot. One set of <code>2F + 1</code> per journal.</td></tr>
+      <tr><td>Matchmaker register</td><td>An optional role beside the matchmaker: the segment records and the controller term.</td></tr>
+      <tr><td>Controller</td><td>Elected by a term in the register. Asks for a reshape; never decides safety.</td></tr>
+    </tbody>
+  </table>
+  <p>The roles and their driver follow one contract, the flight rule: each write to disk has an
+  id, and each message names the write it waits on. So a driver can group writes and keep many in
+  flight, and the role still decides every order (<a href={`${J}/04-roles.md`}>§J4.2</a>,
+  checked by <a href={`${TLA}/flight-rule`}><code>flight-rule/</code></a>). The <a href={url("consensus/driver/")}>driver loop</a> page shows the contract of <code>paros-consensus</code> today.</p>
+
+  <h2 id="checked">How it is checked</h2>
+  <p>No code before its model (<a href={`${J}/07-verification.md`}>§J7</a>). Each rule has a
+  TLA+ check that passes with the rule and a control that fails without it. Then one model composes
+  them: <a href={`${TLA}/journal-state`}><code>journal-state/</code></a> runs three segments, the
+  seal, partial register writes, the fold and the disk of each acceptor, with a crash between two
+  writes. Then the code gets the three judges of the consensus core: each walk of the code is
+  checked against the model, seeded walks run with faults on, and a coverage gate asks for every
+  branch.</p>
+  <table>
+    <thead><tr><th>Rule</th><th>Model</th></tr></thead>
+    <tbody>
+      <tr><td>Exactly-once, multi-writer, a resend across a seal</td><td><a href={`${TLA}/multi-writer`}><code>multi-writer/</code></a>, <a href={`${TLA}/journal-state`}><code>journal-state/</code></a></td></tr>
+      <tr><td>The seal end, the boundary state, two seals in a row</td><td><a href={`${TLA}/seal-chain`}><code>seal-chain/</code></a>, <a href={`${TLA}/seal-ctrl`}><code>seal-ctrl/</code></a></td></tr>
+      <tr><td>A write reaches only its segment's replicas; retire</td><td><a href={`${TLA}/segment-replicas`}><code>segment-replicas/</code></a></td></tr>
+      <tr><td>Segment records across a matchmaker handover</td><td><a href={`${TLA}/segment-records`}><code>segment-records/</code></a></td></tr>
+      <tr><td>Quorum everywhere</td><td><a href={`${TLA}/quorum-everywhere`}><code>quorum-everywhere/</code></a></td></tr>
+      <tr><td>Damage and repair (CTRL)</td><td><a href={`${TLA}/ctrl-grid`}><code>ctrl-grid/</code></a>, <a href={`${TLA}/ctrl-segments`}><code>ctrl-segments/</code></a></td></tr>
+      <tr><td>The controller's election and reshape; health</td><td><a href={`${TLA}/grid-controller`}><code>grid-controller/</code></a>, <a href={`${TLA}/health`}><code>health/</code></a></td></tr>
+    </tbody>
+  </table>
+  <p>§J7.1 maps every rule to its model.</p>
+
+  <h2 id="code">In paros</h2>
+  <ul>
+    <li><a href={`${REPO}/tree/main/crates/lib/paros-journal`}><code>paros-journal</code></a>: the
+      pure journal core. The fold (<code>JournalState</code>), the <code>resolve</code> call, the held
+      answers, the segment record (<code>SegmentRecord</code>), the matchmaker register
+      (<code>register</code>) and the codec.</li>
+    <li><a href={`${REPO}/tree/main/crates/sim/journal-sim`}><code>journal-sim</code></a>: seeded
+      walks of the fold over a chain of segments and of the register across handovers, oracles with
+      no shared code, and the trace check of each walk against <code>journal-state/FoldTrace.tla</code>
+      and <code>segment-records/RegisterTrace.tla</code>.</li>
+    <li>Not built yet: the journal roles (#1326), the controller
+      (<code>paros-journal-control</code>, #1328), the driver (<code>paros-journal-io</code>, #1329),
+      the moonpool adapter (#1330) and the client (#1331). The steps are <a href={`${J}/08-build-steps.md`}>§J8</a>.</li>
+  </ul>
+
+  <h2 id="pages">The pages</h2>
+  <ol class="index-list">
+    <li><a href={url("journal/calls/")}>The calls</a><span class="desc">Write, Read, Truncate, SetLeader; exactly-once with one writer, the answers, Resolve.</span></li>
+    <li><a href={url("journal/segments/")}>Segments</a><span class="desc">A reshape opens a segment, a leader seals the old one, the boundary state carries the journal on.</span></li>
+    <li><a href={url("journal/matchmakers/")}>Matchmakers and the register</a><span class="desc">One compare-and-set register per journal, and why a step acts only on a write seen done.</span></li>
+    <li><a href={url("journal/quorums-and-failures/")}>Quorums and failures</a><span class="desc">What waits for whom, the counts of F + 1, damage and repair, zones.</span></li>
+    <li><a href={url("journal/controller/")}>The controller</a><span class="desc">The fenced reshape, the health of a journal, hold and alert.</span></li>
   </ol>
-  <p>The target design is in <a href={`${REPO}/tree/main/docs/architecture`}><code>docs/architecture/</code></a>.</p>
-
-  <h2 id="before">The version before the rewrite</h2>
-  <p>The whole first version stays at the git tag
-  <a href={TAG}><code>v0.2.0-alpha.1</code></a>: <code>parosd</code>, <code>parosctl</code>,
-  <code>paros-bench</code>, the Docker Compose demo and the simulation. To run it:</p>
-  <pre><code>git clone https://github.com/PierreZ/paros && cd paros
-git checkout v0.2.0-alpha.1
-docker compose up -d --build
-docker compose run --rm init
-docker compose run --rm parosctl tenant create acme</code></pre>
-  <p>Its <code>DEMO.md</code> is the walk-through. A recap of each removed crate is in
-  <a href={`${REPO}/tree/main/docs/archive/v0.2.0-alpha.1`}><code>docs/archive/v0.2.0-alpha.1/</code></a>.</p>
 </Doc>

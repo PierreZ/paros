@@ -1,12 +1,12 @@
 ---
 // A reading page: the title block, the text, and the pages of its section.
 import Base from "./Base.astro";
-import { url } from "../nav";
+import { REPO, url } from "../nav";
 import { LESSONS, check, lessonsOf } from "../course";
 
 interface Sibling { title: string; path: string }
 interface Props {
-  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string; trace?: string; widget?: string; lab?: string };
+  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string; trace?: string; widget?: string; lab?: string; status?: string };
   /** A live widget of public/engineering.js on this page (#812). */
   widget?: boolean;
   title?: string;
@@ -14,6 +14,8 @@ interface Props {
   kicker?: string;
   section?: string;
   siblings?: Sibling[];
+  /** A status callout under the title (`STATUS` below). */
+  status?: string;
 }
 const fm = Astro.props.frontmatter ?? {};
 const title = Astro.props.title ?? fm.title;
@@ -29,8 +31,21 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "Quorums", path: "paxos/quorums/" },
     { title: "Concepts", path: "paxos/concepts/" },
   ],
+  "consensus/": [
+    { title: "paros-consensus", path: "consensus/" },
+    { title: "The driver loop", path: "consensus/driver/" },
+    { title: "The deployments", path: "consensus/deployments/" },
+    { title: "How it is checked", path: "consensus/proof/" },
+  ],
+  "journal/": [
+    { title: "The journal", path: "journal/" },
+    { title: "The calls", path: "journal/calls/" },
+    { title: "Segments", path: "journal/segments/" },
+    { title: "Matchmakers and the register", path: "journal/matchmakers/" },
+    { title: "Quorums and failures", path: "journal/quorums-and-failures/" },
+    { title: "The controller", path: "journal/controller/" },
+  ],
   "engineering/": [
-    { title: "The sans-IO core", path: "engineering/sans-io/" },
     { title: "Grid quorums", path: "engineering/grid-quorums/" },
   ],
 };
@@ -54,6 +69,20 @@ const course = fm.trace ? lessonsOf(fm.trace).map((l) => {
       href: url(`paxos/${next.page}/`) + `#run=${next.runs[0]}&${story(next.page) ? "beat" : "step"}=0` },
   };
 }) : [];
+// A page of a design that is checked but not built yet says so at the top (#1349).
+const STATUS: Record<string, { tag: string; html: string }> = {
+  journal: {
+    tag: "design · checked in TLA+",
+    html: `The journal v1 is designed, and each of its rules has a TLA+ model. Its code is being
+      built (<a href="${REPO}/issues/1323">#1323</a>): the pure journal core
+      (<code>paros-journal</code>) exists, and the roles, the register and the driver do not exist
+      yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
+      this page explains them and links each section.`,
+  },
+};
+const statusName = Astro.props.status ?? fm.status;
+const status = statusName ? STATUS[statusName] : undefined;
+if (statusName && !status) throw new Error(`no status "${statusName}" in Doc.astro`);
 const widget = Astro.props.widget ?? Boolean(fm.widget);
 const siblings = Astro.props.siblings ?? PAGES[section] ?? [];
 const here = Astro.url.pathname;
@@ -69,6 +98,7 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
       {description && <p class="lede">{description}</p>}
     </div>
     <article class="prose">
+      {status && <div class="callout status" data-tag={status.tag}><p set:html={status.html} /></div>}
       <slot />
     </article>
     {trace && <script is:inline type="application/json" id="trace" data-wasm={url("paxos/wasm/paros_paxos.js")} set:html={JSON.stringify(trace).replace(/</g, "\\u003c")} />}

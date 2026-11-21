@@ -1,0 +1,151 @@
+# Release-plz configuration.
+#
+# Three crates are public: `paros-consensus` (the sans-IO Paxos core, a library
+# for everyone, docs/architecture/04-roles.md §4.3), `paros-journal` (the pure
+# journal core) and `paros` (the facade a program depends on). They share one version (`version_group`), one tag and
+# one GitHub release, `v{{ version }}`, on the `paros` package.
+#
+# Nothing publishes by itself. A push to `main` only opens or updates the
+# release pull request (the `release-pr` job of
+# `.github/workflows/release-plz.yml`). Pierre merges it when he wants a
+# release, then starts the `release` job by hand (workflow_dispatch). That job
+# publishes every public crate whose version is not on crates.io yet, so
+# `release_always` is true: the trigger is the decision, not the commit.
+[workspace]
+release_always = true
+
+# The GitHub release starts as a draft; Pierre publishes it.
+git_release_enable = true
+git_release_draft = true
+
+pr_draft = true
+pr_labels = ["release"]
+
+changelog_update = true
+dependencies_update = true
+
+# Pre-1.0, the API is unstable.
+semver_check = false
+
+# A `feat` commit bumps the minor version, also below 1.0.
+features_always_increment_minor = true
+
+# The changelog of `paros` is the repository's CHANGELOG.md and takes the
+# commits of `paros-consensus` and `paros-journal` too. release-plz creates every changelog; none
+# is written by hand.
+[[package]]
+name = "paros"
+version_group = "paros"
+changelog_path = "CHANGELOG.md"
+changelog_include = ["paros-consensus", "paros-journal"]
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+
+# release-plz writes crates/lib/paros-consensus/CHANGELOG.md at the first release.
+[[package]]
+name = "paros-consensus"
+version_group = "paros"
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "paros-journal"
+version_group = "paros"
+git_tag_enable = false
+git_release_enable = false
+
+# Test harnesses and the site's wasm tool: never released.
+[[package]]
+name = "consensus-sim"
+release = false
+publish = false
+
+[[package]]
+name = "journal-sim"
+release = false
+publish = false
+
+[[package]]
+name = "paros-wasm"
+release = false
+publish = false
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
+
+body = """
+{% if version -%}
+    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+    ## [unreleased]
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}**{{commit.scope}}**: {% endif %}{{ commit.message | upper_first }}
+    {%- endfor %}
+{% endfor %}\n
+"""
+
+[[changelog.commit_parsers]]
+message = "^feat"
+group = "<!-- 0 -->🚀 Features"
+
+[[changelog.commit_parsers]]
+message = "^fix"
+group = "<!-- 1 -->🐛 Bug Fixes"
+
+[[changelog.commit_parsers]]
+message = "^doc"
+group = "<!-- 2 -->📚 Documentation"
+
+[[changelog.commit_parsers]]
+message = "^perf"
+group = "<!-- 3 -->⚡ Performance"
+
+[[changelog.commit_parsers]]
+message = "^refactor"
+group = "<!-- 4 -->🚜 Refactor"
+
+[[changelog.commit_parsers]]
+message = "^style"
+group = "<!-- 5 -->🎨 Styling"
+
+[[changelog.commit_parsers]]
+message = "^test"
+group = "<!-- 6 -->🧪 Testing"
+
+# The prefixes the project uses beside the conventional ones.
+[[changelog.commit_parsers]]
+message = "^(core|paros-consensus|consensus|matchmaker)"
+group = "<!-- 0 -->🚀 Features"
+
+[[changelog.commit_parsers]]
+message = "^(sim|consensus-sim|harness)"
+group = "<!-- 6 -->🧪 Testing"
+
+[[changelog.commit_parsers]]
+message = "^chore\\(release\\)"
+skip = true
+
+[[changelog.commit_parsers]]
+message = "^chore\\(deps.*\\)"
+skip = true
+
+[[changelog.commit_parsers]]
+message = "^chore|^ci"
+group = "<!-- 7 -->⚙️ Miscellaneous Tasks"
+
+[[changelog.commit_parsers]]
+message = ".*"
+group = "<!-- 8 -->📦 Other"
