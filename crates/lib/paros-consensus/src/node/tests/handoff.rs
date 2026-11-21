@@ -198,6 +198,60 @@ fn a_stale_accept_of_the_predecessor_does_not_depose_the_successor() {
 }
 
 #[test]
+fn a_late_beat_of_the_predecessor_does_not_depose_the_successor() {
+    // The twin of the stale `Accept` above, for a beat: the predecessor beat
+    // before it relinquished, and the beat reaches the successor after the
+    // install. It carries the inherited ballot, at the successor's promise,
+    // from a node that is not the successor: a follower's rule would follow
+    // it, but nobody else leads that ballot now.
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    nodes[0].tick();
+    let late: Vec<(NodeId, Message)> = drain(&mut nodes[0])
+        .into_iter()
+        .filter(|(to, m)| *to == NodeId(1) && matches!(m, Message::Heartbeat { .. }))
+        .collect();
+    assert_eq!(late.len(), 1, "one beat to the successor is in flight");
+
+    nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |_, m| {
+        matches!(m, Message::Relinquish { .. })
+    });
+    assert!(nodes[1].is_leader(), "the successor holds the authority");
+    let inherited = nodes[1].ballot();
+
+    deliver_all(&mut nodes, late);
+    assert!(
+        nodes[1].is_leader(),
+        "a late beat at the inherited ballot does not depose the successor"
+    );
+    assert_eq!(nodes[1].ballot(), inherited);
+    assert_eq!(
+        nodes[1].leader(),
+        Some(NodeId(1)),
+        "the hint stays on itself"
+    );
+    assert!(
+        drain(&mut nodes[1])
+            .iter()
+            .all(|(_, m)| !matches!(m, Message::HeartbeatAck { .. })),
+        "a leader acks no beat at its own ballot"
+    );
+    // The same beat still makes a follower follow: node 2 adopts the leader
+    // it names.
+    nodes[2].step(Message::Heartbeat {
+        from: NodeId(1),
+        ballot: inherited,
+        commit: None,
+        config: None,
+        fence: None,
+        gc_floor: None,
+    });
+    assert_eq!(nodes[2].leader(), Some(NodeId(1)));
+}
+
+#[test]
 fn an_installed_authority_is_never_handed_on_again() {
     // One hop only. A successor holds a ballot it did not mint, and a replayed
     // copy of the *original* payload could otherwise re-install that ballot at a
@@ -372,7 +426,9 @@ fn a_malformed_tail_is_refused_whole() {
     }
     assert_eq!(nodes[1].handoff_counters().rejected_shape, 3);
 
-    // A payload that names its own receiver as the giver is no transfer.
+    // A payload that names its own receiver as the giver is no transfer: it
+    // is a message in the receiver's own name, which `step` drops before any
+    // handler sees it.
     let looped = tamper(&good, |m| {
         if let Message::Relinquish { from, .. } = m {
             *from = NodeId(1);
@@ -380,7 +436,7 @@ fn a_malformed_tail_is_refused_whole() {
     });
     nodes[1].step(looped);
     assert!(!nodes[1].is_leader());
-    assert_eq!(nodes[1].handoff_counters().rejected_target, 1);
+    assert_eq!(nodes[1].handoff_counters().rejected_target, 0);
 
     // An authority minted by a node outside the configured membership is not an
     // authority at all — the same membership boundary `on_accept` draws.
@@ -391,7 +447,7 @@ fn a_malformed_tail_is_refused_whole() {
     });
     nodes[1].step(forged);
     assert!(!nodes[1].is_leader());
-    assert_eq!(nodes[1].handoff_counters().rejected_target, 2);
+    assert_eq!(nodes[1].handoff_counters().rejected_target, 1);
 
     // The untampered payload still installs, so the guards above rejected the
     // damage and not the mechanism.

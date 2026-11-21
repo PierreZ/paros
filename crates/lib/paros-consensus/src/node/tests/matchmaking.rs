@@ -633,9 +633,10 @@ fn gap_fill_waits_for_every_configuration() {
 /// configuration". And a spare accepts from the moment it is prepared.
 #[test]
 fn a_removed_member_still_answers_phase_one_for_a_non_member_leader() {
-    // Node 3 is a spare; nodes 0..=2 are the bootstrap configuration.
+    // Nodes 3 and 4 are spares; nodes 0..=2 are the bootstrap
+    // configuration. Node 3 campaigns with a configuration of its own.
     let mut old = deployed_node(1, &[0, 1, 2], &[0, 1, 2, 3], 1);
-    let mut spare = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    let mut spare = deployed_node(4, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
     let leader_ballot = ballot(5, 3);
     let prepare = Message::Prepare {
         reply_to: NodeId(3),

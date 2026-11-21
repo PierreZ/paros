@@ -655,6 +655,80 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         repaired
     }
 
+    /// Learn that `command` is chosen at `slot` by `ballot` (the choosing
+    /// ballot a `Commit`, a catch-up or a handoff carried) and hold it as the
+    /// record of the slot. Returns the ballot of the record held after the
+    /// learn.
+    ///
+    /// The recorded ballot of a slot never falls: Phase 1 and the CTRL
+    /// thresholds read each report as the highest ballot this acceptor
+    /// accepted (#529 (sets oracles after PR #515)). So:
+    ///
+    /// - A held record of `command` at `ballot` or above stays, and nothing
+    ///   is written.
+    /// - A faulty entry at a ballot above `ballot` is repaired at its own
+    ///   ballot: the acceptor voted there, and a vote above the choosing
+    ///   ballot carries the chosen value, so the repaired record is the vote
+    ///   it lost. Its ballot is not forgotten.
+    /// - Any other record is replaced by `command` at `ballot`.
+    ///
+    /// The promise is raised to the recorded ballot first, so the batch
+    /// carries the promise ahead of the record (the boot reads "the durable
+    /// promise dominates every accepted record").
+    ///
+    /// # Panics
+    ///
+    /// If `slot` is below the floor (the caller skips a slot it truncated),
+    /// or if a held record above `ballot` carries another command: two
+    /// values for one slot, a detected safety violation.
+    pub fn learn_chosen<W: From<AcceptorWrite<V>>>(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        command: &V,
+        writes: &mut Vec<W>,
+    ) -> Ballot {
+        assert!(
+            !self.records.below_floor(slot),
+            "a learned slot lies at or above the compaction floor"
+        );
+        let lost = self.faulty.get(slot).copied();
+        let at = lost.map_or(ballot, |faulty| faulty.max(ballot));
+        assert!(
+            at >= ballot,
+            "a learn records at the choosing ballot or above"
+        );
+        self.set_promise(self.promised.max(at), writes);
+        let keeps = self
+            .records
+            .get(slot)
+            .is_some_and(|(held, recorded)| recorded == command && *held >= at);
+        if !keeps {
+            self.record_accepted(slot, at, command.clone(), writes);
+        }
+        let (held, recorded) = self
+            .records
+            .get(slot)
+            .expect("a learned slot holds its record");
+        // Postconditions: the chosen command is held, at the recorded
+        // ballot or above, under the promise, and the slot is no longer
+        // faulty.
+        assert!(
+            recorded == command,
+            "a learned slot holds the chosen command"
+        );
+        assert!(*held >= at, "a learn never lowers a recorded ballot");
+        assert!(
+            *held <= self.promised,
+            "the promise covers a learned record"
+        );
+        assert!(
+            !self.faulty.contains_key(slot),
+            "a learned slot is no longer faulty"
+        );
+        *held
+    }
+
     /// The scrub's in-place repair (#362 (background scrubbing)): write the
     /// record this acceptor holds at `slot` again, at the same ballot and
     /// value, because its durable copy failed its checksum when a scrub read

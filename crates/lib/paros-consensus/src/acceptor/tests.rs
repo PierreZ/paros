@@ -152,3 +152,95 @@ fn a_slot_both_readable_and_faulty_breaks_the_check() {
     faulty.insert(Slot(1), ballot(1));
     let _ = Acceptor::new(ballot(1), records, Slot(0), faulty);
 }
+
+/// A learn holds the chosen command and never lowers a recorded ballot: a
+/// held record of the command at or above the choosing ballot stays with no
+/// write, a lower or foreign record is replaced at the choosing ballot, and
+/// the promise rises ahead of the record in the same batch.
+#[test]
+fn a_learn_keeps_a_higher_record_and_replaces_a_lower_one() {
+    let mut records = BTreeMap::new();
+    records.insert(Slot(1), (ballot(5), command(1)));
+    records.insert(Slot(2), (ballot(1), command(9)));
+    let mut acceptor = Acceptor::new(ballot(5), records, Slot(0), BTreeMap::new());
+    let mut writes: Vec<WriteOp> = Vec::new();
+
+    // Chosen at 3, held at 5: the record stays at 5, nothing is written.
+    assert_eq!(
+        acceptor.learn_chosen(Slot(1), ballot(3), &command(1), &mut writes),
+        ballot(5)
+    );
+    assert!(writes.is_empty(), "a held higher record writes nothing");
+
+    // Chosen at 4 with another command than the stale vote at 1: replaced.
+    assert_eq!(
+        acceptor.learn_chosen(Slot(2), ballot(4), &command(2), &mut writes),
+        ballot(4)
+    );
+    assert_eq!(acceptor.record(Slot(2)), Some(&(ballot(4), command(2))));
+    assert!(
+        matches!(
+            writes.as_slice(),
+            [WriteOp::Acceptor(AcceptorWrite::AppendAccepted { slot, ballot: b, .. })]
+                if *slot == Slot(2) && *b == ballot(4)
+        ),
+        "one record, no promise move under the promise"
+    );
+    writes.clear();
+
+    // Chosen above the promise: the promise rises first, then the record.
+    assert_eq!(
+        acceptor.learn_chosen(Slot(3), ballot(7), &command(3), &mut writes),
+        ballot(7)
+    );
+    assert_eq!(acceptor.promised(), ballot(7));
+    assert!(
+        matches!(
+            writes.as_slice(),
+            [
+                WriteOp::Acceptor(AcceptorWrite::SetPromise(p)),
+                WriteOp::Acceptor(AcceptorWrite::AppendAccepted { slot, .. }),
+            ] if *p == ballot(7) && *slot == Slot(3)
+        ),
+        "the promise rides ahead of the record"
+    );
+}
+
+/// A faulty entry above the choosing ballot is repaired at its own ballot:
+/// the acceptor voted there, and a vote above the choosing ballot carries
+/// the chosen command. Repairing it at the choosing ballot would hide the
+/// vote from every later Phase 1 and CTRL threshold.
+#[test]
+fn a_learn_repairs_a_faulty_entry_at_its_own_ballot() {
+    let mut faulty = BTreeMap::new();
+    faulty.insert(Slot(1), ballot(6));
+    faulty.insert(Slot(2), ballot(2));
+    let mut acceptor = Acceptor::new(ballot(6), BTreeMap::new(), Slot(0), faulty);
+    let mut writes: Vec<WriteOp> = Vec::new();
+
+    assert_eq!(
+        acceptor.learn_chosen(Slot(1), ballot(3), &command(1), &mut writes),
+        ballot(6),
+        "the lost vote's ballot is kept"
+    );
+    assert_eq!(acceptor.record(Slot(1)), Some(&(ballot(6), command(1))));
+    // Below the choosing ballot, the faulty vote gives way to it.
+    assert_eq!(
+        acceptor.learn_chosen(Slot(2), ballot(4), &command(2), &mut writes),
+        ballot(4)
+    );
+    assert!(acceptor.faulty().is_empty(), "both faulty entries healed");
+    assert_eq!(acceptor.faulty_repaired(), 2);
+    assert_eq!(acceptor.promised(), ballot(6), "no promise moved");
+}
+
+/// A learn below the floor is the caller's error: a truncated slot is
+/// never learned again.
+#[test]
+#[should_panic(expected = "a learned slot lies at or above the compaction floor")]
+fn a_learn_below_the_floor_is_a_programmer_error() {
+    let mut acceptor: Acceptor<Command> =
+        Acceptor::new(ballot(1), BTreeMap::new(), Slot(2), BTreeMap::new());
+    let mut writes: Vec<WriteOp> = Vec::new();
+    let _ = acceptor.learn_chosen(Slot(1), ballot(1), &command(1), &mut writes);
+}

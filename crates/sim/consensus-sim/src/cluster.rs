@@ -456,6 +456,19 @@ impl Model for Cluster {
         parties
     }
 
+    /// A steer: a node whose disk holds writes that no fsync covers yet is
+    /// three times as likely to crash as another party, so a crash that
+    /// loses them ([`reach::LOST_UNSYNCED`]) does not hang on the schedule.
+    /// Such a window is short (the next synced batch closes it), and a
+    /// crash in it is a legal fault: the contract lets a relaxed batch wait
+    /// for the next fsync.
+    fn node_weight(&self, party: &Party) -> u32 {
+        match *party {
+            Party::Node(id) if self.node(id).live.is_some() && self.node(id).unsynced() > 0 => 3,
+            _ => 1,
+        }
+    }
+
     fn is_up(&self, party: &Party) -> bool {
         match *party {
             Party::Node(id) => self.node(id).live.is_some(),

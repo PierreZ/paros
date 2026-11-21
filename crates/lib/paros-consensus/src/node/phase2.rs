@@ -265,7 +265,16 @@ impl ColocatedNode {
             return false;
         }
         self.acceptor.set_promise(ballot, &mut self.pending_writes);
-        self.record_accepted(slot, ballot, command.clone());
+        // A round taken back from a proxy or moved to another column is
+        // recorded already: the same record is not written again (each
+        // write is a `MustSync` the driver would fsync for nothing).
+        let held = self
+            .acceptor
+            .record(slot)
+            .is_some_and(|(b, c)| *b == ballot && c == command);
+        if !held {
+            self.record_accepted(slot, ballot, command.clone());
+        }
         // The allocator's durable trace: the promise covers the round exactly
         // and the record carries its command.
         assert!(

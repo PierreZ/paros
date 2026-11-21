@@ -594,6 +594,40 @@ pub enum Message {
 }
 
 impl Message {
+    /// The party that sent this message: the `from` of a reply, the
+    /// `reply_to` of a request (a `Prepare`, an `Accept` or a `PreRead`
+    /// names its sender as the place its answer goes). A delegated `Accept`
+    /// and a proxy's `Commit` name a proxy; every other message names a
+    /// node.
+    ///
+    /// ```
+    /// use paros_consensus::contract::Party;
+    /// use paros_consensus::{Message, NodeId};
+    ///
+    /// let message = Message::PreRead { reply_to: NodeId(1), ctx: 7 };
+    /// assert_eq!(message.sender(), Party::Node(NodeId(1)));
+    /// ```
+    #[must_use]
+    pub fn sender(&self) -> Party {
+        match self {
+            Message::Prepare { reply_to, .. } | Message::PreRead { reply_to, .. } => {
+                Party::Node(*reply_to)
+            }
+            Message::Accept { reply_to, .. } => *reply_to,
+            Message::Commit { from, .. } => *from,
+            Message::Promise { from, .. }
+            | Message::Accepted { from, .. }
+            | Message::Nack { from, .. }
+            | Message::CatchUpRequest { from, .. }
+            | Message::CatchUpResponse { from, .. }
+            | Message::TrimmedTo { from, .. }
+            | Message::Relinquish { from, .. }
+            | Message::Heartbeat { from, .. }
+            | Message::PreReadAck { from, .. }
+            | Message::HeartbeatAck { from, .. } => Party::Node(*from),
+        }
+    }
+
     /// The name of the variant, for a trace, a log line or a metric label:
     /// `"Prepare"`, `"Accept"`, `"Commit"`, and so on. One name for each
     /// variant, and the name never changes with the fields.

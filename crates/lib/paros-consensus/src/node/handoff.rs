@@ -570,7 +570,10 @@ impl ColocatedNode {
         // ids are pooled members — the same membership trust boundary
         // `on_accept` already draws around an incoming ballot — and that the
         // successor is exactly this node.
-        if to != me || from == me || !self.in_pool(from) || !self.in_pool(ballot.node) {
+        // A payload in this node's own name never reaches here: `step` drops
+        // every message whose sender is this node.
+        assert!(from != me, "a node never steps its own Relinquish");
+        if to != me || !self.in_pool(from) || !self.in_pool(ballot.node) {
             self.handoff.rejected_target = self.handoff.rejected_target.saturating_add(1);
             return;
         }

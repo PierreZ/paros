@@ -262,9 +262,9 @@ fn probe_promise_pages_are_cursor_checked() {
         p.probe()
             .expect("the probe opens for the blocked slot")
             .requery(NodeId(0))
-            .from_slot,
-        Slot(0),
-        "the probe inherits the election's first slot"
+            .to,
+        vec![(NodeId(2), Slot(0))],
+        "a straggler that sent no page is asked from the election's first slot"
     );
     // A full first page from the straggler leaves it mid-suffix.
     let full: BTreeMap<Slot, (Ballot, Command)> = (0..PROMISE_BATCH as u64)
@@ -283,8 +283,8 @@ fn probe_promise_pages_are_cursor_checked() {
     );
     assert_eq!(
         p.probe().expect("still open").requery(NodeId(0)).to,
-        vec![NodeId(2)],
-        "a straggler mid-suffix is still a straggler"
+        vec![(NodeId(2), Slot(PROMISE_BATCH as u64))],
+        "a straggler mid-suffix is still a straggler, asked for its next page"
     );
     assert_eq!(
         fold_empty_probe(&mut p, 2, ballot(1, 0), Slot(3)),
@@ -332,7 +332,7 @@ fn faulty_report_blocks_until_the_probe_decides() {
         "a faulty report with no have blocks"
     );
     let probe = p.probe().expect("the probe opens for the blocked slot");
-    assert_eq!(probe.requery(NodeId(0)).to, vec![NodeId(2)]);
+    assert_eq!(probe.requery(NodeId(0)).to, vec![(NodeId(2), Slot(0))]);
     assert!(p.resolve_probe().is_empty(), "Case 3: wait");
     let mut have = BTreeMap::new();
     have.insert(Slot(0), (ballot(0, 2), cmd(7)));
@@ -481,7 +481,7 @@ fn a_repair_probe_queries_at_its_leadership_ballot() {
     let probe = p.probe().expect("the probe is open");
     assert_eq!(probe.ballot(), ballot(1, 0));
     assert_eq!(probe.requery(NodeId(0)).ballot, probe.ballot());
-    assert_eq!(probe.requery(NodeId(0)).to, vec![NodeId(4)]);
+    assert_eq!(probe.requery(NodeId(0)).to, vec![(NodeId(4), Slot(0))]);
 }
 
 /// A straggler's faulty report counts against its slot. That slot stays
@@ -754,4 +754,25 @@ fn a_probe_tally_over_an_unblocked_slot_breaks_the_check() {
         .best_have
         .insert(Slot(9), (ballot(0, 1), cmd(9)));
     p.assert_invariants();
+}
+
+/// The recovery pump hands a blocked slot out as `Blocked`, never as a
+/// re-proposal or a fill: slot 0 has a reported command and slot 1 none,
+/// and both are the open repair probe's to resolve.
+#[test]
+fn the_recovery_pump_hands_out_a_blocked_slot_as_blocked() {
+    let mut p: Proposer<NodeId, Command> = Proposer::new();
+    let recovered: BTreeMap<Slot, Command> = [(Slot(0), cmd(5))].into_iter().collect();
+    let blocked: BTreeSet<Slot> = [Slot(0), Slot(1)].into_iter().collect();
+    p.open_recovery(
+        recovered,
+        blocked,
+        Slot(0),
+        Slot(3),
+        RecoveryPolicy::Phase1Backed,
+    );
+    assert_eq!(p.recovery_next(), Some((Slot(0), RecoveryStep::Blocked)));
+    assert_eq!(p.recovery_next(), Some((Slot(1), RecoveryStep::Blocked)));
+    assert_eq!(p.recovery_next(), Some((Slot(2), RecoveryStep::Fill)));
+    assert_eq!(p.recovery_next(), None);
 }

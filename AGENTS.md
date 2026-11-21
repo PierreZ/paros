@@ -49,7 +49,7 @@ flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain
 (`specs/tla/multi-paxos/`: Phase 1 recovery, the allocator frontier, the `Noop` gap fill,
 commit and catch-up, restarts; #1185 (rework 1.14)), the cooperative leader handoff
 (`specs/tla/leader-handoff/`: one hop, the frontier guard, the durable frontier, the pending
-rounds proposed again, and the beat guard that rework 2.7 adds; #1187 (rework 2.8)), grid quorums
+rounds proposed again, and the beat guard of `on_heartbeat` (#902 (node handler gaps)); #1187 (rework 2.8)), grid quorums
 (`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the

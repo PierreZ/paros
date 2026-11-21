@@ -80,9 +80,25 @@ impl ColocatedNode {
         if !self.in_pool(from) {
             return;
         }
+        // A beat at the ballot this node leads comes from the node that
+        // handed the ballot on: the predecessor queued it before it
+        // relinquished (one ballot, one leader at a time, and only a handoff
+        // moves a ballot to another node). It deposes nobody: the leader
+        // keeps its role, its hint and its `CheckQuorum` window, as
+        // `on_accept` keeps them for a stale `Accept` at the same ballot
+        // (`specs/tla/leader-handoff/`, `BeatGuard`; the control
+        // `live_late_beat` loses liveness without it).
+        let late_beat = self.role == NodeRole::Leader && ballot == self.ballot;
+        if late_beat {
+            assert!(from != me, "a node never steps a beat sent in its own name");
+            assert!(
+                self.acceptor.promised() >= ballot,
+                "a leader's promise covers its ballot"
+            );
+        }
         // Follower receiving the leader's beat: adopt its ballot / leadership only
         // if it is at or above our promise.
-        if ballot >= self.acceptor.promised() {
+        if !late_beat && ballot >= self.acceptor.promised() {
             if self.role == NodeRole::Follower {
                 self.leader = Some(from);
                 self.election_elapsed = 0;

@@ -214,7 +214,13 @@ fn a_stalled_delegation_is_taken_back_and_decided_colocated() {
     nodes[0].take_back_delegated(2);
     assert!(nodes[0].delegated_rounds().is_empty(), "taken back");
     assert!(nodes[0].proposer().rounds().contains_key(&Slot(0)));
-    let out = raw(&mut nodes[0]);
+    let ready = nodes[0].ready();
+    assert!(
+        ready.writes().is_empty(),
+        "the round's record is held already: a take-back writes it no second time"
+    );
+    let out = ready.messages().to_vec();
+    ready.advance();
     assert!(
         matches!(
             out.as_slice(),

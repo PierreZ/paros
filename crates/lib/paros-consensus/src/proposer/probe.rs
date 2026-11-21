@@ -137,12 +137,15 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
         &self.prior
     }
 
-    /// The `Prepare` the leader re-sends this tick (#343): at the
-    /// leadership's ballot, from the first slot the original Phase 1 covered
-    /// (the cursor the tally expects a first page at), to the stragglers —
-    /// the members of the prior configurations the election covered (the
-    /// Phase-1 addressee union) that have not answered their full suffix.
-    /// `me` is never a straggler.
+    /// The `Prepare`s the leader re-sends this tick (#343): at the
+    /// leadership's ballot, to the stragglers — the members of the prior
+    /// configurations the election covered (the Phase-1 addressee union)
+    /// that have not answered their full suffix. Each is asked from the
+    /// cursor the tally expects of it: the first slot the original Phase 1
+    /// covered for a straggler that sent no page yet, and its next page for
+    /// one that is mid-suffix. Asking a mid-suffix straggler from the first
+    /// slot again would draw a page the tally refuses, on every tick (the
+    /// shape of #428 (paging livelock)). `me` is never a straggler.
     ///
     /// # Panics
     ///
@@ -150,11 +153,28 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn requery(&self, me: Id) -> RepairQuery<Id> {
-        let to: Vec<Id> = member_union(&self.prior)
+        let to: Vec<(Id, Slot)> = member_union(&self.prior)
             .into_iter()
             .filter(|p| *p != me && !self.promises.answered.contains(p))
+            .map(|p| {
+                let cursor = self
+                    .promises
+                    .promise_next
+                    .get(&p)
+                    .copied()
+                    .unwrap_or(self.promises.from_slot);
+                (p, cursor)
+            })
             .collect();
-        assert!(!to.contains(&me), "the leader is never its own straggler");
+        assert!(
+            to.iter().all(|(p, _)| *p != me),
+            "the leader is never its own straggler"
+        );
+        assert!(
+            to.iter()
+                .all(|(_, cursor)| *cursor >= self.promises.from_slot),
+            "a straggler is asked from the first slot or past it"
+        );
         assert!(
             self.blocked
                 .first()
@@ -163,7 +183,6 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
         );
         RepairQuery {
             ballot: self.promises.ballot,
-            from_slot: self.promises.from_slot,
             to,
         }
     }
@@ -175,12 +194,10 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
 pub struct RepairQuery<Id> {
     /// The leadership ballot the probe queries at.
     pub ballot: Ballot,
-    /// The first slot the original Phase 1 covered: the cursor a straggler's
-    /// first page must carry.
-    pub from_slot: Slot,
-    /// The stragglers: every member of the prior configurations but the
-    /// leader that has not answered its full suffix.
-    pub to: Vec<Id>,
+    /// The stragglers, each with the slot its next page starts at: every
+    /// member of the prior configurations but the leader that has not
+    /// answered its full suffix.
+    pub to: Vec<(Id, Slot)>,
 }
 
 impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
