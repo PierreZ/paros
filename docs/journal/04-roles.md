@@ -22,7 +22,7 @@ have, with no journal concept in the core (§J4.3).
 | Acceptor | promise, votes | The grid of one segment. Default: one column of three (`F = 1`), a plain majority. Else the partitioned grid, `rows = 2F + 1`, `acks = F + 1` | `acceptor.rs`, `membership/` | §J5.1 (#1257) |
 | Replica | the chosen log of its segments | Applies in slot order, folds the journal state, serves reads (leaderless), writes the boundary state of a sealed segment. One replica set for each segment | `replica.rs`, `replica_node.rs`, `quorum_read.rs` | §J2.5, §J3.1 (#1271) |
 | Matchmaker | the configurations of the journal | One set of `2F + 1` for each journal, majority quorums; the set hands over by generations | `matchmaker.rs`, `matchmaker/reconfigurer.rs` | architecture §4.1, `handover/` (#1097) |
-| Matchmaker register (optional role) | the segment records and the controller term | One compare-and-set register for each journal, beside the paper's registration matchmaker | **Open**: where it lives (#1325) | §J3.4 (#1275, #1315) |
+| Matchmaker register (optional role) | the segment records and the controller term | One compare-and-set register for each journal, beside the paper's registration matchmaker | `paros-journal` (`register`), by composition (#1325) | §J3.4 (#1275, #1315) |
 | Grid controller | none (the term is in the register) | Elected by a term in the register; runs on stateless machines; asks, never decides safety. v1: heal and scrub | none | §J6 (#1259, #1260) |
 
 **The default deployment** is three machines, each with every role in one process (Pierre, in
@@ -172,15 +172,16 @@ creates these crates, each in its own step. `paros-journal` and `journal-sim` ex
 
 | Crate | What it holds | Step |
 |---|---|---|
-| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the codec with a release number in every header (`codec`), the record headers (`command`); later the pure client (no network) | #1324 (paros-journal), #1331 (the pure journal client) |
+| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the matchmaker register and its handover (`register`), the codec with a release number in every header (`codec`), the record headers (`command`); later the pure client (no network) | #1324 (paros-journal), #1325 (the matchmaker register), #1331 (the pure journal client) |
 | `paros-journal-control` (`crates/lib/`) | The pure `decide` of the v1 controller and the controller role | #1328 (paros-journal-control) |
 | `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the `Host` inputs), the generic driver under the flight rule, many journals in one process, and the contract suites | #1329 (paros-journal-io) |
 | `paros-journal-moonpool` (`crates/lib/`) | The adapter of the `paros-journal-io` traits on moonpool providers: compio through moonpool's `CompioProviders`, no trait requires `Send` (Pierre, 2026-11-19) | #1330 (paros-journal-moonpool) |
-| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla` | #1327 (journal-sim) |
+| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla` | #1327 (journal-sim) |
 
 The journal roles that compose the core (segments, seal, reads, retire, truncate,
-re-replication) are #1326 (the journal roles); the matchmaker register is #1325 (the matchmaker register as an optional role). **Open**: the
-crate of each (#1326 and #1325 decide). The `ObjectStore` trait of the journal design waits
+re-replication) are #1326 (the journal roles). **Open**: their crate (#1326 decides). The
+matchmaker register is `paros_journal::register` (#1325 (the matchmaker register as an optional
+role), §J3.4). The `ObjectStore` trait of the journal design waits
 with offload (#1329 (paros-journal-io)). The `paros` facade re-exports each layer as a module (`AGENTS.md`).
 
 **The layering rule.** `paros-consensus` stays a library for everyone: plain Multi-Paxos,

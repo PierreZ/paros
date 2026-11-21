@@ -272,8 +272,8 @@ models in step with the v1 scope); Pierre agreed on 2026-11-20 to this page). Th
 segment, and the configuration that each ballot registers; it leaves out the controller term and
 the matchmaker set handover (`grid-controller/`, `segment-records/`). The types of the segment
 record, its states and the guard of each compare-and-set of this section are
-`paros_journal::segment` (#1324 (paros-journal)); the register that holds them is #1325 (the
-matchmaker register as an optional role).
+`paros_journal::segment` (#1324 (paros-journal)); the register that holds them is
+`paros_journal::register` (#1325 (the matchmaker register as an optional role)).
 
 #### What the register is
 
@@ -293,12 +293,42 @@ frozen member takes no write (`specs/tla/segment-records/`, controls `close_one`
 **The register is an optional role** (decided by Pierre on 2026-11-20, #1315, decision 1). The
 registration matchmaker of the Matchmaker Paxos paper stays in `paros-consensus` for the users
 of the library (architecture §4.3), with what it builds today. The register of the journal is a second
-role beside it, which a caller opts into. The handover (`matchmaker/reconfigurer.rs`) must then
-carry the value of this register too. **Open** (#1325 (the matchmaker register as an optional role) decides): whether the register role lives
-in `paros-consensus` as an optional role or in a journal crate that composes the handover of the
-core; and how the rework steps 2.3 to 2.5 (architecture §7), which turn the core's matchmaker into a
-register, change with this decision. It is a question of crates, not of safety: `journal-state/`
-(#1189) holds the register as one value and is the same either way.
+role beside it, which a caller opts into.
+
+**The register lives in `paros-journal`, by composition** (#1325 (the matchmaker register as an
+optional role)). `paros_journal::register` builds it from the core's types and roles, and the core
+does not change: `paros-consensus` gets no message, no `WriteOp` and no field for it, and its
+registration matchmaker and its handover (`matchmaker/reconfigurer.rs`) stay as they are. The
+module has five parts:
+
+- `value`: the value of the register (`RegisterValue`: the controller term and the records) and
+  each compare-and-set of the table below as a `Change` with its guard (`RegisterValue::apply`).
+  A refusal (`ChangeRefusal`) changes nothing.
+- `message`: the requests and the replies between an operation, a handover and the members. Every
+  message names the matchmaker generation.
+- `member`: one member of a set (`RegisterMember`). It raises its read generation on a read, takes
+  a write only if its read generation is at most the operation and its write is below it, freezes
+  on a stop, stores a proposed successor durably, and votes in the decree. The decree half is the
+  core's `Acceptor` on one slot. Each step gives the state to persist before its reply leaves.
+- `call`: one operation (`RegisterCall`). It reads at a majority of one generation, applies its
+  change to the highest write, and writes at that generation. It is done at a majority of writes.
+  A conflict, a refusal and a later set each end it.
+- `handover`: the handover of the set (`RegisterHandover`). It stops a majority of the old set,
+  builds the successor from the highest write and the highest read generation of that majority,
+  stores it at a majority of the next set, chooses it with the core's `Decree` over the old set,
+  then publishes it. The decree opens above the round on the caller's disk and above every
+  promise that the stop majority reported.
+
+A caller acts on a write that its own call saw done, never on a read (§J3.4 below, #1275). The
+rework steps 2.3 to 2.5 (architecture §7), which turn the core's matchmaker into a register, are
+not done by this module. They stay **Open** until they are restated, as architecture §7 says.
+`journal-state/` (#1189) holds the register as one value, and does not change.
+
+**The register has its walk and its trace check** (`crates/sim/journal-sim`, §J7.3). The walk
+runs operations of every change and handovers of the set, with crashes and restarts, and its
+oracles check that every later serving majority holds a done write (`CARRIED`) and that a step
+acts only on a value that every serving majority holds (`ACTED`). The traced walk is a trace of `specs/tla/segment-records/RegisterTrace.tla`,
+which extends `SegmentRecords.tla` and defines no step of its own.
 
 #### The records
 

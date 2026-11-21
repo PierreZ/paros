@@ -72,7 +72,7 @@ What it decided:
   judges with the compare of apply, once its fold covers the position (controls `resolve_uuid`,
   `resolve_early`).
 
-It leaves **Open** where the register role lives (#1325, §J3.4).
+The register role lives in `paros-journal`, by composition (#1325, §J3.4).
 
 ### J7.3 `journal-sim`
 
@@ -101,6 +101,21 @@ with its planted mutant. TLC checks each walk against `journal-state/FoldTrace.t
 extends `Journal.tla` and binds each event to the model's fold operators; the checked walks meet
 16 named rules, a planted `Below` in the segment in force is the control, and TLC refuses 24
 named edits of the recorded walks. The probes and the coverage gate come with the roles (#1326).
+
+**The walk of the register** (#1325 (the matchmaker register as an optional role),
+`src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
+of §J3.4 and handovers of the matchmaker set, with crashes that lose what a member did not
+persist and restarts from the disk. Two oracles judge it: `CARRIED` (each majority that serves the
+generation of a done write, or a later one, returns it or a later value, and the done values never
+move back) and `ACTED` (a retire of the old acceptors and a drop of a replica's copy act on a value
+that every serving majority holds). Each has its planted mutant: a
+member that replies before its write is durable (`SendBeforePersist`) and a caller that acts on
+a read (`ActOnRead`). The walk has two shapes. The wide shape runs three callers, two handovers
+and every change. The traced shape is small enough for TLC: TLC checks each of its walks against
+`segment-records/RegisterTrace.tla`, which extends `SegmentRecords.tla` and binds each event to
+an action of the model. The checked walks meet 9 named rules, a forged `Bootstrapped` reply is
+the control (the oracles pass it, TLC refuses the decree before every bootstrap), and TLC refuses
+23 named edits of the recorded walks.
 
 ### J7.4 The whole journal under moonpool-sim
 

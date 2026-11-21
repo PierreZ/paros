@@ -1,5 +1,6 @@
 # cargo-mutants over paros-journal, the second pass (`scripts/mutants.sh
-# --journal`): the trace checks of journal-sim (`tests/traces.rs`), only on
+# --journal`): the trace checks of journal-sim (`tests/traces.rs` and
+# `tests/register_traces.rs`), only on
 # the mutants that the first pass (`.cargo/mutants-journal.toml`) missed. The
 # test that edits recorded traces judges the trace spec, not the fold: it is
 # left out, as in `.cargo/mutants-tlc.toml`.
@@ -11,7 +12,7 @@ exclude_re = []
 test_package = ["paros-journal", "journal-sim"]
 test_tool = "nextest"
 additional_cargo_test_args = [
-  "-E", "binary(traces) and not test(edited)",
+  "-E", "(binary(traces) | binary(register_traces)) and not test(edited)",
   "--test-threads", "2",
 ]
 profile = "mutants"

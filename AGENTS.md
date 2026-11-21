@@ -137,8 +137,11 @@ designed again from the ground up, together with Pierre. Its sans-IO contract (t
 and its flight rule has a model, `specs/tla/flight-rule/`. The pure journal core is
 `crates/lib/paros-journal` (the fold, the `Resolve` call, the held answers, the segment record
 and the codec; #1324 (paros-journal pure core)), walked and traced against
-`specs/tla/journal-state/FoldTrace.tla` by `crates/sim/journal-sim`. The journal roles, the
-register and the driver are not built yet (#1325, #1326).
+`specs/tla/journal-state/FoldTrace.tla` by `crates/sim/journal-sim`. The journal's matchmaker
+register is `paros_journal::register`, an optional role by composition (the core does not
+change), walked and traced against `specs/tla/segment-records/RegisterTrace.tla` (#1325 (the
+matchmaker register as an optional role)). The journal roles and the driver are not built yet
+(#1326).
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
 2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
 the build steps of #1323 (build the paros journal v1). Start there for any journal work.
@@ -612,13 +615,14 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`examples/`: seven lessons, and four that drive `ColocatedNode` as a driver does, from
   `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
-  fold, the `Resolve` call, the held answers, the segment record and the codec. Sans-IO,
-  wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
+  fold, the `Resolve` call, the held answers, the segment record, the matchmaker register and
+  the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
   `paros::journal`). A program depends on `paros` alone. Wasm-safe and provider-free.
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
-  segments, with oracles that share no code with `paros-journal`, a planted mutant for each, and
-  the trace check of each walk against `specs/tla/journal-state/FoldTrace.tla`.
+  segments and the walk of the matchmaker register across handovers, with oracles that share no
+  code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
+  `specs/tla/journal-state/FoldTrace.tla` and `specs/tla/segment-records/RegisterTrace.tla`.
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
   the core and a planted mutant that each oracle catches, and the trace check of the walks

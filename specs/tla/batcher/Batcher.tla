@@ -185,7 +185,10 @@ Spec == Init /\ [][Next]_vars
 \* The range a write is answered with holds its own records.
 AnswerHolds ==
   \A a \in answers :
-    \A k \in 1..a.n : logs[writes[a.tok].jr][a.seq + k] = a.tok
+    \A k \in 1..a.n :
+      LET log == logs[writes[a.tok].jr] IN
+      /\ a.seq + k \in DOMAIN log
+      /\ log[a.seq + k] = a.tok
 
 RECURSIVE Sub(_, _)
 \* The sequence s is a subsequence of p.

@@ -12,6 +12,7 @@
 //! code's `WrongMode` of a truncate is written so.
 
 pub mod mutate;
+pub mod register;
 
 use std::path::PathBuf;
 
