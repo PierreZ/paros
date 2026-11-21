@@ -300,3 +300,60 @@ fn an_old_member_outside_the_next_set_records_the_successor() {
         Reply::Refused { .. }
     ));
 }
+
+#[test]
+fn a_member_keeps_its_id() {
+    assert_eq!(member(2).id(), MatchmakerId(2));
+}
+
+#[test]
+#[should_panic(expected = "a member of its set is active or frozen")]
+fn a_member_of_its_set_that_is_a_spare_is_refused() {
+    let mut state = MemberState::first(MatchmakerId(1), set(0, &[1, 2, 3]));
+    state.phase = MemberPhase::Inactive;
+    let _ = RegisterMember::new(MatchmakerId(1), state);
+}
+
+#[test]
+fn a_late_chosen_state_does_not_wake_a_frozen_member_of_its_generation() {
+    let mut spare = RegisterMember::new(
+        MatchmakerId(4),
+        MemberState::first(MatchmakerId(4), set(0, &[1, 2, 3])),
+    );
+    let next = successor(1, &[1, 2, 4], 6);
+    spare.step(Request::Chosen {
+        successor: next.clone(),
+    });
+    assert!(spare.serves(MatchmakerGeneration(1)));
+    // The next handover stops generation 1, then the chosen state of
+    // generation 1 arrives again.
+    spare.step(Request::Stop {
+        generation: MatchmakerGeneration(1),
+    });
+    let late = spare.step(Request::Chosen { successor: next });
+    assert_eq!(
+        late.reply,
+        Reply::Learned {
+            generation: MatchmakerGeneration(1)
+        }
+    );
+    assert_eq!(spare.state().phase, MemberPhase::Frozen);
+    assert!(!spare.serves(MatchmakerGeneration(1)));
+}
+
+#[test]
+fn the_fingerprint_of_a_successor_sees_its_set_and_its_write() {
+    let base = successor(1, &[1, 2, 4], 6);
+    let fingerprints = [
+        base.fingerprint(),
+        successor(1, &[1, 2, 3], 6).fingerprint(),
+        successor(2, &[1, 2, 4], 6).fingerprint(),
+        successor(1, &[1, 2, 4], 7).fingerprint(),
+    ];
+    for (i, a) in fingerprints.iter().enumerate() {
+        for b in &fingerprints[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
+    assert_eq!(base.fingerprint(), base.clone().fingerprint());
+}

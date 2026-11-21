@@ -2,7 +2,7 @@ use super::*;
 use crate::register::member::RegisterMember;
 use crate::register::test_support::{deliver, ids, members, set};
 use crate::register::value::{Change, RegisterValue};
-use crate::register::{CallStep, RegisterCall};
+use crate::register::{CallStep, MemberPhase, RegisterCall};
 
 fn op(round: u64, node: u64) -> Ballot {
     Ballot {
@@ -176,4 +176,96 @@ fn a_new_incarnation_opens_above_its_durable_round() {
     handover.start(first, ids(&[2, 3, 4])).expect("started");
     let steps = run(&mut handover, &mut pool, &[1, 2, 3, 4]);
     assert!(steps.contains(&HandoverStep::Round(12)), "{steps:?}");
+}
+
+#[test]
+fn only_a_later_set_supersedes_the_handover() {
+    let first = set(0, &[1, 2, 3]);
+    let mut handover = RegisterHandover::new(NodeId(9), 0);
+    handover
+        .start(first.clone(), ids(&[2, 3, 4]))
+        .expect("started");
+    let refused = |successor| Reply::Refused {
+        set: first.clone(),
+        phase: MemberPhase::Frozen,
+        successor,
+    };
+    // The set it hands over, as the set or as a successor, is not later.
+    assert_eq!(
+        handover.on_reply(MatchmakerId(1), refused(None)),
+        HandoverStep::Pending
+    );
+    assert_eq!(
+        handover.on_reply(MatchmakerId(1), refused(Some(first.clone()))),
+        HandoverStep::Pending
+    );
+    assert!(matches!(handover.phase(), HandoverPhase::Stopping { .. }));
+    let later = set(1, &[1, 2, 4]);
+    assert_eq!(
+        handover.on_reply(MatchmakerId(1), refused(Some(later.clone()))),
+        HandoverStep::Superseded(later)
+    );
+    assert!(matches!(handover.phase(), HandoverPhase::Idle));
+}
+
+#[test]
+fn a_stop_report_of_another_generation_is_not_counted() {
+    let first = set(0, &[1, 2, 3]);
+    let mut handover = RegisterHandover::new(NodeId(9), 0);
+    handover.start(first, ids(&[2, 3, 4])).expect("started");
+    let stopped = |generation| Reply::Stopped {
+        generation: MatchmakerGeneration(generation),
+        written: Written::default(),
+        read: Ballot::zero(),
+        promised: Ballot::zero(),
+    };
+    assert_eq!(
+        handover.on_reply(MatchmakerId(1), stopped(5)),
+        HandoverStep::Pending
+    );
+    assert_eq!(
+        handover.on_reply(MatchmakerId(2), stopped(0)),
+        HandoverStep::Pending
+    );
+    assert!(matches!(handover.phase(), HandoverPhase::Stopping { .. }));
+    assert!(matches!(
+        handover.on_reply(MatchmakerId(3), stopped(0)),
+        HandoverStep::Closed(_)
+    ));
+}
+
+#[test]
+fn a_bootstrap_ack_of_another_state_is_not_counted() {
+    let first = set(0, &[1, 2, 3]);
+    let mut pool = members(&first, &[1, 2, 3, 4]);
+    let mut handover = RegisterHandover::new(NodeId(9), 0);
+    handover.start(first, ids(&[2, 3, 4])).expect("started");
+    for (from, reply) in deliver(&mut pool, handover.requests(), &[1, 2, 3]) {
+        handover.on_reply(from, reply);
+    }
+    assert!(matches!(
+        handover.phase(),
+        HandoverPhase::Bootstrapping { .. }
+    ));
+    for id in [2, 3, 4] {
+        assert_eq!(
+            handover.on_reply(MatchmakerId(id), Reply::Bootstrapped { successor: 0 }),
+            HandoverStep::Pending
+        );
+    }
+    assert!(matches!(
+        handover.phase(),
+        HandoverPhase::Bootstrapping { .. }
+    ));
+}
+
+#[test]
+fn the_round_it_opened_is_the_round_to_persist() {
+    let first = set(0, &[1, 2, 3]);
+    let mut pool = members(&first, &[1, 2, 3, 4]);
+    let mut handover = RegisterHandover::new(NodeId(9), 11);
+    assert_eq!(handover.round(), 11);
+    handover.start(first, ids(&[2, 3, 4])).expect("started");
+    run(&mut handover, &mut pool, &[1, 2, 3, 4]);
+    assert_eq!(handover.round(), 12);
 }

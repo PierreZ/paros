@@ -263,3 +263,29 @@ fn a_record_under_another_id_is_refused() {
     let record = value.segment(SegmentId(1)).expect("segment 1").clone();
     let _ = RegisterValue::from_parts(value.term(), BTreeMap::from([(SegmentId(2), record)]));
 }
+
+#[test]
+fn a_seal_needs_its_successor_pending() {
+    // Segment 1 in force and segment 2 sealed: a register no reshape
+    // builds, which the codec can read back.
+    let mut first = SegmentRecord::open(SegmentId(1), RELEASE, opening(1, None)).expect("opened");
+    first.put_in_force(Slot(0)).expect("in force");
+    let mut second =
+        SegmentRecord::open(SegmentId(2), RELEASE, opening(1, Some(1))).expect("opened");
+    second.put_in_force(Slot(4)).expect("in force");
+    second.seal(Slot(6)).expect("sealed");
+    let value = RegisterValue::from_parts(
+        Term {
+            number: 1,
+            holder: Some(NodeId(7)),
+        },
+        [(SegmentId(1), first), (SegmentId(2), second)].into(),
+    );
+    assert_eq!(
+        value.apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(8)
+        }),
+        Err(ChangeRefusal::NoSuccessor(SegmentId(1)))
+    );
+}

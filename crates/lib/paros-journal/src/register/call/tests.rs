@@ -173,3 +173,44 @@ fn a_reply_of_another_operation_does_nothing() {
         CallStep::Pending
     );
 }
+
+#[test]
+fn a_conflict_of_another_operation_does_not_end_the_write() {
+    let first = set(0, &[1, 2, 3]);
+    let mut pool = members(&first, &[1, 2, 3]);
+    let mut call = RegisterCall::new(op(3), first, elect());
+    for (from, reply) in deliver(&mut pool, call.requests(), &[1, 2]) {
+        call.on_reply(from, reply);
+    }
+    assert!(matches!(call.phase(), CallPhase::Writing { .. }));
+    assert_eq!(
+        call.on_reply(
+            MatchmakerId(1),
+            Reply::Conflict {
+                op: op(2),
+                read: op(4),
+                written: op(4)
+            }
+        ),
+        CallStep::Pending
+    );
+    assert!(matches!(call.phase(), CallPhase::Writing { .. }));
+}
+
+#[test]
+fn a_successor_of_the_same_generation_does_not_move_the_operation() {
+    let first = set(0, &[1, 2, 3]);
+    let mut call = RegisterCall::new(op(1), first.clone(), elect());
+    assert_eq!(
+        call.on_reply(
+            MatchmakerId(1),
+            Reply::Refused {
+                set: first.clone(),
+                phase: MemberPhase::Frozen,
+                successor: Some(first),
+            }
+        ),
+        CallStep::Moved { set: None }
+    );
+    assert!(matches!(call.phase(), CallPhase::Reading(_)));
+}

@@ -340,11 +340,11 @@ impl RegisterMember {
         if successor.set.contains(self.id) && mine < next {
             // Activate: the member serves the next generation, and keeps its
             // own write and read generation where they are higher.
-            let written = if self.state.written.op > successor.written.op {
-                self.state.written.clone()
-            } else {
-                successor.written.clone()
-            };
+            let written = [&successor.written, &self.state.written]
+                .into_iter()
+                .max_by_key(|written| written.op)
+                .expect("two writes")
+                .clone();
             self.state = MemberState {
                 set: successor.set.clone(),
                 phase: MemberPhase::Active,
