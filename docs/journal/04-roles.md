@@ -290,7 +290,9 @@ runtime type. With no feature on, a pure crate depends on workspace crates only.
 features only observe (`serde`, `tracing`, `assertions`): they decide nothing and do no I/O. The
 generic driver of `paros-journal-io` is written against the traits only. A crate that does I/O
 is an adapter in a crate of its own (`paros-journal-moonpool`, #1330), and the facade `paros`
-re-exports it only behind an optional feature that is off by default. CI runs
+re-exports it only behind an optional feature that is off by default. The facade is the place
+where paros bundles moonpool's storage and network for a program that wants them (Pierre,
+2026-11-21): the bundle is a feature of `paros`, never a dependency of a pure crate. CI runs
 `scripts/check-core-deps.sh`: it fails when a pure crate, or the facade with its default
 features, gains a dependency outside the workspace and the observation crates. A new pure crate
 joins that script in the pull request that creates it. The examples of #1370 (journal examples)

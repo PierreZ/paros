@@ -15,10 +15,12 @@ storage, the transport and the clock. The rules are in `docs/journal/` of the re
 Each example prints a trace and asserts what it shows. Read them in this order:
 
     nix develop --command cargo run -p paros-journal --example fold
+    nix develop --command cargo run -p paros-journal --example register
 
 | Example | Shows |
 |---|---|
 | `fold` | The journal fold alone: `SetLeader`, `Write` with `expected_seq`, a resend answered `Duplicate`, `Taken`, `Early`, `Fenced`, `Truncate`, a seal, a resend answered `Below` and its `Resolve`, multi-writer mode |
+| `register` | The journal's matchmaker register alone: the controller's term, a deposed controller refused, a reshape and its resend, the seal, the boundary, the retire with `F + 1` holders, the trim |
 
 The journal roles run on the traits and the generic driver of `paros-journal-io`: its examples
 `in_memory` (a journal on three processes) and `custom_storage` (a storage backend written by
