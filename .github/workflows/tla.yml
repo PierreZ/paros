@@ -5,7 +5,8 @@
 # job, so a new model adds a job and not time to one job; the job `tlc` is
 # green only when every folder's job is green. The job `traces` runs the trace
 # checks of consensus-sim and journal-sim (`tests/traces.rs` of each, and
-# `tests/register_traces.rs` and `tests/live.rs` of journal-sim): a trace
+# `tests/register_traces.rs`, `tests/roles_traces.rs` and `tests/live.rs` of
+# journal-sim): a trace
 # spec EXTENDS its model,
 # so a change of a model or of a `*Trace.tla` alone must meet the walks too
 # (#1231 (traced walks reach the rules)). The Rust workflow runs them for a
@@ -97,7 +98,7 @@ jobs:
       - name: Check the consensus-sim and journal-sim walks against the trace specs (shard ${{ matrix.shard }} of 4)
         run: >-
           nix develop --command cargo nextest run --profile ci --release
-          -p consensus-sim -p journal-sim --test traces --test register_traces --test live
+          -p consensus-sim -p journal-sim --test traces --test register_traces --test roles_traces --test live
           --partition count:${{ matrix.shard }}/4
 
   tlc:

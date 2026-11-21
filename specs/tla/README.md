@@ -132,6 +132,16 @@ no checked model takes. The trace specs today are:
   `Below` answers not yet resolved) and applies those operators: an `apply` event is `Step` with
   the answer `Res`, a `seal` event is `Bound`, and a `resolve` event is `ResolveOn` on the
   boundary of its sealed segment. It defines no rule of its own.
+- `journal-state/RolesTrace`: the journal roles of `paros-journal` (the acceptor, the leader and
+  the segment replica), on the roles walk of `journal-sim` (#1326 (the journal roles over the
+  core)). Each event is one action of `Journal.tla` with the parameters the code chose: a
+  campaign is `Register`, an acceptor's queued batch is `Promise` or `Accept` and its durable
+  batch `Flush`, a Phase 1 that closed is `Phase1On` with the reports the leader read, then
+  `SealWrite`, `Open`, `Propose`, and a replica's durable base, applied slot and boundary write
+  are `TakeBase`, `Apply` and `BoundWrite`. The model's leader takes what its Phase 1 reads and
+  the first slot it writes at `Register`, as the code takes them from the register value of its
+  campaign. The walk is the narrow shape (one column of three): a grid of two columns chooses a
+  slot in one column, which `Journal.tla` does not have.
 
 Merging `leader-handoff/` and `proxy-leader/` into the node model is #1343 (merge proxy and handoff into the node model).
 
@@ -204,7 +214,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | CTRL in the journal: the tri-state tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen value in one write | `proposer.rs` (`slot_decidable`), `acceptor.rs`; the scrub and the repair are designed, not built | `ctrl-grid/` | #1263 (CTRL recovery in the journal), done |
 | CTRL across segments: the copies of a sealed segment across retire and offload, the repair of a replica log and of an object, the data-loss report | the journal steps are designed, not built | `ctrl-segments/` | #1263 (CTRL recovery in the journal), done |
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
-| The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the roles are not built (#1325, #1326) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
+| The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the acceptor, the leader and the segment replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |

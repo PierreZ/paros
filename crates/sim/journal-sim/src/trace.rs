@@ -13,6 +13,7 @@
 
 pub mod mutate;
 pub mod register;
+pub mod roles;
 
 use std::path::PathBuf;
 
@@ -59,11 +60,11 @@ pub fn int(n: impl TryInto<i64>) -> Value {
     Value::Int(n.try_into().ok().expect("a walk's numbers fit an i64"))
 }
 
-fn uuid(uuid: LeaderUuid) -> Value {
+pub(crate) fn uuid(uuid: LeaderUuid) -> Value {
     Value::Str(format!("u{}", uuid.0))
 }
 
-fn leader(leader: Leader) -> Value {
+pub(crate) fn leader(leader: Leader) -> Value {
     match leader {
         Leader::Unset => Value::from("unset"),
         Leader::Multi => Value::from("none"),
@@ -77,7 +78,7 @@ fn state(fields: &mut Vec<(&'static str, Value)>, (lead, next, first): (Leader, 
     fields.push(("first", int(first)));
 }
 
-fn write_fields(fields: &mut Vec<(&'static str, Value)>, write: &Write) {
+pub(crate) fn write_fields(fields: &mut Vec<(&'static str, Value)>, write: &Write) {
     assert!(write.records.len() == 1, "a traced write holds one record");
     let id = write.records[0].payload[0];
     fields.push(("op", Value::from("w")));
@@ -94,6 +95,30 @@ fn write_fields(fields: &mut Vec<(&'static str, Value)>, write: &Write) {
             fields.push(("u", Value::from("none")));
             fields.push(("e", int(0)));
         }
+    }
+}
+
+/// The fields of `command` as the model writes a command (`Cmd` of
+/// `FoldTrace.tla` and `RolesTrace.tla`).
+///
+/// # Panics
+///
+/// On an `Upgrade`, which the model does not have.
+pub(crate) fn command_fields(fields: &mut Vec<(&'static str, Value)>, command: &Command) {
+    match command {
+        Command::Noop => fields.push(("op", Value::from("noop"))),
+        Command::Write(write) => write_fields(fields, write),
+        Command::Truncate { fence, up_to } => {
+            fields.push(("op", Value::from("tr")));
+            fields.push(("u", fence.map_or(Value::from("none"), uuid)));
+            fields.push(("up", int(up_to.0)));
+        }
+        Command::SetLeader { new, old } => {
+            fields.push(("op", Value::from("sl")));
+            fields.push(("new", new.map_or(Value::from("none"), uuid)));
+            fields.push(("old", leader(*old)));
+        }
+        Command::Upgrade { .. } => panic!("the model has no Upgrade"),
     }
 }
 
@@ -140,23 +165,9 @@ pub fn encode(event: &FoldEvent) -> (&'static str, Vec<(&'static str, Value)>) {
             state: after,
         } => {
             let mut res = *answer;
-            match command {
-                Command::Noop => fields.push(("op", Value::from("noop"))),
-                Command::Write(write) => write_fields(&mut fields, write),
-                Command::Truncate { fence, up_to } => {
-                    fields.push(("op", Value::from("tr")));
-                    fields.push(("u", fence.map_or(Value::from("none"), uuid)));
-                    fields.push(("up", int(up_to.0)));
-                    if res == "wrong" {
-                        res = "fenced";
-                    }
-                }
-                Command::SetLeader { new, old } => {
-                    fields.push(("op", Value::from("sl")));
-                    fields.push(("new", new.map_or(Value::from("none"), uuid)));
-                    fields.push(("old", leader(*old)));
-                }
-                Command::Upgrade { .. } => panic!("the model has no Upgrade"),
+            command_fields(&mut fields, command);
+            if matches!(command, Command::Truncate { .. }) && res == "wrong" {
+                res = "fenced";
             }
             assert!(
                 !matches!(res, "empty" | "reserved"),

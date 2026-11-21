@@ -13,6 +13,6 @@ exclude_re = []
 
 test_package = ["paros-journal", "journal-sim"]
 test_tool = "nextest"
-additional_cargo_test_args = ["-E", "not (binary(traces) | binary(register_traces))"]
+additional_cargo_test_args = ["-E", "not (binary(traces) | binary(register_traces) | binary(roles_traces))"]
 profile = "mutants"
 minimum_test_timeout = 120

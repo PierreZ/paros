@@ -135,9 +135,15 @@ ballot belongs to one leader in memory, as in `journal-state/`), so its sends wa
 The inputs are `step(from, message)`, `observe(register value)` (a value that a done write
 gave, §J3.4), and `tick(page)`: the driver paces the re-sends with `page`, because a re-send of
 every round floods a bounded network and loses the messages that would close the rounds (a
-finding of the roles walk). A compare-and-set of the register is an effect
-(`Register(Change)`). `now`, timers, recorded reads, the `Host` and the two ports (rules 2 to
-5) are not built yet (#1329).
+finding of the roles walk). A compare-and-set of the register is an effect: the leader's
+(`Register(Change)`) waits on nothing, and the replica's boundary write (`Register { change,
+after }`) waits on the batch of the last slot it folds, so the register takes only a fold that is
+on the replica's disk. The answer to a `Resolve` reads the fold too, and goes once the batch it
+names is durable. A leader takes what its Phase 1 reads (the segments that are not retired, the
+end of each sealed one) and the first slot it writes from the register value of its campaign, and
+keeps them; the driver computes that first slot from the replicas' disks. `RolesTrace.tla`
+checks each of these against `Journal.tla` (§J7.3). `now`, timers, recorded reads, the `Host` and
+the two ports (rules 2 to 5) are not built yet (#1329).
 
 **Rule 2: every input is recorded.** A restart is `Input::Recovered(state)`. A read from storage
 is an effect, and its result comes back as an input. `now` comes with every input, timers are
@@ -217,7 +223,7 @@ creates these crates, each in its own step. `paros-journal` and `journal-sim` ex
 | `paros-journal-control` (`crates/lib/`) | The pure `decide` of the v1 controller and the controller role | #1328 (paros-journal-control) |
 | `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the `Host` inputs), the generic driver under the flight rule, many journals in one process, and the contract suites | #1329 (paros-journal-io) |
 | `paros-journal-moonpool` (`crates/lib/`) | The adapter of the `paros-journal-io` traits on moonpool providers: compio through moonpool's `CompioProviders`, no trait requires `Send` (Pierre, 2026-11-19) | #1330 (paros-journal-moonpool) |
-| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla` | #1327 (journal-sim) |
+| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla`; the walk of the roles, its trace check against `journal-state/RolesTrace.tla` | #1327 (journal-sim) |
 
 The journal roles that compose the core (segments, seal, reads, retire, truncate,
 re-replication) are #1326 (the journal roles). They live in `paros-journal`, module `roles`
