@@ -42,6 +42,7 @@ jobs:
       - name: Build the Paxos wasm and stage it at /paxos/wasm/
         run: nix develop --command scripts/build-wasm.sh
       - name: Build the site (Astro, #810 (website redo 1/4))
+        id: site
         run: nix develop --command bash -c 'cd website/site && npm ci --no-audit --no-fund && npm run build'
       # The site links files at other refs than main (the tag v0.2.0-alpha.1):
       # fetch every tag, so the link check can read them.
@@ -49,7 +50,9 @@ jobs:
         run: git fetch --depth 1 origin 'refs/tags/*:refs/tags/*'
       - name: Check every link of the built site (#1362)
         run: nix develop --command bash -c 'cd website/site && npm run check-links'
+      # It runs after a red link check too, so one run reports both.
       - name: Browser smoke test of the live parts (Playwright, Chromium, #1362)
+        if: ${{ !cancelled() && steps.site.outcome == 'success' }}
         run: nix develop .#site --command bash -c 'cd website/site && npm test'
       - uses: actions/upload-pages-artifact@v5
         with:
