@@ -1252,20 +1252,29 @@ impl ColocatedNode {
             return;
         }
         let incarnation = check.incarnation();
-        if self.acceptors_since == watermark && !self.acceptors.contains(me) {
-            probe!(reachable, "gc: every matchmaker agreed the node may retire");
-            self.registrations_checked = Some(watermark);
-            // Durable: a boot that reads it is a node that comes back after
-            // it retired, and rejoins (#1037 (rejoin)).
-            assert!(
-                incarnation == self.retire_mark.incarnation,
-                "a retirement is checked at the durable incarnation"
-            );
-            if !self.retire_mark.checked {
-                self.retire_mark.checked = true;
-                self.pending_writes
-                    .push(WriteOp::RetireMark(self.retire_mark));
-            }
+        // A check opens under a belief bound to its floor that leaves this
+        // node outside, and every belief adopted since drops it
+        // (`adopt_configuration`): the node is still outside on that floor.
+        assert!(
+            self.acceptors_since == watermark,
+            "an open check runs under the belief bound to its floor"
+        );
+        assert!(
+            !self.acceptors.contains(me),
+            "an open check runs with the node outside"
+        );
+        probe!(reachable, "gc: every matchmaker agreed the node may retire");
+        self.registrations_checked = Some(watermark);
+        // Durable: a boot that reads it is a node that comes back after
+        // it retired, and rejoins (#1037 (rejoin)).
+        assert!(
+            incarnation == self.retire_mark.incarnation,
+            "a retirement is checked at the durable incarnation"
+        );
+        if !self.retire_mark.checked {
+            self.retire_mark.checked = true;
+            self.pending_writes
+                .push(WriteOp::RetireMark(self.retire_mark));
         }
         self.retire_check = None;
         assert!(

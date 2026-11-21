@@ -243,10 +243,18 @@ impl ColocatedNode {
                 "a rejoin is never below the durable incarnation"
             );
         }
-        if self.retire_check.is_some() {
+        if let Some(check) = self.retire_check.as_ref() {
             assert!(
                 self.role == NodeRole::Follower,
                 "a retirement check runs on a follower"
+            );
+            assert!(
+                self.acceptors_since == check.watermark(),
+                "a retirement check runs under the belief bound to its floor"
+            );
+            assert!(
+                !self.acceptors.contains(self.config.id),
+                "a retirement check runs with the node outside"
             );
         }
     }
