@@ -208,7 +208,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
-  TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder)
+  TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder, and the trace checks of consensus-sim in four
+  `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout))
 
 A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`,
 Markdown, `docs/`, `specs/`) runs only the `wasm` job of `rust.yml`; a push to `main` runs

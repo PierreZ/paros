@@ -7,7 +7,10 @@
 # checks of consensus-sim (`tests/traces.rs`): a trace spec EXTENDS its model,
 # so a change of a model or of a `*Trace.tla` alone must meet the walks too
 # (#1231 (traced walks reach the rules)). The Rust workflow runs them for a
-# change of the code.
+# change of the code. Each CI job has at most 30 minutes, so `traces` runs in
+# four shards (nextest `--partition count:i/4`: the tests in name order, dealt
+# out in turn). Each shard runs a quarter of the tests and every test runs in
+# one shard (#1340 (the traces job reaches its timeout)).
 name: TLA
 
 on:
@@ -71,6 +74,10 @@ jobs:
   traces:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
@@ -79,10 +86,10 @@ jobs:
         with:
           key: traces
           cache-on-failure: true
-      - name: Check the consensus-sim walks against the trace specs
+      - name: Check the consensus-sim walks against the trace specs (shard ${{ matrix.shard }} of 4)
         run: >-
           nix develop --command cargo nextest run --profile ci --release
-          -p consensus-sim --test traces
+          -p consensus-sim --test traces --partition count:${{ matrix.shard }}/4
 
   tlc:
     needs: [specs, spec, traces]
