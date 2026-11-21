@@ -179,8 +179,9 @@ after durability. The trace check reads it, live and chunk by chunk (moonpool-tl
 role grows a private hook for them. Placement reaches a process through one port, so parosd has
 no private API into the journal.
 
-Related decisions of the same night: the runtime is compio through moonpool's `CompioProviders`,
-so no trait requires `Send`; every header carries a release number (v1 scope); a write that holds
+Related decisions of the same night: the runtime of the moonpool adapter is compio through
+moonpool's `CompioProviders`, so no trait requires `Send` (the pure crates name no runtime,
+§J4.3); every header carries a release number (v1 scope); a write that holds
 a slot is answered `Unknown`, never `NotLeader` (#1232 (deposed leader and a held write)).
 
 **The contract against `ColocatedNode` today.** `ColocatedNode` (`paros-consensus`) is the sans-IO
@@ -233,6 +234,22 @@ composition cannot meet is a new optional behaviour of the core with the plain a
 The rule and its reasons are architecture §4.3 (decided by Pierre on 2026-11-20). Cells and
 every other service concept stay out of both the core and the journal crates (#1264 (remove the
 cell from paros-consensus), PR #1268 (no cell in the core)).
+
+**No runtime or storage dependency** (Pierre, 2026-11-21). paros is a library that a program
+uses by implementing its traits: the storage trait, the transport and the clock of
+`paros-journal-io` (#1329), and the `Storage` contract of `paros-consensus`. The pure crates
+(`paros-consensus`, `paros-journal`, and `paros-journal-io`, `paros-journal-control` and the
+client when they exist) therefore depend on no async runtime (tokio, compio, smol), no storage
+engine and no network or file crate. Their traits do not require `Send`, an executor or a
+runtime type. With no feature on, a pure crate depends on workspace crates only. Its optional
+features only observe (`serde`, `tracing`, `assertions`): they decide nothing and do no I/O. The
+generic driver of `paros-journal-io` is written against the traits only. A crate that does I/O
+is an adapter in a crate of its own (`paros-journal-moonpool`, #1330), and the facade `paros`
+re-exports it only behind an optional feature that is off by default. CI runs
+`scripts/check-core-deps.sh`: it fails when a pure crate, or the facade with its default
+features, gains a dependency outside the workspace and the observation crates. A new pure crate
+joins that script in the pull request that creates it. The examples of #1370 (journal examples)
+show the rule: a backend written by hand, in memory, with no runtime crate.
 
 *Moved here from `docs/architecture/04-roles.md` §4.3, where the journal applies the rule
 (#1332 (journal architecture docs)):*

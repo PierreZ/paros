@@ -216,7 +216,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
   `-p paros-journal`
-- `scripts/check-module-style.sh` and `scripts/check-core-layers.sh`
+- `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
+  (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
 - the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
 - the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
@@ -469,6 +470,16 @@ optional behaviour and software composition, never from a service concept inside
 cell, no tenant policy, no `cell init`; #1264 (remove the cell from paros-consensus)). A paros
 need that composition cannot meet is a new optional behaviour, with the plain arm unchanged.
 
+**No runtime or storage dependency** (Pierre, 2026-11-21, `docs/journal/04-roles.md` §J4.3). A
+program uses paros by implementing its traits (storage, transport, clock). The pure crates
+(`paros-consensus`, `paros-journal`, and the journal's IO traits, controller and client crates)
+depend on no async runtime (tokio, compio, smol), no storage engine and no network or file crate,
+and their traits require no `Send` or executor. With no feature on, a pure crate depends on
+workspace crates only; its features only observe (`serde`, `tracing`, `assertions`). A crate that
+does I/O is an adapter of its own (`paros-journal-moonpool`), behind a facade feature that is off
+by default. `scripts/check-core-deps.sh` enforces it in CI; a new pure crate joins its `PURE` list
+in the pull request that creates it.
+
 ## Matchmaking, reconfiguration, GC, generations
 
 - **Matchmaking, then Phase 1.** A candidate registers `(b, C_b)` at a matchmaker quorum before
@@ -655,5 +666,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-core-deps.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.
