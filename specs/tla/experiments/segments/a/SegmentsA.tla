@@ -84,9 +84,13 @@ Gens == 1..NG
 \* What a slot can hold: a client value, or the Noop of the gap fill.
 Cmds == Values \cup {Noop}
 ASSUME \A g \in Gens : CfgOf[g] # {} /\ CfgOf[g] \subseteq Acceptors
+\* The tail read counts a vote at each member of its quorum as a choice, so
+\* it needs one acceptor for each configuration (a vote is then a choice).
+ASSUME Reader => \A g \in Gens : Cardinality(CfgOf[g]) = 1
 
 Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
+Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
 VARIABLES
   \* Matchmakers: the registrations and the segment table.
@@ -197,12 +201,13 @@ Replicated(s) == Cardinality({r \in Replicas : applied[r] >= s}) >= F + 1
 (***************************************************************************)
 
 \* Ballot b registers configuration g: the one in force or its successor.
-\* A successor opens a record with no start yet.
+\* A successor opens a record with no start yet, and only once the newest
+\* configuration has a start (plan rule 1: one in force and at most one
+\* successor; OneSuccessor). Ballots register in order, so a ballot
+\* registers once: a registered b fails c < b for c = b.
 Register(b, g) ==
-  /\ bgen[b] = 0
   /\ \A c \in Ballots : bgen[c] # 0 => c < b
   /\ g \in {Top, Top + 1}
-  /\ g <= NG
   /\ g = Top + 1 => sstart[Top] # 0
   /\ bgen' = [bgen EXCEPT ![b] = g]
   /\ IF g = Top + 1
@@ -214,14 +219,15 @@ Register(b, g) ==
 \* The slots that Phase 1 reads in configuration h.
 ReadSet(h) == IF ReadOld = "belowEnd" /\ send[h] # 0 THEN 1..(send[h] - 1) ELSE Slots
 
-\* Phase 1 of ballot b: a promise quorum of every configuration that still
-\* runs, up to its own. The leader keeps, for each slot, the value of the
-\* highest vote that it saw.
+\* Phase 1 of ballot b: a promise quorum of its own configuration and of
+\* every configuration that still runs below it. The leader keeps, for each slot, the value of the
+\* highest vote that it saw. A second Phase 1 of b needs a quorum that did
+\* not promise b yet; it is a Phase 1 as safe as the first, and it starts
+\* the writes of b again (bst "p1", then Open).
 Phase1(b) ==
   LET g == bgen[b]
-      H == {h \in Live : h <= g}
+      H == {h \in Live : h <= g} \cup {g}
   IN /\ g # 0
-     /\ bst[b] = "new"
      /\ \E Qs \in [H -> SUBSET Acceptors] :
           /\ \A h \in H : Qs[h] \in Maj(CfgOf[h]) /\ \A a \in Qs[h] : prom[a] < b
           /\ LET seen == UNION {{<<s, vote[a][s]>> : a \in UNION {Qs[h] : h \in {k \in H : s \in ReadSet(k)}}} : s \in Slots}
@@ -236,7 +242,8 @@ Phase1(b) ==
      /\ UNCHANGED <<mm, prop, vote, sent2b, dat, rdr>>
 
 \* The first leader of configuration g seals g - 1: it writes the end of
-\* g - 1 and the start of g.
+\* g - 1 and the start of g. g - 1 has a start: g registered only once the
+\* newest configuration, g - 1, had one (Register).
 Seal(b) ==
   LET g == bgen[b]
       p == g - 1
@@ -245,7 +252,6 @@ Seal(b) ==
              ELSE Max({MaxApplied, sstart[p] - 1}) + 1
   IN /\ bst[b] = "p1"
      /\ g >= 2
-     /\ sstart[p] # 0
      /\ IF SealCas THEN send[p] = 0 ELSE sst[p] \in {"open", "sealed"}
      /\ send' = [send EXCEPT ![p] = e]
      /\ sstart' = [sstart EXCEPT ![g] = e]
@@ -261,11 +267,10 @@ Open(b) ==
   /\ bst' = [bst EXCEPT ![b] = "w"]
   /\ UNCHANGED <<mm, bsafe, bmax, bver, prop, acc, dat, rdr>>
 
-\* With Fence = "table", a leader reads the table again after a change.
+\* A leader reads the table version again, at any time. Only Fence = "table"
+\* reads bver; with Fence = "config" the version never moves (Bump), so this
+\* step changes nothing.
 Refresh(b) ==
-  /\ Fence = "table"
-  /\ bst[b] = "w"
-  /\ bver[b] # ver
   /\ bver' = [bver EXCEPT ![b] = ver]
   /\ UNCHANGED <<mm, bst, bsafe, bmax, prop, acc, dat, rdr>>
 
@@ -291,25 +296,32 @@ Writable(b) ==
                  /\ \/ s >= sstart[bgen[b]]
                     \/ s > MaxApplied /\ (bsafe[b][s] # None \/ GapFill)}
 
-Propose(b, s, v) ==
-  /\ CanWrite(b)
-  /\ s \in Writable(b)
-  /\ prop[b][s] = None
-  \* A leader proposes in slot order (the allocator frontier).
-  /\ \A t \in Writable(b) : t < s => prop[b][t] # None
-  /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]}
-           ELSE IF s < sstart[bgen[b]] THEN {Noop}
-           ELSE Values
-  /\ prop' = [prop EXCEPT ![b][s] = v]
-  /\ UNCHANGED <<mm, bst, bsafe, bmax, bver, acc, dat, rdr>>
+\* The leader of b proposes at its next slot: the lowest slot that it may
+\* write and did not propose yet (the allocator frontier of the core).
+\* Order is not what keeps the checks true: a leader that proposes in any
+\* order passes `safety` too, at twice the states. Slots are still pipelined:
+\* an acceptor can vote the second slot before the first, so a slot with no
+\* vote can sit below a slot with one (the case of the gap fill).
+Propose(b, v) ==
+  LET open == {t \in Writable(b) : prop[b][t] = None}
+      s == Min(open)
+  IN /\ CanWrite(b)
+     /\ open # {}
+     /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]}
+              ELSE IF s < sstart[bgen[b]] THEN {Noop}
+              ELSE Values
+     /\ prop' = [prop EXCEPT ![b][s] = v]
+     /\ UNCHANGED <<mm, bst, bsafe, bmax, bver, acc, dat, rdr>>
 
+\* An acceptor of a retired configuration still takes an Accept: retire
+\* (Matchmaker garbage collection) lets it stop, and the checks hold when it
+\* does not. Its promise to the successor's Phase 1 stops the old ballots.
+\* An Accept of a vote that the acceptor has changes nothing.
 Accept(a, b, s) ==
   /\ bgen[b] # 0
   /\ a \in CfgOf[bgen[b]]
-  /\ a \in Active
   /\ prop[b][s] # None
   /\ prom[a] <= b
-  /\ vote[a][s][1] < b
   /\ prom' = [prom EXCEPT ![a] = b]
   /\ vote' = [vote EXCEPT ![a][s] = <<b, prop[b][s]>>]
   /\ sent2b' = sent2b \cup {<<s, b, prop[b][s], a>>}
@@ -319,8 +331,8 @@ Accept(a, b, s) ==
 (* Replicas, retire, offload, trim                                         *)
 (***************************************************************************)
 
+\* No slot above NS is chosen, so applied stays at or below NS.
 Apply(r) ==
-  /\ applied[r] < NS
   /\ IsChosen(applied[r] + 1)
   /\ applied' = [applied EXCEPT ![r] = @ + 1]
   /\ hold' = [hold EXCEPT ![r] = IF applied[r] + 1 >= floor THEN @ \cup {applied[r] + 1} ELSE @]
@@ -338,17 +350,21 @@ Retire(p) ==
   /\ UNCHANGED <<bgen, sstart, send, ldr, acc, dat, rdr>>
 
 \* The offloader copies a retired segment to its object. The key is the
-\* journal and the configuration, so no location is written.
+\* journal and the configuration, so no location is written. A put again
+\* writes the same bytes. With RetireRule = "paper" each slot of a retired
+\* range is chosen; with "early" (a control) a slot that is not chosen yet
+\* stays empty in the object. A trimmed record takes no object
+\* (NoObjectBelowFloor).
 Upload(p) ==
   /\ sst[p] = "retired"
-  /\ store[p] = NoProp
-  /\ \A s \in Range(p) : IsChosen(s)
-  /\ store' = [store EXCEPT ![p] = [s \in Slots |-> IF s \in Range(p) THEN ChosenVal(s) ELSE None]]
+  /\ store' = [store EXCEPT ![p] =
+       [s \in Slots |-> IF s \in Range(p) /\ IsChosen(s) THEN ChosenVal(s) ELSE None]]
   /\ UNCHANGED <<mm, ldr, acc, applied, hold, floor, cursor, rdr>>
 
-\* The record says offloaded once the object is there.
+\* The record says offloaded once the object is there. Only a retired or
+\* offloaded record has an object, and a mark of an offloaded one changes
+\* nothing.
 Mark(p) ==
-  /\ sst[p] = "retired"
   /\ store[p] # NoProp
   /\ sst' = [sst EXCEPT ![p] = "offloaded"]
   /\ Bump
@@ -356,28 +372,27 @@ Mark(p) ==
 
 Drop(r, p) ==
   /\ IF DropRule = "offloaded" THEN sst[p] = "offloaded" ELSE store[p] # NoProp
-  /\ hold[r] \cap Range(p) # {}
   /\ hold' = [hold EXCEPT ![r] = @ \ Range(p)]
   /\ UNCHANGED <<mm, ldr, acc, applied, store, floor, cursor, rdr>>
 
 \* Trim every segment up to the end of p. The records leave the table
-\* (state "trimmed") and the objects are deleted by their keys.
+\* (state "trimmed") and the objects are deleted by their keys. The floor
+\* never moves down: a trim at or below it only marks the records below.
 Trim(p) ==
   LET f == send[p]
   IN /\ sst[p] \in {"retired", "offloaded"}
-     /\ f > floor
      /\ TrimCheck => f <= cursor
      /\ sst' = [g \in Gens |-> IF send[g] # 0 /\ send[g] <= f THEN "trimmed" ELSE sst[g]]
      /\ store' = [g \in Gens |-> IF send[g] # 0 /\ send[g] <= f THEN NoProp ELSE store[g]]
-     /\ hold' = [r \in Replicas |-> {s \in hold[r] : s >= f}]
-     /\ floor' = f
+     /\ floor' = Max({floor, f})
+     /\ hold' = [r \in Replicas |-> {s \in hold[r] : s >= floor'}]
      /\ Bump
      /\ UNCHANGED <<bgen, sstart, send, ldr, acc, applied, cursor, rdr>>
 
-\* The consumer reads its next slot.
+\* The consumer reads its next slot once it is chosen (ConsumedChosen). No
+\* slot above NS is chosen, and TrimCheck keeps the cursor at or above the
+\* floor (CursorSafe).
 Consume ==
-  /\ cursor <= NS
-  /\ cursor >= floor
   /\ IsChosen(cursor)
   /\ cursor' = cursor + 1
   /\ UNCHANGED <<mm, ldr, acc, applied, hold, store, floor, rdr>>
@@ -386,9 +401,9 @@ Consume ==
 (* The tail reader (check 5)                                               *)
 (***************************************************************************)
 
+\* The reader starts a read at any time: it may drop an open read and start
+\* again. ReadFresh judges the read against its last start.
 ReadStart ==
-  /\ Reader
-  /\ rst = "idle"
   /\ rneed' = Max({s \in Slots : IsChosen(s)} \cup {0})
   /\ rst' = "wait"
   /\ UNCHANGED <<mm, ldr, acc, dat, rview, rgot>>
@@ -397,10 +412,9 @@ ReadStart ==
 \* later configuration than the reader's view.
 SaysSealed(a) == a \notin Active \/ (prom[a] # 0 /\ bgen[prom[a]] > rview)
 
-\* A leaderless read of the tail on a quorum of the cached configuration.
+\* A leaderless read of the tail on a quorum of the cached configuration. An
+\* ask after the read is done answers again, later, so no less fresh.
 ReadAsk(Q) ==
-  /\ Reader
-  /\ rst = "wait"
   /\ Q \in Maj(CfgOf[rview])
   /\ IF ReadFence /\ \E a \in Q : SaysSealed(a)
        THEN /\ rview' = InForce
@@ -414,23 +428,18 @@ ReadAsk(Q) ==
             /\ UNCHANGED rview
   /\ UNCHANGED <<mm, ldr, acc, dat, rneed>>
 
-ReadAgain ==
-  /\ rst = "done"
-  /\ rst' = "idle"
-  /\ UNCHANGED <<mm, ldr, acc, dat, rview, rneed, rgot>>
-
 Next ==
   \/ \E b \in Ballots, g \in Gens : Register(b, g)
   \/ \E b \in Ballots : Phase1(b) \/ Seal(b) \/ Open(b) \/ Refresh(b)
-  \/ \E b \in Ballots, s \in Slots, v \in Cmds : Propose(b, s, v)
+  \/ \E b \in Ballots, v \in Cmds : Propose(b, v)
   \/ \E a \in Acceptors, b \in Ballots, s \in Slots : Accept(a, b, s)
   \/ \E r \in Replicas : Apply(r)
   \/ \E p \in Gens : Retire(p)
   \/ Storage /\ \E p \in Gens : Upload(p) \/ Mark(p) \/ Trim(p)
   \/ Storage /\ \E r \in Replicas, p \in Gens : Drop(r, p)
   \/ Storage /\ Consume
-  \/ ReadStart \/ ReadAgain
-  \/ \E Q \in UNION {Maj(CfgOf[g]) : g \in Gens} : ReadAsk(Q)
+  \/ Reader /\ ReadStart
+  \/ Reader /\ \E Q \in UNION {Maj(CfgOf[g]) : g \in Gens} : ReadAsk(Q)
 
 Spec == Init /\ [][Next]_vars
 
@@ -497,6 +506,21 @@ TailNeverBlocked == [][OffloadStep => \A b \in Ballots : CanWrite(b) => CanWrite
 
 \* The consumer cursor is never below the floor.
 CursorSafe == cursor >= floor
+
+\* The consumer read only chosen slots.
+ConsumedChosen == \A s \in 1..(cursor - 1) : IsChosen(s)
+
+\* A leader writes only in a configuration that has a start: the table
+\* names the segment of each write.
+LeaderHasSegment == \A b \in Ballots : bst[b] = "w" => sstart[bgen[b]] # 0
+
+\* Plan rule 1: one configuration in force and at most one successor, the
+\* newest, with no start yet.
+OneSuccessor == \A g \in Gens : sst[g] # "none" /\ sstart[g] = 0 => g = Top
+
+\* Trim deletes the objects below the floor, and no object comes back
+\* below it.
+NoObjectBelowFloor == \A p \in Gens, s \in Slots : store[p][s] # None => s >= floor
 
 \* No stranded hole: a hole is a slot at or above the floor that is not
 \* chosen. Each leader of the configuration in force that finished Phase 1

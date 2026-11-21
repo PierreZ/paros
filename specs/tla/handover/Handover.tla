@@ -136,9 +136,8 @@ Init == /\ gen = [m \in Pool |-> 0]
 (* ask what generation 1 holds when it starts.                              *)
 
 \* A candidate reads the register at the quorum Q: each member raises its
-\* read generation to w.
+\* read generation to w. A second read at w is a read again.
 Read(w, Q) ==
-    /\ <<w, 0>> \notin readDone
     /\ Q \in Serving(0)
     /\ rg' = [m \in Pool |-> IF m \in Q THEN Up(rg[m], w) ELSE rg[m]]
     /\ readDone' = readDone \cup {<<w, 0>>}
@@ -147,10 +146,10 @@ Read(w, Q) ==
 
 \* After its read at w, the candidate writes w at the quorum Q with a
 \* compare-and-set: a member refuses when it read or holds a later
-\* generation, and a refusal stops the write.
+\* generation, and a refusal stops the write. The value of write w is
+\* Val(w) whatever the read saw, so the model lets a write come with no read
+\* of its own; a second write at w takes only members still below w.
 Write(w, Q) ==
-    /\ <<w, 0>> \in readDone
-    /\ <<w, 0>> \notin done
     /\ Q \in Serving(0)
     /\ \A m \in Q : rg[m] <= w /\ reg[m][1] < w
     /\ reg' = [m \in Pool |-> IF m \in Q THEN <<w, Val(w)>> ELSE reg[m]]
@@ -161,7 +160,6 @@ Write(w, Q) ==
 \* The leader raises the GC floor to 1 at the quorum Q: the floor is
 \* effective (the `applied` collector of `handover-gc/`).
 Gc(Q) ==
-    /\ <<1, 0>> \notin floors
     /\ Q \in Serving(0)
     /\ wm' = [m \in Pool |-> IF m \in Q THEN 1 ELSE wm[m]]
     /\ floors' = floors \cup {<<1, 0>>}
@@ -178,17 +176,14 @@ Gc(Q) ==
 RecordSize ==
     /\ Resize
     /\ ResizeGuard => issued = 0
-    /\ chosen = None
-    /\ size = Cardinality(M0)
     /\ size' = Cardinality(M0) + 2
     /\ UNCHANGED <<gen, phase, up, wm, rg, reg, tgt, issued, survive, props,
                    boot, chosen, readDone, done, floors>>
 
 \* The journal records a survive number one higher. With the rule, the
-\* tenant's set in force has the size for it first (decision 35).
+\* tenant's set in force has the size for it first (decision 35); the model
+\* lets the journal ask for it at any time.
 RaiseSurvive ==
-    /\ size > Cardinality(M0)
-    /\ survive = Survives(M0)
     /\ JournalFirst \/ Survives(InForceSet) > survive
     /\ survive' = survive + 1
     /\ UNCHANGED <<gen, phase, up, wm, rg, reg, tgt, issued, size, props,
@@ -197,7 +192,6 @@ RaiseSurvive ==
 \* The coordinator names a target of the recorded size, with live members
 \* only. It names a new one only when a member of the last one is down.
 Issue(i) ==
-    /\ chosen = None
     /\ Cardinality(Targets[i]) = size
     /\ \A m \in Targets[i] : up[m]
     /\ IF issued = 0 THEN TRUE
@@ -207,7 +201,6 @@ Issue(i) ==
                    boot, chosen, readDone, done, floors>>
 
 Crash(m) ==
-    /\ up[m]
     /\ Cardinality(Down) < Faults
     /\ up' = [up EXCEPT ![m] = FALSE]
     /\ UNCHANGED <<gen, phase, wm, rg, reg, tgt, issued, size, survive, props,
@@ -221,7 +214,6 @@ Crash(m) ==
 Stop(m) ==
     /\ issued # 0
     /\ m \in M0 /\ gen[m] = 0 /\ up[m]
-    /\ phase[m] = "active" \/ (phase[m] = "frozen" /\ tgt[m] # issued)
     /\ phase' = [phase EXCEPT ![m] = "frozen"]
     /\ tgt' = [tgt EXCEPT ![m] = issued]
     /\ UNCHANGED <<gen, up, wm, rg, reg, issued, size, survive, props, boot,
@@ -248,7 +240,6 @@ Reconstruct(Q) ==
 \* what the frozen members keep, or, with the answerer rule, the members
 \* that answered.
 Close(Q) ==
-    /\ chosen = None
     /\ Q \in Majorities(M0)
     /\ \A m \in Q : phase[m] = "frozen" /\ up[m]
     /\ \E P \in {Targets[issued],
@@ -259,32 +250,28 @@ Close(Q) ==
                    boot, chosen, readDone, done, floors>>
 
 Bootstrap(m, p) ==
-    /\ p \in props
     /\ m \in p[1] /\ up[m] /\ gen[m] = 0
-    /\ <<m, p>> \notin boot
     /\ boot' = boot \cup {<<m, p>>}
     /\ UNCHANGED <<gen, phase, up, wm, rg, reg, tgt, issued, size, survive,
                    props, chosen, readDone, done, floors>>
 
 Booted(p) == {m \in p[1] : <<m, p>> \in boot}
 
-\* The decree over M0 chooses p. Its acceptors are the members of M0, so it
-\* needs a live majority of them.
+\* The decree over M0 chooses p, once. Its acceptors are the members of M0,
+\* so it needs a live majority of them; every check keeps one up (Faults is
+\* at most 1 of 3), so the model does not test it again here.
 Decide(p) ==
     /\ chosen = None
-    /\ p \in props
     /\ IF FirstWrite = "every" THEN Booted(p) = p[1]
        ELSE Booted(p) \in Majorities(p[1])
-    /\ \E Q \in Majorities(M0) : \A m \in Q : up[m]
     /\ chosen' = p
     /\ UNCHANGED <<gen, phase, up, wm, rg, reg, tgt, issued, size, survive,
                    props, boot, readDone, done, floors>>
 
-\* A member of the chosen set activates with its bootstrap. It keeps its own
-\* floor, read generation and register if they are higher.
+\* A member of the chosen set activates with its bootstrap (only a member of
+\* the set holds one, and a bootstrap names a proposal, so the decree chose). It keeps its own floor, read generation and register
+\* if they are higher. Activating again changes nothing.
 Activate(m) ==
-    /\ chosen # None
-    /\ m \in chosen[1] /\ up[m] /\ gen[m] = 0
     /\ <<m, chosen>> \in boot
     /\ LET s == chosen[2] IN
        /\ gen' = [gen EXCEPT ![m] = 1]
@@ -375,9 +362,12 @@ RegisterCarried ==
 \* Decision 35: the matchmakers survive as many losses as the journal.
 MatchmakersOutlive == survive <= Survives(InForceSet)
 
+\* The decree chooses one set, one time.
+ChosenOnce == [][chosen # None => chosen' = chosen]_vars
+
 \* The handover ends: the decree chose a set, and each live member of it
-\* serves generation 1.
-Ends == <>(chosen # None /\ \A m \in chosen[1] : up[m] => gen[m] = 1)
+\* serves generation 1, from then on.
+Ends == <>[](chosen # None /\ \A m \in chosen[1] : up[m] => gen[m] = 1 /\ phase[m] = "active")
 
 \* Not a real invariant. TLC must find a trace: the handover ends after a
 \* write with an open successor and an effective floor, and with a member of

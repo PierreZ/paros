@@ -92,6 +92,9 @@ jobs:
       # docs/journal/04-roles.md §J4.3: no runtime, I/O or storage dependency in the pure crates.
       - name: Check the pure crates' dependencies
         run: nix develop --command scripts/check-core-deps.sh
+      # AGENTS.md, "Examples": every composing crate has examples, and the examples job runs each one.
+      - name: Check the examples of the composing crates
+        run: scripts/check-examples.sh
 
   test:
     needs: scope
@@ -297,7 +300,10 @@ jobs:
   # them is a test of the public API's shape as much as of the protocol. The examples of
   # `paros-journal` (`crates/lib/paros-journal/examples/`, #1370 (journal examples)) and of
   # `paros-journal-io` (#1329) do the same for the journal fold and for the journal roles on
-  # the traits and the driver, with backends in memory and a storage written by hand. They are linted under the
+  # the traits and the driver, with backends in memory and a storage written by hand. The
+  # examples of the facade `paros` run a journal through `paros::` paths alone, in one process
+  # (`journal`) and on three tokio tasks (`tokio_tasks`; tokio is a dev-dependency of the facade). Every composing
+  # crate has examples (`scripts/check-examples.sh`). They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
   examples:
     needs: scope
@@ -331,10 +337,20 @@ jobs:
         run: nix develop --command cargo run -p paros-consensus --example reconfiguration
       - name: Run the journal example fold
         run: nix develop --command cargo run -p paros-journal --example fold
+      - name: Run the journal example register
+        run: nix develop --command cargo run -p paros-journal --example register
       - name: Run the journal example in_memory
         run: nix develop --command cargo run -p paros-journal-io --example in_memory
       - name: Run the journal example custom_storage
         run: nix develop --command cargo run -p paros-journal-io --example custom_storage
+      - name: Run the journal example multi_writer
+        run: nix develop --command cargo run -p paros-journal-io --example multi_writer
+      - name: Run the grid controller example controller
+        run: nix develop --command cargo run -p paros-journal-control --example controller
+      - name: Run the facade example journal
+        run: nix develop --command cargo run -p paros --example journal
+      - name: Run the facade example tokio_tasks
+        run: nix develop --command cargo run -p paros --example tokio_tasks
       # nextest runs no doc test, so the examples of the rustdoc run here.
       - name: Run the doc examples
         run: nix develop --command cargo test --doc -p paros-consensus -p paros-journal-io

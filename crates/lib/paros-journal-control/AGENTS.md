@@ -20,6 +20,10 @@ register's (`paros_journal::register::value`, §J6.1).
 
 Each module keeps its unit tests in `<module>/tests.rs`.
 
+`examples/controller.rs` drives the role as a driver does, over a register written by hand (an
+election, a heal, a lost reply, a takeover). It asserts each step and runs in the `examples` job
+of CI (root `AGENTS.md`, "Composing crates have examples"). A change to the role's API updates it.
+
 ## Rules
 
 - **`decide` is a pure function of its view.** Every number of §J6 that is **Open** (the stale
@@ -43,5 +47,6 @@ Each module keeps its unit tests in `<module>/tests.rs`.
 `cargo nextest run -p paros-journal-control -p journal-sim`, `cargo clippy --all-targets -- -D
 warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-journal-control --no-deps`,
 `cargo check --target wasm32-unknown-unknown -p paros-journal-control`,
+`cargo run -p paros-journal-control --example controller`,
 `scripts/check-core-deps.sh` (a pure crate) and `scripts/mutants.sh --control` (no survivor),
 all in `nix develop`.

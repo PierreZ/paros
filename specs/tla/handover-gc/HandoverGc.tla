@@ -67,12 +67,15 @@ Init == /\ gen = [m \in Pool |-> 0]
         /\ acks = [k \in Ballots \X Gens |-> {}]
         /\ effective = {}
 
-\* A candidate registers b at m, which serves g.
+\* A candidate registers b at m, which serves g. The model lets a member of
+\* another generation take it too: Match counts only the members at g, and
+\* Activate replaces the registry of a member that moves to generation 1.
+\* A matchmaker also refuses a ballot below one that it registered; that
+\* order serves Phase 1, which this model leaves out (`matchmaker/` checks
+\* it), so the model lets the registrations come in any order.
 Register(b, g, m) ==
-    /\ m \in Set(g) /\ gen[m] = g
     /\ phase[m] = "active" \/ (FrozenRegisters /\ phase[m] = "frozen")
     /\ b >= wm[m]
-    /\ \A r \in regs[m] : r < b
     /\ regs' = [regs EXCEPT ![m] = @ \cup {b}]
     /\ UNCHANGED <<gen, phase, wm, reports, chosen, matched, acks, effective>>
 
@@ -88,18 +91,19 @@ Match(b, g) ==
 \* The leader of b, which addresses generation g, sends its GC request to m.
 \* m applies it if it serves g. If not, it refuses and reports its current
 \* floor. The collector of the leader folds the ack.
+\* A request to a member outside Set(g) never helps a majority of Set(g),
+\* and a second request to a member changes nothing.
 Gc(b, g, m) ==
     /\ <<b, g>> \in matched
-    /\ m \in Set(g)
-    /\ m \notin acks[<<b, g>>]
     /\ IF Serves(m, g)
        THEN /\ wm' = [wm EXCEPT ![m] = Up(@, b)]
             /\ regs' = [regs EXCEPT ![m] = {r \in @ : r >= Up(wm[m], b)}]
             /\ acks' = [acks EXCEPT ![<<b, g>>] = @ \cup {m}]
        ELSE \* A refusal. `newer`: m is at a later generation. `stopped`: m is
-            \* frozen at g. The node drops a `stopped` refusal, and a `newer`
-            \* one when it can learn the later set.
-            /\ ~ (gen[m] = g /\ phase[m] = "frozen")
+            \* frozen at g. The node drops a `newer` refusal when it can learn
+            \* the later set. It also drops a `stopped` one; the model counts
+            \* it, as a frozen member's floor does not change after its
+            \* report, which the successor state takes.
             /\ ~ (gen[m] > g /\ ~ PoolLag)
             /\ Collector = "watermark"
             /\ wm[m] >= b
@@ -109,7 +113,6 @@ Gc(b, g, m) ==
 
 \* The collector reports the floor b as effective at generation g.
 Effective(b, g) ==
-    /\ <<b, g>> \notin effective
     /\ acks[<<b, g>>] \in Majorities(Set(g))
     /\ effective' = effective \cup {<<b, g>>}
     /\ UNCHANGED <<gen, phase, wm, regs, reports, chosen, matched, acks>>
@@ -164,6 +167,22 @@ FloorCarried ==
 RegCarried ==
     \A k \in matched : k[2] = 0 =>
         \A m \in M1 : gen[m] = 1 => (k[1] \in regs[m] \/ k[1] < wm[m])
+
+\* A registration that a majority of generation g took stays: each majority
+\* of g, and of each later generation, that can answer a candidate now has a
+\* member that holds it, or whose floor passed it.
+RegHeld ==
+    \A k \in matched : \A g \in Gens : g >= k[2] =>
+        \A Q \in Majorities(Set(g)) :
+            (\A m \in Q : Serves(m, g)) =>
+                \E m \in Q : k[1] \in regs[m] \/ k[1] < wm[m]
+
+\* A matchmaker holds no registration below its floor: it refuses a ballot
+\* below its floor, and the GC drops the registrations below it.
+RegsAboveFloor == \A m \in Pool : \A r \in regs[m] : r >= wm[m]
+
+\* The successor state is chosen once.
+ChosenOnce == [][chosen # None => chosen' = chosen]_vars
 
 \* Not real invariants. TLC must find a trace for each: the model reaches an
 \* effective floor at generation 0 with a full generation 1.

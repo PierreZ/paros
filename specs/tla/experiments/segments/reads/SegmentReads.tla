@@ -126,8 +126,8 @@ VARIABLES
   rneed,    \* the highest chosen slot when its read started
   rhot,     \* TRUE when a later configuration than its record had chosen a slot then
   rindex,   \* the index that the read served
-  rst       \* "idle", "wait", "done": one read for each behavior, which
-            \* can start in any state
+  rst       \* "idle", "wait", "done": a read starts in any state, and a
+            \* new start drops the open read
 
 mm == <<bgen, sst, sstart, send>>
 ldr == <<bst, bsafe, bmax, prop>>
@@ -202,12 +202,12 @@ HighChosen == Max({s \in Slots : IsChosen(s)} \cup {0})
 (***************************************************************************)
 
 \* Ballot b registers configuration g: the one in force or its successor
-\* (plan rule 1). A successor opens a record with no start yet.
+\* (plan rule 1; OneSuccessor). A successor opens a record with no start
+\* yet. Ballots register in order, so a ballot registers once: a registered
+\* b fails c < b for c = b.
 Register(b, g) ==
-  /\ bgen[b] = 0
   /\ \A c \in Ballots : bgen[c] # 0 => c < b
   /\ g \in {Top, Top + 1}
-  /\ g <= NG
   /\ g = Top + 1 => sstart[Top] # 0
   /\ bgen' = [bgen EXCEPT ![b] = g]
   /\ sst' = IF g = Top + 1 THEN [sst EXCEPT ![g] = "open"] ELSE sst
@@ -254,14 +254,14 @@ Phase1(b) ==
 
 \* The first leader of configuration g seals g - 1 by compare-and-set: the
 \* end of g - 1 and the start of g are one above the highest vote that its
-\* Phase 1 saw (rule 1 of design A).
+\* Phase 1 saw (rule 1 of design A). g - 1 has a start: g registered only
+\* once the newest configuration, g - 1, had one (Register).
 Seal(b) ==
   LET g == bgen[b]
       p == g - 1
       e == Max({bmax[b], sstart[p] - 1}) + 1
   IN /\ bst[b] = "p1"
      /\ g >= 2
-     /\ sstart[p] # 0
      /\ send[p] = 0
      /\ send' = [send EXCEPT ![p] = e]
      /\ sstart' = [sstart EXCEPT ![g] = e]
@@ -280,65 +280,68 @@ Open(b) ==
 (* Phase 2                                                                 *)
 (***************************************************************************)
 
-\* The slots that the leader of b proposes at: each slot above the chosen
-\* prefix. Below the start of its segment it proposes the vote that Phase 1
-\* saw, or a Noop where it saw none (rule 2b of design A).
+\* The slots that the leader of b may propose at: each slot above the chosen
+\* prefix, which it learns from the replicas. Below the start of its segment
+\* it proposes the vote that Phase 1 saw, or a Noop where it saw none (rule
+\* 2b of design A).
 Writable(b) == {s \in Slots : s > Prefix}
 
-Propose(b, s, v) ==
-  /\ bst[b] = "w"
-  /\ s \in Writable(b)
-  /\ prop[b][s] = None
-  \* A leader proposes in slot order (the allocator frontier).
-  /\ \A t \in Writable(b) : t < s => prop[b][t] # None
-  /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]}
-           ELSE IF s < sstart[bgen[b]] THEN {Noop}
-           ELSE Values
-  /\ prop' = [prop EXCEPT ![b][s] = v]
-  /\ UNCHANGED <<mm, bst, bsafe, bmax, acc, rdr>>
+\* The leader of b proposes at its next slot: the lowest slot that it may
+\* write and did not propose yet (the allocator frontier of the core).
+Propose(b, v) ==
+  LET open == {t \in Writable(b) : prop[b][t] = None}
+      s == Min(open)
+  IN /\ bst[b] = "w"
+     /\ open # {}
+     /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]}
+              ELSE IF s < sstart[bgen[b]] THEN {Noop}
+              ELSE Values
+     /\ prop' = [prop EXCEPT ![b][s] = v]
+     /\ UNCHANGED <<mm, bst, bsafe, bmax, acc, rdr>>
 
+\* An Accept of a vote that the acceptor has changes nothing.
 Accept(a, b, s) ==
   /\ bgen[b] # 0
   /\ a \in Cfg(bgen[b])
   /\ a \in Active
   /\ prop[b][s] # None
   /\ prom[a] <= b
-  /\ vote[a][s][1] < b
   /\ prom' = [prom EXCEPT ![a] = b]
   /\ vote' = [vote EXCEPT ![a][s] = <<b, prop[b][s]>>]
   /\ sent2b' = sent2b \cup {<<s, b, prop[b][s], a>>}
   /\ known' = IF Belief THEN [known EXCEPT ![a] = Max({@, bgen[b]})] ELSE known
   /\ UNCHANGED <<mm, ldr, rdr>>
 
-\* Matchmaker garbage collection of the oldest sealed configuration: each
-\* slot of its range is chosen, and each slot where it holds a vote at or
-\* above its end is chosen in a later configuration.
+\* Matchmaker garbage collection of the oldest sealed configuration
+\* (RetiredPrefix), at any time after its seal. The Phase 1 of the
+\* successor's first leader holds a Phase-1 quorum of p, which meets every
+\* Phase-2 quorum of p, so p chooses nothing after the seal. The condition
+\* of the paper (each slot of the range chosen, each vote at or above the end
+\* chosen later) lets a later leader learn from the replicas what p chose:
+\* design A (`../a/`) checks it against the replicas (Readable,
+\* `retire_early`). The reads of this folder need no part of it, and an
+\* earlier retire only gives them more cases.
 Retire(p) ==
   /\ sst[p] = "sealed"
   /\ p = Min(Live)
-  /\ \A s \in Range(p) : IsChosen(s)
-  /\ \A a \in Cfg(p), s \in Slots :
-       vote[a][s][1] > 0 /\ bgen[vote[a][s][1]] = p /\ s >= send[p] =>
-         \E g \in Gens : g > p /\ ChosenInGen(s, g)
   /\ sst' = [sst EXCEPT ![p] = "retired"]
   /\ UNCHANGED <<bgen, sstart, send, ldr, acc, rdr>>
 
 \* An acceptor that is in no configuration that still runs loses its state
 \* of the journal. The history of the votes stays in sent2b: what was chosen
-\* stays chosen.
+\* stays chosen. A wipe of an empty store loses only the belief, which the
+\* probe reads again.
 WipeStore(a) ==
   /\ Wipe
   /\ a \notin Active
-  /\ prom[a] # 0 \/ \E s \in Slots : vote[a][s][1] > 0
   /\ prom' = [prom EXCEPT ![a] = 0]
   /\ vote' = [vote EXCEPT ![a] = [s \in Slots |-> <<0, None>>]]
   /\ known' = IF Belief THEN [known EXCEPT ![a] = 0] ELSE known
   /\ UNCHANGED <<mm, ldr, sent2b, rdr>>
 
 \* An acceptor that lost its state reads the register (the membership probe):
-\* it learns the configuration in force.
+\* it learns the configuration in force. Only Belief sets known to 0.
 Probe(a) ==
-  /\ Belief
   /\ known[a] = 0
   /\ known' = [known EXCEPT ![a] = InForce]
   /\ UNCHANGED <<mm, ldr, prom, vote, sent2b, rdr>>
@@ -353,16 +356,17 @@ Targets(g) ==
     THEN {T \cup C : T \in Rows(g), C \in Columns(g)}
     ELSE Rows(g)
 
-\* The reader fetches the record in force, at any time it is idle.
+\* The reader fetches the record in force, at any time. The start of a
+\* record never changes, so a fetch of the cached record changes nothing, and
+\* a fetch during a read only raises the start that the read serves at.
 Fetch ==
-  /\ rst = "idle"
-  /\ rview # InForce
   /\ rview' = InForce
   /\ rstart' = sstart[InForce]
   /\ UNCHANGED <<mm, ldr, acc, rT, rasked, rwm, rok, rneed, rhot, rindex, rst>>
 
+\* The reader starts a read at any time: it may drop an open read and start
+\* again. ReadFresh judges the read against its last start.
 ReadStart ==
-  /\ rst = "idle"
   /\ rneed' = HighChosen
   /\ rhot' = \E s \in Slots, g \in Gens : g > rview /\ ChosenInGen(s, g)
   /\ \E T \in Targets(rview) : rT' = T
@@ -391,11 +395,11 @@ Above(a) ==
 
 \* Acceptor a answers the read with its vote watermark, and with Fence its
 \* promise. A promise above the record ends the read, and the reader starts
-\* again on the record in force.
+\* again on the record in force. A second answer of an acceptor is a later
+\* answer, and an answer outside an open read (rst # "wait") changes nothing
+\* that a served read keeps: ReadStart sets each part of a read again.
 ReadAsk(a) ==
-  /\ rst = "wait"
   /\ a \in rT
-  /\ a \notin rasked
   \* With Belief, an acceptor that lost its state answers no read.
   /\ Belief => known[a] # 0
   /\ IF Fence /\ Above(a)
@@ -414,10 +418,10 @@ Complete ==
 \* at a matchmaker quorum. The check passes when the cached record is still
 \* in force. A newer record in force ends the read, and it starts again. The
 \* reader serves in a later step: a reshape can come between the two.
+\* A check outside an open read changes nothing that a served read keeps, and
+\* a check again of a read that passed only finds a newer record, which
+\* starts the read again. `Next` runs it with ReadRule = "record" only.
 RecordCheck ==
-  /\ ReadRule = "record"
-  /\ rst = "wait"
-  /\ ~rok
   /\ Complete
   /\ IF InForce = rview
        THEN /\ rok' = TRUE
@@ -426,11 +430,11 @@ RecordCheck ==
   /\ UNCHANGED <<mm, ldr, acc, rneed, rhot, rindex, rst>>
 
 \* The reader serves at the highest watermark, or the start minus one, once
-\* every slot up to there is chosen (a replica caught up to it).
+\* every slot up to there is chosen (a replica caught up to it; ServedChosen).
+\* A serve again of a served read answers later, so no less fresh.
 ReadServe ==
   LET i == Max({rwm, rstart - 1})
-  IN /\ rst = "wait"
-     /\ Complete
+  IN /\ Complete
      /\ ReadRule = "record" => rok
      /\ \A s \in 1..i : IsChosen(s)
      /\ rindex' = i
@@ -440,11 +444,12 @@ ReadServe ==
 Next ==
   \/ \E b \in Ballots, g \in Gens : Register(b, g)
   \/ \E b \in Ballots : Phase1(b) \/ Seal(b) \/ Open(b)
-  \/ \E b \in Ballots, s \in Slots, v \in Cmds : Propose(b, s, v)
+  \/ \E b \in Ballots, v \in Cmds : Propose(b, v)
   \/ \E a \in Acceptors, b \in Ballots, s \in Slots : Accept(a, b, s)
   \/ \E p \in Gens : Retire(p)
   \/ \E a \in Acceptors : WipeStore(a) \/ Probe(a)
-  \/ Fetch \/ ReadStart \/ RecordCheck \/ ReadServe
+  \/ Fetch \/ ReadStart \/ ReadServe
+  \/ ReadRule = "record" /\ RecordCheck
   \/ \E a \in Acceptors : ReadAsk(a)
 
 Spec == Init /\ [][Next]_vars
@@ -458,6 +463,16 @@ Agreement == \A s \in Slots, v, w \in Cmds : Chosen(s, v) /\ Chosen(s, w) => v =
 
 \* Nothing is chosen in a sealed configuration at or above its end.
 SealedFrozen == \A p \in Gens, s \in Slots : send[p] # 0 /\ s >= send[p] => ~ChosenInGen(s, p)
+
+\* Plan rule 1: one configuration in force and at most one successor, the
+\* newest, with no start yet.
+OneSuccessor == \A g \in Gens : sst[g] # "none" /\ sstart[g] = 0 => g = Top
+
+\* Matchmaker garbage collection forgets the oldest configuration first.
+RetiredPrefix == \A p, q \in Gens : p < q /\ sst[q] = "retired" => sst[p] = "retired"
+
+\* A served read serves chosen slots only.
+ServedChosen == rst = "done" => \A s \in 1..rindex : IsChosen(s)
 
 \* A served read covers the highest slot chosen before it started.
 ReadFresh == rst = "done" => rindex >= rneed

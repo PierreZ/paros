@@ -232,9 +232,13 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
-  and the journal examples: `cargo run -p paros-journal --example fold` and
-  `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`; #1370 (journal
-  examples))
+  the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
+  `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
+  `multi_writer`; #1370 (journal examples)), the grid controller's example:
+  `cargo run -p paros-journal-control --example controller`, and the facade examples:
+  `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
+- `scripts/check-examples.sh`: every composing crate has an example, and the `examples` job runs
+  each one (the workflow rule "Composing crates have examples" below)
 - the doc examples: `cargo test --doc -p paros-consensus -p paros-journal-io` (nextest runs no
   doc test)
 - the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
@@ -350,6 +354,19 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
+- **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
+  abstraction and dev experience", "Composing crates only"). A composing crate is a library
+  crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
+  (the facade), `paros-journal`, `paros-journal-control` and `paros-journal-io`; later the moonpool adapter and the
+  journal client. A user programs against these crates, so each one has runnable examples in
+  `examples/` that use its public API as a user would (the facade's examples import `paros::`
+  paths only). An example asserts what it shows, so CI runs it as a test: add each new example
+  to the `examples` job of `.github/workflows/rust.yml`. A change that reshapes the public API of
+  a composing crate updates its examples, or adds one, in the same pull request: the examples are
+  how a reviewer judges the abstraction. `scripts/check-examples.sh` fails when a composing crate
+  has no example or when CI does not run one. The internal crates (`consensus-sim`,
+  `journal-sim`, `paros-wasm`) need none. `paros-consensus` composes nothing, but its examples
+  stay: they are the lessons of each flavor.
 - **release-plz writes every changelog** (Pierre, 2026-11-21). Never create or edit a
   `CHANGELOG.md` by hand. release-plz creates each one from the commit messages in the release
   pull request, so the commit message is where a change is described.
@@ -659,22 +676,28 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
   fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
   journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
-  Its example `fold` (`examples/`) drives the fold alone.
+  Its examples (`examples/`): `fold` drives the fold alone, `register` the compare-and-sets of the
+  matchmaker register.
 - `crates/lib/paros-journal-control` — the grid controller of the journal v1
   (`docs/journal/06-controller.md` §J6, #1328): the P measures of a v1 grid, the placement of a
   heal under the zone rule, the pure `decide` of the v1 controller (heal, repair,
   re-replicate, hold and alert), and the controller role (`role`: its election by a term and
   its fenced reshape call, as asks to a driver), with a `probe!` on every branch. Sans-IO,
   wasm-safe, on `paros-consensus` and `paros-journal`; every **Open** number of §J6 comes from
-  the host. Not published yet, and not in the facade.
+  the host. Not published yet, and not in the facade. Its example `controller` drives the role
+  over a register written by hand: an election, a heal, a lost reply and a takeover.
 - `crates/lib/paros-journal-io` — the journal's IO side, pure (#1329): the four traits a backend
   implements (`Storage`, `Transport`, `Clock`, `Register`), the on-disk format (`layout`), the
   pure `Host` that serves many roles of many journals in one process, the generic `Driver` under
   the flight rule (group commit, held sends), the `Events` port, backends in memory (`mem`) and
-  the contract suites (`contract`). Its examples `in_memory` and `custom_storage` run the roles
-  on it.
+  the contract suites (`contract`). Its examples `in_memory`, `custom_storage` and `multi_writer`
+  run the roles on it.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
-  `paros::journal`, `paros::journal_io`). A program depends on `paros` alone. Wasm-safe and provider-free.
+  `paros::journal`, `paros::journal_io`). A program depends on `paros` alone. Wasm-safe and provider-free
+  with its default features; it is where moonpool's storage and network get bundled, behind a
+  feature, once the adapter exists (#1330). Its examples (`examples/`) run a journal through
+  `paros::` paths alone: `journal` in one process, `tokio_tasks` on three tokio tasks that talk
+  over channels (tokio is a dev-dependency only).
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
   segments, the walk of the matchmaker register across handovers, the walk of the journal
   roles, the walk of the generic driver of `paros-journal-io` on three processes, the sweep of
@@ -706,5 +729,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-core-deps.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-core-deps.sh`, `check-examples.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.
