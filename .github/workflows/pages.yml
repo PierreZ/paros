@@ -3,11 +3,17 @@ name: Deploy the site to GitHub Pages
 on:
   push:
     branches: ["main"]
-  # Build (never deploy) a pull request that touches the site or its tooling.
+  # Build and test (never deploy) a pull request that touches the site, its
+  # tooling, or a crate that its wasm or its pages show (#1362).
   pull_request:
     paths:
       - "website/**"
       - "crates/support/paros-wasm/**"
+      - "crates/lib/paros-consensus/**"
+      - "crates/lib/paros-journal/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "scripts/build-wasm.sh"
       - "flake.nix"
       - "flake.lock"
@@ -27,6 +33,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The 30-minute budget of every CI job.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
@@ -34,7 +42,18 @@ jobs:
       - name: Build the Paxos wasm and stage it at /paxos/wasm/
         run: nix develop --command scripts/build-wasm.sh
       - name: Build the site (Astro, #810 (website redo 1/4))
+        id: site
         run: nix develop --command bash -c 'cd website/site && npm ci --no-audit --no-fund && npm run build'
+      # The site links files at other refs than main (the tag v0.2.0-alpha.1):
+      # fetch every tag, so the link check can read them.
+      - name: Fetch the tags that the site links
+        run: git fetch --depth 1 origin 'refs/tags/*:refs/tags/*'
+      - name: Check every link of the built site (#1362)
+        run: nix develop --command bash -c 'cd website/site && npm run check-links'
+      # It runs after a red link check too, so one run reports both.
+      - name: Browser smoke test of the live parts (Playwright, Chromium, #1362)
+        if: ${{ !cancelled() && steps.site.outcome == 'success' }}
+        run: nix develop .#site --command bash -c 'cd website/site && npm test'
       - uses: actions/upload-pages-artifact@v5
         with:
           path: ./website/site/dist

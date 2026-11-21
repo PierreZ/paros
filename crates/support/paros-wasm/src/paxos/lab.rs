@@ -463,6 +463,8 @@ pub struct LabView {
 pub struct WireMessage {
     /// Its id.
     pub id: u64,
+    /// The `Message` variant's name, e.g. `Prepare`.
+    pub kind: String,
     /// The sending lane.
     pub from: String,
     /// The receiving lane.
@@ -677,6 +679,7 @@ impl Lab {
                 .iter()
                 .map(|message| WireMessage {
                     id: message.id,
+                    kind: message.kind.clone(),
                     from: lane_of(message, true),
                     to: lane_of(message, false),
                     phase: message.phase.clone(),

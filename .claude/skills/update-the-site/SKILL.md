@@ -41,10 +41,13 @@ before you write it. When a page moves, add a redirect in `astro.config.mjs`.
 ## Verify
 
 ```bash
-cd website/site && npm ci && npm run build      # inside nix develop
-npm run dev                                      # live preview
+nix develop --command scripts/build-wasm.sh                        # the wasm of the live parts
+nix develop --command bash -c 'cd website/site && npm ci && npm run build && npm run check-links'
+nix develop .#site --command bash -c 'cd website/site && npm test'  # browser smoke test
+cd website/site && npm run dev                                      # live preview
 ```
 
-Look at each page you changed at 390 px and 1280 px, light and dark (Playwright is
-installed). The site is built by `.github/workflows/pages.yml` on every pull request that
-touches `website/`, and deployed on push to `main`.
+Look at each page you changed at 390 px and 1280 px, light and dark. The site is built,
+link-checked and smoke-tested by `.github/workflows/pages.yml` on every pull request that
+touches `website/`, `paros-wasm`, `paros-consensus` or `paros-journal`, and deployed on
+push to `main` (`website/site/AGENTS.md`, "Tests").

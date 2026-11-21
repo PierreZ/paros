@@ -175,6 +175,11 @@ function mountLab(mount, engine) {
     if (!view.wire.length) wire.append(el("li", "lab-empty", "Nothing is on the wire."));
     for (const m of view.wire) {
       const li = el("li", "lab-msg");
+      // What the message is, for a script that plays the network (the
+      // browser smoke test, website/site/tests/).
+      li.dataset.kind = m.kind;
+      li.dataset.from = m.from;
+      li.dataset.to = m.to;
       li.style.setProperty("--phase", `var(--phase-${m.phase || "other"})`);
       const what = el("span", "lab-msg-what");
       what.append(el("b", "lab-msg-label", m.label));
