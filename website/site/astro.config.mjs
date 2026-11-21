@@ -44,6 +44,7 @@ const redirects = {
   "/engineering/durable-writes": "/engineering/",
   "/engineering/fsync": "/engineering/",
   "/engineering/dogfooding": "/engineering/",
+  "/engineering/sans-io": "/consensus/driver/",
   "/paxos/play": "/paxos/",
   "/paxos/tricky": "/paxos/",
   "/paxos/beyond-multi-paxos": "/paxos/",

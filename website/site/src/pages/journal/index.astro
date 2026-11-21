@@ -83,7 +83,7 @@ const TLA = `${REPO}/tree/main/specs/tla`;
   <p>The roles and their driver follow one contract, the flight rule: each write to disk has an
   id, and each message names the write it waits on. So a driver can group writes and keep many in
   flight, and the role still decides every order (<a href={`${J}/04-roles.md`}>§J4.2</a>,
-  checked by <a href={`${TLA}/flight-rule`}><code>flight-rule/</code></a>). The <a href={url("engineering/sans-io/")}>sans-IO core</a> page shows the contract of <code>paros-consensus</code> today.</p>
+  checked by <a href={`${TLA}/flight-rule`}><code>flight-rule/</code></a>). The <a href={url("consensus/driver/")}>driver loop</a> page shows the contract of <code>paros-consensus</code> today.</p>
 
   <h2 id="checked">How it is checked</h2>
   <p>No code before its model (<a href={`${J}/07-verification.md`}>§J7</a>). Each rule has a

@@ -1,0 +1,115 @@
+---
+// The Consensus section (#1349 (Consensus, Journal and parosd page groups)):
+// the paros-consensus crate, a general Paxos library. The Paxos pages teach
+// each flavor; these pages show how the library builds it.
+import Doc from "../../layouts/Doc.astro";
+import { REPO, url } from "../../nav";
+const SRC = `${REPO}/blob/main/crates/lib/paros-consensus`;
+const TREE = `${REPO}/tree/main/crates/lib/paros-consensus`;
+const ex = (name: string) => `${SRC}/examples/${name}.rs`;
+
+const FLAVORS = [
+  { flavor: "Single-decree Paxos", types: ["decree::Decree"], page: "single-decree", examples: ["single_decree"] },
+  { flavor: "Multi-Paxos", types: ["ColocatedNode"], page: "multi-paxos", examples: ["multi_paxos", "quickstart", "journal_calls"] },
+  { flavor: "Leader handoff", types: ["ColocatedNode::relinquish_to"], page: "multi-paxos", examples: ["leader_handoff"] },
+  { flavor: "Matchmaker Paxos", types: ["Matchmaker", "MatchmakerReconfigurer"], page: "matchmaker", examples: ["matchmaker", "reconfiguration"] },
+  { flavor: "Proxy leaders", types: ["ProxyLeader"], page: "compartmentalized", examples: ["proxy_leader"] },
+  { flavor: "Batchers", types: ["batcher::Batcher", "batcher::Unbatcher"], page: "compartmentalized", examples: [] },
+  { flavor: "Replicas", types: ["ReplicaNode"], page: "compartmentalized", examples: ["replica_tier"] },
+  { flavor: "Leaderless reads", types: ["quorum_read::QuorumReads"], page: "compartmentalized", examples: ["quorum_read"] },
+  { flavor: "Grid quorums", types: ["membership::QuorumSystem"], page: "quorums", examples: ["acceptor_grid"] },
+];
+const PAGE_NAMES: Record<string, string> = {
+  "single-decree": "Single decree", "multi-paxos": "Multi-Paxos", "matchmaker": "Matchmaker",
+  "compartmentalized": "Compartmentalized", "quorums": "Quorums",
+};
+---
+<Doc title="paros-consensus" kicker="Consensus" section="consensus/" siblings={[]}
+  description="Every Paxos role as a sans-IO state machine, in one Rust library. Plain Multi-Paxos, single decree, and every flavor of the Paxos pages.">
+
+  <div class="strip" aria-label="paros-consensus in figures">
+    <div><span class="k">I/O, clock, randomness</span><span class="v">none</span></div>
+    <div><span class="k">Deployments</span><span class="v">4</span></div>
+    <div><span class="k">Runnable examples</span><span class="v">11</span></div>
+  </div>
+
+  <h2 id="what">What it is</h2>
+  <p><code>paros-consensus</code> holds the Paxos roles as plain state machines: proposer,
+  acceptor, replica, matchmaker, proxy leader, batcher, leaderless reader. It does no I/O, it
+  reads no clock and it draws no random number. It uses std only, and with
+  <code>default-features = false</code> it has no dependency. Your program, the driver, owns the
+  sockets, the disk and the timers. So the same code runs in a unit test, in a simulation, in this
+  browser (compiled to wasm) and behind a real network.</p>
+  <p>It is a general library. You can use it for plain Multi-Paxos with a fixed membership, or for
+  one single-decree choice, with no part of the paros journal. A deployment runs what its
+  <code>Config</code> names: the quorum system, the matchmakers, the proxy leaders and the replicas.
+  No cargo feature changes a decision. With no matchmakers, plain Multi-Paxos sends no matchmaker
+  message and writes no extra state, and a reconfiguration is refused. What the paros journal needs
+  comes from optional behaviour and composition, never from a service concept inside the core
+  (<a href={`${REPO}/blob/main/docs/architecture/04-roles.md#43-the-consensus-core-is-a-library-for-everyone`}>architecture §4.3</a>).</p>
+
+  <h2 id="flavors">Each flavor, and where it is</h2>
+  <p>Each row is a flavor that a <a href={url("paxos/")}>Paxos page</a> teaches, the type that
+  builds it, and an example that runs it. Run an example with
+  <code>cargo run -p paros-consensus --example &lt;name&gt;</code>: each prints a trace and asserts
+  the property that it shows.</p>
+    <table>
+      <thead><tr><th>Flavor</th><th>In the crate</th><th>Page</th><th>Example</th></tr></thead>
+      <tbody>
+        {FLAVORS.map((f) => (
+          <tr>
+            <td>{f.flavor}</td>
+            <td>{f.types.map((t, i) => <>{i > 0 && ", "}<code>{t}</code></>)}</td>
+            <td><a href={url(`paxos/${f.page}/`)}>{PAGE_NAMES[f.page]}</a></td>
+            <td>{f.examples.length ? f.examples.map((e, i) => <>{i > 0 && ", "}<a href={ex(e)}><code>{e}</code></a></>) : "none yet"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+
+  <h2 id="layers">Three layers</h2>
+  <p>The crate has three layers, and each layer uses only the layers below it. A role never uses a
+  deployment, and a deployment never uses another deployment. CI checks this with
+  <code>scripts/check-core-layers.sh</code>.</p>
+  <div class="arch" role="img" aria-label="Three layers. Deployments on top: ColocatedNode, ProxyLeader, ReplicaNode, Matchmaker. Roles in the middle: proposer, acceptor, replica, quorum reads, decree, batcher. Foundations at the bottom: types, journal, contract.">
+    <div class="row">
+      <div class="box lead">deployments <small>ColocatedNode · ProxyLeader · ReplicaNode · Matchmaker</small></div>
+    </div>
+    <div class="arrow">▼ <small>wire</small></div>
+    <div class="row">
+      <div class="box">roles <small>proposer · acceptor · replica · quorum_read · decree · batcher</small></div>
+    </div>
+    <div class="arrow">▼ <small>use</small></div>
+    <div class="row">
+      <div class="box side">foundations <small>types · journal · contract · membership</small></div>
+    </div>
+  </div>
+  <p>A role knows only what the caller gives it. The proposer builds no message, the acceptor
+  never reads the chosen prefix, and the replica never sees a ballot tally. Each quorum question
+  goes through <code>membership</code> (<code>has_phase1_quorum</code>,
+  <code>has_phase2_quorum</code>), so a new quorum system is a new <code>QuorumSystem</code>
+  variant and no tally changes.</p>
+
+  <h2 id="journal">The log is a journal</h2>
+  <p>The log of <code>ColocatedNode</code> carries a journal: a <code>Write</code> appends records at
+  a position, <code>SetLeader</code> names the client that may write, and <code>Truncate</code> drops
+  a prefix. The core judges no command at <code>propose</code>. Each node judges a command when its
+  slot is applied, in slot order, so each node gives the same <code>Outcome</code>. A write on a
+  journal with no writer is chosen by Paxos and refused by the journal. The journal v1 core,
+  <code>paros-journal</code>, uses this crate with its features off and adds no concept to it.</p>
+
+  <h2 id="pages">The pages</h2>
+  <ol class="index-list">
+    <li><a href={url("consensus/driver/")}>The driver loop</a><span class="desc">Input in, one <code>Ready</code> out: persist, then send, then learn. Be the driver of three nodes.</span></li>
+    <li><a href={url("consensus/deployments/")}>The deployments</a><span class="desc">The colocated node, the proxy leader, the replica and the matchmaker: what each runs, and when to use it.</span></li>
+    <li><a href={url("consensus/proof/")}>How it is checked</a><span class="desc">A TLA+ model for each flavor, each walk checked against its model, faults on, every probe reached, mutants caught.</span></li>
+  </ol>
+
+  <h2 id="in-paros">In paros</h2>
+  <ul>
+    <li><a href={`${SRC}/README.md`}><code>crates/lib/paros-consensus/README.md</code></a>: the entry point, with the driver loop and the examples.</li>
+    <li><a href={`${SRC}/src/lib.rs`}><code>src/lib.rs</code></a>: the crate root. Its quick start is a doc test with three nodes.</li>
+    <li><a href={`${SRC}/AGENTS.md`}><code>AGENTS.md</code></a>: the map of the modules and the rules for a change.</li>
+    <li><a href={`${TREE}/examples`}><code>examples/</code></a>: seven examples that drive the deployments, and four lessons that drive the roles by hand.</li>
+  </ul>
+</Doc>

@@ -57,3 +57,4 @@ no-op.
   never goes through the leader.
 - Every node applies the chosen slots in order, so a `Write`, a `Truncate` or a
   `SetLeader` gets the same answer on every node.
+- Consensus: [the driver loop](../../consensus/driver/) lets you drive three nodes (persist, then send, then learn), and [the deployments](../../consensus/deployments/#colocatednode) show `ColocatedNode`.

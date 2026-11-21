@@ -31,6 +31,12 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "Quorums", path: "paxos/quorums/" },
     { title: "Concepts", path: "paxos/concepts/" },
   ],
+  "consensus/": [
+    { title: "paros-consensus", path: "consensus/" },
+    { title: "The driver loop", path: "consensus/driver/" },
+    { title: "The deployments", path: "consensus/deployments/" },
+    { title: "How it is checked", path: "consensus/proof/" },
+  ],
   "journal/": [
     { title: "The journal", path: "journal/" },
     { title: "The calls", path: "journal/calls/" },
@@ -40,7 +46,6 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "The controller", path: "journal/controller/" },
   ],
   "engineering/": [
-    { title: "The sans-IO core", path: "engineering/sans-io/" },
     { title: "Grid quorums", path: "engineering/grid-quorums/" },
   ],
 };
