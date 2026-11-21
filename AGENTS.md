@@ -74,7 +74,7 @@ that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold and the read prefix that it gates (#1270 (bypass read order)), GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
 more rules)), quorum everywhere (`specs/tla/quorum-everywhere/`: every step of the journal, the
-write, the election, the leaderless read, the seal, the retire, the offload mark, the trim and the
+write, the election, the leaderless read, the seal, the boundary write, the retire, the offload mark, the trim, the acceptor compaction and the
 matchmaker handover, waits for a quorum only and completes with F members down in every column,
 in each matchmaker set and in the replica set, with a control that blocks each step one member
 later and a control that waits for every member as a FoundationDB TLog commit; #1257 (quorum
@@ -107,7 +107,7 @@ states and their fixed actions, no placement over two zones after a zone loss; #
 health measures)), a user truncate across segments (`specs/tla/segment-truncate/`: the trim floor
 in the boundary state, the floor of a read from the segment in force, the floor check of an
 offloaded read, the trim of a sealed segment once the floor is decided over it, the acceptors'
-compaction after `F + 1` replicas, the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
+compaction after `F + 1` replicas with a floor kept for each segment (#1318), the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
 segments with an empty segment and a seal before the `Fence`; the whole boundary state, the
 leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), the seal
 end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1

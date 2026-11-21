@@ -14,6 +14,9 @@ quorum_majority     pass       ci
 write_move          pass       ci
 # F + 1 down in the replica set: a heal still copies from the one live holder.
 heal_replica        pass       ci
+# F + 1 down in the replica set: the boundary write still starts at the one
+# live replica that applied the segment.
+boundary_replica    pass       ci
 bypass_hold_move    pass       ci
 # One more member down than the quorum allows: each step blocks.
 write_every_column  violation  ci
@@ -23,7 +26,9 @@ election_column     violation  ci
 read_column         violation  ci
 seal_column         violation  ci
 retire_replica      violation  ci
+compact_replica     violation  ci
 election_mm         violation  ci
+boundary_mm         violation  ci
 read_mm             violation  ci
 seal_mm             violation  ci
 retire_mm           violation  ci
@@ -38,6 +43,8 @@ write_all           violation  ci
 election_all        violation  ci
 read_all            violation  ci
 seal_all            violation  ci
+boundary_all        violation  ci
+compact_all         violation  ci
 retire_all          violation  ci
 offload_all         violation  ci
 trim_all            violation  ci

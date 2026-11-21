@@ -82,11 +82,22 @@
 (*             range so far is below the floor.                            *)
 (*   Jump      TRUE: a laggard jumps to the trim point of a peer. FALSE: a *)
 (*             control, it waits for the slot.                             *)
+(*   Reprop    the number of the top slots of S1 that the sealing leader   *)
+(*             proposed again in its own grid (docs/journal §J3.1): their  *)
+(*             votes live at the acceptors of the grid of S2, but they     *)
+(*             belong to S1 and its replica set R1.                        *)
+(*   AccKey    "segment": the acceptors keep a floor for each segment, and *)
+(*             a slot follows the floor and the retire of its own segment, *)
+(*             in whichever grid its vote lives (#1318). "grid": a control,*)
+(*             the acceptors of a grid keep one floor, counted on the      *)
+(*             replica set of the segment in force; it covers the slots of *)
+(*             S1 that live in the grid of S2.                             *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
 CONSTANTS R1, R2, K, NS, F, Vals, None, RetireAt, ReadSeqs,
-          AccRule, Boundary, FloorFrom, CacheCheck, TrimWhen, TrimOpen, Jump
+          AccRule, Boundary, FloorFrom, CacheCheck, TrimWhen, TrimOpen, Jump,
+          Reprop, AccKey
 
 ASSUME R1 # {} /\ R2 # {} /\ R1 \cap R2 = {}
 ASSUME K \in 1..NS /\ NS \in Nat
@@ -97,6 +108,7 @@ ASSUME FloorFrom \in {"tail", "holder"}
 ASSUME CacheCheck \in {"floor", "none"}
 ASSUME TrimWhen \in {"decided", "intent"}
 ASSUME TrimOpen \in BOOLEAN /\ Jump \in BOOLEAN
+ASSUME Reprop \in 0..K /\ AccKey \in {"segment", "grid"}
 
 
 Replicas == R1 \cup R2
@@ -177,17 +189,28 @@ FloorSlot(g) ==
       slot == IF keep = {} THEN Frontier ELSE CHOOSE s \in keep : \A t \in keep : s <= t
   IN Max(Start(g), Min(slot, End(g)))
 Compacted(g, x) == Cardinality({r \in Set(g) : Ready(r) /\ CompactTo(r) >= x}) >= F + 1
+\* The lowest slot of the floor of g: with AccKey "grid", the floor of the
+\* grid of S2 also covers the slots of S1 proposed again there.
+AccStart(g) == IF g = 2 /\ AccKey = "grid" THEN K - Reprop ELSE Start(g)
 AccTarget(g) ==
   IF AccRule = "floor" THEN FloorSlot(g)
-  ELSE CHOOSE x \in Start(g)..End(g) :
-         /\ x = Start(g) \/ Compacted(g, x)
-         /\ \A y \in Start(g)..End(g) : y > x => ~Compacted(g, y)
+  ELSE CHOOSE x \in AccStart(g)..End(g) :
+         /\ x = AccStart(g) \/ Compacted(g, x)
+         /\ \A y \in AccStart(g)..End(g) : y > x => ~Compacted(g, y)
 
 Live(g) == Set(g) \ down
 Holders == {r \in R1 : Front(r) = K}
 Count2 == Max(0, Frontier - K)
 \* The acceptors of a segment still answer.
 AccLive(g) == IF g = 1 THEN state[1] = "sealed" ELSE state[2] = "open"
+\* The slot s is at the acceptors. A slot of S1 proposed again lives in the
+\* grid of S2: with AccKey "segment" it follows the floor and the retire of
+\* S1, with AccKey "grid" those of the grid of S2.
+Moved(s) == Seg(s) = 1 /\ s >= K - Reprop
+AccHolds(s) ==
+  IF AccKey = "grid" /\ Moved(s)
+  THEN AccLive(2) /\ s >= accFloor[2]
+  ELSE AccLive(Seg(s)) /\ s >= accFloor[Seg(s)]
 
 TypeOK ==
   /\ \A s \in Slots : chosen[s] \in Vals \cup {None}
@@ -205,7 +228,7 @@ Init ==
   /\ base = [r \in Replicas |-> None]
   /\ bnd = None
   /\ state = [g \in {1, 2} |-> IF g = 1 THEN "sealed" ELSE "open"]
-  /\ accFloor = [g \in {1, 2} |-> Start(g)]
+  /\ accFloor = [g \in {1, 2} |-> AccStart(g)]
   /\ obj = FALSE
   /\ down = {}
   /\ rd = [q \in Seqs |-> None]
@@ -225,7 +248,7 @@ Learn(r, s) ==
   /\ s >= Front(r)
   /\ s \notin held[r]
   /\ state[Seg(s)] # "trimmed"
-  /\ \/ AccLive(Seg(s)) /\ s >= accFloor[Seg(s)]
+  /\ \/ AccHolds(s)
      \/ \E p \in Live(Seg(s)) : s \in held[p]
   /\ held' = [held EXCEPT ![r] = @ \cup {s}]
   /\ UNCHANGED <<chosen, applied, base, bnd, state, accFloor, obj, down, rd>>
@@ -256,7 +279,7 @@ AccCompact(g) ==
 \* peer: the peer's compaction target and its fold there. No bytes move.
 NoSource(r) ==
   LET s == Front(r) IN
-  /\ ~(AccLive(SetOf(r)) /\ s >= accFloor[SetOf(r)])
+  /\ ~AccHolds(s)
   /\ ~\E p \in Live(SetOf(r)) : s \in held[p]
 JumpTo(r) ==
   /\ Jump
@@ -436,7 +459,7 @@ TrimTrue ==
 Findable == \A s \in 0..(Frontier - 1) :
   chosen[s].op = "w" /\ Truth(s).next >= Floor =>
     \/ \E r \in Live(Seg(s)) : s \in held[r]
-    \/ AccLive(Seg(s)) /\ s >= accFloor[Seg(s)]
+    \/ AccHolds(s)
     \/ Seg(s) = 1 /\ state[1] = "offloaded" /\ obj
 
 \* A trimmed record never becomes live again; the object of a trimmed

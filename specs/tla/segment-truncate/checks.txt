@@ -37,4 +37,5 @@ cache_unchecked   violation  ci
 trim_intent       violation  ci
 trim_open         violation  ci
 acc_floor         violation  ci
+acc_grid          violation  ci
 nojump            violation  ci

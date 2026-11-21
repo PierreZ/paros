@@ -191,7 +191,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
-| Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call, heal of a sealed segment) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
+| Quorum everywhere: every journal step (write, election, leaderless read, seal, boundary write, retire, offload mark, trim, acceptor compaction, matchmaker handover, grid controller election, reshape call, heal of a sealed segment) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
@@ -2130,9 +2130,11 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 | `election` | a matchmaker majority; a Phase-1 quorum of `Old`; a Phase-1 quorum of `New` |
 | `read` | a Phase-1 quorum of the answers to `GridReadTargets(New)`; a matchmaker majority (the segment-record check that #1254 proposed; the journal does not keep it, `docs/journal/03-segments-and-records.md` §J3.1, so this wait asks more than the read needs) |
 | `seal` | a Phase-1 quorum of `Old` (the highest vote); a matchmaker majority (the compare-and-set of the end slot) |
+| `boundary` | one replica of the set that applied the sealed segment (any live member can be the first); a matchmaker majority (the compare-and-set of the boundary state, #1318) |
 | `retire` | `F + 1` replicas of the segment hold it; a matchmaker majority |
 | `offload` | a matchmaker majority (the offload mark, #1256) |
 | `trim` | `acks` of one column (the decided `Truncate`); a matchmaker majority |
+| `compact` | `F + 1` replicas of the segment's set report their compaction point to the leader side (#1276 rule 5, #1318); the floor that the leader side then sends the acceptors waits for no answer, so it is not a wait |
 | `handover` | a stop quorum of `MM`; Phase 1 and Phase 2 of the successor decree in `MM2` |
 | `ctl_election` | a matchmaker majority (read the controller term); a matchmaker majority (its compare-and-set, #1259) |
 | `reshape` | a matchmaker majority (the fenced reshape call, #1259) |
@@ -2153,14 +2155,15 @@ changes nothing, and the state space stays small.
 | `quorum` | ci | pass: the grid 3 × 2 with `acks = 2`, `F = 1`, `Shift = 1` |
 | `quorum_shift_row` | ci | pass: the same with `Shift = 2` (each member keeps its column) |
 | `quorum_3x3` | ci | pass: 3 × 3, `acks = 2`, `F = 1` |
-| `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (890 thousand distinct states with the two controller steps; 12 minutes locally with 4 workers while two other TLC runs shared the machine) |
+| `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (1.13 million distinct states with the boundary write and the acceptor compaction; 12.6 minutes locally with 2 workers while another TLC run shared the machine) |
 | `quorum_majority` | ci | pass: the majority of three (`partitions = 1`, a grid 3 × 1) |
 | `write_move` | ci | pass: `F + 1` down in one column, `F` in the others; the write moves and completes |
 | `bypass_hold_move` | ci | pass: the same for the hold before Phase 2 of a bypass, in the old grid |
 | `bypass_hold_every_column` | ci | violation: `F + 1` down in every column of `Old` blocks the hold |
 | `write_every_column`, `trim_every_column` | ci | violation: `F + 1` down in every column of `New` blocks the write |
 | `election_column`, `read_column`, `seal_column` | ci | violation: `F + 1` down in one column blocks Phase 1 |
-| `retire_replica` | ci | violation: `F + 1` replicas down blocks the retire |
+| `retire_replica`, `compact_replica` | ci | violation: `F + 1` replicas down blocks the retire and the acceptor compaction |
+| `boundary_replica` | ci | pass: with `F + 1` replicas down, the boundary write still starts at the one live replica that applied the segment (the control is `boundary_mm`) |
 | `heal_replica` | ci | pass: with `F + 1` replicas down, the heal still copies from the one live holder (the control is `heal_mm`: the copy needs no quorum of the set) |
 | `<step>_mm`, for each step that asks the matchmakers | ci | violation: `F + 1` down in one matchmaker set blocks the step |
 | `<step>_all`, for each step | ci | violation: a wait that needs every target (a TLog commit) blocks with `F` down |
@@ -2536,6 +2539,7 @@ offloaded S1, and is "trunc" for a trimmed S1.
 | `trim_intent` | ci | violation of `ReadKeep`: S1 is trimmed once a `Truncate` that covers it exists, before it is decided; a read above the floor answers "trunc" |
 | `trim_open` | ci | violation of `Findable`: the open S2 is trimmed when its range so far is below the floor; a later write of S2 has nowhere to live |
 | `acc_floor` | ci | violation of `Ends`: the acceptors of S1 compact to the decided floor before a replica of R1 applied S1; nobody can fold S1, the boundary state is never written, and R2 never starts |
+| `acc_grid` | ci | violation of `Findable` (#1318): the top slot of S1 was proposed again in the grid of S2 (`Reprop = 1`), and the acceptors of that grid keep one floor, counted on R2. r1 applies S1 and writes the boundary state, r1 stops, r4 and r5 start, the floor of the grid rises to `K`, and the slot is at no live replica of R1 and at no acceptor. With the floor kept for each segment (`AccKey = "segment"`, every other check) the slot follows the floor and the retire of S1 |
 | `nojump` | ci | violation of `Ends`: no `TrimmedTo`; a replica of R2 behind the floor waits for ever for a slot that the acceptors and its peer dropped |
 | `crash_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (23.5 million distinct states, depth 26, 3.76 million states left on the queue), no violation; run of the second Fable review of the journal plan, 2026-11-20. A cut that finishes is #1321 |
 | `live_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (16.7 million distinct states, depth 20, 6.2 million states left and growing), no violation; `Ends` is checked as an invariant on a prefix of the state space only. Same run, same issue |
@@ -2559,6 +2563,13 @@ The answer to #1276:
 - **Lagging replica.** A replica behind the floor jumps to a peer's trim point and never
   fetches a slot of a trimmed segment (`nojump`). For that, the acceptors of a segment compact
   only to a slot that `F + 1` replicas of its set compacted to (`acc_floor`): a new rule.
+- **The acceptors' floor is kept for each segment** (#1318, finding 7c of the second Fable
+  review). The slots below the seal end that the sealing leader proposes again live at the
+  acceptors of the new grid, but they belong to S1 and to R1. Their floor is the floor of S1,
+  counted on R1, and they go at the retire of S1, in whichever grid their votes live
+  (`AccKey = "segment"`). The constant `Reprop` moves the top slots of S1 to the grid of S2; with
+  the floor of S1 they behave as every other slot of S1, so the design arm is the model as it
+  was. A grid that keeps one floor counted on R2 (`acc_grid`) loses such a slot.
 - No decision is refuted. Left out: the leader uuid and the fence (`segment-replicas/`), the
   upload races (`offload/`), Phase 1 and the seal end (`experiments/segments/a/`); the
   matchmakers are one atomic register.
