@@ -290,7 +290,7 @@ and name it in the PR description.
 `release-plz.toml` and `.github/workflows/release-plz.yml`. The public crates are
 `paros-consensus`, `paros-journal` and `paros`, at one version (`version_group`), one `v{version}` tag and one
 draft GitHub release. release-plz creates and writes every changelog; none is written by hand.
-`consensus-sim`, `journal-sim` and `paros-wasm` stay `publish = false`. A push to `main`
+`consensus-sim`, `journal-sim`, `paros-wasm` and `paros-authz-biscuit` stay `publish = false`. A push to `main`
 only opens or updates the release pull request. **Nothing publishes by itself**: only Pierre
 merges a release pull request, and only Pierre starts the `release` job (workflow_dispatch),
 which publishes. An agent never merges a release pull request and never starts that job. A new
@@ -674,6 +674,11 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/support/paros-wasm` — the site's wasm tools (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only; feature `journal`,
   the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal` only.
+- `crates/support/paros-authz-biscuit` — Biscuit tokens (#245 (Biscuit tokens)): root keys,
+  offline mint and derive, and the verifier of a request with one Datalog policy. It stands
+  alone: no other paros crate, no runtime, and no crate of the workspace uses it yet. It came
+  back from the tag without its adapter to the old frontend. It does not build for wasm32, so
+  it stays out of the facade.
 
 Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`; `specs/tla/experiments/`
 holds the models that compare candidate designs before Pierre decides, such as the segments
