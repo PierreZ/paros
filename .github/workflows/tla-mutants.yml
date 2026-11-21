@@ -10,7 +10,7 @@
 # `TLA` workflow runs them. Then one job for each slice of a folder judges
 # its mutants one at a time, each TLC on every CPU, with those times
 # (`--baseline-from`). `scripts/mutate-tla-shards.txt` gives the number of
-# slices of each folder. A slice has a budget below its 30-minute job: a
+# slices of each folder, and lists every folder. A slice has a budget below its 30-minute job: a
 # mutant that the budget cuts is `unfinished`, the slice fails, and the fix is
 # more slices. The `report` job lists every survivor and every unfinished
 # mutant. It runs each week and on demand. A pull request only checks that
@@ -43,9 +43,14 @@ jobs:
         run: |
           list=$(for m in specs/tla/*/checks.txt specs/tla/experiments/*/*/checks.txt; do
               [ -f "$m" ] && dirname "${m#specs/tla/}"; done)
+          for f in $list; do
+            if ! awk -v f="$f" '$1 == f { ok = 1 } END { exit !ok }' scripts/mutate-tla-shards.txt; then
+              echo "::error::$f has no line in scripts/mutate-tla-shards.txt"
+              exit 1
+            fi
+          done
           slices=$(for f in $list; do
               n=$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)
-              n=${n:-0}
               for i in $(seq 1 "$n"); do echo "$f $i/$n"; done
             done | jq -R . | jq -sc .)
           folders=$(echo "$list" | jq -R . | jq -sc .)

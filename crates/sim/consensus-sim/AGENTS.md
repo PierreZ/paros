@@ -48,6 +48,18 @@ Test only: `publish = false`, never a dependency of another crate.
   its own step, with the reason in its header, never hidden.
 - **Every trace spec has a control**: a mutant that the oracles miss on some seed and TLC
   refuses (`tests/traces.rs`).
+- **Every trace spec refuses the edits of its recorded traces** (#1308 (mutate recorded
+  traces), `trace/mutate.rs`). A control shows that a check can fail; the edits show that the
+  binding refuses what it must. A named edit drops, repeats, moves or changes one event of a
+  recorded walk at the first place where no correct run records the result (a promise of a
+  ballot not opened yet, a vote at a slot its ballot never proposed, a repeated first `Accept`
+  of a (ballot, slot)), and TLC must refuse the edited trace at the edited event or after it.
+  Each trace spec has at least 20 edits with a place. An edit that TLC accepts is a binding
+  that accepts too much: fix the trace spec (or the walk, when it records a step that changes
+  nothing), never the place of the edit to dodge it. A place is a fact of the trace, never a
+  seed or an index. A new event kind gets its edits in the same PR. A step that the walk
+  records once (the first `Accept` of a (ballot, slot), a registration, a GC ack) is refused a
+  second time with `TracedBefore`.
 - **Every trace spec names the rules its checked walks must meet** (`Spec::rules`,
   `cluster/trace/rules.rs`; #1231 (traced walks reach the rules)): a promise that reports a vote,
   a win above slot 0, three wins in one walk, a `Noop` gap fill, a vote, a learn, a `record`, a
@@ -77,7 +89,7 @@ Test only: `publish = false`, never a dependency of another crate.
     `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `JOURNAL_FOLD`, `PREFIX_SHRINKS` (the durable
     chosen prefix never shrinks: a crash may take back only what no fsync covered).
   - `journal.rs` → `JournalSpec`: the single-writer journal contract
-    (`docs/architecture/02-data-plane.md` §2.1-§2.3, §2.6) written again, folded over the
+    (`docs/journal/02-data-plane.md` §J2.1-§J2.3, §J2.6) written again, folded over the
     commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
     these rules give (so every party folds it the same way). It never calls
     `paros_consensus::journal::state`; it uses the core's types as data only.
@@ -88,7 +100,7 @@ Test only: `publish = false`, never a dependency of another crate.
   leaders, replicas, matchmakers, spares, late spares, matchmaker spares), which optional moves
   are on (`Flavor::allows`) and the `Limits` of every party (`Flavor::paged` puts every page
   at its floor, so the paging branches run). The journal's client (`Client` in `cluster.rs`)
-  pipelines its writes as the writer of `docs/architecture/02-data-plane.md` §2.2 does: it
+  pipelines its writes as the writer of `docs/journal/02-data-plane.md` §J2.2 does: it
   writes at the next position it believes free, continues from the position a refusal names,
   retries one of its last writes unchanged, and writes under a superseded uuid on purpose.
   `Mutant` is the bug of a control run: a planted driver bug that
@@ -140,6 +152,8 @@ Test only: `publish = false`, never a dependency of another crate.
 - `decree.rs` → `DecreeModel`: single-decree Paxos (`paros_consensus::decree`), three acceptors
   and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
   `specs/tla/decree/DecreeTrace.tla`.
+- `trace/mutate.rs` → `Edit`, `edits`: the named edits of a recorded trace (#1308), each
+  with the rule a correct run keeps and the place it finds.
 - `trace.rs` → what every trace check shares: `spec` (a trace spec of `specs/tla/`),
   `require_tlc`, `Ranks` (the code's ballots as the model's `1..NB`), the names of nodes.
 - `batcher.rs` → `BatchModel`: the batcher and the unbatcher (Compartmentalized Paxos §3.5).
@@ -197,7 +211,15 @@ Test only: `publish = false`, never a dependency of another crate.
   retirement with no evidence); the `reconfiguring` flavor against
   `matchmaker/MatchmakerGridTrace` (control: an early GC request on a grid, `Mutant::EarlyGc` on
   `reconfigured-compartments`); the `handover` flavor against `handover/HandoverTrace`
-  (control: a bootstrap page that lost a registration, `Mutant::ShrinkBootstrap`). A retiring or a reconfiguring walk has 250 quiet steps, the others
+  (control: a bootstrap page that lost a registration, `Mutant::ShrinkBootstrap`). The tests
+  `tlc_refuses_the_edited_*` apply every edit of `trace::mutate` to the recorded walks of each
+  trace spec (the first seed and the seeds that meet a new rule; 40 seeds of the decree and
+  batcher walks) and require a refusal at or after the edited event; an invariant of the trace
+  that breaks there counts as a refusal. `MultiPaxosTrace`, `TruncationTrace`,
+  `CompartmentsTrace` and `LeaderHandoffTrace` check `TraceLearnRecordsHeld` (a learned slot
+  holds its vote once the batch of the learn is whole), with a control that drops the record of
+  a learn (`tlc_sees_a_learn_with_no_record_*`). CI runs both in release in the `trace-edits`
+job of `rust.yml`, not in the debug `test` job. A retiring or a reconfiguring walk has 250 quiet steps, the others
   10: a retirement needs a leader that stands while its GC floor becomes effective, and a
   delegated round under a new configuration needs a leadership of it that settles. Every
   control searches from seed 1, never from a seed picked by hand. A cluster walk has
@@ -207,7 +229,8 @@ Test only: `publish = false`, never a dependency of another crate.
   when a rule stays unmet. About three minutes in release on four CPUs. TLC (`tlc`) is in the nix
   dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
   in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
-  a change of `specs/tla/` alone. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
+  a change of `specs/tla/` alone. That job runs in four shards (`--partition count:i/4`), so each
+  shard stays well under the 30 minutes of a CI job. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
   `TRACE_CHAOS`, `TRACE_MAX_EVENTS`, `TRACE_DUMP`.
 - A long run: `MOONPOOL_WALK_SEEDS=1500 cargo nextest run --release -p consensus-sim`. One seed:
   `MOONPOOL_WALK_SEED=17`. The other knobs: `MOONPOOL_WALK_FROM`, `_STEPS`, `_TAIL`, and

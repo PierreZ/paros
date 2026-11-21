@@ -273,6 +273,7 @@ class Check:
     folder: str
     name: str
     expected: str
+    seed: list[str] = field(default_factory=list)
     baseline: float | None = None
     base_result: str = ""
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -298,7 +299,8 @@ def read_checks(folder: str) -> list[Check]:
         if not parts or parts[0].startswith("#"):
             continue
         if len(parts) >= 3 and parts[2] == "ci":
-            checks.append(Check(folder, parts[0], parts[1]))
+            seed = [w[len("seed="):] for w in parts[3:] if w.startswith("seed=")]
+            checks.append(Check(folder, parts[0], parts[1], ["-seed", seed[-1]] if seed else []))
     return checks
 
 
@@ -346,7 +348,7 @@ def run_tlc(tree: Path, check: Check, timeout: float | None) -> tuple[str, float
     try:
         p = subprocess.run(
             ["tlc", "-workers", str(TLC_WORKERS), "-deadlock", "-metadir", meta + "/states",
-             "-config", check.name + ".cfg", "MC.tla"],
+             *check.seed, "-config", check.name + ".cfg", "MC.tla"],
             cwd=tree / check.folder, capture_output=True, text=True, timeout=timeout,
             env=java_env(meta),
         )

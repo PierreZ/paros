@@ -32,3 +32,13 @@ partitions            pass       long  50
 # still ends. Two wipes leave no majority: the control.
 live_wipe             pass       long
 live_wipe_two         violation  ci
+# Inv is inductive (#1307 (inductive invariants, then proofs)): TLC draws
+# random states where Inv holds (`IndInit`, MC.tla) and checks Inv after one
+# step from each. The seed makes each run draw the same states. Its controls:
+# a prefix allocator and a Phase 1 that takes the lowest report break Inv in
+# one step.
+inductive             pass       ci  seed=1
+inductive_three       pass       ci  seed=1
+inductive_grid        pass       ci  seed=1
+inductive_prefix      violation  ci  seed=1
+inductive_lowest      violation  ci  seed=1

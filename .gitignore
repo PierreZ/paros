@@ -37,3 +37,6 @@ negative.out/
 
 # TLC writes its state files here when it runs without -metadir.
 specs/tla/*/states/
+
+# Python bytecode (scripts/mutate-tla.py)
+__pycache__/
