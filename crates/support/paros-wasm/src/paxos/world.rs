@@ -49,6 +49,7 @@ impl ClientId {
 pub mod decree;
 pub mod disk;
 mod drain;
+mod forge;
 mod history;
 mod lifecycle;
 pub mod matchmakers;
