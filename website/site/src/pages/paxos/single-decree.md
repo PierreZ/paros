@@ -50,3 +50,4 @@ second value is chosen. paros refuses to boot a member whose disk is empty (`Boo
   over the initial members ([`paros-machine/src/cell_init.rs`](https://github.com/PierreZ/paros/tree/v0.2.0-alpha.1/crates/lib/paros-machine/src/cell_init.rs)).
 - Two proposers can block each other without end. paros keeps one stable leader, and a
   proposer that loses waits before it tries again.
+- Consensus: [paros-consensus](../../consensus/#flavors) lists every flavor with the type that builds it and an example to run.

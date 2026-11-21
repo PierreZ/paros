@@ -1,8 +1,9 @@
 // The sections of the site, in the order of the top bar.
 export const NAV = [
   { name: "Paxos", path: "paxos/" },
-  { name: "Engineering", path: "engineering/" },
+  { name: "Consensus", path: "consensus/" },
   { name: "Journal", path: "journal/" },
+  { name: "Engineering", path: "engineering/" },
 ] as const;
 
 export const REPO = "https://github.com/PierreZ/paros";

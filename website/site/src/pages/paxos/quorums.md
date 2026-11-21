@@ -58,3 +58,4 @@ the rule" counts two quorums that share no acceptor, and two values are chosen.
 - `paros-consensus`: `QuorumSystem` ([`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/membership/quorum_system.rs)). A configuration carries its
   quorum system, so a reconfiguration can change the shape.
 - `QuorumSystem::partitions(F, P)`: `P` partitions of `2F+1` acceptors each.
+- Consensus: [paros-consensus](../../consensus/#layers) sends every quorum question through `membership`, so a new shape is a new `QuorumSystem` variant.

@@ -32,7 +32,7 @@ If you think that a case needs an exception, stop and ask Pierre. Do not add the
 
 **Where paros is now (2026-11-21).** The repository holds the consensus core and its proofs:
 `paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
-models of `specs/tla/`, the Paxos pages of the website and their wasm engine. The journal v1 has
+models of `specs/tla/`, the Paxos and Consensus pages of the website and their wasm engine. The journal v1 has
 its pure core, `paros-journal`, and its walk crate, `journal-sim` (#1324 (paros-journal pure
 core)); its roles and driver are not built yet. The journal
 service that sat above the core (`parosd`, `parosctl`, `paros-bench`, the library layers, the

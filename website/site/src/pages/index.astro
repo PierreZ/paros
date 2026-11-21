@@ -17,7 +17,7 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
         every one of them in your browser, on the code paros ships.</p>
       <div class="actions">
         <a class="btn primary" href={url("paxos/")}>▶ Learn the Paxos flavors</a>
-        <a class="btn" href={url("engineering/")}>How it is built</a>
+        <a class="btn" href={url("consensus/")}>How it is built</a>
         <a class="btn" href={url("journal/")}>The journal service</a>
       </div>
     </div>
@@ -38,13 +38,14 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
       </ol>
     </Panel>
 
-    <Panel num="02" title="The core">
+    <Panel num="02" title="The core" meta="paros-consensus">
       <ul class="caps">
         <li><b>Sans-IO</b><span><code>paros-consensus</code> has no I/O, no clock and no randomness. Inputs go in, one <code>Ready</code> comes out, and the driver does the I/O in a fixed order.</span></li>
         <li><b>One role per file</b><span>Proposer, acceptor, replica, matchmaker, proxy leader, batcher, quorum read: the roles of the papers, composed into deployments.</span></li>
         <li><b>Models first</b><span>A rule that the papers do not have, or a flavor that is not modelled yet, gets a TLA+ model and a control before its code.</span></li>
-        <li><b>Seven examples</b><span>Small runnable programs drive the roles by hand and assert the property each one teaches.</span></li>
+        <li><b>Eleven examples</b><span>Small runnable programs drive the deployments and the roles, and assert the property each one shows.</span></li>
       </ul>
+      <p class="aside"><a href={url("consensus/")}>The library</a> · <a href={url("consensus/driver/")}>the driver loop</a> · <a href={url("consensus/deployments/")}>the deployments</a> · <a href={url("consensus/proof/")}>how it is checked</a></p>
     </Panel>
 
     <Panel num="03" title="Coming: the journal service" meta="rewrite in progress">
