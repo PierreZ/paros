@@ -11,6 +11,11 @@ use crate::matchmaker::{GcAck, GcRequest};
 /// configuration from `{0, 1, 2}` to `{0, 1}` and decides one write under
 /// it, so its GC campaign is covered and node 2 is retirable.
 fn shrunk_cluster() -> ([ColocatedNode; 3], Vec<Matchmaker>) {
+    shrunk_cluster_after(0)
+}
+
+/// [`shrunk_cluster`], with `proposed` writes chosen before the shrink.
+fn shrunk_cluster_after(proposed: u64) -> ([ColocatedNode; 3], Vec<Matchmaker>) {
     let mut nodes = [0, 1, 2].map(|i| deployed_node(i, &[0, 1, 2], &[0, 1, 2], 3));
     let mut mms = registries(3);
     campaign(&mut nodes[0]);
@@ -21,6 +26,11 @@ fn shrunk_cluster() -> ([ColocatedNode; 3], Vec<Matchmaker>) {
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
     assert!(nodes[0].is_leader());
+    for seq in 0..proposed {
+        let _ = nodes[0].propose(entry(1, seq + 10, 1));
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
     nodes[0].set_election_timeout(NO_CHECK_QUORUM);
     assert!(matches!(
         nodes[0].reconfigure(&cfg(&[0, 1])),
@@ -110,6 +120,15 @@ fn a_matchmaker_quorum_makes_the_floor_effective_and_retires_the_removed_accepto
         gc_requests(&mut nodes[0]).is_empty(),
         "nothing is re-sent once effective"
     );
+}
+
+/// The campaign judges Region 1 by its election fence: the highest slot
+/// proposed below the shrink's ballot (the two writes at slots 0 and 1).
+#[test]
+fn the_gc_campaign_carries_its_election_fence() {
+    let (nodes, _) = shrunk_cluster_after(2);
+    assert_eq!(nodes[0].gc_fence(), Some(Slot(1)));
+    assert_eq!(nodes[1].gc_fence(), None, "a follower collects nothing");
 }
 
 /// An ack the open campaign did not ask for is ignored whole: one from a

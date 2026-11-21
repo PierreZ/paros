@@ -677,6 +677,51 @@ fn a_staged_rejoin_that_never_left_is_sent_again_at_boot() {
     ready.advance();
 }
 
+/// A rejoin a matchmaker quorum took, with no leader to follow, asks the
+/// rest again on its own clock, ahead of an election clock that a
+/// campaign's `Prepare` restarted.
+#[test]
+fn a_rejoin_with_no_leader_asks_the_rest_again() {
+    let mut mms = registries(3);
+    let mut storage = MemStorage::for_node(2, &[0, 1, 2]);
+    let _ = retire_node_2(&mut mms, &mut storage);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    fire_election(&mut n);
+    let requests = persist(&mut n, &mut storage);
+    assert_eq!(requests.len(), 3, "every matchmaker is asked");
+    let mut replies = matchmake(&mut mms, requests);
+    let _ = replies.pop();
+    for reply in replies {
+        let _ = n.on_match_reply(reply);
+        let _ = persist(&mut n, &mut storage);
+    }
+    assert!(n.rejoin.is_some(), "a quorum leaves the rejoin open");
+    assert!(n.leader().is_none());
+    n.set_election_timeout(3);
+    n.tick();
+    n.tick();
+    // A campaign's `Prepare` restarts the election clock, not the rejoin's.
+    n.step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: ballot(40, 0),
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = persist(&mut n, &mut storage);
+    assert!(n.leader().is_none());
+    n.tick();
+    let asked: Vec<(MatchmakerId, MatchPurpose)> = persist(&mut n, &mut storage)
+        .into_iter()
+        .map(|(m, q)| (m, q.purpose))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![(MatchmakerId(2), MatchPurpose::Rejoin { incarnation: 1 })],
+        "only the matchmaker that did not take the rejoin is asked again"
+    );
+    assert!(n.membership_probe().is_none(), "no probe carried it");
+}
+
 /// Close `n2`'s open rejoin. Late answers at the closed check's tag
 /// `check_tag` are not the rejoin's: every matchmaker answering there
 /// leaves the rejoin open. A quorum of the rejoin's own answers to
