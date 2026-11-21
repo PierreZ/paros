@@ -431,6 +431,17 @@ fn recovering_leader(page: usize) -> ColocatedNode {
 }
 
 #[test]
+fn a_recovering_leader_is_not_settled() {
+    let mut n = recovering_leader(RECOVERY_BATCH);
+    assert!(!n.leadership_settled(), "its recovery is open");
+    while n.proposer.recovery().is_some() {
+        n.ready().advance();
+        n.advance_recovery();
+    }
+    assert!(n.leadership_settled());
+}
+
+#[test]
 fn leader_recovery_is_split_across_ready_batches() {
     let mut n = recovering_leader(RECOVERY_BATCH);
     let ready = n.ready();

@@ -139,26 +139,24 @@ impl ColocatedNode {
         };
         // Only a matchmaker deployment moves its configuration, so only one
         // ever lacks a read basis or refuses a pre-read for an unheard belief.
-        if counters.reads_without_basis > 0 || counters.pre_reads_refused_unheard > 0 {
-            assert!(
-                self.config.has_matchmakers(),
-                "only a matchmaker deployment reads without a basis"
-            );
-        }
+        assert!(
+            counters.reads_without_basis == 0 || self.config.has_matchmakers(),
+            "only a matchmaker deployment reads without a basis"
+        );
+        assert!(
+            counters.pre_reads_refused_unheard == 0 || self.config.has_matchmakers(),
+            "only a matchmaker deployment refuses a pre-read for an unheard belief"
+        );
         // A node is outside its configuration only on a deployment that
         // reconfigures: plain Multi-Paxos skips and resigns nothing.
-        if counters.campaigns_skipped > 0 {
-            assert!(
-                self.config.has_matchmakers(),
-                "only a matchmaker deployment skips a campaign"
-            );
-        }
-        if counters.step_downs > 0 {
-            assert!(
-                self.config.has_matchmakers(),
-                "only a matchmaker deployment resigns a non-member"
-            );
-        }
+        assert!(
+            counters.campaigns_skipped == 0 || self.config.has_matchmakers(),
+            "only a matchmaker deployment skips a campaign"
+        );
+        assert!(
+            counters.step_downs == 0 || self.config.has_matchmakers(),
+            "only a matchmaker deployment resigns a non-member"
+        );
         counters
     }
 
@@ -172,12 +170,10 @@ impl ColocatedNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub(super) fn matchmaking_timeouts(&self) -> u64 {
-        if self.counters.matchmaking_timeouts > 0 {
-            assert!(
-                self.config.has_matchmakers(),
-                "only a matchmaker deployment matchmakes"
-            );
-        }
+        assert!(
+            self.counters.matchmaking_timeouts == 0 || self.config.has_matchmakers(),
+            "only a matchmaker deployment matchmakes"
+        );
         self.counters.matchmaking_timeouts
     }
 
@@ -249,12 +245,10 @@ impl ColocatedNode {
     #[must_use]
     pub(super) fn blocked_repairs(&self) -> usize {
         let blocked = self.proposer.probe().map_or(0, |p| p.blocked().len());
-        if blocked > 0 {
-            assert!(
-                self.role == NodeRole::Leader,
-                "only a leader holds a repair probe"
-            );
-        }
+        assert!(
+            blocked == 0 || self.role == NodeRole::Leader,
+            "only a leader holds a repair probe"
+        );
         blocked
     }
 
