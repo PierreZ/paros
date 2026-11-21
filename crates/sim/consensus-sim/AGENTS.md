@@ -229,7 +229,8 @@ job of `rust.yml`, not in the debug `test` job. A retiring or a reconfiguring wa
   when a rule stays unmet. About three minutes in release on four CPUs. TLC (`tlc`) is in the nix
   dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
   in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
-  a change of `specs/tla/` alone. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
+  a change of `specs/tla/` alone. That job runs in four shards (`--partition count:i/4`), so each
+  shard stays well under the 30 minutes of a CI job. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
   `TRACE_CHAOS`, `TRACE_MAX_EVENTS`, `TRACE_DUMP`.
 - A long run: `MOONPOOL_WALK_SEEDS=1500 cargo nextest run --release -p consensus-sim`. One seed:
   `MOONPOOL_WALK_SEED=17`. The other knobs: `MOONPOOL_WALK_FROM`, `_STEPS`, `_TAIL`, and
