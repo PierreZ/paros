@@ -2404,6 +2404,7 @@ never changes, so each invariant is checked once on each state, as in `grid/`.
 | `States` | `code`: the seven journal states of section 5.1. `draft`: a control, the states of the first draft (WritesDegraded and ElectionBlocked by the leader alone, no state for a grid with no writable column). |
 | `HoldSlack` | `0`: the hold of a bypass counts `acks` promises of one column. `1`: a control, one less. |
 | `Zones` | `0`: the grid checks. `2`, `3`: the zone checks, every member live and every map of up to six members to the zones. |
+| `V1` | `TRUE`: the v1 scope (#1319 (a v1 switch in health/)): the partitioned grid only (`rows = 2F + 1`, `acks = F + 1`) and no bypass, so WritesDegraded needs only a column that can write. `FALSE`: every grid of the bound and the bypass hold, the design for after v1. |
 
 The invariants: `ElectableMeaning`, `WritableMeaning` and `HoldMeaning` (each count against its
 quorum predicate); `HoldIsWritable` (the hold of §J5.5 can complete exactly when a column
@@ -2424,6 +2425,8 @@ writable and an election possible); `OneState` (each live set is in exactly one 
 | `draft_states` | ci | control: with no live acceptor, the draft puts a live leader in WritesDegraded, whose bypass hold cannot complete |
 | `draft_one_state` | ci | control: `rows = 4`, `acks = 3`, 2 of 4 live is electable and writes nowhere; the draft has no state for it |
 | `reach_writes_blocked` | ci | reached: a grid that the reshape accepts can be electable and write nowhere (WritesBlocked is not empty) |
+| `v1` | ci | pass, `V1 = TRUE`: the meanings of the counts, `OneState`, `ActionCanRun` with the v1 actions, `PartitionedOneSpare` and `NoWritesBlocked` (WritesBlocked is empty on the v1 grids) on every v1 grid up to 9 acceptors (5 thousand states) |
+| `v1_draft` | ci | control, `V1 = TRUE`: the draft states on the v1 grids; a live leader with no column that can write is in WritesDegraded and cannot write |
 | `zones2` | ci | pass: no placement over two zones survives a zone, on any grid up to six acceptors; `zone_margin` says what the quorums say |
 | `zones3` | ci | pass: `zone_margin` on three zones; row = zone takes every column to the same spare at once |
 | `zones3_placeable` | ci | control: on three zones TLC finds a placement that meets the rule |
@@ -2431,7 +2434,9 @@ writable and an election possible); `OneState` (each live set is in exactly one 
 The answer to #1260: the counts of the catalogue are exact on every grid inside the bound, but a
 grid that is not partitioned needs both spares of a column, and the journal states need
 WritesBlocked and Stopped beside the five of the draft. After a zone loss on three zones no heal
-can meet the zone rule, so the controller holds and alerts. The model does not check the
+can meet the zone rule, so the controller holds and alerts. On the v1 grids (`V1`) the two
+spares are one number and WritesBlocked is empty, so v1 has six states (`docs/journal/06-controller.md`
+§J6.2, "Which checks cover v1"). The model does not check the
 controller's choice of plan; that is `decide`, tested with its crate (#1261 (grid controller
 decision tests)).
 
