@@ -745,6 +745,9 @@ RBoot(r, from) ==
                             THEN [rrds[c] EXCEPT !.state = "ended"] ELSE rrds[c]]
   /\ UNCHANGED <<logVars, mmVars, floorVars, rlearned, rfloor, readVars>>
 
+\* Read c closes: its reader drops the answers to it.
+DropAnswers(c) == racks' = {k \in racks : k.ctx # c}
+
 \* Replica r opens read c (`ReplicaNode::quorum_read_in`), and remembers
 \* the writes that completed before it.
 RRead(r, c) ==
@@ -764,7 +767,8 @@ RServe(r, c, i) ==
      ELSE \E k \in racks : k.ctx = c /\ k.wm <= i
   /\ i < rnext[r]
   /\ rrds' = [rrds EXCEPT ![c].state = "done", ![c].index = i]
-  /\ UNCHANGED <<logVars, mmVars, floorVars, rlearned, rnext, rfloor, readVars>>
+  /\ DropAnswers(c)
+  /\ UNCHANGED <<logVars, mmVars, floorVars, rlearned, rnext, rfloor, rbasis, rds, acked>>
 
 -----------------------------------------------------------------------------
 (* The leaderless reads *)
@@ -777,12 +781,20 @@ TopVote(a) == Max({s \in Slots : vote[a][s].bal > 0} \cup {-1})
 VoteWatermark(a) ==
   IF Watermark = "floor" /\ floor[a] - 1 > TopVote(a) THEN floor[a] - 1 ELSE TopVote(a)
 
-\* Acceptor a answers read c with its vote watermark and its read fence,
-\* at or above its promise (`PreReadAck`). A plain deployment sends no
-\* fence (-1): it never reconfigures.
+\* Read c is open, at a node or at a replica.
+Open(c) == rds[c].state = "open" \/ rrds[c].state = "open"
+
+\* Acceptor a answers read c with its vote watermark and its read fence, at
+\* or above its promise (`PreReadAck`). The read is open, or was: its
+\* `PreRead` asked, and an answer may arrive after the read closed. The
+\* reader drops such an answer.
+\* A plain deployment sends no fence (-1): it never reconfigures.
 ReadAck(a, c, fence) ==
+  /\ rds[c].state # "none" \/ rrds[c].state # "none"
   /\ Fence = "promise" => IF Matchmaking THEN fence >= prom[a] ELSE fence = -1
-  /\ racks' = racks \cup {[acc |-> a, ctx |-> c, wm |-> VoteWatermark(a), fence |-> fence]}
+  /\ racks' = IF Open(c)
+              THEN racks \cup {[acc |-> a, ctx |-> c, wm |-> VoteWatermark(a), fence |-> fence]}
+              ELSE racks
   /\ UNCHANGED <<logVars, mmVars, floorVars, repVars, rbasis, rds, acked>>
 
 \* Node n learns the read basis of the leadership that won ballot b, with
@@ -823,11 +835,13 @@ ReadFold(n, a, c) ==
   /\ \E k \in racks :
        /\ k.acc = a /\ k.ctx = c
        /\ IF k.fence > q.b
-          THEN rds' = [rds EXCEPT ![c].state = "ended"]
+          THEN /\ rds' = [rds EXCEPT ![c].state = "ended"]
+               /\ DropAnswers(c)
           ELSE /\ ~Whole(q)
                /\ ~\E x \in q.answers : x.acc = a
                /\ rds' = [rds EXCEPT ![c].answers = @ \cup {[acc |-> a, wm |-> k.wm]}]
-  /\ UNCHANGED <<logVars, mmVars, floorVars, repVars, rbasis, racks, acked>>
+               /\ UNCHANGED racks
+  /\ UNCHANGED <<logVars, mmVars, floorVars, repVars, rbasis, acked>>
 
 \* Node n serves read c: the answers hold a Phase-1 quorum, its promise is
 \* still not above the basis, and it holds every slot up to the index, the
@@ -840,7 +854,8 @@ ReadServe(n, c) ==
      /\ Whole(q)
      /\ \A s \in Slots : s <= i => Holds(n, s)
      /\ rds' = [rds EXCEPT ![c].state = "done", ![c].index = i]
-     /\ UNCHANGED <<logVars, mmVars, floorVars, repVars, rbasis, racks, acked>>
+     /\ DropAnswers(c)
+     /\ UNCHANGED <<logVars, mmVars, floorVars, repVars, rbasis, acked>>
 
 \* A party applied every slot up to s: those writes completed. Some node or
 \* replica holds each of them.

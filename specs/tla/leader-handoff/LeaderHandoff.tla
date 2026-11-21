@@ -87,6 +87,9 @@
 (*                 FALSE: a control, it keeps leading.                     *)
 (*   Named         TRUE: only the successor that the payload names installs*)
 (*                 it. FALSE: a control, any node installs it.             *)
+(*   KeepHigher    TRUE: a record of a chosen value never lowers the       *)
+(*                 recorded ballot (`mark_chosen`). FALSE: a control, it   *)
+(*                 lowers a leader's own vote below its ballot.            *)
 (*   BeatGuard     TRUE: a beat at a leader's own ballot keeps it leader.  *)
 (*                 FALSE: a control, the code of today: a late beat of the *)
 (*                 predecessor deposes the successor (review of            *)
@@ -97,7 +100,7 @@ EXTENDS Naturals, FiniteSets
 CONSTANTS Acceptors, Learners, Commands, Noop, NB, NS, Q1, Q2, Owner,
           HandBallots, Steady, Restarts, Drops, DropKinds, Resign, Quiet, Wiring,
           OneHop, FrontierGuard, DurableFrontier, Pending, BeatGuard,
-          PromiseGuard, RecordAll, Abdicate, Named
+          PromiseGuard, RecordAll, Abdicate, Named, KeepHigher
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
@@ -113,7 +116,7 @@ ASSUME Owner \in [Ballots -> Acceptors]
 ASSUME Q2 \in [Slots -> SUBSET SUBSET Acceptors]
 ASSUME Pending \in {"keep", "drop"}
 ASSUME {Resign, Quiet, Wiring, OneHop, FrontierGuard, DurableFrontier, BeatGuard} \subseteq BOOLEAN
-ASSUME {PromiseGuard, RecordAll, Abdicate, Named} \subseteq BOOLEAN
+ASSUME {PromiseGuard, RecordAll, Abdicate, Named, KeepHigher} \subseteq BOOLEAN
 
 Vote == [bal : 0..NB, val : Values \cup {None}]
 NoVote == [bal |-> 0, val |-> None]
@@ -389,7 +392,7 @@ Record(n, b, s, v) ==
   /\ Wiring
   /\ b < prom[n]
   /\ ChosenAt(b, s, v)
-  /\ vote[n][s].bal <= b
+  /\ KeepHigher => vote[n][s].bal <= b
   /\ vote[n][s] # [bal |-> b, val |-> v]
   /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
   /\ UNCHANGED <<prom, learned, phase, role, bal, origin, nxt, pend, restarts, drops, lost, msgs>>

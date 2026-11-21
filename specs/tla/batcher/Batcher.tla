@@ -9,7 +9,7 @@
 (* `compartments/` checks the batcher inside the log, with Paxos under it. *)
 (* This model is the walk's shape: writers push writes of several          *)
 (* multi-writer journals into one batcher, a batch lands whole at its      *)
-(* journal's next position with no Paxos under it, and the network drops  *)
+(* journal's next position with no Paxos under it, and the network drops   *)
 (* and duplicates batches and answers (a write may land twice, section 2.4 *)
 (* of docs/architecture/02-data-plane.md). The steps:                      *)
 (*   - `Write`: a writer makes write t of n records and `bytes` bytes for  *)
@@ -29,7 +29,8 @@
 (*                                                                         *)
 (* Constants: `Tokens`, the writes; `Journals`; `MaxRecords` and           *)
 (* `MaxBytes`, the limits of a batch; `MaxN` and `MaxB`, the largest write *)
-(* the writers make; `MaxBatches` and `MaxLog`, the bounds of a check.     *)
+(* the writers make; `MaxBatches`, `MaxLog` and `MaxPushes`, the bounds of *)
+(* a check (a writer may push a write again, after a crash).               *)
 (* Rules, each with a control:                                             *)
 (*   Order    "push": a flush sends its lane in push order (the rule).     *)
 (*            "any": a control, it sends the lane in any order.            *)
@@ -41,7 +42,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS Tokens, Journals, MaxRecords, MaxBytes, MaxN, MaxB, MaxBatches, MaxLog,
+CONSTANTS Tokens, Journals, MaxRecords, MaxBytes, MaxN, MaxB, MaxBatches, MaxLog, MaxPushes,
           Order, Scatter
 
 ASSUME Order \in {"push", "any"}
@@ -108,6 +109,7 @@ Write(t, j, n, b) ==
 \* Write t joins the lane of its journal.
 Push(t) ==
   /\ Made(t)
+  /\ Len(pushed) < MaxPushes
   /\ LET j == writes[t].jr
      IN /\ ~Alone(t)
         /\ Records(lanes[j]) + writes[t].n <= MaxRecords
