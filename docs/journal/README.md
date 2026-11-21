@@ -8,7 +8,9 @@ alone (Pierre, 2026-11-20: "create an equivalent of docs architecture of Parosd 
 journal as first step"; #1332 (journal architecture docs), step 1 of #1323 (build the paros
 journal v1)). Every later step of the build (#1189 and #1324 to #1331) builds against them.
 
-**It is the target, not the code.** No journal code exists yet. `AGENTS.md` describes what paros
+**It is the target, not all of it is code.** The pure journal core exists (`paros-journal` and
+`journal-sim`, #1324 (paros-journal)); the journal roles, the register and the driver do not
+exist yet. `AGENTS.md` describes what paros
 is today. Where these files and `docs/architecture/` disagree on a journal rule, these files win.
 
 **One home for each rule.** A journal rule is written here once, with its decision, its issue

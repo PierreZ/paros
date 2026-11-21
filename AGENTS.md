@@ -30,9 +30,11 @@ without breaking it, so that the work makes progress.**
 
 If you think that a case needs an exception, stop and ask Pierre. Do not add the exception.
 
-**Where paros is now (2026-11-19).** The repository holds the consensus core and its proofs
-only: `paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
-models of `specs/tla/`, the Paxos pages of the website and their wasm engine. The journal
+**Where paros is now (2026-11-21).** The repository holds the consensus core and its proofs:
+`paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
+models of `specs/tla/`, the Paxos pages of the website and their wasm engine. The journal v1 has
+its pure core, `paros-journal`, and its walk crate, `journal-sim` (#1324 (paros-journal pure
+core)); its roles and driver are not built yet. The journal
 service that sat above the core (`parosd`, `parosctl`, `paros-bench`, the library layers, the
 simulation `paros-sim`) was removed on 2026-11-19. It is at the git tag `v0.2.0-alpha.1`, and
 `docs/archive/v0.2.0-alpha.1/README.md` has one recap per removed crate: what it did, its key
@@ -132,7 +134,11 @@ journal's matchmaker register with its writer, its guard and the models that che
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/journal/04-roles.md` §J4.2 (#1255 (journal sans-IO contract)),
-and its flight rule has a model, `specs/tla/flight-rule/`. No journal code exists yet.
+and its flight rule has a model, `specs/tla/flight-rule/`. The pure journal core is
+`crates/lib/paros-journal` (the fold, the `Resolve` call, the held answers, the segment record
+and the codec; #1324 (paros-journal pure core)), walked and traced against
+`specs/tla/journal-state/FoldTrace.tla` by `crates/sim/journal-sim`. The journal roles, the
+register and the driver are not built yet (#1325, #1326).
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
 2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
 the build steps of #1323 (build the paros journal v1). Start there for any journal work.
@@ -202,7 +208,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo nextest run` (CI: `--profile ci`; fall back to `cargo test`)
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
-- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
+  `-p paros-journal`
 - `scripts/check-module-style.sh` and `scripts/check-core-layers.sh`
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
 - the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
@@ -220,19 +227,24 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
   pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
-  the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
+  the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). The
+  same job runs the two passes on the changed lines of `crates/lib/paros-journal/src`
+  (`scripts/mutants.sh --journal`: the tests of `paros-journal` and the walks of `journal-sim`,
+  then the trace checks of `journal-sim`; `.cargo/mutants-journal.toml`,
+  `.cargo/mutants-journal-tlc.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
   earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit
   that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
-  `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
+  `--no-default-features`, `cargo check -p paros-consensus --features serde`,
+  `cargo check --target wasm32-unknown-unknown -p paros-journal`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
-  TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder, and the trace checks of consensus-sim in four
+  TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder, and the trace checks of consensus-sim and journal-sim in four
   `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); the job of each folder also checks that
   each guard mutant parses (`scripts/mutate-tla.py --parse`)
 - the `TLA mutants` workflow, each week and on demand: `scripts/mutate-tla.py` sets each guard
@@ -582,8 +594,14 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`src/models/`), the driver contract (`src/contract/`) and the eleven examples
   (`examples/`: seven lessons, and four that drive `ColocatedNode` as a driver does, from
   `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
-- `crates/lib/paros` — the facade: each layer as a module (`paros::consensus` today). A program
-  depends on `paros` alone. Wasm-safe and provider-free.
+- `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
+  fold, the `Resolve` call, the held answers, the segment record and the codec. Sans-IO,
+  wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
+- `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
+  `paros::journal`). A program depends on `paros` alone. Wasm-safe and provider-free.
+- `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
+  segments, with oracles that share no code with `paros-journal`, a planted mutant for each, and
+  the trace check of each walk against `specs/tla/journal-state/FoldTrace.tla`.
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
   the core and a planted mutant that each oracle catches, and the trace check of the walks

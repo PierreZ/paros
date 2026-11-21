@@ -39,9 +39,10 @@ offload design, after v1 (§J3.1).
 **The shape of `step`** (decided by Pierre on 2026-11-19, #1255 (journal sans-IO contract)): the
 journal's roles and their driver follow five rules, findings 1 to 5 of the second review of the
 journal design (architecture, layering, testability). The rules fix the boundary between the
-pure roles and the driver before any journal code exists. The journal core is not built yet
-(step 3 of #69 (plan of record)), so the names below are a sketch: each exact type is **Open**,
-and the journal core step decides it.
+pure roles and the driver before any journal role exists. The pure journal core
+(`paros-journal`, #1324 (paros-journal)) holds the fold, the records and the codec, and no role
+yet. So the names below are a sketch: each exact type is **Open**, and #1326 (the journal roles
+over the core) decides it.
 
 A role is a pure state machine. A step takes one input and returns its effects:
 
@@ -165,16 +166,17 @@ Each difference below is a **change** (the journal follows the rule above) or a 
 
 ### J4.3 Crates and layering
 
-**The crates of the journal.** No journal code exists yet. The plan (#1323 (build the paros
-journal v1), section J8) creates these crates, each in its own step:
+**The crates of the journal.** The plan (#1323 (build the paros journal v1), section J8)
+creates these crates, each in its own step. `paros-journal` and `journal-sim` exist (#1324
+(paros-journal)); the others do not exist yet:
 
 | Crate | What it holds | Step |
 |---|---|---|
-| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold, the segment record types, the codec with a release number in every header, the record headers; and the pure client (no network) | #1324 (paros-journal), #1331 (the pure journal client) |
+| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the codec with a release number in every header (`codec`), the record headers (`command`); later the pure client (no network) | #1324 (paros-journal), #1331 (the pure journal client) |
 | `paros-journal-control` (`crates/lib/`) | The pure `decide` of the v1 controller and the controller role | #1328 (paros-journal-control) |
 | `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the `Host` inputs), the generic driver under the flight rule, many journals in one process, and the contract suites | #1329 (paros-journal-io) |
 | `paros-journal-moonpool` (`crates/lib/`) | The adapter of the `paros-journal-io` traits on moonpool providers: compio through moonpool's `CompioProviders`, no trait requires `Send` (Pierre, 2026-11-19) | #1330 (paros-journal-moonpool) |
-| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7) | #1327 (journal-sim) |
+| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla` | #1327 (journal-sim) |
 
 The journal roles that compose the core (segments, seal, reads, retire, truncate,
 re-replication) are #1326 (the journal roles); the matchmaker register is #1325 (the matchmaker register as an optional role). **Open**: the

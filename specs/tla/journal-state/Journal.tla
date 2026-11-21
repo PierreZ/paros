@@ -582,22 +582,29 @@ TakeBase(r) ==
 (* write of this uuid, else not written ("taken"). A replica whose fold    *)
 (* has first_seq above the position answers "trunc" (`Truncated`).         *)
 (***************************************************************************)
-ResolveAt(r, v) ==
-  LET st == StateOf(r) IN
+\* The answer of a fold st to the Resolve of the write v. `FoldTrace.tla`
+\* checks the code against it.
+ResolveOn(st, v) ==
   IF v.e < st.first THEN "trunc"
   ELSE IF Resolve = "uuid"
        THEN IF \E x \in st.recs : x[1] = v.e /\ x[2] = v.u THEN "dup" ELSE "taken"
        ELSE IF <<v.e, v.u, v.id>> \in st.recs THEN "dup" ELSE "taken"
 
+ResolveAt(r, v) == ResolveOn(StateOf(r), v)
+
 \* The replica can judge: its fold is below the position (truncated), or
 \* it is a replica of the segment of the position and its fold covers it.
+\* The fold-only part: a fold st that started at base can judge position e.
+CoversOn(base, st, e) ==
+  \/ e < st.first
+  \/ /\ base.next <= e
+     /\ IF Resolve = "early" THEN TRUE ELSE e < st.next
+
 Covers(r, e) ==
   /\ rbase[r] # None
   /\ StartKnown(GenOf(r))
   /\ ~rtrim[GenOf(r)]
-  /\ \/ e < StateOf(r).first
-     \/ /\ rbase[r].next <= e
-        /\ IF Resolve = "early" THEN TRUE ELSE e < StateOf(r).next
+  /\ CoversOn(rbase[r], StateOf(r), e)
 
 ResolveBelow(s, r) ==
   /\ acked[s] = "below"
