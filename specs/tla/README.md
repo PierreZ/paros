@@ -716,6 +716,11 @@ Constants select the rule:
 | `FrozenRegisters` | `TRUE`: a frozen matchmaker still registers a ballot. |
 
 The invariants are `FloorCarried` (the first question) and `RegCarried` (the second).
+The `pass` checks also check `RegHeld` (a registration that a majority of a generation took
+stays held, or below the floor, in each serving majority of that generation and of each later
+one), `RegsAboveFloor` (a matchmaker holds no registration below its floor) and `ChosenOnce`
+(the successor state is chosen once). They make each guard of the model necessary (#1345
+(guards that survive mutation)).
 
 The model has the sets `{X, Y, Z}` and `{Y, Z, W}` and two ballots.
 
@@ -790,8 +795,10 @@ The invariants:
   generation 1, with its value. The value of write 1 is an open successor.
 - `MatchmakersOutlive`: the journal never records a survive number above the one of its
   tenant's set in force (decision 35).
-- `Ends` (with `LiveSpec`): the decree chooses a set, and each live member of it serves
-  generation 1. The handover steps are fair, the clients and the crashes are not.
+- `ChosenOnce`: the decree chooses one set, one time.
+- `Ends` (with `LiveSpec`): from some point on, the decree chose a set and each live member
+  of it serves generation 1, active. The handover steps are fair, the clients and the crashes
+  are not.
 
 The old set is `{X, Y, Z}`. The targets are `{Y, Z, W}`, `{Z, W, V}` and, for the resize, the
 five machines. One machine can go down for good. The liveness checks have four targets of
@@ -889,8 +896,9 @@ Results (`handover-chain/checks.txt`):
 | `one_state` | `OneState`, a reachability control: two members of one chosen set keep different bootstraps | violation (5.9 thousand states) |
 | `no_fence` | control: a tally counts an ack of another generation; two generations, one write, the floor | `ReadCarried` violation (43 thousand states, 14 states deep) |
 | `frozen_serves` | control: a frozen member acks; the same shape | `ReadCarried` violation (183 thousand states) |
-| `two` | the rules; two generations, one write, the floor | pass (337 thousand states, 25 seconds) |
-| `chain` | the rules; three generations, one write, no floor | pass (188 thousand states, 31 seconds) |
+| `two` | the rules; two generations, one write, the floor | pass (926 thousand states) |
+| `chain` | the rules; three generations, one write, no floor | pass (1.2 million states) |
+| `two_writes` | the rules; two generations, two writes, no floor: a write that a member takes below a read or a write it holds lowers the register (`RegisterCarried`) | pass (1.25 million states) |
 | `chain_floor` (`long`, bounded at 30 minutes) | `chain` with the floor | no violation in 14.2 million distinct states (bounded: 30 minutes, 2 workers) |
 | `chain_two_writes` (`long`, bounded at 30 minutes) | `chain` with two writes | no violation in 12.7 million distinct states (bounded: 30 minutes, 2 workers) |
 

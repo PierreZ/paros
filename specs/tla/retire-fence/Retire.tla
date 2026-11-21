@@ -164,9 +164,11 @@ Campaign(n, b) ==
     /\ Open(n, b, belief[n][2], Belief)
 
 \* A reconfiguration is a round change of the leader with a new configuration.
+\* The model also lets the leader reconfigure to the configuration it
+\* believes: that is a round change that a matchmaker records as a
+\* reconfiguration, and the retire rules must hold for it too.
 Reconfigure(n, b, c) ==
     /\ IsLeader(n)
-    /\ c # belief[n][2]
     /\ OperatorRule => c \cap retired = {}
     /\ Live(c)
     /\ Open(n, b, c, Reconf)
@@ -255,9 +257,9 @@ Effective(b) ==
     /\ UNCHANGED rvars
 
 \* A restart: the belief goes back to the bootstrap. The fence too, unless
-\* it is durable.
+\* it is durable. A retired or crashed node does nothing after it, so the
+\* model lets it restart too: its restart changes only its own scalars.
 Restart(n) ==
-    /\ n \notin retired \cup crashed
     /\ restarts < Restarts
     /\ restarts' = restarts + 1
     /\ belief' = [belief EXCEPT ![n] = <<0, C0>>]
@@ -295,11 +297,11 @@ MayRetire(n, w) ==
 \* The ask of #1002: m says yes if no record above w names n. With Rejoin
 \* "off", m judges the ask while n may still retire. Otherwise the ask is a
 \* message: n sends it while it may retire, and m judges it at any later time.
+\* With Ask "none" no matchmaker judges an ask, and a second ask is the same
+\* message, so the model lets n send it at any time it may retire.
 SendAsk(n, w) ==
-    /\ Ask # "none"
     /\ Rejoin # "off"
     /\ MayRetire(n, w)
-    /\ <<n, w, inc[n]>> \notin asks
     /\ asks' = asks \cup {<<n, w, inc[n]>>}
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    belief, fence, prom, eff, acks, retired, restarts, inc, gone, joined, back,
@@ -355,8 +357,8 @@ Comeback(n) ==
 \* m takes it while n is still retired. With "tagged", it drops only the
 \* records of earlier incarnations: a record of the incarnation that rejoins
 \* is a new retirement of the node that came back.
+\* With Rejoin "off" no node comes back, so no rejoin is taken.
 RejoinOne(n, m) ==
-    /\ Rejoin # "off"
     /\ m \notin joined[n]
     /\ IF Rejoin = "early"
        THEN n \in retired /\ Cardinality(back) < Comebacks
@@ -399,9 +401,10 @@ Crash(n) ==
 TombNames(m, b) == \E t \in tomb[m] : t[1] \in cfgOf[b]
 
 \* m refuses the reconfiguration b, as `MatchRefusal::Retired`, and the
-\* leader records the refusal (`Matchmaking::refuse_retired`).
+\* leader records the refusal (`Matchmaking::refuse_retired`). A matchmaker
+\* refuses such a registration with and without Abandon; only
+\* AbandonRetired reads the record.
 RefuseRetired(b, m) ==
-    /\ Abandon
     /\ status[b] = "matching"
     /\ kind[b] = Reconf
     /\ m \notin replied[b]
