@@ -18,6 +18,31 @@ A long check that does not finish has a time bound in minutes as a fourth word o
 violation was found until then. A line with no bound must finish. Every bounded line is a
 bounded run, never a proof: its table line in this file says so.
 
+A line can also end with `seed=<n>`: TLC runs with `-seed <n>`. The inductive checks of
+`multi-paxos/` draw random states, and the seed makes each run draw the same states.
+
+## Inductive invariants
+
+TLC checks a bounded instance only. An inductive invariant `Inv` closes that gap: `Inv` holds in
+the initial state, and each step from a state where `Inv` holds goes to a state where `Inv` holds.
+Then `Inv` holds in every reachable state, at every size and length of run, and so does each safety
+property that `Inv` implies. This is step 1 of #1307 (inductive invariants, then proofs); the proofs
+(TLAPS, then Lean / Veil) are its later steps. The method is the one of Antithesis's
+`proof/MCInv.tla` (antithesishq/etcd-raft-formalized) and of Lamport's note "Using TLC to Check
+Inductive Invariance".
+
+| Model | `Inv` | How TLC checks it | Checks |
+|---|---|---|---|
+| `decree/` | the invariant of Lamport's proved `Paxos.tla`: each proposal is `SafeAt` its ballot, a vote is for the proposal of its ballot, a promise reports the highest vote below it, an acceptor's vote is its highest; a wiped acceptor that takes no step again counts as one that will not vote | every state of the instance where `Inv` holds (`IndInit` in `MC.tla` builds them from smaller choices), then one step: 3 acceptors, 2 values, one wipe; 13 thousand states at 2 ballots, 1.3 million at 3 ballots | `inductive`, `inductive_three` pass; `inductive_ignore` (a proposer that ignores the reports) violation |
+| `multi-paxos/` | the decree invariant for each slot, plus: a record is a vote or a learn of a value chosen at or below it, a promise reports the record of each slot at or above `from`, each slot at or above a leader's allocator is free and holds no proposal of its ballot, the disk is the memory (`Durable = "before"`) | random states where `Inv` holds (`IndInit` draws 100,000 with `seed=1`), then one step: the states are too many to list (more than four million at one slot and two ballots). 3 acceptors, 2 slots, one restart, one wipe | `inductive` (2 ballots), `inductive_three` (3 ballots), `inductive_grid` (a 2 x 2 grid, rounds in any column) pass; `inductive_prefix` (a prefix allocator) and `inductive_lowest` (the lowest report) violation |
+
+Each inductive check also has the safety properties of its model as invariants, so TLC checks
+that `Inv` implies them on every state it starts from. `InvApplies` names the configurations
+that `Inv` covers: `decree/` with no wipe or with a wiped acceptor that takes no step
+(`init.cfg`, where `Phase1 = "every"` keeps a wiped acceptor's empty report safe, is not
+covered), `multi-paxos/` with `Durable = "before"` and `Identity = TRUE`. A pass of a
+`multi-paxos/` check says that no drawn state breaks `Inv` in one step; it is not a proof.
+
 ## Layout
 
 Each folder is one model:

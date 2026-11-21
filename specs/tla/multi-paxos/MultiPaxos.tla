@@ -402,6 +402,127 @@ LearnRecordsHeld ==
 OneProposal ==
   \A m, n \in msgs : m.type = "2a" /\ n.type = "2a" /\ m.bal = n.bal /\ m.slot = n.slot => m = n
 
+-----------------------------------------------------------------------------
+(* The inductive invariant (#1307 (inductive invariants, then proofs)).    *)
+(*                                                                         *)
+(* `Inv` holds in every initial state, and every step from a state where   *)
+(* `Inv` holds goes to a state where `Inv` holds. `Inv` implies            *)
+(* `Agreement`, `LearnedChosen`, `LearnRecordsHeld` and `OneProposal`, so  *)
+(* they hold in every reachable state, with no bound on the run.           *)
+(* `MC.tla` (`IndInit`) and the `inductive*.cfg` files check it with TLC   *)
+(* on bounded instances: TLC starts from every state of the instance where *)
+(* `Inv` holds and checks `Inv` after one step.                            *)
+(*                                                                         *)
+(* It is the invariant of single-decree Paxos for each slot (`SafeAt`, as  *)
+(* in Lamport's proved `Paxos.tla`), with three additions:                 *)
+(*   - a record is a vote or a learn (`mark_chosen`): the record of a      *)
+(*     slot is a proposal, the node never voted above it, and a record     *)
+(*     that is not the node's vote holds a value chosen at or below its    *)
+(*     ballot;                                                             *)
+(*   - a promise reports the record of each slot at or above `from`, and   *)
+(*     the node did not vote between that record and the promise;          *)
+(*   - the allocator: each slot at or above `next[b]` is free at ballot b  *)
+(*     (no value can be chosen there below b), and ballot b proposed       *)
+(*     nothing there.                                                      *)
+(* It covers `Durable = "before"` and `Identity = TRUE`: the disk is the   *)
+(* memory, and a wiped acceptor never takes a step again.                  *)
+(***************************************************************************)
+
+VotedFor(a, b, s, v) == [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
+Proposed(b, s, v) == [type |-> "2a", bal |-> b, slot |-> s, val |-> v] \in msgs
+
+\* Acceptor a did not vote at ballot c and slot s, and it never will: its
+\* promise is above c, or it is wiped and never takes a step again.
+WontVoteIn(a, c, s) ==
+  /\ \A v \in Values : ~VotedFor(a, c, s, v)
+  /\ prom[a] > c \/ a \in wiped
+
+\* No value other than v is chosen or can be chosen at slot s at a ballot
+\* below b: a Phase-1 quorum voted v or will not vote at each such ballot.
+SafeAt(b, s, v) ==
+  \A c \in 1..(b - 1) : \E Q \in Q1 : \A a \in Q : VotedFor(a, c, s, v) \/ WontVoteIn(a, c, s)
+
+\* No value can be chosen at slot s at a ballot below b.
+FreeAt(b, s) == \A c \in 1..(b - 1) : \E Q \in Q1 : \A a \in Q : WontVoteIn(a, c, s)
+
+\* A record r of acceptor a at slot s, held at a promise of ballot `below`
+\* (NB + 1 for the record it holds now): a proposal, no vote of a above it
+\* and below `below`, and a vote of a at its ballot is for its value.
+RecordOK(a, s, r, below) ==
+  /\ (r.bal = 0) = (r.val = None)
+  /\ r.bal < below
+  /\ r.bal > 0 => Proposed(r.bal, s, r.val)
+  /\ \A c \in Ballots, v \in Values :
+       VotedFor(a, c, s, v) /\ c < below => c < r.bal \/ (c = r.bal /\ v = r.val)
+
+ChosenBy(s, b, v) == \E c \in 1..b : ChosenAt(c, s, v)
+
+\* The state of each node.
+NodeInv ==
+  \A a \in Acceptors :
+    IF a \in wiped
+    THEN /\ prom[a] = 0
+         /\ \A s \in Slots : vote[a][s] = NoVote /\ learned[a][s] = None
+    ELSE /\ \A s \in Slots :
+              \* Only a learner or a ballot owner learns.
+              /\ learned[a][s] # None => a \in Learners \cup {Owner[b] : b \in Ballots}
+              /\ RecordOK(a, s, vote[a][s], NB + 1)
+              /\ vote[a][s].bal <= prom[a]
+              \* A record that is not a vote comes from a learn.
+              /\ vote[a][s].bal > 0 /\ ~VotedFor(a, vote[a][s].bal, s, vote[a][s].val)
+                   => ChosenBy(s, vote[a][s].bal, vote[a][s].val)
+              \* A learned slot holds its record, chosen at or below it.
+              /\ learned[a][s] # None =>
+                   /\ vote[a][s].val = learned[a][s]
+                   /\ ChosenBy(s, vote[a][s].bal, learned[a][s])
+
+\* The state of each ballot.
+BallotInv ==
+  \A b \in Ballots :
+    LET Has1a == \E m \in msgs : m.type = "1a" /\ m.bal = b
+    IN /\ phase[b] = "idle" <=> ~Has1a
+       /\ phase[b] \in {"idle", "p1"} => next[b] = 0 /\ front[b] = 0
+       /\ phase[b] \in {"p2", "dead"} => front[b] <= next[b]
+       /\ phase[b] \in {"p1", "p2"} => Owner[b] \notin wiped
+       /\ phase[b] # "idle" => prom[Owner[b]] >= b \/ Owner[b] \in wiped
+       \* The ballot proposed only below its allocator.
+       /\ \A s \in Slots, v \in Values :
+            Proposed(b, s, v) => phase[b] \in {"p2", "dead"} /\ s < next[b]
+       \* Each slot at or above the allocator is free.
+       /\ phase[b] = "p2" => \A s \in Slots : s >= next[b] => FreeAt(b, s)
+
+\* What each message says is true.
+MsgInv ==
+  \A m \in msgs :
+    /\ m.type = "1a" =>
+         /\ \A n \in msgs : n.type = "1a" /\ n.bal = m.bal => n = m
+         /\ \E n \in msgs : n.type = "1b" /\ n.bal = m.bal /\ n.acc = Owner[m.bal]
+    /\ m.type = "1b" =>
+         /\ [type |-> "1a", bal |-> m.bal, from |-> m.from] \in msgs
+         /\ \A n \in msgs : n.type = "1b" /\ n.bal = m.bal /\ n.acc = m.acc => n = m
+         /\ m.acc \notin wiped => m.bal <= prom[m.acc]
+         /\ \A s \in Slots :
+              IF s >= m.from THEN RecordOK(m.acc, s, m.rep[s], m.bal) ELSE m.rep[s] = NoVote
+    /\ m.type = "2a" =>
+         /\ SafeAt(m.bal, m.slot, m.val)
+         /\ \A n \in msgs : n.type = "2a" /\ n.bal = m.bal /\ n.slot = m.slot => n = m
+    /\ m.type = "2b" =>
+         /\ Proposed(m.bal, m.slot, m.val)
+         /\ m.acc \notin wiped => m.bal <= prom[m.acc]
+
+Inv ==
+  /\ TypeOK
+  /\ restarts <= Restarts
+  /\ Cardinality(wiped) <= Wipes
+  /\ dprom = prom
+  /\ dvote = vote
+  /\ NodeInv
+  /\ BallotInv
+  /\ MsgInv
+
+\* The configurations that `Inv` covers.
+InvApplies == Durable = "before" /\ Identity /\ Down = {}
+
 \* Reachability controls: each must be violated.
 NoChoice == ~\E s \in Slots, v \in Values : Chosen(s, v)
 \* A node learned a slot it never voted for: its record comes from the learn.
