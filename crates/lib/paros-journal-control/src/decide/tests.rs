@@ -321,3 +321,30 @@ fn a_journal_with_no_segment_waits_for_its_creation() {
     let value = apply(&RegisterValue::new(), &Change::Elect { holder: ME });
     assert_eq!(Fixture::new(value).action(), Action::Wait(Wait::NoSegment));
 }
+
+#[test]
+fn only_data_loss_a_frozen_control_and_a_blocked_or_stopped_journal_page() {
+    let pages: Vec<Alert> = [
+        Alert::DataLost,
+        Alert::ControlFrozen,
+        Alert::MatchmakersAtRisk,
+        Alert::Unplaceable,
+        Alert::WritesDegraded,
+        Alert::ElectionBlocked,
+        Alert::Stopped,
+        Alert::ReshapeStalled,
+        Alert::ReplicasUnplaceable,
+    ]
+    .into_iter()
+    .filter(|a| a.pages())
+    .collect();
+    assert_eq!(
+        pages,
+        [
+            Alert::DataLost,
+            Alert::ControlFrozen,
+            Alert::ElectionBlocked,
+            Alert::Stopped
+        ]
+    );
+}
