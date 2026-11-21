@@ -477,7 +477,7 @@ performance gains over Multi-Paxos and leaderless alternatives for spatially-loc
   placement, and AGENTS.md's "Matchmaking, reconfiguration, GC, generations" section) is the
   mechanism for moving where the *acceptors* themselves live.
 - **Read leases (§4.5) are not adopted.** paros's reads are leaderless quorum reads
-  (`quorum_read.rs`, the Compartmentalized Paxos-style read `docs/architecture/02-data-plane.md` §2.5 describes:
+  (`quorum_read.rs`, the Compartmentalized Paxos-style read `docs/journal/02-data-plane.md` §J2.5 describes:
   a Phase-1 quorum vote on watermarks, no leader on the read path), not a leader-local lease. The
   implicit lease-via-accept-message technique (no extra round trip, lease vote piggybacked on the
   ordinary Phase-2 ack) has no counterpart there.

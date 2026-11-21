@@ -112,7 +112,8 @@ bound to the ballot.
 
 **How roles are sized and placed** (decided on 2026-10-04; per journal since 2026-10-28, #753).
 Storage roles (acceptors, replicas) are **per journal**, because they hold that journal's data;
-proxy leaders and batchers are per-journal counts too; matchmakers are one set per tenant.
+proxy leaders and batchers are per-journal counts too; matchmakers are one set per journal
+(2026-11-19, below).
 Processes stay shared and keyed by `JournalIdentifier`; only the bookings are per journal.
 Every role's instances go to the eligible machines of its class zone by zone in round robin
 (shuffle sharding inside the cell), and one journal's storage instances never share a machine.
@@ -137,14 +138,13 @@ forwards. The leader's driver in `paros`, never the core, counts origins per zon
 and hands off through `relinquish_to` when another zone dominates past a hysteresis threshold
 (WPaxos §5.1's majority-zone policy). Not built yet (#581).
 
-**Every tenant has one matchmaker set**: per tenant, not per journal (the registry is keyed by
-journal inside the set, so a set per journal buys nothing) and not shared across tenants (a
-shared set is one role that could not scale per tenant and a blast radius across tenants). The
-set is named by the tenant's id (section 3.8). A set is logical: matchmaker *processes* are
-shared, each hosting many tenants' sets keyed by `JournalIdentifier`. **One store per matchmaker
-set** (decided on 2026-10-09, #190): the registers of that set's journals, keyed by `JournalId`,
-are inside it. Every journal of the set, the control journals included, has the set from its
-first entry; there is no bootstrap exception. The cell places the set and moves it by a
+**Every journal has one matchmaker set** (decided by Pierre on 2026-11-19, in the journal
+design; it replaces the set per tenant of 2026-10-09): `2F + 1` matchmakers that hold the
+journal's register (section 2.16). A set is never shared across tenants. A set is logical:
+matchmaker *processes* are shared, each hosting many journals' sets keyed by
+`JournalIdentifier`. **One store per matchmaker set** (decided on 2026-10-09, #190): the register
+of the set's journal is inside it. Every journal, the control journals included, has its set
+from its first entry; there is no bootstrap exception. The cell places the set and moves it by a
 generation handover onto a target that the caller names (rule 2, section 4.1). A matchmaker
 request names the matchmaker it addresses, and a process that is another one drops it.
 Reconfiguration is the operational primitive for everything, so no journal of the service opts
