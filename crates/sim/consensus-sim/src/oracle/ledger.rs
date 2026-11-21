@@ -30,6 +30,14 @@
 //!    relaxed write (`MustSync::Relaxed`), and the node learns the slots
 //!    again. The driver also checks that a party never boots below its
 //!    disk.
+//! 7. **One proposal per ballot and slot** ([`ONE_PROPOSAL`]): every
+//!    `Accept` that a node or a proxy sends at `(slot, ballot)` carries the
+//!    same command. Paxos safety at Phase 2 rests on one proposer per
+//!    ballot; the acceptors' own check (an accept at or below a recorded
+//!    ballot carries the recorded command) is a second line that a vote on
+//!    a fresh acceptor does not have. A ballot handed on by a `Relinquish`
+//!    keeps this rule across the handoff, a restart of the successor and a
+//!    duplicated payload (#1292 (duplicated Relinquish)).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,6 +58,8 @@ pub const PERSIST_BEFORE_SEND: &str = "a vote leaves a node only once its disk h
 pub const LEARNED_CHOSEN: &str = "a learned value is the chosen value";
 /// Oracle 6.
 pub const PREFIX_SHRINKS: &str = "the durable chosen prefix never shrinks";
+/// Oracle 7.
+pub const ONE_PROPOSAL: &str = "a ballot proposes one command per slot";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -75,6 +85,9 @@ pub struct Ledger {
     durable: BTreeMap<String, Slot>,
     /// The journal contract, folded over the chosen log.
     journal: JournalSpec,
+    /// Per `(slot, ballot)`, the fingerprint of the command its first
+    /// `Accept` carried, and the party that sent it. Never pruned.
+    proposals: BTreeMap<(Slot, Ballot), (u64, String)>,
 }
 
 impl Ledger {
@@ -91,6 +104,7 @@ impl Ledger {
             chosen_index: BTreeMap::new(),
             durable: BTreeMap::new(),
             journal: JournalSpec::default(),
+            proposals: BTreeMap::new(),
         }
     }
 
@@ -230,6 +244,24 @@ impl Ledger {
             held,
             "{PERSIST_BEFORE_SEND}: node {} sent Accepted for slot {} at {ballot:?} before its disk held the vote",
             node.0, slot.0
+        );
+    }
+
+    /// Oracle 7: `who` sends an `Accept` of `command` at `(slot, ballot)`.
+    ///
+    /// # Panics
+    ///
+    /// If an earlier `Accept` at `(slot, ballot)` carried another command.
+    pub fn proposed(&mut self, who: &str, slot: Slot, ballot: Ballot, command: &Command) {
+        let print = command_fingerprint(command);
+        let (known, first) = self
+            .proposals
+            .entry((slot, ballot))
+            .or_insert_with(|| (print, who.to_owned()));
+        assert!(
+            *known == print,
+            "{ONE_PROPOSAL}: {first} proposed {known:#x} at slot {} and {ballot:?}, and {who} proposed {print:#x}",
+            slot.0,
         );
     }
 
@@ -376,6 +408,20 @@ mod tests {
         ledger.voted(NodeId(1), Slot(0), ballot(2, 1), &write(2));
         let message = panics(|| ledger.voted(NodeId(2), Slot(0), ballot(2, 1), &write(2)));
         assert!(message.contains(ONE_VALUE), "{message}");
+    }
+
+    #[test]
+    fn a_second_command_at_one_ballot_and_slot_is_red() {
+        let mut ledger = ledger();
+        ledger.proposed("node 1", Slot(6), ballot(10, 5), &write(1));
+        // The same command again (a re-send, a proxy's fan-out) is green,
+        // and so is another command at another slot or another ballot.
+        ledger.proposed("proxy 3", Slot(6), ballot(10, 5), &write(1));
+        ledger.proposed("node 1", Slot(7), ballot(10, 5), &write(2));
+        ledger.proposed("node 2", Slot(6), ballot(11, 2), &write(2));
+        let message = panics(|| ledger.proposed("node 1", Slot(6), ballot(10, 5), &write(2)));
+        assert!(message.contains(ONE_PROPOSAL), "{message}");
+        assert!(message.contains("node 1 proposed"), "{message}");
     }
 
     #[test]
