@@ -328,9 +328,10 @@ H(g) == {h \in Live : h <= g}
 \* (its replicas hold every slot below). A retire or a seal after the
 \* campaign does not change them: the leader of a retired configuration's
 \* acceptors waits, and a seal by another first leader stops this one.
+\* A ballot registers once, above every registered ballot: the second guard
+\* also refuses b itself once it registered.
 Register(b) ==
   LET m == Min(H(top)) IN
-  /\ bgen[b] = 0
   /\ \A c \in Ballots : bgen[c] # 0 => c < b
   /\ <<b, top>> \in GenOK
   /\ bgen' = [bgen EXCEPT ![b] = top]
@@ -359,7 +360,7 @@ Promised(b, Q) ==
 \* that it reads. `RolesTrace.tla` names the quorums that the code read.
 Phase1On(b, Qs) ==
   LET g == bgen[b] IN
-  /\ g # 0
+  \* A registered ballot: `Live` holds no 0.
   /\ g \in Live
   /\ bst[b] = "new"
   /\ \A h \in bH[b] : Qs[h] \in QOf[h] /\ Promised(b, Qs[h])
