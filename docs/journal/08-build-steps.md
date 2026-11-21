@@ -15,7 +15,7 @@ less than this table.
 | 2 | #1189 (the journal state model), with #1309 (the state is the disk) | The composed TLA+ model | §J7.2 |
 | 3 | #1324 (paros-journal) | The pure journal core: the fold, the segment record types, the codec, the record headers | §J2, §J3.4 (types) |
 | 4 | #1325 (the matchmaker register as an optional role) | The register, its handover and its walks | §J3.4 |
-| 5 | #1326 (the journal roles over the core) | Segments, seal, writes, leaderless reads, retire, truncate, re-replication; several pull requests, one rule group each | §J3, §J5 |
+| 5 | #1326 (the journal roles over the core) | Segments, seal, writes, leaderless reads, retire, truncate, re-replication; several pull requests, one rule group each (segments, seal and writes: `paros_journal::roles`) | §J3, §J5 |
 | 6 | #1327 (journal-sim) | The walks, the oracles, the trace check and the coverage gate. Built with steps 3 to 5, in the same pull requests | §J7.3 |
 | 7 | #1328 (paros-journal-control) | The pure `decide` and the v1 controller role; #1261 (grid controller decision tests) is part of it | §J6 |
 | 8 | #1329 (paros-journal-io) | The traits, the driver under the flight rule and the contract suites | §J4.2 |

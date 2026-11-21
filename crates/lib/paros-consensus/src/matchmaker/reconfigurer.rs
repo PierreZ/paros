@@ -1004,13 +1004,11 @@ impl MatchmakerReconfigurer {
     /// The most journals one bootstrap page carries (#439): the driver's
     /// page, no wider than the smallest page a frozen member cut its report
     /// at.
-    fn bootstrap_page(&self) -> usize {
-        let page = self.cut.map_or(self.limits.registry_page, |cut| {
-            cut.min(self.limits.registry_page)
-        });
+    fn bootstrap_page(cut: Option<usize>, limits: Limits) -> usize {
+        let page = cut.map_or(limits.registry_page, |cut| cut.min(limits.registry_page));
         assert!(page > 0, "a bootstrap page carries a journal");
         assert!(
-            page <= self.limits.registry_page,
+            page <= limits.registry_page,
             "a bootstrap page is no wider than the driver's"
         );
         page
@@ -1020,7 +1018,7 @@ impl MatchmakerReconfigurer {
     /// asked for the page after the last one it answered.
     fn paged_requests(&self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
         let me = self.node;
-        let page = self.bootstrap_page();
+        let page = Self::bootstrap_page(self.cut, self.limits);
         let mut queue = Vec::new();
         match &self.phase {
             ReconfigurerPhase::Stopping {
@@ -1294,11 +1292,7 @@ impl MatchmakerReconfigurer {
                     "handover: a reconfigurer sends a bootstrap over several pages"
                 );
             }
-            // `bootstrap_page` borrows all of `self`; the phase is
-            // borrowed here, so read the two fields it reads.
-            let page = self.cut.map_or(self.limits.registry_page, |cut| {
-                cut.min(self.limits.registry_page)
-            });
+            let page = Self::bootstrap_page(self.cut, self.limits);
             self.pending.push((
                 from,
                 ReconfigureRequest::Bootstrap {
@@ -1543,12 +1537,12 @@ impl MatchmakerReconfigurer {
 pub(crate) fn odd_answerers(answerers: impl Iterator<Item = MatchmakerId>) -> Vec<MatchmakerId> {
     let mut members: Vec<MatchmakerId> = answerers.collect();
     let answered = members.len();
-    if answered > 0 && answered.is_multiple_of(2) {
+    // An even count drops its last answerer; no answerer drops nothing.
+    if answered.is_multiple_of(2) && members.pop().is_some() {
         probe!(
             reachable,
             "handover: a finish thins an even count of answerers to an odd successor"
         );
-        members.pop();
     }
     assert!(
         members.is_empty() || members.len() % 2 == 1,

@@ -2,7 +2,7 @@
 
 The paros website (#810 (website redo 1/4), plan approved by Pierre on 2026-10-31). One Astro
 app, one style for every page. Build: `npm ci && npm run build` (output in `dist/`), preview:
-`npm run dev`. The live parts need the wasm first: `scripts/build-wasm.sh` stages
+`npm run dev`, tests: `npm run check-links` and `npm test` (see "Tests"). The live parts need the wasm first: `scripts/build-wasm.sh` stages
 `paros-consensus` into `public/paxos/wasm/`.
 
 ## What the site is for
@@ -19,11 +19,15 @@ in the repository; the old service is named only as "at the tag". No long book p
 | `/` | `src/pages/index.astro` | what paros is now: the flavors to learn, the core, the journal to come |
 | `/paxos/` | `src/pages/paxos/*.md`, `index.astro` | the course map (`src/course.ts`), the map of the flavors and the words (#949); one page per flavor: the problem, a story and a step-through diagram, the rule, where in paros |
 | `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
-| `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | one short page per technique, each with a live widget on `paros-consensus` |
-| `/journal/` | `src/pages/journal/index.astro` | the journal service: what it is, the rewrite, and the tag of the version before it |
+| `/consensus/` | `src/pages/consensus/*` | the `paros-consensus` library (#1349 (Consensus, Journal and parosd page groups)): what the crate is and each flavor with its type and example (`index.astro`), the driver loop with the `Ready` widget (`driver.md`, the former Engineering page "The sans-IO core"), the four deployments (`deployments.md`), how it is checked (`proof.md`). Each Paxos page's "In paros" section links its Consensus page, and back |
+| `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | how paros is made safe (#1361 (safety case)): the safety case (`index.astro`: one row per safety claim of `paros-consensus` and of the journal, with its model and invariant, trace spec, walk and oracle, the controls and mutants that must die, and its state: checked, model only or open, with the issue; the open rows stay), one page each for TLA+ models (`tla.md`), simulation (`simulation.md`) and mutants and assertions (`mutants.md`), and grid quorums with its live widget. A figure on these pages comes from a dated run, with its date |
+| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, and the controller. Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule |
+| `/parosd/` | `src/pages/parosd/index.astro` | the service around the journal: what it will be, that it is rebuilt, and how to run the version before the rewrite at the tag |
+
+The top bar (`src/nav.ts`) is `Paxos · Consensus · Journal · parosd · Engineering` (#1349).
 
 Old URLs (the Zola book, the mdbook `.html` pages, `/play/`, `/sandbox/`, `/playground/`,
-`/docs/`, the removed Engineering pages) redirect in
+`/docs/`, the old `/parosd/*` pages, the removed Engineering pages) redirect in
 `astro.config.mjs`. Add a redirect when a page moves.
 
 ## One style (Pierre, 2026-10-31)
@@ -140,18 +144,45 @@ have exercises; the compartmentalized page runs its own driver, not a level, so 
 none yet.
 Without the wasm, the section says so.
 
-## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))
+## Live widgets (#812 (website redo 3/4), #951 (live Engineering pages))
 
-Every Engineering page shows something live. A page sets `widget: true` in its front matter
+The grid quorums page of Engineering and the driver page of Consensus show something live; the safety case and the technique pages hold no widget. A page sets `widget: true` in its front matter
 (or `widget` on `<Doc>`) and puts `<div data-widget="NAME">` where the widget goes.
 `public/engineering.js` draws them, on the `paros-consensus` bundle at `/paxos/wasm/`:
 
 | Widget | Page | What it shows |
 |---|---|---|
-| `ready` | sans-io | the `Ready` inspector: three `ColocatedNode`s driven by hand (`ReadyLab`) |
+| `ready` | consensus/driver | the `Ready` inspector: three `ColocatedNode`s driven by hand (`ReadyLab`) |
 | `quorums` | grid-quorums | the quorum picker: stop acceptors, `paros-consensus` says what still holds (`quorum_reach`) |
 
 A widget holds no protocol logic: every fact comes from the core. No bench figures and no
 performance numbers on the site (Pierre, 2026-10-31). The widgets that ran the playground engine
 (simulation, same-code, swarm, durable-writes, fsync, dogfooding) are at the tag
 `v0.2.0-alpha.1` (`docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md`).
+
+## Tests (#1362 (browser smoke test and link check))
+
+`.github/workflows/pages.yml` runs both on each pull request that touches the site,
+`paros-wasm`, `paros-consensus`, `paros-journal` or the Cargo files, and before each deploy.
+Both run on the built site, so build the wasm and the site first.
+
+- **Link check**, `npm run check-links` (`scripts/check-links.mjs`, in `nix develop`): every
+  `href` and `src` of `dist/`. A link inside the site names a file of `dist/`, and its
+  `#anchor` names an `id` of that page (`#run=…` and `#lab=…` are addresses that a script
+  reads). A link to this repository on GitHub (`blob/<ref>/…`, `tree/<ref>/…`) names a file
+  or folder that exists at that ref (the working tree for `main`, `git ls-tree` for a tag),
+  and its anchor on a Markdown file names a heading there, as GitHub writes the anchor
+  (`§J4.2 The journal's sans-IO contract` is `#j42-the-journals-sans-io-contract`). Links to
+  other sites are not fetched. A broken link is fixed; there is no list of links to skip.
+- **Browser smoke test**, `npm test` (`tests/smoke.spec.mjs`, Playwright, Chromium only, in
+  `nix develop .#site`: the flake gives the browser of nixpkgs's `playwright-driver`, and
+  `@playwright/test` in `package.json` has its exact version; bump both together).
+  `scripts/serve.mjs` serves `dist/` at `/paros/`. The test fails on a console error or
+  warning, an uncaught exception, a failed request or an answer of 400 or more on any page,
+  and on a page wider than 390 px at 390 px. On each page with a trace, the step-through
+  must switch to the live wasm run (the chip says "live"), every story must reach its last
+  screen, and every "What if" run its last step. One exercise of each lesson is solved by
+  clicks on Deliver and Drop (the rows carry `data-kind`, `data-from` and `data-to`, from
+  `WireMessage` in `paros-wasm`), and the page must say the goal holds. The quorum picker,
+  the `quorums` widget and the `Ready` widget must answer. A new live part gets its test in
+  the same pull request. No test is skipped, and a red run is not run again (`AGENTS.md`).

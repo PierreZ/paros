@@ -108,9 +108,7 @@ impl MemStorage {
             WriteOp::TrimmedTo { point, state } => {
                 self.sealed = *state;
                 let boundary = Slot(point.0 - 1);
-                if self.hard_state.chosen_index.is_none_or(|ci| ci < boundary) {
-                    self.hard_state.chosen_index = Some(boundary);
-                }
+                self.hard_state.chosen_index = self.hard_state.chosen_index.max(Some(boundary));
                 self.raise_floor(*point);
             }
             WriteOp::RegistrationFence(ballot) => {
@@ -206,3 +204,6 @@ impl Storage for MemStorage {
         self.retire_mark
     }
 }
+
+#[cfg(test)]
+mod tests;

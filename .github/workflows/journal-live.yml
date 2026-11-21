@@ -1,0 +1,46 @@
+# The long run of the live trace check (#1310 (check long runs live)): one
+# fold walk of journal-sim with no end, checked live against
+# `specs/tla/journal-state/FoldTrace.tla` for four hours
+# (`crates/sim/journal-sim/tests/live.rs`, `LIVE_MINUTES`). moonpool-tla's
+# `Live` checks the events in chunks while the walk runs; each chunk starts
+# from every state the chunk before it ended in, so one TLC behaviour's
+# limit of 65,535 states does not bound the run. The seed moves with the
+# date. The `traces` job of `tla.yml` and the `test` job of `rust.yml` run
+# the same test on one short walk. A red night is a finding: the test
+# prints the seed, the refused event and the model state before it.
+name: Journal live
+
+on:
+  schedule:
+    - cron: '41 1 * * *'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long the walk runs, in minutes"
+        default: "240"
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: traces
+          cache-on-failure: true
+      # The day since the epoch: no two nights share a seed.
+      - name: Pick the seed of the night
+        run: echo "LIVE_SEED=$(( $(date +%s) / 86400 ))" >> "$GITHUB_ENV"
+      - name: Check one fold walk live for hours
+        env:
+          LIVE_MINUTES: ${{ inputs.minutes || '240' }}
+        run: >-
+          echo "seed: $LIVE_SEED, minutes: $LIVE_MINUTES" &&
+          nix develop --command cargo nextest run --profile ci --release
+          -p journal-sim --test live --no-capture -E 'test(tlc_follows)'

@@ -166,4 +166,5 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
 - Constants: the page ceilings and the read-window floor are in `contract::limits`;
   `HANDOFF_BATCH` (`Limits::DEFAULT.promise_page`), `HANDOFF_FENCE_ELECTIONS`,
   `HEARTBEAT_TICKS` and `REPAIR_TIMEOUT_ELECTIONS` are in `node`.
-- `CHANGELOG.md` is the history up to `v0.2.0-alpha.1`. Nothing is published now (`publish = false`).
+- The crate is public, published with `paros` at one version (root `AGENTS.md`, "Releases").
+  release-plz creates and writes its `CHANGELOG.md`; never edit a changelog by hand.

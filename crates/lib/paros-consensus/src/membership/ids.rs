@@ -146,3 +146,6 @@ impl Fingerprint for Vec<MatchmakerId> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

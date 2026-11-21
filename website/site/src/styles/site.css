@@ -76,6 +76,35 @@ a > code { color: inherit; background: none; }
   .prose td a code { overflow-wrap: anywhere; }
 }
 
+/* The safety case (/engineering/): one row per claim. The prose column is too narrow for
+   six columns, so each row is a block at every width: the claim and its state on top, then
+   each cell under its label, one item per line. */
+.prose table.case, .case thead, .case tbody, .case tr, .case td { display: block; width: auto; }
+.prose table.case { margin: 1em 0 1.6em; font-size: 13px; border-top: 1px solid var(--rule-strong); }
+.case thead { display: none; }
+.case tr { display: grid; grid-template-columns: minmax(0, 1fr) max-content; column-gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--rule-strong); }
+.prose .case td { grid-column: 1 / -1; display: grid; grid-template-columns: 8.5em minmax(0, 1fr); gap: 10px; padding: 3px 0; border-bottom: 0; min-width: 0; }
+.prose .case td::before {
+  content: attr(data-label); color: var(--muted); font-family: var(--font-mono);
+  font-size: 11px; line-height: 20px; letter-spacing: var(--tracking); text-transform: uppercase;
+}
+.prose .case td[data-label="Claim"] { grid-column: 1; grid-row: 1; display: block; padding-bottom: 8px; font-size: 14px; font-weight: 600; }
+.prose .case td[data-label="Claim"]::before { content: none; }
+.prose .case td[data-label="State"] { grid-column: 2; grid-row: 1; display: block; text-align: right; }
+.prose .case td[data-label="State"]::before { content: none; }
+.prose .case code { font-size: 12px; }
+.case-item { display: block; }
+.case-item + .case-item { margin-top: 3px; }
+.case-note { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; font-weight: 400; }
+.case-none { color: var(--muted); }
+.prose .case td[data-label="State"] .case-item { margin-top: 4px; font-size: 11px; max-width: 16em; margin-left: auto; }
+@media (max-width: 600px) {
+  .case tr { grid-template-columns: minmax(0, 1fr); }
+  .prose .case td[data-label="State"] { grid-column: 1; grid-row: 2; text-align: left; padding-bottom: 6px; }
+  .prose .case td[data-label="State"] .case-item { display: inline; margin: 0 0 0 8px; }
+  .prose .case td { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
+
 /* ---- code: a panel like a terminal tab; syntax colours from the tokens ---- */
 
 pre {

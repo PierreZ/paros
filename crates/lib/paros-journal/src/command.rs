@@ -254,5 +254,17 @@ pub enum Command {
     },
 }
 
+impl paros_consensus::types::Fingerprint for Command {
+    /// The FNV-1a hash of the command's bytes ([`crate::codec`]): two equal
+    /// commands encode to the same bytes. The core's Phase-2 tally checks a
+    /// vote against the command of its round with it.
+    fn fingerprint(&self) -> u64 {
+        paros_consensus::types::fnv1a(
+            paros_consensus::types::FNV_OFFSET,
+            &crate::codec::encode_command(self),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests;

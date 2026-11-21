@@ -205,9 +205,7 @@ impl ColocatedNode {
     /// configuration it carries is learned ([`ColocatedNode::learn_config`]).
     pub(super) fn follow_ballot(&mut self, ballot: Ballot, config: Option<AcceptorConfig>) {
         let before = self.ballot;
-        if ballot > self.ballot {
-            self.ballot = ballot;
-        }
+        self.ballot = self.ballot.max(ballot);
         assert!(self.ballot >= before, "the operating ballot never falls");
         assert!(
             self.ballot >= ballot,

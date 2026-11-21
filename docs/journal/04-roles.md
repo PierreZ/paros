@@ -22,8 +22,33 @@ have, with no journal concept in the core (§J4.3).
 | Acceptor | promise, votes | The grid of one segment. Default: one column of three (`F = 1`), a plain majority. Else the partitioned grid, `rows = 2F + 1`, `acks = F + 1` | `acceptor.rs`, `membership/` | §J5.1 (#1257) |
 | Replica | the chosen log of its segments | Applies in slot order, folds the journal state, serves reads (leaderless), writes the boundary state of a sealed segment. One replica set for each segment | `replica.rs`, `replica_node.rs`, `quorum_read.rs` | §J2.5, §J3.1 (#1271) |
 | Matchmaker | the configurations of the journal | One set of `2F + 1` for each journal, majority quorums; the set hands over by generations | `matchmaker.rs`, `matchmaker/reconfigurer.rs` | architecture §4.1, `handover/` (#1097) |
-| Matchmaker register (optional role) | the segment records and the controller term | One compare-and-set register for each journal, beside the paper's registration matchmaker | **Open**: where it lives (#1325) | §J3.4 (#1275, #1315) |
+| Matchmaker register (optional role) | the segment records and the controller term | One compare-and-set register for each journal, beside the paper's registration matchmaker | `paros-journal` (`register`), by composition (#1325) | §J3.4 (#1275, #1315) |
 | Grid controller | none (the term is in the register) | Elected by a term in the register; runs on stateless machines; asks, never decides safety. v1: heal and scrub | none | §J6 (#1259, #1260) |
+
+**The roles built so far** (#1326 (the journal roles over the core), first rule group: segments,
+the seal and writes). They are in `paros_journal::roles`, each a pure state machine under the
+flight rule:
+
+- `JournalAcceptor` (`roles/acceptor.rs`): the core's `Acceptor` over the journal's `Command`.
+  One acceptor serves every segment whose grid names it, with one promise. An `Accept` that raises
+  the promise writes the promise and the vote in one batch (#1309).
+- `JournalLeader` (`roles/leader.rs`, `roles/leader/phase1.rs`): the leader of one ballot, bound to
+  the newest segment. Its Phase 1 reads every segment that is not retired, a sealed one only below
+  its end, and needs `F + 1` of every column of every grid. A first leader of a pending segment
+  writes the seal end (one above the highest vote of the old grid, a faulty vote included,
+  #1313) and opens only on a done write of its own end. It writes again every slot from its first
+  slot: the vote its Phase 1 saw, else a `Noop` (#1233), except a slot whose top report is a
+  faulty vote. It writes each slot in one column of its own grid with the core's `Rounds`, sends
+  each chosen slot to the replica set of the slot's segment (#1271), and holds each answer until
+  a replica applies the slot (#1232).
+- `SegmentReplica` (`roles/replica.rs`): one replica of one segment. It takes its base from the
+  boundary state of the segment just before, applies in slot order, learns the end of its segment
+  from a done seal, writes the boundary state when it is full, pulls missing slots from its
+  peers, and answers `Resolve` (#1320).
+
+The proxy leader, the leaderless read, the retire that the leader asks, the truncate across
+segments with the compaction of the acceptors, the re-replication and the repair of a blocked
+slot (CTRL) are the next rule groups of #1326.
 
 **The default deployment** is three machines, each with every role in one process (Pierre, in
 the journal design); the `Host` also supports one process for each role (§J4.2, rule 3).
@@ -41,8 +66,9 @@ journal's roles and their driver follow five rules, findings 1 to 5 of the secon
 journal design (architecture, layering, testability). The rules fix the boundary between the
 pure roles and the driver before any journal role exists. The pure journal core
 (`paros-journal`, #1324 (paros-journal)) holds the fold, the records and the codec, and no role
-yet. So the names below are a sketch: each exact type is **Open**, and #1326 (the journal roles
-over the core) decides it.
+yet. So the names below are a sketch. #1326 (the journal roles over the core) fixed rule 1 in
+code (below, "What the roles build today"); the other types stay **Open** until #1329
+(paros-journal-io) builds the driver.
 
 A role is a pure state machine. A step takes one input and returns its effects:
 
@@ -100,6 +126,19 @@ in a batch before the vote. A vote that is durable before its promise breaks saf
 crashes, starts again with its old promise, and takes a lower ballot's `Accept` over a vote that
 was chosen (control `order_vote_first`).
 
+*What the roles build today* (#1326). Each role with a disk (the acceptor, the replica) gives
+every persist batch a `PersistId` (`roles::Flight`) and names on each send the batch it waits
+on; a send with no write of its own waits on the last batch the role emitted. A restart is
+`recover(disk)`, and the ids go on above the highest durable id. The driver holds each send
+until its batch is durable, so the role needs no `Persisted` input. The leader has no disk (a
+ballot belongs to one leader in memory, as in `journal-state/`), so its sends wait on nothing.
+The inputs are `step(from, message)`, `observe(register value)` (a value that a done write
+gave, §J3.4), and `tick(page)`: the driver paces the re-sends with `page`, because a re-send of
+every round floods a bounded network and loses the messages that would close the rounds (a
+finding of the roles walk). A compare-and-set of the register is an effect
+(`Register(Change)`). `now`, timers, recorded reads, the `Host` and the two ports (rules 2 to
+5) are not built yet (#1329).
+
 **Rule 2: every input is recorded.** A restart is `Input::Recovered(state)`. A read from storage
 is an effect, and its result comes back as an input. `now` comes with every input, timers are
 `Effect::SetTimer` and `Input::TimerFired`, and the driver draws every random value and passes
@@ -132,15 +171,17 @@ its meaning: a batch is durable or not, never torn. A contract suite certifies t
 crash safety is claimed only on a faultable disk (decided by Pierre on 2026-11-19).
 
 **Rule 5: two ports.** `Events` carries the recorded (input, effects) pair of each `Host` step,
-after durability. The trace check reads it, and so does the grid controller, for its signals.
+after durability. The trace check reads it, live and chunk by chunk (moonpool-tla `Live`,
+§J7.3, #1310 (check long runs live)), and so does the grid controller, for its signals.
 `Assignments` says which journals and roles the process serves, and which it stops.
 
 *Why.* The trace check and the controller then read the same record that replay uses, and no
 role grows a private hook for them. Placement reaches a process through one port, so parosd has
 no private API into the journal.
 
-Related decisions of the same night: the runtime is compio through moonpool's `CompioProviders`,
-so no trait requires `Send`; every header carries a release number (v1 scope); a write that holds
+Related decisions of the same night: the runtime of the moonpool adapter is compio through
+moonpool's `CompioProviders`, so no trait requires `Send` (the pure crates name no runtime,
+§J4.3); every header carries a release number (v1 scope); a write that holds
 a slot is answered `Unknown`, never `NotLeader` (#1232 (deposed leader and a held write)).
 
 **The contract against `ColocatedNode` today.** `ColocatedNode` (`paros-consensus`) is the sans-IO
@@ -172,15 +213,18 @@ creates these crates, each in its own step. `paros-journal` and `journal-sim` ex
 
 | Crate | What it holds | Step |
 |---|---|---|
-| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the codec with a release number in every header (`codec`), the record headers (`command`); later the pure client (no network) | #1324 (paros-journal), #1331 (the pure journal client) |
+| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the matchmaker register and its handover (`register`), the journal roles (`roles`, #1326), the codec with a release number in every header (`codec`), the record headers (`command`); later the pure client (no network) | #1324 (paros-journal), #1325 (the matchmaker register), #1331 (the pure journal client) |
 | `paros-journal-control` (`crates/lib/`) | The pure `decide` of the v1 controller and the controller role | #1328 (paros-journal-control) |
 | `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the `Host` inputs), the generic driver under the flight rule, many journals in one process, and the contract suites | #1329 (paros-journal-io) |
 | `paros-journal-moonpool` (`crates/lib/`) | The adapter of the `paros-journal-io` traits on moonpool providers: compio through moonpool's `CompioProviders`, no trait requires `Send` (Pierre, 2026-11-19) | #1330 (paros-journal-moonpool) |
-| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla` | #1327 (journal-sim) |
+| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla` | #1327 (journal-sim) |
 
 The journal roles that compose the core (segments, seal, reads, retire, truncate,
-re-replication) are #1326 (the journal roles); the matchmaker register is #1325 (the matchmaker register as an optional role). **Open**: the
-crate of each (#1326 and #1325 decide). The `ObjectStore` trait of the journal design waits
+re-replication) are #1326 (the journal roles). They live in `paros-journal`, module `roles`
+(#1326): they are pure and use only the core and the journal's own types, so they need no crate
+of their own. The
+matchmaker register is `paros_journal::register` (#1325 (the matchmaker register as an optional
+role), §J3.4). The `ObjectStore` trait of the journal design waits
 with offload (#1329 (paros-journal-io)). The `paros` facade re-exports each layer as a module (`AGENTS.md`).
 
 **The layering rule.** `paros-consensus` stays a library for everyone: plain Multi-Paxos,
@@ -190,6 +234,22 @@ composition cannot meet is a new optional behaviour of the core with the plain a
 The rule and its reasons are architecture §4.3 (decided by Pierre on 2026-11-20). Cells and
 every other service concept stay out of both the core and the journal crates (#1264 (remove the
 cell from paros-consensus), PR #1268 (no cell in the core)).
+
+**No runtime or storage dependency** (Pierre, 2026-11-21). paros is a library that a program
+uses by implementing its traits: the storage trait, the transport and the clock of
+`paros-journal-io` (#1329), and the `Storage` contract of `paros-consensus`. The pure crates
+(`paros-consensus`, `paros-journal`, and `paros-journal-io`, `paros-journal-control` and the
+client when they exist) therefore depend on no async runtime (tokio, compio, smol), no storage
+engine and no network or file crate. Their traits do not require `Send`, an executor or a
+runtime type. With no feature on, a pure crate depends on workspace crates only. Its optional
+features only observe (`serde`, `tracing`, `assertions`): they decide nothing and do no I/O. The
+generic driver of `paros-journal-io` is written against the traits only. A crate that does I/O
+is an adapter in a crate of its own (`paros-journal-moonpool`, #1330), and the facade `paros`
+re-exports it only behind an optional feature that is off by default. CI runs
+`scripts/check-core-deps.sh`: it fails when a pure crate, or the facade with its default
+features, gains a dependency outside the workspace and the observation crates. A new pure crate
+joins that script in the pull request that creates it. The examples of #1370 (journal examples)
+show the rule: a backend written by hand, in memory, with no runtime crate.
 
 *Moved here from `docs/architecture/04-roles.md` §4.3, where the journal applies the rule
 (#1332 (journal architecture docs)):*

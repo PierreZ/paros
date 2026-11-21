@@ -13,6 +13,7 @@
 //! Every arm is fenced by generation and phase, and a refusal names what this
 //! matchmaker knows so a stale or ahead reconfigurer can adopt or abort.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use super::Retirement;
@@ -504,7 +505,7 @@ impl Matchmaker {
                     at: self.set().generation,
                 }
             }
-        } else if successor.generation > current.generation
+        } else if successor.generation.cmp(&current.generation) == Ordering::Greater
             || matches!(phase, MatchmakerPhase::Inactive | MatchmakerPhase::Fresh)
         {
             // Not a member of the succeeded generation (a spare, or
@@ -564,11 +565,10 @@ impl Matchmaker {
     /// the decree record resets for the new generation, and every pending
     /// bootstrap at or below the new generation is dropped.
     fn activate(&mut self, successor: &MatchmakerSet) -> bool {
-        if !successor.contains(self.config.id) || successor.generation <= self.set().generation {
-            return false;
-        }
         // Only a whole bootstrap activates (#439): a set is chosen only once
-        // every member held it whole, and a whole one is never replaced.
+        // every member held it whole, and a whole one is never replaced. A
+        // pending bootstrap is always for a later set this matchmaker is a
+        // member of (`assert_invariants`), so finding one is the whole test.
         let Some(index) = self
             .hard_state
             .pending
@@ -577,6 +577,10 @@ impl Matchmaker {
         else {
             return false;
         };
+        assert!(
+            successor.contains(self.config.id) && successor.generation > self.set().generation,
+            "an activation moves a member of the successor forward"
+        );
         let bootstrap = self.hard_state.pending.remove(index);
         assert!(bootstrap.complete, "an activation reads a whole bootstrap");
         // The activated watermark is the maximum of the reconstructed one
@@ -647,9 +651,15 @@ impl Matchmaker {
         self.hard_state.phase = MatchmakerPhase::Active;
         self.hard_state.successor = None;
         self.hard_state.decree = DecreeRecord::default();
-        self.hard_state
-            .pending
-            .retain(|p| p.set.generation > successor.generation);
+        // Every caller pruned the settled bootstraps first, and the
+        // successor's own was taken above: what stays is for later sets.
+        assert!(
+            self.hard_state
+                .pending
+                .iter()
+                .all(|p| p.set.generation > successor.generation),
+            "an activation keeps only the bootstraps of later generations"
+        );
         self.refresh_set();
         self.registries = self
             .hard_state

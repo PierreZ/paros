@@ -2,11 +2,11 @@
 name = "paros-journal"
 description = "The pure journal core of paros: the journal fold, the segment records, the codec and the record headers. Sans-IO, no clock, no randomness"
 version.workspace = true
-publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 exclude = ["AGENTS.md", "CLAUDE.md"]

@@ -624,17 +624,17 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             !accepted_by.is_empty(),
             "a decision rests on at least one vote"
         );
-        if round.moves > 0 {
-            probe!(reachable, "phase2: a moved round is chosen");
-        }
-        if round.column.is_some()
-            && accepted_by.len() < config.phase2_addressees(round.column).len()
-        {
-            probe!(
-                reachable,
-                "phase2: a column decides on fewer than all its acceptors"
-            );
-        }
+        probe!(
+            sometimes,
+            round.moves > 0,
+            "phase2: a moved round is chosen"
+        );
+        probe!(
+            sometimes,
+            round.column.is_some()
+                && accepted_by.len() < config.phase2_addressees(round.column).len(),
+            "phase2: a column decides on fewer than all its acceptors"
+        );
         Some((round.ballot, round.command.clone()))
     }
 
@@ -672,16 +672,15 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         };
         let mut pending: Vec<PendingAccept<V>> =
             self.by_slot.range(start..).take(limit).map(page).collect();
-        if pending.len() < limit {
-            let remaining = limit - pending.len();
-            let wrapped = pending.len();
-            pending.extend(self.by_slot.range(..start).take(remaining).map(page));
-            probe!(
-                sometimes,
-                pending.len() > wrapped && wrapped > 0,
-                "phase2: a re-send page wraps around past the highest open round"
-            );
-        }
+        // A short page wraps around from the lowest round held (a full one
+        // takes nothing more).
+        let wrapped = pending.len();
+        pending.extend(self.by_slot.range(..start).take(limit - wrapped).map(page));
+        probe!(
+            sometimes,
+            pending.len() > wrapped && wrapped > 0,
+            "phase2: a re-send page wraps around past the highest open round"
+        );
         for accept in &pending {
             if let Some(round) = self.by_slot.get_mut(&accept.slot) {
                 round.resends = round.resends.saturating_add(1);

@@ -568,15 +568,15 @@ impl ColocatedNode {
         // (`record_own_round`): every round this leader opened while
         // its promise allowed is in its own log, so a reboot derives
         // the frontier it had. O(N) structural, always-on by choice.
-        if self.ballot >= self.acceptor.promised() {
-            assert!(
-                self.proposer
-                    .rounds()
-                    .keys()
-                    .all(|slot| self.acceptor.record(*slot).is_some()),
-                "a leader's every open round is recorded in its own log"
-            );
-        }
+        // A round opens only while the promise allows its record, and a
+        // promise that passes the ballot later leaves the record in place.
+        assert!(
+            self.proposer
+                .rounds()
+                .keys()
+                .all(|slot| self.acceptor.record(*slot).is_some()),
+            "a leader's every open round is recorded in its own log"
+        );
         // Delegation (#142) is the `None` arm's opt-in: a deployment
         // without proxies delegates nothing, and a delegated round
         // names a proxy the deployment has.

@@ -16,6 +16,8 @@ the code, and change the section in the same PR when a rule changes.
 | `resolve.rs` | the read-only `Resolve` call that settles a `Below` answer | §J2.2 (#1320) |
 | `held.rs` | `Held`: the answers a leader holds until the slot is applied; `Unknown` for a slot that chose another command | §J2.2 (#1232) |
 | `segment.rs` | `SegmentRecord` and its states, `Grid`, the guard of each compare-and-set of the register | §J3.4 |
+| `register.rs` (+ `register/`) | the journal's matchmaker register, an optional role by composition: `value` (`RegisterValue`, each `Change` with its guard), `message`, `member` (`RegisterMember`, the decree half on the core's `Acceptor`), `call` (`RegisterCall`, one compare-and-set at a majority), `handover` (`RegisterHandover`: stop, close, bootstrap, the core's `Decree`, publish) | §J3.4 (#1325) |
+| `roles.rs` (+ `roles/`) | the journal roles under the flight rule (#1326): `Flight` and `PersistId`; `message` (the messages between roles); `acceptor` (`JournalAcceptor`, the core's `Acceptor` over `Command`); `leader` (`JournalLeader`: Phase 1 over the segments in `leader/phase1.rs`, the seal, the gap fill, Phase 2 in one column with the core's `Rounds`, the held answers); `replica` (`SegmentReplica`: base, apply in order, boundary write, pull, `Resolve`) | §J4.1, §J4.2, §J3.1 |
 | `codec.rs` | the bytes of each type, the release number in every header, `DecodeError` | §J1.1, §J2.8 |
 
 Each module keeps its unit tests in `<module>/tests.rs`.
@@ -31,12 +33,19 @@ Each module keeps its unit tests in `<module>/tests.rs`.
   client settles it with `Resolve` at a replica of the old segment.
 - **The identity of a write is its fence, its client headers and its payloads.** The leader time
   is not part of it: a resend with a new leader time is the same write.
+- **The register adds nothing to the core.** It composes the core's `Acceptor`, `Decree`,
+  `Ballot` and `MatchmakerSet`; the core's registration matchmaker and its handover do not change
+  (§J3.4). Each member step names the state to persist before its reply leaves, and a caller acts
+  only on a write its call saw done, never on a read.
 - **No dedup table**: single-writer exactly-once comes from `expected_seq` alone.
 - **Tiger Style assertions**, as in `paros-consensus`: hard `assert!`, on in release, pre- and
   postconditions, paired checks, `# Panics` sections. Never assert on what a client or a peer can
   send: it is an answer (`Empty`, `Reserved`, `WrongMode`) or a `DecodeError`.
 - **The codec refuses what it does not know**: an unknown release, kind, tag or paros header key
   is an error, never a guess. A new field is a new release.
+- **A role is pure and paced by its driver**: it emits each persist batch with an id and names
+  on each send the batch it waits on; the driver chooses the re-send page (`tick(page)`) and the
+  promise page. It acts on a register value only when a done write gave it (§J3.4).
 - **Every rule has its walk.** A rule added here gets its oracle, its control and, when the model
   has it, its trace events in `crates/sim/journal-sim` in the same PR.
 

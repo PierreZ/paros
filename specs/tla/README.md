@@ -198,7 +198,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (now the whole state in the segment record, `seal-chain/`; first checked as `next_seq` in the segment record, the uuid in the journal's matchmaker record and a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
 | A user truncate across segments: the trim floor in the boundary state, the floor of a read from the segment in force, the floor check of an offloaded read, the trim of a sealed segment only once the floor is decided over it, the acceptors' compaction after `F + 1` replicas, the trim-point jump | the journal steps are designed, not built | `segment-truncate/` | #1276 (user truncate across segments), done |
 | Multi-writer mode through `SetLeader(None)`: the switch in both directions, the fence at apply, the position judged before the fence so a resend resolves a held write, the writer's basis from the view, `Truncate` in both modes, a `Fence(None)` at a seal, a resend across a seal answered `below` (#1301 (a resent write across a seal)) | the journal steps are designed, not built | `multi-writer/` | #1274 (multi-writer mode through SetLeader(None) and expected_seq), done |
-| Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
+| Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | `paros_journal::register`, traced against `RegisterTrace.tla` by `journal-sim` (#1325) | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
 | Two seals in a row: a chain of segments with an empty segment and a seal before the `Fence`; where the boundary leader uuid lives (the segment record, or the journal metadata with a `Fence` at the next segment) | the journal steps are designed, not built | `seal-chain/` | #1303 (two seals in a row) |
 | CTRL in the journal: the tri-state tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen value in one write | `proposer.rs` (`slot_decidable`), `acceptor.rs`; the scrub and the repair are designed, not built | `ctrl-grid/` | #1263 (CTRL recovery in the journal), done |
@@ -2727,6 +2727,13 @@ The answer to #1275:
   a write that it saw done, never on a read alone. This control fails with no handover too; the
   handover is one more way to lose a mark that a minority holds.
 - No decision is refuted.
+
+**Its trace spec.** `RegisterTrace.tla` extends `SegmentRecords.tla` and defines no step of its
+own: each event of a traced walk of `paros_journal::register` (`crates/sim/journal-sim`,
+`tests/register_traces.rs`, #1325 (the matchmaker register as an optional role)) is an action of
+the model, with the fields of the event bound to the state after it. The walk defines the
+constants `TraceOps` (the kind of each operation) and `TraceStart` (the record before the first
+operation). `scripts/check-tla.sh` does not run it: the Rust test does.
 
 ### `offload/`: the offloader and the races of offload, for #1256
 

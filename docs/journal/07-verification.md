@@ -72,7 +72,7 @@ What it decided:
   judges with the compare of apply, once its fold covers the position (controls `resolve_uuid`,
   `resolve_early`).
 
-It leaves **Open** where the register role lives (#1325, §J3.4).
+The register role lives in `paros-journal`, by composition (#1325, §J3.4).
 
 ### J7.3 `journal-sim`
 
@@ -102,6 +102,54 @@ extends `Journal.tla` and binds each event to the model's fold operators; the ch
 16 named rules, a planted `Below` in the segment in force is the control, and TLC refuses 24
 named edits of the recorded walks. The probes and the coverage gate come with the roles (#1326).
 
+**The walk of the roles** (#1326 (the journal roles over the core), `src/roles.rs`): the
+acceptors, the leaders and the segment replicas of `paros_journal::roles`, with a disk each
+(batches durable in id order, a crash that loses the batches in flight and the held sends), the
+register as an atomic compare-and-set, three proposers that campaign, reshapes to new grids from
+a pool of six acceptors, seals, boundary writes, retires, and the clients of the fold walk (one
+call in flight each, a call answered `Unknown` sent again, `Below` settled with `Resolve`). Six
+oracles judge it: one command chosen at each slot (`AGREE`), nothing chosen in a sealed grid at
+or above its end (`SEALED`), each answer the whole log's (`FOLD`), each replica's fold the whole
+log's at its front (`VIEW`), each boundary state the fold at the end (`BOUNDARY`) and each
+`Resolve` the fate the whole log gives (`RESOLVE`). Each has its planted mutant in the driver:
+an acceptor that loses its disk, a leader bound to a stale grid, a `Duplicate` answered `Taken`,
+a replica that takes a stale base, a stale boundary write and a `Resolve` at the segment in
+force. The narrow shape is the default grid (one column of three); the wide shape adds grids of
+two columns and promises in pages of two. Each campaign reaches its named sites (a seal lost, a
+`Noop` below the start, an old vote chosen again in a new grid, a third segment, a retire, a
+pull from a peer, a leader stopped on a higher promise, `Unknown`, `Below`, `Resolve`, and
+more). **Open**: the trace check of this walk against `Journal.tla` and the coverage gate over
+its probes (the next rule group of #1326); CTRL faulty votes on the acceptors' disks (the
+leader's blocked slot has unit tests only).
+
+**The walk of the register** (#1325 (the matchmaker register as an optional role),
+`src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
+of §J3.4 and handovers of the matchmaker set, with crashes that lose what a member did not
+persist and restarts from the disk. Two oracles judge it: `CARRIED` (each majority that serves the
+generation of a done write, or a later one, returns it or a later value, and the done values never
+move back) and `ACTED` (a retire of the old acceptors and a drop of a replica's copy act on a value
+that every serving majority holds). Each has its planted mutant: a
+member that replies before its write is durable (`SendBeforePersist`) and a caller that acts on
+a read (`ActOnRead`). The walk has two shapes. The wide shape runs three callers, two handovers
+and every change. The traced shape is small enough for TLC: TLC checks each of its walks against
+`segment-records/RegisterTrace.tla`, which extends `SegmentRecords.tla` and binds each event to
+an action of the model. The checked walks meet 9 named rules, a forged `Bootstrapped` reply is
+the control (the oracles pass it, TLC refuses the decree before every bootstrap), and TLC refuses
+23 named edits of the recorded walks.
+
+**The live trace check** (#1310 (check long runs live), `tests/live.rs`). A long run writes more
+events than one TLC run can follow (one behaviour holds at most 65,535 states), and a check after
+the run sees a divergence only when the run ends. moonpool-tla's `Live` checks the events while
+the run writes them, in chunks on a thread of its own: each chunk starts from every model state
+at which the chunk before it ended, so the chunks check what one TLC run over the whole trace
+would check, with no limit on the length. The first chunk that no behaviour matches stops the
+check, and the run stops with it. The fold walk has an events port for it
+(`FoldModel::build_reported`, the walk's form of `Events`, rule 5 of §J4.2): it reports its fresh
+journal, then each event as it records it. Its long shape (`Shape::LONG`) seals up to 200
+segments. In CI one long walk (about 7,000 events, 199 seals) is checked live, and the trace
+control (`BelowInSegment`) is stopped at its first wrong answer, before the walk ends. Each night
+the `Journal live` workflow checks one fold walk with no end live for four hours.
+
 ### J7.4 The whole journal under moonpool-sim
 
 A moonpool-sim of the whole journal runs the driver, the adapter, many journals in one process,
@@ -109,6 +157,14 @@ disk faults inside the contract, machine and zone loss, the controller and clien
 (#1330 (paros-journal-moonpool)). Every input is recorded (§J4.2, rule 2), so a red run replays.
 A contract suite certifies a backend's API only; crash safety is claimed only on a disk that can
 inject faults (Pierre, 2026-11-19).
+
+Its `Events` port feeds the live trace check of §J7.3, so a run of many hours is judged against
+#1189 while it runs (#1310 (check long runs live)). The driver reports each write before it makes
+it (announce, make, confirm): after a kill, only the last announced write is uncertain, and the
+report at restart decides. A control tears a persist batch during a reconfiguration (as E3 of
+etcd-raft, a lost commit index across a membership change), and the live check must refuse it.
+**Open**: these three parts need the driver; #1329 (paros-journal-io) and #1330
+(paros-journal-moonpool) build them.
 
 ### J7.5 The controller's `decide`
 

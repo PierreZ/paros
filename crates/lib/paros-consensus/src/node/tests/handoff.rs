@@ -304,10 +304,14 @@ fn a_second_node_cannot_install_a_relinquish_addressed_elsewhere() {
     // no-op rather than an allocator rewind.
     nodes[1].step(msg.clone());
     assert!(nodes[1].is_leader());
+    // A re-delivery at the same frontier is refused as held already.
+    nodes[1].step(msg.clone());
+    assert_eq!(nodes[1].handoff_counters().rejected_stale, 1);
     let frontier = nodes[1].proposer().next_slot();
     let _ = nodes[1].propose(entry(3, 1, 5));
     nodes[1].step(msg);
     assert_eq!(nodes[1].handoff_counters().installed, 1, "installed once");
+    assert_eq!(nodes[1].handoff_counters().rejected_stale, 2);
     assert!(
         nodes[1].proposer().next_slot() > frontier,
         "the allocator never rewinds"
@@ -354,6 +358,30 @@ fn a_malformed_tail_is_refused_whole() {
     assert!(!nodes[1].is_leader());
     assert_eq!(nodes[1].handoff_counters().rejected_shape, 1);
 
+    // A tail that names a slot below `from_slot` or at `next_slot` covers the
+    // span by count but leaves its own slot undescribed.
+    for outside in [Slot(2), Slot(4)] {
+        let shifted = tamper(&good, |m| {
+            if let Message::Relinquish { pending, .. } = m {
+                let command = pending.pop_first().expect("one stranded slot").1;
+                pending.insert(outside, command);
+            }
+        });
+        nodes[1].step(shifted);
+        assert!(!nodes[1].is_leader());
+    }
+    assert_eq!(nodes[1].handoff_counters().rejected_shape, 3);
+
+    // A payload that names its own receiver as the giver is no transfer.
+    let looped = tamper(&good, |m| {
+        if let Message::Relinquish { from, .. } = m {
+            *from = NodeId(1);
+        }
+    });
+    nodes[1].step(looped);
+    assert!(!nodes[1].is_leader());
+    assert_eq!(nodes[1].handoff_counters().rejected_target, 1);
+
     // An authority minted by a node outside the configured membership is not an
     // authority at all — the same membership boundary `on_accept` draws.
     let forged = tamper(&good, |m| {
@@ -363,7 +391,7 @@ fn a_malformed_tail_is_refused_whole() {
     });
     nodes[1].step(forged);
     assert!(!nodes[1].is_leader());
-    assert_eq!(nodes[1].handoff_counters().rejected_target, 1);
+    assert_eq!(nodes[1].handoff_counters().rejected_target, 2);
 
     // The untampered payload still installs, so the guards above rejected the
     // damage and not the mechanism.
@@ -559,11 +587,13 @@ fn an_uncovered_inherited_fence_resigns_back_to_an_ordinary_election() {
     // only the inherited slot's `Accept` keeps vanishing.
     let timeout = 4;
     nodes[1].set_election_timeout(timeout);
+    let mut ticks = 0;
     for _ in 0..(timeout * HANDOFF_FENCE_ELECTIONS) {
         if !nodes[1].is_leader() {
             break;
         }
         nodes[1].tick();
+        ticks += 1;
         let q = drain(&mut nodes[1]);
         deliver_filtered(&mut nodes, q, |_, m| {
             !matches!(m, Message::Accept { .. } | Message::CatchUpResponse { .. })
@@ -574,6 +604,31 @@ fn an_uncovered_inherited_fence_resigns_back_to_an_ordinary_election() {
         "a handoff leader that cannot cover its inherited fence resigns"
     );
     assert_eq!(nodes[1].handoff_counters().fence_step_downs, 1);
+    assert_eq!(
+        ticks,
+        timeout * HANDOFF_FENCE_ELECTIONS,
+        "the fence resigns at its deadline, not before"
+    );
+}
+
+/// The tail tiles `[from_slot, next_slot)` exactly, within [`HANDOFF_BATCH`].
+#[test]
+fn a_tail_shape_is_bounded_by_the_handoff_batch() {
+    use crate::node::handoff::tail_shape_valid;
+    let b = ballot(1, 0);
+    let tile = |len: u64| -> std::collections::BTreeMap<Slot, Command> {
+        (0..len).map(|s| (Slot(s), ucmd(1, s, 1))).collect()
+    };
+    let none = std::collections::BTreeMap::new();
+    let full = HANDOFF_BATCH as u64;
+    assert!(tail_shape_valid(b, Slot(0), Slot(full), &none, &tile(full)));
+    assert!(!tail_shape_valid(
+        b,
+        Slot(0),
+        Slot(full + 1),
+        &none,
+        &tile(full + 1)
+    ));
 }
 
 #[test]

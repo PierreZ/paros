@@ -1,10 +1,10 @@
-// The live parts of the Engineering pages (#812 (website redo 3/4)).
+// The live parts of the Engineering pages and of the Consensus driver page (#812 (website redo 3/4), #1349).
 //
 // The widgets run paros-consensus compiled to wasm (the `paxos` bundle of
 // paros-wasm, staged at /paxos/wasm/ by scripts/build-wasm.sh) and draw what
 // it returns. No protocol logic here: every fact comes from the core.
 //
-//   [data-widget="ready"]        the Ready inspector (sans-IO)
+//   [data-widget="ready"]        the Ready inspector (consensus/driver)
 //   [data-widget="quorums"]      the quorum picker (grid quorums)
 const PAXOS = new URL("paxos/wasm/paros_paxos.js", import.meta.url);
 

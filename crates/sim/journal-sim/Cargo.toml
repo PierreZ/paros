@@ -15,9 +15,9 @@ authors.workspace = true
 # assertion table in the workspace.
 [dependencies]
 paros-journal = { workspace = true }
-moonpool-walk = { git = "https://github.com/PierreZ/moonpool", rev = "2d29570ff572c4404eedf0240cadcbef2710c070" }
-moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "2d29570ff572c4404eedf0240cadcbef2710c070" }
-moonpool-tla = { git = "https://github.com/PierreZ/moonpool", rev = "2d29570ff572c4404eedf0240cadcbef2710c070" }
+moonpool-walk = { git = "https://github.com/PierreZ/moonpool", rev = "cf24c75f38b945a2b306c3ee0125a37dfd26e1e6" }
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "cf24c75f38b945a2b306c3ee0125a37dfd26e1e6" }
+moonpool-tla = { git = "https://github.com/PierreZ/moonpool", rev = "cf24c75f38b945a2b306c3ee0125a37dfd26e1e6" }
 
 [lints]
 workspace = true

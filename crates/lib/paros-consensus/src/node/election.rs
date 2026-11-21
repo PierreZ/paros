@@ -6,6 +6,8 @@
 //! builds the `Prepare`s, moves the role, fixes the allocator and the read
 //! fence, and opens the GC campaign on a matchmaker deployment.
 
+use std::collections::BTreeSet;
+
 use super::{
     BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Control, Delegation, LeadershipOrigin,
     Message, NodeId, NodeRole, Slot,
@@ -736,19 +738,7 @@ impl ColocatedNode {
         // accepted record above the choosing ballot carries it, P2c). A slot
         // the tally could not clear (a faulty report above the best `have`)
         // stays blocked and resolves through the probe like any other.
-        let prefix_heals: Vec<(Slot, Ballot, Command)> = outcome
-            .recovered
-            .range(..self.first_unchosen())
-            .filter(|(slot, _)| !outcome.blocked.contains(slot) && !self.replica.is_chosen(**slot))
-            .map(|(slot, (ballot, command))| (*slot, *ballot, command.clone()))
-            .collect();
-        for (slot, ballot, command) in prefix_heals {
-            probe!(
-                reachable,
-                "phase1: a fresh leader heals a faulty chosen slot from its promise quorum"
-            );
-            self.mark_chosen(slot, &command, ballot);
-        }
+        self.heal_chosen_prefix(&outcome.recovered, &outcome.blocked);
 
         let recovery_start = self.first_unchosen();
         let recovered: BTreeMap<Slot, Command> = outcome
@@ -789,6 +779,38 @@ impl ColocatedNode {
         // below this ballot may be forgotten.
         if self.config.has_matchmakers() {
             self.open_gc(&outcome.prior);
+        }
+    }
+
+    /// Heal every faulty chosen slot below the chosen prefix's frontier from
+    /// the promise quorum's highest-ballot report (`recovered`), except the
+    /// slots the tally left `blocked`.
+    fn heal_chosen_prefix(
+        &mut self,
+        recovered: &BTreeMap<Slot, (Ballot, Command)>,
+        blocked: &BTreeSet<Slot>,
+    ) {
+        let prefix_heals: Vec<(Slot, Ballot, Command)> = recovered
+            .range(..self.first_unchosen())
+            .filter(|(slot, _)| !blocked.contains(slot) && !self.replica.is_chosen(**slot))
+            .map(|(slot, (ballot, command))| (*slot, *ballot, command.clone()))
+            .collect();
+        for (slot, ballot, command) in prefix_heals {
+            // A heal never relearns a slot this node holds chosen, nor
+            // decides a slot the tally left blocked.
+            assert!(
+                !self.replica.is_chosen(slot),
+                "a prefix heal targets a hole of the chosen prefix"
+            );
+            assert!(
+                !blocked.contains(&slot),
+                "a prefix heal never decides a blocked slot"
+            );
+            probe!(
+                reachable,
+                "phase1: a fresh leader heals a faulty chosen slot from its promise quorum"
+            );
+            self.mark_chosen(slot, &command, ballot);
         }
     }
 

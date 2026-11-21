@@ -85,6 +85,9 @@ jobs:
       # #730 (paros-consensus rework): foundations <- roles <- deployments.
       - name: Check the paros-consensus layers
         run: scripts/check-core-layers.sh
+      # docs/journal/04-roles.md §J4.3: no runtime, I/O or storage dependency in the pure crates.
+      - name: Check the pure crates' dependencies
+        run: nix develop --command scripts/check-core-deps.sh
 
   test:
     needs: scope
@@ -321,6 +324,11 @@ jobs:
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal
       - name: Build paros (the library facade) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
+      # The two public crates (`release-plz.toml`) build as crates.io builds
+      # them: from the packaged files, with each git dependency replaced by its
+      # `version` (moonpool-assertions from crates.io). Nothing is uploaded.
+      - name: Package the public crates as crates.io builds them
+        run: nix develop --command cargo publish --dry-run --workspace --locked
 
   # The site's wasm tool (#540): `paros-wasm`, built for wasm32-unknown-unknown
   # (`paxos`: the step-through engine on paros-consensus). Then the step-through

@@ -96,24 +96,23 @@ impl ColocatedNode {
         // a spare that only ever learns (never prepared, promise still zero)
         // hit it on 1 seed in 2,000 (17196295897912962235) and refused to
         // boot again.
-        if ballot > self.acceptor.promised() {
-            self.acceptor.set_promise(ballot, &mut self.pending_writes);
-            // A live campaign's promise sits at its ballot
-            // (`assert_invariants`): a candidate that learns a slot chosen
-            // above its ballot can no longer accept its own rounds, so its
-            // campaign is over, as a higher `Prepare` ends it in
-            // `on_prepare`. Left open, a matchmaking phase reached Phase 1
-            // with the promise past the ballot (witness
-            // 13099780746496209636 on PR #556 (tenant footprint): a
-            // candidate at (2,1) learned slot 0 chosen at (3,2) through a
-            // `Commit`, then its matchmaker quorum answered).
-            if self.role == NodeRole::Candidate {
-                probe!(
-                    reachable,
-                    "learn: a slot chosen above a campaign's ballot closes it"
-                );
-                self.become_follower(None);
-            }
+        let promise = self.acceptor.promised().max(ballot);
+        self.acceptor.set_promise(promise, &mut self.pending_writes);
+        // A live campaign's promise sits at its ballot
+        // (`assert_invariants`): a candidate that learns a slot chosen
+        // above its ballot can no longer accept its own rounds, so its
+        // campaign is over, as a higher `Prepare` ends it in
+        // `on_prepare`. Left open, a matchmaking phase reached Phase 1
+        // with the promise past the ballot (witness
+        // 13099780746496209636 on PR #556 (tenant footprint): a
+        // candidate at (2,1) learned slot 0 chosen at (3,2) through a
+        // `Commit`, then its matchmaker quorum answered).
+        if self.role == NodeRole::Candidate && self.acceptor.promised() != self.ballot {
+            probe!(
+                reachable,
+                "learn: a slot chosen above a campaign's ballot closes it"
+            );
+            self.become_follower(None);
         }
         assert!(
             self.role != NodeRole::Candidate || self.acceptor.promised() == self.ballot,

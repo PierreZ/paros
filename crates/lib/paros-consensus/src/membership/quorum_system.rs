@@ -72,9 +72,10 @@ pub(super) fn majority_of(members: usize) -> usize {
         majority.saturating_mul(2) > members,
         "a majority self-intersects"
     );
-    if members > 0 {
-        assert!(majority <= members, "a majority fits inside its membership");
-    }
+    assert!(
+        members == 0 || majority <= members,
+        "a majority fits inside a non-empty membership"
+    );
     majority
 }
 
@@ -268,12 +269,12 @@ impl QuorumSystem {
                 cols.saturating_mul(self.phase1_per_column().unwrap_or(0))
             }
         };
-        if let QuorumSystem::Grid { rows, cols, acks } = self
-            && (1..=rows).contains(&acks)
-            && rows.checked_mul(cols) == Some(members)
-        {
+        // The guard is part of the assertion: a tiled grid only.
+        if let QuorumSystem::Grid { rows, cols, acks } = self {
             assert!(
-                size <= members,
+                !(1..=rows).contains(&acks)
+                    || rows.checked_mul(cols) != Some(members)
+                    || size <= members,
                 "a Phase-1 quorum fits inside a tiled membership"
             );
         }
@@ -294,12 +295,10 @@ impl QuorumSystem {
             // `acks` of one column.
             QuorumSystem::Grid { acks, .. } => acks,
         };
-        if let QuorumSystem::Grid { rows, cols, .. } = self
-            && rows.checked_mul(cols) == Some(members)
-            && size <= rows
-        {
+        // The guard is part of the assertion: a tiled grid only.
+        if let QuorumSystem::Grid { rows, cols, .. } = self {
             assert!(
-                size <= members,
+                rows.checked_mul(cols) != Some(members) || size > rows || size <= members,
                 "a column's quorum fits inside a tiled membership"
             );
         }
@@ -354,20 +353,18 @@ impl QuorumSystem {
     #[must_use]
     pub fn cross_intersects(self, members: usize) -> bool {
         let intersects = match self {
+            // Two majorities always meet: the arithmetic is the assertion.
             QuorumSystem::Majority => {
-                self.phase1_quorum_size(members)
-                    .saturating_add(self.phase2_quorum_size(members))
-                    > members
+                assert!(
+                    self.phase1_quorum_size(members)
+                        .saturating_add(self.phase2_quorum_size(members))
+                        > members,
+                    "two majorities cross-intersect by construction"
+                );
+                true
             }
             QuorumSystem::Grid { rows, acks, .. } => (1..=rows).contains(&acks),
         };
-        // Two majorities always meet.
-        if matches!(self, QuorumSystem::Majority) {
-            assert!(
-                intersects,
-                "a majority or a grid cross-intersects by construction"
-            );
-        }
         // Inside a column the two counts meet (`phase1_per_column` asserts
         // the overlap).
         if intersects && let QuorumSystem::Grid { rows, .. } = self {
@@ -475,9 +472,10 @@ impl QuorumSystem {
     pub fn is_majority<I: Ord>(members: &[I], voters: &BTreeSet<I>) -> bool {
         let majority = counted(members, voters) >= majority_of(members.len());
         // A majority of a non-empty membership is somebody.
-        if majority && !members.is_empty() {
-            assert!(!voters.is_empty(), "a majority holds a vote");
-        }
+        assert!(
+            !majority || members.is_empty() || !voters.is_empty(),
+            "a majority holds a vote"
+        );
         majority
     }
 
@@ -533,10 +531,11 @@ impl QuorumSystem {
             _ => self.row_of(ctx),
         };
         // Whatever the caller chose, the row a read runs on is admitted.
-        if let QuorumSystem::Grid { rows, .. } = self
-            && rows >= 1
-        {
-            assert!(self.admits_read_row(row), "a read runs on an admitted row");
+        if let QuorumSystem::Grid { rows, .. } = self {
+            assert!(
+                rows == 0 || self.admits_read_row(row),
+                "a read runs on an admitted row"
+            );
         }
         row
     }
@@ -621,12 +620,10 @@ impl QuorumSystem {
             }
         };
         // A quorum is never assembled out of strangers alone.
-        if quorum && !members.is_empty() {
-            assert!(
-                counted(members, voters) >= 1,
-                "a Phase-1 quorum holds a member's vote"
-            );
-        }
+        assert!(
+            !quorum || members.is_empty() || counted(members, voters) >= 1,
+            "a Phase-1 quorum holds a member's vote"
+        );
         quorum
     }
 
@@ -769,12 +766,10 @@ impl QuorumSystem {
             },
         };
         // A quorum is never assembled out of strangers alone.
-        if quorum && !members.is_empty() {
-            assert!(
-                counted(members, voters) >= 1,
-                "a Phase-2 quorum holds a member's vote"
-            );
-        }
+        assert!(
+            !quorum || members.is_empty() || counted(members, voters) >= 1,
+            "a Phase-2 quorum holds a member's vote"
+        );
         quorum
     }
 
