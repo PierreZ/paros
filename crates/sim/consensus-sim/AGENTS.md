@@ -146,8 +146,8 @@ Test only: `publish = false`, never a dependency of another crate.
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs`, `matchmaker.rs`, `reads.rs`,
   `truncation.rs`, `compartments.rs`, `faults.rs` and `handover.rs` each say which events their
   spec keeps (`Spec::keeps`, a list of the model's own steps). `node.rs` defines the constants of
-  the eight trace specs of `specs/tla/node/`; `proxy_leader.rs`, `leader_handoff.rs` and
-  `handover.rs` define those of their own models. In a batch, the tracer writes the votes that
+  the ten trace specs of `specs/tla/node/`; `handover.rs` defines those of its own model. A
+  proxy round that ends with no decision (a relayed `Nack`, or `expire_stale`) is a `Close`. In a batch, the tracer writes the votes that
   are not the leader's own round and each trim jump before the learns, and each compaction
   after them: a node learns a value it holds, from its trim point on. `reads.rs` records the
   read basis, the answers and the served reads; `truncation.rs` the journal fold of each slot (`Fold`, from the first party that
@@ -207,9 +207,11 @@ Test only: `publish = false`, never a dependency of another crate.
   workflow runs it with 900 root seeds from a first seed that moves with the date.
 - `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): the
   walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of each
-  control that the oracles pass. Single decree against `decree/`; the proxy leaders against
-  `proxy-leader/`; the handoff against `leader-handoff/`; every other cluster flavor against
-  `node/`, the implementation model of `ColocatedNode`: every flavor without matchmakers against
+  control that the oracles pass. Single decree against `decree/`; every cluster flavor against
+  `node/`, the implementation model of `ColocatedNode`: the proxy leaders against
+  `node/ProxyLeaderTrace` (control: a proxy that keeps its rounds across a crash,
+  `Mutant::KeepProxyRounds`); the handoff against `node/LeaderHandoffTrace` (control: a handoff
+  that rewinds the frontier, `Mutant::RewindHandoff`); every flavor without matchmakers against
   `node/MultiPaxosTrace`; the matchmakers against `node/MatchmakerTrace`; the lagging reads
   against `node/ReadsTrace` (controls: a read fence below the promise, a hidden watermark); the
   `compaction` flavor against `node/TruncationTrace` (control: a compaction past the fold);
@@ -225,7 +227,7 @@ Test only: `publish = false`, never a dependency of another crate.
   trace spec (the first seed and the seeds that meet a new rule; 40 seeds of the decree and
   batcher walks) and require a refusal at or after the edited event; an invariant of the trace
   that breaks there counts as a refusal. The tracer writes the record of a learn before the
-  learn, and the `Learn` of `node/` and `leader-handoff/` asks for it, so `LearnRecordsHeld`
+  learn, and the `Learn` of `node/` asks for it, so `LearnRecordsHeld`
   holds at every state of a trace; the control drops the record of a learn and TLC refuses the
   learn (`tlc_refuses_a_learn_with_no_record_*`). CI runs both in release in the `trace-edits`
   job of `rust.yml`, not in the debug `test` job. A retiring or a reconfiguring walk has 250 quiet steps, the others
@@ -251,8 +253,6 @@ Test only: `publish = false`, never a dependency of another crate.
 ## Not traced yet
 
 Every cluster flavor has a trace spec (#1198 (trace checking), #1231 (traced walks reach the
-rules)). A spec judges the steps of its own model: `MatchmakerGridTrace` judges the
-matchmaking, the log, the GC and the proxy `Commit` of the walk with every compartment, and
-the proxy rounds across a crash and the guards of a handoff are judged by `proxy-leader/` and
-`leader-handoff/` on their own walks. Merging those two models into `node/` is #1343 (merge proxy and
-handoff into the node model).
+rules)). Every cluster trace spec extends `node/`, so one model judges the log, the
+matchmaking, the GC, the proxy rounds and the handoff of every walk (#1343 (merge proxy and
+handoff into the node model)).

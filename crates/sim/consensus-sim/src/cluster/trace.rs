@@ -32,8 +32,9 @@
 //! 7. `basis`: a read basis the node did not hold before; `readack`: the
 //!    first answer of the node to a read.
 //!
-//! For a batch of a proxy: `fanout`, the proxy opened a round, and
-//! `commit`, the proxy decided it. For a matchmaker: `register`, a
+//! For a batch of a proxy: `fanout`, the proxy opened a round, `commit`,
+//! the proxy decided it, and `close`, the proxy closed it on a `Nack` that
+//! it relays. A round the proxy evicts (`expire_stale`) is a `close` too. For a matchmaker: `register`, a
 //! registration it did not hold before, and `gcack`, a GC request it
 //! applied. `restart` is a node that boots again from its disk, with a
 //! `rot` for each record its boot read faulty, and
@@ -51,16 +52,15 @@
 //! Each trace spec reads the events it has and leaves the others out
 //! ([`Spec::keeps`]). Every trace spec extends a model that TLC checks
 //! and defines no step of its own (#1306 (trace specs extend the checked
-//! model)). The eight trace specs of the log family (`MultiPaxosTrace`,
-//! `MatchmakerTrace`, `MatchmakerGridTrace`, `RetireTrace`, `ReadsTrace`,
-//! `TruncationTrace`, `FaultsTrace` and `CompartmentsTrace`) extend
-//! `specs/tla/node/Node.tla`, the implementation model of
-//! `ColocatedNode`: `node.rs` writes their constants, and
-//! `multi_paxos.rs`, `matchmaker.rs`, `reads.rs`, `truncation.rs`,
-//! `compartments.rs` and `faults.rs` record their events.
-//! `proxy_leader.rs` writes the trace of `specs/tla/proxy-leader/`,
-//! `leader_handoff.rs` of `specs/tla/leader-handoff/` and `handover.rs`
-//! of `specs/tla/generations/`.
+//! model)). The ten trace specs of the log family (`MultiPaxosTrace`,
+//! `ProxyLeaderTrace`, `LeaderHandoffTrace`, `MatchmakerTrace`,
+//! `MatchmakerGridTrace`, `RetireTrace`, `ReadsTrace`, `TruncationTrace`,
+//! `FaultsTrace` and `CompartmentsTrace`) extend `specs/tla/node/Node.tla`,
+//! the implementation model of `ColocatedNode` and of the proxy leaders:
+//! `node.rs` writes their constants, and `multi_paxos.rs`,
+//! `proxy_leader.rs`, `leader_handoff.rs`, `matchmaker.rs`, `reads.rs`,
+//! `truncation.rs`, `compartments.rs` and `faults.rs` say which events each
+//! keeps. `handover.rs` writes the trace of `specs/tla/generations/`.
 
 mod compartments;
 mod encode;
@@ -84,7 +84,7 @@ use paros_consensus::contract::message::Audience;
 use paros_consensus::contract::write::AcceptorWrite;
 use paros_consensus::journal::{Command, Control, command_fingerprint};
 use paros_consensus::matchmaker::{GcRequest, MatchPurpose, MatchRequest};
-use paros_consensus::membership::{MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
+use paros_consensus::membership::{MatchmakerId, MatchmakerSet, ProxyId};
 use paros_consensus::{Ballot, Message, NodeId, Slot, WriteOp};
 
 pub use rules::Rule;
@@ -211,6 +211,10 @@ pub enum ClusterEvent {
     },
     /// `proxy` crashed and lost its rounds (`Crash`).
     Crash { proxy: ProxyId },
+    /// `proxy` closed its open round of `slot` with no decision: an
+    /// acceptor refused it (the proxy relays the `Nack`), or the round
+    /// reached its retention budget (`expire_stale`) (`Close`).
+    Close { proxy: ProxyId, slot: Slot },
     /// `acceptor` durably voted for `cmd` at `ballot` and `slot`
     /// (`Accept`). `own`: the acceptor leads at `ballot` and records the
     /// round it opens (`record_own_round`).
@@ -236,8 +240,9 @@ pub enum ClusterEvent {
     /// `SetChosenIndex` that no fsync covered (`MustSync::Relaxed`), so the
     /// node may boot knowing a shorter prefix than it learned. `led` is the
     /// ballot the node led at when it went down, by Phase 1 or by a handoff:
-    /// the ballot that the restart ends. A ballot the node handed on lives
-    /// on at its successor.
+    /// the leadership that the restart ends (the model ends every
+    /// leadership of the node). A ballot the node handed on lives on at its
+    /// successor.
     Restart {
         node: NodeId,
         upto: Slot,
@@ -443,9 +448,11 @@ pub(super) struct Batch<'a> {
 }
 
 /// What the tracer recorded of one proxy: the model's `pbal`, `round` and
-/// `done`. A round the code closes on a `Nack` or evicts stays open here:
-/// the model leaves the `Nack` out (an open round decides nothing more), so
-/// the code's next delegation of it is no step.
+/// `done`. A round the code closes on a `Nack` or evicts is closed here
+/// too (`Close`), so the code's next delegation of it opens it again. The
+/// code forgets the oldest rounds it decided (`DONE_MEMORY`) and the model
+/// does not: a delegation of such a round at the ballot it was decided at
+/// is no step here.
 #[derive(Debug, Default)]
 struct ProxyMirror {
     ballot: Ballot,
@@ -825,6 +832,16 @@ impl Tracer {
                         cmd: round.1,
                     });
                 }
+                Message::Nack { ballot, slot, .. } => {
+                    // The proxy closed the round and relays the refusal.
+                    if mirror.rounds.get(slot).is_some_and(|(at, _)| at == ballot) {
+                        mirror.rounds.remove(slot);
+                        events.push(ClusterEvent::Close {
+                            proxy: id,
+                            slot: *slot,
+                        });
+                    }
+                }
                 Message::Commit {
                     ballot,
                     slot,
@@ -850,6 +867,16 @@ impl Tracer {
             }
         }
         events
+    }
+
+    /// Proxy `id` evicted its round of `slot` (`expire_stale`): a step when
+    /// the tracer holds that round open.
+    pub(super) fn proxy_expired(&mut self, id: ProxyId, slot: Slot) -> Option<ClusterEvent> {
+        let mirror = self.proxies.entry(id).or_default();
+        mirror
+            .rounds
+            .remove(&slot)
+            .map(|_| ClusterEvent::Close { proxy: id, slot })
     }
 
     /// Proxy `id` crashed: it boots empty.
@@ -892,19 +919,20 @@ pub enum Spec {
     /// `specs/tla/node/MultiPaxosTrace.tla`: the log of every flavor
     /// without matchmakers.
     MultiPaxos,
-    /// `specs/tla/proxy-leader/ProxyLeaderTrace.tla`: the proxy's
-    /// `Commit` rule.
+    /// `specs/tla/node/ProxyLeaderTrace.tla`: the log and the rounds of
+    /// the proxy leaders: each delegation, fan-out, `Commit`, close and
+    /// crash.
     ProxyLeader,
-    /// `specs/tla/leader-handoff/LeaderHandoffTrace.tla`: the guards of the
-    /// cooperative handoff, on a majority.
+    /// `specs/tla/node/LeaderHandoffTrace.tla`: the log and the
+    /// cooperative handoff: each step down, handoff and install.
     LeaderHandoff,
     /// `specs/tla/node/MatchmakerTrace.tla`: matchmaking, Phase 1
     /// over `H_b`, Phase 2 in `C_b` and the GC, on a majority.
     Matchmaker,
     /// `specs/tla/node/MatchmakerGridTrace.tla`: `MatchmakerTrace`
     /// with each configuration a grid: Phase 1 over every grid of `H_b`,
-    /// Phase 2 in one column of `C_b`, and each proxy's `Commit` backed by
-    /// a column of `C_b`.
+    /// Phase 2 in one column of `C_b`, and the rounds of the proxies, each
+    /// `Commit` backed by a column of `C_b`.
     MatchmakerGrid,
     /// `specs/tla/node/ReadsTrace.tla`: `MatchmakerTrace` and the
     /// leaderless reads: the read basis of a won leadership,
@@ -938,8 +966,8 @@ impl Spec {
     pub fn check(self) -> TraceCheck {
         match self {
             Self::MultiPaxos => spec("node", "MultiPaxosTrace"),
-            Self::ProxyLeader => spec("proxy-leader", "ProxyLeaderTrace"),
-            Self::LeaderHandoff => spec("leader-handoff", "LeaderHandoffTrace"),
+            Self::ProxyLeader => spec("node", "ProxyLeaderTrace"),
+            Self::LeaderHandoff => spec("node", "LeaderHandoffTrace"),
             Self::Matchmaker => spec("node", "MatchmakerTrace"),
             Self::MatchmakerGrid => spec("node", "MatchmakerGridTrace"),
             Self::Reads => spec("node", "ReadsTrace"),
@@ -955,29 +983,31 @@ impl Spec {
     /// model does not have is left out of its trace.
     #[must_use]
     pub fn keeps(self, event: &ClusterEvent) -> bool {
+        // Every spec of `node/` judges the proxy rounds and the handoff of
+        // its walks: one model has every step of `ColocatedNode`.
+        let node = proxy_leader::keeps(event) || leader_handoff::keeps(event);
         match self {
-            Self::MultiPaxos => multi_paxos::keeps(event),
-            Self::ProxyLeader => proxy_leader::keeps(event),
-            Self::LeaderHandoff => leader_handoff::keeps(event),
-            Self::Matchmaker => matchmaker::keeps(event),
-            Self::MatchmakerGrid => {
-                matchmaker::keeps(event) || matches!(event, ClusterEvent::Commit { .. })
+            Self::MultiPaxos | Self::ProxyLeader | Self::LeaderHandoff => {
+                node || multi_paxos::keeps(event)
             }
+            Self::Matchmaker | Self::MatchmakerGrid => node || matchmaker::keeps(event),
             Self::Handover => handover::keeps(event),
             Self::Retire => {
-                matchmaker::keeps(event)
+                node || matchmaker::keeps(event)
                     || matches!(
                         event,
                         ClusterEvent::Retire { .. } | ClusterEvent::Rejoin { .. }
                     )
             }
-            Self::Reads => matchmaker::keeps(event) || reads::keeps(event),
-            Self::Truncation => multi_paxos::keeps(event) || truncation::keeps(event),
+            Self::Reads => node || matchmaker::keeps(event) || reads::keeps(event),
+            Self::Truncation => node || multi_paxos::keeps(event) || truncation::keeps(event),
             Self::Compartments => {
-                multi_paxos::keeps(event) || truncation::keeps(event) || compartments::keeps(event)
+                node || multi_paxos::keeps(event)
+                    || truncation::keeps(event)
+                    || compartments::keeps(event)
             }
             Self::Faults => {
-                faults::keeps(event)
+                node || faults::keeps(event)
                     || (multi_paxos::keeps(event) || truncation::keeps(event))
                         && !matches!(event, ClusterEvent::Promise { .. })
             }
@@ -998,14 +1028,6 @@ impl Spec {
             "a trace of {self:?} holds only the events it keeps"
         );
         match self {
-            Self::ProxyLeader => proxy_leader::trace(flavor, events),
-            Self::LeaderHandoff => {
-                assert!(
-                    flavor.quorum == QuorumSystem::Majority,
-                    "LeaderHandoffTrace runs on a majority"
-                );
-                leader_handoff::trace(flavor.acceptors, events)
-            }
             Self::Handover => handover::trace(
                 flavor.matchmakers + flavor.matchmaker_spares,
                 &(0..flavor.matchmakers)
@@ -1014,6 +1036,8 @@ impl Spec {
                 events,
             ),
             Self::MultiPaxos
+            | Self::ProxyLeader
+            | Self::LeaderHandoff
             | Self::Matchmaker
             | Self::MatchmakerGrid
             | Self::Reads
@@ -1023,19 +1047,6 @@ impl Spec {
             | Self::Retire => node::trace(flavor, events),
         }
     }
-}
-
-/// The ballots that a `Prepare` opened, ranked.
-fn ranks(events: &[ClusterEvent]) -> (Vec<Ballot>, Ranks) {
-    let ballots: BTreeSet<Ballot> = events
-        .iter()
-        .filter_map(|event| match event {
-            ClusterEvent::Prepare { ballot, .. } => Some(*ballot),
-            _ => None,
-        })
-        .collect();
-    let ranks = Ranks::new(ballots.iter().copied());
-    (ballots.into_iter().collect(), ranks)
 }
 
 /// A slot of the code as a slot of a model: both start at 0.
@@ -1102,17 +1113,6 @@ fn rank(ranks: &Ranks, shift: i64, ballot: Ballot) -> Value {
         Value::Int(r) => Value::Int(r + shift),
         other => other,
     }
-}
-
-/// The quorums of `quorum` as the trace constants `TraceCols` and
-/// `TraceAcks`: 0 and 0 for a majority.
-fn grid(trace: &mut Trace, quorum: QuorumSystem) {
-    let (cols, acks) = match quorum {
-        QuorumSystem::Majority => (0, 0),
-        QuorumSystem::Grid { cols, acks, .. } => (cols, acks),
-    };
-    trace.define("TraceCols", int(cols));
-    trace.define("TraceAcks", int(acks));
 }
 
 #[cfg(test)]

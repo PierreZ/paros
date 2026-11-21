@@ -10,10 +10,6 @@ CONSTANTS a1, a2, a3, a4
 CONSTANTS l1, l2
 OwnTwo == [b \in Ballots |-> IF b % 2 = 1 THEN l1 ELSE l2]
 
-\* The colocated deployment: ballot b is owned by acceptor a1 when b is odd,
-\* by a2 when b is even.
-OwnColocated == [b \in Ballots |-> IF b % 2 = 1 THEN a1 ELSE a2]
-
 \* Every slot goes first to proxy p1.
 CONSTANTS p1, p2
 ToP1 == [s \in Slots |-> p1]
