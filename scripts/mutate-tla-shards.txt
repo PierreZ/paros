@@ -1,2 +1,19 @@
 # The folders of specs/tla/ whose guard mutation needs more than one job of 30
 # minutes (`.github/workflows/tla-mutants.yml`): <folder> <number of jobs>.
+config-register 2
+degraded-reshape 4
+experiments/segments/reads 2
+experiments/stale-stopped/restart 3
+handover 12
+leader-handoff 11
+matchmaker 2
+multi-paxos 6
+quorum-everywhere 4
+reads 15
+retire-fence 40
+segment-records 2
+segment-replicas 13
+segment-truncate 31
+truncation 2
+truncation-reconfig 3
+zero-stall 3

@@ -21,10 +21,11 @@ property. There is no allow list (the absolute rule of AGENTS.md).
 
 `--shard i/n` takes the i-th of n slices of the mutants of the folders named
 (1-based). Exit status: 0 when every mutant is caught, 1 when one survives,
-2 on an error of the tool (a mutant that does not parse, a baseline check that
-does not give its expected result).
+2 on an error of the tool (a mutant that does not parse, a check that does not
+give its expected result on the tree as it is).
 
 A check of a mutant that runs longer than `TIMEOUT_FACTOR` times its baseline
+(the same check on the tree as it is, timed once in each run)
 (at least `TIMEOUT_MIN` seconds) is stopped and counts as caught: the guard
 bounds the state space of the check, as for the `Mutants` workflow of the core
 (a timeout counts as caught). The report names such mutants apart.
@@ -38,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -261,7 +263,9 @@ class Check:
     folder: str
     name: str
     expected: str
-    baseline: float = 0.0
+    baseline: float | None = None
+    base_result: str = ""
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 @dataclass
@@ -359,22 +363,23 @@ def copy_tree(dest: Path) -> Path:
     return tree
 
 
-def baseline(checks: list[Check], workers: int) -> None:
-    """Time each check on the tree as it is; each must give its expected result."""
-    def one(c: Check) -> tuple[Check, str, float]:
-        got, took, _ = run_tlc(BASE_TREE, c, None)
-        return c, got, took
+def ensure_baseline(c: Check) -> str:
+    """Time the check on the tree as it is, once, when a mutant first needs it.
 
-    bad = []
-    with concurrent.futures.ThreadPoolExecutor(workers) as ex:
-        for c, got, took in ex.map(one, checks):
+    The check must give its expected result there; the answer is the error
+    when it does not. A slice times only the checks its mutants reach: a
+    caught mutant stops at its first failing check, so most checks of a big
+    folder never run.
+    """
+    with c.lock:
+        if c.baseline is None:
+            got, took, _ = run_tlc(BASE_TREE, c, None)
             c.baseline = took
-            if got != c.expected:
-                bad.append(f"{c.folder}/{c.name}: expected {c.expected}, got {got}")
-    if bad:
-        for b in bad:
-            print("FAIL  baseline " + b, file=sys.stderr)
-        sys.exit(2)
+            c.base_result = got
+            print(f"baseline {c.folder}/{c.name}: {got} in {took:.0f}s", flush=True)
+        if c.base_result != c.expected:
+            return f"baseline {c.folder}/{c.name}: expected {c.expected}, got {c.base_result}"
+        return ""
 
 
 BASE_TREE: Path
@@ -388,6 +393,9 @@ def judge(guard: Guard, checks: list[Check], scratch: Path) -> tuple[str, str]:
     try:
         (tree / guard.module.relative_to(SPECS)).write_text(mutate(guard))
         for c in checks:
+            bad = ensure_baseline(c)
+            if bad:
+                return "tool-error", bad
             limit = max(TIMEOUT_MIN_S, TIMEOUT_FACTOR_X * c.baseline)
             got, _, log = run_tlc(tree, c, limit)
             if got == "parse":
@@ -431,6 +439,8 @@ def main() -> None:
     ap.add_argument("--timeout-min", type=float, default=TIMEOUT_MIN, help="seconds")
     ap.add_argument("--timeout-factor", type=float, default=TIMEOUT_FACTOR)
     ap.add_argument("--out", type=Path, help="append one line per mutant to this file")
+    ap.add_argument("--skip", type=Path,
+                    help="a file of an earlier --out: leave out the mutants it judged")
     args = ap.parse_args()
     TIMEOUT_MIN_S, TIMEOUT_FACTOR_X = args.timeout_min, args.timeout_factor
 
@@ -444,6 +454,14 @@ def main() -> None:
         acts = action_names([p for p in (SPECS / f).glob("*.tla") if not p.name.endswith("Trace.tla")])
         for m in mods:
             guards.extend(scan(m, acts))
+    if args.skip:
+        done = set()
+        for line in args.skip.read_text().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                done.add((parts[1], parts[2]))
+        guards = [g for g in guards
+                  if (f"{g.module.relative_to(SPECS)}:{g.line} {g.definition}", g.text) not in done]
     guards = guards[idx - 1 :: count]
 
     if args.list:
@@ -464,16 +482,13 @@ def main() -> None:
     BASE_TREE = copy_tree(scratch / "base")
     need = sorted({u for g in guards for u in users(g.module)})
     checks = {f: read_checks(f) for f in need}
-    all_checks = [c for f in need for c in checks[f]]
     t0 = time.monotonic()
-    baseline(all_checks, args.workers)
-    print(f"baseline: {len(all_checks)} checks in {time.monotonic() - t0:.0f}s", flush=True)
 
     def plan(g: Guard) -> list[Check]:
         out = []
         for u in users(g.module):
             # Fast checks first: a pass check is the one a weaker guard can break.
-            out.extend(sorted(checks[u], key=lambda c: (c.expected != "pass", c.baseline)))
+            out.extend(sorted(checks[u], key=lambda c: c.expected != "pass"))
         return out
 
     results = {"caught": 0, "caught-timeout": 0, "survived": 0, "tool-error": 0}

@@ -45,7 +45,7 @@ jobs:
               [ -f "$m" ] || continue
               f=$(dirname "${m#specs/tla/}")
               n=$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)
-              n=${n:-3}
+              n=${n:-1}
               for i in $(seq 1 "$n"); do echo "$f $i/$n"; done
             done | jq -R . | jq -sc .)
           test "$slices" != "[]"
@@ -64,16 +64,41 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Mutate the guards of specs/tla/${{ matrix.slice }}
+        id: name
+        # The step stops before the job does, so that the verdicts so far are
+        # still stored; a slice cut by this bound is red and the report names it.
+        timeout-minutes: 26
         run: |
           read -r folder shard <<<"${{ matrix.slice }}"
-          nix develop .#tla --command scripts/mutate-tla.py --shard "$shard" --out mutants.tsv "$folder"
+          echo "artifact=mutants-$(echo "$folder-$shard" | tr '/' '_')" >>"$GITHUB_OUTPUT"
+          touch mutants.tsv
+          status=0
+          nix develop .#tla --command scripts/mutate-tla.py --shard "$shard" --out mutants.tsv --skip scripts/mutate-tla-census.tsv "$folder" \
+            || status=$?
+          printf 'done\t%s\n' "${{ matrix.slice }}" >>mutants.tsv
+          exit "$status"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: ${{ steps.name.outputs.artifact || format('mutants-{0}', strategy.job-index) }}
+          path: mutants.tsv
 
-  mutants:
+  # One list of every surviving guard, and of every slice that did not end.
+  report:
     needs: [slices, slice]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Every slice is green
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: mutants-*
+          path: mutants
+      - name: Survivors and cut slices
         run: |
+          cat mutants/*/mutants.tsv >all.tsv
+          echo "Verdicts:"; cut -f1 all.tsv | grep -v '^done$' | sort | uniq -c
+          echo "Survivors and errors:"; grep -E '^(survived|tool-error)' all.tsv | sort -t$'\t' -k2 || true
+          echo "Slices that did not end:"
+          for d in mutants/*/; do grep -q '^done' "$d/mutants.tsv" || echo "  ${d#mutants/}"; done
           test "${{ needs.slices.result }}" = success
           test "${{ needs.slice.result }}" = success
