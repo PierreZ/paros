@@ -14,7 +14,7 @@
 (*                                                                         *)
 (* Run: `nix develop .#tla --command scripts/check-proofs.sh`.             *)
 (***************************************************************************)
-EXTENDS Decree, FiniteSetTheorems, TLAPS
+EXTENDS Decree, FiniteSetTheorems, WellFoundedInduction, TLAPS
 
 \* The configurations that the proof covers.
 Hyp == InvApplies /\ Pick = "highest"
@@ -24,6 +24,42 @@ USE NBType, WipesType, NoneNotValue DEF Ballots
 -----------------------------------------------------------------------------
 (* Facts about the constants and the types.                                *)
 (***************************************************************************)
+
+\* A nonempty set of naturals has a least member (from the well-founded
+\* order of Nat; TLAPS proves this with no induction rule).
+LEMMA MinExists ==
+  ASSUME NEW T \in SUBSET Nat, T # {}
+  PROVE  \E x \in T : \A y \in T : x <= y
+<1>1. \E x \in T : \A y \in T : ~(<<y, x>> \in OpToRel(<, Nat))
+  BY NatLessThanWellFounded, WFMin
+<1>2. PICK x \in T : \A y \in T : ~(<<y, x>> \in OpToRel(<, Nat))
+  BY <1>1
+<1>3. \A y \in T : ~(y < x)
+  BY <1>2 DEF OpToRel
+<1> QED
+  BY <1>3
+
+\* A nonempty set of naturals with an upper bound has a highest member: the
+\* least upper bound is in the set.
+LEMMA MaxExists ==
+  ASSUME NEW N \in Nat, NEW S \in SUBSET (0..N), S # {}
+  PROVE  \E k \in S : \A j \in S : j <= k
+<1> DEFINE U == {k \in Nat : \A j \in S : j <= k}
+<1>1. U \in SUBSET Nat /\ U # {}
+  BY N \in U
+<1>2. PICK u \in U : \A y \in U : u <= y
+  BY <1>1, MinExists
+<1>3. u \in S
+  <2> SUFFICES ASSUME u \notin S PROVE FALSE
+    OBVIOUS
+  <2>1. PICK j \in S : TRUE
+    OBVIOUS
+  <2>2. u - 1 \in U
+    BY <2>1
+  <2> QED
+    BY <2>2, <1>2
+<1> QED
+  BY <1>2, <1>3
 
 LEMMA WipedFinite ==
   ASSUME TypeOK
@@ -83,15 +119,27 @@ LEMMA SelectableProps ==
   <2> QED
     BY <2>1, <2>2
 <1>2. CASE rep # {}
-  <2> DEFINE top == {m \in rep : \A n \in rep : n.vbal <= m.vbal}
-  <2>1. PICK t \in top : v = t.vval
+  <2>1. \E m \in rep : \A n \in rep : n.vbal <= m.vbal
+    <3> DEFINE B == {m.vbal : m \in rep}
+    <3>1. B \in SUBSET (0..NB) /\ B # {}
+      BY <1>0, <1>2
+    <3>2. PICK k \in B : \A j \in B : j <= k
+      BY <3>1, MaxExists
+    <3>3. PICK m \in rep : m.vbal = k
+      OBVIOUS
+    <3> QED
+      BY <3>2, <3>3
+  <2> DEFINE top == CHOOSE m \in rep : \A n \in rep : n.vbal <= m.vbal
+  <2>2. top \in rep /\ \A n \in rep : n.vbal <= top.vbal
+    BY <2>1
+  <2>3. v = top.vval
     BY <1>2 DEF Selectable
-  <2>2. t.vval \in Values
-    BY <1>0, <2>1, NoneNotValue
-  <2>3. \A n \in S : n.vbal <= t.vbal
-    BY <1>0, <2>1
+  <2>4. top.vval \in Values
+    BY <1>0, <2>2, NoneNotValue
+  <2>5. \A n \in S : n.vbal <= top.vbal
+    BY <1>0, <2>2
   <2> QED
-    BY <2>1, <2>2, <2>3
+    BY <2>2, <2>3, <2>4, <2>5
 <1> QED
   BY <1>1, <1>2
 

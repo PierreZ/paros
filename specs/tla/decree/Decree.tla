@@ -110,15 +110,11 @@ Promise(a, b) ==
 Phase1Done(acc) ==
   IF Phase1 = "every" THEN acc = Acceptors ELSE \E Q \in Quorums : Q \subseteq acc
 
-\* The value a proposer may select from the promises S: the value of a
-\* promise that reports the highest vote. Two promises that report a vote
-\* at the same ballot report the same value (a ballot has one 2a message),
-\* so this set has one member. It is written without CHOOSE so that the
-\* proof (`DecreeProof.tla`) needs no fact about the maximum of a set.
+\* The value a proposer may select from the promises S.
 Selectable(S) ==
   LET rep == {m \in S : m.vbal > 0}
-      top == {m \in rep : \A n \in rep : n.vbal <= m.vbal}
-  IN IF Pick = "ignore" \/ rep = {} THEN Values ELSE {m.vval : m \in top}
+      top == CHOOSE m \in rep : \A n \in rep : n.vbal <= m.vbal
+  IN IF Pick = "ignore" \/ rep = {} THEN Values ELSE {top.vval}
 
 \* The proposer of ballot b closes Phase 1 on the promises S, one for each
 \* acceptor (the first that arrived; the proposer ignores a second promise of

@@ -52,7 +52,7 @@ by TLAPS (`nix develop .#proofs --command scripts/check-proofs.sh`; CI's `proofs
 
 | Model | Proof | What it proves |
 |---|---|---|
-| `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 642 obligations, Z3 and Zenon, about 2 minutes |
+| `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 679 obligations, Z3 and Zenon, about 2 minutes |
 
 The TLAPS of nixpkgs (1.4.5) has no Isabelle and no LS4. So a proof uses no induction lemma (they
 need Isabelle), and the last step of `Safety` (`Spec => []Agreement`), the TLA rule INV1 applied
