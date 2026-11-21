@@ -155,7 +155,7 @@ const CONSENSUS: Claim[] = [
     mutants: [],
     state: "open",
     issue: { n: 1307, name: "inductive invariants, then proofs" },
-    note: "TLC checks that Inv is inductive (every state for the decree, drawn states for Multi-Paxos). No proof with TLAPS or Lean exists yet.",
+    note: "Decree: TLAPS proves that Inv holds at the start, that every step keeps it and that it implies Agreement (DecreeProof.tla); the temporal rule that joins them is not checked (no LS4 in the TLAPS of nixpkgs). Multi-Paxos: TLC checks drawn states only; no proof yet.",
   },
 ];
 
@@ -343,9 +343,9 @@ const ALL = [...CONSENSUS, ...JOURNAL];
   <p>Each judge is tested too. A control is a TLC check that must fail without the rule. A <a href={url("engineering/mutants/")}>mutant</a> is a bug planted in the driver of a walk,
   and its oracle or its trace check must fail.</p>
   <div class="callout">
-    <p><b>Bounded, not proved.</b> TLC explores small instances of each model completely. No
-    claim has a proof that holds at every size yet: that is the last row of the first table
-    (<a href={ISSUE(1307)}>#1307</a>).</p>
+    <p><b>Mostly bounded.</b> TLC explores small instances of each model completely. Only the
+    single decree has a proof that holds at every size (TLAPS); the other claims do not have
+    one yet: that is the last row of the first table (<a href={ISSUE(1307)}>#1307</a>).</p>
   </div>
 
   {[
