@@ -31,7 +31,8 @@ semver_check = false
 features_always_increment_minor = true
 
 # The changelog of `paros` is the repository's CHANGELOG.md and takes the
-# commits of `paros-consensus` too.
+# commits of `paros-consensus` too. release-plz creates every changelog; none
+# is written by hand.
 [[package]]
 name = "paros"
 version_group = "paros"
@@ -42,10 +43,10 @@ git_tag_name = "v{{ version }}"
 git_release_enable = true
 git_release_name = "v{{ version }}"
 
+# release-plz writes crates/lib/paros-consensus/CHANGELOG.md at the first release.
 [[package]]
 name = "paros-consensus"
 version_group = "paros"
-changelog_path = "crates/lib/paros-consensus/CHANGELOG.md"
 git_tag_enable = false
 git_release_enable = false
 

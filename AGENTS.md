@@ -251,7 +251,8 @@ and name it in the PR description.
 **Releases** (Pierre, 2026-11-21: release-plz back on, publish more often; he decides when).
 `release-plz.toml` and `.github/workflows/release-plz.yml`. The public crates are
 `paros-consensus` and `paros`, at one version (`version_group`), one `v{version}` tag and one
-draft GitHub release. `consensus-sim` and `paros-wasm` stay `publish = false`. A push to `main`
+draft GitHub release. release-plz creates and writes every changelog; none is written by hand.
+`consensus-sim` and `paros-wasm` stay `publish = false`. A push to `main`
 only opens or updates the release pull request. **Nothing publishes by itself**: only Pierre
 merges a release pull request, and only Pierre starts the `release` job (workflow_dispatch),
 which publishes. An agent never merges a release pull request and never starts that job. A new
