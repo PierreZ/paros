@@ -207,8 +207,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
-  demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
-  for an edit that changes nothing, with its reason.
+  demand, and fails on any survivor. A timeout counts as caught, and so does a test that
+  earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit
+  that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
