@@ -107,7 +107,10 @@ in the boundary state, the floor of a read from the segment in force, the floor 
 offloaded read, the trim of a sealed segment once the floor is decided over it, the acceptors'
 compaction after `F + 1` replicas, the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
 segments with an empty segment and a seal before the `Fence`; the whole boundary state, the
-leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)).
+leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), the seal
+end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1
+that reads the old grid below the end keeps one value; #1313 (the seal end against a CTRL faulty
+record)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are
@@ -191,7 +194,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
-  `Mutants` workflow runs every mutant of the core (about 2,850) in 24 shards each Sunday and on
+  `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught. An `exclude_re` entry is only
   for an edit that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
