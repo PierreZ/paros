@@ -163,8 +163,21 @@ Its `Events` port feeds the live trace check of §J7.3, so a run of many hours i
 it (announce, make, confirm): after a kill, only the last announced write is uncertain, and the
 report at restart decides. A control tears a persist batch during a reconfiguration (as E3 of
 etcd-raft, a lost commit index across a membership change), and the live check must refuse it.
-**Open**: these three parts need the driver; #1329 (paros-journal-io) and #1330
-(paros-journal-moonpool) build them.
+**Open**: these three parts need the moonpool adapter, #1330 (paros-journal-moonpool). The
+driver and its `Events` port are built (#1329 (paros-journal-io), §J4.2): the driver reports each
+step of the `Host` once its batches are settled. The announce, make and confirm of each write, the
+live check fed by the port, and the torn-batch control land with the adapter.
+
+**The driver walk** (#1329, `journal-sim/tests/host.rs`). Before the moonpool-sim, `journal-sim`
+walks the generic driver itself: three processes, each a `Driver` with a disk that fails commits
+inside the contract (before or after the write), a transport through the walk's mailbox (lost,
+repeated, reordered), crashes that keep the disk, restarts that read it back, campaigns that
+depose a leader, and a writer that sends a call again. Its oracles share no code with the
+driver: `AGREE` (no two `Commit`s on the wire name two commands at one slot), `FLIGHT` (an
+`Accepted` or a `Promise` leaves only once the state it reports is on the disk) and `ANSWER`
+(each answer is the whole log's at a slot of the command). Each has its planted mutant: a disk
+that lies about a commit (`LyingDisk`), a process that loses its disk (`WipeDisk`), and a client
+that takes a `Taken` as written (`TakenAsWritten`). The driver has no trace check yet.
 
 ### J7.5 The controller's `decide`
 

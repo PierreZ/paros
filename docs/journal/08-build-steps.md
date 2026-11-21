@@ -18,7 +18,7 @@ less than this table.
 | 5 | #1326 (the journal roles over the core) | Segments, seal, writes, leaderless reads, retire, truncate, re-replication; several pull requests, one rule group each (segments, seal and writes: `paros_journal::roles`) | §J3, §J5 |
 | 6 | #1327 (journal-sim) | The walks, the oracles, the trace check and the coverage gate. Built with steps 3 to 5, in the same pull requests | §J7.3 |
 | 7 | #1328 (paros-journal-control) | The pure `decide` and the v1 controller role; #1261 (grid controller decision tests) is part of it | §J6 |
-| 8 | #1329 (paros-journal-io) | The traits, the driver under the flight rule and the contract suites | §J4.2 |
+| 8 | #1329 (paros-journal-io) | The traits, the driver under the flight rule and the contract suites (built: `crates/lib/paros-journal-io`, the driver walk of `journal-sim`) | §J4.2 |
 | 9 | #1330 (paros-journal-moonpool) | The moonpool adapter and the moonpool-sim of the whole journal | §J7.4 |
 | 10 | #1331 (the pure journal client) | The client state machine of the four calls. After step 3; it can run beside steps 7 to 9 | §J2 |
 
@@ -30,8 +30,8 @@ result, and each lands with the step that it needs:
 | Example | Shows | Needs |
 |---|---|---|
 | `fold` | The journal fold alone (§J2): writes, resends, a seal, `Below` and `Resolve`, multi-writer | Step 3: done |
-| `in_memory` | Three acceptors, two leaders and two segments in one process; storage, transport and clock written by hand in the example | Step 5, first rule group: done. It moves onto the storage traits of step 8 when they land |
-| `custom_storage` | A storage backend of the user, checked by the contract suite of the storage trait | Step 8 |
+| `in_memory` | A journal on three processes, on the traits and the driver of `paros-journal-io` with its backends in memory; a process crashes and starts again from its storage, and a second segment seals the first | Step 8: done (`paros-journal-io`) |
+| `custom_storage` | A storage backend of the user (an append-only log), checked by the contract suite of the storage trait, with a journal on it | Step 8: done (`paros-journal-io`) |
 | `single_writer`, `multi_writer` | The pure client: exactly-once with `expected_seq`; `SetLeader(None)` and back | Step 10 |
 | `moonpool`, `simulation` | The same journal on the moonpool host, then under moonpool-sim with faults | Step 9 |
 

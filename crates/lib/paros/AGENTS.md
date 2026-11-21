@@ -1,9 +1,11 @@
 # paros
 
 The facade. It bundles every library crate of paros into one crate, so a program (and the
-binaries to come, like `parosd` and `parosctl`) depends on `paros` alone. Today there are two
-layers: `paros::consensus` (the sans-IO consensus core, `crates/lib/paros-consensus`) and
-`paros::journal` (the pure journal core, `crates/lib/paros-journal`, on the consensus core). It
+binaries to come, like `parosd` and `parosctl`) depends on `paros` alone. Today there are three
+layers: `paros::consensus` (the sans-IO consensus core, `crates/lib/paros-consensus`),
+`paros::journal` (the pure journal core, `crates/lib/paros-journal`, on the consensus core) and
+`paros::journal_io` (the journal's traits, `Host` and generic driver,
+`crates/lib/paros-journal-io`; #1329). It
 stays wasm-checkable and provider-free.
 
 Three rules (Pierre, 2026-11-19):

@@ -19,7 +19,10 @@ Each example prints a trace and asserts what it shows. Read them in this order:
 | Example | Shows |
 |---|---|
 | `fold` | The journal fold alone: `SetLeader`, `Write` with `expected_seq`, a resend answered `Duplicate`, `Taken`, `Early`, `Fenced`, `Truncate`, a seal, a resend answered `Below` and its `Resolve`, multi-writer mode |
-| `in_memory` | A whole journal in one process: three acceptors, two leaders and two segments, driven by a loop written by hand. The storage is a key-value map in memory with an adapter for each role, and the driver keeps the flight rule. An acceptor crashes and starts again from its store, and a second segment seals the first |
+
+The journal roles run on the traits and the generic driver of `paros-journal-io`: its examples
+`in_memory` (a journal on three processes) and `custom_storage` (a storage backend written by
+hand) show them.
 
 The examples depend on this crate alone: CI checks that their build pulls in no crate from
 outside the workspace (`scripts/check-core-deps.sh`).

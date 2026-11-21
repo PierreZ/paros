@@ -7,6 +7,9 @@
 //!   randomness).
 //! - [`journal`]: the pure core of the journal v1 (`docs/journal/`): the fold
 //!   of the data plane, the segment record, the `Resolve` call and the codec.
+//! - [`journal_io`]: the traits that a backend of the journal implements
+//!   (storage, transport, clock, register), the pure `Host` and the generic
+//!   driver under the flight rule. No runtime: a program brings the backends.
 //!
 //! The journal layers of the old design (wire, model, storage, net, client,
 //! roles, coordinator, machine) and the `parosd` service are at the git tag
@@ -15,3 +18,4 @@
 
 pub use paros_consensus as consensus;
 pub use paros_journal as journal;
+pub use paros_journal_io as journal_io;
