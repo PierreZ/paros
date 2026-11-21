@@ -23,14 +23,18 @@ of segments. Test only: `publish = false`.
 - `src/roles.rs`: the walk of the roles (`RolesModel`, #1326), its shapes (`NARROW`, the default
   grid; `WIDE`, two columns and promise pages of two), its oracles (`AGREE`, `SEALED`, `FOLD`,
   `VIEW`, `BOUNDARY`, `RESOLVE`; the truth is `Truth` over the chosen log), its reach sites and
-  its planted mutants (`RolesMutant`). Its trace check against `Journal.tla` is not built yet.
+  its planted mutants (`RolesMutant`), its events (`RolesEvent`, one action of `Journal.tla`
+  each) and the trace control `BoundaryBeforeDurable`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
+- `src/trace/roles.rs`: the events of a roles walk as a trace of
+  `specs/tla/journal-state/RolesTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/register.rs`: the events of a register walk as a trace of
   `specs/tla/segment-records/RegisterTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/mutate.rs`: the named edits of recorded traces (#1308 (mutate recorded traces)).
 - `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/roles.rs` (the roles walks and
-  their mutants); `tests/register.rs` (the register
+  their mutants); `tests/roles_traces.rs` (the roles trace check on the narrow shape, its rules, its
+  control `BoundaryBeforeDurable` and its edits); `tests/register.rs` (the register
   walks and their mutants) and `tests/register_traces.rs` (the register trace check, its rules,
   its control `ForgedBootstrap` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
   long fold walk checked live through its events port by moonpool-tla's `Live`, and the control
@@ -53,12 +57,14 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
   `CoversOn`, `ResolveOn`). A step of the code that the model does not have becomes a step of the
   model, with its check, in the same PR.
 - **`RegisterTrace` extends `SegmentRecords.tla`** in the same way: each event is an action of
-  the model.
-- **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register: the
+  the model. **`RolesTrace` extends `Journal.tla`**: each event of the roles walk is one action of
+  the model, with the parameters that the code chose.
+- **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register;
+  `BoundaryBeforeDurable` for the roles: the
   oracles pass it, TLC refuses it) and **refuses the edits** of the recorded walks at the edited event or after it: at least 20 edits
   with a place. A new event kind gets its edits in the same PR.
-- **The checked walks meet every rule** of `RULES` in `tests/traces.rs` and
-  `tests/register_traces.rs` (a resend answered
+- **The checked walks meet every rule** of `RULES` in `tests/traces.rs`,
+  `tests/register_traces.rs` and `tests/roles_traces.rs` (a resend answered
   `Below`, a `Resolve` answered both ways, two seals, and more). A rule no walk meets fails the
   test.
 - TLC must run: `require_tlc` fails the test when `tlc` is missing (the default nix shell has it).

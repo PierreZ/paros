@@ -142,7 +142,8 @@ register is `paros_journal::register`, an optional role by composition (the core
 change), walked and traced against `specs/tla/segment-records/RegisterTrace.tla` (#1325 (the
 matchmaker register as an optional role)). The first journal roles are `paros_journal::roles`
 (the acceptor, the leader with its Phase 1 over the segments and the seal, the segment replica;
-#1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk;
+#1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk
+and traced against `specs/tla/journal-state/RolesTrace.tla`;
 the other rule groups of #1326 (proxy leader, leaderless reads, retire, truncate,
 re-replication) and the driver (#1329) are not built yet.
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
@@ -642,7 +643,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   segments, the walk of the matchmaker register across handovers and the walk of the journal
   roles, with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
-  `specs/tla/journal-state/FoldTrace.tla` and `specs/tla/segment-records/RegisterTrace.tla`, and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
+  `specs/tla/journal-state/FoldTrace.tla`, `specs/tla/segment-records/RegisterTrace.tla` and
+  `specs/tla/journal-state/RolesTrace.tla`, and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
   (check long runs live); four hours each night in the `Journal live` workflow).
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
