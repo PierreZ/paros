@@ -393,7 +393,8 @@ impl BatchModel {
         log.extend(batch.records.iter().cloned());
         cx.record(BatchEvent::Land { id, seq });
         let count = batch.records.len() as u64;
-        let answers = Unbatcher::scatter(&batch.writes, seq, count);
+        let answers = Unbatcher::scatter(&batch.writes, seq, count)
+            .expect("the leader answers the batch it accepted");
         sometimes!(answers.len() > 1, reach::SCATTERED);
         for (token, at, n) in answers {
             *self.landed.entry(token).or_default() += 1;

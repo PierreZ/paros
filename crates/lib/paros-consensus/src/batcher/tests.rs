@@ -102,13 +102,22 @@ fn lowered_limits_only_go_down() {
 #[test]
 fn a_scatter_is_dense_and_in_order() {
     let out = Unbatcher::scatter(&[(7, 2), (8, 0), (9, 3)], 10, 5);
-    assert_eq!(out, vec![(7, 10, 2), (8, 12, 0), (9, 12, 3)]);
+    assert_eq!(out, Some(vec![(7, 10, 2), (8, 12, 0), (9, 12, 3)]));
 }
 
+/// An answer that does not count the batch is an input, refused with
+/// `None`, never a panic: a count too small, too large, or a range past
+/// `u64::MAX`.
 #[test]
-#[should_panic(expected = "accepted whole")]
-fn a_scatter_refuses_a_partial_answer() {
-    let _ = Unbatcher::scatter(&[(1, 2), (2, 2)], 0, 3);
+fn a_scatter_refuses_an_answer_that_is_not_the_batch() {
+    assert_eq!(Unbatcher::scatter(&[(1, 2), (2, 2)], 0, 3), None);
+    assert_eq!(Unbatcher::scatter(&[(1, 2), (2, 2)], 0, 5), None);
+    assert_eq!(Unbatcher::scatter(&[(1, 2)], u64::MAX - 1, 2), None);
+    assert_eq!(
+        Unbatcher::scatter(&[(1, 2)], u64::MAX - 2, 2),
+        Some(vec![(1, u64::MAX - 2, 2)])
+    );
+    assert_eq!(Unbatcher::scatter::<u8>(&[], 7, 0), Some(Vec::new()));
 }
 
 /// A write that would carry its lane past the byte limit flushes the lane

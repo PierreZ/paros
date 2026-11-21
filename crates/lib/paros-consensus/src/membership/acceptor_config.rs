@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 #[cfg(doc)]
 use super::MatchmakerSet;
 use super::quorum_system::counted;
-use super::{FailureDomain, MAX_ROLE_COUNT, QuorumSystem, ReplicaId};
+use super::{FailureDomain, MAX_ROLE_COUNT, QuorumSystem, ReplicaId, ShapeError};
 use crate::types::{NodeId, Slot};
 
 /// An acceptor configuration as registered with a matchmaker: a membership
@@ -32,7 +32,7 @@ use crate::types::{NodeId, Slot};
 #[cfg_attr(
     feature = "serde",
     serde(
-        from = "SerdeAcceptorConfig<Id>",
+        try_from = "SerdeAcceptorConfig<Id>",
         bound(
             serialize = "Id: serde::Serialize",
             deserialize = "Id: Copy + Ord + serde::Deserialize<'de>"
@@ -80,34 +80,57 @@ struct SerdeAcceptorConfig<Id> {
 }
 
 #[cfg(feature = "serde")]
-impl<Id: Copy + Ord> From<SerdeAcceptorConfig<Id>> for AcceptorConfig<Id> {
-    fn from(wire: SerdeAcceptorConfig<Id>) -> Self {
+impl<Id: Copy + Ord> TryFrom<SerdeAcceptorConfig<Id>> for AcceptorConfig<Id> {
+    type Error = ShapeError;
+
+    /// A configuration off the wire is an input: a malformed one is refused
+    /// with a decode error, never a panic.
+    fn try_from(wire: SerdeAcceptorConfig<Id>) -> Result<Self, ShapeError> {
         let config = if wire.domains.is_empty() {
-            Self::new(wire.members, wire.quorum_system)
+            Self::try_new(wire.members, wire.quorum_system)?
         } else {
-            Self::zoned(
+            if wire.domains.len() != wire.members.len() {
+                return Err(ShapeError::UnlabeledMember);
+            }
+            Self::try_zoned(
                 wire.members.into_iter().zip(wire.domains).collect(),
                 wire.quorum_system,
-            )
+            )?
         };
-        config.with_counts(wire.proxies, wire.replicas)
+        config.try_with_counts(wire.proxies, wire.replicas)
     }
 }
 
 impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// A configuration over `members` (sorted and deduplicated here) under
-    /// `quorum_system`.
+    /// `quorum_system`: [`AcceptorConfig::try_new`] for a value the program
+    /// builds itself.
     ///
     /// # Panics
     ///
-    /// If `members` is empty: a configuration with no acceptor can never form
-    /// a quorum, so registering one is a programmer error. Also if the
-    /// normalized configuration is not well formed
-    /// ([`AcceptorConfig::is_well_formed`]) — the cross-intersection claim
-    /// every quorum tally rests on is asserted here, once, at the only
-    /// construction site, never per tally.
+    /// If [`AcceptorConfig::try_new`] refuses it: a membership with no
+    /// acceptor, or a quorum system the membership does not admit
+    /// ([`AcceptorConfig::is_well_formed`]). The panic text is the
+    /// [`ShapeError`]'s rule.
     #[must_use]
-    pub fn new(mut members: Vec<Id>, quorum_system: QuorumSystem) -> Self {
+    pub fn new(members: Vec<Id>, quorum_system: QuorumSystem) -> Self {
+        Self::try_new(members, quorum_system).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// A configuration over `members` (sorted and deduplicated here) under
+    /// `quorum_system`, or the rule it breaks. The form for an input: a
+    /// configuration from the wire or from an operator.
+    ///
+    /// # Errors
+    ///
+    /// [`ShapeError::NoMember`] if `members` is empty: no quorum can form.
+    /// [`ShapeError::QuorumNotAdmitted`] if the quorum system does not admit
+    /// the membership ([`QuorumSystem::admits`]).
+    ///
+    /// # Panics
+    ///
+    /// If a built configuration breaks a postcondition (a programmer error).
+    pub fn try_new(mut members: Vec<Id>, quorum_system: QuorumSystem) -> Result<Self, ShapeError> {
         members.sort_unstable();
         members.dedup();
         Self::build(members, Vec::new(), quorum_system)
@@ -117,40 +140,61 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// failure domain, sorted by member and deduplicated here, under
     /// `quorum_system`. The labels are bound to the configuration like the
     /// membership: two configurations that differ only in a label are two
-    /// configurations.
+    /// configurations. [`AcceptorConfig::try_zoned`] for a value the program
+    /// builds itself.
     ///
     /// # Panics
     ///
-    /// As [`AcceptorConfig::new`]; also if one member is named twice with
-    /// two domains, or a domain is not well formed
-    /// ([`FailureDomain::is_well_formed`]).
+    /// If [`AcceptorConfig::try_zoned`] refuses it. The panic text is the
+    /// [`ShapeError`]'s rule.
     #[must_use]
-    pub fn zoned(mut members: Vec<(Id, FailureDomain)>, quorum_system: QuorumSystem) -> Self {
+    pub fn zoned(members: Vec<(Id, FailureDomain)>, quorum_system: QuorumSystem) -> Self {
+        Self::try_zoned(members, quorum_system).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The labeled form of [`AcceptorConfig::try_new`].
+    ///
+    /// # Errors
+    ///
+    /// As [`AcceptorConfig::try_new`]; also [`ShapeError::TwoDomains`] if one
+    /// member is named twice with two domains, and
+    /// [`ShapeError::DomainTooLong`] if a domain is not well formed
+    /// ([`FailureDomain::is_well_formed`]).
+    ///
+    /// # Panics
+    ///
+    /// If a built configuration breaks a postcondition (a programmer error).
+    pub fn try_zoned(
+        mut members: Vec<(Id, FailureDomain)>,
+        quorum_system: QuorumSystem,
+    ) -> Result<Self, ShapeError> {
         members.sort_by_key(|a| a.0);
-        for pair in members.windows(2) {
-            if pair[0].0 == pair[1].0 {
-                assert!(
-                    pair[0].1 == pair[1].1,
-                    "a member of a configuration has one failure domain"
-                );
-            }
+        if members
+            .windows(2)
+            .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1)
+        {
+            return Err(ShapeError::TwoDomains);
         }
         members.dedup_by(|a, b| a.0 == b.0);
         let (members, domains): (Vec<Id>, Vec<FailureDomain>) = members.into_iter().unzip();
-        assert!(
-            domains.iter().all(FailureDomain::is_well_formed),
-            "a configuration's failure domains are short labels"
-        );
-        Self::build(members, domains, quorum_system)
+        if !domains.iter().all(FailureDomain::is_well_formed) {
+            return Err(ShapeError::DomainTooLong);
+        }
+        let config = Self::build(members, domains, quorum_system)?;
+        assert!(config.is_zoned(), "a labeled configuration stays labeled");
+        Ok(config)
     }
 
     /// The one place a configuration is assembled, from a sorted and
     /// deduplicated membership and its labels (empty, or one per member).
-    fn build(members: Vec<Id>, domains: Vec<FailureDomain>, quorum_system: QuorumSystem) -> Self {
-        assert!(
-            !members.is_empty(),
-            "an acceptor configuration names at least one acceptor"
-        );
+    fn build(
+        members: Vec<Id>,
+        domains: Vec<FailureDomain>,
+        quorum_system: QuorumSystem,
+    ) -> Result<Self, ShapeError> {
+        if members.is_empty() {
+            return Err(ShapeError::NoMember);
+        }
         assert!(
             domains.is_empty() || domains.len() == members.len(),
             "a configuration labels every member or none"
@@ -162,10 +206,9 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
             proxies: 0,
             replicas: 0,
         };
-        assert!(
-            config.is_well_formed(),
-            "an acceptor configuration admits its quorum system"
-        );
+        if !config.is_well_formed() {
+            return Err(ShapeError::QuorumNotAdmitted);
+        }
         // Paxos safety, restated once at the only constructor: every Phase-1
         // quorum meets every Phase-2 quorum, and both fit the membership.
         let n = config.members.len();
@@ -181,7 +224,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
             config.quorum_system.phase2_quorum_size(n) <= n,
             "a Phase-2 quorum fits the membership"
         );
-        config
+        Ok(config)
     }
 
     /// Whether this configuration can be run at all: at least one acceptor, a
@@ -477,18 +520,34 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     ///
     /// If a count is above [`MAX_ROLE_COUNT`].
     #[must_use]
-    pub fn with_counts(mut self, proxies: usize, replicas: usize) -> Self {
-        assert!(
-            proxies <= MAX_ROLE_COUNT && replicas <= MAX_ROLE_COUNT,
-            "a configuration's role counts are at most the cap"
-        );
+    pub fn with_counts(self, proxies: usize, replicas: usize) -> Self {
+        self.try_with_counts(proxies, replicas)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// [`AcceptorConfig::with_counts`] for an input: the counts of a
+    /// configuration from the wire or from an operator.
+    ///
+    /// # Errors
+    ///
+    /// [`ShapeError::RoleCountOverCap`] if a count is above
+    /// [`MAX_ROLE_COUNT`].
+    ///
+    /// # Panics
+    ///
+    /// If the counted configuration is not well formed (a programmer error:
+    /// the counts do not touch the membership or the quorum system).
+    pub fn try_with_counts(mut self, proxies: usize, replicas: usize) -> Result<Self, ShapeError> {
+        if proxies > MAX_ROLE_COUNT || replicas > MAX_ROLE_COUNT {
+            return Err(ShapeError::RoleCountOverCap);
+        }
         self.proxies = proxies;
         self.replicas = replicas;
         assert!(
             self.is_well_formed(),
             "naming the counts keeps a configuration well formed"
         );
-        self
+        Ok(self)
     }
 
     /// How many proxy leaders this configuration's leader delegates to

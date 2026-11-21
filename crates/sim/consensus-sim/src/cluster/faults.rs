@@ -40,7 +40,11 @@ impl Cluster {
             return;
         };
         let disk = &self.node(id).disk;
-        let readable: Vec<Slot> = (disk.first_slot().0..=disk.last_slot().0)
+        let first = disk.first_slot().0;
+        let readable: Vec<Slot> = disk
+            .last_slot()
+            .into_iter()
+            .flat_map(|last| first..=last.0)
             .map(Slot)
             .filter(|slot| disk.accepted(*slot).is_some() && !faulty.contains(slot))
             .collect();

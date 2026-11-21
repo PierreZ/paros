@@ -71,7 +71,7 @@ impl ColocatedNode {
             ..limits
         };
         let (hard_state, config) = storage.initial_state();
-        assert_config_shape(&config);
+        assert_node_config(&config);
         let acceptors = config.bootstrap();
         // The `None` arm of the state machine: a plain deployment holds no
         // matchmaker set at all, never an empty one.
@@ -293,47 +293,19 @@ fn assert_read_back<A, F>(
     }
 }
 
-/// The configuration's shape, asserted once at boot: quorum arithmetic,
-/// `contains` and broadcast all assume strictly sorted, deduplicated
-/// memberships, and every set must be drawn from its pool.
+/// The node's own place in the configuration, asserted once at boot after
+/// [`Config::assert_valid`]: a node is in the pool it votes from.
 ///
 /// # Panics
 ///
-/// If any membership is empty, unsorted or duplicated, if the bootstrap
-/// membership or matchmaker set leaves its pool, or if the pool does not name
-/// this node.
-fn assert_config_shape(config: &Config) {
-    // Config shape: quorum arithmetic and broadcast both assume a strictly
-    // sorted, deduplicated membership. A duplicated peer silently inflates
-    // the quorum; a missing self silently deflates it.
-    assert!(
-        !config.peers.is_empty(),
-        "Config::peers is empty: the bootstrap membership names at least one acceptor (Config::with_peers)"
-    );
-    assert!(
-        config.peers.windows(2).all(|w| w[0] < w[1]),
-        "Config::peers is not sorted and deduplicated (Config::with_peers sorts it)"
-    );
-    assert!(
-        config.nodes.windows(2).all(|w| w[0] < w[1]),
-        "Config::nodes is not sorted and deduplicated"
-    );
-    assert!(
-        config.matchmakers.windows(2).all(|w| w[0] < w[1]),
-        "Config::matchmakers is not sorted and deduplicated"
-    );
-    // The bootstrap membership is drawn from the pool, and this node is
-    // in the pool. On a plain deployment (no `nodes`, no matchmakers) the
-    // pool *is* the membership, so this is today's "membership includes
-    // this node's own id": a node outside the acceptor set exists only
-    // where a reconfiguration could add or remove it.
-    assert!(
-        config
-            .peers
-            .iter()
-            .all(|p| config.pool().binary_search(p).is_ok()),
-        "Config::peers names a node outside Config::nodes: the bootstrap membership is drawn from the node pool"
-    );
+/// If the pool does not name this node, or a plain deployment's membership
+/// leaves it out.
+fn assert_node_config(config: &Config) {
+    config.assert_valid();
+    // A missing self silently deflates a quorum. On a plain deployment (no
+    // `nodes`, no matchmakers) the pool *is* the membership, so this is
+    // "membership includes this node's own id": a node outside the acceptor
+    // set exists only where a reconfiguration could add or remove it.
     assert!(
         config.pool().binary_search(&config.id).is_ok(),
         "Config::id is not in the node pool (Config::nodes, or Config::peers when nodes is empty)"
@@ -344,13 +316,6 @@ fn assert_config_shape(config: &Config) {
             "Config::id is not in Config::peers: a plain deployment's membership includes this node's own id"
         );
     }
-    assert!(
-        config
-            .matchmakers
-            .iter()
-            .all(|m| config.matchmaker_pool().binary_search(m).is_ok()),
-        "the bootstrap matchmaker set is drawn from the matchmaker pool"
-    );
 }
 
 /// The acceptor's working state as a boot scan reads it back: the compaction
@@ -377,8 +342,12 @@ fn read_back_log<S: Storage>(storage: &S, promised: Ballot) -> BootLog {
     // Scan the durable per-slot log (first_slot..=last_slot); gaps read back
     // as `None` and are skipped.
     let mut accepted: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
-    let (first, last) = (first_slot.0, storage.last_slot().0);
-    for s in first..=last {
+    let first = first_slot.0;
+    let scan = storage
+        .last_slot()
+        .into_iter()
+        .flat_map(move |last| first..=last.0);
+    for s in scan {
         if let Some(record) = storage.accepted(Slot(s)) {
             // Boot-side pair of the write-side ordering (`on_accept` /
             // `start_accept_round` raise the promise in the same batch as

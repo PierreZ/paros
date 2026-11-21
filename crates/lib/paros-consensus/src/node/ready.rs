@@ -201,18 +201,7 @@ impl<'a> Ready<'a> {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn recovery_batch(&self) -> Option<(usize, usize, usize)> {
-        let batch = self.node.pending_recovery_batch();
-        if let Some((started, gap_fills, _)) = batch {
-            assert!(
-                gap_fills <= started,
-                "a recovery page fills only rounds it started"
-            );
-            assert!(
-                started <= self.node.limits().recovery_page,
-                "a recovery page is bounded"
-            );
-        }
-        batch
+        self.node.pending_recovery_batch()
     }
 
     /// Matchmaking requests to send this batch, one per addressed matchmaker
@@ -228,15 +217,7 @@ impl<'a> Ready<'a> {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
-        let requests = self.node.pending_match_requests();
-        // The plain path never speaks to a matchmaker.
-        if !requests.is_empty() {
-            assert!(
-                self.node.config().has_matchmakers(),
-                "only a matchmaker deployment registers"
-            );
-        }
-        requests
+        self.node.pending_match_requests()
     }
 
     /// Garbage-collection requests to send this batch (#123), one per
@@ -249,14 +230,7 @@ impl<'a> Ready<'a> {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn gc_requests(&self) -> &[(MatchmakerId, GcRequest)] {
-        let requests = self.node.pending_gc_requests();
-        if !requests.is_empty() {
-            assert!(
-                self.node.config().has_matchmakers(),
-                "only a matchmaker deployment collects"
-            );
-        }
-        requests
+        self.node.pending_gc_requests()
     }
 
     /// Whether the batch holds no work: nothing to persist, send, learn or

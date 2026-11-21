@@ -221,7 +221,13 @@ impl Run {
                 .collect(),
             proxies: if split {
                 (0..PROXIES as u64)
-                    .map(|p| Some(ProxyLeader::new(ProxyId(p), acceptors.clone())))
+                    .map(|p| {
+                        Some(ProxyLeader::new(
+                            ProxyId(p),
+                            acceptors.clone(),
+                            paros_consensus::Limits::DEFAULT,
+                        ))
+                    })
                     .collect()
             } else {
                 Vec::new()
@@ -1008,6 +1014,7 @@ impl Run {
             panic!("the leader applied the batch");
         };
         let answers: Vec<String> = Unbatcher::scatter(&batch.writes, seq.0, *count)
+            .expect("the leader answers the batch it accepted")
             .into_iter()
             .map(|(writer, at, n)| {
                 if n == 1 {
@@ -1112,7 +1119,8 @@ impl Run {
     fn proxy_beats(&mut self, id: u64) {
         let index = usize::try_from(id).expect("a small id");
         if let Some(proxy) = &mut self.proxies[index] {
-            proxy.resend_pending();
+            let evicted = proxy.tick();
+            assert!(evicted.is_empty(), "the default retention evicts nothing");
         }
         self.drain(Who::Proxy(id));
     }

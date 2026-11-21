@@ -14,6 +14,11 @@ fn the_default_limits_are_the_ceilings() {
     assert_eq!(limits.apply_page, APPLY_BATCH);
     assert_eq!(limits.registry_page, REGISTRY_PAGE);
     assert_eq!(limits.read_window, READ_TTL_TICKS);
+    assert_eq!(
+        limits.proxy_retention,
+        u64::MAX,
+        "a proxy keeps every round by default"
+    );
     limits.assert_valid();
 }
 
@@ -27,6 +32,7 @@ fn a_page_of_one_is_valid() {
         apply_page: 1,
         read_window: 0,
         registry_page: 1,
+        proxy_retention: 1,
     }
     .assert_valid();
 }
@@ -69,4 +75,16 @@ fn the_kept_read_window_is_never_below_the_floor() {
     assert_eq!(kept(READ_TTL_TICKS - 1), READ_TTL_TICKS);
     assert_eq!(kept(READ_TTL_TICKS + 5), READ_TTL_TICKS + 5);
     assert_eq!(kept(u64::MAX), u64::MAX);
+}
+
+/// A retention of zero would evict a round before its first re-fan-out.
+/// The check refuses it.
+#[test]
+#[should_panic(expected = "a proxy keeps a round for at least one re-fan-out")]
+fn a_proxy_retention_of_zero_is_refused() {
+    Limits {
+        proxy_retention: 0,
+        ..Limits::DEFAULT
+    }
+    .assert_valid();
 }

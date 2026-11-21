@@ -188,8 +188,8 @@ impl Storage for MemStorage {
     fn first_slot(&self) -> Slot {
         self.first_slot
     }
-    fn last_slot(&self) -> Slot {
-        self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
+    fn last_slot(&self) -> Option<Slot> {
+        self.accepted.keys().next_back().copied()
     }
     fn sealed_state(&self) -> JournalState {
         self.sealed

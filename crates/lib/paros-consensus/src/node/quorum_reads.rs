@@ -19,7 +19,7 @@ use super::{BeliefSource, ColocatedNode, Message, NodeId, NodeRole, ReadState, S
 use crate::journal::{Command, Control};
 use crate::membership::QuorumSystem;
 use crate::node::{Delegation, ProposeResult};
-use crate::quorum_read::PreReadFold;
+use crate::quorum_read::{PreReadFold, ReadOpen};
 use crate::types::Ballot;
 
 pub(crate) use crate::contract::limits::READ_TTL_TICKS;
@@ -44,16 +44,19 @@ impl ColocatedNode {
     /// the driver owns the client-facing timeout, and the client records it
     /// *ambiguous*, never aborted.
     ///
+    /// Returns what the ask did ([`ReadOpen`]): a token already open, or no
+    /// read basis yet, opens nothing and is a result, never a panic.
+    ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
-    /// operating condition): a driver token is opened at most once.
+    /// operating condition).
     ///
     /// [`AcceptorConfig::row_of`]: crate::membership::AcceptorConfig::row_of
     /// [`Ready::read_states`]: crate::Ready::read_states
     /// [`Replica::covers`]: crate::replica::Replica::covers
-    pub fn quorum_read(&mut self, ctx: u64) {
-        self.quorum_read_in(ctx, None);
+    pub fn quorum_read(&mut self, ctx: u64) -> ReadOpen {
+        self.quorum_read_in(ctx, None)
     }
 
     /// [`ColocatedNode::quorum_read`] with the **row named by the caller**
@@ -73,8 +76,13 @@ impl ColocatedNode {
     /// [`AcceptorConfig::row_of`]: crate::membership::AcceptorConfig::row_of
     /// [`AcceptorConfig::read_row`]: crate::membership::AcceptorConfig::read_row
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
-    pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
+    pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) -> ReadOpen {
         let me = self.config.id;
+        // A token still open is the driver's to wait on: nothing moves, not
+        // even the gap fill below.
+        if self.quorum_reads.is_open(ctx) {
+            return ReadOpen::TokenInUse;
+        }
         let marks = self.durable_marks();
         // No basis, no read (#260): the read opens nothing, and the driver's
         // retry sweep answers it unserved — the client asks again, here or
@@ -100,7 +108,7 @@ impl ColocatedNode {
             );
             self.assert_marks_monotone(marks);
             self.assert_invariants();
-            return;
+            return ReadOpen::NoBasis;
         };
         // The reader is its own first answer when it sits in the row: its
         // watermark is a fact its durable log holds, exactly what a peer's
@@ -127,7 +135,8 @@ impl ColocatedNode {
         let config = basis.config.clone();
         let addressees = self
             .quorum_reads
-            .open(ctx, row, basis, self.tick_count, own);
+            .open(ctx, row, basis, self.tick_count, own)
+            .expect("the token was checked free above");
         // The row's other members, and nobody outside the configuration.
         assert!(
             !addressees.contains(&me),
@@ -146,6 +155,7 @@ impl ColocatedNode {
         // A read touches no durable state.
         self.assert_marks_monotone(marks);
         self.assert_invariants();
+        ReadOpen::Opened
     }
 
     /// Acceptor: answer a `PreRead` with this node's vote watermark. No

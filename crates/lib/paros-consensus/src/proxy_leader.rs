@@ -56,9 +56,9 @@
 //! - **Out: nothing durable.** Ephemeral state only: no `HardState`, no
 //!   `WriteOp`, no storage seam. A proxy that crashes reboots empty, and
 //!   the leader's next re-delegation rebuilds every round it still needs.
-//! - **A beat: [`ProxyLeader::resend_pending`].** The driver is expected to
-//!   re-fan-out the open rounds each beat, exactly as it re-sends a
-//!   leader's. Two liveness paths meet here and neither replaces the
+//! - **A beat: [`ProxyLeader::tick`].** The driver calls it on each beat;
+//!   it evicts the rounds past their retention (below), then re-fans-out a
+//!   page of the open rounds, exactly as a leader re-sends its own. Two liveness paths meet here and neither replaces the
 //!   other: the leader's re-delegation heals a proxy that *lost* a round
 //!   (a crash), the proxy's re-send heals a fan-out that lost a vote — and
 //!   it is what closes a round the leader took back and decided itself,
@@ -68,8 +68,8 @@
 //!   (relayed, round closed). The model checker found a round of each
 //!   kind held open forever before the beat existed (seeds 20 and 87 of
 //!   the first runs). Skipping a beat is always safe.
-//! - **Bounded retention: [`ProxyLeader::expire_stale`].** A round the beat
-//!   has re-fanned-out `after` times without closing is **evicted**. The
+//! - **Bounded retention: [`Limits::proxy_retention`].** A round the beat
+//!   has re-fanned-out that many times without closing is **evicted**. The
 //!   re-send above closes a round only when the acceptors *answer* it, and
 //!   one class never answers: a slot every acceptor has compacted past —
 //!   an `Accept` below the floor is ignored, neither `Accepted` nor `Nack`
@@ -133,6 +133,7 @@ pub mod ready;
 
 use std::collections::BTreeMap;
 
+use crate::contract::limits::Limits;
 use crate::contract::message::{Audience, Message, Party};
 use crate::journal::{Command, command_fingerprint};
 use crate::membership::{AcceptorConfig, ProxyId};
@@ -168,8 +169,8 @@ pub struct ProxyCounters {
     /// Rounds of a lower ballot closed because a delegation at a higher
     /// ballot arrived.
     pub superseded: u64,
-    /// Rounds evicted by [`ProxyLeader::expire_stale`]: re-fanned-out the
-    /// caller's budget of times without an answer.
+    /// Rounds evicted by [`ProxyLeader::tick`]: re-fanned-out
+    /// [`Limits::proxy_retention`] times without an answer.
     pub expired: u64,
 }
 
@@ -184,6 +185,9 @@ pub struct ProxyLeader {
     /// its fan-outs address and its decisions are judged over. The
     /// bootstrap configuration on plain Multi-Paxos, for good.
     acceptors: AcceptorConfig,
+    /// The re-send page and the retention budget, fixed for the
+    /// incarnation, as every deployment takes them.
+    limits: Limits,
     /// The ballot `acceptors` was bound to (`Ballot::zero()` for the
     /// bootstrap configuration).
     acceptors_since: Ballot,
@@ -208,12 +212,19 @@ pub struct ProxyLeader {
 
 impl ProxyLeader {
     /// A proxy `id` over the deployment's bootstrap configuration
-    /// `acceptors`, with nothing in flight.
+    /// `acceptors`, with nothing in flight, under `limits` (it reads
+    /// [`Limits::resend_page`] and [`Limits::proxy_retention`]).
+    ///
+    /// # Panics
+    ///
+    /// If `limits` breaks [`Limits::assert_valid`].
     #[must_use]
-    pub fn new(id: ProxyId, acceptors: AcceptorConfig) -> Self {
+    pub fn new(id: ProxyId, acceptors: AcceptorConfig, limits: Limits) -> Self {
+        limits.assert_valid();
         let proxy = Self {
             id,
             acceptors,
+            limits,
             acceptors_since: Ballot::zero(),
             ballot: Ballot::zero(),
             rounds: Rounds::new(),
@@ -487,23 +498,37 @@ impl ProxyLeader {
             .push((Audience::Node(leader), Message::Nack { from, ballot, slot }));
     }
 
-    /// Re-fan-out a fair bounded page of this proxy's open rounds
-    /// ([`Rounds::resend_page`]), each to the column it was opened against
-    /// with the leader hint its last delegation named. **The driver is
-    /// expected to call this on each beat**; skipping a call is always safe
-    /// (see the module doc).
+    /// **The beat.** Evict every open round re-fanned-out
+    /// [`Limits::proxy_retention`] times without closing, then re-fan-out a
+    /// fair bounded page ([`Limits::resend_page`]) of the rounds still open.
+    /// Returns the slots evicted. The driver calls it on each beat; skipping
+    /// a beat is always safe, and so is an eviction: a proxy decides
+    /// nothing, and the leader's re-delegation and take-back recover a
+    /// round that is still needed (see the module doc).
     ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(proxy = self.id.0)))]
-    pub fn resend_pending(&mut self) {
+    pub fn tick(&mut self) -> Vec<Slot> {
+        let evicted = self.expire_stale(self.limits.proxy_retention);
+        self.resend_pending();
+        assert!(
+            evicted
+                .iter()
+                .all(|slot| self.rounds.column(*slot).is_none()),
+            "a re-fan-out never reopens an evicted round"
+        );
+        evicted
+    }
+
+    /// Re-fan-out a fair bounded page of this proxy's open rounds
+    /// ([`Rounds::resend_page`]), each to the column it was opened against
+    /// with the leader hint its last delegation named.
+    fn resend_pending(&mut self) {
         let ballot = self.ballot;
-        for accept in self
-            .rounds
-            .resend_page(crate::contract::limits::RESEND_BATCH)
-        {
+        for accept in self.rounds.resend_page(self.limits.resend_page) {
             let leader = *self
                 .delegators
                 .get(&accept.slot)
@@ -544,21 +569,9 @@ impl ProxyLeader {
     /// **Bounded retention** (see the module doc): close every open round
     /// re-fanned-out at least `after` times ([`Rounds::stalled`]) without
     /// closing, and report the slots evicted. Nothing is emitted and
-    /// nothing is remembered as done — an eviction is not a decision, and
-    /// a later delegation of the slot reopens it fresh. **The driver is
-    /// expected to call this on each beat, before the re-fan-out**, with
-    /// its retention budget; the budget is the driver's policy (floor 1)
-    /// and calling with `u64::MAX` is the unbounded retention this method
-    /// replaces. Always safe: a proxy decides nothing, so evicting a round
-    /// only stops this proxy folding it, and the leader's re-delegation and
-    /// take-back recover a round that is still needed.
-    ///
-    /// # Panics
-    ///
-    /// If an internal invariant is broken (a programmer error, never an
-    /// operating condition).
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(proxy = self.id.0)))]
-    pub fn expire_stale(&mut self, after: u64) -> Vec<Slot> {
+    /// nothing is remembered as done: an eviction is not a decision, and a
+    /// later delegation of the slot reopens it fresh.
+    fn expire_stale(&mut self, after: u64) -> Vec<Slot> {
         let stale = self.rounds.stalled(after);
         // Read from the rounds, apart from `stalled` (#269): only a round
         // that reached the budget is evicted.
@@ -620,7 +633,7 @@ impl ProxyLeader {
     ///
     /// Panics when a proxy invariant is broken: a programmer error, never
     /// an operating condition.
-    pub fn assert_invariants(&self) {
+    pub(crate) fn assert_invariants(&self) {
         assert!(
             self.rounds
                 .by_slot()
@@ -660,6 +673,12 @@ impl ProxyLeader {
     #[must_use]
     pub fn acceptors(&self) -> &AcceptorConfig {
         &self.acceptors
+    }
+
+    /// The limits this proxy was built with.
+    #[must_use]
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// The highest ballot ever delegated to this proxy: the leadership it

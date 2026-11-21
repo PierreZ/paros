@@ -124,7 +124,7 @@ use crate::journal::state::JournalState;
 use crate::journal::{Command, Seq};
 use crate::membership::{AcceptorConfig, QuorumSystem, ReplicaId};
 use crate::quorum_read::ReadState;
-use crate::quorum_read::{QuorumReads, ReadBasis};
+use crate::quorum_read::{QuorumReads, ReadBasis, ReadOpen};
 use crate::replica::Replica;
 use crate::types::{Ballot, NodeId, Slot};
 
@@ -235,7 +235,11 @@ impl ReplicaNode {
         );
         let mut below: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut above: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
-        for s in floor.0..=storage.last_slot().0 {
+        let scan = storage
+            .last_slot()
+            .into_iter()
+            .flat_map(|last| floor.0..=last.0);
+        for s in scan {
             if let Some(record) = storage.accepted(Slot(s)) {
                 if Slot(s) < first_unchosen {
                     below.insert(Slot(s), record);
@@ -435,12 +439,17 @@ impl ReplicaNode {
     /// row, since a replica votes nothing. `row` is the driver's choice, as
     /// on a node; a row the configuration lacks falls back to the default.
     ///
+    /// Returns what the ask did ([`ReadOpen`]): a token already open, or no
+    /// read basis yet, opens nothing and is a result, never a panic.
+    ///
     /// # Panics
     ///
-    /// If a read is already open at `ctx` (a driver token is unique), or an
-    /// internal invariant is broken.
+    /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, ctx)))]
-    pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
+    pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) -> ReadOpen {
+        if self.quorum_reads.is_open(ctx) {
+            return ReadOpen::TokenInUse;
+        }
         // On a matchmaker deployment a read waits for a won leadership's
         // beat (#260): the bootstrap configuration is no basis, the
         // configurations in force since may hold slots its quorums never
@@ -452,7 +461,7 @@ impl ReplicaNode {
                 "only a matchmaker deployment reads without a basis"
             );
             self.assert_invariants();
-            return;
+            return ReadOpen::NoBasis;
         };
         let row = basis.config.read_row(ctx, row);
         assert!(
@@ -462,7 +471,8 @@ impl ReplicaNode {
         );
         let addressees = self
             .quorum_reads
-            .open(ctx, row, basis, self.tick_count, None);
+            .open(ctx, row, basis, self.tick_count, None)
+            .expect("the token was checked free above");
         self.counters.quorum_reads += 1;
         // A replica votes nothing, so it is never its own row's addressee.
         assert!(
@@ -483,6 +493,7 @@ impl ReplicaNode {
             ));
         }
         self.assert_invariants();
+        ReadOpen::Opened
     }
 
     /// Release the next bounded page of the apply walk after the caller has
@@ -883,7 +894,7 @@ impl ReplicaNode {
     ///
     /// Panics when an invariant is broken: a programmer error, never an
     /// operating condition.
-    pub fn assert_invariants(&self) {
+    pub(crate) fn assert_invariants(&self) {
         assert!(
             self.floor <= self.replica.first_unchosen(),
             "a replica's floor never outruns its chosen prefix"
@@ -1044,25 +1055,7 @@ impl ReplicaNode {
 /// duplicated, if the membership leaves the pool, or if the pool names this
 /// replica.
 fn assert_replica_config_shape(config: &Config) {
-    assert!(
-        !config.peers.is_empty(),
-        "a replica knows at least one acceptor to learn from"
-    );
-    assert!(
-        config.peers.windows(2).all(|w| w[0] < w[1]),
-        "membership is sorted and deduplicated"
-    );
-    assert!(
-        config.nodes.windows(2).all(|w| w[0] < w[1]),
-        "the node pool is sorted and deduplicated"
-    );
-    assert!(
-        config
-            .peers
-            .iter()
-            .all(|p| config.pool().binary_search(p).is_ok()),
-        "the bootstrap membership is drawn from the node pool"
-    );
+    config.assert_valid();
     assert!(
         config.pool().binary_search(&config.id).is_err(),
         "a replica is never in the node pool"
