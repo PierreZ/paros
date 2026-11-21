@@ -1078,8 +1078,13 @@ impl ColocatedNode {
                         !prior.is_empty(),
                         "a repair probe covers some prior configuration"
                     );
+                    // The leader's own answer is folded when the probe opens.
+                    assert!(
+                        probe.answered().contains(&me),
+                        "a repair probe holds its leader's own answer"
+                    );
                     for member in prior.iter().flat_map(|c| c.members().iter()) {
-                        if *member != me && !probe.answered().contains(member) {
+                        if !probe.answered().contains(member) {
                             assert!(
                                 query.to.contains(member),
                                 "a repair probe re-asks every unanswered prior member"

@@ -9,6 +9,7 @@
 //! produce, which is exactly what crash-beats-corruption is for.
 
 use super::*;
+use crate::contract::write::{AcceptorWrite, WriteOp};
 
 fn accept(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
     Message::Accept {
@@ -219,5 +220,222 @@ fn a_stale_trim_point_never_rewinds_a_frontier() {
     assert!(
         nodes[1].pending_writes.is_empty(),
         "a stale trim point writes nothing"
+    );
+}
+
+// ---- each invariant check, fed a state it must refuse ----------------------
+
+#[test]
+#[should_panic(expected = "a recovery page is never empty")]
+fn an_empty_recovery_page_fails_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.limits.recovery_page = 0;
+    n.assert_invariants();
+}
+
+/// A faulty record under the chosen prefix with no fold hole at or below
+/// it: the fold passed a slot this node cannot read.
+#[test]
+#[should_panic(expected = "the fold's hole covers every faulty slot under the chosen prefix")]
+fn a_fold_past_a_faulty_slot_fails_the_invariants() {
+    let nodes = cluster_with_three_chosen();
+    let mut storage = MemStorage::from_node(&nodes[1]);
+    storage.rot(Slot(1));
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    assert_eq!(n.replica.fold_hole(), Some(Slot(1)));
+    n.replica.learn(Slot(1), &ucmd(1, 2, 20));
+    n.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "a plain deployment stores no read basis")]
+fn a_plain_read_basis_fails_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.read_basis = Some(crate::quorum_read::ReadBasis {
+        config: cfg(&[0, 1, 2]),
+        since: Ballot::zero(),
+        fence: None,
+    });
+    n.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "the membership fence covers the registration fence")]
+fn a_registration_fence_above_the_membership_fence_fails_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.registration_fence = ballot(5, 0);
+    n.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "a plain deployment's configuration is bound to no ballot")]
+fn a_plain_configuration_bound_to_a_ballot_fails_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.acceptors_since = ballot(3, 0);
+    n.belief_fact = Ballot::zero();
+    n.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "a plain deployment matches no reconfiguration fact")]
+fn a_plain_reconfiguration_fact_fails_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.belief_fact = ballot(1, 0);
+    n.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "the active configuration is drawn from the node pool")]
+fn a_configuration_outside_the_pool_fails_the_invariants() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    n.acceptors = cfg(&[0, 1, 9]);
+    n.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "a candidate holds exactly one open campaign phase")]
+fn a_candidate_with_no_campaign_fails_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.role = NodeRole::Candidate;
+    n.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "a leader knows itself as leader")]
+fn a_leader_that_names_another_fails_the_invariants() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    nodes[0].leader = Some(NodeId(1));
+    nodes[0].assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "only a leader carries an inherited leadership origin")]
+fn a_follower_with_an_inherited_origin_fails_the_invariants() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.leadership_origin = LeadershipOrigin::Handoff { from: NodeId(1) };
+    n.assert_invariants();
+}
+
+/// The marks of one node, read back on a node with a lower promise.
+#[test]
+#[should_panic(expected = "a node's promise never decreases")]
+fn a_promise_that_falls_fails_the_marks() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let high = nodes[0].durable_marks();
+    let low = node(1, &[0, 1, 2]);
+    low.assert_marks_monotone(high);
+}
+
+// ---- the batch's own write-order checks -------------------------------------
+
+#[test]
+#[should_panic(expected = "a batch only ever raises the promise")]
+fn a_batch_that_repeats_a_promise_fails_its_check() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let _ = drain(&mut nodes[0]);
+    let promised = nodes[0].hard_state().max_promised_ballot;
+    for _ in 0..2 {
+        nodes[0]
+            .pending_writes
+            .push(WriteOp::Acceptor(AcceptorWrite::SetPromise(promised)));
+    }
+    let _ = nodes[0].ready().writes();
+}
+
+#[test]
+#[should_panic(expected = "a batch only ever advances the chosen index")]
+fn a_batch_that_repeats_a_chosen_index_fails_its_check() {
+    let mut nodes = cluster_with_three_chosen();
+    let _ = drain(&mut nodes[0]);
+    for _ in 0..2 {
+        nodes[0]
+            .pending_writes
+            .push(WriteOp::SetChosenIndex(Slot(1)));
+    }
+    let _ = nodes[0].ready().writes();
+}
+
+#[test]
+#[should_panic(expected = "a batch only ever raises the floor")]
+fn a_batch_that_repeats_a_trim_point_fails_its_check() {
+    let mut nodes = cluster_with_three_chosen();
+    let _ = drain(&mut nodes[0]);
+    for _ in 0..2 {
+        nodes[0].pending_writes.push(WriteOp::TrimmedTo {
+            point: Slot(1),
+            state: crate::journal::state::JournalState::default(),
+        });
+    }
+    let _ = nodes[0].ready().writes();
+}
+
+/// A durable log with a silent hole under its chosen index refuses to boot.
+#[test]
+#[should_panic(expected = "every retained slot below the chosen prefix has a durable record")]
+fn a_silent_hole_under_the_chosen_index_refuses_to_boot() {
+    let nodes = cluster_with_three_chosen();
+    let mut storage = MemStorage::from_node(&nodes[1]);
+    storage.accepted.remove(&Slot(1));
+    let _ = ColocatedNode::new(&storage, Limits::DEFAULT);
+}
+
+// ---- the view and the counters -----------------------------------------------
+
+#[test]
+fn the_view_reports_the_clock_and_the_matchmaker_pool() {
+    let mut n = node(0, &[0, 1, 2]);
+    assert_eq!(n.counters().election_gap_fills, 0);
+    assert_eq!(n.counters().matchmaking_timeouts, 0);
+    assert_eq!(n.counters().blocked_repairs, 0);
+    n.set_election_timeout(7);
+    assert_eq!(n.election_timeout(), 7);
+    n.tick();
+    n.tick();
+    assert_eq!(n.election_elapsed(), 2);
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    assert_eq!(
+        nodes[0].election_elapsed(),
+        0,
+        "a leader's clock is stopped"
+    );
+    let deployed = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
+    assert_eq!(
+        deployed.matchmaker_pool(),
+        &[MatchmakerId(0), MatchmakerId(1), MatchmakerId(2)]
+    );
+}
+
+/// The read basis takes a new fence at the same ballot, and refuses one
+/// at a lower ballot.
+#[test]
+fn a_read_basis_moves_to_a_new_fence_at_the_same_ballot() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    n.learn_read_basis(cfg(&[0, 1, 2]), ballot(3, 1), Some(Slot(1)));
+    n.learn_read_basis(cfg(&[0, 1, 2]), ballot(3, 1), Some(Slot(4)));
+    assert_eq!(n.read_basis().and_then(|b| b.fence), Some(Slot(4)));
+    n.learn_read_basis(cfg(&[0, 1, 2]), ballot(2, 1), Some(Slot(9)));
+    assert_eq!(n.read_basis().and_then(|b| b.fence), Some(Slot(4)));
+}
+
+/// The matched reconfiguration fact survives a binding of the same
+/// configuration at or above it, and goes with any other configuration.
+#[test]
+fn the_matched_fact_follows_its_configuration() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    n.adopt_configuration(cfg(&[0, 1, 2]), ballot(3, 0));
+    n.belief_fact = ballot(3, 0);
+    n.adopt_configuration(cfg(&[0, 1, 2]), ballot(3, 0));
+    assert_eq!(n.belief_fact, ballot(3, 0), "the same binding keeps it");
+    n.adopt_configuration(cfg(&[0, 1, 2]), ballot(5, 0));
+    assert_eq!(n.belief_fact, ballot(3, 0), "a later binding keeps it");
+    n.adopt_configuration(cfg(&[0, 1]), ballot(6, 0));
+    assert_eq!(
+        n.belief_fact,
+        Ballot::zero(),
+        "another configuration drops it"
     );
 }
