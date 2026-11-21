@@ -569,21 +569,22 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         let Some(e) = self.election.as_mut() else {
             return;
         };
-        if ballot != e.promises.ballot || prepared >= ballot {
-            // A testimony at another ballot, or one that claims this very
-            // ballot or above it (wire input), proves nothing here.
+        if ballot != e.promises.ballot {
+            // A testimony at another ballot proves nothing here. One that
+            // claims this very ballot or above it (wire input) is kept, and
+            // drops nothing: every abandonable registration lies below the
+            // ballot (`mark_abandonable`).
             return;
         }
         let slot = e.testimony.entry(from).or_insert(prepared);
         *slot = (*slot).min(prepared);
         assert!(*slot <= prepared, "the lowest testimony counts");
         let dropped = e.drop_abandoned();
-        if dropped > 0 {
-            probe!(
-                reachable,
-                "phase1: a candidate drops a configuration only abandoned ballots registered"
-            );
-        }
+        probe!(
+            sometimes,
+            dropped > 0,
+            "phase1: a candidate drops a configuration only abandoned ballots registered"
+        );
     }
 
     /// The win gate (#121): every prior configuration covered — one
@@ -606,12 +607,10 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         // A quorum of a non-empty H_b is somebody: a won campaign over prior
         // configurations rests on at least one promise.
         if let Some(e) = self.election.as_ref().filter(|_| won) {
-            if !e.prior.is_empty() {
-                assert!(
-                    !e.promises.answered.is_empty(),
-                    "a won campaign rests on a promise"
-                );
-            }
+            assert!(
+                e.prior.is_empty() || !e.promises.answered.is_empty(),
+                "a won campaign rests on a promise"
+            );
             assert!(
                 e.promises.ballot >= promise,
                 "a won campaign is not below the promise"

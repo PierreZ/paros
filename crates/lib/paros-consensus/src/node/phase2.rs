@@ -61,9 +61,18 @@ impl ColocatedNode {
             self.acceptors.contains(from),
             "a counted Accepted comes from a member"
         );
-        if self.role == NodeRole::Leader && ballot == self.ballot {
-            self.proposer.credit_authority(from);
-        }
+        // A counted vote is one of this leader's own open rounds: rounds
+        // live only while the node leads (`clear_leadership_state`), all at
+        // its ballot (`assert_invariants`).
+        assert!(
+            self.role == NodeRole::Leader,
+            "a counted Accepted reaches a leader"
+        );
+        assert!(
+            ballot == self.ballot,
+            "a counted Accepted is at the leader's own ballot"
+        );
+        self.proposer.credit_authority(from);
         self.try_decide(slot);
     }
 
@@ -164,12 +173,10 @@ impl ColocatedNode {
         // window after a higher-ballot `Commit` passed the allocator (see the
         // role-couplings note in `assert_invariants`), so the check carries the
         // same promise gate.
-        if self.ballot >= self.acceptor.promised() {
-            assert!(
-                !self.replica.is_chosen(slot),
-                "an accept round never re-opens a chosen slot"
-            );
-        }
+        assert!(
+            self.ballot < self.acceptor.promised() || !self.replica.is_chosen(slot),
+            "an accept round never re-opens a chosen slot"
+        );
         // A named column is one the active grid has; a majority names none. The core derives its own through the
         // membership boundary, and a driver's override is checked against
         // the same boundary — a stray column is a programmer error.
@@ -213,12 +220,12 @@ impl ColocatedNode {
         self.try_decide(slot);
         // The round is in flight, or it decided at once (and possibly
         // compacted away with its prefix).
-        if !self.proposer.is_round_open_at(slot, ballot) && slot >= self.acceptor.first_slot() {
-            assert!(
-                self.replica.is_chosen(slot),
-                "a closed fresh round decided its slot"
-            );
-        }
+        assert!(
+            self.proposer.is_round_open_at(slot, ballot)
+                || slot < self.acceptor.first_slot()
+                || self.replica.is_chosen(slot),
+            "a closed fresh round decided its slot"
+        );
     }
 
     /// Record the round this leader opens at `slot` in its **own** log,

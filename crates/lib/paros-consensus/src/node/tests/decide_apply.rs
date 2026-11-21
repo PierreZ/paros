@@ -343,6 +343,32 @@ fn a_stuck_round_moves_to_another_column() {
     );
 }
 
+/// A delegated round is its proxy's: the leader moves it only once it took
+/// it back, and a refused move writes nothing.
+#[test]
+fn a_delegated_round_does_not_move() {
+    let mut nodes: Vec<ColocatedNode> = (0..6)
+        .map(|id| {
+            let mut storage = MemStorage::for_node(id, &[0, 1, 2, 3, 4, 5]);
+            storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 3);
+            storage.config.proxy_count = 1;
+            ColocatedNode::new(&storage, Limits::DEFAULT)
+        })
+        .collect();
+    make_leader(&mut nodes, 0);
+    assert!(matches!(
+        nodes[0].propose(entry(1, 1, 10)),
+        ProposeResult::Accepted(Slot(0))
+    ));
+    let _ = drain(&mut nodes[0]);
+    assert!(nodes[0].proposer.rounds()[&Slot(0)].proxy().is_some());
+    assert!(!nodes[0].move_round(Slot(0), 1));
+    let ready = nodes[0].ready();
+    assert!(ready.writes().is_empty(), "a refused move writes nothing");
+    assert!(ready.messages().is_empty(), "a refused move sends nothing");
+    ready.advance();
+}
+
 #[test]
 #[should_panic(expected = "an accept round's column is a column of the active configuration")]
 fn a_column_the_grid_does_not_have_is_a_programmer_error() {

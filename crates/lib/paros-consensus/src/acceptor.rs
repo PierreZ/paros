@@ -469,7 +469,9 @@ impl<V: Clone + PartialEq> Acceptor<V> {
                 (None, None) => break,
                 (Some(_), None) => true,
                 (None, Some(_)) => false,
-                (Some((ra, _)), Some((rf, _))) => ra < rf,
+                // The two maps are disjoint (`assert_invariants`): the
+                // slots never tie.
+                (Some((ra, _)), Some((rf, _))) => ra.cmp(rf).is_lt(),
             };
             if take_readable {
                 let (slot, record) = readable.next().expect("peeked");

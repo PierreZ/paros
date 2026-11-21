@@ -140,3 +140,15 @@ fn a_rewrite_writes_the_record_held_and_moves_nothing() {
     }
     assert!(writes.is_empty(), "a slot with no record writes nothing");
 }
+
+/// The tri-state is a partition: a slot both readable and faulty breaks
+/// the acceptor's check.
+#[test]
+#[should_panic(expected = "the faulty set stays disjoint from the accepted log")]
+fn a_slot_both_readable_and_faulty_breaks_the_check() {
+    let mut records = BTreeMap::new();
+    records.insert(Slot(1), (ballot(1), command(1)));
+    let mut faulty = BTreeMap::new();
+    faulty.insert(Slot(1), ballot(1));
+    let _ = Acceptor::new(ballot(1), records, Slot(0), faulty);
+}

@@ -200,7 +200,7 @@ pub struct HandoffCounters {
 /// Phase 1: it may re-propose only what it was explicitly handed, and it must
 /// never invent a `Noop` for a slot nobody described (outside a Phase-1
 /// quorum's report, a no-op fill can overwrite an already-chosen value).
-fn tail_shape_valid(
+pub(super) fn tail_shape_valid(
     ballot: Ballot,
     from_slot: Slot,
     next_slot: Slot,

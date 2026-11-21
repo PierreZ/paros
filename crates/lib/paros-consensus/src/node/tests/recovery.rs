@@ -199,6 +199,43 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
     assert_eq!(case2, 0);
 }
 
+/// R3 Case 3 → Case 2: a slot only the rebooted proposer ever accepted, and
+/// lost, stays blocked until the straggler's late `none` makes a quorum of
+/// `none` without the faulty reporter; the probe then decides it a `Noop`.
+#[test]
+fn blocked_slot_waits_then_resolves_case2_from_a_straggler() {
+    let mut nodes = cluster_with_three_chosen();
+    let _ = nodes[0].propose(entry(1, 4, 40));
+    let q = drain(&mut nodes[0]);
+    // No `Accept` leaves: node 0's own record is the only copy of slot 3.
+    deliver_filtered(&mut nodes, q, |_, m| {
+        !matches!(m, Message::Accept { .. } | Message::Commit { .. })
+    });
+    let mut s0 = MemStorage::from_node(&nodes[0]);
+    s0.rot(Slot(3));
+    nodes[0] = ColocatedNode::new(&s0, Limits::DEFAULT);
+
+    campaign(&mut nodes[0]);
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _m| to != NodeId(1));
+    assert!(nodes[0].is_leader(), "the campaign still wins");
+    assert_eq!(nodes[0].blocked_repairs(), 1, "slot 3 is blocked: wait");
+
+    nodes[0].set_election_timeout(NO_CHECK_QUORUM);
+    nodes[0].tick();
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(nodes[0].blocked_repairs(), 0, "the probe closed");
+    assert_eq!(
+        nodes[0].replica.chosen_at(Slot(3)),
+        Some(&Command::Control(Control::Noop)),
+        "a quorum of none decides the slot a no-op"
+    );
+    let crate::node::RepairCounters { case1, case2, .. } = nodes[0].repair_counters();
+    assert_eq!(case1, 0);
+    assert_eq!(case2, 1);
+}
+
 /// CTRL §4.2: a leader that cannot finish recovery (the only holder of a
 /// blocked slot's value stays unreachable) resigns after the recovery timeout
 /// so another node can try.

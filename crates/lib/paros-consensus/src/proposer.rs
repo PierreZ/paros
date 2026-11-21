@@ -335,8 +335,8 @@ fn promise_page_shape_valid<V>(
             .keys()
             .all(|slot| *slot >= from_slot && !accepted.contains_key(slot))
         && next_from_slot.is_none_or(|next| {
+            // Past the last entry, so past `from_slot` too.
             len > 0
-                && next > from_slot
                 && accepted.keys().next_back().is_none_or(|last| next > *last)
                 && faulty.keys().next_back().is_none_or(|last| next > *last)
         })
