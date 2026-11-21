@@ -213,7 +213,7 @@ Test only: `publish = false`, never a dependency of another crate.
   150 chaos steps. Each test searches the seeds (at most 300, oracles on, no TLC) and TLC checks
   the first seed and each seed that meets a rule of the spec that no checked seed met before; a
   walk of more than 200 kept events is skipped (TLC grows faster than the trace). The test fails
-  when a rule stays unmet. About three minutes in release on four CPUs. TLC (`tlc`) is in the nix
+  when a rule stays unmet. About eight minutes in release on four CPUs. TLC (`tlc`) is in the nix
   dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
   in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
   a change of `specs/tla/` alone. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,

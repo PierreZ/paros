@@ -788,12 +788,11 @@ VoteWatermark(a) ==
 Open(c) == rds[c].state = "open" \/ rrds[c].state = "open"
 
 \* Acceptor a answers read c with its vote watermark and its read fence, at
-\* or above its promise (`PreReadAck`). The read is open, or was: its
-\* `PreRead` asked, and an answer may arrive after the read closed. The
-\* reader drops such an answer.
+\* or above its promise (`PreReadAck`). Only an open read counts an answer:
+\* an answer to a read that is not open (it closed, or a trace leaves out
+\* the reader's steps) changes nothing.
 \* A plain deployment sends no fence (-1): it never reconfigures.
 ReadAck(a, c, fence) ==
-  /\ rds[c].state # "none" \/ rrds[c].state # "none"
   /\ Fence = "promise" => IF Matchmaking THEN fence >= prom[a] ELSE fence = -1
   /\ racks' = IF Open(c)
               THEN racks \cup {[acc |-> a, ctx |-> c, wm |-> VoteWatermark(a), fence |-> fence]}

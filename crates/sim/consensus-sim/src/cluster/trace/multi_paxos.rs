@@ -19,4 +19,3 @@ pub(super) fn keeps(event: &ClusterEvent) -> bool {
             | ClusterEvent::Restart { .. }
     )
 }
-
