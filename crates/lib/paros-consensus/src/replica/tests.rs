@@ -451,3 +451,39 @@ fn a_floor_on_a_slot_without_records_fails_the_check() {
     r.truncate(Slot(1));
     r.assert_compacted();
 }
+
+/// A refused write is never a retained retry: a foreign writer's write at
+/// the journal's next position reads no record, so it holds no floor down.
+#[test]
+fn a_refused_write_at_the_next_position_holds_no_floor() {
+    let foreign = Command::Write(Entry {
+        leader: LeaderUuid(2),
+        seq: Seq(2),
+        records: vec![Value(b"x".to_vec())],
+    });
+    let commands = [
+        claim(),
+        write(0, &[b"a"]),
+        write(1, &[b"b"]),
+        foreign,
+        truncate_to(1, 1),
+    ];
+    let (r, target) = walked(WriterMode::Single, &commands);
+    assert!(
+        !matches!(r.outcome_at(Slot(3)), Some(Outcome::Accepted { .. })),
+        "{:?}",
+        r.outcome_at(Slot(3))
+    );
+    assert_eq!(target, Some(Slot(1)), "slot 2 holds the first record");
+    assert_eq!(r.compaction_target(), target);
+}
+
+/// The fold never stops at a slot it holds chosen below the first unchosen
+/// slot: `assert_invariants` names a fold left behind.
+#[test]
+#[should_panic(expected = "the journal fold stops only at a slot it does not hold")]
+fn a_fold_left_behind_fails_the_invariants() {
+    let mut r = replica(&[claim(), write(0, &[b"a"]), write(1, &[b"b"])]);
+    r.folded = Slot(1);
+    r.assert_invariants(Slot(0));
+}

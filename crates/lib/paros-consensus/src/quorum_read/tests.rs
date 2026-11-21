@@ -27,6 +27,7 @@ fn ballot(round: u64) -> Ballot {
 #[test]
 fn a_read_completes_on_its_row_at_the_maximum_watermark() {
     let mut reads: QuorumReads<NodeId> = QuorumReads::new();
+    assert!(reads.is_empty(), "no read is open yet");
     // Node 5 is the reader, in row 1 = {4, 5, 6}: it seeds its own
     // watermark and asks the other two.
     let addressees = reads.open(
@@ -38,6 +39,7 @@ fn a_read_completes_on_its_row_at_the_maximum_watermark() {
     );
     assert_eq!(addressees, vec![NodeId(4), NodeId(6)]);
     assert_eq!(reads.pending()[0].row(), Some(1));
+    assert!(!reads.is_empty(), "the read is open");
     assert!(reads.serve(|_| true).is_empty(), "one answer is no row");
     assert_eq!(
         reads.fold(1, NodeId(4), Some(Slot(3)), None),

@@ -294,18 +294,16 @@ impl ProxyLeader {
             self.counters.ignored += 1;
             return;
         }
-        if ballot > self.ballot {
-            if !self.rounds.is_empty() {
-                // The state `close_below` exists for (#341): a new
-                // leadership's delegation meets rounds the old one left.
-                probe!(
-                    reachable,
-                    "proxy: a higher-ballot delegation meets a superseded leadership's rounds"
-                );
-            }
-            self.ballot = ballot;
-            self.close_below(ballot);
-        }
+        // The state `close_below` exists for (#341): a new leadership's
+        // delegation meets rounds the old one left. At the ballot this proxy
+        // works for, every open round is already at it, and nothing closes.
+        probe!(
+            sometimes,
+            ballot > self.ballot && !self.rounds.is_empty(),
+            "proxy: a higher-ballot delegation meets a superseded leadership's rounds"
+        );
+        self.ballot = ballot;
+        self.close_below(ballot);
         self.learn_config(ballot, config);
         if self.done.get(&slot) == Some(&ballot) {
             // A round this proxy already decided at this ballot: the
@@ -319,24 +317,24 @@ impl ProxyLeader {
             return;
         }
         let column = self.acceptors.column_of(slot);
-        match self.rounds.by_slot().get(&slot) {
-            Some(round) if round.ballot() == ballot => {
-                // One ballot, one proposer (P2b): a re-delegation carries
-                // the round's own command, verbatim — a handoff successor
-                // re-proposes what it inherited, a re-send what it sent.
-                assert!(
-                    *round.command() == command,
-                    "a re-delegation at the open round's ballot carries the round's command"
-                );
-                self.delegators.insert(slot, leader);
-                self.counters.refanned += 1;
-                self.fan_out(leader, ballot, slot, command, column);
-                return;
-            }
-            // Every open round runs at the ballot this proxy works for, and
-            // this delegation is at that ballot: the slot is free.
-            Some(_) => unreachable!("every open proxy round runs at the proxy's ballot"),
-            None => {}
+        if let Some(round) = self.rounds.by_slot().get(&slot) {
+            // Every open round runs at the ballot this proxy works for,
+            // and this delegation is at that ballot.
+            assert!(
+                round.ballot() == ballot,
+                "every open proxy round runs at the proxy's ballot"
+            );
+            // One ballot, one proposer (P2b): a re-delegation carries
+            // the round's own command, verbatim — a handoff successor
+            // re-proposes what it inherited, a re-send what it sent.
+            assert!(
+                *round.command() == command,
+                "a re-delegation at the open round's ballot carries the round's command"
+            );
+            self.delegators.insert(slot, leader);
+            self.counters.refanned += 1;
+            self.fan_out(leader, ballot, slot, command, column);
+            return;
         }
         // The proxy casts no vote: it is not an acceptor.
         self.rounds

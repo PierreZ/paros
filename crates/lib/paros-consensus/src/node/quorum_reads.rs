@@ -328,12 +328,11 @@ impl ColocatedNode {
         self.quorum_reads.abandon_superseded(fence);
         let left = self.quorum_reads.pending().len();
         assert!(left <= open, "fencing opens no read");
-        if left < open {
-            probe!(
-                reachable,
-                "quorum read: a promise above the reader's basis ends its read"
-            );
-        }
+        probe!(
+            sometimes,
+            left < open,
+            "quorum read: a promise above the reader's basis ends its read"
+        );
         assert!(
             fence >= self.acceptor.promised(),
             "the reader's fence covers its own promise"

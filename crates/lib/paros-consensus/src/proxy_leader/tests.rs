@@ -300,3 +300,63 @@ fn a_delegator_without_an_open_round_breaks_the_proxy_invariants() {
     proxy.delegators.insert(Slot(3), NodeId(0));
     proxy.assert_invariants();
 }
+
+/// Each ignored delegation counts once: one addressed to another proxy,
+/// one below the ballot the proxy works for.
+#[test]
+fn every_ignored_delegation_is_counted() {
+    let mut proxy = ProxyLeader::new(ProxyId(1), majority(&[0, 1, 2]));
+    assert_eq!(proxy.id(), ProxyId(1));
+    proxy.step(delegation(2, 0, ballot(3, 0), 7, cmd(7)));
+    assert_eq!(proxy.counters().ignored, 1);
+    assert!(!proxy.has_pending_accepts());
+    proxy.step(delegation(1, 0, ballot(3, 0), 7, cmd(7)));
+    assert!(proxy.has_pending_accepts());
+    proxy.step(delegation(1, 0, ballot(2, 0), 8, cmd(8)));
+    assert_eq!(proxy.counters().ignored, 2);
+    assert_eq!(proxy.counters().delegated, 1);
+}
+
+/// A refusal from outside the configuration, or for a round that is not
+/// open at that ballot, is not relayed.
+#[test]
+fn only_a_member_s_refusal_of_an_open_round_is_relayed() {
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
+    drain(&mut proxy);
+    proxy.step(Message::Nack {
+        from: NodeId(9),
+        ballot: ballot(3, 0),
+        slot: Slot(4),
+    });
+    proxy.step(Message::Nack {
+        from: NodeId(2),
+        ballot: ballot(3, 0),
+        slot: Slot(5),
+    });
+    assert_eq!(drain(&mut proxy), Vec::new());
+    assert!(proxy.has_pending_accepts(), "the round is still open");
+    assert_eq!(proxy.counters().relayed_nacks, 0);
+}
+
+/// The proxy remembers the last `DONE_MEMORY` slots it decided, and no
+/// more: the oldest of them is still ignored on a re-delegation.
+#[test]
+fn the_closed_round_memory_holds_exactly_its_bound() {
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    let b = ballot(3, 0);
+    let rounds = u64::try_from(DONE_MEMORY).expect("small bound") + 1;
+    for slot in 0..rounds {
+        proxy.step(delegation(0, 0, b, slot, cmd(slot)));
+        proxy.step(accepted(0, b, slot, &cmd(slot)));
+        proxy.step(accepted(1, b, slot, &cmd(slot)));
+        drain(&mut proxy);
+    }
+    assert_eq!(proxy.counters().decided, rounds);
+    // Slot 1 is the oldest remembered; slot 0 is forgotten.
+    proxy.step(delegation(0, 0, b, 1, cmd(1)));
+    assert!(drain(&mut proxy).is_empty(), "slot 1 is remembered");
+    assert_eq!(proxy.counters().ignored, 1);
+    proxy.step(delegation(0, 0, b, 0, cmd(0)));
+    assert_eq!(drain(&mut proxy).len(), 1, "slot 0 is forgotten");
+}

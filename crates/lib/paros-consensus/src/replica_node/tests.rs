@@ -1091,3 +1091,85 @@ fn a_replica_batch_is_empty_until_it_learns() {
     assert!(ready.is_empty(), "an advanced batch is gone");
     ready.advance();
 }
+
+fn commit(slot: u64) -> Message {
+    Message::Commit {
+        from: Party::Node(NodeId(0)),
+        ballot: Ballot {
+            round: 1,
+            node: NodeId(0),
+        },
+        slot: Slot(slot),
+        command: cmd(slot + 1),
+    }
+}
+
+/// A batch that holds only a learned record above a hole (nothing to apply,
+/// send or serve) is not empty.
+#[test]
+fn a_batch_of_writes_alone_is_not_empty() {
+    let mut tier = Tier::new();
+    tier.replicas[0].step(commit(1));
+    let ready = tier.replicas[0].ready();
+    assert_eq!(ready.writes().len(), 1);
+    assert_eq!(ready.messages(), &[]);
+    assert_eq!(ready.read_states(), &[]);
+    assert!(ready.committed().is_empty(), "slot 0 is a hole");
+    assert!(!ready.is_empty());
+    ready.advance();
+}
+
+/// A replica with an apply page of one releases one slot per batch:
+/// `advance_recovery` releases the next, and a relearned slot is counted.
+#[test]
+fn a_small_apply_page_defers_the_walk_to_advance_recovery() {
+    let disk = MemStorage::new(config(10));
+    let mut replica = ReplicaNode::new(
+        &disk,
+        Limits {
+            apply_page: 1,
+            ..Limits::DEFAULT
+        },
+    );
+    // The holes first: slot 0 then opens a walk over all three.
+    for slot in [2, 1, 0] {
+        replica.step(commit(slot));
+    }
+    let mut applied = Vec::new();
+    for _ in 0..3 {
+        let ready = replica.ready();
+        let committed: Vec<Slot> = ready.committed().iter().map(|c| c.0).collect();
+        ready.advance();
+        assert_eq!(committed.len(), 1, "one slot per page: {committed:?}");
+        applied.extend(committed);
+        replica.advance_recovery();
+    }
+    assert_eq!(applied, vec![Slot(0), Slot(1), Slot(2)]);
+    replica.step(commit(1));
+    assert_eq!(replica.counters().relearned, 1);
+    assert_eq!(replica.counters().learned, 3);
+}
+
+/// The learner's marks catch a floor that moved back.
+#[test]
+#[should_panic(expected = "a replica's floor never decreases")]
+fn a_floor_that_moves_back_fails_the_marks() {
+    let mut tier = Tier::new();
+    for slot in 0..3 {
+        tier.replicas[0].step(commit(slot));
+    }
+    tier.replicas[0].floor = Slot(2);
+    let marks = tier.replicas[0].marks();
+    tier.replicas[0].floor = Slot(1);
+    tier.replicas[0].assert_marks_monotone(marks);
+}
+
+/// A replica's invariants catch a floor above its chosen prefix.
+#[test]
+#[should_panic(expected = "floor")]
+fn a_floor_above_the_prefix_fails_the_invariants() {
+    let mut tier = Tier::new();
+    tier.replicas[0].step(commit(0));
+    tier.replicas[0].floor = Slot(9);
+    tier.replicas[0].assert_invariants();
+}

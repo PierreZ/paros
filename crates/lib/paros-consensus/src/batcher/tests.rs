@@ -110,3 +110,26 @@ fn a_scatter_is_dense_and_in_order() {
 fn a_scatter_refuses_a_partial_answer() {
     let _ = Unbatcher::scatter(&[(1, 2), (2, 2)], 0, 3);
 }
+
+/// A write that would carry its lane past the byte limit flushes the lane
+/// first: one byte waiting and four more pass a limit of four.
+#[test]
+fn a_write_past_the_byte_limit_flushes_its_lane_first() {
+    let mut b = Batcher::new(limits(16, 4, 16));
+    assert_eq!(b.push(journal(1), 1, vec![vec![0]]), Vec::new());
+    let out = b.push(journal(1), 2, vec![vec![0; 4]]);
+    assert_eq!(out.len(), 1, "the waiting lane goes first");
+    assert_eq!(out[0].writes, vec![(1, 1)]);
+    assert_eq!(b.pending(), 1, "the new write starts a lane of its own");
+}
+
+/// Every bound of `BatchLimits` is checked on its own.
+#[test]
+fn each_batch_limit_is_checked() {
+    assert!(limits(4, 8, 4).valid());
+    assert!(limits(4, 8, 1).valid());
+    assert!(!limits(0, 8, 1).valid(), "no record");
+    assert!(!limits(4, 0, 1).valid(), "no byte");
+    assert!(!limits(4, 8, 0).valid(), "no flush");
+    assert!(!limits(4, 8, 5).valid(), "a flush past the record limit");
+}
