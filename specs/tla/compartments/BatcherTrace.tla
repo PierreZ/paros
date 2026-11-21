@@ -27,7 +27,9 @@
 (*   - "answer": a writer hears the range of its write. The unbatcher cuts *)
 (*     the range of a landed batch in batch order (`Unbatcher::scatter`):  *)
 (*     the write's position is the batch's position plus the records of    *)
-(*     the writes before it in the batch, and its count is its own.        *)
+(*     the writes before it in the batch, and its count is its own. A     *)
+(*     copy of an answer that the network duplicated is no step: the walk  *)
+(*     records the first copy only.                                        *)
 (* `AnswerHolds` is `OneRange` of `Compartments` for this walk: the range  *)
 (* a write is answered with holds its own records.                         *)
 (***************************************************************************)
@@ -124,6 +126,7 @@ Answer ==
   /\ e.event = "answer" /\ Has("tok") /\ Has("seq") /\ Has("n")
   /\ Made(e.tok)
   /\ e.n = writes[e.tok].n
+  /\ [tok |-> e.tok, seq |-> e.seq, n |-> e.n] \notin answers
   /\ \E x \in landed : \E i \in 1..Len(batches[x.id].ws) :
        /\ batches[x.id].ws[i] = e.tok
        /\ e.seq = x.seq + Records(SubSeq(batches[x.id].ws, 1, i - 1))

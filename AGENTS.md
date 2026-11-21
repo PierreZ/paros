@@ -134,7 +134,9 @@ walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `prox
 `tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
-rules)). Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
+rules)). The trace checks are tested too: each trace spec must refuse about 20 named edits of
+its recorded walks at the edited event or after it (#1308 (mutate recorded traces),
+`trace/mutate.rs`). Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
 `probe!` of the core over all the walks. The walks also rot disks, retire and rejoin nodes,
 admit late nodes, hand the matchmaker set over and move stuck rounds (#1225 (walk moves for the
@@ -188,6 +190,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
+- the edits of recorded traces (#1308 (mutate recorded traces)), in release in the
+  `trace-edits` job: `cargo nextest run --release -p consensus-sim --test traces -E
+  'test(edited) | test(no_record)'`. The `test` job leaves them out.
 - the `mutants` job (pull requests only): cargo-mutants on the lines of
   `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
   pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of

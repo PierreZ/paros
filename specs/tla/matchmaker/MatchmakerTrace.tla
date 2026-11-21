@@ -69,6 +69,15 @@ logVars == <<lprom, lvote, learned, lphase, lnext, lfront, lmsgs>>
 
 e == Trace[l]
 
+\* Whether an event before the current one is a `name` event that agrees
+\* with the current one on each field of `fs`. The walk records some steps
+\* once only (the first `Accept` of a (ballot, slot)): a second record of
+\* such a step is no step of the run.
+TracedBefore(name, fs) ==
+  \E j \in 1..(l - 1) :
+    /\ Trace[j].event = name
+    /\ \A f \in fs : f \in DOMAIN Trace[j] /\ f \in DOMAIN e /\ Trace[j][f] = e[f]
+
 Slots == 0..(TraceNS - 1)
 Owner == TraceOwner
 Vote == [bal : 0..NB, val : Values \cup {None}]
@@ -205,6 +214,7 @@ TWin ==
 
 TPropose ==
   /\ e.event = "propose" /\ IsBallot /\ IsSlot /\ IsValue
+  /\ ~TracedBefore("propose", {"bal", "slot"})
   /\ LET m == [type |-> "2a", bal |-> e.bal, slot |-> e.slot, val |-> e.val] IN
      \/ /\ lphase[e.bal] = "p2"
         /\ lnext[e.bal] = e.slot

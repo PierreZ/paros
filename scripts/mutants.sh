@@ -66,13 +66,15 @@ done < mutants.first/missed.txt
 
 echo "Second pass: $((${#filters[@]} / 2)) survivors of the first pass, against the trace checks."
 # A timeout counts as caught, so the timeout of this pass comes from a run of
-# the same trace checks on the unmutated tree: three times its time, and at
+# the same trace checks on the unmutated tree (the filter of
+# `.cargo/mutants-tlc.toml`): three times its time, and at
 # least 60 s. With a fixed timeout below that time, every mutant timed out
 # and was counted as caught. The run also proves that the trace checks pass
 # without a mutant, so a mutant that fails them is caught by its own change.
 start=$(date +%s)
 cargo nextest run --cargo-profile mutants --features paros-consensus/serde \
-  -p paros-consensus -p consensus-sim -E 'binary(traces)' --test-threads 2
+  -p paros-consensus -p consensus-sim \
+  -E 'binary(traces) and not test(edited) and not test(no_record)' --test-threads 2
 baseline=$(($(date +%s) - start))
 timeout=$((baseline * 3 > 60 ? baseline * 3 : 60))
 echo "Second pass: the unmutated trace checks took ${baseline} s; the timeout of a mutant is ${timeout} s."

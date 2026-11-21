@@ -48,6 +48,16 @@ VARIABLES l,      \* the index of the next event
 vars == <<l, gen, phase, wm, reg, held, acked, boots, votes>>
 
 e == Trace[l]
+
+\* Whether an event before the current one is a `name` event that agrees
+\* with the current one on each field of `fs`. The walk records a
+\* registration and a GC ack of a (matchmaker, ballot) the first time only,
+\* and a decree vote when the matchmaker's vote changes: a second record of
+\* such a step is no step of the run.
+TracedBefore(name, fs) ==
+  \E j \in 1..(l - 1) :
+    /\ Trace[j].event = name
+    /\ \A f \in fs : f \in DOMAIN Trace[j] /\ f \in DOMAIN e /\ Trace[j][f] = e[f]
 Has(f) == f \in DOMAIN e
 
 Matchmakers == TraceMatchmakers
@@ -110,6 +120,7 @@ Boot ==
 
 Vote ==
   /\ e.event = "vote" /\ IsMatchmaker /\ IsGen /\ Has("bal") /\ Has("set")
+  /\ ~TracedBefore("vote", {"mm", "gen", "bal"})
   /\ LET g == e.gen IN
      /\ e.mm \in Set(g) /\ gen[e.mm] = g /\ phase[e.mm] # "inactive"
      /\ \A x \in e.set : \E r \in boots : r.mm = x /\ r.gen = g + 1 /\ r.set = e.set
@@ -131,6 +142,7 @@ Activate ==
 
 Register ==
   /\ e.event = "register" /\ IsMatchmaker /\ Has("bal") /\ e.bal \in Ballots
+  /\ ~TracedBefore("register", {"mm", "bal"})
   /\ phase[e.mm] = "active" /\ e.bal >= wm[e.mm]
   /\ reg' = [reg EXCEPT ![e.mm] = @ \cup {e.bal}]
   /\ held' = held \cup {<<e.mm, gen[e.mm], e.bal>>}
@@ -138,6 +150,7 @@ Register ==
 
 GcAck ==
   /\ e.event = "gcack" /\ IsMatchmaker /\ Has("bal") /\ e.bal \in Ballots
+  /\ ~TracedBefore("gcack", {"mm", "bal"})
   /\ phase[e.mm] = "active"
   /\ wm' = [wm EXCEPT ![e.mm] = IF e.bal > @ THEN e.bal ELSE @]
   /\ reg' = [reg EXCEPT ![e.mm] = {b \in @ : b >= wm'[e.mm]}]
