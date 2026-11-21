@@ -11,8 +11,13 @@
 (* are the rules of `Truncation.tla` for the floor:                        *)
 (*   - "fold": the first party that applied a slot names the end of the    *)
 (*     records of the slot (`high`, 0 when it holds none) and `first_seq`  *)
-(*     after the slot (`first`). The slots come in order. The fold is a    *)
-(*     function of the chosen log, so one fold serves every node;          *)
+(*     after the slot (`first`). The slots come in order, each one chosen. *)
+(*     The records of a slot end at or above `next_seq` (the end of the    *)
+(*     slots before), and `first_seq` never goes down nor past `next_seq`. *)
+(*     The fold is a function of the chosen log, so one fold serves every  *)
+(*     node. The commands are fingerprints here, so TLC does not judge how *)
+(*     many records a write adds; the `JOURNAL_FOLD` oracle of the walk    *)
+(*     judges the fold of each slot;                                       *)
 (*   - "compact": a node moved its floor to `floor` (`Compact`). It holds  *)
 (*     every slot below the floor (`CompactWhen` = "prefix"), the floor    *)
 (*     goes up, and each record below the floor is below `first_seq` once  *)
@@ -110,10 +115,19 @@ TRestart ==
   /\ Reboot(e.node, e.upto, e.led)
   /\ UNCHANGED floorVars
 
+\* The largest of a set of integers.
+Highest(S) == CHOOSE x \in S : \A y \in S : y <= x
+
+\* The end of the records of the slots folded so far: `next_seq`.
+NextSeq == Highest({0} \cup {F(s).high : s \in 0..(Len(fold) - 1)})
+
 TFold ==
   /\ e.event = "fold" /\ IsSlot /\ Has("high") /\ Has("first")
   /\ e.slot = Len(fold)
+  /\ \E v \in Values : Chosen(e.slot, v)
+  /\ e.high = 0 \/ e.high >= NextSeq
   /\ e.first >= IF fold = <<>> THEN 0 ELSE F(Len(fold) - 1).first
+  /\ e.first <= Highest({NextSeq, e.high})
   /\ fold' = Append(fold, [high |-> e.high, first |-> e.first])
   /\ UNCHANGED <<vars, floor>>
 

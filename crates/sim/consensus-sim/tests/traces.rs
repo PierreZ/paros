@@ -16,7 +16,7 @@
 use consensus_sim::batcher::{self, BatchEvent, BatchModel, BatchMutant};
 use consensus_sim::cluster::{Cluster, ClusterEvent, Flavor, Mutant, Spec, Steer};
 use consensus_sim::decree::{self, DecreeEvent, DecreeModel, DecreeMutant};
-use consensus_sim::trace::{Verdict, require_tlc, spec};
+use consensus_sim::trace::{Trace, TraceCheck, Verdict, mutate, require_tlc, spec};
 use moonpool_walk::Walk;
 use paros_consensus::decree::Phase1Rule;
 
@@ -750,4 +750,273 @@ fn tlc_refuses_a_lane_sent_out_of_push_order() {
         matches!(event, BatchEvent::Flush { .. }),
         "seed {seed}: TLC refused {event:?}, not a flush"
     );
+}
+
+/// The recorded traces of `spec` that the edits work on: the walks of
+/// `flavor` that [`accepts`] would check, the first seed and each seed
+/// that meets a rule of the spec no trace before met.
+fn recorded(spec: Spec, flavor: &Flavor) -> Vec<Trace> {
+    let rules = spec.rules();
+    let mut unmet: Vec<_> = rules.iter().collect();
+    let mut traces = Vec::new();
+    for seed in 1..=300 {
+        if unmet.is_empty() {
+            break;
+        }
+        let run = cluster_walk_of(flavor.clone(), 150)
+            .replay(seed)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let events = kept(spec, &run);
+        if events.len() > 200 {
+            continue;
+        }
+        let before = unmet.len();
+        unmet.retain(|rule| !rule.met(&events));
+        if unmet.len() == before && !traces.is_empty() {
+            continue;
+        }
+        traces.push(spec.trace(flavor, &events));
+    }
+    traces
+}
+
+/// The decree and batcher walks the edits may work on. A walk costs
+/// milliseconds; TLC checks only the walks that an edit works on.
+const EDITED_SEEDS: u64 = 40;
+
+/// The least number of edits that find a place in the recorded traces of
+/// each trace spec.
+const MIN_EDITS: usize = 20;
+
+/// TLC refuses every edit of the recorded traces at or after the edited
+/// event (#1308 (mutate recorded traces)). Each edit runs on the first
+/// recorded trace that has a place for it ([`mutate::Edit::apply`]). An
+/// edit that TLC accepts is a binding that accepts too much: fix the trace
+/// spec, never the edit's place to dodge it.
+fn refuses_the_edits(name: &str, check: &TraceCheck, recorded: &[Trace]) {
+    require_tlc(check);
+    assert!(!recorded.is_empty(), "{name}: a recorded trace");
+    let mut placed = 0;
+    let mut wrong = Vec::new();
+    let mut accepted = vec![false; recorded.len()];
+    for edit in mutate::edits() {
+        let Some((index, mutant)) = recorded
+            .iter()
+            .enumerate()
+            .find_map(|(index, trace)| Some((index, edit.apply(trace)?)))
+        else {
+            continue;
+        };
+        if !accepted[index] {
+            // The events before the edited one are recorded ones: TLC
+            // accepts the whole recorded trace.
+            let verdict = check.check(&recorded[index]).expect("TLC gives a verdict");
+            assert_eq!(verdict, Verdict::Accepted, "{name}: recorded trace {index}");
+            accepted[index] = true;
+        }
+        placed += 1;
+        let verdict = check.check(&mutant.trace).expect("TLC gives a verdict");
+        // The first event that TLC does not take: the event no behaviour
+        // matches, or the event after which an invariant of the trace
+        // breaks (`matched` events are matched then).
+        let refused = match &verdict {
+            Verdict::Rejected(rejection) => Some(rejection.index),
+            Verdict::InvariantViolated { matched, .. } => matched.checked_sub(1),
+            Verdict::Accepted => None,
+        };
+        eprintln!(
+            "{name}: {} at {}: refused at {refused:?}",
+            edit.name, mutant.at
+        );
+        match refused {
+            Some(index) if index >= mutant.at => {}
+            Some(index) => wrong.push(format!(
+                "{}: refused at {index}, before the edited event {}: {verdict:?}",
+                edit.name, mutant.at
+            )),
+            None => wrong.push(format!(
+                "{}: accepted (edited event {})",
+                edit.name, mutant.at
+            )),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{name}: TLC must refuse every edit:\n{}",
+        wrong.join("\n")
+    );
+    assert!(
+        placed >= MIN_EDITS,
+        "{name}: only {placed} edits find a place in the recorded traces, at least {MIN_EDITS} must"
+    );
+}
+
+/// The edits of the recorded walks of `flavor`, judged by `spec`.
+fn refuses_the_cluster_edits(spec: Spec, flavor: &Flavor) {
+    refuses_the_edits(&format!("{spec:?}"), &spec.check(), &recorded(spec, flavor));
+}
+
+#[test]
+fn tlc_refuses_the_edited_decree_traces() {
+    let recorded: Vec<Trace> = (1..=EDITED_SEEDS)
+        .map(|seed| {
+            let run = decree_walk(Phase1Rule::Quorum, DecreeMutant::None)
+                .replay(seed)
+                .unwrap_or_else(|failure| panic!("{failure}"));
+            decree::trace(Phase1Rule::Quorum, run.events())
+        })
+        .collect();
+    refuses_the_edits("DecreeTrace", &spec("decree", "DecreeTrace"), &recorded);
+}
+
+#[test]
+fn tlc_refuses_the_edited_batcher_traces() {
+    let recorded: Vec<Trace> = (1..=EDITED_SEEDS)
+        .filter_map(|seed| {
+            let run = batcher_walk(BatchMutant::None).replay(seed).ok()?;
+            let events: Vec<BatchEvent> = run.events().cloned().collect();
+            (events.len() <= 200).then(|| batcher::trace(&events))
+        })
+        .collect();
+    refuses_the_edits(
+        "BatcherTrace",
+        &spec("compartments", "BatcherTrace"),
+        &recorded,
+    );
+}
+
+#[test]
+fn tlc_refuses_the_edited_multi_paxos_traces() {
+    refuses_the_cluster_edits(Spec::MultiPaxos, &Flavor::multi_paxos_five());
+}
+
+#[test]
+fn tlc_refuses_the_edited_proxy_leader_traces() {
+    refuses_the_cluster_edits(Spec::ProxyLeader, &Flavor::proxies());
+}
+
+#[test]
+fn tlc_refuses_the_edited_leader_handoff_traces() {
+    refuses_the_cluster_edits(Spec::LeaderHandoff, &Flavor::handoff());
+}
+
+#[test]
+fn tlc_refuses_the_edited_matchmaker_traces() {
+    refuses_the_cluster_edits(Spec::Matchmaker, &Flavor::matchmakers());
+}
+
+#[test]
+fn tlc_refuses_the_edited_matchmaker_grid_traces() {
+    refuses_the_cluster_edits(Spec::MatchmakerGrid, &Flavor::reconfiguring());
+}
+
+#[test]
+fn tlc_refuses_the_edited_read_traces() {
+    refuses_the_cluster_edits(Spec::Reads, &Flavor::lagging_reads());
+}
+
+#[test]
+fn tlc_refuses_the_edited_truncation_traces() {
+    refuses_the_cluster_edits(Spec::Truncation, &Flavor::compaction());
+}
+
+#[test]
+fn tlc_refuses_the_edited_compartment_traces() {
+    refuses_the_cluster_edits(Spec::Compartments, &Flavor::compartments_compacting());
+}
+
+#[test]
+fn tlc_refuses_the_edited_fault_traces() {
+    refuses_the_cluster_edits(Spec::Faults, &Flavor::disk_faults());
+}
+
+#[test]
+fn tlc_refuses_the_edited_retirement_traces() {
+    refuses_the_cluster_edits(Spec::Retire, &Flavor::retiring());
+}
+
+#[test]
+fn tlc_refuses_the_edited_handover_traces() {
+    refuses_the_cluster_edits(Spec::Handover, &Flavor::handover());
+}
+
+/// The control of `TraceLearnRecordsHeld`: a trace of `spec` with the
+/// record of a learn dropped from its batch. TLC reports the invariant at
+/// the learn or after it.
+fn learn_records_held(spec: Spec, flavor: &Flavor) {
+    let check = spec.check();
+    require_tlc(&check);
+    let dropped = recorded(spec, flavor).iter().find_map(|trace| {
+        let events = trace.events();
+        let field = |e: &moonpool_tla::Value, f: &str| match e {
+            moonpool_tla::Value::Record(r) => r.get(f).cloned(),
+            _ => None,
+        };
+        let is = |e: &moonpool_tla::Value, name: &str| field(e, "event") == Some(name.into());
+        // A record whose learn is earlier in its batch: every event between
+        // them is of the same node.
+        let (learn, k) = (1..events.len()).find_map(|k| {
+            let r = &events[k];
+            if !is(r, "record") {
+                return None;
+            }
+            (0..k)
+                .rev()
+                .take_while(|&i| !is(&events[i], "restart"))
+                .find(|&i| {
+                    is(&events[i], "learn")
+                        && field(&events[i], "node") == field(r, "node")
+                        && field(&events[i], "slot") == field(r, "slot")
+                        && events[i + 1..k].iter().all(|b| {
+                            ["node", "acc", "by", "owner"]
+                                .iter()
+                                .find_map(|f| {
+                                    field(b, f).filter(|v| matches!(v, moonpool_tla::Value::Str(_)))
+                                })
+                                .is_none_or(|n| Some(n) == field(r, "node"))
+                        })
+                })
+                .map(|i| (i, k))
+        })?;
+        let mut edited = trace.prefix(0);
+        for (i, event) in events.iter().enumerate() {
+            if i == k {
+                continue;
+            }
+            let moonpool_tla::Value::Record(mut fields) = event.clone() else {
+                unreachable!("an event is a record")
+            };
+            let Some(moonpool_tla::Value::Str(name)) = fields.remove("event") else {
+                unreachable!("an event has a name")
+            };
+            edited.event(&name, fields);
+        }
+        consensus_sim::trace::whole(&mut edited);
+        Some((learn, edited))
+    });
+    let (learn, edited) = dropped.expect("a recorded trace has the record of a learn");
+    match check.check(&edited).expect("TLC gives a verdict") {
+        Verdict::InvariantViolated {
+            invariant, matched, ..
+        } => {
+            assert_eq!(invariant, "TraceLearnRecordsHeld");
+            // The invariant reads ahead to the end of the batch: it breaks
+            // at the learn whose record is gone.
+            assert!(
+                matched > learn,
+                "{spec:?}: the learn at {learn} whose record is gone breaks it, not {matched}"
+            );
+        }
+        other => panic!("{spec:?}: TLC does not see a learn with no record: {other:?}"),
+    }
+}
+
+#[test]
+fn tlc_sees_a_learn_with_no_record_on_multi_paxos() {
+    learn_records_held(Spec::MultiPaxos, &Flavor::multi_paxos_five());
+}
+
+#[test]
+fn tlc_sees_a_learn_with_no_record_on_the_handoff() {
+    learn_records_held(Spec::LeaderHandoff, &Flavor::handoff());
 }

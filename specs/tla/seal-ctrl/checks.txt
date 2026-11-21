@@ -1,0 +1,39 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# The old grid (three acceptors, F = 1) and the next configuration (one
+# acceptor, or three for `_cfg3`), a seal by a leader of the next
+# configuration, CTRL faulty records in the old grid. One slot and three
+# ballots unless the name ends in `_ns2` (two slots) or `_nb4` (four ballots).
+#
+# The rule: the end counts faulty votes ("any").
+safety               pass       ci
+safety_two           pass       ci
+safety_nb4           pass       ci
+safety_ns2           pass       ci
+safety_cfg3          pass       long
+live                 pass       ci
+live_ns2             pass       ci
+live_down            pass       ci
+reach_faulty         violation  ci
+#
+# The control: the end counts readable votes only.
+end_readable         violation  ci
+#
+# Rule 3 of #1313: Phase 1 reads the whole sealed grid, with the end of
+# readable votes. Agreement holds, the end is below a chosen slot.
+read_all             pass       ci
+read_all_nb4         pass       long
+read_all_ns2         pass       long
+end_readable_cover   violation  ci
+#
+# Rule 2 of #1313: the seal waits for the repair probe, with the end of
+# readable votes. Agreement holds and the seal is live, the end is below a
+# chosen slot.
+wait                 pass       ci
+wait_nb4             pass       long
+wait_live            pass       ci
+wait_cover           violation  ci

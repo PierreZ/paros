@@ -18,6 +18,31 @@ A long check that does not finish has a time bound in minutes as a fourth word o
 violation was found until then. A line with no bound must finish. Every bounded line is a
 bounded run, never a proof: its table line in this file says so.
 
+A line can also end with `seed=<n>`: TLC runs with `-seed <n>`. The inductive checks of
+`multi-paxos/` draw random states, and the seed makes each run draw the same states.
+
+## Inductive invariants
+
+TLC checks a bounded instance only. An inductive invariant `Inv` closes that gap: `Inv` holds in
+the initial state, and each step from a state where `Inv` holds goes to a state where `Inv` holds.
+Then `Inv` holds in every reachable state, at every size and length of run, and so does each safety
+property that `Inv` implies. This is step 1 of #1307 (inductive invariants, then proofs); the proofs
+(TLAPS, then Lean / Veil) are its later steps. The method is the one of Antithesis's
+`proof/MCInv.tla` (antithesishq/etcd-raft-formalized) and of Lamport's note "Using TLC to Check
+Inductive Invariance".
+
+| Model | `Inv` | How TLC checks it | Checks |
+|---|---|---|---|
+| `decree/` | the invariant of Lamport's proved `Paxos.tla`: each proposal is `SafeAt` its ballot, a vote is for the proposal of its ballot, a promise reports the highest vote below it, an acceptor's vote is its highest; a wiped acceptor that takes no step again counts as one that will not vote | every state of the instance where `Inv` holds (`IndInit` in `MC.tla` builds them from smaller choices), then one step: 3 acceptors, 2 values, one wipe; 13 thousand states at 2 ballots, 1.3 million at 3 ballots | `inductive`, `inductive_three` pass; `inductive_ignore` (a proposer that ignores the reports) violation |
+| `multi-paxos/` | the decree invariant for each slot, plus: a record is a vote or a learn of a value chosen at or below it, a promise reports the record of each slot at or above `from`, each slot at or above a leader's allocator is free and holds no proposal of its ballot, the disk is the memory (`Durable = "before"`) | random states where `Inv` holds (`IndInit` draws 100,000 with `seed=1`), then one step: the states are too many to list (more than four million at one slot and two ballots). 3 acceptors, 2 slots, one restart, one wipe | `inductive` (2 ballots), `inductive_three` (3 ballots), `inductive_grid` (a 2 x 2 grid, rounds in any column) pass; `inductive_prefix` (a prefix allocator) and `inductive_lowest` (the lowest report) violation |
+
+Each inductive check also has the safety properties of its model as invariants, so TLC checks
+that `Inv` implies them on every state it starts from. `InvApplies` names the configurations
+that `Inv` covers: `decree/` with no wipe or with a wiped acceptor that takes no step
+(`init.cfg`, where `Phase1 = "every"` keeps a wiped acceptor's empty report safe, is not
+covered), `multi-paxos/` with `Durable = "before"` and `Identity = TRUE`. A pass of a
+`multi-paxos/` check says that no drawn state breaks `Inv` in one step; it is not a proof.
+
 ## Layout
 
 Each folder is one model:
@@ -104,7 +129,7 @@ Each experiment has one folder for each design, with the same layout as a model,
   record check of the reader (rule 1) passes too. An acceptor of a retired segment that loses its
   state breaks the promise fence alone; the belief half of the fence with the refusal of an
   acceptor that did not hear closes it, and so does the record check. Pierre chose the fence of
-  the code, with no record check (2026-11-20, `docs/architecture/02-data-plane.md` §2.10).
+  the code, with no record check (2026-11-20, `docs/journal/03-segments-and-records.md` §J3.1).
 - `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
   ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
   the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
@@ -140,9 +165,10 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
 | Two seals in a row: a chain of segments with an empty segment and a seal before the `Fence`; where the boundary leader uuid lives (the segment record, or the journal metadata with a `Fence` at the next segment) | the journal steps are designed, not built | `seal-chain/` | #1303 (two seals in a row) |
+| The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
-| The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/architecture/04-roles.md` §4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
+| The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -906,7 +932,7 @@ meet, so the read finds that acceptor. On the full grid two rows do not meet
 (`grid/grid_full_rows`). Two rules close the gap, and each check passes: a full grid that
 refuses a change of members (`grid_full_static`), and a seal that reaches each row
 (`grid_full_seal`). Pierre chose the seal that reaches each row on 2026-11-19 (#1102, decision 31
-in `docs/architecture/02-data-plane.md` section 2.5); the code is #1209 (seal each row of a full
+in `docs/journal/02-data-plane.md` §J2.5); the code is #1209 (seal each row of a full
 grid).
 
 The fence of the `PreReadAck` (#1099 (rework 1.10), findings 1 and 11 of the review of
@@ -1572,7 +1598,7 @@ reported a vote), or, above the new frontier, it is free again. The model has:
   delivers a request at most one time (with `Copies`, a few more times).
 - **The edge refusal**: the leader refuses a merged batch over its record limit (`TooLarge`)
   before it allocates a slot. The batcher lowers its limit (`lower_limits`) and sends each write
-  of the batch again, alone (`docs/architecture/02-data-plane.md` §2.4).
+  of the batch again, alone (`docs/journal/02-data-plane.md` §J2.4).
 - **The held answer**: the leader allocates the frontier slot, and answers once the slot and
   every slot below it are chosen, with the `seq` that its fold gives the batch, and only when the
   slot chose the batch that the leader proposed there. A new leader holds no answer of the old
@@ -2063,7 +2089,7 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 |---|---|
 | `write` | `acks` of one column of `New`, with the move |
 | `election` | a matchmaker majority; a Phase-1 quorum of `Old`; a Phase-1 quorum of `New` |
-| `read` | a Phase-1 quorum of the answers to `GridReadTargets(New)`; a matchmaker majority (the segment-record check that #1254 proposed; the journal does not keep it, `docs/architecture/02-data-plane.md` §2.10, so this wait asks more than the read needs) |
+| `read` | a Phase-1 quorum of the answers to `GridReadTargets(New)`; a matchmaker majority (the segment-record check that #1254 proposed; the journal does not keep it, `docs/journal/03-segments-and-records.md` §J3.1, so this wait asks more than the read needs) |
 | `seal` | a Phase-1 quorum of `Old` (the highest vote); a matchmaker majority (the compare-and-set of the end slot) |
 | `retire` | `F + 1` replicas of the segment hold it; a matchmaker majority |
 | `offload` | a matchmaker majority (the offload mark, #1256) |
@@ -2189,19 +2215,19 @@ The answer to #1259:
   again; without an idempotent answer the record refuses it, and the controller believes a
   reshape failed that took place (`noidem`). The record keeps the identity of the call that
   opened each segment (term, expected configuration, grid) and answers it "ok" again. Pierre
-  decided this rule on 2026-11-20 (`docs/architecture/02-data-plane.md` §2.12).
+  decided this rule on 2026-11-20 (`docs/journal/06-controller.md` §J6.1).
 - **The bound must be a guard of the record, not only a policy of the controller.** A grid outside
   `F + 1 <= acks <= rows - F` can open and never come into force with one acceptor down; the
   retire guard then blocks every heal (`live_nobound`).
 - **Trace checking.** The controller has no code yet. The model's steps (`ReadTerm`, `Elect`,
   `Plan`, `Call`, `Process`, `Receive`, `SealIn`, `Retire`) are the events a trace spec will
-  follow once the consensus-sim flavor of the controller loop exists (#1261 (grid controller
+  follow once the `journal-sim` walk of the controller loop exists (#1261 (grid controller
   decision tests), after #1189).
 
 ### `degraded-reshape/`: a reshape when a column is below quorum, for #1258 (reshape with a column below quorum)
 
-The journal grid is `Grid { rows: 2F + 1, cols: P, acks: F + 1 }` (section 2.11 of
-`docs/architecture/02-data-plane.md`). A column is below quorum when fewer than `F + 1` of its
+The journal grid is `Grid { rows: 2F + 1, cols: P, acks: F + 1 }` (§J5.1 of
+`docs/journal/05-quorums-and-failures.md`). A column is below quorum when fewer than `F + 1` of its
 acceptors are live. Then no Phase-1 quorum of the grid exists, because Phase 1 needs `F + 1` of
 every column. A write still completes in another column (#533 (move a stuck round)). So no new
 leader can be elected, and a reconfiguration through a full Phase 1 is blocked. The question of
@@ -2284,9 +2310,9 @@ The answer to #1258:
      bypass costs one round trip to one old column before the first write, not a full Phase 1.
      With one promise less it fails (`block_propose_short`).
 
-  Both change the rule of #579, which is not built. Pierre chose rule 2 on 2026-11-20 (section
-  2.13 of `docs/architecture/02-data-plane.md`), with the fence of the code on the read path
-  (section 2.10, #1254).
+  Both change the rule of #579, which is not built. Pierre chose rule 2 on 2026-11-20 (§J5.5 of
+  `docs/journal/05-quorums-and-failures.md`), with the fence of the code on the read path
+  (§J3.3, #1254).
 - **The limit of the rule.** A reshape away from a column below quorum needs a live leader: the
   first leader after the loss cannot run Phase 1 over the old grid. If the leader is lost too, the
   journal stops writes until a member of the column comes back, as the grid controller's "hold and
@@ -2304,7 +2330,7 @@ The answer to #1258:
 ### `health/`: the health measures of a journal's grid, for #1260 (journal health measures)
 
 The grid controller acts on counts: the live acceptors of a column against a threshold
-(`docs/architecture/05-failure-model-and-zones.md` section 5.1). The protocol acts on quorums.
+(`docs/journal/06-controller.md` §J6.2). The protocol acts on quorums.
 This model checks that each count says what the quorums of `grid/Grid.tla` say, on every grid
 that the fenced reshape accepts (`F + 1 <= acks <= rows - F` with `F >= 1`, so `rows >= 3` and
 `2 <= acks <= rows - 1`), up to 9 acceptors, for every set of live acceptors. The state is one
@@ -2319,7 +2345,7 @@ never changes, so each invariant is checked once on each state, as in `grid/`.
 | `Zones` | `0`: the grid checks. `2`, `3`: the zone checks, every member live and every map of up to six members to the zones. |
 
 The invariants: `ElectableMeaning`, `WritableMeaning` and `HoldMeaning` (each count against its
-quorum predicate); `HoldIsWritable` (the hold of section 2.13 can complete exactly when a column
+quorum predicate); `HoldIsWritable` (the hold of §J5.5 can complete exactly when a column
 can write); `SpareMeaning` (a spare in every column exactly when one more loss leaves every column
 writable and an election possible); `OneState` (each live set is in exactly one state);
 `ActionCanRun` (the fixed action of each state can run, or nothing can); `PartitionedOneSpare`
@@ -2352,8 +2378,8 @@ decision tests)).
 
 Compartmentalized Paxos says that every replica executes every write (sections 3.3 and 8.5 of
 `docs/references/papers/scaling-rsm-compartmentalization`), so the replicas bound write
-throughput. In design A each segment has its own replica set (`docs/architecture/02-data-plane.md`
-section 2.10). The model checks that a write can go to the replicas of its segment only.
+throughput. In design A each segment has its own replica set (`docs/journal/03-segments-and-records.md`
+§J3.1). The model checks that a write can go to the replicas of its segment only.
 
 The journal has a sealed segment S1 (slots `0 .. K - 1`) with the replica set R1, and the open
 segment S2 (slots `K .. NS - 1`) with the disjoint replica set R2. The log is abstract (the leader
@@ -2435,7 +2461,7 @@ The answer to #1271:
 Truncation is driven by the user only (no retention policy, no cursors; Pierre, 2026-11-19): a
 `Truncate` decided by Paxos and judged at apply raises `first_seq`. `truncation/` and
 `truncation-reconfig/` check it on plain Multi-Paxos and across one reconfiguration; this model
-checks it with segments (`docs/architecture/02-data-plane.md` section 2.10).
+checks it with segments (`docs/journal/03-segments-and-records.md` §J3.1).
 
 The journal has a sealed segment S1 (slots `0 .. K - 1`, replica set R1) and the open segment S2
 (slots `K .. NS - 1`, replica set R2), as in `segment-replicas/`. One writer, so no leader uuid
@@ -2472,6 +2498,8 @@ offloaded S1, and is "trunc" for a trimmed S1.
 | `trim_open` | ci | violation of `Findable`: the open S2 is trimmed when its range so far is below the floor; a later write of S2 has nowhere to live |
 | `acc_floor` | ci | violation of `Ends`: the acceptors of S1 compact to the decided floor before a replica of R1 applied S1; nobody can fold S1, the boundary state is never written, and R2 never starts |
 | `nojump` | ci | violation of `Ends`: no `TrimmedTo`; a replica of R2 behind the floor waits for ever for a slot that the acceptors and its peer dropped |
+| `crash_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (23.5 million distinct states, depth 26, 3.76 million states left on the queue), no violation; run of the second Fable review of the journal plan, 2026-11-20. A cut that finishes is #1321 |
+| `live_all` | long | pass, bounded: did not finish in 38 minutes with 2 workers (16.7 million distinct states, depth 20, 6.2 million states left and growing), no violation; `Ends` is checked as an invariant on a prefix of the state space only. Same run, same issue |
 
 The answer to #1276:
 
@@ -2599,8 +2627,9 @@ record is in the old segment:
 
 ### `segment-records/`: segment records across a matchmaker set handover, for #1275
 
-In design A (`docs/architecture/02-data-plane.md` section 2.10) the matchmakers of a journal hold
-its segment records and its matchmaker record (the controller term, the leader uuid). Every change
+In design A (`docs/journal/03-segments-and-records.md` §J3.1) the matchmakers of a journal hold
+its segment records and its matchmaker record (the controller term; the leader uuid of the
+boundary state is in the segment record since #1303, `seal-chain/`). Every change
 is a compare-and-set on that state: the seal, the retire, the offload mark, the controller
 election and the reshape call. `handover/` checks the floor and the configuration register across
 a handover of the matchmaker set, but it has no segment records. This model runs each record write
@@ -2662,7 +2691,7 @@ The answer to #1275:
 
 ### `offload/`: the offloader and the races of offload, for #1256
 
-In design A (`docs/architecture/02-data-plane.md` section 2.10) a sealed segment goes to an object
+In design A (`docs/journal/03-segments-and-records.md` §J3.1) a sealed segment goes to an object
 store, and its record in the journal's matchmaker record says `offloaded`. The upload is done by
 the offloader, a stateless role (Pierre, 2026-11-20). For each retired segment it reads the
 segment from a replica of the segment, builds the object with deterministic bytes, writes it with
@@ -2803,11 +2832,78 @@ same rules. Pierre chose the segment record on 2026-11-20.
   metadata as it is (`meta_blank`; `meta_wait` stops the journal, unless a seal waits for the
   `Fence`, `meta_guard_live`). It also needs the `Fence` slot and, with the gap fill, the refusal
   rule of #1302. Here a segment chooses at most one `Fence`; a real log with leader changes can
-  choose two copies, and then a replica must apply only the first (`fence-gap/`, #1302).
+  choose two copies, and then a replica must apply only the first (#1302; no model of that case
+  is in the tree, because the design has no `Fence` slot).
 
 What is not in the model: the crashes and the reads inside one replica set (`segment-replicas/`),
 the seal end and the agreement (`experiments/segments/a/`, `multi-paxos/`), the register across a
 matchmaker handover (`segment-records/`), multi-writer mode (`multi-writer/`).
+
+### `seal-ctrl/`: the seal end against a CTRL faulty record, for #1313
+
+The first leader of the next configuration writes the end of the old segment once, after its
+Phase 1: one above the highest slot where its Phase 1 saw a vote in the old grid, and a later
+Phase 1 reads the old grid only below the end (`docs/journal/03-segments-and-records.md` §J3.1). CTRL
+(`truncation/`, #1216) lets a boot find a record damaged, with its ballot known and its value
+lost. The second review of the journal plan (new finding 1) asked what a faulty report counts for
+in the end: if only readable votes count, the end can land at or below a chosen slot whose top copy
+rotted, and the next leader then reads nothing there. No model combined the two. This one does.
+
+The old grid is one column of three acceptors (`F = 1`); the next configuration has one acceptor
+(three in `_cfg3`). Ballot 1 is the old grid's leader, in Phase 2 from the start. Each later ballot
+is a leader of the next configuration: it reads the end at matchmaking, runs Phase 1 over both
+configurations (a promise quorum of each, Matchmaker Paxos), proposes in its own configuration
+only, and the first one that finished Phase 1 writes the end by compare-and-set. Phase 1 has the
+tri-state tally of `truncation/` (a faulty report above the highest readable one does not qualify;
+the qualifying answers need a quorum of each configuration that counts at the slot; else the slot
+is blocked and the repair probe decides it on later promises of the same ballot), and the frontier
+counts faulty reports, as `proposer.rs` does. A boot may find a faulty record on any old acceptor
+at any time. Each ballot writes one command (`v1` for the old leader, `v2` for the next ones), and
+a message can arrive late, two times or never.
+
+| Constant | Values (first: the rule that passes) |
+|---|---|
+| `EndRule` | `any`: the end counts every vote of the old grid that the sealer's Phase 1 saw, faulty votes too. `readable`: readable votes only. |
+| `ReadOld` | `belowEnd`: a Phase 1 that read an end reads the old grid only below it. `all`: it reads the whole old grid (rule 3 of #1313). |
+| `SealWait` | `none`: the sealer writes the end from the promises of its win. `repaired`: it writes the end only once its repair probe closed every blocked slot, from every promise it holds then (rule 2 of #1313). |
+
+Safety: `Agreement` (no slot chooses two values, across the seal) and `EndCovers` (the end is above
+every slot that the old grid chose: the old replicas fold only the slots below the end into the
+boundary state, and the old grid retires once `F + 1` of them hold those slots). Liveness: `Ends`,
+written as an invariant (every step is bounded, so a run ends where no step is enabled; then the
+end is written and every slot that the old grid chose is chosen in the next configuration too),
+with one faulty record, or with one old acceptor down (`live_down`).
+
+| Check | CI | Result |
+|---|---|---|
+| `safety`, `safety_two`, `safety_nb4`, `safety_ns2` | ci | pass: `Agreement`, `EndCovers` (22.7 thousand, 51.4 thousand, 1.27 million, 840 thousand distinct states; `safety_two` has two faulty records, `safety_nb4` four ballots, `safety_ns2` two slots) |
+| `safety_cfg3` | long | pass: three acceptors in the next configuration (1.2 million distinct states, 5 minutes) |
+| `live`, `live_ns2`, `live_down` | ci | pass: `Ends` |
+| `reach_faulty` | ci | violation: the end is written while an old acceptor holds a faulty record at a slot that the old grid chose |
+| `end_readable` | ci | violation of `Agreement`: `v1` is chosen at slot 0 by `a1` and `a3`; `a1` finds its record faulty; the sealer hears `a1` (faulty) and `a2` (no vote), so slot 0 is blocked and the end of readable votes is 0; the next leader reads the old grid below 0, sees nothing at slot 0 and chooses `v2` there |
+| `read_all` | ci | pass: `Agreement` (rule 3: the next leader sees the faulty record and the tally blocks the slot) |
+| `read_all_nb4`, `read_all_ns2` | long | pass: `Agreement` |
+| `end_readable_cover` | ci | violation of `EndCovers` with rule 3: the same run, the end is 0 under a chosen slot |
+| `wait`, `wait_live` | ci | pass: `Agreement`, `Ends` (rule 2) |
+| `wait_nb4` | long | pass: `Agreement` |
+| `wait_cover` | ci | violation of `EndCovers` with rule 2: `a2` votes `v1` at slot 0 for the old leader, the next configuration took `v1` at ballot 2, `a2`'s record rots, ballot 3 hears `a2` (faulty, below the readable vote of ballot 2, so nothing blocks) and writes the end 0; then `a3` takes the old leader's `v1` and the old grid chooses slot 0 above the end |
+
+The answer to #1313: **the end counts faulty votes** (rule 1, without its second half). The end is
+one above the highest slot where the sealer's Phase 1 saw any vote in the old grid, a faulty vote
+too: the frontier of its Phase 1 over the old grid. With that end the reading below the end stays
+safe, no seal waits for the repair probe, and the seal is live with a faulty record or with one old
+acceptor down. The repair probe is not needed before the seal: a blocked slot below the end stays in
+the tally of every later Phase 1. Rules 2 and 3 keep `Agreement` but not `EndCovers`: with an end of
+readable votes, the old grid can still hold a chosen slot at or above the end (in `wait_cover` the
+vote under the faulty record is the one that a late `Accept` completes), so the boundary state and
+the retire of §J3.1 would miss it. Rule 3 also keeps the whole old grid in every later Phase 1, which
+the end makes needless.
+
+What is not in the model: a faulty record of the next configuration (the tally is the one of
+`truncation/`, and `ctrl-grid/` of PR #1293 (CTRL recovery in the journal)), two ballots in the old grid (the tally of three ballots is checked in
+`truncation/`), the retire and the boundary write (`segment-replicas/`, `seal-chain/`), the register
+across a matchmaker handover (`segment-records/`), and the bypass (no Phase 1, the end is the
+frontier, §J5.5).
 
 ### `re-replication/`: the heal of a sealed segment's replica set, for #1314
 

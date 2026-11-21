@@ -186,12 +186,19 @@ for every other slot.
   the repair rides the existing `Accept`, `Commit` and catch-up paths.
 - A slot is decided over **every** prior configuration of a matchmaker deployment, not one
   majority.
+- The seal end of a journal segment counts a faulty report as a vote: the end is one above the
+  highest slot where the sealing leader's Phase 1 saw any vote in the old grid, faulty votes too
+  (#1313 (the seal end against a CTRL faulty record), `specs/tla/seal-ctrl/`). A later Phase 1
+  reads the old grid only below the end, so the tri-state tally then still sees the slot.
 - Snapshot recovery ([PAR §3.5]) does not apply: paros runs no application and takes no snapshot
   (#186).
 
 ## 10. Pitfalls
 
 - **Faulty counted as none.** Two values for one slot (R2, and a red demo the restatement records).
+- **Faulty counted as none in the seal end.** A seal end from readable votes only lands at or
+  below a chosen slot whose top copy rotted; the next leader reads the old grid below the end,
+  misses the slot and chooses a second value (`specs/tla/seal-ctrl/`, control `end_readable`).
 - **Asking only the newest configuration.** A successor whose members never held the slot filled
   it with `Noop` while the departed member that held its only clean copy was down. The sweep went
   red on two values for one slot (#267, witness 9147512841470386050; the `slot_decidable` doc).

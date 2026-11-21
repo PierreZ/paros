@@ -13,6 +13,8 @@
 //! This module holds what every flavor shares: the check of a spec folder,
 //! the rank of a ballot, and the names of nodes and values.
 
+pub mod mutate;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -86,6 +88,14 @@ impl Ranks {
         );
         int(below + 1)
     }
+}
+
+/// Define `TraceLength`, the number of events of the whole trace. A check
+/// that reads ahead to the end of a batch (`RecordAhead`) reads it: a
+/// prefix of the trace (`Trace::prefix` keeps each definition) may cut the
+/// last batch, and a cut batch is not judged whole.
+pub fn whole(trace: &mut Trace) {
+    trace.define("TraceLength", int(trace.len()));
 }
 
 /// A count or an index as a TLA+ integer.

@@ -2,6 +2,9 @@
 
 Research and design notes backing the Paxos implementation. No code here.
 
+- `journal/` — the target design of the journal v1: every journal rule with its decision, its
+  issue and its TLA+ model, and the build steps (#1323). `journal/README.md` is the map;
+  `architecture/` is the service around it.
 - `knowledge/` — the Paxos knowledge base: one card per concept paros uses, each backed by a
   paper or a real implementation and mapped onto the code. Start here for a protocol
   question; `knowledge/CLAUDE.md` is its map and `knowledge/concepts.md` its index.

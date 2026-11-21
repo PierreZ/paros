@@ -5,7 +5,7 @@ not a model of the plan: it changes no model of `specs/tla/`, and no rule of `pa
 comes from it until Pierre decides. The report below goes to Pierre.
 
 **Decision**: Pierre chose design A on 2026-11-19. The rules are recorded in
-`docs/architecture/02-data-plane.md` section 2.10. The gap review of 2026-11-19 found a missing
+`docs/journal/03-segments-and-records.md` §J3.1. The gap review of 2026-11-19 found a missing
 rule of A and three rows of this report that were not fair to B (#1233 (segments gap fill));
 Pierre kept A, and this report includes the corrections.
 
@@ -46,7 +46,7 @@ decision 31, #1209, on a full grid), so the record check of the reader adds noth
 acceptor of a retired segment that loses its state opens the case again, and the belief half of
 the fence (with the refusal of an acceptor that did not hear) or the record check closes it.
 Pierre chose the fence of the code, with no record check (2026-11-20,
-`docs/architecture/02-data-plane.md` §2.10).
+`docs/journal/03-segments-and-records.md` §J3.1).
 
 ## The two designs
 

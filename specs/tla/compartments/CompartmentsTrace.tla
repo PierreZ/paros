@@ -13,9 +13,16 @@
 (*   - "rapply": a replica folded a slot. It walks its chosen prefix in    *)
 (*     slot order (`Walk` = "prefix"): the slot is the next one, and the   *)
 (*     replica holds it;                                                   *)
-(*   - "rcompact": a replica compacted below a slot its walk folded;       *)
+(*   - "fold": the first party that applied a slot names the end of the    *)
+(*     records of the slot (`high`) and `first_seq` after it (`first`), as *)
+(*     in `truncation/TruncationTrace.tla`;                                *)
+(*   - "rcompact": a replica compacted below a slot its walk folded, and   *)
+(*     each record below the floor is below `first_seq` at a slot its walk *)
+(*     folded;                                                             *)
 (*   - "rtrim": a replica jumped to a trim point, and its walk moves to    *)
-(*     it. After either, each slot below the floor is chosen;              *)
+(*     it. Each record below the trim point is below `first_seq` at some   *)
+(*     folded slot: the trim point is the floor of a peer, which compacted *)
+(*     by that rule. After either, each slot below the floor is chosen;    *)
 (*   - "rboot": a replica booted again and folded its prefix again from    *)
 (*     its disk (`Boot` = "refold"): its walk is at `from`, and it holds   *)
 (*     every slot below `from`;                                            *)
@@ -39,7 +46,8 @@ VARIABLES rlearned, \* replica: the value it holds at each slot
           rfloor,   \* replica: the first slot it holds
           racks,    \* the answers the acceptors sent
           rds,      \* read token: the read
-          acked     \* the highest slot whose write completed (-1: none)
+          acked,    \* the highest slot whose write completed (-1: none)
+          rfold     \* the fold of the slots 0..Len(rfold)-1, in order
 
 repVars == <<rlearned, rnext, rfloor, racks, rds, acked>>
 
@@ -55,6 +63,17 @@ TopVote(a) == MaxOf({s \in Slots : vote[a][s].bal > 0} \cup {-1})
 \* Replica r holds slot s: it learned it, or the slot is below its floor.
 RHolds(r, s) == s < rfloor[r] \/ rlearned[r][s] # None
 
+\* The fold of slot s.
+RF(s) == rfold[s + 1]
+
+\* The end of the records of the slots folded so far: `next_seq`.
+RNextSeq == MaxOf({0} \cup {RF(s).high : s \in 0..(Len(rfold) - 1)})
+
+\* Each record below floor f is below `first_seq` at a folded slot below u.
+RReleased(f, u) ==
+  /\ f <= Len(rfold)
+  /\ \E t \in 0..(u - 1) : t < Len(rfold) /\ \A s \in 0..(f - 1) : RF(s).high <= RF(t).first
+
 CompInit ==
   /\ TraceInit
   /\ rlearned = [r \in Replicas |-> [s \in Slots |-> None]]
@@ -63,6 +82,7 @@ CompInit ==
   /\ racks = {}
   /\ rds = [c \in Ctxs |-> NoRead]
   /\ acked = -1
+  /\ rfold = <<>>
 
 IsRep == Has("rep") /\ e.rep \in Replicas
 IsCtx == Has("ctx") /\ e.ctx \in Ctxs
@@ -94,11 +114,13 @@ Raise(r, f) ==
 RCompact ==
   /\ e.event = "rcompact" /\ IsRep /\ Has("floor")
   /\ e.floor <= rnext[e.rep]
+  /\ RReleased(e.floor, rnext[e.rep])
   /\ Raise(e.rep, e.floor)
 
 \* A jump moves the walk to the trim point of a peer.
 RTrim ==
   /\ e.event = "rtrim" /\ IsRep /\ Has("floor")
+  /\ RReleased(e.floor, Len(rfold))
   /\ Raise(e.rep, e.floor)
 
 RBoot ==
@@ -140,13 +162,26 @@ RApplied ==
   /\ acked' = e.slot
   /\ UNCHANGED <<rlearned, rnext, rfloor, racks, rds>>
 
+RFold ==
+  /\ e.event = "fold" /\ IsSlot /\ Has("high") /\ Has("first")
+  /\ e.slot = Len(rfold)
+  /\ \E v \in Values : Chosen(e.slot, v)
+  /\ e.high = 0 \/ e.high >= RNextSeq
+  /\ e.first >= IF rfold = <<>> THEN 0 ELSE RF(Len(rfold) - 1).first
+  /\ e.first <= MaxOf({RNextSeq, e.high})
+  /\ rfold' = Append(rfold, [high |-> e.high, first |-> e.first])
+  /\ UNCHANGED <<vars, repVars>>
+
 RepStep ==
   /\ \/ RLearn \/ RApply \/ RCompact \/ RTrim \/ RBoot \/ RRead \/ RReadAck \/ RServe \/ RApplied
-  /\ UNCHANGED vars
+  /\ UNCHANGED <<vars, rfold>>
 
-CompNext == l <= Len(Trace) /\ ((Step /\ UNCHANGED repVars) \/ RepStep) /\ l' = l + 1
+CompNext ==
+  /\ l <= Len(Trace)
+  /\ (Step /\ UNCHANGED <<repVars, rfold>>) \/ RepStep \/ RFold
+  /\ l' = l + 1
 
-CompSpec == CompInit /\ [][CompNext]_<<l, vars, repVars>>
+CompSpec == CompInit /\ [][CompNext]_<<l, vars, repVars, rfold>>
 
 -----------------------------------------------------------------------------
 (* Safety *)
