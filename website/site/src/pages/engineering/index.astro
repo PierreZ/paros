@@ -48,8 +48,8 @@ const CONSENSUS: Claim[] = [
   },
   {
     claim: "A Commit is sent only for a value that a Phase-2 quorum chose.",
-    models: [{ dir: "node", inv: ["CommitBacked"] }, { dir: "proxy-leader", inv: ["CommitBacked", "CommitAgree"] }],
-    trace: ["proxy-leader/ProxyLeaderTrace.tla"],
+    models: [{ dir: "node", inv: ["CommitBacked", "CommitAgree"] }, { dir: "proxy-leader", inv: ["CommitBacked", "CommitAgree"] }],
+    trace: ["node/ProxyLeaderTrace.tla"],
     walk: "proxies, proxies_on_grid, compartments · COMMIT_BACKED",
     controls: ["short", "belief_any"],
     mutants: ["EarlyCommit", "KeepProxyRounds"],
@@ -112,8 +112,8 @@ const CONSENSUS: Claim[] = [
   },
   {
     claim: "One node at a time leads at a ballot across a handoff, and the successor keeps every pending round.",
-    models: [{ dir: "leader-handoff", inv: ["OneHolder", "LeaderFrontier"] }],
-    trace: ["leader-handoff/LeaderHandoffTrace.tla"],
+    models: [{ dir: "node", inv: ["OneHolder", "LeaderFrontier"] }, { dir: "leader-handoff", inv: ["OneHolder", "LeaderFrontier"] }],
+    trace: ["node/LeaderHandoffTrace.tla"],
     walk: "handoff",
     controls: ["two_hops", "volatile_frontier"],
     mutants: ["RewindHandoff"],
