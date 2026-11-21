@@ -34,7 +34,7 @@ If you think that a case needs an exception, stop and ask Pierre. Do not add the
 `paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
 models of `specs/tla/`, the Paxos and Consensus pages of the website and their wasm engine. The journal v1 has
 its pure core, `paros-journal`, and its walk crate, `journal-sim` (#1324 (paros-journal pure
-core)); its roles and driver are not built yet. The journal
+core)); its first roles (segments, the seal and writes; #1326) are built, its driver is not. The journal
 service that sat above the core (`parosd`, `parosctl`, `paros-bench`, the library layers, the
 simulation `paros-sim`) was removed on 2026-11-19. It is at the git tag `v0.2.0-alpha.1`, and
 `docs/archive/v0.2.0-alpha.1/README.md` has one recap per removed crate: what it did, its key
@@ -140,8 +140,11 @@ and the codec; #1324 (paros-journal pure core)), walked and traced against
 `specs/tla/journal-state/FoldTrace.tla` by `crates/sim/journal-sim`. The journal's matchmaker
 register is `paros_journal::register`, an optional role by composition (the core does not
 change), walked and traced against `specs/tla/segment-records/RegisterTrace.tla` (#1325 (the
-matchmaker register as an optional role)). The journal roles and the driver are not built yet
-(#1326).
+matchmaker register as an optional role)). The first journal roles are `paros_journal::roles`
+(the acceptor, the leader with its Phase 1 over the segments and the seal, the segment replica;
+#1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk;
+the other rule groups of #1326 (proxy leader, leaderless reads, retire, truncate,
+re-replication) and the driver (#1329) are not built yet.
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
 2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
 the build steps of #1323 (build the paros journal v1). Start there for any journal work.
@@ -620,12 +623,13 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`examples/`: seven lessons, and four that drive `ColocatedNode` as a driver does, from
   `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
-  fold, the `Resolve` call, the held answers, the segment record, the matchmaker register and
-  the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
+  fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
+  journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
   `paros::journal`). A program depends on `paros` alone. Wasm-safe and provider-free.
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
-  segments and the walk of the matchmaker register across handovers, with oracles that share no
+  segments, the walk of the matchmaker register across handovers and the walk of the journal
+  roles, with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
   `specs/tla/journal-state/FoldTrace.tla` and `specs/tla/segment-records/RegisterTrace.tla`, and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
   (check long runs live); four hours each night in the `Journal live` workflow).

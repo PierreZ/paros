@@ -80,3 +80,17 @@ fn a_new_leader_is_multi_or_a_set_uuid() {
 fn the_unset_uuid_never_leads() {
     let _ = Leader::uuid(LeaderUuid::UNSET);
 }
+
+#[test]
+fn the_fingerprint_tells_two_commands_apart() {
+    // The Phase-2 tally of the core counts a vote by its fingerprint: two
+    // commands with one fingerprint would count as one value.
+    use paros_consensus::types::Fingerprint;
+    let truncate = |up_to| Command::Truncate {
+        fence: None,
+        up_to: Seq(up_to),
+    };
+    assert_eq!(truncate(1).fingerprint(), truncate(1).fingerprint());
+    assert_ne!(truncate(1).fingerprint(), truncate(2).fingerprint());
+    assert_ne!(Command::Noop.fingerprint(), truncate(1).fingerprint());
+}

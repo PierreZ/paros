@@ -41,6 +41,7 @@ pub mod fold;
 pub mod held;
 pub mod register;
 pub mod resolve;
+pub mod roles;
 pub mod segment;
 
 pub use codec::{DecodeError, RELEASE, Release};

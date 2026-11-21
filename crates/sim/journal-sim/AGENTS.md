@@ -5,7 +5,9 @@ Deterministic simulation testing of `paros-journal` (#1327 (journal-sim), built 
 walk (moonpool-walk) drives the journal fold over a chain of segments: three writers, resends
 across seals, `SetLeader` with `None`, truncates, crashes of the replica that refold its segment,
 and the `Resolve` call that settles each `Below`. A second walk drives the journal's matchmaker
-register across handovers of the set (#1325). Test only: `publish = false`.
+register across handovers of the set (#1325). A third walk drives the journal roles
+(`paros_journal::roles`, #1326): acceptors, leaders and segment replicas with disks, over a chain
+of segments. Test only: `publish = false`.
 
 ## Map
 
@@ -18,12 +20,17 @@ register across handovers of the set (#1325). Test only: `publish = false`.
 - `src/register.rs` (+ `src/register/order.rs`): the walk of the matchmaker register
   (`RegisterModel`, #1325) across handovers of the set, its shapes (`TRACED`, `WIDE`), its oracles
   (`CARRIED`, `ACTED`), its reach sites and its planted mutants (`RegisterMutant`).
+- `src/roles.rs`: the walk of the roles (`RolesModel`, #1326), its shapes (`NARROW`, the default
+  grid; `WIDE`, two columns and promise pages of two), its oracles (`AGREE`, `SEALED`, `FOLD`,
+  `VIEW`, `BOUNDARY`, `RESOLVE`; the truth is `Truth` over the chosen log), its reach sites and
+  its planted mutants (`RolesMutant`). Its trace check against `Journal.tla` is not built yet.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/register.rs`: the events of a register walk as a trace of
   `specs/tla/segment-records/RegisterTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/mutate.rs`: the named edits of recorded traces (#1308 (mutate recorded traces)).
-- `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/register.rs` (the register
+- `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/roles.rs` (the roles walks and
+  their mutants); `tests/register.rs` (the register
   walks and their mutants) and `tests/register_traces.rs` (the register trace check, its rules,
   its control `ForgedBootstrap` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
   long fold walk checked live through its events port by moonpool-tla's `Live`, and the control

@@ -102,6 +102,26 @@ extends `Journal.tla` and binds each event to the model's fold operators; the ch
 16 named rules, a planted `Below` in the segment in force is the control, and TLC refuses 24
 named edits of the recorded walks. The probes and the coverage gate come with the roles (#1326).
 
+**The walk of the roles** (#1326 (the journal roles over the core), `src/roles.rs`): the
+acceptors, the leaders and the segment replicas of `paros_journal::roles`, with a disk each
+(batches durable in id order, a crash that loses the batches in flight and the held sends), the
+register as an atomic compare-and-set, three proposers that campaign, reshapes to new grids from
+a pool of six acceptors, seals, boundary writes, retires, and the clients of the fold walk (one
+call in flight each, a call answered `Unknown` sent again, `Below` settled with `Resolve`). Six
+oracles judge it: one command chosen at each slot (`AGREE`), nothing chosen in a sealed grid at
+or above its end (`SEALED`), each answer the whole log's (`FOLD`), each replica's fold the whole
+log's at its front (`VIEW`), each boundary state the fold at the end (`BOUNDARY`) and each
+`Resolve` the fate the whole log gives (`RESOLVE`). Each has its planted mutant in the driver:
+an acceptor that loses its disk, a leader bound to a stale grid, a `Duplicate` answered `Taken`,
+a replica that takes a stale base, a stale boundary write and a `Resolve` at the segment in
+force. The narrow shape is the default grid (one column of three); the wide shape adds grids of
+two columns and promises in pages of two. Each campaign reaches its named sites (a seal lost, a
+`Noop` below the start, an old vote chosen again in a new grid, a third segment, a retire, a
+pull from a peer, a leader stopped on a higher promise, `Unknown`, `Below`, `Resolve`, and
+more). **Open**: the trace check of this walk against `Journal.tla` and the coverage gate over
+its probes (the next rule group of #1326); CTRL faulty votes on the acceptors' disks (the
+leader's blocked slot has unit tests only).
+
 **The walk of the register** (#1325 (the matchmaker register as an optional role),
 `src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
 of §J3.4 and handovers of the matchmaker set, with crashes that lose what a member did not
