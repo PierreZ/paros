@@ -111,11 +111,13 @@ const TLA = `${REPO}/tree/main/specs/tla`;
   <ul>
     <li><a href={`${REPO}/tree/main/crates/lib/paros-journal`}><code>paros-journal</code></a>: the
       pure journal core. The fold (<code>JournalState</code>), the <code>resolve</code> call, the held
-      answers, the segment record (<code>SegmentRecord</code>) and the codec.</li>
+      answers, the segment record (<code>SegmentRecord</code>), the matchmaker register
+      (<code>register</code>) and the codec.</li>
     <li><a href={`${REPO}/tree/main/crates/sim/journal-sim`}><code>journal-sim</code></a>: seeded
-      walks of the fold over a chain of segments, oracles with no shared code, and the trace check
-      of each walk against <code>journal-state/FoldTrace.tla</code>.</li>
-    <li>Not built yet: the register (#1325), the journal roles (#1326), the controller
+      walks of the fold over a chain of segments and of the register across handovers, oracles with
+      no shared code, and the trace check of each walk against <code>journal-state/FoldTrace.tla</code>
+      and <code>segment-records/RegisterTrace.tla</code>.</li>
+    <li>Not built yet: the journal roles (#1326), the controller
       (<code>paros-journal-control</code>, #1328), the driver (<code>paros-journal-io</code>, #1329),
       the moonpool adapter (#1330) and the client (#1331). The steps are <a href={`${J}/08-build-steps.md`}>§J8</a>.</li>
   </ul>
