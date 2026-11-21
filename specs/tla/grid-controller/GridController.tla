@@ -134,6 +134,9 @@ TypeOK ==
   /\ failed \subseteq Acc
   /\ \A m \in reps : m.ans \in Answers
 
+\* Only a holder (maybe deposed) has a plan.
+PlanOnlyLead == \A c \in Ctrls : ctl[c].plan # NoGrid => ctl[c].st = "lead"
+
 Init ==
   /\ term = 0
   /\ holder = None
@@ -193,8 +196,8 @@ Plan(c) ==
   /\ UNCHANGED <<term, holder, top, rec, st, reqs, reps, failed, crashes, losses, ev>>
 
 \* The call, and its retry while no request or reply of it is in flight.
+\* Only a holder has a plan (`PlanOnlyLead`).
 Call(c) ==
-  /\ ctl[c].st = "lead"
   /\ ctl[c].plan # NoGrid
   /\ ~InFlight(c)
   /\ reqs' = reqs \cup {Req(c)}
@@ -203,8 +206,8 @@ Call(c) ==
 (***************************************************************************)
 (* The compare-and-set at the matchmaker record.                           *)
 (***************************************************************************)
+\* `Next` takes m from `reqs`, and a reply from `reps`.
 Process(m) ==
-  /\ m \in reqs
   /\ LET termOk  == ~TermCheck \/ m.tm = term
          expOk   == ~ExpCheck \/ m.exp = top
          retOk   == ~RetireGuard \/ (st[top] = "inforce" /\ \A g \in 1..(top - 1) : st[g] = "retired")
@@ -239,7 +242,6 @@ Process(m) ==
 \* controller (before a crash or a new term) is dropped. A refusal for the
 \* term tells the controller it was deposed.
 Receive(m) ==
-  /\ m \in reps
   /\ reps' = reps \ {m}
   /\ IF ctl[m.c].plan # NoGrid /\ m.req = Req(m.c)
      THEN ctl' = [ctl EXCEPT ![m.c] = IF m.ans = "term" THEN Idle
@@ -251,10 +253,11 @@ Receive(m) ==
 (* The journal's steps.                                                    *)
 (***************************************************************************)
 \* A leader of g seals g - 1: Phase 1 in both grids, then Phase 2 in g.
+\* `Next` takes g in 2..NG. A pending g has g - 1 in force: a reshape opens
+\* g only from g - 1 in force (`RetireGuard`), and only `SealIn(g)` moves
+\* g - 1 then (`Chain`).
 SealIn(g) ==
-  /\ g \in 2..NG
   /\ st[g] = "pending"
-  /\ st[g - 1] = "inforce"
   /\ Live1(rec[g - 1].grid)
   /\ Live1(rec[g].grid)
   /\ Live2(rec[g].grid)
@@ -271,9 +274,9 @@ Retire(g) ==
 (***************************************************************************)
 (* Faults.                                                                 *)
 (***************************************************************************)
+\* A crash of a controller that is down changes nothing but the count.
 Crash(c) ==
   /\ crashes < Crashes
-  /\ ctl[c].st # "down"
   /\ crashes' = crashes + 1
   /\ ctl' = [ctl EXCEPT ![c] = [Idle EXCEPT !.st = "down"]]
   /\ ev' = ev \cup (IF ctl[c].plan # NoGrid /\ ~InFlight(c) THEN Note("crash_after_plan") ELSE {})
@@ -286,23 +289,21 @@ Restart(c) ==
 
 LoseReq(m) ==
   /\ losses < Losses
-  /\ m \in reqs
   /\ reqs' = reqs \ {m}
   /\ losses' = losses + 1
   /\ UNCHANGED <<term, holder, top, rec, st, ctl, reps, failed, crashes, ev>>
 
 LoseRep(m) ==
   /\ losses < Losses
-  /\ m \in reps
   /\ reps' = reps \ {m}
   /\ losses' = losses + 1
   /\ ev' = ev \cup (IF m.ans = "ok" THEN Note("ok_lost") ELSE {})
   /\ UNCHANGED <<term, holder, top, rec, st, ctl, reqs, failed, crashes>>
 
-\* An acceptor fails, maybe between a plan that names it and the call.
+\* An acceptor fails, maybe between a plan that names it and the call. A
+\* second failure of a failed acceptor changes nothing.
 Fail(a) ==
   /\ Cardinality(failed) < Fails
-  /\ a \notin failed
   /\ failed' = failed \cup {a}
   /\ ev' = ev \cup (IF \E c \in Ctrls : a \in ctl[c].plan.mem
                     THEN Note("fail_after_plan") ELSE {})
@@ -312,7 +313,8 @@ Next ==
   \/ \E c \in Ctrls : ReadTerm(c) \/ Elect(c) \/ Plan(c) \/ Call(c) \/ Crash(c) \/ Restart(c)
   \/ \E m \in reqs : Process(m) \/ LoseReq(m)
   \/ \E m \in reps : Receive(m) \/ LoseRep(m)
-  \/ \E g \in Gens : SealIn(g) \/ Retire(g)
+  \/ \E g \in 2..NG : SealIn(g)
+  \/ \E g \in Gens : Retire(g)
   \/ \E a \in Acc : Fail(a)
 
 \* Fairness for the steps that must happen: the record answers each request,
@@ -323,7 +325,8 @@ Fairness ==
        /\ WF_vars(\E m \in reqs : m.c = c /\ Process(m))
        /\ WF_vars(\E m \in reps : m.c = c /\ Receive(m))
        /\ WF_vars(Call(c))
-  /\ \A g \in Gens : WF_vars(SealIn(g)) /\ WF_vars(Retire(g))
+  /\ \A g \in 2..NG : WF_vars(SealIn(g))
+  /\ \A g \in Gens : WF_vars(Retire(g))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -360,6 +363,32 @@ Answered == \A c \in Ctrls : ctl[c].plan # NoGrid ~> ctl[c].plan = NoGrid
 \* After the faults stop, a configuration that a reshape opened comes into
 \* force.
 Settles == \A g \in Gens : st[g] = "pending" ~> st[g] # "pending"
+
+\* The same for a grid that meets the bound. The control `live_nobound_old`
+\* breaks it: a grid in force outside the bound blocks the seal of the next
+\* grid, even of a grid that meets the bound.
+SettlesBounded ==
+  \A g \in Gens : st[g] = "pending" /\ Bounded(rec[g].grid) ~> st[g] # "pending"
+
+\* A controller's life: a holder gives up the lead only when a refusal for
+\* its term tells it, or at a crash (it keeps calling until then); only a
+\* candidate becomes the holder; a candidate goes back to idle only when it
+\* lost the compare-and-set; a controller that is down only restarts.
+CtlSteps ==
+  [][\A c \in Ctrls :
+       /\ ctl[c].st = "lead" /\ ctl'[c].st # "lead" =>
+            \/ crashes' > crashes
+            \/ \E m \in reps \ reps' : m.c = c /\ m.ans = "term"
+       /\ ctl'[c].st = "lead" /\ ctl[c].st # "lead" => ctl[c].st = "cand"
+       /\ ctl[c].st = "cand" /\ ctl'[c].st = "idle" => term # ctl[c].seen
+       /\ ctl[c].st = "down" => ctl'[c].st \in {"down", "idle"}]_vars
+
+\* Each configuration of the table moves one way, one state at a time:
+\* none, pending, in force, sealed, retired.
+StRank(x) == CASE x = "none" -> 0 [] x = "pending" -> 1 [] x = "inforce" -> 2
+                [] x = "sealed" -> 3 [] x = "retired" -> 4
+Chain ==
+  [][\A g \in Gens : st'[g] = st[g] \/ StRank(st'[g]) = StRank(st[g]) + 1]_vars
 
 \* A reachability check: the event `Reach` never happens. Its config must
 \* find a violation, which shows that the model reaches the case.
