@@ -9,12 +9,15 @@
 (* Each event is one action of `Node` with its arguments, so TLC has       *)
 (* nothing to guess. The other fields of an event are what the code        *)
 (* observed, and the binding asks that they are the model's: the report of *)
-(* a promise, the frontier of a win, the read fence of a basis, the index  *)
-(* of a served read. Three events are no step when the model already holds *)
-(* what they say: a `propose` of a slot whose `Accept` a win or a probe    *)
-(* sent, a `learn` of a slot the node learned (the prefix reaches a slot   *)
-(* that a handoff payload named), and a `rejoin` of a node that never      *)
-(* retired (it lingered). This module defines no step of its own.          *)
+(* a promise, the frontier of a win and the slots it knew learned, the     *)
+(* read fence of a basis, the index of a served read, the payload of a     *)
+(* handoff. Four events are no step when the model already holds what they *)
+(* say: a `propose` of a slot whose `Accept` a win, a probe or an install  *)
+(* sent, an `accept` of the leader's own round that the model recorded     *)
+(* when the round opened (`Allocate`, `Install`), a `learn` of a slot the  *)
+(* node learned (the prefix reaches a slot that a handoff payload named),  *)
+(* and a `rejoin` of a node that never retired (it lingered). A `direct`   *)
+(* is the check `Direct`. This module defines no step of its own.          *)
 (*                                                                         *)
 (* Each trace spec of this folder extends this module, and its             *)
 (* configuration names the invariants its walk must keep. The walk writes  *)
@@ -40,7 +43,8 @@ RunRestarts == Cardinality(Events("restart"))
 RunFaults == Cardinality(Events("rot"))
 RunPaged == \E i \in Events("promise") : "upto" \in DOMAIN Trace[i]
 RunFloors == Events("compact") \cup Events("trim") \cup Events("fold") # {}
-RunProxies == Events("commit") # {}
+RunCrashes == Cardinality(Events("crash"))
+RunHandoff == Events("relinquish") \cup Events("stepdown") # {}
 RunMaxPos ==
   LET P == {Trace[i].high : i \in Events("fold")} \cup {Trace[i].first : i \in Events("fold")}
   IN IF P = {} THEN 0 ELSE Max(P)
@@ -92,6 +96,7 @@ IsSlot == Has("slot") /\ e.slot \in Slots
 IsValue == Has("val") /\ e.val \in Values
 IsRep == Has("rep") /\ e.rep \in Replicas
 IsCtx == Has("ctx") /\ e.ctx \in Ctxs
+IsProxy == Has("proxy") /\ e.proxy \in Proxies
 IsFloor == Has("floor") /\ e.floor \in 1..NS
 
 \* The vote at slot s that a promise reports.
@@ -132,16 +137,48 @@ TPrepare ==
        /\ \A c \in hist'[e.bal] \ e.hist : AbandonedIn(e.bal, c, msgs')
 
 TPropose ==
-  /\ e.event = "propose" /\ IsBallot /\ IsSlot /\ IsValue
+  /\ e.event = "propose" /\ IsBallot /\ IsSlot /\ IsValue /\ IsNode("by")
   /\ ~TracedBefore("propose", {"bal", "slot"})
-  /\ \/ Allocate(e.bal, e.slot, e.val)
-     \/ Probe(e.bal, e.slot, e.val)
+  /\ \/ leads[e.by] = e.bal /\ Allocate(e.by, e.slot, e.val)
+     \/ Owner[e.bal] = e.by /\ Probe(e.bal, e.slot, e.val)
      \/ /\ [type |-> "2a", bal |-> e.bal, slot |-> e.slot, val |-> e.val] \in msgs
         /\ UNCHANGED vars
 
 TLearn ==
   /\ e.event = "learn" /\ IsNode("node") /\ IsSlot /\ IsValue
   /\ IF learned[e.node][e.slot] = e.val THEN UNCHANGED vars ELSE Learn(e.node, e.slot, e.val)
+
+\* A vote; the first record of the leader's own round, which the model
+\* wrote when the round opened, is no step.
+TAccept ==
+  /\ e.event = "accept" /\ IsNode("acc") /\ IsBallot /\ IsSlot /\ IsValue
+  /\ \/ Accept(e.acc, e.bal, e.slot, e.val)
+     \/ /\ Has("own") /\ e.own = TRUE
+        /\ ~TracedBefore("accept", {"acc", "bal", "slot"})
+        /\ vote[e.acc][e.slot] = [bal |-> e.bal, val |-> e.val]
+        /\ UNCHANGED vars
+
+\* A win, with the frontier of the owner and the slots below it that the
+\* owner knows chosen, each chosen with that value.
+AsRounds(m) ==
+  [s \in Slots |-> IF \E r \in m : r.slot = s THEN (CHOOSE r \in m : r.slot = s).val ELSE None]
+
+TWin ==
+  /\ e.event = "win" /\ IsBallot /\ Has("front")
+  /\ Win(e.bal)
+  /\ nxt'[Owner[e.bal]] = e.front
+  /\ front'[e.bal] = e.front
+  /\ Has("known") =>
+       (\A k \in e.known : k.slot \in Slots /\ k.val \in Values /\ Chosen(k.slot, k.val)) = TRUE
+
+\* A handoff, with the payload the code sent.
+TRelinquish ==
+  /\ e.event = "relinquish" /\ IsNode("from") /\ IsNode("to") /\ IsBallot
+  /\ Has("lo") /\ Has("nxt") /\ Has("dec") /\ Has("pen")
+  /\ leads[e.from] = e.bal
+  /\ Relinquish(e.from, e.to)
+  /\ [type |-> "rel", from |-> e.from, to |-> e.to, bal |-> e.bal, lo |-> e.lo,
+      nxt |-> e.nxt, dec |-> AsRounds(e.dec), pen |-> AsRounds(e.pen)] \in msgs'
 
 TRejoin ==
   /\ e.event = "rejoin" /\ IsNode("node")
@@ -178,23 +215,35 @@ TReadAck ==
 Step ==
   \/ TPrepare
   \/ TPromise
-  \/ e.event = "win" /\ IsBallot /\ Has("front") /\ Win(e.bal) /\ front'[e.bal] = e.front
+  \/ TWin
   \/ TPropose
-  \/ e.event = "accept" /\ IsNode("acc") /\ IsBallot /\ IsSlot /\ IsValue
-       /\ Accept(e.acc, e.bal, e.slot, e.val)
+  \/ TAccept
   \/ e.event = "record" /\ IsNode("node") /\ IsBallot /\ IsSlot /\ IsValue
        /\ Record(e.node, e.bal, e.slot, e.val)
   \/ TLearn
-  \/ e.event = "restart" /\ IsNode("node") /\ Has("upto") /\ Has("led")
-       /\ e.upto \in 0..NS /\ e.led \in 0..NB
-       /\ Restart(e.node, e.upto, e.led)
+  \/ e.event = "restart" /\ IsNode("node") /\ Has("upto") /\ e.upto \in 0..NS
+       /\ Has("led") /\ e.led = leads[e.node]
+       /\ Restart(e.node, e.upto)
+  \/ e.event = "stepdown" /\ IsNode("node") /\ StepDown(e.node)
+  \/ TRelinquish
+  \/ e.event = "install" /\ IsNode("node") /\ IsBallot /\ Install(e.node) /\ leads'[e.node] = e.bal
+  \/ e.event = "direct" /\ IsBallot /\ IsSlot /\ IsValue /\ Direct(e.bal, e.slot, e.val)
+  \/ e.event = "delegate" /\ IsBallot /\ IsSlot /\ IsValue /\ IsProxy
+       /\ Proposed(e.bal, e.slot) = e.val
+       /\ Delegate(e.bal, e.slot, e.proxy)
+  \/ e.event = "fanout" /\ IsBallot /\ IsSlot /\ IsValue /\ IsProxy
+       /\ Fanout(e.proxy, e.bal, e.slot, e.val)
+  \/ e.event = "commit" /\ IsBallot /\ IsSlot /\ IsValue /\ IsProxy
+       /\ round[e.proxy][e.slot] = [bal |-> e.bal, val |-> e.val]
+       /\ Decide(e.proxy, e.slot)
+  \/ e.event = "close" /\ IsSlot /\ IsProxy /\ Close(e.proxy, e.slot)
+  \/ e.event = "crash" /\ IsProxy /\ Crash(e.proxy)
   \/ e.event = "select" /\ IsBallot /\ Has("cfg") /\ e.cfg \in Configs /\ Select(e.bal, e.cfg)
   \/ e.event = "register" /\ IsMatchmaker /\ IsBallot /\ Register(e.mm, e.bal)
   \/ e.event = "gcask" /\ IsBallot /\ GcAsk(e.bal)
   \/ e.event = "gcack" /\ IsMatchmaker /\ IsBallot /\ GcAck(e.mm, e.bal)
   \/ e.event = "retire" /\ IsNode("node") /\ Shutdown(e.node)
   \/ TRejoin
-  \/ e.event = "commit" /\ IsBallot /\ IsSlot /\ IsValue /\ ProxyCommit(e.bal, e.slot, e.val)
   \/ e.event = "fold" /\ IsSlot /\ Has("high") /\ Has("first")
        /\ e.high \in 0..MaxPos /\ e.first \in 0..MaxPos
        /\ Fold(e.slot, e.high, e.first)

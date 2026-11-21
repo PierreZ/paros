@@ -1,15 +1,16 @@
 //! The events of a cluster walk as a trace of the implementation model of
 //! `ColocatedNode`, `specs/tla/node/` (#1306 (trace specs extend the
-//! checked model)): the log, matchmaking, the GC, the retirement, the
-//! floors and the faulty entries of CTRL, the read replica and the
-//! leaderless reads. Every trace spec of that folder extends
-//! `NodeTrace.tla`, the binding of these events to the actions of
-//! `Node.tla`, and reads the same constants: this module writes them all.
+//! checked model)): the log, the handoff, the rounds of the proxy leaders,
+//! matchmaking, the GC, the retirement, the floors and the faulty entries
+//! of CTRL, the read replica and the leaderless reads. Every trace spec of
+//! that folder extends `NodeTrace.tla`, the binding of these events to the
+//! actions of `Node.tla`, and reads the same constants: this module writes
+//! them all.
 
 use std::collections::BTreeSet;
 
 use moonpool_tla::Value;
-use paros_consensus::membership::{MatchmakerId, QuorumSystem};
+use paros_consensus::membership::{MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::{Ballot, NodeId};
 
 use super::{ClusterEvent, Flavor, Sizes, encode};
@@ -97,6 +98,14 @@ pub(super) fn trace(flavor: &Flavor, events: &[ClusterEvent]) -> Trace {
         ),
     );
     trace.define("TraceCtxs", Value::Set(ctxs.into_iter().collect()));
+    trace.define(
+        "TraceProxies",
+        Value::Set(
+            (0..flavor.proxies)
+                .map(|id| encode::proxy(ProxyId(id)))
+                .collect(),
+        ),
+    );
     trace.define("TraceCommands", sizes.commands(false));
     trace.define("TraceNB", ranks.count());
     trace.define("TraceNS", int(sizes.slots.max(1)));

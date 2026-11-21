@@ -1116,6 +1116,21 @@ const EDITS: &[Edit] = &[
             })
         },
     },
+    Edit {
+        // A proxy closes a round it holds open: here before the first
+        // round of its slot opened.
+        name: "move a proxy close before its round",
+        find: |ev| {
+            each(ev, "close", |j| {
+                let e = &ev[j];
+                let opens = |f: &Value| {
+                    is(f, "fanout") && field(f, "proxy") == field(e, "proxy") && slot(f) == slot(e)
+                };
+                let i = ev[..j].iter().position(opens)?;
+                (ev[..j].iter().rposition(opens) == Some(i)).then(|| hoist(ev, j, i))
+            })
+        },
+    },
     // --- The matchmaker set handover ---
     Edit {
         // A matchmaker stops its generation once.
