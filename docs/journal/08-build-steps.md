@@ -10,7 +10,7 @@ less than this table.
 
 | Step | Issue | It delivers | It builds |
 |---|---|---|---|
-| 0 | #1313 (the seal end against a CTRL faulty record), #1314 (re-replication of a sealed segment's replica set), #1315 (bring docs and models in step with the v1 scope) | The gate: two TLA+ checks and the decisions in the docs (#1313 done, PR #1336) | §J3.1, §J5.2, §J1.1 |
+| 0 | #1313 (the seal end against a CTRL faulty record), #1314 (re-replication of a sealed segment's replica set), #1315 (bring docs and models in step with the v1 scope) | The gate: two TLA+ checks and the decisions in the docs (#1313 done, PR #1336; #1314 done, PR #1334) | §J3.1, §J5.2, §J1.1 |
 | 1 | #1332 (journal architecture docs) | These files | all |
 | 2 | #1189 (the journal state model), with #1309 (the state is the disk) | The composed TLA+ model | §J7.2 |
 | 3 | #1324 (paros-journal) | The pure journal core: the fold, the segment record types, the codec, the record headers | §J2, §J3.4 (types) |

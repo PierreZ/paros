@@ -24,7 +24,7 @@
 (*   - a leaderless read sends to `GridReadTargets` and waits for a        *)
 (*     Phase-1 quorum of the answers (`QuorumRead`, `has_phase1_quorum_in`). *)
 (* Matchmaker quorums are majorities. A segment retires after `F + 1`      *)
-(* replicas of its replica set hold it.                                    *)
+(* replicas of its replica set hold it; a heal copies it from one.         *)
 (*                                                                         *)
 (* The journal holds two configurations: `Old`, a sealed segment, and      *)
 (* `New`, the configuration in force. `New` is `Old` with the members      *)
@@ -104,8 +104,12 @@ ReadAlts(M) ==
 \* The replicas that hold a sealed segment before it retires.
 HoldQ == {Q \in SUBSET R : Cardinality(Q) >= F + 1}
 
+\* The heal of a sealed segment copies it from one member of its replica set
+\* that holds it whole (#1314, `specs/tla/re-replication/`).
+CopyQ == {Q \in SUBSET R : Cardinality(Q) >= 1}
+
 Steps == <<"write", "election", "read", "seal", "retire", "offload", "trim", "handover",
-           "ctl_election", "reshape", "bypass_hold">>
+           "ctl_election", "reshape", "bypass_hold", "heal">>
 
 \* The waits of each step, in order. A zero-arity definition: TLC computes
 \* it once.
@@ -139,7 +143,12 @@ WaitsOf == [s \in {Steps[k] : k \in DOMAIN Steps} |->
     \* The hold before Phase 2 of a Phase-1 bypass (#1258,
     \* `specs/tla/degraded-reshape/`): `F + 1` promises of one column of the
     \* old grid, which meet every read quorum of it; a stuck column moves.
-    [] s = "bypass_hold" -> <<Phase2(OldSeq)>>]
+    [] s = "bypass_hold" -> <<Phase2(OldSeq)>>
+    \* The heal of a sealed segment's replica set (#1314,
+    \* `specs/tla/re-replication/`): the new replica copies the segment from
+    \* one member that holds it whole, then the controller writes the new
+    \* set into the segment record by compare-and-set.
+    [] s = "heal"     -> <<<<Alt(R, CopyQ)>>, MMWait(MM)>>]
 
 Run == IF Only = "all" THEN Steps ELSE <<Only>>
 

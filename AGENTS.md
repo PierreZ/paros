@@ -114,7 +114,12 @@ record)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state tally on a 
 configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen
 value in one write; `specs/tla/ctrl-segments/`: the copies of a sealed segment across retire and
 offload, the repair of a replica log and of an object, the data-loss report; #1263 (CTRL recovery
-in the journal)).
+in the journal)), the heal of a sealed segment's replica set
+(`specs/tla/re-replication/`: a new replica counts only on its own complete copy from a full
+member of the set, the new set written by compare-and-set on the version of the register, a "done"
+report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
+removed replica that comes back during the heal; #1314 (re-replication of a sealed segment's
+replica set)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are

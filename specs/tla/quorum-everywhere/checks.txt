@@ -12,6 +12,8 @@ quorum_f2           pass       ci
 quorum_majority     pass       ci
 # F + 1 down in one column: the write moves to the next column and completes.
 write_move          pass       ci
+# F + 1 down in the replica set: a heal still copies from the one live holder.
+heal_replica        pass       ci
 bypass_hold_move    pass       ci
 # One more member down than the quorum allows: each step blocks.
 write_every_column  violation  ci
@@ -30,6 +32,7 @@ trim_mm             violation  ci
 handover_mm         violation  ci
 ctl_election_mm     violation  ci
 reshape_mm          violation  ci
+heal_mm             violation  ci
 # Each step waits for every target (a FoundationDB TLog commit): F down blocks it.
 write_all           violation  ci
 election_all        violation  ci
@@ -42,6 +45,7 @@ handover_all        violation  ci
 ctl_election_all    violation  ci
 reshape_all         violation  ci
 bypass_hold_all     violation  ci
+heal_all            violation  ci
 # The full grid (acks = rows) needs a whole column to write: one down in each
 # column blocks the write.
 full_grid_write     violation  ci

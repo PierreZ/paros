@@ -33,7 +33,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | Quorum everywhere and the grid bound | §J5.1 | `quorum-everywhere/`, `grid/` | #1257 (quorum everywhere); #1318 (two rows **Not proved**) |
 | CTRL on a grid and across segments | §J5.3 | `ctrl-grid/`, `ctrl-segments/` | #1263 (CTRL recovery in the journal) |
 | The seal end against a faulty record: a faulty vote counts | §J3.1, §J5.3 | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record) |
-| Re-replication of a sealed segment | §J5.2 | open | #1314 (re-replication of a sealed segment's replica set) |
+| Re-replication of a sealed segment | §J3.1, §J5.2 | `re-replication/`, its row in `quorum-everywhere/` | #1314 (re-replication of a sealed segment's replica set) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
 | The controller's election and fenced reshape | §J6.1 | `grid-controller/` | #1259 (the fenced reshape call of the grid controller) |
 | The health measures and the journal states | §J6.2 | `health/`; its v1 switch is #1319 (a v1 switch in health/) | #1260 (journal health measures) |

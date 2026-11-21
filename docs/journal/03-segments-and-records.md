@@ -118,10 +118,42 @@ checked, each with a control that TLC breaks:
 - **A sealed segment is re-replicated in v1** (decided by Pierre on 2026-11-20, #1315,
   decision 4). With offload deferred, a sealed segment lives only on its replica set until the
   user truncates over it. When a member of that set is lost, the controller copies the segment
-  from a holder to a new member and changes the replica set in the record. The model comes first:
-  #1314 (re-replication of a sealed segment's replica set) checks the change of the set, the copy,
-  the reader that routes with the old set, the trim that races the copy and the count of holders.
-  The guard of the change is its result.
+  from a holder to a new member and changes the replica set in the record. Six rules make this
+  heal safe and live (#1314 (re-replication of a sealed segment's replica set), checked on
+  2026-11-20 by `specs/tla/re-replication/`). With them, every slot at or above the floor of a
+  segment that is not trimmed stays on a live replica, and the margin of the promise holds: with
+  `D` members of the set down, at least `F + 1 - D` live members hold the whole segment (`F + 1`
+  with no member down). Each rule has a control that TLC breaks:
+  - **A new replica counts only on its own complete copy.** The controller writes the new set
+    only after the new replica reports that its copy reached the segment end (the `next_seq` of
+    the record). A replica counted when its copy starts (`count_start`) lets the next failures
+    lose a slot.
+  - **The copy comes from a member of the set that holds every slot up to the segment end**, as
+    the offloader. A source that holds only a prefix (`copy_any`) gives a copy that looks complete
+    and is not, and a slot is lost. A source outside the set (`live_outside`) can drop its copy
+    during the copy, and the heal stops.
+  - **The change of the set is a compare-and-set on the version of the register that the
+    controller read.** The version covers the state of the record, the set and the controller
+    term. A write checked on the term only writes the record of an old read and undoes a trim
+    (`cas_term`). A write with no check lets a deposed controller and an old read put back a
+    replica that dropped its copy (`cas_blind`). With the version, the term check adds no safety
+    (`version_only` passes), because the election writes the register; it stays, to tell a
+    deposed controller to stop (§J6.1).
+  - **A "done" report belongs to one copy.** A new plan starts a new copy. A report kept from an
+    aborted copy (`report_sticky`) counts a replica that dropped its copy since.
+  - **A replica that does not hold a slot refuses the read**, and the reader reads the record and
+    the floor again. A read that took the set before a heal stays correct: a removed replica
+    still holds the slot (the bytes of a sealed slot never change) or refuses. A replica whose
+    copy ends below the slot must not answer "no record" as at the tail of an open segment
+    (`answer_partial`).
+  - **A replica that is not in the set and is no plan's new replica drops its copy.** A removed
+    replica that comes back drops it too and never counts again on its old copy: to join again it
+    copies again. A trim during the heal fails the heal's compare-and-set (the state is in the
+    version), the plan ends, the new replica drops its copy, and the trimmed record stays trimmed.
+
+  The heal waits for one member that holds the segment and a matchmaker majority (§J5.1). The
+  model has no register across a matchmaker handover (`segment-records/` checks it) and no replica
+  that comes back with an empty disk (a new replica stands for it).
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in
@@ -274,7 +306,7 @@ opens the segment to its trim. A segment is the run of slots of one configuratio
 | New segment: its grid, in state `pending` | the grid controller, by `reshape(expected configuration, new grid, term)` | The term is the term of the register (`TermCheck`); the expected configuration is the newest of the table (`ExpCheck`); the newest configuration is in force and every older one is retired (`RetireGuard`); the grid is a v1 grid (`BoundGuard`, below); a call that the register already took gets "ok" again (`Idempotent`) | `grid-controller/` (controls `noterm`, `noexp_noterm`, `noretire`, `nobound`, `live_nobound`, `noidem`); `segment-records/` (`control`) |
 | Identity of the opening call: term, expected configuration, grid | the grid controller, in the same write | Written once, with the new segment. The register compares a retry with it | `grid-controller/` (`noidem`, `noexp_noidem`) |
 | Release number of the segment | the writer of the new segment | Written once, with the new segment. A role refuses a release it does not know (upgrade minimum of v1, Pierre, 2026-11-19, journal design) | no model: the field enters no safety rule |
-| Replica set of the segment | **Open** (#1189): the reshape call of §J6.1 names a grid only, and the journal v1 plan lists the replica set as a field of the record. A re-replication of a sealed segment changes it (decision 4 of §J1.1) | **Open**: the guard of a change of the set is the result of #1314 (re-replication of a sealed segment's replica set) | `segment-replicas/` checks a fixed set; #1314 (running) checks a change |
+| Replica set of the segment | **Open** (#1189): the reshape call of §J6.1 names a grid only, and the journal v1 plan lists the replica set as a field of the record. A re-replication of a sealed segment changes it (decision 4 of §J1.1) | A change of a sealed segment's set (a heal, §J3.1): by the grid controller, a compare-and-set on the register version that it read (and on its term), only from `retired`, removing a member and adding a new replica whose own report says its copy, from a full member of the set, reached the segment end (#1314) | `segment-replicas/` checks a fixed set; `re-replication/` checks a change (`count_start`, `copy_any`, `live_outside`, `cas_term`, `cas_blind`, `report_sticky`) |
 | Seal end of the predecessor; the predecessor becomes `sealed` and the new segment `in force` | the first leader of the new configuration, after its Phase 1 over the old and the new grid | Written once, by compare-and-set from "no end". The end is one above the highest slot where its Phase 1 saw a vote in the old grid. A CTRL faulty vote counts, so the end is the frontier of that Phase 1 over the old grid (#1313 (the seal end against a CTRL faulty record), §J3.1) | `experiments/segments/a/` (the end, `end_uncommitted_*`); `seal-ctrl/` (`end_readable`, `wait_cover`, `end_readable_cover`); `segment-records/` (`seal`, `SealOnce`); `grid-controller/` (`SealIn`) |
 | Boundary state of a sealed segment: `next_seq`, `first_seq` and the writer uuid | the first replica of the segment's set that applied every slot of the segment | Written once, by compare-and-set from "no boundary", in one write with all three fields. The value is the fold at the end of the segment. A replica of the next segment starts from the record of the segment just before it, never from the newest record | `segment-replicas/` (`boundary_early`, `boundary_seq`, `retire_norecord`); `segment-truncate/` (`nofirst`, `trimstate`); `seal-chain/` (`record_latest`, `record_reach_empty`) |
 | `retired` | the leader | From `sealed`, once `F + 1` replicas of the set hold the segment and the boundary state is written. A found damage that is not repaired also blocks it (a margin, Pierre, 2026-11-20, #1263). The old acceptors stop only after this write is done | `segment-replicas/` (`retire_early`, `retire_norecord`); `segment-records/` (`seal`, `RetireKept`); `ctrl-segments/` (`retire_f`, `live_retire_f`; the margin: `retire_any` passes) |
