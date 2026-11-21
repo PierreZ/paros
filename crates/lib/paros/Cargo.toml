@@ -6,10 +6,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../../README.md"
-publish = false
+# Agent notes stay in the repository, out of the published crate.
+exclude = ["AGENTS.md", "CLAUDE.md"]
 
 # The facade: each layer is its own crate, and this crate re-exports each one
 # as a module. Today there is one layer, the sans-IO core. The journal layers

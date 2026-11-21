@@ -5,7 +5,8 @@ only. A caller, the **driver**, owns the sockets, the disk and the timers. The c
 what to persist and what to send, and the driver does it. The same code runs in a test, in a
 simulation, in a browser (wasm32) and behind a real network.
 
-paros is a learning project. It is not for production, and nothing is published to crates.io.
+paros is a learning project. It is not for production. Releases go to crates.io as
+`paros-consensus`, and through the `paros` facade as `paros::consensus`.
 
 ## What is in the crate
 
