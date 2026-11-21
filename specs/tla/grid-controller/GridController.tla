@@ -376,14 +376,12 @@ SettlesBounded ==
 \* lost the compare-and-set; a controller that is down only restarts.
 CtlSteps ==
   [][\A c \in Ctrls :
-       LET s == ctl[c].st
-           s2 == ctl'[c].st
-       IN /\ s = "lead" /\ s2 # "lead" =>
-               \/ crashes' > crashes
-               \/ \E m \in reps \ reps' : m.c = c /\ m.ans = "term"
-          /\ s2 = "lead" /\ s # "lead" => s = "cand"
-          /\ s = "cand" /\ s2 = "idle" => term # ctl[c].seen
-          /\ s = "down" => s2 \in {"down", "idle"}]_vars
+       /\ ctl[c].st = "lead" /\ ctl'[c].st # "lead" =>
+            \/ crashes' > crashes
+            \/ \E m \in reps \ reps' : m.c = c /\ m.ans = "term"
+       /\ ctl'[c].st = "lead" /\ ctl[c].st # "lead" => ctl[c].st = "cand"
+       /\ ctl[c].st = "cand" /\ ctl'[c].st = "idle" => term # ctl[c].seen
+       /\ ctl[c].st = "down" => ctl'[c].st \in {"down", "idle"}]_vars
 
 \* Each configuration of the table moves one way, one state at a time:
 \* none, pending, in force, sealed, retired.
