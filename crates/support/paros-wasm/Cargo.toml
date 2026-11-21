@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The site's wasm tool: the Paxos step-through engine on paros-consensus (`paxos`)"
+description = "The site's wasm tools: the Paxos step-through engine on paros-consensus (`paxos`), the journal fold lab on paros-journal (`journal`)"
 publish = false
 
 [lib]
@@ -18,10 +18,13 @@ crate-type = ["cdylib", "rlib"]
 # The `playground` tool (paros + moonpool-sim) was removed on 2026-11-19; it is
 # at the tag `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md).
 [features]
-default = ["paxos"]
+default = ["paxos", "journal"]
 # The Paxos step-through engine (#308, #811): `paros-consensus` driven by hand, and
 # nothing else.
 paxos = ["dep:paros-consensus", "dep:serde", "dep:serde_json"]
+# The journal fold lab (#1363): `paros-journal` driven by hand, and nothing
+# else.
+journal = ["dep:paros-journal", "dep:serde", "dep:serde_json"]
 
 [[test]]
 name = "paxos_traces"
@@ -38,6 +41,10 @@ serde = { version = "1", features = ["derive"], optional = true }
 paros-consensus = { workspace = true, default-features = false, features = [
   "serde",
 ], optional = true }
+
+# `journal`: the pure journal core alone (it takes `paros-consensus` with its
+# features off).
+paros-journal = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # MUST stay exactly 0.2.130: the flake pins `wasm-bindgen-cli` 0.2.130, and the

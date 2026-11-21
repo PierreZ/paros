@@ -1,8 +1,9 @@
 # paros-wasm
 
-The site's wasm tool (#540), one cargo feature per tool. `publish = false`; `cdylib` for the wasm
-bundle, `rlib` for the native tests. Today there is one tool, `paxos`, on by default; the wasm
-bundle is built with `--no-default-features --features paxos` (`scripts/build-wasm.sh`).
+The site's wasm tools (#540), one cargo feature per tool. `publish = false`; `cdylib` for the wasm
+bundle, `rlib` for the native tests. Two tools, `paxos` and `journal`, both on by default (so
+clippy and nextest cover both); each wasm bundle is built alone with `--no-default-features
+--features <tool>` (`scripts/build-wasm.sh`).
 
 - `paxos` → `src/paxos.rs` + `src/paxos/` → the engine of the step-through diagrams of the
   site's `/paxos/` pages (#811 (Paxos flavor pages)). Depends on `paros-consensus` only
@@ -14,6 +15,10 @@ bundle is built with `--no-default-features --features paxos` (`scripts/build-wa
   the automation flags are gone. Every decision of a run is `paros-consensus`'s own; a script only
   delivers, drops, copies, ticks, crashes and proposes. Add no level. The design of the game is
   `docs/analysis/play/game-plan.md`, a record.
+- `journal` → `src/journal.rs` + `src/journal/` → the fold lab of the site's `/journal/calls/`
+  page (#1363 (journal fold lab)). Depends on `paros-journal` only (which takes
+  `paros-consensus` with its features off). Bundle `paros_journal_lab`, staged into
+  `website/site/public/journal/wasm/`.
 - `playground` was removed on 2026-11-19 with the journal layers. It is at the tag
   `v0.2.0-alpha.1` (`docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md`).
 
@@ -120,6 +125,26 @@ The `applied` log in `world/disk.rs` is the **game's own** application stand-in,
   and matchmaker ids are different spaces (`MessageView::from_party` / `to_party`).
 - `# Panics` on anything that asserts; `#[must_use]` on accessors (pedantic).
 
+## `journal`: the fold lab of the Journal pages
+
+**The rule** is the same: the module is a driver of `paros-journal` and holds no journal rule.
+Every answer comes from `JournalState::apply` or `resolve`; the module builds the commands and
+keeps what a client and a replica keep around the fold. No consensus runs: each call is one
+decided slot, applied at once.
+
+- `src/journal/world.rs` → `Journal`, `Call`, `Outcome`, `Event` → three writers (A, B, C, fixed
+  uuids) and a chain of segments. A writer's `belief` is the last view it heard (a lost answer
+  teaches nothing); a new write is one record at the believed `next_seq`; `Resend` sends the
+  last write unchanged; `Truncate` is fenced unless the writer believes the journal is
+  multi-writer; `Seal` starts the next segment from `JournalState::boundary`; `Resolve` asks
+  the last segment that starts at or below the write's position.
+- `src/journal/lab.rs` → `Exercise`, `Lab`, `Move`, `LabView` (wasm `JournalLab`) → the five
+  exercises: a list of calls, a goal read off the answers the writers heard, and a
+  `solution`. The view names each answer's row of the answers table of §J2. Undo is a replay.
+- `src/journal/lab/tests.rs` → each solution reaches its goal, and every sequence of up to five
+  calls of every exercise trips no assertion of the core (an abort in wasm). The browser
+  smoke test plays the same solutions by `data-call` (`Call::key`): change both together.
+
 ## Tests & gates
 
 Prefix each with `nix develop --command`. CI's `wasm` job runs the traces diff and the wasm
@@ -127,14 +152,16 @@ build; clippy and nextest cover the crate through the workspace.
 
 - `cargo nextest run -p paros-wasm`
 - `cargo test -p paros-wasm --test paxos_traces` then `git diff --exit-code -- website/site/src/traces`
-- `cargo check --target wasm32-unknown-unknown -p paros-wasm --no-default-features --features paxos`
-- `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `target/wasm-tools/paxos/`, not
-  committed)
+- `cargo check --target wasm32-unknown-unknown -p paros-wasm --no-default-features --features paxos`,
+  and the same with `--features journal`
+- `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `target/wasm-tools/paxos/` and
+  `target/wasm-tools/journal/`, not committed)
 - Full deploy build: `scripts/build-wasm.sh`, then `npm run build` in `website/site/` (the Pages
   workflow).
 
 ## Deps & pins (`Cargo.toml`)
 
-`paxos`: `serde`, and `paros-consensus` (`default-features = false`, `serde`); on wasm32 also `serde_json`, the JSON of the exports. The native tests take `serde_json` as a dev-dependency.
+`paxos`: `serde`, and `paros-consensus` (`default-features = false`, `serde`); `journal`: `serde`
+and `paros-journal`; on wasm32 also `serde_json`, the JSON of the exports. The native tests take `serde_json` as a dev-dependency.
 wasm-only `wasm-bindgen = "=0.2.130"` (must equal the flake's `wasm-bindgen-cli`, bumped
 together) and `console_error_panic_hook`.
