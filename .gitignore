@@ -40,3 +40,6 @@ specs/tla/*/states/
 
 # Python bytecode (scripts/mutate-tla.py)
 __pycache__/
+
+# TLAPS writes its fingerprint cache beside each proof (scripts/check-proofs.sh).
+specs/tla/**/*.tlaps/

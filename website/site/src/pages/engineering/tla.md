@@ -64,7 +64,10 @@ at the start, and every step from a state where `Inv` holds goes to a state wher
 
 - **`decree/`**: the invariant of Lamport's proved `Paxos.tla`. TLC starts from every state of
   the instance where `Inv` holds and takes one step. The control `inductive_ignore` (a proposer
-  that ignores the reported votes) breaks `Inv` in one step.
+  that ignores the reported votes) breaks `Inv` in one step. TLAPS proves it at every size
+  (`DecreeProof.tla`, 679 obligations): `Inv` holds at the start, every step keeps it, and it
+  implies `Agreement`. The last step, the TLA rule that joins the three, is not checked by
+  the prover: the TLAPS of nixpkgs has no LS4, its temporal backend.
 - **`multi-paxos/`**: the decree invariant for each slot, and the rules of the log, the
   allocator and the disk. The states are too many to list, so TLC draws 100,000 of them with a
   fixed seed. A pass says that no drawn state breaks `Inv`; it is not a proof.
