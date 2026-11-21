@@ -27,21 +27,20 @@
 (*     (`Decide`);                                                         *)
 (*   - "crash": a proxy crashed and lost its rounds (`Crash`).             *)
 (*                                                                         *)
-(* The model's deployment is compartmentalized: leaders, proxies and       *)
-(* acceptors are three sets, and every round goes through a proxy. The     *)
-(* cluster colocates a leader with an acceptor, and a leader may run a     *)
-(* round itself (`Delegation::Colocated`, the leader's take-back). So the  *)
-(* trace spec has four steps that are not steps of the model, each a step  *)
-(* of the colocated deployment of `multi-paxos/`:                          *)
+(* The cluster colocates a leader with an acceptor, and a leader may run  *)
+(* a round itself (`Delegation::Colocated`, the leader's take-back): the   *)
+(* steps of the model's colocated deployment (`Colocated = TRUE`):         *)
 (*   - "direct": the leader sends the `Accept` of its proposed value to    *)
-(*     the acceptors itself;                                               *)
+(*     the acceptors itself (`Direct`);                                    *)
 (*   - an "accept" with `own`: the leader records the round it opens as    *)
-(*     its own vote (`record_own_round`), with no `Accept` message: the    *)
-(*     value is the one the leader proposed;                               *)
+(*     its own vote (`OwnVote`);                                           *)
 (*   - "record": a node keeps a value chosen at a ballot as its record,    *)
-(*     below its promise (`mark_chosen`);                                  *)
+(*     below its promise (`Record`);                                       *)
 (*   - "learn": a node learned a slot. The model has no learner state, so  *)
-(*     the step only asks that the value is chosen.                        *)
+(*     the event changes nothing, and the trace spec asks that the value   *)
+(*     is chosen.                                                          *)
+(* The trace spec defines no step of its own (#1306 (trace specs extend    *)
+(* the checked model)).                                                    *)
 (* A node restart changes nothing here (the promise and the votes are      *)
 (* durable), so the walk's restarts are not in the trace.                  *)
 (*                                                                         *)
@@ -116,49 +115,10 @@ Reported(s) ==
   THEN LET r == CHOOSE r \in e.rep : r.slot = s IN [bal |-> r.bal, val |-> r.val]
   ELSE NoVote
 
-\* The owner of ballot b opens Phase 1 and promises it: `Prepare`, then
-\* the owner's `Promise`, in one step.
-PrepareOwn(b, o) ==
-  /\ Owner[b] = o
-  /\ phase[b] = "idle"
-  /\ o \in UNION {Members[k] : k \in History(b)}
-  /\ prom[o] < b
-  /\ phase' = [phase EXCEPT ![b] = "p1"]
-  /\ prom' = [prom EXCEPT ![o] = b]
-  /\ msgs' = msgs \cup {[type |-> "1a", bal |-> b],
-                        [type |-> "1b", acc |-> o, bal |-> b, rep |-> vote[o]]}
-  /\ UNCHANGED <<vote, safe, prop, pbal, pcfg, round, done, crashes>>
-
-\* The leader of ballot b sends the `Accept` of its value at slot s to the
-\* acceptors itself: the trace spec's own step, see above.
-Direct(b, s, v) ==
-  /\ phase[b] = "p2"
-  /\ prop[b][s] = v
-  /\ Send([type |-> "2a", bal |-> b, slot |-> s, val |-> v])
-  /\ UNCHANGED <<prom, vote, phase, safe, prop, pbal, pcfg, round, done, crashes>>
-
-\* The leader a of ballot b records the round it opens at slot s as its
-\* own vote: the trace spec's own step, see above.
-OwnVote(a, b, s, v) ==
-  /\ a \in Addressees(b, s)
-  /\ prom[a] <= b
-  /\ prop[b][s] = v
-  /\ vote[a][s] # [bal |-> b, val |-> v]
-  /\ prom' = [prom EXCEPT ![a] = b]
-  /\ vote' = [vote EXCEPT ![a][s] = [bal |-> b, val |-> v]]
-  /\ Send([type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v])
-  /\ UNCHANGED <<phase, safe, prop, pbal, pcfg, round, done, crashes>>
-
-\* Node n keeps the value chosen at ballot b as its record of slot s: the
-\* trace spec's own step, see above. It is no vote: it sends no 2b.
-Record(n, b, s, v) ==
-  /\ ChosenAt(b, s, v)
-  /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
-  /\ UNCHANGED <<prom, phase, safe, prop, pbal, pcfg, round, done, crashes, msgs>>
-
 Step ==
   \/ /\ e.event = "prepare" /\ IsBallot /\ IsNode("owner")
-     /\ PrepareOwn(e.bal, e.owner)
+     /\ Owner[e.bal] = e.owner
+     /\ PrepareOwn(e.bal)
   \/ /\ e.event = "promise" /\ IsNode("acc") /\ IsBallot /\ Has("from") /\ Has("rep")
      /\ Opened(e.bal) /\ CampaignFrom(e.bal) = e.from
      /\ Promise(e.acc, e.bal)
@@ -170,7 +130,8 @@ Step ==
   \/ /\ e.event = "propose" /\ IsBallot /\ IsSlot /\ IsValue
      /\ Propose(e.bal, e.slot, e.val)
   \/ /\ e.event = "direct" /\ IsBallot /\ IsSlot /\ IsValue
-     /\ Direct(e.bal, e.slot, e.val)
+     /\ prop[e.bal][e.slot] = e.val
+     /\ Direct(e.bal, e.slot)
   \/ /\ e.event = "delegate" /\ IsBallot /\ IsSlot /\ IsValue /\ IsProxy
      /\ prop[e.bal][e.slot] = e.val
      /\ Delegate(e.bal, e.slot, e.proxy)
@@ -179,7 +140,8 @@ Step ==
                             val |-> e.val, proxy |-> e.proxy])
   \/ /\ e.event = "accept" /\ IsNode("acc") /\ IsBallot /\ IsSlot /\ IsValue /\ Has("own")
      /\ IF e.own
-        THEN OwnVote(e.acc, e.bal, e.slot, e.val)
+        THEN /\ prop[e.bal][e.slot] = e.val
+             /\ OwnVote(e.acc, e.bal, e.slot)
         ELSE /\ Accept(e.acc, e.bal, e.slot)
              /\ vote'[e.acc][e.slot] = [bal |-> e.bal, val |-> e.val]
   \/ /\ e.event = "commit" /\ IsBallot /\ IsSlot /\ IsValue /\ IsProxy

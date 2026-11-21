@@ -31,6 +31,7 @@ a segment's replica set, each step completes:
 | Offload mark, record of a trim | a matchmaker majority. In v1 the offload mark is a rule of the record only: nothing writes it (§J3.1) |
 | Matchmaker set handover | a majority of the old set (the stop quorum), then a majority of the new set (the successor decree) |
 | Grid controller election, reshape call | a matchmaker majority for each compare-and-set on the matchmaker record (§J6.1, #1259) |
+| Heal of a sealed segment's replica set | one member of the set that holds the segment whole (the copy), then a matchmaker majority for the compare-and-set of the new set (§J3.1, #1314); `heal_replica` passes even with `F + 1` members of the set down while one holder lives |
 | Hold before Phase 2 of a bypass | not in v1 (§J5.5). `F + 1` acceptors of one column of the old grid; a stuck column moves (§J5.5, #1258) |
 
 Each step blocks with one member more down than its quorum allows, and each step that waits for
@@ -58,7 +59,7 @@ is still live. Each rule is in the section that the table names.
 |---|---|---|---|
 | Retire of a sealed segment | `F + 1` replicas of its set hold the whole segment, and the boundary state is written. A found damage that is not repaired also blocks it, as a margin (Pierre, 2026-11-20, #1263) | §J3.1, §J3.4 | `segment-replicas/` (#1271) |
 | Compaction of a segment's acceptors | to a slot that `F + 1` replicas of its set compacted to, counted on the leader side through `membership/` | §J3.2 | `segment-truncate/` (#1276); the quorum row is **Not proved** (#1318) |
-| Re-replication of a sealed segment | a holder copies the segment to a new member of the set (v1, Pierre, 2026-11-20). **Open**: the guard of the change of the set | §J3.1, §J3.4 | #1314 (re-replication of a sealed segment's replica set), open |
+| Re-replication of a sealed segment | a member that holds the whole segment copies it to a new replica, which counts only on its own complete copy; with `D` members down, at least `F + 1 - D` live members hold the segment (v1, Pierre, 2026-11-20) | §J3.1, §J3.4 | `re-replication/` (#1314 (re-replication of a sealed segment's replica set)) |
 
 ### J5.3 Damage: CTRL in the journal
 

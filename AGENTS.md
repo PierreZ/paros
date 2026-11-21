@@ -118,7 +118,12 @@ in the journal)), the journal v1 composed (`specs/tla/journal-state/`: three seg
 register writes that are partial or done, the boundary state, a replica set per segment, the fold
 with `Below` and its `Resolve` call (#1320), retire, trim; the acceptors' state is a memory, a queue of writes and a disk, with a
 crash between two writes, and an `Accept` that raises the promise writes the promise first or in
-the same write; #1189 (the journal state model), #1309 (the state is the disk)).
+the same write; #1189 (the journal state model), #1309 (the state is the disk)), the heal of a sealed segment's replica set
+(`specs/tla/re-replication/`: a new replica counts only on its own complete copy from a full
+member of the set, the new set written by compare-and-set on the version of the register, a "done"
+report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
+removed replica that comes back during the heal; #1314 (re-replication of a sealed segment's
+replica set)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are
@@ -139,11 +144,14 @@ faults on, with moonpool-walk, moonpool #554, a seeded random walk over the sans
 machines), and coverage-driven simulation (the seeds are steered toward the branches not yet
 reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
 crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
-walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
-`leader-handoff/`, `matchmaker/` (with the retirement, and on grids with every compartment), `reads/` (the read basis and the read fence), `truncation/`
-(the compaction floor and the trim jump, and the faulty entries of CTRL with the tri-state tally),
-`compartments/` (the read replica and the batcher) and `handover/` (the matchmaker set handover) (#1198 (trace checking),
-`tests/traces.rs`), and each trace spec names the steps its checked walks must take (a `Noop` gap
+walks)). Trace checking is there for every walk (#1198 (trace checking), `tests/traces.rs`), and every
+trace spec extends a model that TLC checks and defines no step of its own (#1306 (trace specs
+extend the checked model)): `decree/`; `node/`, the implementation model of `ColocatedNode` (the
+log, matchmaking, the GC and the retirement, grids, the compaction floor and the trim jump, the
+faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads and the
+proxy `Commit`), which eight trace specs extend; `proxy-leader/`; `leader-handoff/`;
+`generations/` (the chain of matchmaker set handovers); and `batcher/`. Merging `proxy-leader/`
+and `leader-handoff/` into `node/` is #1343 (merge proxy and handoff into the node model). Each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
 rules)). The trace checks are tested too: each trace spec must refuse about 20 named edits of
@@ -225,7 +233,12 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder, and the trace checks of consensus-sim in four
-  `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout))
+  `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); the job of each folder also checks that
+  each guard mutant parses (`scripts/mutate-tla.py --parse`)
+- the `TLA mutants` workflow, each week and on demand: `scripts/mutate-tla.py` sets each guard
+  of each action of `specs/tla/` to `TRUE` and runs the folder's `ci` checks; one check must
+  fail. A survivor fails the run: remove the guard or add the check that needs it, never an
+  allow list (#1311 (mutate spec guards), `specs/tla/README.md`)
 
 A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`,
 Markdown, `docs/`, `specs/`) runs only the `wasm` job of `rust.yml`; a push to `main` runs
@@ -593,5 +606,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-tla.sh`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

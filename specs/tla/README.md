@@ -43,6 +43,32 @@ that `Inv` covers: `decree/` with no wipe or with a wiped acceptor that takes no
 covered), `multi-paxos/` with `Durable = "before"` and `Identity = TRUE`. A pass of a
 `multi-paxos/` check says that no drawn state breaks `Inv` in one step; it is not a proof.
 
+## Guard mutation
+
+`scripts/mutate-tla.py` tests the checks of each model (#1311 (mutate spec guards)). A guard is
+a conjunct of an action that changes no variable: a `/\` item of a definition that primes a
+variable, with no prime, no `UNCHANGED` and no call of an action. For each guard, the script
+sets that one item to `TRUE` in a copy of the specs and runs the `ci` checks of `checks.txt` on
+the copy, the `pass` lines first. The mutant is caught when one check does not give its listed
+result; a check of each folder that links the module counts too. A check that runs past 3 times
+its time on the specs as they are (at least 60 seconds) is stopped, and the mutant counts as
+caught: the guard bounds the state space of the check.
+
+A mutant that every check accepts is a survivor. The guard is not necessary, or a property is
+missing. Remove the guard, or add the check that fails without it (often a liveness check, or a
+control). There is no allow list.
+
+    nix develop .#tla --command scripts/mutate-tla.py decree            # every guard of a folder
+    nix develop .#tla --command scripts/mutate-tla.py --list decree     # the guards only
+    nix develop .#tla --command scripts/mutate-tla.py --parse decree    # each mutant parses
+
+The `spec` job of the `TLA` workflow runs `--parse` on each folder. The `TLA mutants` workflow
+runs every mutant each week and on demand, in slices of 30 minutes
+(`scripts/mutate-tla-shards.txt`), and its `report` job lists the survivors. The `--help` of the
+script names the other options (`--shard`, `--budget`, `--baseline-out`, `--baseline-from`,
+`--out`, `--skip`). The trace specs (`*Trace.tla`) are not mutated: `checks.txt` does not run
+them.
+
 ## Layout
 
 Each folder is one model:
@@ -59,57 +85,58 @@ the rule prevents. A model with no control proves little.
 A model may also have a trace spec, `<Name>Trace.tla` and `<Name>Trace.cfg`: the model, forced
 to follow the events of one run of the code (#1198 (trace checking)). It is not in `checks.txt`:
 `crates/sim/consensus-sim/tests/traces.rs` runs it with TLC, through moonpool-tla, on the walks
-of `consensus-sim`. The trace specs today are:
+of `consensus-sim`.
+
+**Every trace spec extends a model that TLC checks, and defines no step of its own** (#1306
+(trace specs extend the checked model)). A step of the code that the model does not have is a
+step of the model, with a check and a control in its `checks.txt`, never a step of the trace
+spec. A trace spec only binds each event to an action of its model, with the arguments of the
+event, and checks what the event observes (the votes a promise reports, the frontier of a win,
+a watermark). An event that changes nothing (a slot learned again) is a stutter. So the spec
+that judges the code is the spec that TLC checks, and a trace check never accepts a step that
+no checked model takes. The trace specs today are:
 
 - `decree/DecreeTrace`: the decree walk.
-- `multi-paxos/MultiPaxosTrace`: the log of every cell flavor without matchmakers.
+- `node/`: the implementation model of `ColocatedNode`, `Node.tla`: the log (Phase 1 from the
+  first slot the owner does not hold, the frontier, the recovery with the `Noop` gap fill, the
+  learns and the records of a learn, a restart that loses a suffix of the chosen index),
+  matchmaking, the GC, the retirement and the rejoin, the quorums of a configuration (a
+  majority or a grid), the compaction floor and the trim jump, the faulty entries of CTRL with
+  the pages of a promise, the tri-state tally and the repair probe, the read replica, the
+  leaderless reads and the proxy's `Commit` rule. `NodeTrace.tla` binds the events of a walk to
+  its actions, and eight thin trace specs extend it, one for each family of walks:
+  `MultiPaxosTrace` (every cluster flavor without matchmakers), `MatchmakerTrace` (the flavor
+  with matchmakers), `ReadsTrace` (the lagging-reads flavor), `TruncationTrace` (the
+  `compaction` flavor), `CompartmentsTrace` (every compartment, and its `compaction` steer),
+  `FaultsTrace` (`disk-faults` and `disk-faults-3`), `RetireTrace` (`retiring`) and
+  `MatchmakerGridTrace` (`reconfiguring`). Each sets the bounds of the model from the events of
+  its walk (`crates/sim/consensus-sim/src/cluster/trace/node.rs`).
 - `proxy-leader/ProxyLeaderTrace`: the proxy's `Commit` rule, on the flavors with proxy leaders.
+  The colocated steps (the leader's own promise, an `Accept` it sends itself, its own vote, the
+  record of a learn) are steps of `ProxyLeader.tla` (`Colocated = TRUE`).
 - `leader-handoff/LeaderHandoffTrace`: the guards of the cooperative handoff, on the handoff
-  flavor.
-- `matchmaker/MatchmakerTrace`: matchmaking, Phase 1 over every configuration of `H_b`, Phase 2
-  in `C_b` and the GC, on the flavor with matchmakers. The model decides one value; the trace
-  spec takes its matchmaking and GC, and writes the log as its own steps.
-- `reads/ReadsTrace`: `MatchmakerTrace` and the leaderless reads (the read basis of a won
-  leadership, the read fence of each answer, the served index), on the lagging-reads flavor.
-- `truncation/TruncationTrace`: `MultiPaxosTrace` and the compaction floor (the journal fold,
-  each compaction against `first_seq`, the trim jump, the floor guards, a restart that holds
-  the slots below its floor), on the `compaction` flavor (Multi-Paxos on five, steered toward
-  compactions).
-- `compartments/CompartmentsTrace`: `MultiPaxosTrace` and the read replica (its learns, its walk
-  in slot order, its floors, its boot and its leaderless read), on the every-compartment flavor.
-- `compartments/BatcherTrace`: the batcher and the unbatcher (each push fits the lane, a batch is
-  the whole lane in push order or one write alone, the unbatcher cuts the range in batch order),
-  on the batcher walk. The walk has no Paxos under the batcher, so this spec states the batcher
-  rules of `Compartments.tla` and does not extend it.
-- `truncation/FaultsTrace`: `TruncationTrace` and the faulty entries of CTRL (a boot that reads
-  a record faulty, the pages of a promise with their faulty reports, the tri-state tally of the
-  win, the repair probe), on the flavors `disk-faults` and `disk-faults-3`.
-- `matchmaker/RetireTrace`: `MatchmakerTrace` and the retirement (a node retires on an effective
-  floor that no registration at or above names, a retired node takes no step, and a rejoin
-  books it again), on the `retiring` flavor.
-- `matchmaker/MatchmakerGridTrace`: `MatchmakerTrace` with each configuration a grid (a win
-  needs a Phase-1 quorum of every grid of `H_b`, a value is chosen in one column of `C_b`) and
-  each proxy's `Commit` backed by a column of `C_b`, on the steered `reconfiguring` flavor
-  (matchmakers and every compartment).
-- `handover/HandoverTrace`: the matchmaker set handover over a chain of generations (a member
-  freezes, a member of a proposed set holds its whole bootstrap, a member of the old set votes
-  in the successor decree, a member of the chosen set activates with its bootstrap), with the
-  registrations and the GC acks of one journal, on the `handover` flavor. It states its rules
-  for many generations and does not extend `Handover.tla`, which hands generation 0 over once.
+  flavor. A win that skips a learned slot, a step down, a learn of one slot, a record and a
+  restart that loses a suffix of the chosen index are steps of `LeaderHandoff.tla`.
+- `generations/HandoverTrace`: the matchmaker set handover over a chain of generations, with
+  the registrations and the GC acks of one journal, on the `handover` flavor. `Generations.tla`
+  closes a bootstrap over a majority of the old generation that froze, and checks that every
+  floor and every registration a majority held reaches each later generation.
+- `batcher/BatcherTrace`: the batcher and the unbatcher, on the batcher walk. `Batcher.tla` has
+  the walk's network (a batch lands whole, maybe twice, with no Paxos under it) and checks that
+  each answer holds its own records and that a batch keeps push order.
 
-A trace spec that extends the trace spec of another model links that model's modules into its
-folder, as `reads/` links `matchmaker/`.
+Merging `leader-handoff/` and `proxy-leader/` into the node model is #1343 (merge proxy and handoff into the node model).
 
 Each trace spec has a control: a bug planted in the driver that TLC refuses
 (`tests/traces.rs`). Each trace spec also names the steps that some checked walk must take
 (`Spec::rules` in `crates/sim/consensus-sim/src/cluster/trace/rules.rs`, #1231 (traced walks
 reach the rules)): a walk that never fills a gap leaves the gap-fill guard unjudged. A change
-of `specs/tla/` alone runs the trace checks in the `traces` job of the `TLA` workflow (four shards), because
-a trace spec `EXTENDS` its model.
+of `specs/tla/` alone also runs the trace checks, in the `traces` job of the `TLA` workflow (four
+shards): a change of a model changes what its trace specs accept.
 
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
-`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`,
+`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `node/`,
 `proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`.
 
 ## Experiments
@@ -147,15 +174,16 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Plain Multi-Paxos, with the majority, the partitioned grid and the full grid | `node.rs`, `proposer/`, `acceptor.rs`, `replica.rs`, `membership/` | `multi-paxos/` | #1185 (rework 1.14), done |
 | The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` | #1187 (rework 2.8), done |
 | Matchmaker Paxos | `matchmaking.rs`, `matchmaker.rs`, `collector.rs` | `matchmaker/` | #1200 (TLA+ model Matchmaker Paxos), done |
-| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time | #1097 (rework 1.8), done |
+| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time; `generations/` for the chain of handovers that the code runs, with the registrations and the floor of a journal | #1097 (rework 1.8), done |
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
-| The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/` | #1190 (rework 6.10), done |
+| The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/`; `batcher/` for the batcher walk | #1190 (rework 6.10), done |
+| `ColocatedNode` as one implementation model: the log, matchmaking, the GC and the retirement, the floor and CTRL, the read replica, the leaderless reads and the proxy `Commit`, as the code runs them together | `node.rs` and the roles it wires | `node/`, which the log-family trace specs extend | #1306 (trace specs extend the checked model), done |
 | Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
-| Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
+| Quorum everywhere: every journal step (write, election, leaderless read, seal, retire, offload mark, trim, matchmaker handover, grid controller election, reshape call, heal of a sealed segment) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
@@ -169,6 +197,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | CTRL across segments: the copies of a sealed segment across retire and offload, the repair of a replica log and of an object, the data-loss report | the journal steps are designed, not built | `ctrl-segments/` | #1263 (CTRL recovery in the journal), done |
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
 | The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | not built (the journal core, #1324 to #1326) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
+| Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
@@ -2100,6 +2129,7 @@ of its column answered and the answers hold no quorum (#533 (move a stuck round)
 | `ctl_election` | a matchmaker majority (read the controller term); a matchmaker majority (its compare-and-set, #1259) |
 | `reshape` | a matchmaker majority (the fenced reshape call, #1259) |
 | `bypass_hold` | `acks` of one column of `Old`, with the move (the hold before Phase 2 of a bypass, #1258) |
+| `heal` | one replica of the set that holds the sealed segment whole (the copy); a matchmaker majority (the compare-and-set of the new set, #1314) |
 
 `Old` is a sealed configuration and `New` the configuration in force: `New` moves the members
 of `Old` by `Shift` places, so with `Shift = 1` each member that stays changes its column. The
@@ -2123,6 +2153,7 @@ changes nothing, and the state space stays small.
 | `write_every_column`, `trim_every_column` | ci | violation: `F + 1` down in every column of `New` blocks the write |
 | `election_column`, `read_column`, `seal_column` | ci | violation: `F + 1` down in one column blocks Phase 1 |
 | `retire_replica` | ci | violation: `F + 1` replicas down blocks the retire |
+| `heal_replica` | ci | pass: with `F + 1` replicas down, the heal still copies from the one live holder (the control is `heal_mm`: the copy needs no quorum of the set) |
 | `<step>_mm`, for each step that asks the matchmakers | ci | violation: `F + 1` down in one matchmaker set blocks the step |
 | `<step>_all`, for each step | ci | violation: a wait that needs every target (a TLog commit) blocks with `F` down |
 | `full_grid_write` | ci | violation: the full grid (`acks = rows`) writes only with a whole column |
@@ -3068,6 +3099,81 @@ matchmakers' steps are one atomic write each.
 
 What is not in the model: the grid controller's election and a deposed controller
 (`grid-controller/`), the matchmaker set handover (`segment-records/`), CTRL faulty records
-(`seal-ctrl/`, `ctrl-grid/`), the re-replication of a sealed segment (#1314), leaderless reads
+(`seal-ctrl/`, `ctrl-grid/`), the re-replication of a sealed segment (`re-replication/`), leaderless reads
 (`reads/`, `experiments/segments/reads/`), the acceptors' compaction and the trim-point jump
 (`segment-truncate/`), offload (`offload/`), and the client's pipeline and resolve.
+
+### `re-replication/`: the heal of a sealed segment's replica set, for #1314
+
+Offload is prepared, not built, in v1, so a retired segment lives only on its replica set until a
+user `Truncate` trims it. Its acceptors are gone. When a member of the set is down, the grid
+controller heals: it copies the segment to a new replica and writes the new set into the segment
+record (decided in v1 by Pierre on 2026-11-20). The segment has `K` chosen slots whose bytes never
+change, so a copy is a range of slots `[lo, hi)`; `FL0` is the trim floor of the boundary state
+(a replica that compacted holds `[FL0, hi)`) and `fl` the floor that the journal decided later.
+The record is one value of the matchmaker register (state, replica set, controller term and the
+register version, which every write raises), and each step on it is atomic, so a step acts on a
+write that is done. Replicas crash and come back with their disk, at most `F` members of the set
+down at one time. A member that lags copies from a peer or jumps to its trim point. A controller
+is elected by a term, plans a heal for a down member (a new replica and a source), lets the new
+replica copy one slot at a time, and commits the new set, or aborts. A replica that is not a member
+and no plan's new replica drops its copy, and every replica drops it after the trim. A reader takes
+the floor and the set, asks a member, and reads both again on a refusal.
+
+| Constant | Values (first: the design that passes) |
+|---|---|
+| `CountWhen` | `done`: the commit needs the new replica's report that its copy reached the segment end. `start`: the replica counts when its copy starts. |
+| `CopyFrom` | `full`: the source is a member that holds every slot up to the segment end. `any`: any member that holds a slot; the new replica takes the end of the source's copy as the segment end. `outside`: a live replica that holds every slot, a member or not. |
+| `Cas` | `cas`: a compare-and-set on the register version of the plan's read (and on the term, `TermFence`). `term`: the term check only; the commit writes its read with the new set. `blind`: no check. |
+| `TermFence` | `TRUE`: the `cas` commit also checks the term. `FALSE`: the version alone. |
+| `Report` | `copy`: a "done" report belongs to the copy of one plan. `sticky`: the controller keeps a report from an earlier copy. |
+| `Refuse` | `TRUE`: a member that does not hold the slot refuses the read. `FALSE`: a member whose copy ends below the slot answers "no record". |
+
+Safety: `Findable` (each slot at or above the floor of a segment that is not trimmed is on a live
+replica), `Margin` (with `D` members of the set down, at least `F + 1 - D` live members hold the
+whole segment: it survives every failure that the promise still allows), `SetSize`, `ReadTrue` (a
+read answers the record, or "trunc" below the floor) and `TrimStays`. Liveness: `Ends` (every run
+ends with each read answered, no plan open, and each member a good holder unless it is down and no
+live replica is left to replace it; after the trim, no live replica holds a slot). Five replicas,
+three in the first set (`F = 1`), two controllers, two slots, two crashes, one restart, two terms.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass (61 thousand distinct states) |
+| `safety_trim` | ci | pass: the floor rises over the whole segment and the record is trimmed (402 thousand) |
+| `safety_floor` | ci | pass: `FL0 = 1`, replicas that compacted, a copy that jumps, reads of both slots (8.7 million, about 4 minutes with 4 workers) |
+| `version_only` | ci | pass: the commit checks the version only, not the term (402 thousand) |
+| `live`, `live_trim` | ci | pass: `Ends` |
+| `reach_heal`, `reach_two_heals`, `reach_read_new`, `reach_trim_abort`, `reach_back_drop` | ci | violation: a heal, two heals in a row, a read served by a new replica, a heal that the trim aborts, a removed replica that comes back with its copy |
+| `count_start` | ci | violation of `Margin`: a down member is replaced by a new replica before it copied anything; without `Margin`, the next crash loses a slot (`Findable`) |
+| `copy_any` | ci | violation of `Margin`: the source is a laggard that holds one slot, the new replica stops there and counts; without `Margin`, `Findable` breaks |
+| `cas_term` | ci | violation of `TrimStays`: the trim lands between the plan's read and its commit, and the commit writes the old value back, retired |
+| `cas_blind` | ci | violation of `Margin`: a deposed controller's commit removes a member that came back, which drops its copy; the new controller's commit, from an older read, puts it back, empty |
+| `report_sticky` | ci | violation of `Margin` (and `Findable` without it): a copy completes, an election aborts its plan, the replica drops its copy, and the next plan counts it on the old report |
+| `answer_partial` | ci | violation of `ReadTrue`: a laggard member answers "no record" for a slot that its copy has not reached |
+| `live_outside` | ci | violation of `Ends`: the source is a replica outside the set, it drops its copy during the copy, and the heal stops for good |
+
+The answer to #1314: the heal is safe and live with six rules, and no decision is refuted.
+
+- **A new replica counts only on its own complete copy**: its report that the copy reached the
+  segment end, the `next_seq` of the record (`count_start`).
+- **The copy comes from a member of the set that holds every slot up to the segment end**, as the
+  offloader of #1256 (`copy_any` loses a slot; `live_outside` stops the heal).
+- **The commit is a compare-and-set on the version of the register that the controller read.**
+  The term check alone writes an old record over a trim (`cas_term`), and no check puts back a
+  replica that dropped its copy (`cas_blind`). With the version, the term adds no safety
+  (`version_only`), because an election writes the register; it stays, to tell a deposed
+  controller to stop (#1259).
+- **A "done" report belongs to one copy** (`report_sticky`).
+- **A replica that does not hold the slot refuses the read** (`answer_partial`). A read routed
+  with the set from before a heal stays correct: a removed replica holds the slot (the bytes never
+  change) or refuses.
+- **A replica outside the set drops its copy**, a removed replica that comes back too, and it
+  joins again only through a new copy. A trim during a heal fails the commit, and the copy stops.
+
+`quorum-everywhere/` has the `heal` row: one member that holds the segment, then a matchmaker
+majority. It passes with `F + 1` members of the set down (`heal_replica`).
+
+What is not in the model: the register across a matchmaker handover (`segment-records/`), a
+replica that comes back with an empty disk (a new replica stands for it), a source that the
+controller changes during a copy (the plan aborts and a new plan starts), and offload.

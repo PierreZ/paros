@@ -44,8 +44,12 @@ Test only: `publish = false`, never a dependency of another crate.
 - **A trace records only the steps that change the model's state** (#1198 (trace checking)). A
   step is recorded when its batch reached the disk; a message sent again is not a step. Each
   event names the action of the model it is, with every argument, so TLC follows the trace with
-  no search. A step of the code that the model does not have is written in the trace spec as
-  its own step, with the reason in its header, never hidden.
+  no search.
+- **Every trace spec extends a model that TLC checks and defines no step of its own** (#1306
+  (trace specs extend the checked model)). A step of the code that the model does not have
+  becomes a step of the model, with a TLC check and a control in its `checks.txt`, in the same
+  PR. The trace spec binds each event to an action and checks what the event observes; an event
+  that changes nothing is a stutter.
 - **Every trace spec has a control**: a mutant that the oracles miss on some seed and TLC
   refuses (`tests/traces.rs`).
 - **Every trace spec refuses the edits of its recorded traces** (#1308 (mutate recorded
@@ -140,9 +144,13 @@ Test only: `publish = false`, never a dependency of another crate.
 - `cluster/trace.rs` + `cluster/trace/` → `Tracer`, `ClusterEvent`, `Spec`: the steps of a cluster walk as
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs`, `matchmaker.rs`, `reads.rs`,
-  `truncation.rs`, `compartments.rs`, `faults.rs` and `handover.rs` each say which events their model keeps
-  (`Spec::keeps`, a list of the model's own steps) and define its constants. `reads.rs` records the read basis, the answers and the served
-  reads; `truncation.rs` the journal fold of each slot (`Fold`, from the first party that
+  `truncation.rs`, `compartments.rs`, `faults.rs` and `handover.rs` each say which events their
+  spec keeps (`Spec::keeps`, a list of the model's own steps). `node.rs` defines the constants of
+  the eight trace specs of `specs/tla/node/`; `proxy_leader.rs`, `leader_handoff.rs` and
+  `handover.rs` define those of their own models. In a batch, the tracer writes the votes that
+  are not the leader's own round and each trim jump before the learns, and each compaction
+  after them: a node learns a value it holds, from its trim point on. `reads.rs` records the
+  read basis, the answers and the served reads; `truncation.rs` the journal fold of each slot (`Fold`, from the first party that
   applies it) and each floor a node writes; `compartments.rs` the learns, the walk, the floors
   and the boot of a read replica; `faults.rs` each page of a promise (`Page`, with its faulty
   reports) and each record a boot reads faulty (`Rot`); `handover.rs` the handover steps of a
@@ -157,7 +165,7 @@ Test only: `publish = false`, never a dependency of another crate.
 - `trace.rs` → what every trace check shares: `spec` (a trace spec of `specs/tla/`),
   `require_tlc`, `Ranks` (the code's ballots as the model's `1..NB`), the names of nodes.
 - `batcher.rs` → `BatchModel`: the batcher and the unbatcher (Compartmentalized Paxos §3.5).
-  `BatchEvent` and `trace` are its steps for `specs/tla/compartments/BatcherTrace.tla`;
+  `BatchEvent` and `trace` are its steps for `specs/tla/batcher/BatcherTrace.tla`;
   `BatchMutant::ReverseLane` is the control.
 
 ## Tests and seeds
@@ -199,34 +207,35 @@ Test only: `publish = false`, never a dependency of another crate.
   workflow runs it with 900 root seeds from a first seed that moves with the date.
 - `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): the
   walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of each
-  control that the oracles pass. Single decree against `decree/`; every cluster flavor without
-  matchmakers against `multi-paxos/`; the flavors with proxy leaders against `proxy-leader/`;
-  the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`; the lagging
-  reads against `reads/` (controls: a read fence below the promise, a hidden watermark);
-  the `compaction` flavor against `truncation/` (control: a compaction past the fold);
-  every compartment against `compartments/` (control: a replica read with no quorum); the
-  batcher walk against `compartments/BatcherTrace` (control: a lane sent out of push order); the
-  flavors `disk-faults` and `disk-faults-3` against `truncation/FaultsTrace` (control: a promise
-  that hides a faulty record); the `retiring` flavor against `matchmaker/RetireTrace` (control: a
-  retirement with no evidence); the `reconfiguring` flavor against
-  `matchmaker/MatchmakerGridTrace` (control: an early GC request on a grid, `Mutant::EarlyGc` on
-  `reconfigured-compartments`); the `handover` flavor against `handover/HandoverTrace`
-  (control: a bootstrap page that lost a registration, `Mutant::ShrinkBootstrap`). The tests
+  control that the oracles pass. Single decree against `decree/`; the proxy leaders against
+  `proxy-leader/`; the handoff against `leader-handoff/`; every other cluster flavor against
+  `node/`, the implementation model of `ColocatedNode`: every flavor without matchmakers against
+  `node/MultiPaxosTrace`; the matchmakers against `node/MatchmakerTrace`; the lagging reads
+  against `node/ReadsTrace` (controls: a read fence below the promise, a hidden watermark); the
+  `compaction` flavor against `node/TruncationTrace` (control: a compaction past the fold);
+  every compartment against `node/CompartmentsTrace` (control: a replica read with no quorum);
+  the flavors `disk-faults` and `disk-faults-3` against `node/FaultsTrace` (control: a promise
+  that hides a faulty record); the `retiring` flavor against `node/RetireTrace` (control: a
+  retirement with no evidence); the `reconfiguring` flavor against `node/MatchmakerGridTrace`
+  (control: an early GC request on a grid, `Mutant::EarlyGc` on `reconfigured-compartments`);
+  the batcher walk against `batcher/` (control: a lane sent out of push order); the `handover`
+  flavor against `generations/` (control: a bootstrap page that lost a registration,
+  `Mutant::ShrinkBootstrap`). The tests
   `tlc_refuses_the_edited_*` apply every edit of `trace::mutate` to the recorded walks of each
   trace spec (the first seed and the seeds that meet a new rule; 40 seeds of the decree and
   batcher walks) and require a refusal at or after the edited event; an invariant of the trace
-  that breaks there counts as a refusal. `MultiPaxosTrace`, `TruncationTrace`,
-  `CompartmentsTrace` and `LeaderHandoffTrace` check `TraceLearnRecordsHeld` (a learned slot
-  holds its vote once the batch of the learn is whole), with a control that drops the record of
-  a learn (`tlc_sees_a_learn_with_no_record_*`). CI runs both in release in the `trace-edits`
-job of `rust.yml`, not in the debug `test` job. A retiring or a reconfiguring walk has 250 quiet steps, the others
+  that breaks there counts as a refusal. The tracer writes the record of a learn before the
+  learn, and the `Learn` of `node/` and `leader-handoff/` asks for it, so `LearnRecordsHeld`
+  holds at every state of a trace; the control drops the record of a learn and TLC refuses the
+  learn (`tlc_refuses_a_learn_with_no_record_*`). CI runs both in release in the `trace-edits`
+  job of `rust.yml`, not in the debug `test` job. A retiring or a reconfiguring walk has 250 quiet steps, the others
   10: a retirement needs a leader that stands while its GC floor becomes effective, and a
   delegated round under a new configuration needs a leadership of it that settles. Every
   control searches from seed 1, never from a seed picked by hand. A cluster walk has
   150 chaos steps. Each test searches the seeds (at most 300, oracles on, no TLC) and TLC checks
   the first seed and each seed that meets a rule of the spec that no checked seed met before; a
   walk of more than 200 kept events is skipped (TLC grows faster than the trace). The test fails
-  when a rule stays unmet. About three minutes in release on four CPUs. TLC (`tlc`) is in the nix
+  when a rule stays unmet. About eight minutes in release on four CPUs. TLC (`tlc`) is in the nix
   dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
   in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
   a change of `specs/tla/` alone. That job runs in four shards (`--partition count:i/4`), so each
@@ -245,4 +254,5 @@ Every cluster flavor has a trace spec (#1198 (trace checking), #1231 (traced wal
 rules)). A spec judges the steps of its own model: `MatchmakerGridTrace` judges the
 matchmaking, the log, the GC and the proxy `Commit` of the walk with every compartment, and
 the proxy rounds across a crash and the guards of a handoff are judged by `proxy-leader/` and
-`leader-handoff/` on their own walks.
+`leader-handoff/` on their own walks. Merging those two models into `node/` is #1343 (merge proxy and
+handoff into the node model).

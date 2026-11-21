@@ -1,1 +1,0 @@
-../multi-paxos/MultiPaxos.tla

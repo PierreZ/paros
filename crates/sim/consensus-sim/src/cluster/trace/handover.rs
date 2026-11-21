@@ -1,6 +1,6 @@
 //! The events of a cluster walk as a trace of
-//! `specs/tla/handover/HandoverTrace.tla`: the matchmaker set handover of
-//! `specs/tla/handover/Handover.tla` over many generations (#1231 (traced
+//! `specs/tla/generations/HandoverTrace.tla`: the matchmaker set handover
+//! of `specs/tla/generations/Generations.tla` over many generations (#1231 (traced
 //! walks reach the rules)).
 //!
 //! The tracer reads each matchmaker's durable state before and after it

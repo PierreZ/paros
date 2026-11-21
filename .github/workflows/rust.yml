@@ -108,7 +108,7 @@ jobs:
 
   # The edits of recorded traces (#1308 (mutate recorded traces)): each trace
   # spec refuses every named edit of its recorded walks at the edited event or
-  # after it, and the controls of `TraceLearnRecordsHeld`. A change of the
+  # after it, and refuses a learn whose record is gone. A change of the
   # walks can change the traces they start from, so they run for a change of
   # the code. In debug they took the `test` job over its 30 minutes.
   trace-edits:

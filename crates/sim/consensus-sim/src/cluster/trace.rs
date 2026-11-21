@@ -48,14 +48,19 @@
 //! only when it changes a model's state. A message sent again is not a
 //! step.
 //!
-//! Each model reads the events it has and leaves the others out
-//! ([`Spec::keeps`]): `multi_paxos.rs` writes them for
-//! `specs/tla/multi-paxos/`, `proxy_leader.rs` for `specs/tla/proxy-leader/`,
-//! `leader_handoff.rs` for `specs/tla/leader-handoff/`, `matchmaker.rs`
-//! for `specs/tla/matchmaker/`, `reads.rs` for `specs/tla/reads/`,
-//! `truncation.rs` for `specs/tla/truncation/`, `compartments.rs` for
-//! `specs/tla/compartments/` and `faults.rs` for the faulty entries of
-//! `specs/tla/truncation/FaultsTrace.tla`.
+//! Each trace spec reads the events it has and leaves the others out
+//! ([`Spec::keeps`]). Every trace spec extends a model that TLC checks
+//! and defines no step of its own (#1306 (trace specs extend the checked
+//! model)). The eight trace specs of the log family (`MultiPaxosTrace`,
+//! `MatchmakerTrace`, `MatchmakerGridTrace`, `RetireTrace`, `ReadsTrace`,
+//! `TruncationTrace`, `FaultsTrace` and `CompartmentsTrace`) extend
+//! `specs/tla/node/Node.tla`, the implementation model of
+//! `ColocatedNode`: `node.rs` writes their constants, and
+//! `multi_paxos.rs`, `matchmaker.rs`, `reads.rs`, `truncation.rs`,
+//! `compartments.rs` and `faults.rs` record their events.
+//! `proxy_leader.rs` writes the trace of `specs/tla/proxy-leader/`,
+//! `leader_handoff.rs` of `specs/tla/leader-handoff/` and `handover.rs`
+//! of `specs/tla/generations/`.
 
 mod compartments;
 mod encode;
@@ -64,6 +69,7 @@ mod handover;
 mod leader_handoff;
 mod matchmaker;
 mod multi_paxos;
+mod node;
 mod proxy_leader;
 mod reads;
 mod rules;
@@ -489,21 +495,27 @@ impl Tracer {
         self.leadership(batch, &mut events);
         let leads = batch.leading.map(|(ballot, _, _)| ballot);
         // A vote the batch writes before a floor is a step before the
-        // learns and the floor: a slot below a floor takes no vote.
+        // learns and the floor: a slot below a floor takes no vote. Every
+        // vote but the leader's own round (a record of a learn, an `Accept`
+        // of a peer's round) is a step before the learns too: a node learns
+        // a value it holds. The leader's own round follows the `Win` or the
+        // `Propose` of its batch.
         let floor = batch
             .writes
             .iter()
             .position(|w| matches!(w, WriteOp::Truncate { .. } | WriteOp::TrimmedTo { .. }));
-        for write in &batch.writes[..floor.unwrap_or(0)] {
+        for (i, write) in batch.writes.iter().enumerate() {
             if let WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
                 ballot,
                 value,
             }) = write
+                && (floor.is_some_and(|f| i < f) || leads != Some(*ballot))
             {
                 self.vote(batch.id, leads, *slot, *ballot, Cmd::of(value), &mut events);
             }
         }
+        Self::trims(batch, &mut events);
         for &(slot, cmd) in &batch.learned {
             events.push(ClusterEvent::Learn {
                 node: batch.id,
@@ -511,8 +523,7 @@ impl Tracer {
                 cmd,
             });
         }
-        // A floor drops what the node learned below it.
-        Self::floors(batch, &mut events);
+        Self::compactions(batch, &mut events);
         for (audience, message) in batch.messages {
             self.message(batch.id, &batch.prior, audience, message, &mut events);
         }
@@ -878,8 +889,8 @@ impl Tracer {
 /// The trace specs a cluster walk is checked against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spec {
-    /// `specs/tla/multi-paxos/MultiPaxosTrace.tla`: the log of every
-    /// flavor without matchmakers.
+    /// `specs/tla/node/MultiPaxosTrace.tla`: the log of every flavor
+    /// without matchmakers.
     MultiPaxos,
     /// `specs/tla/proxy-leader/ProxyLeaderTrace.tla`: the proxy's
     /// `Commit` rule.
@@ -887,35 +898,35 @@ pub enum Spec {
     /// `specs/tla/leader-handoff/LeaderHandoffTrace.tla`: the guards of the
     /// cooperative handoff, on a majority.
     LeaderHandoff,
-    /// `specs/tla/matchmaker/MatchmakerTrace.tla`: matchmaking, Phase 1
+    /// `specs/tla/node/MatchmakerTrace.tla`: matchmaking, Phase 1
     /// over `H_b`, Phase 2 in `C_b` and the GC, on a majority.
     Matchmaker,
-    /// `specs/tla/matchmaker/MatchmakerGridTrace.tla`: `MatchmakerTrace`
+    /// `specs/tla/node/MatchmakerGridTrace.tla`: `MatchmakerTrace`
     /// with each configuration a grid: Phase 1 over every grid of `H_b`,
     /// Phase 2 in one column of `C_b`, and each proxy's `Commit` backed by
     /// a column of `C_b`.
     MatchmakerGrid,
-    /// `specs/tla/reads/ReadsTrace.tla`: `MatchmakerTrace` and the
-    /// leaderless reads of `reads/`: the read basis of a won leadership,
+    /// `specs/tla/node/ReadsTrace.tla`: `MatchmakerTrace` and the
+    /// leaderless reads: the read basis of a won leadership,
     /// the answers and their read fence, and the served index.
     Reads,
-    /// `specs/tla/truncation/TruncationTrace.tla`: `MultiPaxosTrace` and
-    /// the compaction floor of `truncation/`: the journal fold, each
+    /// `specs/tla/node/TruncationTrace.tla`: `MultiPaxosTrace` and
+    /// the compaction floor: the journal fold, each
     /// compaction and each trim-point jump.
     Truncation,
-    /// `specs/tla/compartments/CompartmentsTrace.tla`: `MultiPaxosTrace`
-    /// and the read replica of `compartments/`: its learns, its walk in
+    /// `specs/tla/node/CompartmentsTrace.tla`: `MultiPaxosTrace`,
+    /// the floors and the read replica: its learns, its walk in
     /// slot order, its boot and its leaderless read.
     Compartments,
-    /// `specs/tla/truncation/FaultsTrace.tla`: `TruncationTrace` and the
+    /// `specs/tla/node/FaultsTrace.tla`: `TruncationTrace` and the
     /// faulty entries of CTRL: a boot that reads a faulty record, the
     /// pages of a promise, the tri-state tally and the repair probe.
     Faults,
-    /// `specs/tla/matchmaker/RetireTrace.tla`: `MatchmakerTrace` and the
+    /// `specs/tla/node/RetireTrace.tla`: `MatchmakerTrace` and the
     /// retirement: a node retires on an effective floor that no
     /// registration above names, and a retired node rejoins.
     Retire,
-    /// `specs/tla/handover/HandoverTrace.tla`: the matchmaker set
+    /// `specs/tla/generations/HandoverTrace.tla`: the matchmaker set
     /// handover over many generations: each freeze, bootstrap, decree vote
     /// and activation, and the registrations and floors it carries.
     Handover,
@@ -926,17 +937,17 @@ impl Spec {
     #[must_use]
     pub fn check(self) -> TraceCheck {
         match self {
-            Self::MultiPaxos => spec("multi-paxos", "MultiPaxosTrace"),
+            Self::MultiPaxos => spec("node", "MultiPaxosTrace"),
             Self::ProxyLeader => spec("proxy-leader", "ProxyLeaderTrace"),
             Self::LeaderHandoff => spec("leader-handoff", "LeaderHandoffTrace"),
-            Self::Matchmaker => spec("matchmaker", "MatchmakerTrace"),
-            Self::MatchmakerGrid => spec("matchmaker", "MatchmakerGridTrace"),
-            Self::Reads => spec("reads", "ReadsTrace"),
-            Self::Truncation => spec("truncation", "TruncationTrace"),
-            Self::Compartments => spec("compartments", "CompartmentsTrace"),
-            Self::Faults => spec("truncation", "FaultsTrace"),
-            Self::Retire => spec("matchmaker", "RetireTrace"),
-            Self::Handover => spec("handover", "HandoverTrace"),
+            Self::Matchmaker => spec("node", "MatchmakerTrace"),
+            Self::MatchmakerGrid => spec("node", "MatchmakerGridTrace"),
+            Self::Reads => spec("node", "ReadsTrace"),
+            Self::Truncation => spec("node", "TruncationTrace"),
+            Self::Compartments => spec("node", "CompartmentsTrace"),
+            Self::Faults => spec("node", "FaultsTrace"),
+            Self::Retire => spec("node", "RetireTrace"),
+            Self::Handover => spec("generations", "HandoverTrace"),
         }
     }
 
@@ -963,9 +974,7 @@ impl Spec {
             Self::Reads => matchmaker::keeps(event) || reads::keeps(event),
             Self::Truncation => multi_paxos::keeps(event) || truncation::keeps(event),
             Self::Compartments => {
-                multi_paxos::keeps(event)
-                    || compartments::keeps(event)
-                    || matches!(event, ClusterEvent::Fold { .. })
+                multi_paxos::keeps(event) || truncation::keeps(event) || compartments::keeps(event)
             }
             Self::Faults => {
                 faults::keeps(event)
@@ -988,8 +997,7 @@ impl Spec {
             events.iter().all(|event| self.keeps(event)),
             "a trace of {self:?} holds only the events it keeps"
         );
-        let mut trace = match self {
-            Self::MultiPaxos => multi_paxos::trace(flavor.acceptors, flavor.quorum, events),
+        match self {
             Self::ProxyLeader => proxy_leader::trace(flavor, events),
             Self::LeaderHandoff => {
                 assert!(
@@ -998,31 +1006,6 @@ impl Spec {
                 );
                 leader_handoff::trace(flavor.acceptors, events)
             }
-            Self::Matchmaker | Self::Retire => {
-                assert!(
-                    flavor.quorum == QuorumSystem::Majority,
-                    "{self:?} runs on a majority"
-                );
-                matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
-            }
-            Self::MatchmakerGrid => {
-                assert!(
-                    matches!(flavor.quorum, QuorumSystem::Grid { .. }),
-                    "MatchmakerGridTrace runs on a grid"
-                );
-                let mut trace =
-                    matchmaker::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events);
-                matchmaker::layouts(&mut trace, events);
-                grid(&mut trace, flavor.quorum);
-                trace
-            }
-            Self::Reads => {
-                assert!(
-                    flavor.quorum == QuorumSystem::Majority && flavor.replicas == 0,
-                    "ReadsTrace runs on a majority, with no replica"
-                );
-                reads::trace(flavor.acceptors + flavor.spares, flavor.matchmakers, events)
-            }
             Self::Handover => handover::trace(
                 flavor.matchmakers + flavor.matchmaker_spares,
                 &(0..flavor.matchmakers)
@@ -1030,23 +1013,15 @@ impl Spec {
                     .collect::<Vec<_>>(),
                 events,
             ),
-            Self::Truncation | Self::Faults => {
-                assert!(
-                    flavor.matchmakers == 0 && flavor.proxies == 0 && flavor.replicas == 0,
-                    "{self:?} runs on plain Multi-Paxos"
-                );
-                multi_paxos::trace(flavor.acceptors, flavor.quorum, events)
-            }
-            Self::Compartments => {
-                assert!(
-                    flavor.matchmakers == 0 && flavor.replicas > 0,
-                    "CompartmentsTrace runs on read replicas, with no matchmaker"
-                );
-                compartments::trace(flavor, events)
-            }
-        };
-        crate::trace::whole(&mut trace);
-        trace
+            Self::MultiPaxos
+            | Self::Matchmaker
+            | Self::MatchmakerGrid
+            | Self::Reads
+            | Self::Truncation
+            | Self::Compartments
+            | Self::Faults
+            | Self::Retire => node::trace(flavor, events),
+        }
     }
 }
 

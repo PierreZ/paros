@@ -90,14 +90,6 @@ impl Ranks {
     }
 }
 
-/// Define `TraceLength`, the number of events of the whole trace. A check
-/// that reads ahead to the end of a batch (`RecordAhead`) reads it: a
-/// prefix of the trace (`Trace::prefix` keeps each definition) may cut the
-/// last batch, and a cut batch is not judged whole.
-pub fn whole(trace: &mut Trace) {
-    trace.define("TraceLength", int(trace.len()));
-}
-
 /// A count or an index as a TLA+ integer.
 ///
 /// # Panics
