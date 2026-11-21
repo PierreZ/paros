@@ -55,3 +55,6 @@ impl FailureDomain {
         self.region.len() <= MAX_FAILURE_DOMAIN_BYTES && self.az.len() <= MAX_FAILURE_DOMAIN_BYTES
     }
 }
+
+#[cfg(test)]
+mod tests;

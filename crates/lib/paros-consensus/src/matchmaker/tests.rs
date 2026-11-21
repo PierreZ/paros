@@ -1044,3 +1044,442 @@ fn a_handover_keeps_the_later_incarnation_of_a_retirement() {
         ])
     );
 }
+
+/// A matchmaker frozen at generation 2, with or without a recorded
+/// successor, over `{0, 1, 2}`.
+fn stopped(successor: Option<MatchmakerSet>) -> Matchmaker {
+    let hard_state = MatchmakerHardState {
+        generation: MatchmakerGeneration(2),
+        members: [0, 1, 2].map(MatchmakerId).to_vec(),
+        phase: MatchmakerPhase::Stopped,
+        successor,
+        ..MatchmakerHardState::default()
+    };
+    Matchmaker::new(
+        &mmconfig(0, &[0, 1, 2]),
+        &MemRegistry::new(hard_state, BTreeMap::new()),
+        Limits::DEFAULT,
+    )
+}
+
+/// A frozen generation with a successor sends every request of its own
+/// generation or of an earlier one to the successor, and serves no later
+/// one.
+#[test]
+fn a_frozen_generation_names_its_successor_to_every_request_behind_it() {
+    let successor = set(3, &[0, 1, 2]);
+    let mm = stopped(Some(successor.clone()));
+    assert_eq!(
+        mm.generation_refusal(MatchmakerGeneration(1)),
+        Some(MatchRefusal::Stopped {
+            successor: Some(successor.clone())
+        })
+    );
+    assert_eq!(
+        mm.generation_refusal(MatchmakerGeneration(2)),
+        Some(MatchRefusal::Stopped {
+            successor: Some(successor.clone())
+        })
+    );
+    assert_eq!(
+        mm.generation_refusal(MatchmakerGeneration(3)),
+        Some(MatchRefusal::Inactive)
+    );
+    assert_eq!(
+        mm.newer_set(MatchmakerGeneration(1)),
+        Some(successor.clone())
+    );
+    assert_eq!(mm.newer_set(MatchmakerGeneration(2)), Some(successor));
+    assert_eq!(mm.newer_set(MatchmakerGeneration(3)), None);
+}
+
+/// A frozen generation with no successor yet names itself to a request
+/// behind it, the undecided freeze to a request of its own generation, and
+/// serves no later one.
+#[test]
+fn a_frozen_generation_with_no_successor_names_itself_to_a_request_behind_it() {
+    let mm = stopped(None);
+    let current = set(2, &[0, 1, 2]);
+    assert_eq!(
+        mm.generation_refusal(MatchmakerGeneration(1)),
+        Some(MatchRefusal::Generation {
+            current: current.clone()
+        })
+    );
+    assert_eq!(
+        mm.generation_refusal(MatchmakerGeneration(2)),
+        Some(MatchRefusal::Stopped { successor: None })
+    );
+    assert_eq!(
+        mm.generation_refusal(MatchmakerGeneration(3)),
+        Some(MatchRefusal::Inactive)
+    );
+    assert_eq!(mm.newer_set(MatchmakerGeneration(1)), Some(current));
+    assert_eq!(mm.newer_set(MatchmakerGeneration(2)), None);
+    assert_eq!(mm.newer_set(MatchmakerGeneration(3)), None);
+}
+
+/// An active matchmaker names its set only to a request behind it: a
+/// request ahead of it learns no later set here.
+#[test]
+fn an_active_matchmaker_names_its_set_only_to_a_request_behind_it() {
+    let hard_state = MatchmakerHardState {
+        generation: MatchmakerGeneration(2),
+        members: [0, 1, 2].map(MatchmakerId).to_vec(),
+        phase: MatchmakerPhase::Active,
+        ..MatchmakerHardState::default()
+    };
+    let mm = Matchmaker::new(
+        &mmconfig(0, &[0, 1, 2]),
+        &MemRegistry::new(hard_state, BTreeMap::new()),
+        Limits::DEFAULT,
+    );
+    assert_eq!(
+        mm.newer_set(MatchmakerGeneration(1)),
+        Some(set(2, &[0, 1, 2]))
+    );
+    assert_eq!(mm.newer_set(MatchmakerGeneration(2)), None);
+    assert_eq!(mm.newer_set(MatchmakerGeneration(3)), None);
+}
+
+/// The accessors read back what the matchmaker was built with and what it
+/// registered.
+#[test]
+fn a_matchmaker_reports_its_identity_limits_and_effective_configuration() {
+    let limits = Limits {
+        registry_page: 2,
+        ..Limits::DEFAULT
+    };
+    let mut mm = Matchmaker::new(&mmconfig(1, &[0, 1, 2]), &MemRegistry::default(), limits);
+    assert_eq!(mm.id(), MatchmakerId(1));
+    assert_eq!(mm.limits(), limits);
+    assert_eq!(mm.effective(J), None);
+    mm.step(MatchRequest::reconfigure(
+        J,
+        NodeId(1),
+        ballot(1, 1),
+        config(&[0, 1, 2]),
+        G0,
+    ));
+    drain(&mut mm);
+    assert_eq!(mm.effective(J), Some(&(ballot(1, 1), config(&[0, 1, 2]))));
+}
+
+/// A request exactly at the GC watermark is not below it: the floor keeps
+/// the registration at the watermark, and the same request again is
+/// answered from it.
+#[test]
+fn a_request_at_the_watermark_is_not_below_it() {
+    let mut mm = fresh(0);
+    mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
+    mm.step(request(1, ballot(2, 1), &[0, 1, 3]));
+    drain(&mut mm);
+    assert_eq!(
+        mm.advance_gc_watermark(J, G0, ballot(2, 1)),
+        GcOutcome::Raised
+    );
+    drain(&mut mm);
+    mm.step(request(1, ballot(2, 1), &[0, 1, 3]));
+    let (writes, replies) = drain(&mut mm);
+    assert!(writes.is_empty(), "the same request registers nothing");
+    let (history, watermark) = registered(&replies[0]);
+    assert_eq!(watermark, ballot(2, 1));
+    assert!(history.is_empty(), "nothing retained sits below the ballot");
+}
+
+/// A retirement check counts only the registrations at or above its floor:
+/// a registration below it that names the node does not keep it, and the
+/// node is recorded as retired. A plain probe still reports that
+/// registration.
+#[test]
+fn a_retirement_check_ignores_a_naming_registration_below_its_floor() {
+    let mut mm = fresh(0);
+    mm.step(request(1, ballot(1, 1), &[5, 6, 7]));
+    mm.step(request(1, ballot(2, 1), &[6, 7, 8]));
+    drain(&mut mm);
+    let probe = || MatchRequest::probe(J, NodeId(5), ballot(3, 5), config(&[6, 7, 8]), G0);
+    mm.step(probe());
+    let (_, replies) = drain(&mut mm);
+    assert!(matches!(
+        replies[0].outcome,
+        MatchOutcome::Probed {
+            named: Some(named),
+            ..
+        } if named == ballot(1, 1)
+    ));
+    mm.step(probe().retiring(ballot(2, 1), 0));
+    let (writes, replies) = drain(&mut mm);
+    assert!(matches!(
+        replies[0].outcome,
+        MatchOutcome::Probed { named: None, .. }
+    ));
+    assert_eq!(writes.len(), 1, "the retirement is recorded");
+    mm.step(request(9, ballot(4, 9), &[5, 6, 7]));
+    let (_, replies) = drain(&mut mm);
+    assert_eq!(
+        replies[0].outcome,
+        MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(5) })
+    );
+}
+
+/// The accessors of a request's purpose read only their own variant.
+#[test]
+fn a_purpose_reports_only_its_own_fields() {
+    let retire = MatchPurpose::Retire {
+        watermark: ballot(4, 2),
+        incarnation: 3,
+    };
+    let rejoin = MatchPurpose::Rejoin { incarnation: 5 };
+    assert_eq!(retire.retire_watermark(), Some(ballot(4, 2)));
+    assert_eq!(retire.retire_incarnation(), Some(3));
+    assert_eq!(retire.rejoin_incarnation(), None);
+    assert_eq!(rejoin.rejoin_incarnation(), Some(5));
+    assert_eq!(rejoin.retire_watermark(), None);
+    assert_eq!(rejoin.retire_incarnation(), None);
+    assert_eq!(MatchPurpose::Probe.retire_watermark(), None);
+    assert_eq!(MatchPurpose::Probe.retire_incarnation(), None);
+    assert_eq!(MatchPurpose::Probe.rejoin_incarnation(), None);
+}
+
+/// The cross-field checker fires on a page size out of its range.
+#[test]
+#[should_panic(expected = "a registry page is never empty")]
+fn the_invariants_refuse_an_empty_registry_page() {
+    let mut mm = fresh(0);
+    mm.limits.registry_page = 0;
+    mm.assert_invariants();
+}
+
+/// The cross-field checker fires on an activated generation with no
+/// durable membership.
+#[test]
+#[should_panic(expected = "an activated generation has a durable membership")]
+fn the_invariants_refuse_an_activated_generation_with_no_members() {
+    let mut mm = fresh(0);
+    mm.hard_state.generation = MatchmakerGeneration(1);
+    mm.assert_invariants();
+}
+
+/// The postconditions of a registration answer fire on an answer that
+/// names a ballot the registry does not hold.
+#[test]
+#[should_panic(expected = "a Registered reply names a registered ballot")]
+fn a_registered_answer_for_an_unregistered_ballot_is_refused() {
+    let mut mm = fresh(0);
+    mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
+    let (_, replies) = drain(&mut mm);
+    mm.assert_registered_answer(&replies[0].outcome, J, ballot(7, 1), G0);
+}
+
+/// A whole reconstruction of `successor` over journals 1 and 2, each
+/// with one registration.
+fn two_journal_bootstrap(successor: &MatchmakerSet) -> PendingBootstrap {
+    let registry = |round| JournalRegistry {
+        gc_watermark: Ballot::zero(),
+        history: BTreeMap::from([(ballot(round, 1), Registration::belief(config(&[0, 1, 2])))]),
+        effective: None,
+        retired: BTreeMap::new(),
+    };
+    PendingBootstrap {
+        set: successor.clone(),
+        registries: BTreeMap::from([(JournalId(1), registry(1)), (JournalId(2), registry(2))]),
+        complete: true,
+    }
+}
+
+/// A member that learned the successor before its bootstrap still takes
+/// the successor's own pages, and activates only once it holds them all:
+/// a `Chosen` that meets half a bootstrap records the chain link and
+/// activates nothing.
+#[test]
+fn a_recorded_successor_takes_its_own_bootstrap_and_activates_only_when_whole() {
+    let successor = set(1, &[0, 1, 2]);
+    let mut mm = fresh(0);
+    let (_, replies) = chosen(&mut mm, 5, &successor);
+    assert!(matches!(
+        &replies[0],
+        ReconfigureReply::Learned {
+            activated: false,
+            ..
+        }
+    ));
+    assert_eq!(mm.hard_state().successor.as_ref(), Some(&successor));
+    let bootstrap = two_journal_bootstrap(&successor);
+    let first = bootstrap.page(None, 1);
+    assert!(!first.last, "two journals on pages of one need two pages");
+    mm.step_reconfigure(ReconfigureRequest::Bootstrap {
+        from: NodeId(5),
+        bootstrap: first,
+    });
+    let (_, replies) = drain_reconfigure(&mut mm);
+    assert!(
+        matches!(&replies[0], ReconfigureReply::Bootstrapped { .. }),
+        "the recorded successor's own bootstrap is not a competing one"
+    );
+    assert_eq!(mm.hard_state().pending.len(), 1);
+    assert!(!mm.hard_state().pending[0].complete);
+    let (_, replies) = chosen(&mut mm, 5, &successor);
+    assert!(
+        matches!(
+            &replies[0],
+            ReconfigureReply::Learned {
+                activated: false,
+                ..
+            }
+        ),
+        "half a bootstrap activates nothing"
+    );
+    assert_eq!(mm.set().generation, G0);
+    mm.step_reconfigure(ReconfigureRequest::Bootstrap {
+        from: NodeId(5),
+        bootstrap: bootstrap.page(Some(JournalId(1)), 1),
+    });
+    drain_reconfigure(&mut mm);
+    assert!(mm.hard_state().pending[0].complete);
+    let (_, replies) = chosen(&mut mm, 5, &successor);
+    assert!(matches!(
+        &replies[0],
+        ReconfigureReply::Learned {
+            activated: true,
+            ..
+        }
+    ));
+    assert_eq!(*mm.set(), successor);
+}
+
+/// A registry is blank only when every one of its four parts says
+/// nothing.
+#[test]
+fn a_registry_is_blank_only_when_it_says_nothing() {
+    assert!(JournalRegistry::default().is_blank());
+    let with = |edit: fn(&mut JournalRegistry)| {
+        let mut registry = JournalRegistry::default();
+        edit(&mut registry);
+        registry.is_blank()
+    };
+    assert!(!with(|r| r.gc_watermark = ballot(1, 1)));
+    assert!(!with(|r| {
+        r.history
+            .insert(ballot(1, 1), Registration::belief(config(&[0, 1, 2])));
+    }));
+    assert!(!with(
+        |r| r.effective = Some((ballot(1, 1), config(&[0, 1, 2])))
+    ));
+    assert!(!with(|r| {
+        r.retired.insert(NodeId(4), Retirement::default());
+    }));
+}
+
+/// The wire hygiene of a bootstrap page: at most a ceiling of journals,
+/// each strictly above the cursor and not blank, and a page that is not
+/// the last holds a journal.
+#[test]
+fn a_bootstrap_page_is_well_formed_only_inside_its_hygiene() {
+    let floor = |round| JournalRegistry {
+        gc_watermark: ballot(round, 1),
+        ..JournalRegistry::default()
+    };
+    let page = |after: Option<u64>, journals: &[u64], last| BootstrapPage {
+        set: set(1, &[0, 1, 2]),
+        after: after.map(JournalId),
+        registries: journals
+            .iter()
+            .map(|journal| (JournalId(*journal), floor(*journal)))
+            .collect(),
+        last,
+    };
+    assert!(page(None, &[1, 2], true).is_well_formed());
+    assert!(page(Some(1), &[2, 3], false).is_well_formed());
+    assert!(
+        page(Some(4), &[], true).is_well_formed(),
+        "an empty last page"
+    );
+    assert!(
+        !page(Some(4), &[], false).is_well_formed(),
+        "an empty page that is not the last"
+    );
+    assert!(
+        !page(Some(2), &[2, 3], true).is_well_formed(),
+        "a journal at the cursor"
+    );
+    assert!(
+        !page(Some(3), &[2, 4], true).is_well_formed(),
+        "a journal below the cursor"
+    );
+    let mut blank = page(None, &[1], true);
+    blank
+        .registries
+        .insert(JournalId(2), JournalRegistry::default());
+    assert!(!blank.is_well_formed(), "a blank journal");
+    let wide: Vec<u64> = (1..=u64::try_from(REGISTRY_PAGE).unwrap() + 1).collect();
+    assert!(
+        !page(None, &wide, true).is_well_formed(),
+        "past the ceiling"
+    );
+}
+
+/// Generation 0 resolves to the bootstrap set only while it records no
+/// membership of its own.
+#[test]
+fn generation_zero_resolves_to_its_recorded_members_once_it_has_them() {
+    let bootstrap = [0, 1, 2].map(MatchmakerId);
+    let scalars = |members: &[u64]| MatchmakerHardState {
+        members: members.iter().copied().map(MatchmakerId).collect(),
+        ..MatchmakerHardState::default()
+    };
+    assert_eq!(resolved_set(&scalars(&[]), &bootstrap), set(0, &[0, 1, 2]));
+    assert_eq!(
+        resolved_set(&scalars(&[5, 6, 7]), &bootstrap),
+        set(0, &[5, 6, 7])
+    );
+}
+
+/// A tie keeps the held effective configuration: only a strictly higher
+/// ballot moves it.
+#[test]
+fn an_effective_configuration_moves_only_on_a_higher_ballot() {
+    let mut held = None;
+    assert!(raise_effective(
+        &mut held,
+        ballot(2, 1),
+        &config(&[0, 1, 2])
+    ));
+    assert!(!raise_effective(
+        &mut held,
+        ballot(2, 1),
+        &config(&[0, 1, 3])
+    ));
+    assert_eq!(held, Some((ballot(2, 1), config(&[0, 1, 2]))));
+    assert!(!raise_effective(
+        &mut held,
+        ballot(1, 1),
+        &config(&[0, 1, 3])
+    ));
+    assert!(raise_effective(
+        &mut held,
+        ballot(3, 1),
+        &config(&[0, 1, 3])
+    ));
+    assert_eq!(held, Some((ballot(3, 1), config(&[0, 1, 3]))));
+}
+
+/// A watermark write that raises nothing leaves the store as it was: no
+/// journal entry appears for a floor of zero.
+#[test]
+fn a_watermark_write_that_raises_nothing_changes_nothing() {
+    let mut store = MemRegistry::default();
+    store.apply(&MatchmakerWriteOp::SetGcWatermark {
+        journal: J,
+        watermark: Ballot::zero(),
+    });
+    assert_eq!(store.initial_state(), MatchmakerHardState::default());
+    store.apply(&MatchmakerWriteOp::SetGcWatermark {
+        journal: J,
+        watermark: ballot(2, 1),
+    });
+    store.apply(&MatchmakerWriteOp::SetGcWatermark {
+        journal: J,
+        watermark: ballot(2, 1),
+    });
+    assert_eq!(store.initial_state().gc_watermark(J), ballot(2, 1));
+}

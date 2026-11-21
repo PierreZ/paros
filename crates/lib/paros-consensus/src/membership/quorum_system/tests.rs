@@ -98,3 +98,56 @@ fn a_system_survives_the_failures_both_phases_allow() {
     );
     assert_eq!(QuorumSystem::grid(2, 2).tolerated_failures(5), 0, "untiled");
 }
+
+/// A grid whose column needs every accept survives no failure: a lost
+/// acceptor leaves its column one accept short (`rows - acks + 1` is one).
+#[test]
+fn a_grid_that_waits_for_a_whole_column_survives_nothing() {
+    let all_acks = QuorumSystem::Grid {
+        rows: 3,
+        cols: 1,
+        acks: 3,
+    };
+    assert_eq!(all_acks.tolerated_failures(3), 0);
+    let two_columns = QuorumSystem::Grid {
+        rows: 3,
+        cols: 2,
+        acks: 3,
+    };
+    assert_eq!(
+        two_columns.tolerated_failures(6),
+        1,
+        "Phase 2 survives one lost acceptor while the other column stays whole"
+    );
+}
+
+/// A grid cross-intersects only while a column decides on one accept or
+/// more and on no more accepts than it holds.
+#[test]
+fn a_grid_with_acks_out_of_its_column_does_not_cross_intersect() {
+    let acks = |acks| QuorumSystem::Grid {
+        rows: 3,
+        cols: 2,
+        acks,
+    };
+    assert!(acks(1).cross_intersects(6));
+    assert!(acks(3).cross_intersects(6));
+    assert!(!acks(0).cross_intersects(6));
+    assert!(!acks(4).cross_intersects(6));
+}
+
+/// A column past the last one holds no Phase-2 quorum, even when the
+/// members it would step over voted.
+#[test]
+fn a_column_out_of_the_grid_holds_no_phase2_quorum() {
+    use std::collections::BTreeSet;
+    let system = QuorumSystem::Grid {
+        rows: 2,
+        cols: 3,
+        acks: 1,
+    };
+    let members: Vec<u8> = (0..6).collect();
+    let voters: BTreeSet<u8> = [3].into_iter().collect();
+    assert!(system.is_phase2_quorum_in(&members, &voters, Some(0)));
+    assert!(!system.is_phase2_quorum_in(&members, &voters, Some(3)));
+}

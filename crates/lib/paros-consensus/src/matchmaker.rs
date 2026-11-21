@@ -124,6 +124,7 @@ pub(crate) use reconfigurer::odd_answerers;
 mod state;
 mod storage;
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 /// The handover's decree: the successor set, over the matchmakers of `M_g`.
@@ -941,9 +942,12 @@ impl Matchmaker {
             // requester's generation too, not yet bootstrapped there)
             // refuses with the set it serves, an earlier one: that names
             // no later set (seed 4434657833621076437 of PR #625).
-            MatchRefusal::Generation { current } if current.generation > generation => {
-                Some(current)
-            }
+            // An active matchmaker never refuses its own generation, so
+            // the two never compare equal here.
+            MatchRefusal::Generation { current } => match current.generation.cmp(&generation) {
+                Ordering::Greater => Some(current),
+                Ordering::Less | Ordering::Equal => None,
+            },
             _ => None,
         };
         assert!(
@@ -1009,33 +1013,29 @@ impl Matchmaker {
             MatchmakerPhase::Active => Some(MatchRefusal::Generation {
                 current: current.clone(),
             }),
-            MatchmakerPhase::Stopped if current.generation == generation => {
-                Some(MatchRefusal::Stopped {
-                    successor: self.hard_state.successor.clone(),
-                })
-            }
-            MatchmakerPhase::Stopped => {
-                // Frozen for another generation. A proposer *behind* this
-                // generation learns the chain link if there is one, else the
-                // set in force here — never `Inactive`, which would leave a
-                // restarted node (it boots believing the bootstrap
-                // generation) with no way to discover the generation it
-                // must campaign in while the successor is still undecided
-                // (the sweep found exactly that cluster: every campaign
-                // refused, no leader for a whole run). A proposer *ahead*
-                // of this generation is simply not served here.
-                match &self.hard_state.successor {
-                    Some(successor) if generation < current.generation.next() => {
-                        Some(MatchRefusal::Stopped {
-                            successor: Some(successor.clone()),
-                        })
-                    }
-                    None if generation < current.generation => Some(MatchRefusal::Generation {
+            // Frozen. A proposer of the frozen generation learns the
+            // successor if there is one. A proposer *behind* this generation
+            // learns the chain link if there is one, else the set in force
+            // here — never `Inactive`, which would leave a restarted node (it
+            // boots believing the bootstrap generation) with no way to
+            // discover the generation it must campaign in while the successor
+            // is still undecided (the sweep found exactly that cluster: every
+            // campaign refused, no leader for a whole run). A proposer *ahead*
+            // of this generation is simply not served here.
+            MatchmakerPhase::Stopped => Some(
+                match (
+                    generation.cmp(&current.generation),
+                    &self.hard_state.successor,
+                ) {
+                    (Ordering::Greater, _) => MatchRefusal::Inactive,
+                    (Ordering::Less, None) => MatchRefusal::Generation {
                         current: current.clone(),
-                    }),
-                    _ => Some(MatchRefusal::Inactive),
-                }
-            }
+                    },
+                    (Ordering::Equal | Ordering::Less, successor) => MatchRefusal::Stopped {
+                        successor: successor.clone(),
+                    },
+                },
+            ),
             MatchmakerPhase::Inactive | MatchmakerPhase::Fresh => Some(MatchRefusal::Inactive),
         }
     }
@@ -1291,16 +1291,15 @@ impl Matchmaker {
                 .all(|journal| self.registries.contains_key(journal)),
             "every journal with scalars has a registry window"
         );
-        if self.hard_state.generation > MatchmakerGeneration(0) {
-            assert!(
-                !self.hard_state.members.is_empty(),
-                "an activated generation has a durable membership"
-            );
-            assert!(
-                self.hard_state.phase != MatchmakerPhase::Fresh,
-                "an activated generation is never fresh"
-            );
-        }
+        let bootstrap = self.hard_state.generation == MatchmakerGeneration(0);
+        assert!(
+            bootstrap || !self.hard_state.members.is_empty(),
+            "an activated generation has a durable membership"
+        );
+        assert!(
+            bootstrap || self.hard_state.phase != MatchmakerPhase::Fresh,
+            "an activated generation is never fresh"
+        );
         if let Some(successor) = &self.hard_state.successor {
             assert!(
                 successor.generation == self.hard_state.generation.next(),
