@@ -22,6 +22,19 @@ less than this table.
 | 9 | #1330 (paros-journal-moonpool) | The moonpool adapter and the moonpool-sim of the whole journal | §J7.4 |
 | 10 | #1331 (the pure journal client) | The client state machine of the four calls. After step 3; it can run beside steps 7 to 9 | §J2 |
 
+**The examples** (#1370 (journal examples), Pierre 2026-11-21). The examples of the journal crates
+show that the journal is a library: a program implements the storage, the transport and the clock
+and drives the pure roles, with no runtime crate (§J4.3). Each one runs in CI and asserts its
+result, and each lands with the step that it needs:
+
+| Example | Shows | Needs |
+|---|---|---|
+| `fold` | The journal fold alone (§J2): writes, resends, a seal, `Below` and `Resolve`, multi-writer | Step 3: done |
+| `in_memory` | Three acceptors, two leaders and two segments in one process; storage, transport and clock written by hand in the example | Step 5, first rule group: done. It moves onto the storage traits of step 8 when they land |
+| `custom_storage` | A storage backend of the user, checked by the contract suite of the storage trait | Step 8 |
+| `single_writer`, `multi_writer` | The pure client: exactly-once with `expected_seq`; `SetLeader(None)` and back | Step 10 |
+| `moonpool`, `simulation` | The same journal on the moonpool host, then under moonpool-sim with faults | Step 9 |
+
 **Rules for every step** (#1323):
 
 - **The core stays a library for everyone** (§J4.3). The journal fold and every journal concept

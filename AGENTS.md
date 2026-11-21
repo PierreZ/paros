@@ -166,10 +166,11 @@ walks)). Trace checking is there for every walk (#1198 (trace checking), `tests/
 trace spec extends a model that TLC checks and defines no step of its own (#1306 (trace specs
 extend the checked model)): `decree/`; `node/`, the implementation model of `ColocatedNode` (the
 log, matchmaking, the GC and the retirement, grids, the compaction floor and the trim jump, the
-faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads and the
-proxy `Commit`), which eight trace specs extend; `proxy-leader/`; `leader-handoff/`;
-`generations/` (the chain of matchmaker set handovers); and `batcher/`. Merging `proxy-leader/`
-and `leader-handoff/` into `node/` is #1343 (merge proxy and handoff into the node model). Each trace spec names the steps its checked walks must take (a `Noop` gap
+faulty entries of CTRL with the tri-state tally, the read replica, the leaderless reads, the
+rounds of the proxy leaders and the cooperative handoff; #1343 (merge proxy and handoff into the
+node model)), which ten trace specs extend; `generations/` (the chain of matchmaker set
+handovers); and `batcher/`. `proxy-leader/` and `leader-handoff/` stay as design models with
+their own checks, the liveness checks too. Each trace spec names the steps its checked walks must take (a `Noop` gap
 fill, a reconfiguration, GC above frontier 0, a compaction that keeps a record, a promise that
 reports a faulty record, a node that retires and rejoins, and more; #1231 (traced walks reach the
 rules)). The trace checks are tested too: each trace spec must refuse about 20 named edits of
@@ -224,7 +225,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `-p paros-journal` and `-p paros-journal-control`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
-- the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
+- the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
+  and the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `in_memory`;
+  #1370 (journal examples))
 - the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
 - the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
   instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
@@ -646,12 +649,15 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
   fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
   journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
+  Its examples (`examples/`, listed in its `README.md`) drive the fold and the roles with
+  storage written by hand.
 - `crates/lib/paros-journal-control` — the grid controller of the journal v1
   (`docs/journal/06-controller.md` §J6, #1328): the P measures of a v1 grid, the placement of a
-  heal under the zone rule, and the pure `decide` of the v1 controller (heal, repair,
-  re-replicate, hold and alert), with a `probe!` on every branch. Sans-IO, wasm-safe, on
-  `paros-consensus` and `paros-journal`; every **Open** number of §J6 comes from the host. Not
-  published yet, and not in the facade.
+  heal under the zone rule, the pure `decide` of the v1 controller (heal, repair,
+  re-replicate, hold and alert), and the controller role (`role`: its election by a term and
+  its fenced reshape call, as asks to a driver), with a `probe!` on every branch. Sans-IO,
+  wasm-safe, on `paros-consensus` and `paros-journal`; every **Open** number of §J6 comes from
+  the host. Not published yet, and not in the facade.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
   `paros::journal`). A program depends on `paros` alone. Wasm-safe and provider-free.
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
