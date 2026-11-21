@@ -111,9 +111,12 @@ leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals i
 end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1
 that reads the old grid below the end keeps one value; #1313 (the seal end against a CTRL faulty
 record)).
-`specs/tla/README.md` lists every flavor with its model, and
-`docs/architecture/02-1-journal-register.md` (§2.16) lists every record of the journal's
-matchmaker register with its writer, its guard and the models that check it (#1315). Then the journal is
+`specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
+inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
+the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are
+its later steps). `docs/architecture/02-1-journal-register.md` (§2.16) lists every record of the
+journal's matchmaker register with its writer, its guard and the models that check it (#1315).
+Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
 `Assignments` ports) is `docs/architecture/04-roles.md` §4.2 (#1255 (journal sans-IO contract)),
