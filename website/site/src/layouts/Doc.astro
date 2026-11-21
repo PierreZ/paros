@@ -46,6 +46,10 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "The controller", path: "journal/controller/" },
   ],
   "engineering/": [
+    { title: "The safety case", path: "engineering/" },
+    { title: "TLA+ models", path: "engineering/tla/" },
+    { title: "Simulation", path: "engineering/simulation/" },
+    { title: "Mutants and assertions", path: "engineering/mutants/" },
     { title: "Grid quorums", path: "engineering/grid-quorums/" },
   ],
 };
@@ -74,9 +78,9 @@ const STATUS: Record<string, { tag: string; html: string }> = {
   journal: {
     tag: "design · checked in TLA+",
     html: `The journal v1 is designed, and each of its rules has a TLA+ model. Its code is being
-      built (<a href="${REPO}/issues/1323">#1323</a>): the pure journal core
-      (<code>paros-journal</code>) exists, and the roles, the register and the driver do not exist
-      yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
+      built (<a href="${REPO}/issues/1323">#1323</a>): the pure journal core and the
+      matchmaker register (<code>paros-journal</code>) exist, and the roles and the driver do not
+      exist yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
       this page explains them and links each section.`,
   },
 };

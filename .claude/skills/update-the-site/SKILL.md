@@ -27,11 +27,14 @@ teases the journal service being rewritten (the version before is at the tag `v0
 | quorum systems, grids, partitions | `paxos/quorums.md` |
 | the Paxos section's landing page, the order of the flavors | `paxos/index.astro` |
 | a knowledge card in `docs/knowledge/concepts/` | `paxos/concepts.astro`: a new card needs its entry in `SHOWN`, or the build fails |
-| the engineering section's landing page | `engineering/index.astro` |
 | the top bar | `src/nav.ts` |
 | the sans-IO core, `Ready`, `advance()`, the driver contract | `consensus/driver.md` |
 | a deployment (`ColocatedNode`, `ProxyLeader`, `ReplicaNode`, `Matchmaker`), a role, a flavor type or an example | `consensus/index.astro` (the flavor table), `consensus/deployments.md` |
 | a model, a trace spec, a walk flavor of consensus-sim, the mutants | `consensus/proof.md` |
+| a safety claim, its model or invariant, a trace spec, a walk or oracle of consensus-sim or journal-sim, a planted mutant, an open issue that a claim waits on | `engineering/index.astro` (the safety case: its row and its state) |
+| how TLA+ models are checked, the inductive invariants, the guard mutants | `engineering/tla.md` |
+| the absolute rule of simulation, the walks, the trace checks, the coverage gate | `engineering/simulation.md` |
+| cargo-mutants, a new full mutants run, the assertions | `engineering/mutants.md` (the score of a run, with its date) |
 | the grid quorum system, partitions | `engineering/grid-quorums.md` |
 | `crates/support/paros-wasm` (the `paxos` feature) or a `paros-consensus` type its views read | the step-through traces: run `cargo test -p paros-wasm --test paxos_traces` and commit `website/site/src/traces` |
 

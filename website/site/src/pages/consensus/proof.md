@@ -14,26 +14,14 @@ model finds every order, but it checks the model, not the code.
 
 ## The technique
 
-`paros-consensus` uses both, and links them:
-
-1. **A TLA+ model first.** No code is built on a flavor before TLC checks its model. A rule that
-   the paper does not have gets a check that passes with the rule, and a control that fails
-   without it.
-2. **Deterministic simulation.** `consensus-sim` runs a seeded random walk over the real state
-   machines, through their public API only. A seed is a run. The walk drops, repeats and reorders
-   messages, crashes a party and restarts it from its disk (and loses the writes that no fsync
-   covers), and makes the moves of the clients and the clocks. After each step, oracles that share
-   no code with the core judge the run.
-3. **Trace checking.** Each walk records its steps, and TLC checks that the trace is a run of the
-   model. Each trace spec extends a model that TLC checks, and defines no step of its own.
-4. **Coverage.** The walks branch from the runs that reach a new probe or a new branch of the
-   core. CI fails if a walk set does not reach every `probe!` of the core.
-5. **Mutants.** Each oracle and each trace spec has a planted bug that it must catch. Each trace
-   spec must refuse about 20 edits of its recorded walks. cargo-mutants edits the core and a test
-   must fail; a TLA+ script removes each guard of each model and a check must fail.
-
-There is no exception list: a failure is a finding, never a seed to skip. The rule is at the top of
-[`AGENTS.md`](https://github.com/PierreZ/paros/blob/main/AGENTS.md#absolute-rule-no-exception-in-simulation).
+`paros-consensus` uses both, and links them. A TLA+ model comes before the code of each flavor.
+Then three judges run on the code that ships: seeded walks with faults on, the trace check of each
+walk against its model, and a coverage gate over every `probe!` of the core. Mutants test the
+judges. Each technique has its page in Engineering:
+[TLA+ models](../../engineering/tla/), [simulation](../../engineering/simulation/) and
+[mutants and assertions](../../engineering/mutants/). The [safety case](../../engineering/) lists
+each claim of the core with the model, the trace spec, the walk and the mutants behind it, and the
+claims that are still open.
 
 ## Each flavor and its judges
 
