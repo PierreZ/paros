@@ -12,4 +12,5 @@ pub mod campaign;
 pub mod fold;
 pub mod oracle;
 pub mod register;
+pub mod roles;
 pub mod trace;
