@@ -11,7 +11,7 @@ matchmaker 3
 multi-paxos 16
 quorum-everywhere 1
 reads 43
-retire-fence 49
+retire-fence 25
 segment-records 4
 segment-replicas 27
 segment-truncate 45

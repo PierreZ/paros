@@ -513,8 +513,9 @@ def main() -> None:
     if args.budget is not None:
         DEADLINE = t0 + args.budget
     if args.baseline_out:
-        # The checks of each folder named and of each folder that links one of its modules.
-        need = sorted({u for f in folders for m in own_modules(f) for u in users(m)} | set(folders))
+        # The checks of each folder named; a folder that links one of its modules
+        # times its own checks in its own run.
+        need = folders
         bad = []
         with args.baseline_out.open("w") as fh:
             for f in need:

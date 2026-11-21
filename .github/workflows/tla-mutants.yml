@@ -10,7 +10,7 @@
 # `TLA` workflow runs them. Then one job for each slice of a folder judges
 # its mutants one at a time, each TLC on every CPU, with those times
 # (`--baseline-from`). `scripts/mutate-tla-shards.txt` names the folders that
-# need more than one slice. A slice has a budget below its 30-minute job: a
+# need more than one slice (GitHub runs at most 256 jobs of one matrix). A slice has a budget below its 30-minute job: a
 # mutant that the budget cuts is `unfinished`, the slice fails, and the fix is
 # more slices. It runs each week and on demand. A pull request runs only
 # `--list` on every folder (the `spec` job of `tla.yml`), because the run of
