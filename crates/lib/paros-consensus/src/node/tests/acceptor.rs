@@ -197,6 +197,16 @@ fn a_message_naming_a_stranger_is_ignored() {
     });
     assert!(drain(&mut n).is_empty(), "no answer to a stranger");
     assert_eq!(n.hard_state().max_promised_ballot, promised);
+    n.step(Message::Accept {
+        reply_to: Party::Node(NodeId(0)),
+        leader: NodeId(0),
+        ballot: ballot(4, 9),
+        slot: Slot(0),
+        command: ucmd(1, 1, 9),
+        config: None,
+    });
+    assert!(drain(&mut n).is_empty(), "no accept of a stranger's ballot");
+    assert_eq!(n.hard_state().max_promised_ballot, promised);
 }
 
 /// With `CheckQuorum` off (an election timeout of zero), a leader that
