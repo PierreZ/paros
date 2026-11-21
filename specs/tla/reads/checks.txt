@@ -24,6 +24,11 @@ learner_any         pass       long
 grid_full           violation  ci
 grid_full_static    pass       ci
 grid_full_seal      pass       ci
+# The rule of the code (#1209 (seal each row of a full grid)): the seal of
+# each configuration of H_b other than the ballot's own one. With two ballots,
+# and with three ballots of two proposers (`long`).
+grid_full_seal_others  pass    ci
+grid_full_seal_others3 pass    long  60
 grid_partitions     pass       long  120
 # A second read: a served read also covers what an earlier read returned.
 reads_plain_again        pass       ci

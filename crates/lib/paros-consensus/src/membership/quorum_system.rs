@@ -627,6 +627,47 @@ impl QuorumSystem {
         quorum
     }
 
+    /// Whether `voters` **seal** `members` for an election (decision 31,
+    /// #1209): a Phase-1 quorum ([`QuorumSystem::is_phase1_quorum`]) and, on
+    /// a full-column grid (`acks = rows`), one voter in **each row**. An
+    /// election asks it of each configuration of `H_b` other than its own
+    /// `C_b`.
+    ///
+    /// On a full-column grid a quorum read asks one row, and two rows never
+    /// meet. A Phase 1 that one row alone completes leaves the other rows
+    /// unaware of the new ballot, so a reader of such a row misses what a
+    /// column of the new configuration chooses (`specs/tla/reads/`, check
+    /// `grid_full`). With one promise in each row, each row holds an acceptor
+    /// whose `PreReadAck` names the new ballot and ends the read (check
+    /// `grid_full_seal_others`). A majority and a partitioned grid read over
+    /// the whole membership, which meets every Phase-1 quorum: there the seal
+    /// is the Phase-1 quorum.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn is_phase1_seal<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
+        let quorum = self.is_phase1_quorum(members, voters);
+        let rows_heard = match self {
+            QuorumSystem::Grid { rows, cols, acks } if acks == rows => (0..rows).all(|row| {
+                grid_row(members, cols, row)
+                    .iter()
+                    .any(|m| voters.contains(m))
+            }),
+            _ => true,
+        };
+        let seal = quorum && rows_heard;
+        // The seal asks more than a Phase-1 quorum, never less.
+        assert!(!seal || quorum, "a seal holds a Phase-1 quorum");
+        // Outside a full-column grid it asks nothing more.
+        if !matches!(self, QuorumSystem::Grid { rows, acks, .. } if acks == rows) {
+            assert!(seal == quorum, "only a full-column grid seals its rows");
+        }
+        seal
+    }
+
     /// Whether `node` is one of the acceptors a Phase-1 message in `row` is
     /// addressed to — the guard a quorum read's tally applies to a
     /// `PreReadAck` before counting it. A member of the configuration under
