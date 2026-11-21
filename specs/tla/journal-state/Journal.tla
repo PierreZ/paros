@@ -465,9 +465,9 @@ Propose(b, s, v) ==
 (* <<kind, s, b, v, send>>: kind "p" (promise b), "v" (vote <<b, v>> at s) *)
 (* or "pv" (both). send tells whether the write's flush sends the reply.   *)
 (***************************************************************************)
+\* `bH[b]` is empty until b registers, so only a registered ballot is promised.
 Promise(a, b) ==
   /\ ~Direct
-  /\ bgen[b] # 0
   /\ a \in Active
   /\ \E h \in bH[b] : a \in CfgOf[h]
   /\ mprom[a] < b

@@ -335,6 +335,9 @@ struct Driver {
     leaders: BTreeMap<NodeId, JournalLeader<u64>>,
     network: VecDeque<(NodeId, NodeId, Message)>,
     changes: VecDeque<(Origin, Change)>,
+    /// The replicas' register changes that wait on a batch not yet
+    /// durable: a boundary write reports the replica's durable state.
+    held: Vec<(NodeId, PersistId, Change)>,
     replies: BTreeMap<u64, Reply>,
     tokens: u64,
 }
@@ -358,6 +361,7 @@ impl Driver {
             leaders: BTreeMap::new(),
             network: VecDeque::new(),
             changes: VecDeque::new(),
+            held: Vec::new(),
             replies: BTreeMap::new(),
             tokens: 0,
         }
@@ -474,9 +478,12 @@ impl Driver {
                         self.network.push_back((node, to, message));
                     }
                 }
-                ReplicaEffect::Register(change) => {
-                    self.changes.push_back((Origin::Replica, change));
-                }
+                ReplicaEffect::Register { change, after } => match after {
+                    Some(id) if replica.store.durable() < Some(id) => {
+                        self.held.push((node, id, change));
+                    }
+                    _ => self.changes.push_back((Origin::Replica, change)),
+                },
             }
         }
     }
@@ -492,6 +499,15 @@ impl Driver {
             for (to, message) in replica.flush() {
                 self.network.push_back((*node, to, message));
             }
+        }
+        let replicas = &self.replicas;
+        let (ready, held): (Vec<_>, Vec<_>) = self
+            .held
+            .drain(..)
+            .partition(|(node, id, _)| Some(*id) <= replicas[node].store.durable());
+        self.held = held;
+        for (_, _, change) in ready {
+            self.changes.push_back((Origin::Replica, change));
         }
     }
 
