@@ -8,9 +8,8 @@ import { url } from "../../nav";
 <Doc title="Engineering" kicker="Engineering" section="engineering/" siblings={[]}
   description="How paros is built, one short page per technique. Each page runs the real paros-consensus in your browser.">
   <ol class="index-list">
-    <li><a href={url("engineering/sans-io/")}>The sans-IO core</a><span class="desc">Paxos as a pure state machine: inputs in, one <code>Ready</code> out. Be its driver.</span></li>
     <li><a href={url("engineering/grid-quorums/")}>Grid quorums</a><span class="desc">Partitions of acceptors: a write touches one, an election touches all. Stop acceptors and see what still works.</span></li>
   </ol>
-  <p>More pages come as each Paxos flavor gets its TLA+ model: the goal is to watch every
-  message of a run, step by step, on the code that paros ships.</p>
+  <p>The sans-IO core and its driver loop are in <a href={url("consensus/driver/")}>Consensus</a>,
+  with the library that builds every flavor.</p>
 </Doc>

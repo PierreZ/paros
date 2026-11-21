@@ -21,7 +21,10 @@ teases the journal service being rewritten (the version before is at the tag `v0
 | the Paxos section's landing page, the order of the flavors | `paxos/index.astro` |
 | a knowledge card in `docs/knowledge/concepts/` | `paxos/concepts.astro`: a new card needs its entry in `SHOWN`, or the build fails |
 | the engineering section's landing page | `engineering/index.astro` |
-| the sans-IO core, `Ready`, `advance()` | `engineering/sans-io.md` |
+| the top bar | `src/nav.ts` |
+| the sans-IO core, `Ready`, `advance()`, the driver contract | `consensus/driver.md` |
+| a deployment (`ColocatedNode`, `ProxyLeader`, `ReplicaNode`, `Matchmaker`), a role, a flavor type or an example | `consensus/index.astro` (the flavor table), `consensus/deployments.md` |
+| a model, a trace spec, a walk flavor of consensus-sim, the mutants | `consensus/proof.md` |
 | the grid quorum system, partitions | `engineering/grid-quorums.md` |
 | `crates/support/paros-wasm` (the `paxos` feature) or a `paros-consensus` type its views read | the step-through traces: run `cargo test -p paros-wasm --test paxos_traces` and commit `website/site/src/traces` |
 

@@ -48,3 +48,4 @@ configuration chose, and writes do not stop during the change.
   registration that names it (`MatchRefusal::Retired`). A handover carries these records to
   the successor set. When placement books the node on that journal again, the node first
   rejoins: at a new incarnation, it asks every matchmaker to drop its record.
+- Consensus: [the deployments](../../consensus/deployments/#matchmaker-and-matchmakerreconfigurer) show how a node and its matchmakers are driven together.
