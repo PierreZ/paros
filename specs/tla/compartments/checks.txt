@@ -8,6 +8,9 @@ reach_split       violation  ci
 reach_read        violation  ci
 batch             pass       ci
 batch_split       pass       ci
+# The batcher's limit is the leader's: it flushes the two writes apart,
+# and never hears TooLarge (`NoTooLarge`).
+batch_limit       pass       ci
 restart           pass       ci
 reads             pass       ci
 reads_two         pass       long

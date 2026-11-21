@@ -13,4 +13,10 @@ GridSet == {[mem |-> M, acks |-> k] : M \in Mems, k \in 1..3}
 \* that do not need the bad grids.
 GoodGrids == {[mem |-> M, acks |-> 2] : M \in Mems}
 First == [mem |-> {"a1", "a2", "a3"}, acks |-> 2]
+\* The controls of the bound for liveness: one grid outside the bound, on
+\* a2..a4. acks = 1 needs all three rows for Phase 1; acks = 3 needs all
+\* three rows for Phase 2. One failure blocks the seal into it (`One`, `All`)
+\* or out of it (`One`, then `First` again).
+One == {First, [mem |-> {"a2", "a3", "a4"}, acks |-> 1]}
+All == {First, [mem |-> {"a2", "a3", "a4"}, acks |-> 3]}
 =============================================================================

@@ -9,8 +9,10 @@
 (* master).                                                                  *)
 (*                                                                           *)
 (* A campaign may register any configuration of Configs: a stale belief, a  *)
-(* reconfiguration, or the configuration in force. It may stop at any time   *)
-(* before its first Prepare.                                                 *)
+(* reconfiguration, or the configuration in force. It may stop at any time,  *)
+(* before or after its first Prepare (a stale belief, a refusal, its owner   *)
+(* gone for good). A ballot that stops takes no more step, which every      *)
+(* behaviour already holds, so the model has no stop action.                 *)
 (*                                                                           *)
 (* Skip : "none"   = Phase 1 needs a quorum of each configuration in H_b.   *)
 (*        "owner"  = the owner of ballot j promised the candidate, and its   *)
@@ -33,17 +35,21 @@
 (* KindSet : the kinds a campaign may register. Only Anchor = "newest"     *)
 (*        reads the kind, so the other checks register beliefs alone.        *)
 (*                                                                           *)
+(* An acceptor that crashes and never comes back is one that takes no more  *)
+(* step, which every behaviour already holds, so the model has no crash     *)
+(* action. The GC is always on.                                              *)
+(*                                                                           *)
 (* Not in the model: matchmaker generations, lost durable state, wipes.     *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Values, NB, Owner, Configs, C0, Mem, Q1s, Q2s,
-          Skip, Ask, Anchor, Crashes, Gc, KindSet
+          Skip, Ask, Anchor, KindSet
 
 Ballots == 1..NB
 Belief == "belief"
 Reconf == "reconf"
 
-VARIABLES status,  \* ballot -> "idle" | "matching" | "matched" | "preparing" | "leading" | "dead"
+VARIABLES status,  \* ballot -> "idle" | "matching" | "matched" | "preparing" | "leading"
           cfgOf,   \* ballot -> its configuration
           kind,    \* ballot -> Belief | Reconf
           reg,     \* matchmaker -> set of <<ballot, config, kind>>
@@ -60,11 +66,10 @@ VARIABLES status,  \* ballot -> "idle" | "matching" | "matched" | "preparing" | 
           pv,      \* ballot -> the votes that its promises reported
           val,     \* ballot -> the value it proposes
           prepd,   \* the ballots whose owner sent a Prepare
-          skipped, \* the ballots that a candidate skipped
-          crashed  \* the acceptors that crashed
+          skipped  \* the ballots that a candidate skipped
 
 vars == <<status, cfgOf, kind, reg, wm, wcfg, replied, hist, hwm, hanc, ap, seen, votes,
-          pmd, pv, val, prepd, skipped, crashed>>
+          pmd, pv, val, prepd, skipped>>
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 MMQuorums == {Q \in SUBSET Matchmakers : 2 * Cardinality(Q) > Cardinality(Matchmakers)}
@@ -89,14 +94,13 @@ Init == /\ status = [b \in Ballots |-> "idle"]
         /\ val = [b \in Ballots |-> CHOOSE v \in Values : TRUE]
         /\ prepd = {}
         /\ skipped = {}
-        /\ crashed = {}
 
 \* The owner opens b with configuration c. Its own acceptor promises b first
-\* (`campaign()` sets the promise before matchmaking).
+\* (`campaign()` sets the promise before matchmaking). The owner's promise is
+\* below b only while b is idle: the campaign raises it to b, and a promise
+\* never goes down (`Monotone`).
 Campaign(b, c, k) ==
     LET o == Owner[b] IN
-    /\ status[b] = "idle"
-    /\ o \notin crashed
     /\ ap[o] < b
     /\ status' = [status EXCEPT ![b] = "matching"]
     /\ cfgOf' = [cfgOf EXCEPT ![b] = c]
@@ -104,11 +108,12 @@ Campaign(b, c, k) ==
     /\ ap' = [ap EXCEPT ![o] = b]
     /\ seen' = [seen EXCEPT ![o] = @ \cup {b}]
     /\ UNCHANGED <<reg, wm, wcfg, replied, hist, hwm, hanc, votes, pmd, pv, val, prepd,
-                   skipped, crashed>>
+                   skipped>>
 
+\* A matchmaker registers b once: after it registered b, it holds b (or a
+\* watermark above b), so the last two guards refuse b again.
 Register(b, m) ==
     /\ status[b] = "matching"
-    /\ m \notin replied[b]
     /\ b >= wm[m]
     /\ \A r \in reg[m] : r[1] < b
     /\ reg' = [reg EXCEPT ![m] = @ \cup {<<b, cfgOf[b], kind[b]>>}]
@@ -117,42 +122,34 @@ Register(b, m) ==
     /\ hwm' = [hwm EXCEPT ![b] = IF wm[m] > @ THEN wm[m] ELSE @]
     /\ hanc' = [hanc EXCEPT ![b] = IF wm[m] > hwm[b] THEN wcfg[m] ELSE @]
     /\ UNCHANGED <<status, cfgOf, kind, wm, wcfg, ap, seen, votes, pmd, pv, val, prepd,
-                   skipped, crashed>>
+                   skipped>>
 
 MatchDone(b) ==
     /\ status[b] = "matching"
     /\ replied[b] \in MMQuorums
     /\ status' = [status EXCEPT ![b] = "matched"]
     /\ UNCHANGED <<cfgOf, kind, reg, wm, wcfg, replied, hist, hwm, hanc, ap, seen, votes,
-                   pmd, pv, val, prepd, skipped, crashed>>
-
-\* A campaign stops before its first Prepare (a stale belief, a refusal).
-Abandon(b) ==
-    /\ status[b] \in {"matching", "matched"}
-    /\ status' = [status EXCEPT ![b] = "dead"]
-    /\ UNCHANGED <<cfgOf, kind, reg, wm, wcfg, replied, hist, hwm, hanc, ap, seen, votes,
-                   pmd, pv, val, prepd, skipped, crashed>>
+                   pmd, pv, val, prepd, skipped>>
 
 StartPrepare(b) ==
     /\ status[b] = "matched"
-    /\ Owner[b] \notin crashed
     /\ Skip # "ownerNoGuard" => ap[Owner[b]] <= b
     /\ status' = [status EXCEPT ![b] = "preparing"]
     /\ prepd' = prepd \cup {b}
     /\ UNCHANGED <<cfgOf, kind, reg, wm, wcfg, replied, hist, hwm, hanc, ap, seen, votes,
-                   pmd, pv, val, skipped, crashed>>
+                   pmd, pv, val, skipped>>
 
+\* A second promise of a to b changes nothing: a accepted no ballot since
+\* (Accept at b needs b leading, below b needs a promise below b).
 Promise(b, a) ==
     /\ status[b] = "preparing"
-    /\ a \notin crashed
-    /\ a \notin pmd[b]
     /\ ap[a] <= b
     /\ ap' = [ap EXCEPT ![a] = b]
     /\ seen' = [seen EXCEPT ![a] = @ \cup {b}]
     /\ pmd' = [pmd EXCEPT ![b] = @ \cup {a}]
     /\ pv' = [pv EXCEPT ![b] = @ \cup {<<x[2], x[3]>> : x \in {y \in votes : y[1] = a}}]
     /\ UNCHANGED <<status, cfgOf, kind, reg, wm, wcfg, replied, hist, hwm, hanc, votes, val,
-                   prepd, skipped, crashed>>
+                   prepd, skipped>>
 
 Newest(b) ==
     LET R == {r \in hist[b] : r[3] = Reconf}
@@ -184,48 +181,37 @@ Phase1Done(b) ==
           /\ val' = [val EXCEPT ![b] = v]
     /\ status' = [status EXCEPT ![b] = "leading"]
     /\ UNCHANGED <<cfgOf, kind, reg, wm, wcfg, replied, hist, hwm, hanc, ap, seen, votes,
-                   pmd, pv, prepd, crashed>>
+                   pmd, pv, prepd>>
 
 Accept(b, a) ==
     /\ status[b] = "leading"
     /\ a \in Mem[cfgOf[b]]
-    /\ a \notin crashed
     /\ ap[a] <= b
-    /\ <<a, b, val[b]>> \notin votes
     /\ ap' = [ap EXCEPT ![a] = b]
     /\ seen' = [seen EXCEPT ![a] = @ \cup {b}]
     /\ votes' = votes \cup {<<a, b, val[b]>>}
     /\ UNCHANGED <<status, cfgOf, kind, reg, wm, wcfg, replied, hist, hwm, hanc, pmd, pv,
-                   val, prepd, skipped, crashed>>
+                   val, prepd, skipped>>
 
 ChosenAt(b, v) == \E Q \in Q2s[cfgOf[b]] : \A a \in Q : <<a, b, v>> \in votes
 
-\* The leader of b, once its value is chosen at b, raises the watermark of m.
+\* Once the value of b is chosen at b, the watermark of m rises to b. The
+\* leader of b sends it; a node that learned the choice may send it again.
 GcStep(b, m) ==
-    /\ Gc
-    /\ status[b] = "leading"
     /\ ChosenAt(b, val[b])
     /\ wm[m] < b
     /\ wm' = [wm EXCEPT ![m] = b]
     /\ wcfg' = [wcfg EXCEPT ![m] = cfgOf[b]]
     /\ reg' = [reg EXCEPT ![m] = {r \in @ : r[1] >= b}]
     /\ UNCHANGED <<status, cfgOf, kind, replied, hist, hwm, hanc, ap, seen, votes, pmd, pv,
-                   val, prepd, skipped, crashed>>
-
-Crash(a) ==
-    /\ a \notin crashed
-    /\ Cardinality(crashed) < Crashes
-    /\ crashed' = crashed \cup {a}
-    /\ UNCHANGED <<status, cfgOf, kind, reg, wm, wcfg, replied, hist, hwm, hanc, ap, seen,
-                   votes, pmd, pv, val, prepd, skipped>>
+                   val, prepd, skipped>>
 
 Next ==
     \/ \E b \in Ballots, c \in Configs, k \in KindSet : Campaign(b, c, k)
     \/ \E b \in Ballots, m \in Matchmakers : Register(b, m) \/ GcStep(b, m)
-    \/ \E b \in Ballots : MatchDone(b) \/ Abandon(b) \/ StartPrepare(b)
+    \/ \E b \in Ballots : MatchDone(b) \/ StartPrepare(b)
                           \/ Phase1Done(b)
     \/ \E b \in Ballots, a \in Acceptors : Promise(b, a) \/ Accept(b, a)
-    \/ \E a \in Acceptors : Crash(a)
 
 Spec == Init /\ [][Next]_vars
 
@@ -236,6 +222,51 @@ Agreement == Cardinality(Chosen) <= 1
 
 \* A skipped ballot never leads: it would hold votes.
 SkipSafe == \A j \in skipped : status[j] # "leading"
+
+\* A ballot proposes one value: every vote at b is for the same value.
+OneValue == \A x, y \in votes : x[2] = y[2] => x[3] = y[3]
+
+\* Phase 2 addresses C_b alone: every vote at b comes from a member of C_b.
+VotesInConfig == \A x \in votes : x[1] \in Mem[cfgOf[x[2]]]
+
+\* A matchmaker holds the configuration and the kind that the ballot
+\* campaigned with, and only for a ballot that campaigned.
+RegTrue ==
+    \A m \in Matchmakers : \A r \in reg[m] :
+        r[1] > 0 => /\ status[r[1]] # "idle"
+                    /\ r[2] = cfgOf[r[1]]
+                    /\ r[3] = kind[r[1]]
+
+\* A candidate knows every registration below it that a matchmaker of its
+\* quorum holds: a matchmaker never registers b below a ballot it answered.
+HistComplete ==
+    \A c \in Ballots : \A m \in replied[c] : \A r \in reg[m] : r[1] < c => r \in hist[c]
+
+\* The floor that a candidate learns is at or below its own ballot: a
+\* matchmaker refuses a registration below its watermark.
+FloorBelow == \A b \in Ballots : hwm[b] <= b
+
+\* An acceptor promises only a ballot whose owner sent a Prepare: the owner
+\* testimony of the skip rule counts on it.
+PromisedPrepared == \A b \in Ballots : pmd[b] # {} => b \in prepd
+
+\* A watermark sits at a ballot whose value is chosen, with its configuration.
+WmChosen ==
+    \A m \in Matchmakers : wm[m] > 0 => /\ ChosenAt(wm[m], val[wm[m]])
+                                         /\ wcfg[m] = cfgOf[wm[m]]
+
+Inv == /\ Agreement /\ SkipSafe /\ OneValue /\ VotesInConfig /\ RegTrue
+       /\ HistComplete /\ FloorBelow /\ WmChosen /\ PromisedPrepared
+
+\* An acceptor's promise and a matchmaker's watermark never go down, and a
+\* ballot's life goes one way.
+Rank(s) == CASE s = "idle" -> 0 [] s = "matching" -> 1 [] s = "matched" -> 2
+             [] s = "preparing" -> 3 [] s = "leading" -> 4
+Steps ==
+    /\ \A a \in Acceptors : ap'[a] >= ap[a]
+    /\ \A m \in Matchmakers : wm'[m] >= wm[m]
+    /\ \A b \in Ballots : status'[b] = status[b] \/ Rank(status'[b]) > Rank(status[b])
+Monotone == [][Steps]_vars
 
 \* Not real invariants: TLC must find a skip, and a chosen value.
 NoSkip == skipped = {}

@@ -500,8 +500,20 @@ Results (`abandoned-ballot/checks.txt`):
 |---|---|---|
 | `reach_skip` | `NoSkip`, a reachability control under `"owner"` | violation (14 thousand states) |
 | `reach_choice` | `NoChoice`, a value is chosen | violation |
-| `owner_noguard` | the owner rule with no promise guard | `Agreement` violation (11.6 million states) |
-| `owner` | the owner rule | no violation in 45 million distinct states, to depth 24 (a 40-minute bounded run; `long`). The control broke at 11.6 million. |
+| `owner_two` | the owner rule with two ballots: `Inv` and `Monotone` (below) | pass (2.6 million distinct states, about 3 minutes with 4 workers; ci) |
+| `owner_noguard` | the owner rule with no promise guard, two ballots | `Agreement` violation (750 thousand states; ci) |
+| `owner` | the owner rule, three ballots | no violation in 45 million distinct states, to depth 24 (a 40-minute bounded run; `long`). The control broke at 11.6 million. |
+
+The rules that `owner_two` and `owner` check besides `Agreement` and `SkipSafe` (#1345 (guards
+that survive mutation)): `OneValue` (a ballot proposes one value), `VotesInConfig` (Phase 2
+addresses `C_b` alone), `RegTrue` (a matchmaker holds the configuration and the kind that the
+ballot campaigned with), `HistComplete` (a matchmaker never registers a ballot below one it
+answered, so a candidate knows every lower registration of its quorum), `FloorBelow` (the floor
+that a candidate learns is at or below its ballot), `WmChosen` (a watermark sits at a ballot whose
+value is chosen), `PromisedPrepared` (an acceptor promises only a ballot whose owner sent a
+`Prepare`), and the action property `Monotone` (a promise and a watermark never go down, and
+a ballot's life goes one way). The model has no crash and no stop action: a crashed acceptor or a
+campaign that stops takes no more step, which every behaviour already holds. The GC is always on.
 
 The control shows why the guard matters: an owner whose testimony is below `j` can still open
 Phase 1 at `j` if it does not promise first, and a value chosen there is lost.
@@ -1673,7 +1685,8 @@ reported a vote), or, above the new frontier, it is free again. The model has:
 | `LeaderMax`, `BatchMax` | The leader's record limit and the batcher's limit before it hears the leader's. With 3, the merged batch of `w1` (one record) and `w2` (two records) fits; with 2, the leader refuses it. |
 | `Held` | What a deposed leader answers for a held batch. `"unknown"`: `Unknown`, or `ok` when the slot chose the batch (the rule, #1232). `"slot"`: a control, it answers from the outcome of the slot, whatever the slot chose. `"notleader"`: a control, it answers `NotLeader`, and the batcher follows the hint and sends the batch again (§2.4). |
 | `Copies` | How many times in a run the transport may deliver a batch one more time. 0 in every check but `copies` and `copies_onerange`. |
-| `Leaders`, `Restarts`, `Crash` | How many leader changes and replica restarts can happen, and whether the batcher can stop for good. |
+| `Leaders`, `Restarts` | How many leader changes and replica restarts can happen. The batcher can stop for good at any time: no step of the batcher is fair, so a behaviour in which it takes no more step is that stop. |
+| `MaxSends` | The ids of the batches. The rule sends each write in one batch, and again alone after a `TooLarge`, so no check of the rule sends more (`TypeOK`). The controls that send a batch again (`resend_ambiguous`, `held_notleader`) bound their search with the constraint `SendBound`. |
 
 The safety invariants:
 
@@ -1692,6 +1705,10 @@ The safety invariants:
 - `ReadFresh`: a read that a replica serves holds each write that was complete (answered with a
   range) before the read started. The same rule as `ReadSeesAcked` of `reads/`, on the replica
   tier that `reads/` leaves out.
+- `TypeOK` also says that an open slot holds a proposal and is not chosen yet; `HeldOwn`: the
+  slots of the leader that holds answers change only by its own proposals; `NoTooLarge`: a
+  batcher whose limit is the leader's never hears `TooLarge` (`batch_limit`, where the two writes
+  do not fit one batch).
 
 The liveness property is `Ends` under `LiveSpec`: each batch that the batcher sent reaches the
 log, and each slot below the frontier is chosen and folded at each replica, also when the batcher
@@ -2200,7 +2217,9 @@ count).
 
 A controller is stateless: a crash forgets its term and its plan. It reads the term, then writes
 term + 1 by compare-and-set on the term it read. A candidate can depose a live holder, and the
-deposed holder keeps calling with its old term until a refusal tells it. The controller may ask
+deposed holder keeps calling with its old term until a refusal tells it. A controller may start a
+campaign in any state: from `down` it is a restart, from `cand` or `lead` it drops what it held,
+as a crash does. The controller may ask
 for any grid of `Grids` from the newest configuration it read, at any time: the record judges
 what gets in, not the controller. The network loses at most one request or reply, and a
 controller sends its request again while it has no answer. One acceptor of the pool fails
@@ -2223,7 +2242,7 @@ retry "ok").
 
 | Check | CI | Result |
 |---|---|---|
-| `safety` | ci | pass: every rule; two controllers, terms up to 2, one controller crash, one lost message, six grids (two member sets, `acks` 1 to 3) |
+| `safety` | ci | pass: every rule, `PlanOnlyLead` (only a holder has a plan) and `Chain` (each configuration of the table moves one way, one state at a time); two controllers, terms up to 2, one controller crash, one lost message, six grids (two member sets, `acks` 1 to 3) |
 | `safety_long` | long | pass: every rule with terms up to 3 and one acceptor failure too (24.6 million distinct states, 7 minutes locally with 4 workers) |
 | `live_ci` | ci | pass: `Answered` and `Settles`, with every rule, one lost message and one acceptor down, no controller crash (257 thousand distinct states, under 2 minutes) |
 | `live` | long | pass: the same with one controller crash too (1.8 million distinct states, 14 minutes locally with 4 workers while two other TLC runs shared the machine) |
@@ -2236,6 +2255,8 @@ retry "ok").
 | `noretire` | ci | violation of `OneUnretired`: a second reshape while the first is pending |
 | `nobound` | ci | violation of `AllBounded`: the record takes a grid outside the bound |
 | `live_nobound` | ci | violation of `Settles`: a grid with `acks = 1` and one acceptor down never comes into force (Phase 1 needs every member), and the retire guard then blocks every later reshape |
+| `live_nobound_p1`, `live_nobound_p2` | ci | violation of `Settles`: the only other grid is outside the bound, `acks = 1` (Phase 1 of the new grid needs every member) or `acks = 3` (Phase 2 needs every member); one acceptor down blocks the seal into it |
+| `live_nobound_old` | ci | violation of `SettlesBounded`: a grid with `acks = 1` comes into force, an acceptor fails, and the seal into the next grid, one that meets the bound, needs Phase 1 of the old grid and never comes |
 | `noidem` | ci | violation of `AnswerTrue`: the "ok" is lost, and the retry is refused for its expected configuration although the reshape took place |
 | `reach_<event>` | ci | violation of `NotReached`, one for each case the issue names: `lost_race` (two candidates read one term, one loses the compare-and-set), `deposed` (a candidate deposes a live holder), `stale_refused` (the deposed controller's call is refused for its term), `takeover` and `open_after_takeover` (a candidate takes the term of a crashed holder, then opens a segment), `crash_after_plan` and `open_after_crash` (a controller crashes between its plan and its call, and the journal still reshapes), `sealed_refused` (a reshape asked while a segment is sealed but not retired is refused), `ok_lost` (an "ok" is lost), `fail_after_plan` (an acceptor fails after a plan named it), `inforce_with_failed` (that grid still comes into force) |
 
@@ -2841,7 +2862,7 @@ the fold of the whole log.
 | `FenceRead` | (`meta`) `rec`: the leader of `g` reads the uuid once the record of `g - 1` is written, in the same read of the register. `any`: a control, once the metadata holds a uuid. `stale`: a control, at any time. |
 | `EmptyMeta` | (`meta`) what the boundary write of a segment with no `Fence` applied does to the metadata. `keep`: nothing. `blank`: a control, it writes the uuid of the empty state. `wait`: a control, it waits for a uuid. |
 | `SealGuard` | (`meta`) `TRUE`: a seal waits for the `Fence` of the segment. |
-| `GapFill` | `FALSE`: in `meta`, the first slot of a segment is its `Fence`. `TRUE`: a `Noop` or a pipelined command can come first, and a replica refuses every command of its segment until it applied a `Fence` (#1302, candidate 1); in `record`, a `Noop` can take any slot. |
+| `GapFill` | `FALSE`: in `meta`, the first slot of a segment is its `Fence`. `TRUE`: a `Noop` or a pipelined command can come first, and a replica refuses every command of its segment until it applied a `Fence` (#1302, candidate 1). A `Noop` can take any other slot in every check: the gap fill of an election is always possible. |
 
 Safety: `AckTrue` (each writer gets the answer of the whole log: no deposed writer writes, no
 `seq` twice), `OneFold`, `RecordTrue`, `NoMoveBack` (`next_seq` and `first_seq` never move back
