@@ -144,7 +144,11 @@ matchmaker register as an optional role)). The first journal roles are `paros_jo
 (the acceptor, the leader with its Phase 1 over the segments and the seal, the segment replica;
 #1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk;
 the other rule groups of #1326 (proxy leader, leaderless reads, retire, truncate,
-re-replication) and the driver (#1329) are not built yet.
+re-replication) and the driver (#1329) are not built yet. The grid controller's pure decision is
+`crates/lib/paros-journal-control` (`decide`: heal, repair, re-replicate, or hold and alert, with
+a probe on every branch; #1328 (paros-journal-control), #1261 (grid controller decision tests)),
+judged by `journal-sim`'s sweep of every small view against a reference `decide` that shares no
+code with it; the controller role and its walk are not built yet.
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
 2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
 the build steps of #1323 (build the paros journal v1). Start there for any journal work.
@@ -215,7 +219,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
-  `-p paros-journal`
+  `-p paros-journal` and `-p paros-journal-control`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
@@ -238,7 +242,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   same job runs the two passes on the changed lines of `crates/lib/paros-journal/src`
   (`scripts/mutants.sh --journal`: the tests of `paros-journal` and the walks of `journal-sim`,
   then the trace checks of `journal-sim`; `.cargo/mutants-journal.toml`,
-  `.cargo/mutants-journal-tlc.toml`). A
+  `.cargo/mutants-journal-tlc.toml`), and one pass on the changed lines of
+  `crates/lib/paros-journal-control/src` (`scripts/mutants.sh --control`: its unit tests and
+  `journal-sim`'s sweep of the controller's decisions; `.cargo/mutants-control.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
@@ -246,7 +252,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`,
-  `cargo check --target wasm32-unknown-unknown -p paros-journal`, and
+  `cargo check --target wasm32-unknown-unknown -p paros-journal`,
+  `cargo check --target wasm32-unknown-unknown -p paros-journal-control`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
@@ -636,11 +643,18 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
   fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
   journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
+- `crates/lib/paros-journal-control` — the grid controller of the journal v1
+  (`docs/journal/06-controller.md` §J6, #1328): the P measures of a v1 grid, the placement of a
+  heal under the zone rule, and the pure `decide` of the v1 controller (heal, repair,
+  re-replicate, hold and alert), with a `probe!` on every branch. Sans-IO, wasm-safe, on
+  `paros-consensus` and `paros-journal`; every **Open** number of §J6 comes from the host. Not
+  published yet, and not in the facade.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
   `paros::journal`). A program depends on `paros` alone. Wasm-safe and provider-free.
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
-  segments, the walk of the matchmaker register across handovers and the walk of the journal
-  roles, with oracles that share no
+  segments, the walk of the matchmaker register across handovers, the walk of the journal
+  roles, and the sweep of the grid controller's decisions over every small view against a
+  reference `decide` (`control`, #1261), with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
   `specs/tla/journal-state/FoldTrace.tla` and `specs/tla/segment-records/RegisterTrace.tla`, and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
   (check long runs live); four hours each night in the `Journal live` workflow).

@@ -308,3 +308,55 @@ Its tests come with its crate, after #1189, and follow the plan of the design do
    each P measure from the walk's own state, with no shared code, and compares.
 6. A `probe!` on every branch and every refusal reason of `decide`; the coverage gate requires
    all of them, with no excused probe (the absolute rule of `AGENTS.md`).
+
+#### The decision as built
+
+`crates/lib/paros-journal-control` (#1328 (paros-journal-control), #1261 (grid controller
+decision tests)) builds `decide` from this chapter. Its view is a done read of the register, the
+liveness of each member (`up`, `suspect`, `down`), the zones, the candidates that the host's
+placement offers, the leader, the matchmakers, the scrub's pending repairs, `data_lost`, the ages
+of the signals and of the oldest seal, the time since the last reshape, and whether the rate
+limiter has a token. The numbers that are **Open** above stay the host's: `Tunables` (the stale
+age, the minimum interval, the stall window) has no default. The view has no load, latency or
+error signal, so `NO_LOAD_PLAN` holds by the type. `decide` gives at most one action and every
+alert, in this order:
+
+1. A controller whose term is not the register's stops and reports nothing (§J6.1).
+2. The alerts: `data_lost`; the matchmakers below a majority (`ControlFrozen`, a page) or at a
+   majority with no spare; the journal states of the table above that hold (Unplaceable,
+   WritesDegraded, ElectionBlocked and Stopped; the last two page); a seal older than the stall
+   window (`ReshapeStalled`).
+3. No action while the matchmakers are frozen or a signal is stale.
+4. The cheap action first: the repair of a found damage, with no token.
+5. The re-replication of the first sealed or retired segment that has a replica down, under a
+   token.
+6. The heal reshape of the segment in force, when the state is AtRisk and a member is down, or a
+   replica of its set is down: it waits for the retire of every older segment, the minimum
+   interval and a token. The new grid keeps every member that is not down in its place and puts
+   a candidate in the place of each member that is down, the first placement in the host's
+   order that meets the zone rule; the replica set the same, with no zone rule.
+
+The tests as built: the unit tests of the crate; tests 1, 2, 5 (the oracles that one decision can
+judge: `NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`, `FENCED`, `NO_STALE_PLAN`, `NO_SUSPECT_REPLACED`,
+`IDEMPOTENT`, `MONOTONE` and `SAME_AS_REFERENCE`, each with a planted mutant) and 6 run in
+`journal-sim`'s `tests/control.rs` over every small view (`P <= 3`, `F <= 2`, no zones or three or
+four zones: about 390 thousand views); `scripts/mutants.sh --control` leaves no survivor. Tests 3
+and 4, and the oracles of a run (`NO_OSCILLATION`, `CONVERGES`, `COST_BOUND`, and the
+many-journals scenario of #1261 with `BOUNDED_IN_FLIGHT`), come with the controller role and its
+walk.
+
+**Proposals of the build, for Pierre's review** (each is a reading of this chapter, not a
+decision of Pierre):
+
+- **A suspect member is not replaced.** It counts as lost for the spares (the catalogue), and a
+  heal replaces only members that are `down`. A column at risk only through suspects waits.
+- **The minimum interval holds every reshape, a heal at spare 0 too** (item 1 of the tests above
+  says "no reshape inside the minimum interval"; the first text of #1261 said "unless the spare
+  is 0", which in v1 would leave the interval no effect, since a heal runs only at spare 0).
+- **A replica down in the segment in force heals by a reshape**; the re-replication of §J3.1 is
+  for sealed and retired segments (v1 has no offload, so a retired segment's replicas hold its
+  only copy).
+- **A heal does not move survivors**: a member that is down is replaced in its own place. The
+  zone rule of a v1 grid is the rule of each column.
+- **The matchmakers at a majority with no spare alert**; the handover of the catalogue is not an
+  action of v1's `decide` yet.

@@ -10,6 +10,7 @@ resolver = "3"
 [workspace.dependencies]
 paros-consensus = { path = "crates/lib/paros-consensus", version = "0.2.0", default-features = false }
 paros-journal = { path = "crates/lib/paros-journal", version = "0.2.0" }
+paros-journal-control = { path = "crates/lib/paros-journal-control" }
 
 
 [workspace.package]

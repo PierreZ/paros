@@ -26,7 +26,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 root="$(pwd)"
 
-PURE=(paros-consensus paros-journal)
+PURE=(paros-consensus paros-journal paros-journal-control)
 FACADE=paros
 
 # The crates that the observation features of the pure crates pull in.
