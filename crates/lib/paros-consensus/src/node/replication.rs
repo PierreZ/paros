@@ -146,12 +146,13 @@ impl ColocatedNode {
             // slots, so that hole would be permanent. Pull the decided range from
             // our first unchosen slot.
             self.pull_gap(from, ci);
-        } else if commit < ci {
+        } else {
             probe!(
-                reachable,
+                sometimes,
+                commit < ci,
                 "catch-up: a follower replays the decided prefix to a leader that advertises a lower commit"
             );
-            // We are ahead of the sender: push what it is missing. This is what
+            // We are ahead of the sender, or level: push what it is missing. This is what
             // heals a leader that lost its (relaxed, non-fsync'd) chosen index to a
             // crash — it beats a stale low `commit`, so no follower would ever pull;
             // a follower that *does* know the slot is decided replays it to the
@@ -164,9 +165,9 @@ impl ColocatedNode {
             // boundary it converted a one-slot-behind peer into a trim-point jump
             // install (`commit == first_slot - 1` tripped the below-floor
             // branch for a replay we can serve normally).
+            // At an equal commit the replay starts past our own prefix and
+            // sends nothing.
             self.serve_catchup(from, commit.map_or(Slot(0), |c| Slot(c.0 + 1)));
-        }
-        if commit <= ci {
             // No gap: the next pull starts fresh.
             self.pull_beats = 0;
         }
@@ -184,7 +185,9 @@ impl ColocatedNode {
     /// changes only who answers.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0)))]
     fn pull_gap(&mut self, from: NodeId, ci: Option<Slot>) {
-        if self.pull_beats == 0 || self.pull_index != ci {
+        // The count belongs to one chosen index: a pull at another index
+        // starts it over. At a count of zero the index is only overwritten.
+        if self.pull_index != ci {
             self.pull_index = ci;
             self.pull_beats = 0;
         }

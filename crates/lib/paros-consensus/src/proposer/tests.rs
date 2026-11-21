@@ -209,6 +209,14 @@ fn a_promise_page_of_the_wrong_shape_is_refused() {
     assert!(!valid(2, &[], &[], 2, Some(3)), "an empty continued page");
     assert!(!valid(2, &[2], &[], 2, Some(2)), "a cursor at the start");
     assert!(
+        !valid(2, &[3], &[], 2, Some(3)),
+        "a cursor at the last record"
+    );
+    assert!(
+        !valid(2, &[], &[3], 2, Some(3)),
+        "a cursor at the last faulty entry"
+    );
+    assert!(
         !valid(2, &[2, 5], &[], 2, Some(4)),
         "a cursor before a record"
     );
@@ -655,4 +663,95 @@ fn a_promise_from_outside_the_configurations_is_ignored() {
         fold_empty_probe(&mut p, 2, ballot(1, 0), Slot(0)),
         PromiseFold::Answered
     );
+}
+
+/// An election reports the first slot it asked from, and the reports it
+/// merged so far, before it closes.
+#[test]
+fn an_open_election_reports_its_first_slot_and_its_merge() {
+    let mut p: Proposer<NodeId, Command> = Proposer::new();
+    let _ = p.open_phase1(
+        Campaign {
+            me: Some(NodeId(0)),
+            ballot: ballot(1, 0),
+            config: config(&[0, 1, 2]),
+            prior: vec![config(&[0, 1, 2])],
+            from_slot: Slot(3),
+        },
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    assert_eq!(p.election().map(Election::from_slot), Some(Slot(3)));
+    let mut report = BTreeMap::new();
+    report.insert(Slot(4), (ballot(0, 1), cmd(4)));
+    let _ = p.fold_promise(
+        NodeId(1),
+        ballot(1, 0),
+        Slot(3),
+        report.clone(),
+        BTreeMap::new(),
+        None,
+    );
+    assert_eq!(p.election().map(Election::recovered), Some(&report));
+}
+
+/// The tally's own invariants name a sender that is both answered and
+/// owed a page.
+#[test]
+#[should_panic(expected = "an answered sender owes no further page")]
+fn an_answered_sender_that_owes_a_page_breaks_the_check() {
+    let mut tally: PromiseTally<NodeId> = PromiseTally::new(ballot(1, 0), Slot(0), BTreeSet::new());
+    tally.answered.insert(NodeId(1));
+    tally.promise_next.insert(NodeId(1), Slot(4));
+    tally.assert_invariants();
+}
+
+/// A candidate holds no repair probe: the proposer's check names it.
+#[test]
+#[should_panic(expected = "a candidate holds no repair probe")]
+fn a_candidate_with_a_repair_probe_breaks_the_check() {
+    let mut p = opened(vec![config(&[0, 1, 2])]);
+    let mut leader = blocked_on_two_slots();
+    p.probe = leader.probe.take();
+    assert!(p.probe.is_some(), "the leader holds a probe");
+    p.assert_invariants();
+}
+
+/// A recovery's cursor is where it was opened, and moves one slot per step.
+#[test]
+fn a_recovery_cursor_starts_where_it_was_opened() {
+    let mut p: Proposer<NodeId, Command> = Proposer::new();
+    p.open_recovery(
+        BTreeMap::new(),
+        BTreeSet::new(),
+        Slot(3),
+        Slot(5),
+        RecoveryPolicy::Phase1Backed,
+    );
+    assert_eq!(p.recovery().map(Recovery::cursor), Some(Slot(3)));
+    let _ = p.recovery_next();
+    assert_eq!(p.recovery().map(Recovery::cursor), Some(Slot(4)));
+}
+
+/// The standing authority the proposer reports is the one it opened.
+#[test]
+fn the_reported_authority_is_the_open_one() {
+    let mut p: Proposer<NodeId, Command> = Proposer::new();
+    p.raise_next_slot(Slot(8));
+    p.open_authority(Some(Slot(6)), Some(NodeId(0)));
+    assert_eq!(p.authority().fence(), Some(Slot(6)));
+}
+
+/// The probe's tally is over its blocked slots only: the check names a
+/// tally over a slot that is not blocked.
+#[test]
+#[should_panic(expected = "the probe's have-tally is over blocked slots only")]
+fn a_probe_tally_over_an_unblocked_slot_breaks_the_check() {
+    let mut p = blocked_on_two_slots();
+    p.probe
+        .as_mut()
+        .expect("a probe")
+        .best_have
+        .insert(Slot(9), (ballot(0, 1), cmd(9)));
+    p.assert_invariants();
 }

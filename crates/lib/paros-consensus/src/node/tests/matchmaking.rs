@@ -453,6 +453,43 @@ fn a_keep_alive_skips_a_promiser_outside_the_configurations() {
     );
 }
 
+/// A keep-alive asks a peer that answered and is a member of the campaign's
+/// configuration only (node 2, absent from the prior one): the audience is
+/// the union of the configurations, never their intersection.
+#[test]
+fn a_keep_alive_reaches_a_member_of_one_configuration_only() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    let targets = open_phase1(&mut n, &[cfg(&[0, 1, 3])]);
+    assert!(
+        targets.contains(&NodeId(3)),
+        "Phase 1 asks the prior member"
+    );
+    n.set_election_timeout(1_000);
+    let camp = n.ballot();
+    n.step(promise(2, camp));
+    // Node 3 answers one page of a longer suffix: the campaign pages it.
+    let page = BTreeMap::from([(Slot(0), (ballot(0, 2), ucmd(9, 0, 1)))]);
+    n.step(Message::Promise {
+        from: NodeId(3),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted: page,
+        faulty: BTreeMap::new(),
+        next_from_slot: Some(Slot(1)),
+        prepared: None,
+    });
+    assert!(!n.is_leader(), "a paged answer is not complete yet");
+    let _ = drain(&mut n);
+    n.tick();
+    let mut keep_alive = prepares(&drain(&mut n));
+    keep_alive.sort_unstable();
+    assert_eq!(
+        keep_alive,
+        vec![NodeId(2)],
+        "node 3 still pages: it gets its continuation"
+    );
+}
+
 /// Identical consecutive configurations: one promise quorum, as today.
 #[test]
 fn identical_configurations_need_one_quorum() {

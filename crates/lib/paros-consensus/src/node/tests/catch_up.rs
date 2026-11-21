@@ -572,3 +572,117 @@ fn a_leadership_a_higher_ballot_passed_proposes_nothing() {
         "a leadership a higher ballot passed proposes nothing, got {r:?}"
     );
 }
+
+/// A follower behind the beats pulls from the beat's sender, and once its
+/// pulls at one chosen index outlast the fallback it asks the whole pool;
+/// a beat with no gap starts the count over.
+#[test]
+fn a_stalled_pull_asks_the_whole_pool_after_the_fallback() {
+    let mut n = node(1, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    let beat = |commit: Option<Slot>| Message::Heartbeat {
+        from: NodeId(0),
+        ballot: ballot(1, 0),
+        commit,
+        config: None,
+        fence: None,
+        gc_floor: None,
+    };
+    let pulls = |n: &mut ColocatedNode, commit: Option<Slot>| -> Vec<NodeId> {
+        n.step(beat(commit));
+        drain(n)
+            .into_iter()
+            .filter(|(_, m)| matches!(m, Message::CatchUpRequest { .. }))
+            .map(|(to, _)| to)
+            .collect()
+    };
+    for _ in 0..crate::node::PULL_FALLBACK_BEATS {
+        assert_eq!(pulls(&mut n, Some(Slot(5))), vec![NodeId(0)]);
+    }
+    let all = pulls(&mut n, Some(Slot(5)));
+    assert!(all.len() > 1, "the whole pool is asked: {all:?}");
+    // A beat with no gap resets the count: the next pulls ask the sender.
+    assert_eq!(pulls(&mut n, None), Vec::new());
+    for _ in 0..crate::node::PULL_FALLBACK_BEATS {
+        assert_eq!(pulls(&mut n, Some(Slot(5))), vec![NodeId(0)]);
+    }
+}
+
+/// The pull count belongs to one chosen index: a follower that learns a slot
+/// between two pulls starts the count over and keeps asking the sender.
+#[test]
+fn a_pull_at_a_new_chosen_index_starts_the_count_over() {
+    let mut n = node(1, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    let pulls = |n: &mut ColocatedNode| -> Vec<NodeId> {
+        n.step(Message::Heartbeat {
+            from: NodeId(0),
+            ballot: ballot(1, 0),
+            commit: Some(Slot(5)),
+            config: None,
+            fence: None,
+            gc_floor: None,
+        });
+        drain(n)
+            .into_iter()
+            .filter(|(_, m)| matches!(m, Message::CatchUpRequest { .. }))
+            .map(|(to, _)| to)
+            .collect()
+    };
+    for _ in 0..crate::node::PULL_FALLBACK_BEATS {
+        assert_eq!(pulls(&mut n), vec![NodeId(0)]);
+    }
+    n.step(Message::Commit {
+        from: Party::Node(NodeId(0)),
+        ballot: ballot(1, 0),
+        slot: Slot(0),
+        command: ucmd(7, 7, 1),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(n.hard_state().chosen_index, Some(Slot(0)));
+    for _ in 0..crate::node::PULL_FALLBACK_BEATS {
+        assert_eq!(pulls(&mut n), vec![NodeId(0)], "the count started over");
+    }
+    assert!(pulls(&mut n).len() > 1, "the fallback still comes");
+}
+
+/// A follower ahead of a beat replays what the sender misses, from one past
+/// the sender's chosen index; a beat at its own chosen index asks nothing.
+#[test]
+fn a_follower_ahead_replays_from_past_the_beat_s_commit() {
+    let mut nodes = cluster_with_three_chosen();
+    let replay = |n: &mut ColocatedNode, commit: Option<Slot>| -> Vec<Slot> {
+        n.step(Message::Heartbeat {
+            from: NodeId(0),
+            ballot: n.hard_state().max_promised_ballot,
+            commit,
+            config: None,
+            fence: None,
+            gc_floor: None,
+        });
+        drain(n)
+            .into_iter()
+            .filter_map(|(_, m)| match m {
+                Message::CatchUpResponse { entries, .. } => Some(entries.into_keys()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    };
+    assert_eq!(replay(&mut nodes[1], Some(Slot(0))), vec![Slot(1), Slot(2)]);
+    nodes[1].step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: nodes[1].hard_state().max_promised_ballot,
+        commit: Some(Slot(2)),
+        config: None,
+        fence: None,
+        gc_floor: None,
+    });
+    assert!(
+        !drain(&mut nodes[1]).iter().any(|(_, m)| matches!(
+            m,
+            Message::CatchUpResponse { .. } | Message::TrimmedTo { .. }
+        )),
+        "a beat at the follower's own chosen index asks no replay"
+    );
+}

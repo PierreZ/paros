@@ -158,3 +158,55 @@ fn a_delegated_round_is_the_proxys_until_taken_back() {
     );
     assert_eq!(rounds.resend_page(RESEND_BATCH)[0].proxy, None);
 }
+
+/// A short page wraps around from the lowest round, and never past its
+/// limit.
+#[test]
+fn a_wrapped_resend_page_keeps_its_limit() {
+    let mut rounds: Rounds<NodeId, Command> = Rounds::new();
+    for slot in 0..4 {
+        rounds.open(Slot(slot), ballot(1, 0), cmd(slot), None, None);
+    }
+    let first = rounds.resend_page(3);
+    assert_eq!(
+        first.iter().map(|p| p.slot).collect::<Vec<_>>(),
+        vec![Slot(0), Slot(1), Slot(2)]
+    );
+    let second = rounds.resend_page(2);
+    assert_eq!(
+        second.iter().map(|p| p.slot).collect::<Vec<_>>(),
+        vec![Slot(3), Slot(0)],
+        "one round from the cursor, one wrapped"
+    );
+}
+
+/// `all_at` holds only when every open round runs at the ballot, and
+/// `close_below` keeps a round at the ballot itself.
+#[test]
+fn rounds_below_a_ballot_close_and_rounds_at_it_stay() {
+    let mut rounds: Rounds<NodeId, Command> = Rounds::new();
+    rounds.open(Slot(1), ballot(1, 0), cmd(1), None, None);
+    rounds.open(Slot(2), ballot(2, 0), cmd(2), None, None);
+    assert!(!rounds.all_at(ballot(2, 0)));
+    assert_eq!(rounds.close_below(ballot(2, 0)), vec![Slot(1)]);
+    assert!(rounds.all_at(ballot(2, 0)));
+    assert!(rounds.is_open_at(Slot(2), ballot(2, 0)));
+}
+
+/// A move to the column a round already runs against is no move; a move to
+/// another column is counted once.
+#[test]
+fn a_move_to_the_same_column_is_refused() {
+    let grid = AcceptorConfig::new(
+        vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+        QuorumSystem::grid(2, 2),
+    );
+    let mut rounds: Rounds<NodeId, Command> = Rounds::new();
+    rounds.open(Slot(1), ballot(1, 0), cmd(1), None, Some(0));
+    assert_eq!(rounds.by_slot()[&Slot(1)].moves(), 0);
+    assert!(!rounds.move_to(&grid, Slot(1), Some(0), None));
+    assert_eq!(rounds.by_slot()[&Slot(1)].moves(), 0);
+    assert!(rounds.move_to(&grid, Slot(1), Some(1), None));
+    assert!(rounds.move_to(&grid, Slot(1), Some(0), None));
+    assert_eq!(rounds.by_slot()[&Slot(1)].moves(), 2);
+}
