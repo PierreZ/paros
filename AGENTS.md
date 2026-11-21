@@ -110,7 +110,11 @@ segments with an empty segment and a seal before the `Fence`; the whole boundary
 leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), the seal
 end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1
 that reads the old grid below the end keeps one value; #1313 (the seal end against a CTRL faulty
-record)).
+record)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state tally on a grid and across the
+configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen
+value in one write; `specs/tla/ctrl-segments/`: the copies of a sealed segment across retire and
+offload, the repair of a replica log and of an object, the data-loss report; #1263 (CTRL recovery
+in the journal)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs), the proofs are

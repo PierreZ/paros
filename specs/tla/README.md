@@ -165,6 +165,8 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Segment records across a matchmaker set handover: the seal, the retire, the offload mark, the controller election and the reshape call, each a compare-and-set on the matchmaker register while the set hands over | the journal steps are designed, not built | `segment-records/` | #1275 (segment records across a matchmaker handover), done |
 | Offload of sealed segments: the offloader role (full copy, conditional put, compare-and-set mark), the late upload after trim, the lost mark, the duplicate upload, an offloader that stops between the put and the mark, the drop after the mark, the scrub of the controller | not built (the offloader and the controller, after #1189) | `offload/` | #1256 (offload races and the offloader role), done |
 | Two seals in a row: a chain of segments with an empty segment and a seal before the `Fence`; where the boundary leader uuid lives (the segment record, or the journal metadata with a `Fence` at the next segment) | the journal steps are designed, not built | `seal-chain/` | #1303 (two seals in a row) |
+| CTRL in the journal: the tri-state tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen value in one write | `proposer.rs` (`slot_decidable`), `acceptor.rs`; the scrub and the repair are designed, not built | `ctrl-grid/` | #1263 (CTRL recovery in the journal), done |
+| CTRL across segments: the copies of a sealed segment across retire and offload, the repair of a replica log and of an object, the data-loss report | the journal steps are designed, not built | `ctrl-segments/` | #1263 (CTRL recovery in the journal), done |
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
@@ -1855,6 +1857,7 @@ minutes with 4 workers):
 | `ctrl_one_slot` | ci | one fault, one slot | pass (32 thousand states) |
 | `ctrl_three` | ci | one fault on `a1`, one slot, three ballots, `c1` too, no node catches up: a faulty report above a readable one | pass (687 thousand states, 2 min) |
 | `ctrl_have` | ci | the same, a faulty report qualifies beside any readable report | `Agreement` violation |
+| `ctrl_plus_one` | ci | the same, the threshold is one above the highest readable report (#1263 (CTRL recovery in the journal), item 5) | `Agreement` violation (14 thousand states) |
 | `rot_two` | ci | two faults, one slot, `c1` too | pass (146 thousand states): two faults cost liveness, never agreement |
 | `ctrl_live` | ci | `Ends`, one fault on `a1` or `a3`, one slot, `a2` (the last leader) catches up | pass |
 | `reach_retry` | ci | `NoRetry`, a reachability control: a refused candidate asks again; `a1` leads ballot 1 and `a3` ballot 2 | violation |
@@ -2897,7 +2900,78 @@ the retire of §J3.1 would miss it. Rule 3 also keeps the whole old grid in ever
 the end makes needless.
 
 What is not in the model: a faulty record of the next configuration (the tally is the one of
-`truncation/`, and `ctrl-grid/` of PR #1293 (CTRL recovery in the journal)), two ballots in the old grid (the tally of three ballots is checked in
+`truncation/`, and `ctrl-grid/`), two ballots in the old grid (the tally of three ballots is checked in
 `truncation/`), the retire and the boundary write (`segment-replicas/`, `seal-chain/`), the register
 across a matchmaker handover (`segment-records/`), and the bypass (no Phase 1, the end is the
 frontier, §J5.5).
+
+### `ctrl-grid/`: the CTRL tally on a grid and across configurations, the scrub and the repair, for #1263
+
+`truncation/` checks CTRL on plain Multi-Paxos on a majority. The journal adds grid quorums,
+several configurations in `H_b` (a sealed segment is an older configuration, read below its
+end), and the scrub of the grid controller, which finds a damaged record while the acceptor runs
+(#1263 (CTRL recovery in the journal), items 1, 3 and 5). The model is the log of `truncation/`
+with no floor and no truncation: a campaign asks from slot 0, a ballot is bound to one
+configuration (`Cfg`), the win and the tally need a Phase-1 quorum of every configuration of
+`H_b`, and Phase 2 runs in the configuration of the ballot. A damaged record is found by a scrub
+(the acceptor keeps running) or by a boot (its ballots die and its learned value goes); both give
+the same faulty record. A repair writes a faulty record again, under the ballot that it keeps.
+`RecordsTrue` checks that a readable record at or above the ballot that chose a slot holds the
+chosen value.
+
+| Check | CI | Result |
+|---|---|---|
+| `grid4` | ci | pass: a grid of two columns of two (acks 1), two ballots, two commands, one damaged record, the repair of a chosen value (77 thousand states) |
+| `grid4_restart` | ci | pass: the same with one restart (263 thousand states) |
+| `majority` | ci | pass: a majority of three, three ballots, so that a faulty report can sit above a readable one (2.8 million states, 7 min) |
+| `two_one` | ci | pass: two configurations, `c1` (a1, a2, a3; ballot 1) and `c2` (a3, a4; ballots 2 and 3), one command |
+| `two` | long | pass: the same with two commands (3.0 million states, 8 min) |
+| `drop_first_up` | long | pass: a repair in two writes (delete, then write) with no restart |
+| `repair_none` | long | pass: no repair, only a later `Accept` heals: the repair adds a copy, it never decides |
+| `live` | long | pass: `Ends`, the last ballot settles and every faulty record of a learned slot is repaired |
+| `grid` | long, 60 min | pass (bounded): the default grid of the journal, two columns of three, acks 2; no violation in 60 min (10.9 million distinct states, depth 19), a bounded run, not a proof |
+| `grid_majority` | long | violation of `NoFillChosen`: the majority control on the default grid (668 thousand states, 1 min) |
+| `reach_faulty`, `reach_block`, `reach_repair`, `reach_cross` | ci | violation: a faulty record of a chosen slot, a repair probe, a repair, and a ballot of `c2` that chooses a slot where a record of `c1` is faulty |
+| `grid4_majority` | ci | violation of `NoFillChosen`: the qualifying answers need a majority of the four members. Ballot 1 chooses `v` on `a1`; a scrub finds `a1` damaged; ballot 2 hears `a1` faulty and three empty answers, three is a majority, and it fills the slot with a `Noop`. The grid needs both members of column 0 to qualify, and `a1` does not: the slot is blocked |
+| `plus_one` | ci | violation of `NoFillChosen`: the threshold is one above the highest readable report (item 5) |
+| `tally_none` | ci | violation of `NoFillChosen`: a faulty report counts as no vote |
+| `two_current` | ci | violation of `NoFillChosen`: the tally asks only `c2`. Ballot 1 chooses `v` in `c1`, a scrub finds a record of `c1` damaged, and the leader of `c2` fills the slot with a `Noop` on the empty answers of `c2` |
+| `damage_drop` | ci | violation of `Agreement`: a scrub drops the damaged record, and the slot reads as a slot with no vote |
+| `repair_peer` | ci | violation of `Agreement`: the repair writes the value of a peer's vote under its own ballot, not a chosen value |
+| `drop_first` | ci | violation of `NoFillChosen`: the repair deletes the record, the node restarts before it writes the new one, and the slot reads as a slot with no vote |
+
+### `ctrl-segments/`: the copies of a sealed segment across retire and offload, for #1263
+
+The copies of a sealed segment S1 (every slot chosen): the records of its grid until it
+retires, the logs of its replica set, and one object once offloaded (#1263 items 2 and 4). A copy
+is `good`, `bad` (rotted), `none` or `gone` (its machine is lost). The grid serves a slot while
+one of its acceptors holds a good record (`ctrl-grid/` checks that the tally then decides it
+right or blocks). The controller scrubs every copy and repairs a found damaged copy from a good
+one: an acceptor record from the grid or a replica, a replica log from a peer, the grid until the
+retire or the object once offloaded, an object by a replace from a replica (one step in the
+model; how a replace works is Open for the offload design, `docs/journal/03-segments-and-records.md`
+§J3.1, since the conditional put of `offload/` never replaces an object). With no good copy
+left it reports data loss. The survive promise is `F` failed machine copies at once: a rotted
+copy is failed until its repair, a lost machine for ever. The object store is outside the
+promise (`ObjFaults`). `Survive`: with no damaged object, every slot keeps a good copy.
+`TrueLoss`: a loss report is true. `Repairable`: a found damage always has a source.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety`, `safety_k2` | ci | pass: three acceptors, three replicas, `F = 1`, one or two slots; retire at `F + 1`, offload, drop |
+| `live` | ci | pass: `Kept` (each slot ends with a good copy) and `Heals` (every found damage ends repaired) |
+| `retire_any` | ci | pass: a replica whose damage a scrub found and no repair fixed counts for the retire. The damaged copy is the one failed copy of the promise, so the other counted replica stays good and the repair reads it, never the retired grid |
+| `object`, `live_object` | ci | pass: one damaged object is replaced from a replica, or reported once no replica holds the segment; a report is always true |
+| `reach_loss`, `reach_offload`, `reach_repair` | ci | violation: a loss report, an offload that every replica dropped, a repair after the retire |
+| `retire_f` | ci | violation of `Survive`: S1 retires at `F` replicas, and the one holder rots |
+| `live_retire_f` | ci | violation of `Kept`: the same, as liveness |
+| `upload_any` | ci | violation of `Survive`: the offloader puts a log that it did not check; the replicas drop, and a rotted copy is the only one |
+| `drop_retired` | ci | violation of `Survive`: a replica drops its copy once S1 retired, before the record says offloaded |
+
+**Finding.** #1263 proposed the rule "a segment does not retire while a scrub has found damage in
+it that is not repaired". The model shows that it is not needed for the survive promise: a
+damaged copy is one of the `F` failed copies until its repair, so `F + 1` counted holders leave at
+least one good copy, whatever their damage (`retire_any`). It is a margin, not a safety rule.
+**Decided** (Pierre, 2026-11-20): the journal keeps it as a margin (`RetireCount = "clean"`, the
+design value of the model).
+`F + 1` holders is the rule (`retire_f`).
