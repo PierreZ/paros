@@ -11,7 +11,7 @@
 old code. The v1 names come with the journal crates: the fold and the codec with #1324
 (paros-journal), the client with #1331 (the pure journal client).
 
-Every journal exposes four calls, in one of two **modes**: **single-writer**, where one leader
+Every journal exposes four calls (and the recovery call `Resolve` of §J2.2), in one of two **modes**: **single-writer**, where one leader
 appends under its leader uuid, and **multi-writer**, where anyone with access appends. The mode
 is what the last applied `SetLeader` left: `SetLeader(None, old)` makes the journal
 multi-writer, and `SetLeader(new, None)` makes it single-writer again (decided by Pierre on
@@ -48,7 +48,8 @@ means that a resend of the same write gets the same answer for ever.
 | refused, `fenced` | fenced `Write`, `Truncate` | yes | The uuid is not the leader. Uuids are fresh, so the write never lands | §J2.3, §J2.4.1 |
 | early | fenced `Write` | no | `expected_seq` is above `next_seq`: send it again later | §J2.2, §J2.4.1 |
 | `Truncated` | `Write`, `Read` | no | The position is below `first_seq`. For a write, the fate is unknown | §J2.2, §J2.6 |
-| `Below` | fenced `Write` | no | The position is in an older segment: the client reads that segment to learn the fate. **Open**: the wire shape (#1320) | §J2.2 |
+| `Below` | fenced `Write` | no | The position is in an older segment: the client sends `Resolve` to a replica of that segment to learn the fate | §J2.2 |
+| written with `seq`, not written, or `Truncated` | `Resolve` | yes, except `Truncated` | A replica of the old segment judged the resent write against the record at its position, with the compare of `apply_write` | §J2.2 |
 | `Unknown` | `Write` | no | A deposed leader held the write and cannot tell its fate. The client resends the same write at the same `expected_seq` | §J2.2 |
 | `WRONG_MODE` | `Write`, `Truncate` | yes for that copy | The call is shaped for the other mode | §J2.4.1 |
 | `TooLarge` | `Write` | yes for that node | The batch is over the limits of the node; the write is in no slot | §J2.7 |
@@ -115,11 +116,29 @@ taken", and a writer that writes it again lands it two times (controls `seal_loc
 apply would wait for another replica set. A digest of the last writes in the boundary state is
 safe only while it covers the writer's whole pipeline (`seal_digest`).
 
-**Open** (#1320 (the wire shape that resolves a `Below` answer), decided with #1189): how the
-client resolves `Below`. The model resolves it with the writer uuid and the write of the record
-at that position, which a `Read` does not return today. The options are a `Resolve` call that a
-replica of the old segment judges against its stored entry, a field of `Read` with the writer
-uuid of each record, or a compare of bytes. Each one is a format fact of v1.
+**The client resolves `Below` with a `Resolve(uuid, expected_seq, write)` call** (decided by
+Pierre on 2026-11-21, #1320 (the wire shape that resolves a `Below` answer), option (a)). The
+client sends it to a replica of the old segment, the segment that holds `expected_seq`. The
+replica judges the resent write against its stored entry at that position, with the same compare
+as `apply_write`: the same uuid and the same write (its limits) is **written**, with its `seq`;
+anything else is **not written**. A replica whose fold has `first_seq` above the position answers
+`Truncated`. The replica answers only once its fold covers the position: a sealed segment does not
+change after that, so the answer is final (except `Truncated`, as above). So the replica log, and
+later the offload object format, keep the writer uuid and the limits of each write, beside its
+bytes. **`Resolve` only reads**: it never writes to the sealed segment, never moves its end, and
+never places the resent write there. It is a recovery call of the client beside the four calls of
+the data plane. After "not written", the writer reads the current tail and sends the write again
+to the segment in force, with a new `expected_seq`. A `Read` stays as it is: it returns no writer uuid. The rejected options
+were a writer uuid on each record of a `Read`, and a compare of bytes, under which equal bytes at
+the position count as written.
+
+`specs/tla/journal-state/` (#1189 (the journal state model)) checks the call: a resend across a
+seal answered `Below`, then resolved (`ResolveTrue`: the answer is the answer of the whole log at
+the slot of the write, or `Truncated` once the floor is above the position; reach
+`reach_resolve`; `ResolveReadOnly`: a step that answers a `Resolve` changes no register field, no
+vote and no replica log). Two controls break `ResolveTrue`: a compare of the uuid only, when the writer
+wrote another write at the same position (`resolve_uuid`), and a replica that answers before its
+fold covers the position (`resolve_early`).
 
 The client pipelines a single-writer journal's writes with `paros::client::Pipeline` (#597
 (several writes in flight per journal)): one writer's leadership, shared by its callers, each
@@ -281,9 +300,11 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   `boundary_early`). The record needs no third value for "not written": a replica of the next
   segment starts only from a written record.
 
-**Open**: the leader of a fresh journal, before its first `SetLeader`: `None` (a fresh journal
-is multi-writer) or unset (every write and truncate is refused until a `SetLeader`). The model
-passes with both (`safety`, `unset`); the journal state model (#1189) decides it.
+**The leader of a fresh journal is unset**, as §J2.3 says: every write and truncate is refused
+until a `SetLeader`. A fresh journal that is multi-writer (`None`) is safe too. `multi-writer/`
+passes with both (`safety`, `unset`), and so does the composed model `journal-state/` across three
+segments (`chain` starts unset, `chain_fresh_none` starts at `None`; #1189 (the journal state
+model)). The choice is not a safety rule: a change to `None` needs no new check.
 
 ### J2.5 Reads
 

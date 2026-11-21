@@ -196,8 +196,8 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | CTRL in the journal: the tri-state tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen value in one write | `proposer.rs` (`slot_decidable`), `acceptor.rs`; the scrub and the repair are designed, not built | `ctrl-grid/` | #1263 (CTRL recovery in the journal), done |
 | CTRL across segments: the copies of a sealed segment across retire and offload, the repair of a replica log and of an object, the data-loss report | the journal steps are designed, not built | `ctrl-segments/` | #1263 (CTRL recovery in the journal), done |
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
+| The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | not built (the journal core, #1324 to #1326) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
-| The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
@@ -3006,6 +3006,102 @@ least one good copy, whatever their damage (`retire_any`). It is a margin, not a
 **Decided** (Pierre, 2026-11-20): the journal keeps it as a margin (`RetireCount = "clean"`, the
 design value of the model).
 `F + 1` holders is the rule (`retire_f`).
+
+### `journal-state/`: the journal v1 composed, with the state on disk, for #1189 and #1309
+
+Each rule of the journal has its own model (`docs/journal/07-verification.md` §J7.1). This
+model puts them together, so that TLC checks the seams between them (#1189 (the journal state
+model)), and its acceptors keep their state on disk, with a crash between any two writes
+(#1309 (the state is the disk)). The model has:
+
+- **Paxos inside each segment.** A configuration is one grid; a ballot registers the newest
+  configuration, in ballot order. Phase 1 takes a promise quorum of each configuration that is
+  not retired (a sealed one is read below its end), the leader writes from the applied prefix of
+  the oldest segment it read: the vote that its Phase 1 saw, a `Noop` where it saw none below its
+  start (the gap fill), and the commands of the clients at its start and above.
+- **The disk.** An acceptor's variables are its memory (`mprom`, `mvote`), a queue of atomic
+  writes (`pend`) and its disk (`dprom`, `dvote`). A step queues its writes; the driver makes the
+  first one durable (`Flush`) and sends the reply that the write makes true, built from the disk.
+  A crash drops the queue and starts the role again from its disk. With no crash and both
+  replies from the disk (`Direct`), a write is durable in its step and Phase 1 takes its promise
+  quorum in one step (the lesson of `flight-rule/`: a delay is a slow network).
+- **The register of the journal** (§J3.4): the reshape of the grid controller (with
+  `RetireGuard`), the seal end (written once by the first leader of the next grid, one above the
+  highest vote its Phase 1 saw in the old grid), the boundary state (written by a replica of the
+  old set that applied every slot), retired and trimmed. A write of the end or of the boundary
+  is first partial and can be lost (a later operation reads a majority that misses it and writes
+  over it), or it is done (`Partial`).
+- **The replicas.** Each segment has its own replica set. A replica starts from the boundary
+  state of the segment before it, learns each slot from a live source (a quorum of a grid that
+  still runs holds the vote on its disk, or a peer of its set applied it), applies in slot order,
+  answers the writer of each slot, and stops at the end of its segment.
+- **The journal fold** (§J2): `Write(u, e)` (fenced at the position `e`, or unfenced),
+  `Truncate(u, up)` and `SetLeader(new, old)` with `new = None`, judged at apply, the position
+  before the fence, and `Below` for a fenced write whose position is in an older segment.
+- **`Resolve`** (§J2.2, #1320 (the wire shape that resolves a `Below` answer)): the client sends
+  `Resolve(uuid, expected_seq, write)` to a replica of the old segment, which judges it with the
+  compare of apply once its fold covers the position (`Resolve`).
+- **Retire and trim** (§J3.1, §J3.2): retire once the boundary is done and `RetireAt` replicas
+  hold every slot; trim once a fold has `first_seq` at or above the last `seq` of a sealed
+  segment.
+
+The clients' commands are a script: `Values[s]` is what a leader may propose at slot `s` (`MC.tla`
+names each script). `GenOK` names which ballot may register which configuration.
+
+Safety: `Agreement`; `SealedFrozen` (a sealed grid chooses nothing at or above its end);
+`AckTrue` (each answer is the answer of the fold of the whole log, or `Below` where the whole log
+says `Duplicate` or position taken); `OneFold` (each replica's fold is the fold of the whole log at
+its front); `RecordTrue` (a done boundary state is the journal state at the end); `NoMoveBack`;
+`OneUnretired`; `ResolveTrue` (the answer to a `Resolve` is the answer of the whole log at the
+slot of the write, or `Truncated` once the floor is above the position); `Readable` (every record at or above the floor has a live copy: a disk quorum of
+a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `TrimStays`, `ResolveReadOnly` (a `Resolve` changes nothing but its answer).
+Liveness: `Ends` (the chosen log has no hole and every chosen slot is answered).
+
+| Check | CI | Result |
+|---|---|---|
+| `chain`, `chain_none`, `chain_fresh_none`, `chain_trunc`, `chain_move` | ci | pass: three segments, one acceptor and one replica in each grid; the scripts are the claim of `u1`, its write and a resend of it (67 thousand distinct states); the claim, the write and `SetLeader(None, u1)` (68 thousand); the same on a fresh journal that is multi-writer; a `Truncate` over the write (73 thousand); the `SetLeader` that deposes `u1` and a write of `u1` (80 thousand). About 30 seconds each |
+| `register`, `register_bound_read` | ci | pass: two segments, the first grid of three acceptors, two first leaders of the second grid that race to seal, partial writes that are lost (686 and 837 thousand distinct states, about 3 minutes each). `register_bound_read`: a replica of the next segment starts from a partial boundary write |
+| `disk` | ci | pass: two segments, one crash between two writes, three ballots, any leader change (646 thousand distinct states, about 2 minutes) |
+| `order_atomic`, `order_prom_first` | ci | pass: one segment of three acceptors, two ballots, one crash; an `Accept` that raises the promise is one write, or the promise then the vote (99 and 119 thousand distinct states) |
+| `order_vote_first` | ci | violation of `Readable`: the vote, then the promise. `a3` (outside ballot 2's promise quorum) takes ballot 2's `Accept`, its vote is durable and sent, so ballot 2 chooses with `a1` and `a3`; `a3` crashes before its promise is durable, starts again with its old promise, and takes ballot 1's `Accept` at the same slot over its vote. The chosen value is now on one disk only |
+| `order_atomic_nb3`, `order_prom_first_nb3`, `disk_reg` | long 40 | bounded: three ballots; and `disk` on the register's grids (more than 5 million distinct states, no violation found) |
+| `live` | ci | pass: `Ends`, two segments, weak fairness |
+| `reply_mem2b` | ci | violation of `Agreement`: a vote is sent from memory before its write; the acceptor crashes, the next leader reads its disk, sees no vote and chooses another value (etcd-io/raft#551, E1) |
+| `reply_mem1b` | ci | violation of `SealedFrozen`: a promise is sent from memory; the sealer writes the end on it, the old acceptor crashes and loses the promise, and the old leader chooses at the end in the sealed grid (the segment record is written and its seal is lost) |
+| `end_applied` | ci | violation of `SealedFrozen`: the end is one above the applied prefix, under a vote that the old grid chose |
+| `end_read` | ci | violation of `RecordTrue`: a replica stops at a partial end (0) and writes the boundary state there; another sealer writes the end 1 over it and the end is done; the boundary state misses the claim at slot 0 |
+| `gap_off` | ci | violation of `Ends`: with no `Noop` below the start, a slot below the end with no vote stays a hole |
+| `retire_early` | ci | violation of `Readable`: the old grid retires at the seal, before a replica or the new grid holds a chosen slot |
+| `reshape_noguard` | ci | violation of `OneUnretired` |
+| `lookup_local` | ci | violation of `AckTrue`: the resend of a written write across a seal is answered "position taken" |
+| `trim_open` | ci | violation of `Ends`: the open segment is trimmed on its range so far, and its later writes are never answered |
+| `resolve_uuid` | ci | violation of `ResolveTrue`: the `Resolve` compares the uuid only; `u1` wrote another write at position 0, and its resend is resolved "written" |
+| `resolve_early` | ci | violation of `ResolveTrue`: a replica of the old segment answers before its fold covers the position, and a written write is resolved "not written" |
+| `reach_crash`, `reach_third`, `reach_below`, `reach_resolve`, `reach_lost_end`, `reach_repropose`, `reach_trim_retired`, `reach_moved` | ci | violation: a value chosen after a crash between writes; a write acked in the third segment; a resend across a seal answered `Below`; a `Below` resolved "written"; a partial end lost and another end done; a slot of the old segment chosen in the new grid; a retired segment trimmed; a `SetLeader` in an earlier segment and the deposed writer refused in a later one |
+
+**The write orders** (#1309). Each row is one order of writes and sends, and what the model
+shows. The model covers the acceptors' writes and the register; the replicas' and the
+matchmakers' steps are one atomic write each.
+
+| Write order | Result | Check |
+|---|---|---|
+| A promise is sent once its write is durable | safe | `disk`, `order_*` |
+| A promise is sent from memory, before its write | unsafe: a sealed grid chooses | `reply_mem1b` |
+| A vote is sent once its write is durable | safe | `disk`, `order_*` |
+| A vote is sent from memory, before its write | unsafe: two values chosen | `reply_mem2b` |
+| An `Accept` that raises the promise: one atomic write | safe | `order_atomic` |
+| The promise, then the vote | safe | `order_prom_first` |
+| The vote, then the promise | unsafe: after a crash, the acceptor takes a lower ballot over a chosen vote | `order_vote_first` |
+| A leader writes, or a replica stops, at a seal end that is partial | unsafe: the boundary state is at the wrong end | `end_read` |
+| A replica of the next segment starts from a boundary write that is partial | safe: the value is a function of the chosen log up to a done end | `register_bound_read` |
+| A replica writes its applied prefix and its fold | not covered: one atomic write | |
+| A crash of a replica or a matchmaker | not covered (`segment-replicas/`, `segment-truncate/`, `segment-records/`) | |
+
+What is not in the model: the grid controller's election and a deposed controller
+(`grid-controller/`), the matchmaker set handover (`segment-records/`), CTRL faulty records
+(`seal-ctrl/`, `ctrl-grid/`), the re-replication of a sealed segment (`re-replication/`), leaderless reads
+(`reads/`, `experiments/segments/reads/`), the acceptors' compaction and the trim-point jump
+(`segment-truncate/`), offload (`offload/`), and the client's pipeline and resolve.
 
 ### `re-replication/`: the heal of a sealed segment's replica set, for #1314
 

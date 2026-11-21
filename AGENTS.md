@@ -114,7 +114,11 @@ record)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state tally on a 
 configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen
 value in one write; `specs/tla/ctrl-segments/`: the copies of a sealed segment across retire and
 offload, the repair of a replica log and of an object, the data-loss report; #1263 (CTRL recovery
-in the journal)), the heal of a sealed segment's replica set
+in the journal)), the journal v1 composed (`specs/tla/journal-state/`: three segments, the seal,
+register writes that are partial or done, the boundary state, a replica set per segment, the fold
+with `Below` and its `Resolve` call (#1320), retire, trim; the acceptors' state is a memory, a queue of writes and a disk, with a
+crash between two writes, and an `Accept` that raises the promise writes the promise first or in
+the same write; #1189 (the journal state model), #1309 (the state is the disk)), the heal of a sealed segment's replica set
 (`specs/tla/re-replication/`: a new replica counts only on its own complete copy from a full
 member of the set, the new set written by compare-and-set on the version of the register, a "done"
 report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
