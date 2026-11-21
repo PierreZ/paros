@@ -20,10 +20,11 @@ in the repository; the old service is named only as "at the tag". No long book p
 | `/paxos/` | `src/pages/paxos/*.md`, `index.astro` | the course map (`src/course.ts`), the map of the flavors and the words (#949); one page per flavor: the problem, a story and a step-through diagram, the rule, where in paros |
 | `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
 | `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | one short page per technique, each with a live widget on `paros-consensus` |
-| `/journal/` | `src/pages/journal/index.astro` | the journal service: what it is, the rewrite, and the tag of the version before it |
+| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, and the controller. Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule |
+| `/parosd/` | `src/pages/parosd/index.astro` | the service around the journal: what it will be, that it is rebuilt, and how to run the version before the rewrite at the tag |
 
 Old URLs (the Zola book, the mdbook `.html` pages, `/play/`, `/sandbox/`, `/playground/`,
-`/docs/`, the removed Engineering pages) redirect in
+`/docs/`, the old `/parosd/*` pages, the removed Engineering pages) redirect in
 `astro.config.mjs`. Add a redirect when a page moves.
 
 ## One style (Pierre, 2026-10-31)

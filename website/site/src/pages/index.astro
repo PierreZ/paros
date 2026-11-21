@@ -1,6 +1,6 @@
 ---
 // The home page: what paros is now (the consensus core and its proofs), the
-// Paxos flavors to learn, and the journal service being rewritten on top.
+// Paxos flavors to learn, and the journal designed on top of them.
 import Base from "../layouts/Base.astro";
 import Panel from "../components/Panel.astro";
 import { REPO, url } from "../nav";
@@ -18,7 +18,7 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
       <div class="actions">
         <a class="btn primary" href={url("paxos/")}>▶ Learn the Paxos flavors</a>
         <a class="btn" href={url("engineering/")}>How it is built</a>
-        <a class="btn" href={url("journal/")}>The journal service</a>
+        <a class="btn" href={url("journal/")}>The journal</a>
       </div>
     </div>
 
@@ -47,15 +47,13 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
       </ul>
     </Panel>
 
-    <Panel num="03" title="Coming: the journal service" meta="rewrite in progress">
-      <p>Ordered, durable logs for many tenants on a cell of machines, with four calls:
-        <code>Write</code>, <code>Read</code>, <code>Truncate</code> and <code>SetLeader</code>.
-        A first version ran, and paros is now rewriting it from the ground up on stronger
-        foundations: the proved core first, then the journal on top.</p>
-      <p class="aside">To see the version before the rewrite (<code>parosd</code>, <code>parosctl</code>,
-        the Compose demo, the simulation), check out the tag
-        <a href={TAG}><code>v0.2.0-alpha.1</code></a>.
-        <a href={url("journal/")}>More</a>.</p>
+    <Panel num="03" title="The journal" meta="designed · checked in TLA+ · being built">
+      <p>One ordered, durable log for each journal id, with four calls: <code>Write</code>, <code>Read</code>, <code>Truncate</code> and <code>SetLeader</code>.
+        Paxos chooses every record, segments let the acceptors change with no stop, and no step
+        waits for every member of a group. Each rule has a TLA+ model; the pure journal core is
+        built, and the roles come next.</p>
+      <p class="aside"><a href={url("journal/")}>The journal pages</a>. The service around it, <a href={url("parosd/")}><code>parosd</code></a>, is being rebuilt; the version before the
+        rewrite is at the tag <a href={TAG}><code>v0.2.0-alpha.1</code></a>.</p>
     </Panel>
   </div>
 </Base>
