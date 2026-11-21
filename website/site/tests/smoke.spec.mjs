@@ -186,6 +186,18 @@ const EXERCISES = [
     id: "grid-column",
     moves: [["extra", "The client writes alpha"], ["settle", {}], ["extra", "The client writes bravo"], ["settle", {}]],
   },
+  {
+    page: "paxos/compartmentalized/",
+    id: "proxy-down",
+    moves: [
+      ["extra", "The client writes bravo"],
+      ["settle", {}],
+      ["extra", "Node 0 beats"],
+      ["settle", {}],
+      ["extra", "Node 0 beats"],
+      ["settle", {}],
+    ],
+  },
   { page: "paxos/matchmaker/", id: "old-set", moves: [["extra", "Node 3 starts an election"], ["settle", {}]] },
 ];
 

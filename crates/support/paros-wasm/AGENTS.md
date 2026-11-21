@@ -38,6 +38,8 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
 - `src/paxos/world/verbs.rs` → wire, clock, client and handoff verbs (`propose(.., column)`, `relinquish`).
 - `src/paxos/world/history.rs` → the client's record and linearizability judge.
 - `src/paxos/world/lifecycle.rs` → crash, the two seams, restart, wipe (boot refused, narrated), corrupt.
+- `src/paxos/world/forge.rs` → `World::skip_phase1` (`Action::SkipPhase1`): the fault of the
+  Multi-Paxos "Break the rule" run, Accepts that the engine writes with no Phase 1.
 - `src/paxos/world/reads.rs` → `World::quorum_read`, the only read, served via `ReadState`.
 - `src/paxos/world/disk.rs` → `Disk` → the game's `Storage` impl, the trim-point jump, and the `applied` log.
 - `src/paxos/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held.
@@ -73,20 +75,30 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   `proxy_leader` and `replica_tier` examples of `paros-consensus` do. Three `ColocatedNode`s, two
   `ProxyLeader`s, two `ReplicaNode`s and a `Batcher`; the driver only moves messages, and
   every state line and quorum answer is read off those roles. The handoff run stays a
-  `Recorder` run on its level, with its own lanes.
+  `Recorder` run on its level, with its own lanes. Its "Break the rule" run has a `Commit`
+  that the driver writes (`Run::forge_commit`): a proxy leader that commits after one vote.
+  `trace/compart/desk.rs` → `Desk`, `Verb` → the same deployment driven by hand, the world of
+  the lesson 6 exercises (deliver or lose each message, a client write, a beat of node 0 or of
+  a proxy leader, a proxy leader crash).
 - `src/paxos/picker.rs` → `check(shape, down)`: which quorums `paros-consensus` finds in a shape
   with some acceptors stopped; the wasm export `paxos_quorums` serves the quorums page's
   picker (#948 (quorum shapes and picker)).
 - A "Break the rule" run (#946) causes its fault from **outside** the core, with verbs the
-  shipped code refuses: `Wipe` boots an acceptor of the single-decree world on an empty disk,
-  and `Reconfigure` there gives one proposer its own acceptors with no matchmaker. The core
-  is never changed; `DecreeWorld::violation` and `DecreeWorld::decisions` record the two
-  values chosen.
+  shipped code refuses or never takes: `Wipe` boots an acceptor of the single-decree world on
+  an empty disk, `Reconfigure` there gives one proposer its own acceptors with no matchmaker,
+  `SkipPhase1` sends Accepts that no Phase 1 opened (log world), and the compartmentalized
+  driver writes a proxy leader's `Commit` after one vote. The core is never changed; the
+  receivers are the shipped code. `DecreeWorld::violation` and `DecreeWorld::decisions`
+  record the two values chosen in the single-decree world; in the log world and on the
+  compartmentalized page the recorder marks a step `broken` when two nodes hold two values
+  chosen for one slot.
 - `src/paxos/lab.rs` → `Exercise`, `Lab`, `Move`, `LabView` (wasm `PaxosLab`) → the "your turn"
   exercises of the Paxos course: a level's world that the reader drives by hand (deliver or
   drop each message, plus the few extra moves an exercise lists), and a goal read off the
   world. An exercise's setup (an election, a first write) is played with the same helpers as
-  a solution and is not the reader's: undo never takes it back. A rule that an exercise turns off is a driver move the shipped code refuses
+  a solution and is not the reader's: undo never takes it back. An exercise runs a level
+  (`Game`) or the compartmentalized deployment (`Desk`); its extra moves are `Extra::Act` or
+  `Extra::Compart`. A rule that an exercise turns off is a driver move the shipped code refuses
   (`Wipe`), never a change of the core, and the exercise says so (`rule_off`). Each exercise
   has a solution that a test plays, so an exercise the core no longer lets a reader solve
   fails CI. Undo is a replay: the engine draws no randomness.

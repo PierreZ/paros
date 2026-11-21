@@ -102,8 +102,11 @@ the screen marks the right answer, the reader's answer and the reason (`why`). T
 in the page only (`window.paxosStory.answers()`), and each one fires `paxos:answer` on the
 document. A "Break the rule" run ends with a "find the bug" question (`after`): its beat plays
 first, then the screen asks what went wrong in it, and an answer marks the right one with no
-second play. A page with no beats keeps the step-through alone. The story draws the recorded
-trace only; the step-through switches to the live wasm run.
+second play. Every page has one: single decree (an acceptor loses its disk), quorums (two
+quorums that do not meet), Multi-Paxos (a node skips Phase 1), compartmentalized (a proxy
+leader commits after one vote) and matchmaker (skip the matchmakers). A page with no beats
+keeps the step-through alone. The story draws the recorded trace only; the step-through
+switches to the live wasm run.
 
 ## The course (`src/course.ts`)
 
@@ -139,9 +142,10 @@ extra moves of the exercise, what the core said about the last move, Deliver all
 message until the wire is empty, one move), Undo and Start again. When the engine says
 the goal holds, the page shows why it matters and the next exercise. A solved exercise is
 kept in the browser (`public/course.js`) and the map counts it. `#lab=<id>` opens a tab, at
-load or later: the end of a lesson's story links to its first exercise. Lessons 1 to 5 and 7
-have exercises; the compartmentalized page runs its own driver, not a level, so lesson 6 has
-none yet.
+load or later: the end of a lesson's story links to its first exercise. Every lesson has
+exercises. The exercises of lesson 6 run the compartmentalized deployment of the page's own
+driver (`Desk` in `src/paxos/trace/compart/desk.rs`), not a level: node 0, two proxy leaders
+(lanes `p0`, `p1`) and two replicas (`r0`, `r1`).
 Without the wasm, the section says so.
 
 ## Live widgets (#812 (website redo 3/4), #951 (live Engineering pages))
