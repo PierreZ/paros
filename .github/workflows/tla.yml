@@ -19,6 +19,7 @@ on:
     paths:
       - "specs/tla/**"
       - "scripts/check-tla.sh"
+      - "scripts/mutate-tla.py"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/tla.yml"
@@ -27,6 +28,7 @@ on:
     paths:
       - "specs/tla/**"
       - "scripts/check-tla.sh"
+      - "scripts/mutate-tla.py"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/tla.yml"
@@ -70,6 +72,10 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run TLC on specs/tla/${{ matrix.folder }}
         run: nix develop .#tla --command scripts/check-tla.sh "${{ matrix.folder }}"
+      # Each guard set to TRUE still parses, so that the weekly `TLA mutants`
+      # workflow judges every guard (#1311 (mutate spec guards)).
+      - name: Parse each guard mutant of specs/tla/${{ matrix.folder }}
+        run: nix develop .#tla --command scripts/mutate-tla.py --parse "${{ matrix.folder }}"
 
   traces:
     runs-on: ubuntu-latest

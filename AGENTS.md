@@ -229,7 +229,12 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder, and the trace checks of consensus-sim in four
-  `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout))
+  `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); the job of each folder also checks that
+  each guard mutant parses (`scripts/mutate-tla.py --parse`)
+- the `TLA mutants` workflow, each week and on demand: `scripts/mutate-tla.py` sets each guard
+  of each action of `specs/tla/` to `TRUE` and runs the folder's `ci` checks; one check must
+  fail. A survivor fails the run: remove the guard or add the check that needs it, never an
+  allow list (#1311 (mutate spec guards), `specs/tla/README.md`)
 
 A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`,
 Markdown, `docs/`, `specs/`) runs only the `wasm` job of `rust.yml`; a push to `main` runs
@@ -597,5 +602,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-tla.sh`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

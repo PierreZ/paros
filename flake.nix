@@ -93,9 +93,10 @@
         };
 
         # TLC alone, without the Rust toolchain: what CI's `tla` workflow enters
-        # (`nix develop .#tla --command scripts/check-tla.sh`).
+        # (`nix develop .#tla --command scripts/check-tla.sh`). Python runs the
+        # guard mutation of the specs (`scripts/mutate-tla.py`, #1311).
         devShells.tla = pkgs.mkShell {
-          buildInputs = [ pkgs.tlaplus ];
+          buildInputs = [ pkgs.tlaplus pkgs.python3 ];
         };
       }
     );
