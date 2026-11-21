@@ -549,3 +549,50 @@ fn a_campaign_whose_set_is_gone_learns_the_set_in_force_from_the_pool() {
     assert_eq!(n.role(), NodeRole::Follower, "the campaign is abandoned");
     assert!(n.matchmaking_role().is_none());
 }
+
+/// A probe answer from matchmaker `m` at `tag` that names `effective`.
+fn probed(m: u64, tag: Ballot, effective: Option<(Ballot, AcceptorConfig)>) -> MatchReply {
+    MatchReply {
+        journal: J,
+        matchmaker: MatchmakerId(m),
+        to: NodeId(3),
+        ballot: tag,
+        generation: G0,
+        outcome: MatchOutcome::Probed {
+            effective,
+            named: None,
+        },
+    }
+}
+
+/// Node 3 probes, and two of three matchmakers close the probe naming
+/// `(ballot(4, 1), {0, 1, 2})`: the node is outside the belief it heard.
+/// Returns the probe's tag.
+fn closed_outside(n: &mut ColocatedNode) -> Ballot {
+    fire_election(n);
+    let tag = n
+        .membership_probe()
+        .map(crate::matchmaking::MembershipProbe::ballot)
+        .expect("a probe");
+    let _ = drain_match_requests(n);
+    for m in [0, 1] {
+        let _ = n.on_match_reply(probed(m, tag, Some((ballot(4, 1), cfg(&[0, 1, 2])))));
+    }
+    assert!(n.membership_probe().is_none(), "the probe closed");
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(n.belief_source(), BeliefSource::Heard);
+    assert_eq!(*n.acceptors(), cfg(&[0, 1, 2]));
+    tag
+}
+
+/// A late answer at the fact the node already holds is not newer: a
+/// different configuration at that same ballot moves nothing.
+#[test]
+fn a_late_answer_at_the_held_fact_moves_nothing() {
+    let mut n = rebooted_member();
+    let tag = closed_outside(&mut n);
+    let step = n.on_match_reply(probed(2, tag, Some((ballot(4, 1), cfg(&[1, 2, 3])))));
+    assert_eq!(step, MatchStep::Ignored);
+    assert_eq!(*n.acceptors(), cfg(&[0, 1, 2]));
+    assert_eq!(n.role(), NodeRole::Follower);
+}

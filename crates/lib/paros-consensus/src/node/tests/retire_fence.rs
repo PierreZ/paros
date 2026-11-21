@@ -677,6 +677,92 @@ fn a_staged_rejoin_that_never_left_is_sent_again_at_boot() {
     ready.advance();
 }
 
+/// A rejoin a matchmaker quorum took, with no leader to follow, asks the
+/// rest again on its own clock, ahead of an election clock that a
+/// campaign's `Prepare` restarted.
+#[test]
+fn a_rejoin_with_no_leader_asks_the_rest_again() {
+    let mut mms = registries(3);
+    let mut storage = MemStorage::for_node(2, &[0, 1, 2]);
+    let _ = retire_node_2(&mut mms, &mut storage);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    fire_election(&mut n);
+    let requests = persist(&mut n, &mut storage);
+    assert_eq!(requests.len(), 3, "every matchmaker is asked");
+    let mut replies = matchmake(&mut mms, requests);
+    let _ = replies.pop();
+    for reply in replies {
+        let _ = n.on_match_reply(reply);
+        let _ = persist(&mut n, &mut storage);
+    }
+    assert!(n.rejoin.is_some(), "a quorum leaves the rejoin open");
+    assert!(n.leader().is_none());
+    n.set_election_timeout(3);
+    n.tick();
+    n.tick();
+    // A campaign's `Prepare` restarts the election clock, not the rejoin's.
+    n.step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: ballot(40, 0),
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = persist(&mut n, &mut storage);
+    assert!(n.leader().is_none());
+    n.tick();
+    let asked: Vec<(MatchmakerId, MatchPurpose)> = persist(&mut n, &mut storage)
+        .into_iter()
+        .map(|(m, q)| (m, q.purpose))
+        .collect();
+    assert_eq!(
+        asked,
+        vec![(MatchmakerId(2), MatchPurpose::Rejoin { incarnation: 1 })],
+        "only the matchmaker that did not take the rejoin is asked again"
+    );
+    assert!(n.membership_probe().is_none(), "no probe carried it");
+}
+
+/// Close `n2`'s open rejoin. Late answers at the closed check's tag
+/// `check_tag` are not the rejoin's: every matchmaker answering there
+/// leaves the rejoin open. A quorum of the rejoin's own answers to
+/// `requests` leaves it open too; the last one closes it.
+fn close_rejoin(
+    n2: &mut ColocatedNode,
+    storage: &mut MemStorage,
+    mms: &mut [Matchmaker],
+    requests: Vec<(MatchmakerId, MatchRequest)>,
+    check_tag: Ballot,
+) {
+    for m in 0..3 {
+        let _ = n2.on_match_reply(MatchReply {
+            journal: J,
+            matchmaker: MatchmakerId(m),
+            to: NodeId(2),
+            ballot: check_tag,
+            generation: MatchmakerGeneration(0),
+            outcome: MatchOutcome::Probed {
+                effective: None,
+                named: None,
+            },
+        });
+        let _ = persist(n2, storage);
+    }
+    assert!(
+        n2.rejoin.is_some(),
+        "an answer at another tag is not the rejoin's"
+    );
+    let mut replies = matchmake(mms, requests);
+    let last = replies.pop().expect("three answers");
+    for reply in replies {
+        let _ = n2.on_match_reply(reply);
+        let _ = persist(n2, storage);
+    }
+    assert!(n2.rejoin.is_some(), "a quorum leaves the rejoin open");
+    let _ = n2.on_match_reply(last);
+    let _ = persist(n2, storage);
+    assert!(n2.rejoin.is_none(), "every matchmaker took the rejoin");
+}
+
 /// A journal booked again while it still runs on a node that retired from
 /// it rejoins with no reboot (#1037 (rejoin)): `rejoin` stages the next
 /// incarnation and asks every matchmaker to drop its record, and a
@@ -718,6 +804,7 @@ fn a_running_journal_booked_again_rejoins() {
     let _ = persist(&mut n2, &mut storage);
     assert!(n2.check_retirement_heard());
     let requests = persist(&mut n2, &mut storage);
+    let check_tag = requests[0].1.ballot;
     for reply in matchmake(&mut mms, requests) {
         let _ = n2.on_match_reply(reply);
         let _ = persist(&mut n2, &mut storage);
@@ -726,6 +813,7 @@ fn a_running_journal_booked_again_rejoins() {
         n2.retire_mark().checked,
         "every matchmaker let node 2 retire"
     );
+    assert_eq!(n2.closed_probe, Some(check_tag), "the check's probe closed");
     // Booked again before it stopped: the running node rejoins.
     assert!(n2.rejoin());
     let ready = n2.ready();
@@ -755,10 +843,7 @@ fn a_running_journal_booked_again_rejoins() {
         persist(&mut n2, &mut storage).is_empty(),
         "a second rejoin asks nothing new"
     );
-    for reply in matchmake(&mut mms, requests) {
-        let _ = n2.on_match_reply(reply);
-        let _ = persist(&mut n2, &mut storage);
-    }
+    close_rejoin(&mut n2, &mut storage, &mut mms, requests, check_tag);
     // A registration naming node 2 is taken again.
     let back = MatchRequest::reconfigure(J, NodeId(0), ballot(19, 0), old, generation);
     let answers = matchmake(
