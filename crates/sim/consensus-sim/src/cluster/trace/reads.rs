@@ -1,7 +1,7 @@
-//! The events of a cluster walk as a trace of
-//! `specs/tla/reads/ReadsTrace.tla`: `MatchmakerTrace` and the leaderless
-//! reads of `specs/tla/reads/Reads.tla` (#1231 (traced walks reach the
-//! rules)).
+//! The leaderless read events of a cluster walk, for
+//! `specs/tla/node/ReadsTrace.tla`: the events of `MatchmakerTrace` and
+//! the leaderless reads of `specs/tla/node/Node.tla` (#1231 (traced walks
+//! reach the rules)).
 //!
 //! A read is recorded at four seams: the reader learned a read basis (after
 //! a batch, from `ColocatedNode::read_basis`), the driver opened a read
@@ -11,11 +11,9 @@
 //! served the read (`ReadServe`). `Applied` is the highest slot a party
 //! applied: a write up to it completed, so a later read must see it.
 
-use moonpool_tla::Value;
 use paros_consensus::{Ballot, Message, NodeId, Slot};
 
-use super::{Batch, ClusterEvent, OwnAnswer, Tracer, matchmaker};
-use crate::trace::Trace;
+use super::{Batch, ClusterEvent, OwnAnswer, Tracer};
 
 /// The read steps of `ReadsTrace`.
 pub(super) fn keeps(event: &ClusterEvent) -> bool {
@@ -28,23 +26,6 @@ pub(super) fn keeps(event: &ClusterEvent) -> bool {
             | ClusterEvent::ReadServe { .. }
             | ClusterEvent::Applied { .. }
     )
-}
-
-/// The events of one cluster walk of a pool of `nodes` and `matchmakers`
-/// matchmakers as a trace of `ReadsTrace.tla`.
-pub(super) fn trace(nodes: u64, matchmakers: u64, events: &[ClusterEvent]) -> Trace {
-    let mut trace = matchmaker::trace(nodes, matchmakers, events);
-    let ctxs = events
-        .iter()
-        .filter_map(|event| match event {
-            ClusterEvent::ReadStart { ctx, .. } => {
-                Some(Value::Int(i64::try_from(*ctx).expect("a token")))
-            }
-            _ => None,
-        })
-        .collect();
-    trace.define("TraceCtxs", Value::Set(ctxs));
-    trace
 }
 
 impl Tracer {

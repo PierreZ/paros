@@ -1,0 +1,18 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+# Reachability: a member activates a later generation, and a member skips
+# generation 1.
+reach        violation  ci
+reach_skip   violation  ci
+# Two handovers, from {m1, m2} to {m3} and back: the floor and the
+# registrations are carried, and m1 and m2 skip generation 1.
+chain        pass       ci
+# The close takes the frozen state of one member of a set of three: a
+# registration that a majority held is lost.
+close_one    violation  ci
+# The close takes the state of a majority that need not have frozen: a
+# registration after the close is lost.
+close_live   violation  ci

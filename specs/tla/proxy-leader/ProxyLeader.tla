@@ -76,6 +76,14 @@
 (*           round of its own slot. With `Tally = "belief"` and two slots, *)
 (*           the proxy then counts an open lower round over the new        *)
 (*           configuration.                                                *)
+(*   Colocated TRUE: each leader is also an acceptor, as `ColocatedNode`   *)
+(*           runs it, and has the steps of the colocated deployment: its   *)
+(*           own promise in the step that opens Phase 1 (`PrepareOwn`), an *)
+(*           `Accept` it sends itself (`Delegation::Colocated`, `Direct`), *)
+(*           the round it opens recorded as its own vote                   *)
+(*           (`record_own_round`, `OwnVote`), and the record of a value    *)
+(*           chosen at a ballot (`mark_chosen`, `Record`). The trace spec  *)
+(*           of a walk sets it. FALSE: the compartmentalized deployment.   *)
 (*   Crashes how many proxy crashes may happen (in the whole run).         *)
 (*   Down    the proxies that never take a step (liveness checks only).    *)
 (***************************************************************************)
@@ -83,7 +91,7 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Leaders, Proxies, Commands, NB, NS, Owner, Cfg,
           Members, Q1, Q2, ProxyOf, Tally, Hear, Count, Move, TakeBack, CloseBelow,
-          Crashes, Down
+          Colocated, Crashes, Down
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
@@ -96,6 +104,7 @@ ASSUME Count \in {"quorum", "short"}
 ASSUME Move \in BOOLEAN
 ASSUME TakeBack \in BOOLEAN
 ASSUME CloseBelow \in BOOLEAN
+ASSUME Colocated \in BOOLEAN /\ (Colocated => Leaders \subseteq Acceptors)
 ASSUME Down \subseteq Proxies
 ASSUME Owner \in [Ballots -> Leaders]
 ASSUME Cfg \in [0..NB -> Configs]
@@ -274,6 +283,10 @@ Accept(a, b, s) ==
 
 Voted(a, b, s, v) == [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
 
+\* A value is chosen at slot s once a Phase-2 quorum of the configuration
+\* of ballot b voted for it at b.
+ChosenAt(b, s, v) == \E Q \in Q2[Cfg[b]][s] : \A a \in Q : Voted(a, b, s, v)
+
 \* The votes that a proxy counts as a decision of value v at ballot b and
 \* slot s over configuration k.
 Counted(k, b, s, v) ==
@@ -316,6 +329,61 @@ LeaderDecide(b, s) ==
   /\ Send([type |-> "commit", bal |-> b, slot |-> s, val |-> prop[b][s]])
   /\ UNCHANGED <<prom, vote, phase, safe, prop, pbal, pcfg, round, done, crashes>>
 
+-----------------------------------------------------------------------------
+(* The colocated deployment *)
+
+\* The owner o of ballot b opens Phase 1 and promises b in the same step:
+\* a colocated leader is its own first acceptor.
+PrepareOwn(b) ==
+  LET o == Owner[b] IN
+  /\ Colocated
+  /\ phase[b] = "idle"
+  /\ o \in UNION {Members[k] : k \in History(b)}
+  /\ prom[o] < b
+  /\ phase' = [phase EXCEPT ![b] = "p1"]
+  /\ prom' = [prom EXCEPT ![o] = b]
+  /\ msgs' = msgs \cup {[type |-> "1a", bal |-> b],
+                        [type |-> "1b", acc |-> o, bal |-> b, rep |-> vote[o]]}
+  /\ UNCHANGED <<vote, safe, prop, pbal, pcfg, round, done, crashes>>
+
+\* The leader of ballot b sends the `Accept` of its value at slot s to the
+\* acceptors itself (`Delegation::Colocated`): it runs the round with no
+\* proxy, and decides it as a taken-back round (`LeaderDecide`).
+Direct(b, s) ==
+  /\ Colocated
+  /\ phase[b] = "p2"
+  /\ prop[b][s] # None
+  /\ Send([type |-> "2a", bal |-> b, slot |-> s, val |-> prop[b][s]])
+  /\ UNCHANGED <<prom, vote, phase, safe, prop, pbal, pcfg, round, done, crashes>>
+
+\* Leader a records the round of ballot b that it opens at slot s as its
+\* own vote, with no `Accept` message (`record_own_round`), when the round
+\* goes to it. The leader of a ballot is its owner, or a node the ballot
+\* was handed to (`relinquish_to`): any leader may record the value that
+\* ballot b proposed.
+OwnVote(a, b, s) ==
+  LET v == prop[b][s] IN
+  /\ Colocated
+  /\ a \in Leaders
+  /\ phase[b] = "p2"
+  /\ v # None
+  /\ a \in Addressees(b, s)
+  /\ prom[a] <= b
+  /\ vote[a][s] # [bal |-> b, val |-> v]
+  /\ prom' = [prom EXCEPT ![a] = b]
+  /\ vote' = [vote EXCEPT ![a][s] = [bal |-> b, val |-> v]]
+  /\ Send([type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v])
+  /\ UNCHANGED <<phase, safe, prop, pbal, pcfg, round, done, crashes>>
+
+\* Node n keeps the value v chosen at ballot b as its record of slot s
+\* (`mark_chosen` on a `Commit` or a catch-up). It is no vote: it sends no
+\* 2b.
+Record(n, b, s, v) ==
+  /\ Colocated
+  /\ ChosenAt(b, s, v)
+  /\ vote' = [vote EXCEPT ![n][s] = [bal |-> b, val |-> v]]
+  /\ UNCHANGED <<prom, phase, safe, prop, pbal, pcfg, round, done, crashes, msgs>>
+
 \* Proxy p crashes and boots empty, with the bootstrap configuration.
 Crash(p) ==
   /\ p \notin Down
@@ -338,6 +406,10 @@ Next ==
   \/ \E p \in Proxies, s \in Slots : Decide(p, s)
   \/ \E b \in Ballots, s \in Slots : TakeBackRound(b, s) \/ LeaderDecide(b, s)
   \/ \E p \in Proxies : Crash(p)
+  \/ \E b \in Ballots : PrepareOwn(b)
+  \/ \E b \in Ballots, s \in Slots : Direct(b, s)
+  \/ \E a \in Acceptors, b \in Ballots, s \in Slots : OwnVote(a, b, s)
+  \/ \E n \in Acceptors, b \in Ballots, s \in Slots, v \in Commands : Record(n, b, s, v)
 
 Spec == Init /\ [][Next]_vars
 
@@ -373,9 +445,6 @@ Ends == <>(\A s \in Slots : Committed(s))
 -----------------------------------------------------------------------------
 (* Safety *)
 
-\* A value is chosen at slot s once a Phase-2 quorum of the configuration
-\* of ballot b voted for it at b.
-ChosenAt(b, s, v) == \E Q \in Q2[Cfg[b]][s] : \A a \in Q : Voted(a, b, s, v)
 Chosen(s, v) == \E b \in Ballots : ChosenAt(b, s, v)
 
 \* One command for each slot.

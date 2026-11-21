@@ -682,7 +682,7 @@ const BATCHER_RULES: &[BatchRule] = &[
 /// of `BatcherTrace`.
 #[test]
 fn tlc_accepts_the_batcher_walks() {
-    let check = spec("compartments", "BatcherTrace");
+    let check = spec("batcher", "BatcherTrace");
     require_tlc(&check);
     let max_events = usize::try_from(knob("TRACE_MAX_EVENTS", 200)).expect("a size");
     let mut unmet: Vec<_> = BATCHER_RULES.iter().collect();
@@ -731,7 +731,7 @@ fn tlc_accepts_the_batcher_walks() {
 /// TLC refuses the flush.
 #[test]
 fn tlc_refuses_a_lane_sent_out_of_push_order() {
-    let check = spec("compartments", "BatcherTrace");
+    let check = spec("batcher", "BatcherTrace");
     require_tlc(&check);
     let refused = (1..=40).find_map(|seed| {
         let run = batcher_walk(BatchMutant::ReverseLane).replay(seed).ok()?;
@@ -878,11 +878,7 @@ fn tlc_refuses_the_edited_batcher_traces() {
             (events.len() <= 200).then(|| batcher::trace(&events))
         })
         .collect();
-    refuses_the_edits(
-        "BatcherTrace",
-        &spec("compartments", "BatcherTrace"),
-        &recorded,
-    );
+    refuses_the_edits("BatcherTrace", &spec("batcher", "BatcherTrace"), &recorded);
 }
 
 #[test]
@@ -940,10 +936,11 @@ fn tlc_refuses_the_edited_handover_traces() {
     refuses_the_cluster_edits(Spec::Handover, &Flavor::handover());
 }
 
-/// The control of `TraceLearnRecordsHeld`: a trace of `spec` with the
-/// record of a learn dropped from its batch. TLC reports the invariant at
-/// the learn or after it.
-fn learn_records_held(spec: Spec, flavor: &Flavor) {
+/// The record of a learn comes first: the walk writes the record of a
+/// learn before the learn in its batch, and the model's `Learn` asks for it
+/// (`LearnRecordsHeld`). The control: a trace of `spec` with the record
+/// before a learn dropped. TLC refuses the learn, or an event after it.
+fn learn_needs_its_record(spec: Spec, flavor: &Flavor) {
     let check = spec.check();
     require_tlc(&check);
     let dropped = recorded(spec, flavor).iter().find_map(|trace| {
@@ -953,30 +950,28 @@ fn learn_records_held(spec: Spec, flavor: &Flavor) {
             _ => None,
         };
         let is = |e: &moonpool_tla::Value, name: &str| field(e, "event") == Some(name.into());
-        // A record whose learn is earlier in its batch: every event between
-        // them is of the same node.
-        let (learn, k) = (1..events.len()).find_map(|k| {
+        // A record that a later learn of its batch needs: the learn is of
+        // the same node and slot, and every event between them is of that
+        // node or of no node.
+        let k = (0..events.len()).find(|&k| {
             let r = &events[k];
-            if !is(r, "record") {
-                return None;
-            }
-            (0..k)
-                .rev()
-                .take_while(|&i| !is(&events[i], "restart"))
-                .find(|&i| {
-                    is(&events[i], "learn")
-                        && field(&events[i], "node") == field(r, "node")
-                        && field(&events[i], "slot") == field(r, "slot")
-                        && events[i + 1..k].iter().all(|b| {
-                            ["node", "acc", "by", "owner"]
-                                .iter()
-                                .find_map(|f| {
-                                    field(b, f).filter(|v| matches!(v, moonpool_tla::Value::Str(_)))
-                                })
-                                .is_none_or(|n| Some(n) == field(r, "node"))
-                        })
-                })
-                .map(|i| (i, k))
+            is(r, "record")
+                && (k + 1..events.len())
+                    .take_while(|&i| !is(&events[i], "restart"))
+                    .take_while(|&i| {
+                        ["node", "acc", "by", "owner"]
+                            .iter()
+                            .find_map(|f| {
+                                field(&events[i], f)
+                                    .filter(|v| matches!(v, moonpool_tla::Value::Str(_)))
+                            })
+                            .is_none_or(|n| Some(n) == field(r, "node"))
+                    })
+                    .any(|i| {
+                        is(&events[i], "learn")
+                            && field(&events[i], "node") == field(r, "node")
+                            && field(&events[i], "slot") == field(r, "slot")
+                    })
         })?;
         let mut edited = trace.prefix(0);
         for (i, event) in events.iter().enumerate() {
@@ -991,32 +986,25 @@ fn learn_records_held(spec: Spec, flavor: &Flavor) {
             };
             edited.event(&name, fields);
         }
-        consensus_sim::trace::whole(&mut edited);
-        Some((learn, edited))
+        Some((k, edited))
     });
-    let (learn, edited) = dropped.expect("a recorded trace has the record of a learn");
+    let (k, edited) = dropped.expect("a recorded trace has the record of a learn");
     match check.check(&edited).expect("TLC gives a verdict") {
-        Verdict::InvariantViolated {
-            invariant, matched, ..
-        } => {
-            assert_eq!(invariant, "TraceLearnRecordsHeld");
-            // The invariant reads ahead to the end of the batch: it breaks
-            // at the learn whose record is gone.
-            assert!(
-                matched > learn,
-                "{spec:?}: the learn at {learn} whose record is gone breaks it, not {matched}"
-            );
-        }
-        other => panic!("{spec:?}: TLC does not see a learn with no record: {other:?}"),
+        Verdict::Rejected(rejection) => assert!(
+            rejection.index >= k,
+            "{spec:?}: the learn after {k} whose record is gone is refused, not {}",
+            rejection.index
+        ),
+        other => panic!("{spec:?}: TLC takes a learn with no record: {other:?}"),
     }
 }
 
 #[test]
-fn tlc_sees_a_learn_with_no_record_on_multi_paxos() {
-    learn_records_held(Spec::MultiPaxos, &Flavor::multi_paxos_five());
+fn tlc_refuses_a_learn_with_no_record_on_multi_paxos() {
+    learn_needs_its_record(Spec::MultiPaxos, &Flavor::multi_paxos_five());
 }
 
 #[test]
-fn tlc_sees_a_learn_with_no_record_on_the_handoff() {
-    learn_records_held(Spec::LeaderHandoff, &Flavor::handoff());
+fn tlc_refuses_a_learn_with_no_record_on_the_handoff() {
+    learn_needs_its_record(Spec::LeaderHandoff, &Flavor::handoff());
 }

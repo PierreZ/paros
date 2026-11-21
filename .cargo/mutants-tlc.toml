@@ -17,8 +17,8 @@ test_tool = "nextest"
 # it), so the serde code is mutated too: its tests must run.
 features = ["paros-consensus/serde"]
 # The tests that edit recorded traces (`tlc_refuses_the_edited_*`) and the
-# controls of `TraceLearnRecordsHeld` (`tlc_sees_a_learn_with_no_record_*`)
-# judge the trace specs, not the core: a mutant of the core changes the
+# controls of a learn whose record is gone
+# (`tlc_refuses_a_learn_with_no_record_*`) judge the trace specs, not the core: a mutant of the core changes the
 # walks they start from, never what TLC must refuse. They are left out here.
 # Two TLC runs at a time: each one is a JVM, and more of them at once ran a
 # four-core runner out of memory.

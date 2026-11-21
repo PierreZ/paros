@@ -1,0 +1,16 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+# Each write of a landed batch is answered with its own records, and a batch
+# keeps the push order of its lane.
+batch         pass       ci
+two_journals  pass       ci
+# Controls: a flush in any order, and an unbatcher that reads the lane now.
+order_any     violation  ci
+scatter_lane  violation  ci
+# Reachability: an answer, a batch of two writes, a batch that lands twice.
+reach         violation  ci
+reach_two     violation  ci
+reach_dup     violation  ci

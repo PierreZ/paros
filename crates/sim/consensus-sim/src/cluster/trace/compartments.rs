@@ -1,7 +1,7 @@
-//! The events of a cluster walk as a trace of
-//! `specs/tla/compartments/CompartmentsTrace.tla`: `MultiPaxosTrace` and
-//! the read replica of `specs/tla/compartments/Compartments.tla` (#1231
-//! (traced walks reach the rules)).
+//! The read replica events of a cluster walk, for
+//! `specs/tla/node/CompartmentsTrace.tla`: the log of `MultiPaxosTrace`,
+//! the floors of `TruncationTrace` and the read replica of
+//! `specs/tla/node/Node.tla` (#1231 (traced walks reach the rules)).
 //!
 //! A read replica is recorded by the driver loop of the cluster
 //! (`Cluster::drain_replica`): a `WriteOp::Learned` (`ReplicaLearn`), a floor
@@ -11,11 +11,9 @@
 //! (`ReplicaRead`). The acceptors' answers (`ReadAck`) and the writes that
 //! completed (`Applied`) are the events of `reads.rs`.
 
-use moonpool_tla::Value;
 use paros_consensus::{NodeId, WriteOp};
 
-use super::{ClusterEvent, Cmd, Flavor, multi_paxos};
-use crate::trace::{Trace, node};
+use super::{ClusterEvent, Cmd};
 
 /// The replica steps of `CompartmentsTrace`.
 pub(super) fn keeps(event: &ClusterEvent) -> bool {
@@ -30,31 +28,6 @@ pub(super) fn keeps(event: &ClusterEvent) -> bool {
             | ClusterEvent::ReadAck { .. }
             | ClusterEvent::Applied { .. }
     )
-}
-
-/// The events of one cluster walk of `flavor` as a trace of
-/// `CompartmentsTrace.tla`.
-pub(super) fn trace(flavor: &Flavor, events: &[ClusterEvent]) -> Trace {
-    let mut trace = multi_paxos::trace(flavor.acceptors, flavor.quorum, events);
-    trace.define(
-        "TraceReplicas",
-        Value::Set(
-            (0..flavor.replicas)
-                .map(|i| node(NodeId(crate::cluster::REPLICA_BASE + i)))
-                .collect(),
-        ),
-    );
-    let ctxs = events
-        .iter()
-        .filter_map(|event| match event {
-            ClusterEvent::ReplicaRead { ctx, .. } => {
-                Some(Value::Int(i64::try_from(*ctx).expect("a token")))
-            }
-            _ => None,
-        })
-        .collect();
-    trace.define("TraceCtxs", Value::Set(ctxs));
-    trace
 }
 
 /// The steps of the writes of one batch of `replica` that come before the

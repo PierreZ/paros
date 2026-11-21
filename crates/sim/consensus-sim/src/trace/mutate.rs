@@ -91,7 +91,6 @@ impl Edit {
             };
             edited.event(&name, fields);
         }
-        super::whole(&mut edited);
         Some(Mutant {
             edit: self.name,
             at,
