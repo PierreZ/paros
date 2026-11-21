@@ -83,7 +83,7 @@ jobs:
 
   slice:
     needs: [slices, baseline]
-    if: always() && needs.slices.result == 'success'
+    if: ${{ !cancelled() && needs.slices.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -112,7 +112,7 @@ jobs:
           printf 'done\t%s\n' "${{ matrix.slice }}" >>mutants.tsv
           exit "$status"
       - uses: actions/upload-artifact@v5
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: ${{ steps.name.outputs.artifact || format('mutants-{0}', strategy.job-index) }}
           path: mutants.tsv
@@ -120,7 +120,7 @@ jobs:
   # One list of every surviving guard, and of every slice that did not end.
   report:
     needs: [slices, baseline, slice]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v6
