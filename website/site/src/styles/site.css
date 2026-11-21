@@ -648,6 +648,16 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 .jlab .jlab-row dt { color: var(--muted); }
 .jlab .jlab-row dd { margin: 0; }
 .jlab .jlab-history { list-style: none; margin: 0; padding: 0 12px 8px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+/* The register and record labs (public/register-lab.js): the matchmakers,
+   each controller with its moves, and the strip of the segment records. */
+.rlab .rlab-members { padding: 0 12px 8px; }
+.rlab .rlab-card p, .rlab .rlab-caller p { margin: 0; }
+.rlab .rlab-card .lab-state { margin: 4px 0 0; overflow-wrap: anywhere; }
+.rlab .rlab-card.down { border-style: dashed; color: var(--muted); }
+.rlab .rlab-caller { padding: 0 12px 6px; }
+.rlab .rlab-world > .strip { margin: 12px 12px 8px; }
+.rlab .jlab-segment .lab-extras { padding: 6px 0 0; }
+.rlab .rlab-refused { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
   .jlab .jlab-row { grid-template-columns: 1fr; }
 }
