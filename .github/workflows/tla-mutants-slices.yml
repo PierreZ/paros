@@ -1,0 +1,60 @@
+# The slice jobs of the `TLA mutants` workflow (`tla-mutants.yml`), one matrix
+# of at most 256 slices. Each slice judges its mutants one at a time, each TLC
+# on every CPU, with the baseline times of the run (`--baseline-from`). A slice
+# has a budget below its 30-minute job: a mutant that the budget cuts is
+# `unfinished`, and the slice fails.
+name: TLA mutants slices
+
+on:
+  workflow_call:
+    inputs:
+      slices:
+        description: 'JSON list of "<folder> <i>/<n>" slices, at most 256'
+        required: true
+        type: string
+      max_parallel:
+        description: 'At most this many slice jobs at a time'
+        required: false
+        type: string
+        default: '256'
+
+permissions:
+  contents: read
+
+jobs:
+  slice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix:
+        slice: ${{ fromJSON(inputs.slices) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: baseline-*
+          path: baselines
+      - name: Mutate the guards of specs/tla/${{ matrix.slice }}
+        id: name
+        env:
+          SLICE: ${{ matrix.slice }}
+        run: |
+          read -r folder shard <<<"$SLICE"
+          echo "artifact=mutants-$(echo "$folder-$shard" | tr '/' '_')" >>"$GITHUB_OUTPUT"
+          cat baselines/*/baseline.tsv >baseline.tsv
+          touch mutants.tsv
+          status=0
+          nix develop .#tla --command scripts/mutate-tla.py --workers 1 --budget 1320 \
+            --baseline-from baseline.tsv \
+            --shard "$shard" --out mutants.tsv "$folder" || status=$?
+          printf 'done\t%s\n' "$SLICE" >>mutants.tsv
+          exit "$status"
+      - uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
+        with:
+          name: ${{ steps.name.outputs.artifact || format('mutants-{0}', strategy.job-index) }}
+          path: mutants.tsv
