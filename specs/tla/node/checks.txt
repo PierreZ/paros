@@ -1,0 +1,54 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+# A pass checks every invariant of the model; a control or a reach checks one.
+#
+# The log of plain Multi-Paxos: two ballots and two slots, three ballots,
+# a restart, a 2 x 2 grid.
+log              pass       ci
+three_ballots    pass       ci
+restart          pass       ci
+grid             pass       ci
+reach            violation  ci
+reach_noop       violation  ci
+reach_record     violation  ci
+alloc_prefix     violation  ci
+pick_lowest      violation  ci
+record_any       violation  ci
+# Matchmaking on a move from {a1} to {a2}; the retirement with three
+# matchmakers.
+mm               pass       ci
+mm_retire        pass       long
+mm_phase1_own    violation  ci
+mm_nocheck       violation  ci
+mm_gone_any      violation  ci
+mm_gc_early      violation  ci
+mm_retire_one    violation  ci
+mm_reach_retire  violation  ci
+# The compaction floor and the trim jump (one ballot for the pass).
+# `compact_any` turns the release by the fold off too (`Release = "none"`).
+floors_nb1       pass       ci
+reach_compaction violation  ci
+floor_guard_off  violation  ci
+compact_any      violation  ci
+release_none     violation  ci
+trim_any         violation  ci
+# The faulty records of CTRL, the tri-state tally and the repair probe
+# (three ballots for the pass, a promise in one page).
+faults_three     pass       ci
+tally_none       violation  ci
+reach_blocked    violation  ci
+# The read replica (one ballot for the pass).
+replica_nb1      pass       ci
+replica_one      violation  ci
+reach_serve      violation  ci
+# The leaderless reads of a node (one ballot for the pass). The read fence
+# is checked by reads/ (see `Fence` in Node.tla).
+reads_plain1     pass       ci
+reads_watermark  violation  ci
+# The `Commit` of a proxy leader.
+proxies          pass       ci
+proxies2         pass       long
+commit_any       violation  ci
