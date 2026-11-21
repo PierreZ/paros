@@ -19,7 +19,7 @@ less than this table.
 | 6 | #1327 (journal-sim) | The walks, the oracles, the trace check and the coverage gate. Built with steps 3 to 5, in the same pull requests | §J7.3 |
 | 7 | #1328 (paros-journal-control) | The pure `decide` and the v1 controller role; #1261 (grid controller decision tests) is part of it | §J6 |
 | 8 | #1329 (paros-journal-io) | The traits, the driver under the flight rule and the contract suites (built: `crates/lib/paros-journal-io`, the driver walk of `journal-sim`) | §J4.2 |
-| 9 | #1330 (paros-journal-moonpool) | The moonpool adapter and the moonpool-sim of the whole journal | §J7.4 |
+| 9 | #1330 (paros-journal-moonpool) | The moonpool adapter (its transport is moonpool RPC with protobuf messages, §J4.3) and the moonpool-sim of the whole journal | §J7.4 |
 | 10 | #1331 (the pure journal client) | The client state machine of the four calls. After step 3; it can run beside steps 7 to 9 | §J2 |
 
 **The examples** (#1370 (journal examples), Pierre 2026-11-21). The examples of the journal crates
