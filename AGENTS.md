@@ -303,6 +303,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
+- **release-plz writes every changelog** (Pierre, 2026-11-21). Never create or edit a
+  `CHANGELOG.md` by hand. release-plz creates each one from the commit messages in the release
+  pull request, so the commit message is where a change is described.
 - **A flaky check is a finding** (decided on 2026-11-17). A check that is red and then green
   with no change teaches you to run it again in place of a fix. Never run a check again until
   it is green, and never add a retry around it. Find the cause: a bug in the code is fixed with
