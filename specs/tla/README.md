@@ -2155,7 +2155,7 @@ changes nothing, and the state space stays small.
 | `quorum` | ci | pass: the grid 3 × 2 with `acks = 2`, `F = 1`, `Shift = 1` |
 | `quorum_shift_row` | ci | pass: the same with `Shift = 2` (each member keeps its column) |
 | `quorum_3x3` | ci | pass: 3 × 3, `acks = 2`, `F = 1` |
-| `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (890 thousand distinct states with the two controller steps; 12 minutes locally with 4 workers while two other TLC runs shared the machine) |
+| `quorum_f2` | ci | pass: 5 × 2, `acks = 3`, `F = 2` (1.13 million distinct states with the boundary write and the acceptor compaction; 12.6 minutes locally with 2 workers while another TLC run shared the machine) |
 | `quorum_majority` | ci | pass: the majority of three (`partitions = 1`, a grid 3 × 1) |
 | `write_move` | ci | pass: `F + 1` down in one column, `F` in the others; the write moves and completes |
 | `bypass_hold_move` | ci | pass: the same for the hold before Phase 2 of a bypass, in the old grid |
