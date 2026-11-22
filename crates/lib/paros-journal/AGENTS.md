@@ -22,7 +22,8 @@ the code, and change the section in the same PR when a rule changes.
 
 Each module keeps its unit tests in `<module>/tests.rs`.
 
-`examples/` (#1370 (journal examples)): `fold` (the fold alone). Shared code is in
+`examples/` (#1370 (journal examples)): `fold` (the fold alone) and `register` (the
+compare-and-sets of the matchmaker register, with their guards). Shared code is in
 `examples/common/mod.rs`. Each example asserts its result and runs in the `examples` job of CI;
 `README.md` lists them in reading order. An example uses no crate from outside the workspace
 (`scripts/check-core-deps.sh`). The examples that run the roles (`in_memory`, `custom_storage`)
@@ -58,7 +59,8 @@ updates `paros-journal-io` (its `Host` and its `layout`) and those examples in t
 
 ## Gates
 
-`cargo nextest run -p paros-journal -p journal-sim`, `cargo run -p paros-journal --example fold`,
+`cargo nextest run -p paros-journal -p journal-sim`, `cargo run -p paros-journal --example fold`
+and `--example register`,
 `cargo clippy --all-targets -- -D warnings`,
 `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-journal --no-deps` and
 `cargo check --target wasm32-unknown-unknown -p paros-journal`, all in `nix develop`.

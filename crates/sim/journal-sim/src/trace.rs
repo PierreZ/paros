@@ -11,6 +11,7 @@
 //! `"noop"`). The model has one refusal for a truncate, `"fenced"`: the
 //! code's `WrongMode` of a truncate is written so.
 
+pub mod controller;
 pub mod mutate;
 pub mod register;
 

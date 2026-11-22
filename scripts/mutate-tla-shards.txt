@@ -7,10 +7,10 @@
 # mutants: give its folder more slices. GitHub runs at most 256 slices.
 abandoned-ballot 2
 campaign-discovery 1
-cas-register 1
+cas-register 4
 cell-control 2
 compartments 3
-config-register 5
+config-register 8
 ctrl-grid 14
 ctrl-segments 1
 decree 2
@@ -25,7 +25,7 @@ health 0
 leader-handoff 12
 matchmaker 3
 multi-paxos 14
-multi-writer 1
+multi-writer 2
 offload 1
 proxy-leader 1
 quorum-everywhere 3
@@ -37,7 +37,7 @@ segment-records 5
 segment-replicas 19
 segment-truncate 29
 truncation 6
-truncation-reconfig 4
+truncation-reconfig 6
 zero-stall 17
 experiments/segments/a 2
 experiments/segments/b 2

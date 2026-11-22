@@ -75,6 +75,9 @@ sequenceDiagram
   client **unserved** (ambiguous), and the client asks another server.
 - **A newer configuration.** A node abandons every open read when it learns one
   (`QuorumReads::abandon_superseded`): the row it asked need not meet the successor's columns.
+  A row that heard nothing of the successor still ends the read: on a full-column grid the
+  successor's Phase 1 seals each row of the old grid (one promise in each row, #1209), so an
+  acceptor of the row answers with the new ballot.
 - **A campaign in progress.** A server whose read fence (the higher of its promise and its belief
   ballot) moved above its basis opens no read until the new leadership's beat arrives, and ends
   the reads it holds: "reads are unavailable during a campaign, never stale" (`quorum_read.rs`

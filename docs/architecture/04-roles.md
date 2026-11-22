@@ -200,3 +200,94 @@ arm stays unchanged. This extends "plain Multi-Paxos is a shape of the core" of 
 every flavor.
 
 **How the journal applies the rule** (the journal fold stays out of the core; the journal's register is an optional role; Pierre, 2026-11-20, #1315 (bring docs and models in step with the v1 scope)) is in [docs/journal/04-roles.md](../journal/04-roles.md) §J4.3.
+
+### 4.4 The layers of the service
+
+**The service is a stack of layers, and each layer is a crate that stands alone** (Pierre,
+2026-11-21 and 2026-11-22; goals 7, 8 and 10 of section 1.1). The features of the service at the tag
+`v0.2.0-alpha.1` stay. Its structure changes: the old crates were cut by kind of code (one wire
+crate, one model crate, one knob struct and one observation trait for every layer), and the new
+crates are cut by layer of meaning. Each layer owns its messages, its knobs, its events, its
+model and its walk. The test for each crate is: can a program that is not paros use it alone?
+Nothing of this section is built before the journal v1 is done (#1323 (build the paros journal
+v1)). The crate names are **Open**.
+
+These points are decided:
+
+- **A role is an actor.** A role (an acceptor, a leader, a coordinator, the frontend) is a pure
+  `step` under the flight rule of the journal ([docs/journal/04-roles.md](../journal/04-roles.md)
+  §J4.2): a send waits for the persist batch that it names, the step reads no clock and draws no
+  random number, and a refusal is data. One host of actors serves every role of a process.
+- **The frontend is a role like the others.** It has no layer and no crate of its own.
+- **The election over a journal is its own crate.** It is the `SetLeader` compare-and-set of
+  section 3.3, and a user can elect a leader with it as the coordinators do.
+- **One crate for each control level** (universe, cell, tenant), and each coordinator is a pure
+  state machine as the journal roles are.
+- **The core has no tenant.** `paros-consensus` and `paros-journal` know no tenant. A crate that
+  wraps them adds the tenant by composition (#1402 (remove the tenant from the core), section
+  3.8).
+- **The service wire.** The pure crates define their messages as Rust types. protobuf over
+  moonpool RPC is in the adapter only. A gRPC frontend comes later, for integrations that do not
+  use the simulation.
+- **The host of actors is pure and stays in paros. moonpool gets no actor layer** (Pierre,
+  2026-11-22; it replaces the decision of 2026-11-21 that put an actor layer over the RPC in
+  moonpool). The pure host holds the role contract, the flight rule and the group commit, with no
+  runtime. moonpool RPC is enough as it is: the activation of a role registers a dynamic group
+  of endpoints, and its deactivation drops the group (a role that placement released stays
+  active until its protocol guard holds: a released acceptor answers until `may_retire` holds).
+  The paros adapter keeps the map from the id of a role to its group.
+- **A typed interface for each kind of role.** In the adapter, each kind of role has one
+  interface of moonpool RPC, with one one-way method for each message of the role. A reply of
+  the protocol (a `Promise`) is a later one-way message, because the step sends it after its
+  persist. The calls of a client at the frontend are calls with replies. No role takes opaque
+  bytes through one method. **Open** (#1330 (the moonpool adapter)): the protobuf types are
+  written by hand or generated from the Rust types of the pure crates.
+- **An info table at each control level** (Pierre, 2026-11-22; the equivalent of FoundationDB's
+  `ServerDBInfo`). The holder of the term of a level keeps a transient table of references, with
+  a generation, and pushes it: the machines for a cell, the roles of the journals for a tenant,
+  the cells for the universe. A reader long-polls with the generation it knows. It accepts a
+  table only from the term that it read in the control journal of the level, and only with a
+  newer generation. The table is a hint: the fold stays the truth, each term builds the table
+  again from registrations, and no safety rests on it. A machine tells the cell coordinator that
+  it is up (its address and its incarnation), and it tells each tenant coordinator the roles of
+  that tenant that it hosts, a few at a time. The table is pure state of the coordinator; only
+  the push is in the adapter. The core still knows no tenant: a journal role takes the
+  references of its peers through a port. **Open**: the exact fields, and the tenant and cell
+  tables are built before the universe table.
+- **A machine answers "which reference serves this id now"** with one fixed method. A caller
+  whose reference is refused asks it one time. So the peers of a role that restarted find it
+  when the coordinator of the tenant is down (static stability). There is no fallback to a
+  fixed endpoint of the role.
+- **A reference changes at each restart; a few services are fixed.** A dynamic reference of
+  moonpool RPC names one incarnation of a process, so a message for an old activation never
+  reaches a new one. A service is fixed (well-known) when a caller must reach it with an address
+  only: the directory of a machine, the bootstrap and the admission of a machine, the frontend
+  service for clients, and the health and inspect calls. Every journal role, coordinator and
+  controller is dynamic. A reference is not a credential: the right stays with the token at the
+  frontend (section 3.5), and the fences stay with the terms and the ballots.
+
+- **Everything simulates and compiles to wasm** (goal 10). Each pure layer builds for
+  `wasm32-unknown-unknown`, as `paros-consensus` and `paros-journal` do today, and the whole
+  service runs in the deterministic simulation and in a browser. A crate that cannot build for
+  wasm is a finding: `paros-authz-biscuit` does not build for it today.
+
+- **The cut of the old tenant coordinator** (Pierre, 2026-11-22: "The cut is good"). The loop
+  that changes the membership of one journal (book, reconfigure, wait for the GC watermark,
+  release) is the work of the grid controller of that journal
+  ([docs/journal/06-controller.md](../journal/06-controller.md)). The questions that the loop
+  asks are questions of the whole cell, and the cell answers them through a **placement port**:
+  which member must leave (its machine drains, is slow, is held for maintenance or is gone),
+  where a new member goes, and how many moves run at one time. A grant of the port is also the
+  token of the rate limit of the cell. "Gone" is a durable record of the cell, not the memory of
+  one coordinator. The sets of a tenant, the frontends of a tenant, the move of a tenant between
+  cells and the `Configure` of a tenant stay with the tenant and the cell.
+- **The placement across cells is the one of section 3.7** (Pierre, 2026-11-22: "follow the hash
+  assignment" of his post "Notes about cell-based architecture"). The override table is read
+  first, then the hash of the name gives a bucket, and a fixed table gives the cell of each
+  bucket. The hash, the two tables and their fold are pure and belong to the universe layer. The
+  frontend and the resolver are the thin router and serve from the last directory they read. A
+  tenant keeps its registration record in the universe directory: it is one write at creation,
+  and it is where the fold checks the `TenantId` (section 3.8).
+
+**Open**: the layer table and the calls of the placement port. They are proposals until Pierre
+agrees.
