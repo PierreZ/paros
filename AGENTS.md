@@ -56,14 +56,15 @@ reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmak
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
 only a resize record changes, the floor and the register across the handover; #1097 (rework
 1.8); `specs/tla/handover-chain/`: three generations, clients that reach one member at a time,
-and the two fences of the state transfer; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
+and the two fences of the state transfer; `specs/tla/handover-scalars/`: the retirement records
+and the effective configuration across a handover; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
 read, the held answers of a deposed leader (#1232 (held writes)); #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
 promise with the old belief fence as a control, a lagging pool, a lagging reader gated on its promise (#1228 (stale read by a lagging reader)), a restart and the refusal of a
-rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)), truncation on plain
+rebooted node, and the read replica with a stale basis in `specs/tla/read-replica/`; #1016 (model of leaderless reads), #1099 (rework 1.10)), truncation on plain
 Multi-Paxos (`specs/tla/truncation/`: the decided `Truncate` and the floor as a fold of the
 journal, the floor guard of Phase 1 and the retry of a refused laggard, the trim-point jump that
 keeps the promise, the vote watermark over the floor, the faulty entries of CTRL with the

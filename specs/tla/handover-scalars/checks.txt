@@ -1,0 +1,21 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# The retirement records across a handover: the code's rules, then a close
+# that takes one report (it passes: every matchmaker agreed, so every report
+# holds the record), a frozen member that answers (the control), and a check
+# that a quorum completes, with the merge and with one report.
+retire          pass       ci
+retire_one      pass       ci
+retire_frozen   violation  ci
+quorum_merge    pass       ci
+quorum_one      violation  ci
+reach_retire    violation  ci
+reach_rejoin    violation  ci
+# The effective configuration across a handover, with a GC floor above it.
+effective       pass       ci
+eff_history     violation  ci
+reach_eff       violation  ci

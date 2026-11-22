@@ -65,6 +65,14 @@ ReadersLag == {"a1"}
 Q1Lag == [c \in ConfigsLag |-> MajorityQuorums(c)]
 TargetsLag == [c \in ConfigsLag |-> {c}]
 
+\* No read replica.
+NoReplicas == {}
+
+\* A read replica r1, the one reader (#1230 (rules no check tests)): it is in
+\* no configuration, and its basis can go stale (`ReplicaRestart`, a late
+\* beat).
+ReadersReplica == {"r1"}
+
 \* The learner checks: ballot 3 is only the abandoned campaign of a reader.
 OnlyOwn3 == status[3] \in {"matching", "abandoned"} /\ replied[3] = {}
 

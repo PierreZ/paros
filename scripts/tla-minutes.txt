@@ -33,6 +33,7 @@ grid-controller 2.5
 handover 10
 handover-chain 7.5
 handover-gc 1.5
+handover-scalars 2
 health 3.5
 journal-ids 6
 journal-state 17
@@ -46,6 +47,7 @@ placement-port 5.5
 proxy-leader 2
 quorum-everywhere 15.5
 re-replication 8
+read-replica 1
 reads 22
 retire-fence 16
 seal-chain 2.5
