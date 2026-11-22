@@ -581,13 +581,28 @@ fn a_node_runs_the_highest_copy_it_was_asked() {
 
 #[test]
 fn a_node_goes_on_with_a_higher_copy_on_its_disk() {
+    let (host, effects) = join_over(7);
+    assert!(
+        !writes_a_copy(&effects),
+        "no new copy is written: {effects:?}"
+    );
+    assert_eq!(
+        host.replica(NEW).and_then(SegmentReplica::joining),
+        Some(copy(7))
+    );
+}
+
+/// The effects of a node asked copy 5 whose disk runs `on_disk`.
+fn join_over(on_disk: u64) -> (Host, Vec<Effect>) {
     let mut host = Host::new(CONFIG);
     host.step(Time(0), observe(retired()));
     host.step(Time(0), join(5));
     let entries: Vec<(Key, Entry)> = layout::replica_ops(
         NEW,
         PersistId(2),
-        &[paros_journal::roles::ReplicaOp::Joining(Some(copy(7)))],
+        &[paros_journal::roles::ReplicaOp::Joining(Some(copy(
+            on_disk,
+        )))],
     )
     .into_iter()
     .map(|op| (op.key, Entry::Value(op.value)))
@@ -599,16 +614,34 @@ fn a_node_goes_on_with_a_higher_copy_on_its_disk() {
             entries,
         },
     );
-    assert!(
-        !effects.iter().any(|e| matches!(
+    (host, effects)
+}
+
+fn writes_a_copy(effects: &[Effect]) -> bool {
+    effects.iter().any(|e| {
+        matches!(
             e,
             Effect::Persist { ops, .. } if ops.iter().any(|op| op.key.kind == Kind::Joining)
-        )),
-        "no new copy is written: {effects:?}"
+        )
+    })
+}
+
+#[test]
+fn a_node_goes_on_with_the_same_copy_on_its_disk() {
+    let (host, effects) = join_over(5);
+    assert!(
+        !writes_a_copy(&effects),
+        "the copy on the disk goes on, with no new start: {effects:?}"
     );
     assert_eq!(
         host.replica(NEW).and_then(SegmentReplica::joining),
-        Some(copy(7))
+        Some(copy(5))
+    );
+    let (host, effects) = join_over(4);
+    assert!(writes_a_copy(&effects), "a lower copy on the disk ends");
+    assert_eq!(
+        host.replica(NEW).and_then(SegmentReplica::joining),
+        Some(copy(5))
     );
 }
 
