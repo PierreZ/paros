@@ -252,6 +252,14 @@ pub struct SegmentReplica {
     grid: Option<Grid>,
     /// The open reads, by the reader's id.
     reads: BTreeMap<u64, PendingRead>,
+    /// The retired segments below this one that are not trimmed, with the
+    /// last `seq` of each (the `next_seq` of its boundary state), from the
+    /// last value observed: the trims this replica's floor may write. The
+    /// register takes the trim of a sealed segment too, but a replica waits
+    /// for its retire: the controller opens the next segment only once
+    /// every older one is retired (`ReshapeGuard` of
+    /// `specs/tla/journal-state/`), and a trimmed record never retires.
+    older: BTreeMap<SegmentId, Seq>,
     flight: Flight,
 }
 
@@ -293,6 +301,7 @@ impl SegmentReplica {
             dropped: false,
             grid: None,
             reads: BTreeMap::new(),
+            older: BTreeMap::new(),
             flight: Flight::after(disk.durable),
         };
         if let Some((boundary, start)) = disk.base {
@@ -559,9 +568,21 @@ impl SegmentReplica {
                 effects.extend(self.take_base(boundary, start));
             }
         }
+        self.older = value
+            .segments()
+            .range(..self.segment)
+            .filter(|(_, record)| {
+                matches!(
+                    record.state(),
+                    SegmentState::Retired | SegmentState::Offloaded
+                )
+            })
+            .filter_map(|(id, record)| record.boundary().map(|b| (*id, b.next_seq)))
+            .collect();
         effects.extend(self.boundary());
         effects.extend(self.copied());
         effects.extend(self.serve_reads());
+        effects.extend(self.trims());
         self.assert_invariants();
         effects
     }
@@ -722,7 +743,44 @@ impl SegmentReplica {
         effects.extend(self.boundary());
         effects.extend(self.copied());
         effects.extend(self.serve_reads());
+        effects.extend(self.trims());
         effects
+    }
+
+    /// The trim of each retired segment below this one that the fold's
+    /// floor covers (§J3.2, `Trim` of `specs/tla/journal-state/`): the
+    /// floor is decided, since the fold applied the `Truncate`, and the
+    /// change waits on the batch of the slot that moved it. Each trim is
+    /// asked once for each value observed; the register refuses a record
+    /// that is trimmed already.
+    fn trims(&mut self) -> Vec<ReplicaEffect> {
+        let Some(folded) = &self.folded else {
+            return Vec::new();
+        };
+        let first_seq = folded.state.first_seq();
+        let covered: Vec<SegmentId> = self
+            .older
+            .iter()
+            .filter(|(_, last)| first_seq >= **last)
+            .map(|(segment, _)| *segment)
+            .collect();
+        let after = self.flight.last();
+        covered
+            .into_iter()
+            .map(|segment| {
+                probe!(reachable, "replica: a floor over a sealed segment trims it");
+                let last = self.older.remove(&segment).expect("an older segment");
+                assert!(first_seq >= last, "a trim never cuts above the floor");
+                assert!(
+                    segment < self.segment,
+                    "a replica trims only an older segment"
+                );
+                ReplicaEffect::Register {
+                    change: Change::Trim { segment, first_seq },
+                    after,
+                }
+            })
+            .collect()
     }
 
     /// A member's answer to the new replica's `Holding`: a member that holds

@@ -559,7 +559,9 @@ Apply(r) ==
   \* A slot past the last one is never chosen, so the sources below bound s.
   /\ rbase[r] # None
   /\ IF EndKnown(g) THEN s < rend[g].v ELSE TRUE
-  /\ ~rtrim[g]
+  \* A replica of a trimmed segment may still apply until it learns the
+  \* trim (`SegmentReplica::observe` drops its copy then): nothing reads
+  \* it, since `Covers` and `HeldBy` count no replica of a trimmed segment.
   \* It learns the slot from a live source: a quorum of a grid that still
   \* runs holds the vote on its disk, or a peer of its set applied it.
   \* Both sources hold a chosen slot only (`OnDisk` and a peer's `Apply`).

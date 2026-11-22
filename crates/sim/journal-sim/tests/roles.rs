@@ -3,8 +3,8 @@
 
 use journal_sim::campaign::campaign;
 use journal_sim::roles::{
-    AGREE, BOUNDARY, FOLD, PROXY, READ, RESOLVE, RETIRE, RolesMutant, SEALED, Shape, VIEW, reach,
-    walk,
+    AGREE, BOUNDARY, FLOOR, FOLD, PROXY, READ, RESOLVE, RETIRE, RolesMutant, SEALED, Shape, TRIM,
+    VIEW, reach, walk,
 };
 
 /// The seeds of each walk in CI.
@@ -93,4 +93,14 @@ fn proxy_catches_a_proxy_that_counts_forged_votes() {
 #[test]
 fn read_catches_a_read_with_no_fence() {
     caught(RolesMutant::ReadNoFence, READ);
+}
+
+#[test]
+fn trim_catches_a_trim_on_the_intent_to_truncate() {
+    caught(RolesMutant::TrimIntent, TRIM);
+}
+
+#[test]
+fn floor_catches_a_reader_that_takes_the_floor_of_the_holder() {
+    caught(RolesMutant::FloorFromHolder, FLOOR);
 }

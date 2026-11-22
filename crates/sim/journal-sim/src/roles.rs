@@ -95,6 +95,14 @@ pub const RESOLVE: &str = "a Resolve at a replica answers the fate that the whol
 /// set hold every slot of it on their disk (`retire_f`).
 pub const RETIRE: &str = "a segment retires only with F + 1 replicas of its set holding it on disk";
 
+/// Oracle: a segment is trimmed only once it is sealed and the decided
+/// floor of the whole log is at or above its last `seq` (§J3.2,
+/// `trim_intent`, `trim_open` of `specs/tla/segment-truncate/`).
+pub const TRIM: &str = "a segment is trimmed only once the decided floor covers its last seq";
+/// Oracle: a read serves no record below the floor that the whole log had
+/// when the read started (§J3.2, `holder` of `specs/tla/segment-truncate/`).
+pub const FLOOR: &str = "a read serves no record below the floor of the whole log";
+
 /// Oracle: a proxy leader commits a slot only once `F + 1` acceptors of the
 /// column of the round hold a vote at the round's ballot or above on their
 /// disk (`specs/tla/proxy-leader/`).
@@ -147,6 +155,11 @@ pub mod reach {
     pub const READ_SUPERSEDED: &str = "roles walk: a read met a later segment";
     /// A read of a sealed segment served its last records.
     pub const READ_SEALED: &str = "roles walk: a read reached the end of a sealed segment";
+    /// A sealed segment trimmed under the floor.
+    pub const SEGMENT_TRIMMED: &str = "roles walk: a floor over a sealed segment trimmed it";
+    /// A read of an older segment refused below the floor of the segment
+    /// in force.
+    pub const FLOOR_REFUSED: &str = "roles walk: a read met the floor of the segment in force";
     /// A slot chosen in a grid of two columns (wide only).
     pub const COLUMNS: &str = "roles walk: a slot chosen in a grid of two columns";
 
@@ -173,6 +186,8 @@ pub mod reach {
         READ_OPEN,
         READ_SUPERSEDED,
         READ_SEALED,
+        SEGMENT_TRIMMED,
+        FLOOR_REFUSED,
     ];
     /// The sites of the wide walk.
     pub const WIDE: &[&str] = &[COLUMNS, PAGED];
@@ -237,6 +252,12 @@ pub enum RolesMutant {
     /// reader's own segment, so a read never meets a later segment.
     /// [`READ`] catches it.
     ReadNoFence,
+    /// The driver trims a sealed segment on the intent to truncate: at the
+    /// proposal of a `Truncate`, before it is decided. [`TRIM`] catches it.
+    TrimIntent,
+    /// The reader of an older segment takes the floor of the holder, not
+    /// of the segment in force. [`FLOOR`] catches it.
+    FloorFromHolder,
 }
 
 /// One step of the roles walk that changes the state of
@@ -346,6 +367,14 @@ pub enum RolesEvent {
         /// The segment.
         p: u64,
     },
+    /// The register took the trim of segment `p` that replica `r` wrote
+    /// (`Trim`).
+    Trim {
+        /// The segment.
+        p: u64,
+        /// The replica.
+        r: u64,
+    },
     /// Replica `r` answered `res` to the `Resolve` of the write at `s`
     /// (`ResolveBelow`).
     Resolve {
@@ -397,6 +426,24 @@ pub enum RolesAction {
     Read,
     /// A replica learns the register value it missed.
     Observe,
+}
+
+/// One open read of the walk's reader.
+#[derive(Clone, Copy, Debug)]
+struct OpenRead {
+    /// The replica asked.
+    node: NodeId,
+    /// The first position.
+    from: u64,
+    /// The most records.
+    limit: usize,
+    /// The length of the chosen prefix when the read started.
+    need: usize,
+    /// The floor of the whole log when the reader started.
+    floor: u64,
+    /// For a read of the floor: the replica of the older segment that the
+    /// reader asks next, with the first position and the limit.
+    then: Option<(NodeId, u64, usize)>,
 }
 
 /// A role with a disk, under the flight rule.
@@ -515,9 +562,12 @@ pub struct RolesModel {
     traced: BTreeMap<NodeId, Slot>,
     /// The records of the whole log, by position.
     records: BTreeMap<u64, Record>,
-    /// The open reads: the replica, the first position, the limit, and the
-    /// length of the chosen prefix when the read started.
-    reads: BTreeMap<u64, (NodeId, u64, usize, usize)>,
+    /// The open reads, by id.
+    reads: BTreeMap<u64, OpenRead>,
+    /// The reads of an older segment whose floor read was not served, with
+    /// the floor when the reader started: the reader asks the floor again
+    /// later.
+    waiting: Vec<(NodeId, u64, usize, u64)>,
     /// The read answers that wait on a batch of their replica.
     held_reads: BTreeMap<NodeId, Vec<(PersistId, u64, ReadAnswer)>>,
     /// The ids of the reads.
@@ -732,7 +782,7 @@ impl Model for RolesModel {
             // The reads of a replica that crashed get no answer: their
             // client times out.
             self.held_reads.remove(node);
-            self.reads.retain(|_, (at, ..)| at != node);
+            self.reads.retain(|_, open| open.node != *node);
         } else if let Some(proxy) = self.proxies.get_mut(node) {
             self.proxy_crashed |= proxy.as_ref().is_some_and(|p| p.open() > 0);
             *proxy = None;
@@ -920,6 +970,7 @@ impl RolesModel {
             traced: BTreeMap::new(),
             records: BTreeMap::new(),
             reads: BTreeMap::new(),
+            waiting: Vec::new(),
             held_reads: BTreeMap::new(),
             read_ids: 0,
             slow: None,
@@ -1412,11 +1463,14 @@ impl RolesModel {
                                 .or_default()
                                 .push((id, read, answer));
                         }
-                        _ => self.judge_read(read, &answer),
+                        _ => self.judge_read(read, &answer, cx),
                     }
                 }
-                ReplicaEffect::Copied { .. } | ReplicaEffect::Drop => {
-                    unreachable!("the roles walk has no heal and no trim of a record: {node:?}")
+                // A replica of a trimmed segment drops its copy: it answers
+                // no read and takes no step after it.
+                ReplicaEffect::Drop => {}
+                ReplicaEffect::Copied { .. } => {
+                    unreachable!("the roles walk has no heal: {node:?}")
                 }
             }
         }
@@ -1541,6 +1595,25 @@ impl RolesModel {
                         );
                         cx.record(RolesEvent::Retire { p: segment.0 });
                         sometimes!(true, reach::RETIRED);
+                    }
+                    (Change::Trim { segment, .. }, _) => {
+                        let last = self
+                            .register
+                            .segment(*segment)
+                            .and_then(SegmentRecord::boundary)
+                            .map(|b| b.next_seq.0);
+                        assert!(
+                            last.is_some_and(|last| self.truth.first >= last),
+                            "{TRIM}: {segment:?} trimmed with its last seq {last:?}, the decided floor is {}",
+                            self.truth.first
+                        );
+                        if let Origin::Replica(node) = origin {
+                            cx.record(RolesEvent::Trim {
+                                p: segment.0,
+                                r: node.0,
+                            });
+                        }
+                        sometimes!(true, reach::SEGMENT_TRIMMED);
                     }
                     (Change::Seal { segment, end }, _) => {
                         for (slot, (_, round, node)) in &self.chosen {
@@ -1768,7 +1841,7 @@ impl RolesModel {
             .partition(|(held, ..)| *held <= id);
         self.held_reads.insert(node, wait);
         for (_, read, answer) in answers {
-            self.judge_read(read, &answer);
+            self.judge_read(read, &answer, cx);
         }
     }
 
@@ -1959,6 +2032,32 @@ impl RolesModel {
             .filter(|_| cx.rng().chance(1, 2));
         let up_to = Seq(cx.rng().below(self.truth.next + 2));
         self.propose(None, Command::Truncate { fence, up_to }, cx);
+        if self.mutant == RolesMutant::TrimIntent
+            && let Some(in_force) = self
+                .register
+                .segments()
+                .values()
+                .rev()
+                .find(|r| r.state() == SegmentState::InForce)
+        {
+            let node = Self::set_of(in_force.id())[0];
+            let covered: Vec<SegmentId> = self
+                .register
+                .segments()
+                .values()
+                .filter(|r| r.boundary().is_some_and(|b| b.next_seq <= up_to))
+                .map(SegmentRecord::id)
+                .collect();
+            for segment in covered {
+                self.queue.push((
+                    Origin::Replica(node),
+                    Change::Trim {
+                        segment,
+                        first_seq: up_to,
+                    },
+                ));
+            }
+        }
     }
 
     /// A reply to the caller of `token`.
@@ -2036,7 +2135,6 @@ impl RolesModel {
         }
     }
 
-    /// A client resolves a `Below` at a replica of an older segment.
     /// A client reads at one replica that runs, from a position at most two
     /// past the whole log's next.
     fn read(&mut self, cx: &mut Cx<'_, Self>) {
@@ -2062,10 +2160,79 @@ impl RolesModel {
             cx.rng().below(self.truth.next + 2)
         };
         let limit = usize::try_from(cx.rng().below(4) + 1).expect("small");
+        if !self.waiting.is_empty() && cx.rng().chance(1, 2) {
+            let (node, from, limit, floor) = self.waiting.remove(0);
+            self.route_read(node, from, limit, floor, cx);
+        } else {
+            let floor = self.truth.first;
+            self.route_read(node, from, limit, floor, cx);
+        }
+    }
+
+    /// A replica of a segment older than the one in force folds only up to
+    /// its seal: the reader first takes the floor from a replica of the
+    /// segment in force, with a read at its tail (§J3.2).
+    fn route_read(
+        &mut self,
+        node: NodeId,
+        from: u64,
+        limit: usize,
+        floor: u64,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        if self.replicas[&node].role.is_none() {
+            return;
+        }
+        let segment = Self::segment_of_replica(node);
+        let in_force = self
+            .register
+            .segments()
+            .values()
+            .rev()
+            .find(|r| r.state() == SegmentState::InForce)
+            .map(SegmentRecord::id)
+            .filter(|f| *f > segment && self.mutant != RolesMutant::FloorFromHolder);
+        let Some(in_force) = in_force else {
+            self.start_read(node, from, limit, floor, None, cx);
+            return;
+        };
+        let set: Vec<NodeId> = Self::set_of(in_force)
+            .into_iter()
+            .filter(|n| self.replicas[n].role.is_some())
+            .collect();
+        match cx.rng().index(set.len()) {
+            Some(i) => {
+                let next = self.truth.next;
+                self.start_read(set[i], next, 1, floor, Some((node, from, limit)), cx);
+            }
+            None => self.waiting.push((node, from, limit, floor)),
+        }
+    }
+
+    /// Send the read to `node`, and judge its answer when it comes.
+    fn start_read(
+        &mut self,
+        node: NodeId,
+        from: u64,
+        limit: usize,
+        floor: u64,
+        then: Option<(NodeId, u64, usize)>,
+        cx: &mut Cx<'_, Self>,
+    ) {
         self.read_ids += 1;
         let read = self.read_ids;
-        let prefix = self.states.len() - 1;
-        self.reads.insert(read, (node, from, limit, prefix));
+        let need = self.states.len() - 1;
+        self.reads.insert(
+            read,
+            OpenRead {
+                node,
+                from,
+                limit,
+                need,
+                floor,
+                then,
+            },
+        );
         let role = self
             .replicas
             .get_mut(&node)
@@ -2076,10 +2243,54 @@ impl RolesModel {
     }
 
     /// The oracle [`READ`] on the answer of `read`.
-    fn judge_read(&mut self, read: u64, answer: &ReadAnswer) {
-        let Some((node, from, limit, need)) = self.reads.remove(&read) else {
+    fn judge_read(&mut self, read: u64, answer: &ReadAnswer, cx: &mut Cx<'_, Self>) {
+        let Some(OpenRead {
+            node,
+            from,
+            limit,
+            need,
+            floor,
+            then,
+        }) = self.reads.remove(&read)
+        else {
             return;
         };
+        self.judge_answer(read, node, (from, limit), (need, floor), answer);
+        // The floor read gave the floor of the segment in force: the reader
+        // asks the older segment only at or above it.
+        let Some((target, from, limit)) = then else {
+            return;
+        };
+        let view = match answer {
+            ReadAnswer::Page { view, .. }
+            | ReadAnswer::Below(view)
+            | ReadAnswer::Truncated(view) => *view,
+            ReadAnswer::Superseded(_) | ReadAnswer::Unserved => {
+                self.waiting.push((target, from, limit, floor));
+                return;
+            }
+        };
+        if from < view.first_seq.0 {
+            let answer = ReadAnswer::Truncated(view);
+            self.judge_answer(read, target, (from, limit), (need, floor), &answer);
+            sometimes!(true, reach::FLOOR_REFUSED);
+        } else if self.replicas[&target].role.is_some() {
+            self.start_read(target, from, limit, floor, None, cx);
+        }
+    }
+
+    /// The oracles [`READ`] and [`FLOOR`] on one answer.
+    /// The read asked `from` and `limit`; `need` is the length of the
+    /// chosen prefix when it started, and `floor` the floor of the whole
+    /// log when its reader started.
+    fn judge_answer(
+        &mut self,
+        read: u64,
+        node: NodeId,
+        (from, limit): (u64, usize),
+        (need, floor): (usize, u64),
+        answer: &ReadAnswer,
+    ) {
         let segment = Self::segment_of_replica(node);
         match answer {
             ReadAnswer::Page {
@@ -2094,6 +2305,11 @@ impl RolesModel {
                         self.records.get(&seq.0)
                     );
                 }
+                assert!(
+                    records.first().is_none_or(|(seq, _)| seq.0 >= floor),
+                    "{FLOOR}: read {read} at {node:?} served from {:?}, the floor was {floor} when its reader started",
+                    records.first().map(|(seq, _)| seq)
+                );
                 assert!(
                     records.first().is_none_or(|(seq, _)| seq.0 == from),
                     "{READ}: read {read} from {from} served from {:?}",

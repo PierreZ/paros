@@ -162,6 +162,7 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
         }
         RolesEvent::Boundary { r } => ("boundary", vec![("r", int(*r))]),
         RolesEvent::Retire { p } => ("retire", vec![("p", int(*p))]),
+        RolesEvent::Trim { p, r } => ("trim", vec![("p", int(*p)), ("r", int(*r))]),
         RolesEvent::Resolve { s, r, res } => (
             "resolve",
             vec![("s", int(*s)), ("r", int(*r)), ("res", Value::from(*res))],
@@ -398,6 +399,18 @@ pub const EDITS: &[Edit] = &[
     repeat_edit!("a base taken twice", "base"),
     repeat_edit!("a boundary written twice", "boundary"),
     repeat_edit!("a retire repeated", "retire"),
+    repeat_edit!("a trim repeated", "trim"),
+    Edit::new("a trim of the open segment", |events| {
+        let at = events.iter().position(|e| is(e, "trim"))?;
+        let newest = events[..at]
+            .iter()
+            .rev()
+            .find(|e| is(e, "reshape"))
+            .map(|e| fields(e)["g"].clone())?;
+        let mut edited = events.to_vec();
+        edited[at] = with(&events[at], "p", newest);
+        Some((at, edited))
+    }),
     repeat_edit!("a reshape repeated", "reshape"),
     Edit::new("a written Resolve called not written", |events| {
         change_first(

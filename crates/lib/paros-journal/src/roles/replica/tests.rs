@@ -931,3 +931,101 @@ fn a_new_replica_that_restarts_keeps_its_copy_while_its_plan_runs() {
         "once its plan ended, a restart does not bring the copy back"
     );
 }
+
+/// Segment 1 holds a claim and one record, sealed at 2 with its boundary
+/// written and retired, and a replica of segment 2 with its base.
+fn over_one_record() -> (RegisterValue, SegmentReplica) {
+    let value = sealed(2);
+    let mut first = based();
+    first.step(LEADER, commit(1, 0, claim(7)));
+    first.step(LEADER, commit(1, 1, write(7, 0, 1)));
+    first.observe(&value);
+    let state = first.state().expect("a fold").boundary();
+    let done = value
+        .apply(&Change::Boundary {
+            segment: SegmentId(1),
+            state,
+        })
+        .expect("the boundary");
+    let mut second = SegmentReplica::recover(
+        NodeId(21),
+        SegmentId(2),
+        nodes(&[21, 22, 23]),
+        Leader::Unset,
+        ReplicaDisk::default(),
+    );
+    second.observe(&done);
+    assert_eq!(second.start(), Some(Slot(2)));
+    let effects = second.step(LEADER, commit(2, 2, truncate(1)));
+    assert_eq!(
+        trims(&effects),
+        vec![],
+        "a sealed segment that is not retired is not trimmed"
+    );
+    let retired = done
+        .apply(&Change::Retire {
+            segment: SegmentId(1),
+            holders: 2,
+            unrepaired_damage: false,
+        })
+        .expect("segment 1 retires");
+    (retired, second)
+}
+
+fn trims(effects: &[ReplicaEffect]) -> Vec<(SegmentId, Seq, Option<PersistId>)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            ReplicaEffect::Register {
+                change: Change::Trim { segment, first_seq },
+                after,
+            } => Some((*segment, *first_seq, *after)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn truncate(up_to: u64) -> Command {
+    Command::Truncate {
+        fence: Some(LeaderUuid(7)),
+        up_to: Seq(up_to),
+    }
+}
+
+#[test]
+fn a_floor_over_a_retired_segment_trims_it_after_its_slot_is_durable() {
+    let (value, mut second) = over_one_record();
+    let effects = second.observe(&value);
+    assert_eq!(
+        trims(&effects),
+        vec![(SegmentId(1), Seq(1), Some(PersistId(1)))],
+        "the trim waits on the batch of the Truncate"
+    );
+    let trimmed = value
+        .apply(&Change::Trim {
+            segment: SegmentId(1),
+            first_seq: Seq(1),
+        })
+        .expect("the trim");
+    assert_eq!(
+        trims(&second.observe(&trimmed)),
+        vec![],
+        "a trimmed record is not trimmed again"
+    );
+}
+
+#[test]
+fn a_floor_inside_a_retired_segment_does_not_trim_it() {
+    let (value, _) = over_one_record();
+    let mut second = SegmentReplica::recover(
+        NodeId(22),
+        SegmentId(2),
+        nodes(&[21, 22, 23]),
+        Leader::Unset,
+        ReplicaDisk::default(),
+    );
+    second.observe(&value);
+    let effects = second.step(LEADER, commit(2, 2, truncate(0)));
+    assert_eq!(trims(&effects), vec![], "the floor is below the last seq");
+    assert_eq!(trims(&second.observe(&value)), vec![]);
+}

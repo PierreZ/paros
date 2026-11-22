@@ -20,7 +20,8 @@
 (*   "seal"     `SealWrite(b)`; "open" `Open(b)` from `start`.             *)
 (*   "propose"  `Propose(b, s, v)`.                                        *)
 (*   "base"     `TakeBase(r)`; "apply" `Apply(r)` at slot s, answered res; *)
-(*   "boundary" `BoundWrite(r)`; "retire" `Retire(p)`.                     *)
+(*   "boundary" `BoundWrite(r)`; "retire" `Retire(p)`;                     *)
+(*   "trim"     `Trim(p, r)`: the register took the trim of replica r.     *)
 (*   "resolve"  `ResolveBelow(s, r)`, answered res.                        *)
 (*                                                                         *)
 (* The trace defines the sizes and the grids: `TraceGrids` (the acceptors  *)
@@ -94,6 +95,7 @@ TraceStep ==
      /\ acked'[e.s] = e.res
   \/ e.event = "boundary" /\ BoundWrite(e.r)
   \/ e.event = "retire" /\ Retire(e.p)
+  \/ e.event = "trim" /\ Trim(e.p, e.r)
   \/ /\ e.event = "resolve"
      /\ ResolveBelow(e.s, e.r)
      /\ resolved'[e.s] = e.res
