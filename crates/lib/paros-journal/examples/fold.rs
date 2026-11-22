@@ -7,7 +7,7 @@
 //! fold**, [`JournalState::apply`]. The fold decides what each command
 //! means: a `Write` is accepted or refused there, at apply, never at
 //! propose. This example calls the fold by hand, so it shows the meaning of
-//! the log without the roles that choose it (`in_memory` shows those).
+//! the log without the roles that choose it (the `in_memory` example of `paros-journal-io` shows those).
 //!
 //! # What the run shows
 //!

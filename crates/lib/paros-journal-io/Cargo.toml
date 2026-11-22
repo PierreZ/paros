@@ -1,0 +1,24 @@
+[package]
+name = "paros-journal-io"
+description = "The IO traits of the paros journal (storage, transport, clock, register), the pure Host that routes many journals in one process, and a generic driver under the flight rule. No runtime, no storage engine"
+version.workspace = true
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude = ["AGENTS.md", "CLAUDE.md"]
+
+# A pure crate (docs/journal/04-roles.md §J4.3): it depends on workspace crates
+# only. A program brings the storage, the transport and the clock by
+# implementing the traits of this crate; an adapter that does I/O
+# (paros-journal-moonpool, #1330) is a crate of its own.
+[dependencies]
+paros-consensus = { workspace = true }
+paros-journal = { workspace = true }
+
+[lints]
+workspace = true

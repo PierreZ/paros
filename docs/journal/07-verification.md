@@ -21,7 +21,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | Multi-writer mode through `SetLeader(None)`, position before fence, the resend across a seal (`Below`) | §J2.2, §J2.4.1 | `multi-writer/` | #1274 (multi-writer mode), #1301 (a resent write across a seal) |
 | The `Resolve` call that settles `Below` | §J2.2 | `journal-state/` | #1320 (the wire shape that resolves a `Below` answer) |
 | Leaderless reads: the read fence on the promise and the belief ballot | §J2.5 | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), #1228 (stale read by a lagging reader) |
-| The row seal of a full grid (not a v1 grid) | §J2.5 | `reads/` (`grid_full_seal`) | #1102 (rework 1.13), #1209 (seal each row of a full grid) |
+| The row seal of a full grid (not a v1 grid) | §J2.5 | `reads/` (`grid_full_seal`, `grid_full_seal_others`) | #1102 (rework 1.13), #1209 (seal each row of a full grid) |
 | Truncation on plain Multi-Paxos: the floor, the trim-point jump | §J2.6 | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2) |
 | Segments in the matchmakers, the seal end, the gap fill | §J3.1 | `experiments/segments/a/` | #1213 (segments in the protocol or in storage), #1233 (segments gap fill) |
 | A write reaches only the replica set of its segment; retire at `F + 1` holders | §J3.1 | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment) |
@@ -175,8 +175,21 @@ Its `Events` port feeds the live trace check of §J7.3, so a run of many hours i
 it (announce, make, confirm): after a kill, only the last announced write is uncertain, and the
 report at restart decides. A control tears a persist batch during a reconfiguration (as E3 of
 etcd-raft, a lost commit index across a membership change), and the live check must refuse it.
-**Open**: these three parts need the driver; #1329 (paros-journal-io) and #1330
-(paros-journal-moonpool) build them.
+**Open**: these three parts need the moonpool adapter, #1330 (paros-journal-moonpool). The
+driver and its `Events` port are built (#1329 (paros-journal-io), §J4.2): the driver reports each
+step of the `Host` once its batches are settled. The announce, make and confirm of each write, the
+live check fed by the port, and the torn-batch control land with the adapter.
+
+**The driver walk** (#1329, `journal-sim/tests/host.rs`). Before the moonpool-sim, `journal-sim`
+walks the generic driver itself: three processes, each a `Driver` with a disk that fails commits
+inside the contract (before or after the write), a transport through the walk's mailbox (lost,
+repeated, reordered), crashes that keep the disk, restarts that read it back, campaigns that
+depose a leader, and a writer that sends a call again. Its oracles share no code with the
+driver: `AGREE` (no two `Commit`s on the wire name two commands at one slot), `FLIGHT` (an
+`Accepted` or a `Promise` leaves only once the state it reports is on the disk) and `ANSWER`
+(each answer is the whole log's at a slot of the command). Each has its planted mutant: a disk
+that lies about a commit (`LyingDisk`), a process that loses its disk (`WipeDisk`), and a client
+that takes a `Taken` as written (`TakenAsWritten`). The driver has no trace check yet.
 
 ### J7.5 The controller's `decide`
 

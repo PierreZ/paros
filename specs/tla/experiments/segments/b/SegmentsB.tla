@@ -57,6 +57,9 @@ ASSUME RetireRule \in {"paper", "early"}
 ASSUME TrimCheck \in BOOLEAN /\ ReadFence \in BOOLEAN /\ Reader \in BOOLEAN
 ASSUME None \notin Values
 ASSUME F + 1 <= Cardinality(Replicas)
+\* The tail read counts a vote at each member of its quorum as a choice, so
+\* it needs one acceptor for each configuration (a vote is then a choice).
+ASSUME Reader => \A g \in 1..NG : Cardinality(CfgOf[g]) = 1
 
 Slots == 1..NS
 Ballots == 1..NB
@@ -71,6 +74,7 @@ Entries == Values \cup (IF Claims = "log" THEN Keys ELSE {})
 
 Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
+Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
 VARIABLES
   \* Matchmakers: the registrations.
@@ -112,7 +116,8 @@ TypeOK ==
   /\ applied \in [Replicas -> 0..NS]
   /\ hold \in [Replicas -> SUBSET Slots]
   /\ cut \in [Replicas -> 0..NS]
-  /\ want \subseteq Keys
+  \* Only the variant has claims.
+  /\ want \subseteq (IF Claims = "log" THEN Keys ELSE {})
   /\ store \in [Keys -> [Slots -> Entries \cup {None}]]
   /\ floor \in 1..NS + 1
   /\ cursor \in 1..NS + 1
@@ -173,26 +178,26 @@ Winner(k, t) ==
 (***************************************************************************)
 
 \* Ballot b registers configuration g: the one in force or its successor.
-\* A successor waits until the newest configuration has a leader.
+\* A successor waits until the newest configuration has a leader (plan
+\* rule 1; OneSuccessor). Ballots register in order, so a ballot registers
+\* once: a registered b fails c < b for c = b.
 Register(b, g) ==
-  /\ bgen[b] = 0
   /\ \A c \in Ballots : bgen[c] # 0 => c < b
   /\ g \in {Top, Top + 1}
-  /\ g <= NG
   /\ g = Top + 1 => Top = 1 \/ \E c \in Ballots : bgen[c] = Top /\ bst[c] = "w"
   /\ bgen' = [bgen EXCEPT ![b] = g]
   /\ gst' = IF g = Top + 1 THEN [gst EXCEPT ![g] = "live"] ELSE gst
   /\ UNCHANGED <<ldr, acc, dat, rdr>>
 
-\* Phase 1 of ballot b: a promise quorum of every configuration that still
-\* runs, up to its own, read above the chosen prefix that the replicas
-\* report.
+\* Phase 1 of ballot b: a promise quorum of its own configuration and of
+\* every configuration that still runs below it, read above the chosen
+\* prefix that the replicas report. A second Phase 1 of b needs a quorum
+\* that did not promise b yet; it is a Phase 1 as safe as the first.
 Phase1(b) ==
   LET g == bgen[b]
-      H == {h \in Live : h <= g}
+      H == {h \in Live : h <= g} \cup {g}
       base == MaxApplied + 1
   IN /\ g # 0
-     /\ bst[b] = "new"
      /\ \E Qs \in [H -> SUBSET Acceptors] :
           /\ \A h \in H : Qs[h] \in Maj(CfgOf[h]) /\ \A a \in Qs[h] : prom[a] < b
           /\ LET seen == {<<s, vote[a][s]>> : s \in base..NS, a \in UNION {Qs[h] : h \in H}}
@@ -215,23 +220,26 @@ CanWrite(b) ==
 
 Writable(b) == {s \in Slots : s >= floor /\ s >= bbase[b]}
 
-Propose(b, s, v) ==
-  /\ CanWrite(b)
-  /\ s \in Writable(b)
-  /\ prop[b][s] = None
-  \* A leader proposes in slot order (the allocator frontier).
-  /\ \A t \in Writable(b) : t < s => prop[b][t] # None
-  /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]} ELSE Values \cup want
-  /\ prop' = [prop EXCEPT ![b][s] = v]
-  /\ UNCHANGED <<mm, bst, bsafe, bbase, acc, dat, rdr>>
+\* The leader of b proposes at its next slot: the lowest slot that it may
+\* write and did not propose yet (the allocator frontier of the core), as
+\* in design A.
+Propose(b, v) ==
+  LET open == {t \in Writable(b) : prop[b][t] = None}
+      s == Min(open)
+  IN /\ CanWrite(b)
+     /\ open # {}
+     /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]} ELSE Values \cup want
+     /\ prop' = [prop EXCEPT ![b][s] = v]
+     /\ UNCHANGED <<mm, bst, bsafe, bbase, acc, dat, rdr>>
 
+\* As in design A: an acceptor of a retired configuration still takes an
+\* Accept, and its promise to the successor's Phase 1 stops the old
+\* ballots. An Accept of a vote that the acceptor has changes nothing.
 Accept(a, b, s) ==
   /\ bgen[b] # 0
   /\ a \in CfgOf[bgen[b]]
-  /\ a \in Active
   /\ prop[b][s] # None
   /\ prom[a] <= b
-  /\ vote[a][s][1] < b
   /\ prom' = [prom EXCEPT ![a] = b]
   /\ vote' = [vote EXCEPT ![a][s] = <<b, prop[b][s]>>]
   /\ sent2b' = sent2b \cup {<<s, b, prop[b][s], a>>}
@@ -241,16 +249,17 @@ Accept(a, b, s) ==
 (* Replicas, retire, offload, trim                                         *)
 (***************************************************************************)
 
+\* No slot above NS is chosen, so applied stays at or below NS.
 Apply(r) ==
-  /\ applied[r] < NS
   /\ IsChosen(applied[r] + 1)
   /\ applied' = [applied EXCEPT ![r] = @ + 1]
   /\ hold' = [hold EXCEPT ![r] = IF applied[r] + 1 >= floor THEN @ \cup {applied[r] + 1} ELSE @]
   /\ UNCHANGED <<mm, ldr, acc, cut, want, store, floor, cursor, rdr>>
 
 \* Matchmaker garbage collection of a configuration below the one in force.
+\* A configuration below a registered one is registered, and a retire of a
+\* retired one changes nothing.
 Retire(h) ==
-  /\ gst[h] = "live"
   /\ \E c \in Ballots : bgen[c] > h /\ bst[c] = "w"
   /\ RetireRule = "paper" =>
        \A a \in CfgOf[h], s \in Slots :
@@ -258,65 +267,64 @@ Retire(h) ==
   /\ gst' = [gst EXCEPT ![h] = "retired"]
   /\ UNCHANGED <<bgen, ldr, acc, dat, rdr>>
 
-Data(k) == [s \in Slots |-> IF s \in KeyRange(k) THEN ChosenVal(s) ELSE None]
+\* The bytes of the chunk k: the chosen slots of its range (ObjectsComplete:
+\* each slot of an uploaded chunk is chosen).
+Data(k) == [s \in Slots |-> IF s \in KeyRange(k) /\ IsChosen(s) THEN ChosenVal(s) ELSE None]
 
-\* Plain B: replica r cuts its next chunk and uploads it.
-CutUpload(r, hi) ==
-  LET k == <<cut[r] + 1, hi>>
+\* Plain B: replica r cuts its next chunk, n slots long, and uploads it.
+CutUpload(r, n) ==
+  LET hi == cut[r] + n
+      k == <<cut[r] + 1, hi>>
   IN /\ Claims = "none"
-     /\ cut[r] < hi
-     /\ Cuts = "fixed" => hi = cut[r] + 1
+     /\ Cuts = "fixed" => n = 1
      /\ hi <= applied[r]
      /\ k[1] >= floor
      /\ store' = [store EXCEPT ![k] = Data(k)]
      /\ cut' = [cut EXCEPT ![r] = hi]
      /\ UNCHANGED <<mm, ldr, acc, applied, hold, want, floor, cursor, rdr>>
 
-\* Variant: replica r asks the leader to append a claim for its next chunk.
-Ask(r, hi) ==
-  LET k == <<cut[r] + 1, hi>>
+\* Variant: replica r asks the leader to append a claim for its next chunk,
+\* n slots long. A claim names its own range, so the claims run with free
+\* cuts. A claim below the floor wins nothing that UploadClaim uploads.
+Ask(r, n) ==
+  LET hi == cut[r] + n
+      k == <<cut[r] + 1, hi>>
   IN /\ Claims = "log"
-     /\ cut[r] < hi
-     /\ Cuts = "fixed" => hi = cut[r] + 1
      /\ hi <= applied[r]
-     /\ k[1] >= floor
      /\ want' = want \cup {k}
      /\ cut' = [cut EXCEPT ![r] = hi]
      /\ UNCHANGED <<mm, ldr, acc, applied, hold, store, floor, cursor, rdr>>
 
-\* Variant: a replica that applied a winning claim uploads its chunk.
+\* Variant: a replica that applied a winning claim uploads its chunk. Only
+\* the variant has a winning claim, and a put again writes the same bytes.
+\* No upload holds a trimmed slot (NoUploadBelowFloor).
 UploadClaim(r, k) ==
-  /\ Claims = "log"
-  /\ store[k] = NoProp
   /\ k[1] >= floor
   /\ \E t \in Slots : Winner(k, t) /\ applied[r] >= t
   /\ store' = [store EXCEPT ![k] = Data(k)]
   /\ UNCHANGED <<mm, ldr, acc, applied, hold, cut, want, floor, cursor, rdr>>
 
-\* A replica drops the slots of an object: in plain B once the object is
-\* there; in the variant once it also applied the winning claim.
+\* A replica drops the slots of an object once the object is there. In the
+\* variant an object exists only for a winning claim, so the log declares
+\* it (Visible).
 Drop(r, k) ==
   /\ store[k] # NoProp
-  /\ Claims = "log" => \E t \in Slots : Winner(k, t) /\ applied[r] >= t
-  /\ hold[r] \cap KeyRange(k) # {}
   /\ hold' = [hold EXCEPT ![r] = @ \ KeyRange(k)]
   /\ UNCHANGED <<mm, ldr, acc, applied, cut, want, store, floor, cursor, rdr>>
 
 \* Trim up to f: a decided Truncate. Objects that end below f are deleted
-\* by their keys.
+\* by their keys. With TrimCheck the consumer read each slot below f, so
+\* each is chosen (ConsumedChosen).
 Trim(f) ==
   /\ f > floor
-  /\ f <= NS + 1
-  /\ \A s \in 1..(f - 1) : Replicated(s)
   /\ TrimCheck => f <= cursor
   /\ store' = [k \in Keys |-> IF k[2] < f THEN NoProp ELSE store[k]]
   /\ hold' = [r \in Replicas |-> {s \in hold[r] : s >= f}]
   /\ floor' = f
   /\ UNCHANGED <<mm, ldr, acc, applied, cut, want, cursor, rdr>>
 
+\* As in design A: the consumer reads its next slot once it is chosen.
 Consume ==
-  /\ cursor <= NS
-  /\ cursor >= floor
   /\ IsChosen(cursor)
   /\ cursor' = cursor + 1
   /\ UNCHANGED <<mm, ldr, acc, applied, hold, cut, want, store, floor, rdr>>
@@ -325,9 +333,8 @@ Consume ==
 (* The tail reader (check 5)                                               *)
 (***************************************************************************)
 
+\* As in design A: the reader starts a read at any time.
 ReadStart ==
-  /\ Reader
-  /\ rst = "idle"
   /\ rneed' = Max({s \in Slots : IsChosen(s)} \cup {0})
   /\ rst' = "wait"
   /\ UNCHANGED <<mm, ldr, acc, dat, rview, rgot>>
@@ -353,23 +360,23 @@ QuorumTop(Q, H) ==
      bgen[b] \in H /\ \A a \in Q : <<s, b, v, a>> \in sent2b}
 ReadAsk(Q) ==
   LET H == IF ReadScope = "live" THEN {h \in Live : h <= rview} \cup {rview} ELSE {rview}
-  IN /\ Reader
-     /\ rst = "wait"
-     /\ Q \in Maj(CfgOf[rview])
+  IN /\ Q \in Maj(CfgOf[rview])
      /\ IF ReadFence /\ \E a \in Q : SaysSealed(a)
           THEN /\ rview' = InForce
                /\ UNCHANGED <<rgot, rst>>
           ELSE IF ReadScope = "fence"
+          \* With one acceptor, a ballot of the cached configuration that its
+          \* acceptor promised past is no older basis than the one it promised:
+          \* each slot that the later ballot chose is a vote of that acceptor.
           THEN /\ \E b \in Ballots :
                     /\ bst[b] = "w"
                     /\ bgen[b] = rview
-                    /\ \A a \in Q : prom[a] <= b
                     /\ rgot' = Max(QuorumTop(Q, {rview}) \cup {Fence(b)})
                /\ rst' = "done"
                /\ UNCHANGED rview
+          \* With one acceptor, the quorum of the cached configuration is Q.
           ELSE /\ \E Qs \in [H -> SUBSET Acceptors] :
                     /\ \A h \in H : Qs[h] \in Maj(CfgOf[h])
-                    /\ Qs[rview] = Q
                     /\ rgot' = Max({s \in Slots : \E h \in H, b \in Ballots, v \in Entries :
                                        bgen[b] = h /\ \A a \in Qs[h] : <<s, b, v, a>> \in sent2b}
                                     \cup {MaxApplied})
@@ -377,24 +384,19 @@ ReadAsk(Q) ==
                /\ UNCHANGED rview
      /\ UNCHANGED <<mm, ldr, acc, dat, rneed>>
 
-ReadAgain ==
-  /\ rst = "done"
-  /\ rst' = "idle"
-  /\ UNCHANGED <<mm, ldr, acc, dat, rview, rneed, rgot>>
-
 Next ==
   \/ \E b \in Ballots, g \in Gens : Register(b, g)
   \/ \E b \in Ballots : Phase1(b)
-  \/ \E b \in Ballots, s \in Slots, v \in Entries : Propose(b, s, v)
+  \/ \E b \in Ballots, v \in Entries : Propose(b, v)
   \/ \E a \in Acceptors, b \in Ballots, s \in Slots : Accept(a, b, s)
   \/ \E r \in Replicas : Apply(r)
   \/ \E h \in Gens : Retire(h)
-  \/ Storage /\ \E r \in Replicas, hi \in Slots : CutUpload(r, hi) \/ Ask(r, hi)
+  \/ Storage /\ \E r \in Replicas, n \in Slots : CutUpload(r, n) \/ Ask(r, n)
   \/ Storage /\ \E r \in Replicas, k \in Keys : UploadClaim(r, k) \/ Drop(r, k)
   \/ Storage /\ \E f \in Slots \cup {NS + 1} : Trim(f)
   \/ Storage /\ Consume
-  \/ ReadStart \/ ReadAgain
-  \/ \E Q \in UNION {Maj(CfgOf[g]) : g \in Gens} : ReadAsk(Q)
+  \/ Reader /\ ReadStart
+  \/ Reader /\ \E Q \in UNION {Maj(CfgOf[g]) : g \in Gens} : ReadAsk(Q)
 
 Spec == Init /\ [][Next]_vars
 
@@ -439,12 +441,29 @@ Visible ==
 
 \* Check 7.
 OffloadStep == \/ \E h \in Gens : Retire(h)
-               \/ \E r \in Replicas, hi \in Slots : CutUpload(r, hi) \/ Ask(r, hi)
+               \/ \E r \in Replicas, n \in Slots : CutUpload(r, n) \/ Ask(r, n)
                \/ \E r \in Replicas, k \in Keys : UploadClaim(r, k) \/ Drop(r, k)
                \/ \E f \in Slots \cup {NS + 1} : Trim(f)
 TailNeverBlocked == [][OffloadStep => \A b \in Ballots : CanWrite(b) => CanWrite(b)']_vars
 
 CursorSafe == cursor >= floor
+
+\* The consumer read only chosen slots.
+ConsumedChosen == \A s \in 1..(cursor - 1) : IsChosen(s)
+
+\* An object holds the chosen bytes of each slot of its key.
+ObjectsComplete ==
+  \A k \in Keys : store[k] # NoProp => \A s \in KeyRange(k) : IsChosen(s) /\ store[k][s] = ChosenVal(s)
+
+\* No write to the object store holds a slot below the floor: trim deleted
+\* those bytes, and they do not come back. A chunk that straddles the floor
+\* stays until a trim passes its end.
+NoUploadBelowFloor ==
+  [][\A k \in Keys, s \in Slots : store[k][s] = None /\ store'[k][s] # None => s >= floor]_vars
+
+\* Plan rule 1: one configuration in force (the newest with a leader that
+\* finished Phase 1) and at most one successor.
+OneSuccessor == \A g \in Gens : gst[g] # "none" => g <= InForce + 1
 
 \* No stranded hole, the same invariant as design A's: each leader of the
 \* configuration in force that finished Phase 1 may propose at each slot at

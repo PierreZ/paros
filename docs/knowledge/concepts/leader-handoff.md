@@ -96,7 +96,18 @@ sequenceDiagram
   back.
 - **C crashes after the install.** C's promise is at `b` and its records hold every round it
   opened (`record_own_round`), so it reboots with the frontier it had and refuses a replayed
-  `Relinquish` that would rewind it. An ordinary election follows.
+  `Relinquish` that would rewind it. An ordinary election follows. Three cases (#1292
+  (duplicated Relinquish)):
+  - C proposed at or past the inherited frontier: its record is on its disk, the rebooted
+    frontier is past the payload's `next_slot`, and the copy is refused (`rejected_stale`).
+  - C proposed nothing new: the copy installs `b` again with the same tail and frontier. No
+    command was proposed at or past the frontier under `b`, and the pending slots are proposed
+    again verbatim, so one `(slot, ballot)` still carries one command.
+  - A higher `Prepare` passed C's promise: C opens no new round under `b`, and after the
+    restart the promise guard refuses the copy.
+
+  A rule that refused every payload at or below C's durable promise would refuse the ordinary
+  handoff too: C usually promised the minter's own Phase 1 at `b`.
 - **C cannot cover the inherited fence.** C never ran Phase 1 over `[from_slot, next_slot)`. If
   a decision only A knew becomes unreachable, C's chosen prefix stops below the fence. After
   `HANDOFF_FENCE_ELECTIONS` (3) election timeouts, `tick_handoff_fence` resigns, and an
@@ -166,35 +177,32 @@ fence is needed, authority uniqueness) and in the doc of `can_relinquish` (one h
 full design note is [the design note]. AGENTS.md lists it under "Protocol invariants to
 remember".
 
-**Sim gates and oracles** (`paros-sim/src/audit/`). The oracle rebuilds authority from wire
-events (`Accept` sent means "exercises", `Relinquish` sent means "released"), never from the
-node's role:
+**Sim gates and oracles** (`crates/sim/consensus-sim`). The `handoff` flavor
+(`Flavor::handoff`, `Action::Handoff`) hands the leadership on while the walk drops, duplicates
+and reorders messages and crashes and restarts nodes. Its oracles read only the wire and the
+disks:
 
-- `"a relinquished authority is never exercised again"`,
-  `"one physical node at a time exercises a logical Paxos authority"`,
-  `"only the node exercising an authority relinquishes it"`,
-  `"a transferred allocator frontier never rewinds"` (`state.rs`).
-- `"a relinquished tail exactly tiles the transferred range"`,
-  `"an inherited allocator frontier never rewinds"` (`node.rs`).
-- Reach gates: `"a successor installs a transferred authority"`,
-  `"a handed-over authority continues Phase 2 without another Phase 1"`,
-  `"an inherited authority streams Phase 2 with no Phase 1 of its own"`,
-  `"proxy: a delegated round survives a leader handoff"` (`state.rs`).
-- Downstream: `"one ballot proposes at most one command for a slot"` (`state.rs`).
+- `ONE_PROPOSAL`, "a ballot proposes one command per slot" (`oracle/ledger.rs`): every `Accept`
+  that a node or a proxy sends at one `(slot, ballot)` carries one command. It judges the
+  proposer side, so it fires even when the acceptors' own check holds a second command back.
+  Its control is `Mutant::RewindHandoff` (`tests/mutants.rs`). The old `paros-sim` had this
+  oracle; it came back after #1292 (duplicated Relinquish).
+- `ONE_VALUE`, `COMMIT_BACKED`, `PERSIST_BEFORE_SEND` and `LEARNED_CHOSEN` judge the votes and
+  the decisions.
+- The trace check: each walk is a behaviour of `specs/tla/node/LeaderHandoffTrace.tla`, and TLC
+  refuses the payload of `Mutant::RewindHandoff` (`tests/traces.rs`).
 
-**BUGGIFY sites** (in `paros-roles`, never in `paros-consensus`):
-
-- `initiate_handoff` (`paros-roles/src/node/draws.rs`): 0.03 for a leader still healing a hole,
-  0.02 for a leader with an unchosen tail, 0.002 for a settled leader, plus the handoff-storm
-  scenario (`paros_observe::scenario::hand_off`, #484).
-- The target: 0.5 to pin the lowest-id candidate, so a seed can bounce leadership between two
-  nodes (`offer_handoff`, `paros-roles/src/node/shared.rs`).
-- Drop and duplicate a `Relinquish` at 0.25 each (`paros-roles/src/node/transport.rs`).
+The design model is `specs/tla/leader-handoff/`. Its invariant `OneProposal` and its controls
+`replay` (no frontier guard), `volatile_frontier` (no durable frontier) and `promise_guard_off`
+are the duplicated `Relinquish` that reaches the successor after a restart.
 
 Unit tests: `paros-consensus/src/node/tests/handoff.rs`, for example
 `an_installed_authority_is_never_handed_on_again`,
 `a_restart_cannot_resurrect_a_relinquished_authority`,
-`a_handoff_never_no_op_fills_a_slot_nobody_described`.
+`a_handoff_never_no_op_fills_a_slot_nobody_described`, and the three cases of a duplicated
+payload after the successor restarts: `a_duplicated_relinquish_after_the_successor_restarts_is_refused`,
+`a_successor_that_restarts_before_it_proposes_installs_the_copy_unchanged`,
+`a_successor_passed_by_a_higher_promise_refuses_the_copy_after_a_restart`.
 
 **Divergences from the sources:**
 

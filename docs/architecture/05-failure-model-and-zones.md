@@ -1,4 +1,4 @@
-[← 04-roles.md](04-roles.md) · [Index](README.md) · [06-verification.md →](06-verification.md)
+[← 04-6-parity.md](04-6-parity.md) · [Index](README.md) · [06-verification.md →](06-verification.md)
 
 ## 5. Failure model and zones
 

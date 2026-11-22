@@ -9,6 +9,9 @@ no_fence           violation  ci
 frozen_serves      violation  ci
 two                pass       ci
 chain              pass       ci
+# Two writes on two generations: a write that a member took at a lower
+# number than one it read or holds would lower the register.
+two_writes         pass       ci
 # The chain with the floor, and with two writes: bounded runs.
 chain_floor        pass       long  30
 chain_two_writes   pass       long  30

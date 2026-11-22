@@ -19,7 +19,7 @@ teases the journal service being rewritten (the version before is at the tag `v0
 | the matchmaker register, its records and guards (§J3.4) | `journal/matchmakers.md` |
 | quorum everywhere, the counts of `F + 1`, CTRL, zones (§J5) | `journal/quorums-and-failures.md` |
 | the controller, the fenced reshape, journal health (§J6) | `journal/controller.md` |
-| parosd, the version at the tag `v0.2.0-alpha.1` | `parosd/index.astro` |
+| parosd, the ten goals (`docs/architecture/01-goal.md` §1.1), the version at the tag `v0.2.0-alpha.1` | `parosd/index.astro` |
 | single decree | `paxos/single-decree.md` |
 | slots, the leader, persist-before-send, reads | `paxos/multi-paxos.md` |
 | matchmakers, reconfiguration, GC | `paxos/matchmaker.md` |

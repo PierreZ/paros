@@ -34,7 +34,8 @@ If you think that a case needs an exception, stop and ask Pierre. Do not add the
 `paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
 models of `specs/tla/`, the Paxos and Consensus pages of the website and their wasm engine. The journal v1 has
 its pure core, `paros-journal`, and its walk crate, `journal-sim` (#1324 (paros-journal pure
-core)); its first roles (segments, the seal and writes; #1326) are built, its driver is not. The journal
+core)); its first roles (segments, the seal and writes; #1326) are built, and so are its IO
+traits, its pure `Host` and its generic driver, `paros-journal-io` (#1329). The journal
 service that sat above the core (`parosd`, `parosctl`, `paros-bench`, the library layers, the
 simulation `paros-sim`) was removed on 2026-11-19. It is at the git tag `v0.2.0-alpha.1`, and
 `docs/archive/v0.2.0-alpha.1/README.md` has one recap per removed crate: what it did, its key
@@ -147,7 +148,16 @@ matchmaker register as an optional role)). The first journal roles are `paros_jo
 #1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk
 and traced against `specs/tla/journal-state/RolesTrace.tla`;
 the other rule groups of #1326 (proxy leader, leaderless reads, retire, truncate,
-re-replication) and the driver (#1329) are not built yet.
+re-replication) are not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
+(storage, transport, clock, register), the pure `Host` that serves many journals in one process,
+and the generic driver under the flight rule (#1329 (paros-journal-io)), judged by
+`journal-sim`'s driver walk. The grid controller's pure decision is
+`crates/lib/paros-journal-control` (`decide`: heal, repair, re-replicate, or hold and alert, with
+a probe on every branch; #1328 (paros-journal-control), #1261 (grid controller decision tests)),
+judged by `journal-sim`'s sweep of every small view against a reference `decide` that shares no
+code with it. The controller role (`paros_journal_control::role`) is walked by `journal-sim`'s
+controller walk with two controllers and traced against `specs/tla/grid-controller/ControllerTrace.tla`;
+the moonpool-sim scenarios of the controller wait for its driver.
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
 2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
 the build steps of #1323 (build the paros journal v1). Start there for any journal work.
@@ -186,6 +196,28 @@ is the journal v1, `docs/journal/`** (Pierre, 2026-11-20): the journal alone, wi
 plane, segments, roles, quorums, controller, verification and build steps. The journal rules of
 `docs/architecture/` moved there; each moved architecture section keeps its heading and a link.
 
+## The goals
+
+Pierre, 2026-11-22. The goals say what paros is for and how it is built; a rule of this file
+or of `docs/` is a consequence of one of them (`docs/architecture/01-goal.md` §1.1).
+
+| # | Goal | In short |
+|---|---|---|
+| 1 | **A journal service for tenants** | Four calls: `Write`, `Read`, `Truncate`, `SetLeader`. A durable, ordered, fenced log. paros owns the log, never the state. |
+| 2 | **The cell heals with nobody watching** | After the faults stop, each journal and each set is whole again within one bound, or reports a true reason. |
+| 3 | **paros eats its own food** | State is in journals, who acts is an election on a journal, agreement is a Paxos flavor of the core. The control plane gets no call that a tenant does not have. |
+| 4 | **One shape at every level** | Universe, cell and tenant are each a control journal, a pure fold and one coordinator. Levels talk only through records. |
+| 5 | **The person says what, the system says where** | A person types names and what a journal must survive. The system chooses machines and ids, and refuses what it cannot place. |
+| 6 | **Everything can move** | A namespace moves to another cell with no change of protocol, and a cell is rolled out by evacuation. |
+| 7 | **Layers that stand alone** | Each layer is a crate that a program that is not paros can use alone. A layer depends only on the layers below it. The core has no tenant. |
+| 8 | **Every role is a pure actor** | A deterministic step, persist before send, a refusal is data. I/O is only in adapters. So each layer has its model, its walk and its trace check. |
+| 9 | **Proved before built** | No code before its TLA+ model, and no excuse in simulation. |
+| 10 | **Everything simulates, and it runs in the browser** | Every layer, and the whole service, runs in the deterministic simulation. The same code compiles to wasm and runs in a browser. |
+
+The features of the service at the tag stay; its structure changes (goals 7 and 8,
+`docs/architecture/04-roles.md` §4.4). When you add a crate, ask: can a program that is not
+paros use it alone?
+
 ## Who owns the code
 
 This codebase is yours: how it's built is your call, and you'll keep building on it. When you
@@ -219,13 +251,19 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
-  `-p paros-journal`
+  `-p paros-journal`, `-p paros-journal-control` and `-p paros-journal-io`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
-  and the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `in_memory`;
-  #1370 (journal examples))
-- the doc examples of the core: `cargo test --doc -p paros-consensus` (nextest runs no doc test)
+  the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
+  `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
+  `multi_writer`; #1370 (journal examples)), the grid controller's example:
+  `cargo run -p paros-journal-control --example controller`, and the facade examples:
+  `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
+- `scripts/check-examples.sh`: every composing crate has an example, and the `examples` job runs
+  each one (the workflow rule "Composing crates have examples" below)
+- the doc examples: `cargo test --doc -p paros-consensus -p paros-journal-io` (nextest runs no
+  doc test)
 - the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
   instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
   `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`). Each CI job has at most 30
@@ -244,7 +282,12 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   same job runs the two passes on the changed lines of `crates/lib/paros-journal/src`
   (`scripts/mutants.sh --journal`: the tests of `paros-journal` and the walks of `journal-sim`,
   then the trace checks of `journal-sim`; `.cargo/mutants-journal.toml`,
-  `.cargo/mutants-journal-tlc.toml`). A
+  `.cargo/mutants-journal-tlc.toml`), and one pass on the changed lines of
+  `crates/lib/paros-journal-control/src` (`scripts/mutants.sh --control`: its unit tests,
+  `journal-sim`'s sweep of the controller's decisions and its controller walks;
+  `.cargo/mutants-control.toml`), and one pass on the changed lines of
+  `crates/lib/paros-journal-io/src` (`scripts/mutants.sh --journal-io`: its tests and the driver
+  walk of `journal-sim`; `.cargo/mutants-journal-io.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
@@ -252,7 +295,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`,
-  `cargo check --target wasm32-unknown-unknown -p paros-journal`, and
+  `cargo check --target wasm32-unknown-unknown -p paros-journal`, the same with
+  `-p paros-journal-control` and with `-p paros-journal-io`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
@@ -282,7 +326,7 @@ and name it in the PR description.
 `release-plz.toml` and `.github/workflows/release-plz.yml`. The public crates are
 `paros-consensus`, `paros-journal` and `paros`, at one version (`version_group`), one `v{version}` tag and one
 draft GitHub release. release-plz creates and writes every changelog; none is written by hand.
-`consensus-sim`, `journal-sim` and `paros-wasm` stay `publish = false`. A push to `main`
+`consensus-sim`, `journal-sim`, `paros-wasm` and `paros-authz-biscuit` stay `publish = false`. A push to `main`
 only opens or updates the release pull request. **Nothing publishes by itself**: only Pierre
 merges a release pull request, and only Pierre starts the `release` job (workflow_dispatch),
 which publishes. An agent never merges a release pull request and never starts that job. A new
@@ -333,6 +377,19 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
+- **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
+  abstraction and dev experience", "Composing crates only"). A composing crate is a library
+  crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
+  (the facade), `paros-journal`, `paros-journal-control` and `paros-journal-io`; later the moonpool adapter and the
+  journal client. A user programs against these crates, so each one has runnable examples in
+  `examples/` that use its public API as a user would (the facade's examples import `paros::`
+  paths only). An example asserts what it shows, so CI runs it as a test: add each new example
+  to the `examples` job of `.github/workflows/rust.yml`. A change that reshapes the public API of
+  a composing crate updates its examples, or adds one, in the same pull request: the examples are
+  how a reviewer judges the abstraction. `scripts/check-examples.sh` fails when a composing crate
+  has no example or when CI does not run one. The internal crates (`consensus-sim`,
+  `journal-sim`, `paros-wasm`) need none. `paros-consensus` composes nothing, but its examples
+  stay: they are the lessons of each flavor.
 - **release-plz writes every changelog** (Pierre, 2026-11-21). Never create or edit a
   `CHANGELOG.md` by hand. release-plz creates each one from the commit messages in the release
   pull request, so the commit message is where a change is described.
@@ -467,7 +524,9 @@ design always has matchmakers, decided on 2026-11-16, decision 15). Before touch
   step 0.12 of the rework). Grids, matchmakers, proxies and replicas are **configuration data**,
   never implied by code being present. Every peer and client message carries a `JournalIdentifier`
   `(TenantId, JournalId)`; under that identifier the plain deployment exchanges the same
-  messages and persists the same scalars.
+  messages and persists the same scalars. The tenant leaves the core (Pierre, 2026-11-22): a crate
+  that wraps the core adds it, and the core will carry one journal id (#1402 (remove the tenant
+  from the core)); the code still carries the pair until then.
 
 **The core is a library for everyone** (decided by Pierre on 2026-11-20,
 `docs/architecture/04-roles.md` §4.3). `paros-consensus` stays usable by other people for plain
@@ -642,16 +701,36 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
   fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
   journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
-  Its examples (`examples/`, listed in its `README.md`) drive the fold and the roles with
-  storage written by hand.
+  Its examples (`examples/`): `fold` drives the fold alone, `register` the compare-and-sets of the
+  matchmaker register.
+- `crates/lib/paros-journal-control` — the grid controller of the journal v1
+  (`docs/journal/06-controller.md` §J6, #1328): the P measures of a v1 grid, the placement of a
+  heal under the zone rule, the pure `decide` of the v1 controller (heal, repair,
+  re-replicate, hold and alert), and the controller role (`role`: its election by a term and
+  its fenced reshape call, as asks to a driver), with a `probe!` on every branch. Sans-IO,
+  wasm-safe, on `paros-consensus` and `paros-journal`; every **Open** number of §J6 comes from
+  the host. Not published yet, and not in the facade. Its example `controller` drives the role
+  over a register written by hand: an election, a heal, a lost reply and a takeover.
+- `crates/lib/paros-journal-io` — the journal's IO side, pure (#1329): the four traits a backend
+  implements (`Storage`, `Transport`, `Clock`, `Register`), the on-disk format (`layout`), the
+  pure `Host` that serves many roles of many journals in one process, the generic `Driver` under
+  the flight rule (group commit, held sends), the `Events` port, backends in memory (`mem`) and
+  the contract suites (`contract`). Its examples `in_memory`, `custom_storage` and `multi_writer`
+  run the roles on it.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
-  `paros::journal`). A program depends on `paros` alone. Wasm-safe and provider-free.
+  `paros::journal`, `paros::journal_io`). A program depends on `paros` alone. Wasm-safe and provider-free
+  with its default features; it is where moonpool's storage and network get bundled, behind a
+  feature, once the adapter exists (#1330). Its examples (`examples/`) run a journal through
+  `paros::` paths alone: `journal` in one process, `tokio_tasks` on three tokio tasks that talk
+  over channels (tokio is a dev-dependency only).
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
-  segments, the walk of the matchmaker register across handovers and the walk of the journal
-  roles, with oracles that share no
+  segments, the walk of the matchmaker register across handovers, the walk of the journal
+  roles, the walk of the generic driver of `paros-journal-io` on three processes, the sweep of
+  the grid controller's decisions over every small view against a reference `decide`
+  (`control`, #1261) and the walk of the controller role (`controller`), with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
   `specs/tla/journal-state/FoldTrace.tla`, `specs/tla/segment-records/RegisterTrace.tla` and
-  `specs/tla/journal-state/RolesTrace.tla`, and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
+  `specs/tla/journal-state/RolesTrace.tla` (and of the controller walk against `specs/tla/grid-controller/ControllerTrace.tla`), and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
   (check long runs live); four hours each night in the `Journal live` workflow).
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
@@ -662,6 +741,11 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/support/paros-wasm` — the site's wasm tools (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only; feature `journal`,
   the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal` only.
+- `crates/support/paros-authz-biscuit` — Biscuit tokens (#245 (Biscuit tokens)): root keys,
+  offline mint and derive, and the verifier of a request with one Datalog policy. It stands
+  alone: no other paros crate, no runtime, and no crate of the workspace uses it yet. It came
+  back from the tag without its adapter to the old frontend. It does not build for wasm32, so
+  it stays out of the facade.
 
 Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`; `specs/tla/experiments/`
 holds the models that compare candidate designs before Pierre decides, such as the segments
@@ -676,5 +760,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-core-deps.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-core-deps.sh`, `check-examples.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

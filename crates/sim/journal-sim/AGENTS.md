@@ -7,7 +7,8 @@ across seals, `SetLeader` with `None`, truncates, crashes of the replica that re
 and the `Resolve` call that settles each `Below`. A second walk drives the journal's matchmaker
 register across handovers of the set (#1325). A third walk drives the journal roles
 (`paros_journal::roles`, #1326): acceptors, leaders and segment replicas with disks, over a chain
-of segments. Test only: `publish = false`.
+of segments. A fourth walk runs the generic driver of `paros-journal-io` (#1329) on three processes.
+Test only: `publish = false`.
 
 ## Map
 
@@ -25,18 +26,42 @@ of segments. Test only: `publish = false`.
   `VIEW`, `BOUNDARY`, `RESOLVE`; the truth is `Truth` over the chosen log), its reach sites and
   its planted mutants (`RolesMutant`), its events (`RolesEvent`, one action of `Journal.tla`
   each) and the trace control `BoundaryBeforeDurable`.
+- `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
+  controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
+  `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each
+  column, the candidates, the leader, and mixed signals: about 390 thousand views); `check`
+  judges each decision with the oracles (`NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`, `FENCED`,
+  `NO_STALE_PLAN`, `NO_SUSPECT_REPLACED`, `IDEMPOTENT`, `MONOTONE`, `SAME_AS_REFERENCE`), each
+  with its `ControlMutant`; `reference` is `decide` written again from §J6.2, with no code of
+  `paros-journal-control`. `tests/control.rs` also requires every `probe!` of `decide`
+  (`PROBES`), through `campaign::try_sites`.
+- `src/controller.rs`: the walk of the controller role (`ControllerModel`, #1261, §J6.2 test 3):
+  controllers that race, crash and get deposed, lost requests and replies, failing acceptors, and
+  the journal's seal and retire, over an atomic register. Its shapes (`TRACED`, `WIDE` with stale
+  views and recoveries, `MANY`: four journals on one shared machine and a token with a cap of
+  one), its oracles (`FENCED`, `BOUNDED_RESHAPE_RATE`, `COST_BOUND`, `NO_OSCILLATION`,
+  `BOUNDED_IN_FLIGHT`, `CONVERGES`), its reach sites and its planted mutants (`ControllerMutant`).
+  `tests/controller.rs` also requires every `probe!` of the role (`role::PROBES`).
+- `src/host.rs`: the driver walk (`HostModel`, #1329): three processes, each a `Driver` of
+  `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
+  walk's mailbox, crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
+  `FLIGHT`, `ANSWER`), its reach sites and its planted mutants (`HostMutant`). `tests/host.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/roles.rs`: the events of a roles walk as a trace of
   `specs/tla/journal-state/RolesTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/register.rs`: the events of a register walk as a trace of
   `specs/tla/segment-records/RegisterTrace.tla`, and the named edits of its recorded traces.
+- `src/trace/controller.rs`: the events of a controller walk as a trace of
+  `specs/tla/grid-controller/ControllerTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/mutate.rs`: the named edits of recorded traces (#1308 (mutate recorded traces)).
 - `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/roles.rs` (the roles walks and
   their mutants); `tests/roles_traces.rs` (the roles trace check on the narrow shape, its rules, its
   control `BoundaryBeforeDurable` and its edits); `tests/register.rs` (the register
   walks and their mutants) and `tests/register_traces.rs` (the register trace check, its rules,
-  its control `ForgedBootstrap` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
+  its control `ForgedBootstrap` and its edits); `tests/controller.rs` (the controller walks, their
+  mutants and the role's probes) and `tests/controller_traces.rs` (the controller trace check, its
+  rules, its control `ElectNoCas` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
   long fold walk checked live through its events port by moonpool-tla's `Live`, and the control
   `BelowInSegment` stopped at its first wrong answer; `LIVE_MINUTES` runs one walk with no end for
   that long (the `Journal live` workflow, four hours each night).
@@ -56,9 +81,10 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
   the checked model)): each event applies the model's operators (`Res`, `Step`, `Bound`,
   `CoversOn`, `ResolveOn`). A step of the code that the model does not have becomes a step of the
   model, with its check, in the same PR.
-- **`RegisterTrace` extends `SegmentRecords.tla`** in the same way: each event is an action of
-  the model. **`RolesTrace` extends `Journal.tla`**: each event of the roles walk is one action of
-  the model, with the parameters that the code chose.
+- **`RegisterTrace` extends `SegmentRecords.tla`**, and **`ControllerTrace` extends
+  `GridController.tla`**, in the same way: each event is an action of the model. **`RolesTrace`
+  extends `Journal.tla`**: each event of the roles walk is one action of the model, with the
+  parameters that the code chose.
 - **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register;
   `BoundaryBeforeDurable` for the roles: the
   oracles pass it, TLC refuses it) and **refuses the edits** of the recorded walks at the edited event or after it: at least 20 edits

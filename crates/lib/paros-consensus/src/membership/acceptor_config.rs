@@ -231,6 +231,26 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
         quorum
     }
 
+    /// Whether `voters` **seal** this configuration for an election —
+    /// [`QuorumSystem::is_phase1_seal`] over it: a Phase-1 quorum and, on a
+    /// full-column grid, one voter in each row (decision 31, #1209).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn has_phase1_seal(&self, voters: &BTreeSet<Id>) -> bool {
+        let seal = self.quorum_system.is_phase1_seal(&self.members, voters);
+        if seal {
+            assert!(
+                self.has_phase1_quorum(voters),
+                "a seal holds a Phase-1 quorum"
+            );
+        }
+        seal
+    }
+
     /// Whether `voters` hold a **Phase-1** quorum of this configuration in
     /// `row` — [`QuorumSystem::is_phase1_quorum_in`] over it: the form a
     /// quorum read asks, by the row it was addressed to.

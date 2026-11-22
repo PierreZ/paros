@@ -1,6 +1,6 @@
 # paros-authz-biscuit
 
-Biscuit tokens for paros: root keys, offline mint and derive, and the verifier of each request with one Datalog policy. Removed after the tag `v0.2.0-alpha.1` (commit `d8047ad`). At the tag it lived in `crates/support/paros-authz-biscuit/` (1,844 lines of Rust).
+Biscuit tokens for paros: root keys, offline mint and derive, and the verifier of each request with one Datalog policy. Removed after the tag `v0.2.0-alpha.1` (commit `d8047ad`). **It is back in the tree since 2026-11-21**, at the same path, without `src/frontend.rs` and `tests/frontend.rs` (the adapter to the old frontend); this recap describes the crate at the tag. At the tag it lived in `crates/support/paros-authz-biscuit/` (1,844 lines of Rust).
 
 ## What it did
 

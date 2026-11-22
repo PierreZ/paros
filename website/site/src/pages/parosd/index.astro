@@ -24,6 +24,25 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
   design is <a href={`${REPO}/tree/main/docs/architecture`}><code>docs/architecture/</code></a>;
   most of what it names is at the tag below, not in the tree.</p>
 
+  <h2 id="goals">The goals</h2>
+  <p>Ten goals say what paros is for and how it is built. Each rule of the design is a
+  consequence of one of them (<a href={`${REPO}/blob/main/docs/architecture/01-goal.md`}><code>docs/architecture/01-goal.md</code></a>, §1.1).</p>
+  <ol>
+    <li><strong>A journal service for tenants.</strong> Four calls, and a durable, ordered, fenced log. paros owns the log, never the state.</li>
+    <li><strong>The cell heals with nobody watching.</strong> After the faults stop, each journal is whole again within one bound, or reports a true reason.</li>
+    <li><strong>paros eats its own food.</strong> State is in journals, who acts is an election on a journal, and agreement is a Paxos flavor of the core.</li>
+    <li><strong>One shape at every level.</strong> The universe, a cell and a tenant are each a control journal, a pure fold and one coordinator.</li>
+    <li><strong>The person says what, the system says where.</strong> A person types names and what a journal must survive. The system chooses the machines and the ids.</li>
+    <li><strong>Everything can move.</strong> A namespace moves to another cell with no change of protocol.</li>
+    <li><strong>Layers that stand alone.</strong> Each layer is a crate that another program can use alone. The core has no tenant.</li>
+    <li><strong>Every role is a pure actor.</strong> A deterministic step, persist before send, and I/O only in adapters.</li>
+    <li><strong>Proved before built.</strong> No code before its TLA+ model, and no excuse in simulation.</li>
+    <li><strong>Everything simulates, and it runs in the browser.</strong> Every layer and the whole service run in the deterministic simulation, and the same code compiles to wasm.</li>
+  </ol>
+  <p>The features of the first version stay. Its structure changes: the service becomes a stack
+  of layers on the journal v1, and each layer is a crate with its own model and its own
+  simulation (<a href={`${REPO}/blob/main/docs/architecture/04-roles.md`}><code>docs/architecture/04-roles.md</code></a>, §4.4).</p>
+
   <h2 id="before">The version before the rewrite</h2>
   <p>A first version ran: a daemon on each machine, a CLI, many cells, Biscuit tokens and a
   deterministic simulation with faults on. It showed where its foundations were too weak, so paros

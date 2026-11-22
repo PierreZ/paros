@@ -9,7 +9,10 @@
 //! another crate.
 
 pub mod campaign;
+pub mod control;
+pub mod controller;
 pub mod fold;
+pub mod host;
 pub mod oracle;
 pub mod register;
 pub mod roles;
