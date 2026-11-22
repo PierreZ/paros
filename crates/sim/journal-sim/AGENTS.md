@@ -69,7 +69,7 @@ Test only: `publish = false`.
   shared reshape token, a client that writes, resends and resolves, crashes, the loss of a zone
   for a while, lost register calls and disk faults, the leader's retire and the heal of a retired
   segment's replica set on the `Host` (#1314); its oracles (`AGREE`, `SEALED`, `FLIGHT`,
-  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`), its reach sites and its planted mutants (`WholeMutant`).
+  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`), its reach sites and its planted mutants (`WholeMutant`).
   `tests/whole.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.

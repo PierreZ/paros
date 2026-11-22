@@ -63,6 +63,9 @@
 //!   (no lost acked write).
 //! - [`ALERTS`]: each alert of the controller is true of the machines as
 //!   they are, not as the view says.
+//! - [`HEAL_HELD`]: each node that a done heal added to the set of a
+//!   retired segment holds every slot of it on its disk while the set
+//!   names it.
 //!
 //! **The liveness claim** (goal 2, the heal bound: the settle budget of the
 //! walk): once the faults stop, every machine is up again; each journal has
@@ -76,7 +79,9 @@
 //! The walk asks the new replica's driver to copy ([`Driver::join`]) and
 //! to drop an abandoned copy ([`Driver::abandon`]); each driver reads the
 //! register first, so it judges the ask on a value done after the ask was
-//! sent. A complete copy reaches every live controller of the journal
+//! sent. In the chaos phase an ask may be lost, and the network may hold
+//! it and give it again later ([`reach::LATE_ASK`]). A complete copy
+//! reaches every live controller of the journal
 //! ([`reach::COPIED`]), and the heal's compare-and-set runs on the register
 //! like a reshape ([`reach::REREPLICATED`]).
 //!
@@ -104,6 +109,7 @@ use paros_journal_control::{
     Tunables, View,
 };
 use paros_journal_io::mem::{ManualClock, MemRegister};
+use paros_journal_io::storage::Storage as _;
 use paros_journal_io::{
     Address, Assignment, CallId, CallOutcome, Clock, Driver, Envelope, HostConfig, JournalId,
     Notice, Op, Register,
@@ -127,6 +133,10 @@ pub const ONCE: &str = "whole journal: no record is written twice in the whole l
 pub const ACKED: &str = "whole journal: each acked write holds its position in the whole log";
 /// Oracle: each alert of the controller is true.
 pub const ALERTS: &str = "whole journal: each controller alert is true of the machines";
+/// Oracle: a node that a heal added to a retired set holds the whole
+/// segment on its disk while the set names it.
+pub const HEAL_HELD: &str =
+    "whole journal: a node a heal added holds the whole segment on its disk";
 
 /// The coverage sites of the whole journal walk.
 pub mod reach {
@@ -144,6 +154,8 @@ pub mod reach {
     pub const HEALED: &str = "whole journal: a controller's heal reshape was done";
     /// A new replica reported its complete copy.
     pub const COPIED: &str = "whole journal: a new replica reported its complete copy";
+    /// A copy or abandon ask arrived again, late.
+    pub const LATE_ASK: &str = "whole journal: a copy or abandon ask arrived again, late";
     /// A heal of a retired segment's replica set was done.
     pub const REREPLICATED: &str = "whole journal: a heal of a retired segment's set was done";
     /// A heal reshape was done with its reply lost.
@@ -186,6 +198,7 @@ pub mod reach {
         REREPLICATE,
         COPIED,
         REREPLICATED,
+        LATE_ASK,
         DUPLICATE,
         UNKNOWN,
         BELOW,
@@ -203,11 +216,7 @@ pub enum WholeMutant {
     /// The disk says a commit is done and writes nothing. [`FLIGHT`]
     /// catches it.
     LyingDisk,
-    /// A machine restarts with the records of its acceptors lost: an
-    /// acceptor forgets its promise and its votes. [`AGREE`] catches it.
-    /// The replicas keep their records: a lost replica disk loses chosen
-    /// slots that no oracle of agreement judges, and the walk stalls on
-    /// them before [`AGREE`] can see two values.
+    /// A machine restarts with an empty disk. [`AGREE`] catches it.
     WipeDisk,
     /// The client takes a `Taken` as written. [`ANSWER`] catches it.
     TakenAsWritten,
@@ -223,6 +232,9 @@ pub enum WholeMutant {
     /// The host keeps a machine down in the view once it ever was.
     /// [`ALERTS`] catches it.
     StaleLiveness,
+    /// The walk reports a new replica's copy complete as soon as it asks
+    /// the copy. [`HEAL_HELD`] catches it.
+    EarlyCopied,
 }
 
 /// The weights of the walk's crash and restart steps: a machine comes
@@ -332,6 +344,8 @@ struct Journal {
     sealed_at: BTreeMap<SegmentId, u64>,
     /// The segments that a controller's reshape opened.
     healed: BTreeSet<SegmentId>,
+    /// The nodes that a done heal added to the set of a retired segment.
+    added: BTreeSet<(SegmentId, NodeId)>,
     ctls: Vec<Ctl>,
     claimed: bool,
     next: u64,
@@ -354,6 +368,9 @@ pub struct WholeModel {
     register: MemRegister,
     machines: BTreeMap<u64, Machine>,
     journals: Vec<Journal>,
+    /// The copy and abandon asks that the network still holds: each may
+    /// arrive again, late ([`WholeAction::Late`]).
+    late: Vec<(usize, Ask)>,
 }
 
 /// The walk with `mutant` planted.
@@ -388,6 +405,8 @@ pub enum WholeAction {
     Fault,
     /// Every machine of a zone crashes.
     ZoneOut,
+    /// A copy or abandon ask that the network held arrives again, late.
+    Late,
 }
 
 impl Model for WholeModel {
@@ -410,13 +429,14 @@ impl Model for WholeModel {
             WholeAction::Resolve,
             WholeAction::Fault,
             WholeAction::ZoneOut,
+            WholeAction::Late,
         ]
     }
 
     fn weight(action: WholeAction, phase: Phase) -> u32 {
         match (action, phase) {
-            (WholeAction::Fault | WholeAction::ZoneOut, Phase::Chaos) => 1,
-            (WholeAction::Fault | WholeAction::ZoneOut, _) => 0,
+            (WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late, Phase::Chaos) => 1,
+            (WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late, _) => 0,
             (_, Phase::Settle) => 1,
             (WholeAction::Poll, _) => 120,
             (WholeAction::Tick | WholeAction::Campaign, _) => 8,
@@ -436,8 +456,10 @@ impl Model for WholeModel {
             WholeAction::Resolve => self.each(cx, Self::resolve),
             WholeAction::Fault => self.fault(cx),
             WholeAction::ZoneOut => self.zone_out(cx),
+            WholeAction::Late => self.late(cx),
         }
         self.place();
+        self.judge_heals();
     }
 
     fn deliver(&mut self, envelope: Envelope, _cx: &mut Cx<'_, Self>) {
@@ -464,7 +486,7 @@ impl Model for WholeModel {
             return;
         }
         if self.mutant == WholeMutant::WipeDisk {
-            self.machines[node].disk.wipe_acceptors();
+            self.machines[node].disk.wipe();
         }
         self.start(*node);
         let driver = self.machines[node].driver.as_ref().expect("started");
@@ -612,6 +634,7 @@ impl WholeModel {
                 opened_at: BTreeMap::new(),
                 sealed_at: BTreeMap::new(),
                 healed: BTreeSet::new(),
+                added: BTreeSet::new(),
                 ctls,
                 claimed: false,
                 next: 0,
@@ -630,6 +653,7 @@ impl WholeModel {
             register,
             machines: BTreeMap::new(),
             journals,
+            late: Vec::new(),
         };
         for m in MACHINES {
             model.machines.insert(
@@ -671,6 +695,12 @@ impl WholeModel {
     fn value(&self, j: usize) -> RegisterValue {
         self.register
             .value(self.journals[j].id)
+            .expect("each journal has a register")
+    }
+
+    fn value_of(&self, id: JournalId) -> RegisterValue {
+        self.register
+            .value(id)
             .expect("each journal has a register")
     }
 
@@ -1421,13 +1451,13 @@ impl WholeModel {
 
     /// Run what the controller `c` of journal `j` asks.
     fn act(&mut self, j: usize, c: usize, ask: Ask, cx: &mut Cx<'_, Self>) {
-        let id = self.journals[j].id;
         match ask {
             Ask::Nothing => {}
             Ask::Call(change @ Change::Rereplicate { .. }) => {
                 let (outcome, done) = self.operate(j, &change, cx);
-                if done {
+                if done && let Change::Rereplicate { segment, add, .. } = &change {
                     sometimes!(true, reach::REREPLICATED);
+                    self.journals[j].added.insert((*segment, *add));
                 }
                 let Some(role) = self.journals[j].ctls[c].role.as_mut() else {
                     return;
@@ -1470,35 +1500,115 @@ impl WholeModel {
                     "the role runs a re-replication as a heal, not {action:?}"
                 );
             }
-            Ask::Copy {
-                segment,
-                node,
-                set,
-                copy,
-            } => {
+            ask @ Ask::Copy { .. } => {
                 sometimes!(true, reach::REREPLICATE);
-                let address = Address::replica(id, node, segment);
-                if let Some(driver) = self
-                    .machines
-                    .get_mut(&machine_of(node))
-                    .and_then(|machine| machine.driver.as_mut())
-                {
-                    driver.join(address, set, Leader::Unset, copy);
-                }
+                self.send_ask(j, c, &ask, cx);
             }
-            Ask::Abandon {
-                segment,
-                node,
-                copy,
-            } => {
-                let address = Address::replica(id, node, segment);
-                if let Some(driver) = self
-                    .machines
-                    .get_mut(&machine_of(node))
-                    .and_then(|machine| machine.driver.as_mut())
-                {
-                    driver.abandon(address, copy);
+            ask @ Ask::Abandon { .. } => self.send_ask(j, c, &ask, cx),
+        }
+    }
+
+    /// A copy or abandon ask of controller `c` goes to the new replica's
+    /// driver. In the chaos phase the network may lose it, and may hold a
+    /// copy of it that arrives again later ([`WholeAction::Late`]).
+    fn send_ask(&mut self, j: usize, c: usize, ask: &Ask, cx: &mut Cx<'_, Self>) {
+        if cx.phase() == Phase::Chaos {
+            if cx.rng().chance(1, 4) {
+                self.late.push((j, ask.clone()));
+            }
+            if cx.rng().chance(1, 10) {
+                return;
+            }
+        }
+        if self.mutant == WholeMutant::EarlyCopied
+            && let Ask::Copy { segment, copy, .. } = &ask
+        {
+            let next = self.journals[j].ctls[c]
+                .role
+                .as_mut()
+                .map_or(Ask::Nothing, |role| role.copied(*segment, *copy));
+            self.deliver_ask(j, ask);
+            self.act(j, c, next, cx);
+            return;
+        }
+        self.deliver_ask(j, ask);
+    }
+
+    /// The new replica's driver takes the ask, when its machine is up.
+    fn deliver_ask(&mut self, j: usize, ask: &Ask) {
+        let id = self.journals[j].id;
+        let (node, address) = match ask {
+            Ask::Copy { segment, node, .. } | Ask::Abandon { segment, node, .. } => {
+                (*node, Address::replica(id, *node, *segment))
+            }
+            _ => unreachable!("only a copy or an abandon is held"),
+        };
+        let Some(driver) = self
+            .machines
+            .get_mut(&machine_of(node))
+            .and_then(|machine| machine.driver.as_mut())
+        else {
+            return;
+        };
+        match ask {
+            Ask::Copy { set, copy, .. } => {
+                driver.join(address, set.clone(), Leader::Unset, *copy);
+            }
+            Ask::Abandon { copy, .. } => driver.abandon(address, *copy),
+            _ => unreachable!("only a copy or an abandon is held"),
+        }
+    }
+
+    /// A held copy or abandon ask arrives again; the network keeps it or
+    /// not.
+    fn late(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(at) = cx.rng().index(self.late.len()) else {
+            return;
+        };
+        let (j, ask) = if cx.rng().chance(1, 2) {
+            self.late.swap_remove(at)
+        } else {
+            self.late[at].clone()
+        };
+        sometimes!(true, reach::LATE_ASK);
+        self.deliver_ask(j, &ask);
+    }
+
+    /// [`HEAL_HELD`]: each node that a done heal added to the set of a
+    /// retired segment holds every slot of the segment on its disk while
+    /// the set names it.
+    fn judge_heals(&self) {
+        for journal in &self.journals {
+            let value = self.value_of(journal.id);
+            for (segment, node) in &journal.added {
+                let Some(record) = value.segment(*segment) else {
+                    continue;
+                };
+                if record.state() != SegmentState::Retired || !record.replicas().contains(node) {
+                    continue;
                 }
+                let start = record.start().unwrap_or(Slot(0));
+                let end = record.end().expect("a retired segment has an end");
+                let address = Address::replica(journal.id, *node, *segment);
+                let entries = self.machines[&machine_of(*node)]
+                    .disk
+                    .store
+                    .borrow_mut()
+                    .scan(address)
+                    .expect("a scan of memory");
+                let held: BTreeSet<u64> = entries
+                    .iter()
+                    .filter(|(key, entry)| {
+                        key.kind == paros_journal_io::layout::Kind::Chosen
+                            && matches!(entry, paros_journal_io::layout::Entry::Value(_))
+                    })
+                    .map(|(key, _)| key.index)
+                    .collect();
+                let missing: Vec<u64> = (start.0..end.0).filter(|s| !held.contains(s)).collect();
+                assert!(
+                    missing.is_empty(),
+                    "{HEAL_HELD}: {node:?} of {segment:?} misses the slots {missing:?}"
+                );
             }
         }
     }

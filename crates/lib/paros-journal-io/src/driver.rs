@@ -39,7 +39,7 @@ use paros_journal::{Command, Leader, NodeId, SegmentId};
 use crate::clock::Clock;
 use crate::events::{Event, Events};
 use crate::host::{Assignment, CallId, CallOutcome, Effect, Host, HostConfig, Input, Stop};
-use crate::layout::{self, Op};
+use crate::layout::{self, Entry, Key, Op};
 use crate::register::Register;
 use crate::storage::Storage;
 use crate::transport::Transport;
@@ -360,6 +360,7 @@ where
                         self.durable.insert(address, id);
                         self.settled.insert(address, id);
                     }
+                    let entries = self.with_group(address, entries);
                     self.inputs.push_back(Input::Recovered { address, entries });
                 }
                 Err(_) => self.inputs.push_back(Input::Unreadable { address }),
@@ -431,25 +432,47 @@ where
                 self.notices.push(Notice::Retired { address, segment });
             }
             Effect::Stopped { address, why } => {
-                // A stopped role writes and sends nothing more: its batches
-                // leave the group, settled, and what waited on them is
-                // dropped.
+                // A stopped role writes and sends nothing more: what waited
+                // on its batches is dropped. A replica that dropped its copy
+                // stopped by its own step, so its last batches (a copy that
+                // ends) stay in the group and reach the disk; any other stop
+                // takes them out of the group, settled.
                 let other = |role: Address| role != address;
-                if let Some(id) = self
-                    .group
-                    .iter()
-                    .rev()
-                    .find_map(|(role, id, _)| (!other(*role)).then_some(*id))
-                {
-                    self.settled.insert(address, id);
+                if why != Stop::Dropped {
+                    if let Some(id) = self
+                        .group
+                        .iter()
+                        .rev()
+                        .find_map(|(role, id, _)| (!other(*role)).then_some(*id))
+                    {
+                        self.settled.insert(address, id);
+                    }
+                    self.group.retain(|(role, ..)| other(*role));
                 }
-                self.group.retain(|(role, ..)| other(*role));
                 self.held.retain(|(_, sender, _)| other(*sender));
                 self.held_changes.retain(|(_, role, _)| other(*role));
                 self.durable.remove(&address);
                 self.stopped.push((address, why));
             }
         }
+    }
+
+    /// The records of the role at `address` as the disk will hold them
+    /// once the group commits: `entries`, with the ops of the role's
+    /// batches that the group still holds on top (a later op at a key
+    /// wins). A role that starts again before the commit reads its own
+    /// last writes, and its new batches follow the last one.
+    fn with_group(&self, address: Address, entries: Vec<(Key, Entry)>) -> Vec<(Key, Entry)> {
+        let mut records: BTreeMap<[u8; layout::KEY_LEN], (Key, Entry)> = entries
+            .into_iter()
+            .map(|(key, entry)| (key.to_bytes(), (key, entry)))
+            .collect();
+        for (_, _, ops) in self.group.iter().filter(|(role, ..)| *role == address) {
+            for op in ops {
+                records.insert(op.key.to_bytes(), (op.key, Entry::Value(op.value.clone())));
+            }
+        }
+        records.into_values().collect()
     }
 
     fn is_durable(&self, address: Address, after: Option<PersistId>) -> bool {

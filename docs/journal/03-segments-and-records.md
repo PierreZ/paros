@@ -151,7 +151,8 @@ checked, each with a control that TLC breaks:
     that knows the set only from the last register value it saw; it checks the five rules of
     this list and of "As built" below that `re-replication/` cannot see, each with a control.
     The highest-copy rule and the fresh-value rule are a contract of the driver that starts and
-    abandons copies: no built driver runs a copy yet (the Open below).
+    abandons copies: the `Host` of `paros-journal-io` keeps them (`Input::Join`,
+    `Input::Abandon`; `Driver::join` and `Driver::abandon` read the register first).
   - **A "done" report belongs to one copy.** A new plan starts a new copy. A report kept from an
     aborted copy (`report_sticky`) counts a replica that dropped its copy since.
   - **A replica that does not hold a slot refuses the read**, and the reader reads the record and
@@ -202,10 +203,12 @@ checked, each with a control that TLC breaks:
   `Copied` when it is full. A replica in no set that runs no copy, or of a trimmed segment, drops
   its copy and stops (`Stop::Dropped` in the `Host`). A node that serves the segment as a member
   refuses every copy. `decide` heals only a retired segment: a sealed one retires first.
-  **Open**: the `Host` does not run `Ask::Copy` and `Ask::Abandon` yet (the whole-journal walk,
-  #1445); a new replica whose controller crashed keeps its copy until a trim or a higher copy
+  The `Host` runs `Ask::Copy` and `Ask::Abandon`, and the whole-journal walk drives them (#1445).
+  **Open**: a new replica whose controller crashed keeps its copy until a trim or a higher copy
   (the model drops it, as no open plan names it); a heal in flight holds back the controller's
-  other decisions until it ends.
+  other decisions until it ends; the storage has no delete, so the records of an earlier copy and
+  of a dropped replica stay on the disk (true chosen slots of the segment, a disk leak, where the
+  model wipes them).
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in

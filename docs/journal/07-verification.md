@@ -253,10 +253,11 @@ heal keeps the live replicas of a column (Pierre, 2026-11-22, #1445); the addres
 of a replica name its segment (§J4.2). A member of a retired segment that stays down long enough
 is healed by re-replication (#1314): the walk asks the new replica's driver to copy and to drop an
 abandoned copy (`Driver::join`, `Driver::abandon`, which read the register first, so the `Host`
-judges each ask on a value done after it was sent), and gives each complete copy to the
-controllers (sites `REREPLICATE`, `COPIED`, `REREPLICATED`). The mutant of `AGREE` loses the
-records of a machine's acceptors at a restart; its replicas keep theirs, since a lost replica disk
-loses chosen slots and the walk stalls before `AGREE` sees two values. **Open**: the walk loses a
+judges each ask on a value done after it was sent), may lose an ask or give it again later
+(site `LATE_ASK`), and gives each complete copy to the controllers (sites `REREPLICATE`,
+`COPIED`, `REREPLICATED`). The oracle `HEAL_HELD` judges that each node a done heal added holds
+every slot of the retired segment on its disk while the set names it (mutant `EarlyCopied`: the
+walk reports a copy complete when it asks it). **Open**: the walk loses a
 machine or a zone only for a while; a permanent loss joins the walk as the next step of #1314.
 
 ### J7.5 The controller's `decide`

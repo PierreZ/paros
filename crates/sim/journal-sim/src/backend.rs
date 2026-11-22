@@ -73,14 +73,6 @@ impl Disk {
         *self.store.borrow_mut() = MemStorage::new();
     }
 
-    /// Lose the records of every acceptor: a planted bug, never a fault of
-    /// the contract. The replicas keep theirs.
-    pub fn wipe_acceptors(&self) {
-        self.store
-            .borrow_mut()
-            .lose(|key| key.address.segment.is_none());
-    }
-
     /// Arm a fault of the contract for the next commit: it fails before or
     /// after its write, as `after` says.
     pub fn arm(&self, after: bool) {

@@ -635,3 +635,108 @@ fn a_second_leader_seals_the_first_segment_through_the_register() {
         "the Host holds the value of the last done write"
     );
 }
+
+/// The world, with segment 2 open and segment 1 sealed at 0 and retired.
+fn retired_world() -> World {
+    let mut world = World::new();
+    let value = world.register.value(J).expect("a register");
+    for change in [
+        Change::Reshape {
+            opening: OpeningCall {
+                term: value.term().number,
+                expected: Some(SegmentId(1)),
+                grid: Grid::new(1, vec![ACCEPTORS.map(NodeId).to_vec()]).expect("a grid"),
+                replicas: vec![NodeId(21), NodeId(22), NodeId(23)],
+            },
+            release: RELEASE,
+        },
+        Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(0),
+        },
+        Change::Boundary {
+            segment: SegmentId(1),
+            state: paros_journal::BoundaryState::fresh(Leader::Unset),
+        },
+        Change::Retire {
+            segment: SegmentId(1),
+            holders: 2,
+            unrepaired_damage: false,
+        },
+    ] {
+        world
+            .register
+            .change(J, &change)
+            .expect("the change is done");
+    }
+    world
+}
+
+const NEW: Address = Address {
+    journal: J,
+    node: NodeId(20),
+    segment: Some(SegmentId(1)),
+};
+
+fn copy_of(term: u64, number: u64) -> paros_journal::roles::CopyId {
+    paros_journal::roles::CopyId { term, number }
+}
+
+fn joining_on(disk: &Shared) -> Option<paros_journal::roles::CopyId> {
+    let entries = disk.0.borrow_mut().scan(NEW).expect("a scan of memory");
+    layout::decode_replica(NEW, &entries)
+        .expect("the records decode")
+        .joining
+}
+
+#[test]
+fn an_abandoned_copy_ends_on_the_disk() {
+    let world = retired_world();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[]);
+    driver.join(
+        NEW,
+        REPLICAS.map(NodeId).to_vec(),
+        Leader::Unset,
+        copy_of(2, 1),
+    );
+    driver.poll();
+    assert_eq!(joining_on(&disk), Some(copy_of(2, 1)));
+    driver.abandon(NEW, copy_of(2, 1));
+    driver.poll();
+    assert!(!driver.host().serves(NEW), "the replica dropped its copy");
+    assert_eq!(joining_on(&disk), None, "the end of the copy is durable");
+}
+
+#[test]
+fn a_copy_asked_again_before_the_commit_reads_the_last_writes() {
+    let world = retired_world();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[]);
+    driver.join(
+        NEW,
+        REPLICAS.map(NodeId).to_vec(),
+        Leader::Unset,
+        copy_of(2, 1),
+    );
+    driver.poll();
+    // The abandon and a later, lower ask come before the next commit: the
+    // ask reads the abandon's write, so the ended copy does not come back,
+    // and the new batches follow the abandon's.
+    driver.abandon(NEW, copy_of(2, 1));
+    driver.join(
+        NEW,
+        REPLICAS.map(NodeId).to_vec(),
+        Leader::Unset,
+        copy_of(1, 7),
+    );
+    assert_eq!(
+        driver
+            .host()
+            .replica(NEW)
+            .and_then(paros_journal::roles::SegmentReplica::joining),
+        Some(copy_of(1, 7))
+    );
+    driver.poll();
+    assert_eq!(joining_on(&disk), Some(copy_of(1, 7)));
+}

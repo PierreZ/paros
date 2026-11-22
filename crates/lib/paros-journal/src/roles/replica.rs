@@ -284,10 +284,13 @@ impl SegmentReplica {
     }
 
     /// A new replica `id` of the retired `segment`, for the copy `copy` of a
-    /// heal (#1314), and the batch that records its copy: an empty disk,
-    /// and `set`, the replica set of the record that the controller read, as
-    /// the members to copy from. The driver deletes the records of an
-    /// earlier copy on this node first: a new plan starts a new copy. The
+    /// heal (#1314), and the batch that records its copy: it starts with
+    /// nothing in memory, and `set`, the replica set of the record that the
+    /// controller read, as the members to copy from. A new plan starts a new
+    /// copy. The records of an earlier copy may stay on the disk (the
+    /// storage has no delete; **Open**, §J3.1): they are chosen slots of the
+    /// same segment, so a later recovery folds true values, and the copy
+    /// reports complete only on what it holds. The
     /// driver starts a copy only above the copy the node runs: a lower one
     /// comes from a deposed controller and is refused, so the copy that a
     /// later term counts stays on the disk. It never starts a copy of a

@@ -766,3 +766,42 @@ fn a_holding_goes_to_the_replica_and_a_holds_to_its_asker() {
         "the new replica pulls from its source: {effects:?}"
     );
 }
+
+#[test]
+fn a_holds_reaches_both_the_acceptor_and_the_new_replica_of_a_node() {
+    let mut host = joined(retired());
+    host.step(Time(1), acceptor(at(J, 20)));
+    host.step(Time(1), recovered(at(J, 20)));
+    let holds = Envelope {
+        journal: J,
+        from: NodeId(11),
+        to: NodeId(20),
+        message: Message::Holds {
+            segment: SegmentId(1),
+            full: true,
+        },
+    };
+    let effects = host.step(Time(1), Input::Message(holds));
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Send { envelope, .. }
+                if envelope.to == NodeId(11) && matches!(envelope.message, Message::Pull { .. })
+        )),
+        "the new replica pulls although an acceptor serves the node: {effects:?}"
+    );
+}
+
+#[test]
+fn a_join_whose_set_names_the_node_is_refused() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(retired()));
+    let ask = Input::Join {
+        address: NEW,
+        set: vec![NodeId(11), NodeId(20)],
+        initial: Leader::Unset,
+        copy: copy(5),
+    };
+    assert_eq!(host.step(Time(0), ask), Vec::new());
+    assert!(!host.serves(NEW));
+}

@@ -3,7 +3,7 @@
 
 use journal_sim::campaign::{campaign, try_campaign};
 use journal_sim::whole::{
-    ACKED, AGREE, ALERTS, ANSWER, FLIGHT, ONCE, SEALED, WholeMutant, reach, walk,
+    ACKED, AGREE, ALERTS, ANSWER, FLIGHT, HEAL_HELD, ONCE, SEALED, WholeMutant, reach, walk,
 };
 
 /// Two journals on nine machines in three zones, with their controllers,
@@ -28,7 +28,7 @@ fn flight_catches_a_disk_that_lies_about_a_commit() {
 }
 
 #[test]
-fn agree_catches_a_machine_that_loses_its_acceptor_disk() {
+fn agree_catches_a_machine_that_loses_its_disk() {
     caught(WholeMutant::WipeDisk, AGREE);
 }
 
@@ -55,4 +55,9 @@ fn acked_catches_an_ack_kept_at_another_position() {
 #[test]
 fn alerts_catches_a_machine_kept_down_in_the_view() {
     caught(WholeMutant::StaleLiveness, ALERTS);
+}
+
+#[test]
+fn heal_held_catches_a_copy_reported_when_it_starts() {
+    caught(WholeMutant::EarlyCopied, HEAL_HELD);
 }

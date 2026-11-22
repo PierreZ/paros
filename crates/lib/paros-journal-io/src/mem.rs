@@ -22,8 +22,7 @@ use crate::transport::Transport;
 use crate::wire::{Address, Envelope, Time};
 
 /// A storage in memory: sorted keys to bytes. Every commit is durable at
-/// once. A test can mark a record corrupt, make the next commit fail, or
-/// lose records.
+/// once. A test can mark a record corrupt, or make the next commit fail.
 #[derive(Clone, Debug, Default)]
 pub struct MemStorage {
     records: BTreeMap<[u8; KEY_LEN], Vec<u8>>,
@@ -58,19 +57,6 @@ impl MemStorage {
     /// The next commit fails, and writes nothing.
     pub fn fail_next_commit(&mut self) {
         self.fail_next = true;
-    }
-
-    /// Lose every record whose key `lost` names: a bug that a test plants,
-    /// never a fault of the contract (a commit that was durable stays).
-    ///
-    /// # Panics
-    ///
-    /// When the storage holds bytes that are not a key: a commit stores
-    /// keys only.
-    pub fn lose(&mut self, mut lost: impl FnMut(&Key) -> bool) {
-        self.records.retain(|bytes, _| {
-            !lost(&Key::from_bytes(bytes).expect("the storage holds keys only"))
-        });
     }
 }
 

@@ -212,8 +212,9 @@ pub enum Stop {
     /// ([`Input::Join`]): the role starts again from its records.
     Replaced,
     /// The replica dropped its copy: it is not in its segment's set and is
-    /// no plan's new replica, or the segment is trimmed (§J3.1). Its records
-    /// may be deleted.
+    /// no plan's new replica, or the segment is trimmed (§J3.1). Its last
+    /// batches still reach the disk. Its records stay there: the storage has
+    /// no delete (**Open**, §J3.1).
     Dropped,
 }
 
@@ -544,7 +545,9 @@ impl Host {
     }
 
     fn join(&mut self, now: Time, address: Address, ask: JoinAsk, effects: &mut Vec<Effect>) {
-        if address.segment.is_none() || !self.may_copy(address) {
+        // A set that names the node is no copy ask a correct controller
+        // sends: refused, as the value's own member check.
+        if address.segment.is_none() || !self.may_copy(address) || ask.set.contains(&address.node) {
             return;
         }
         match self.roles.get(&address) {
@@ -709,14 +712,26 @@ impl Host {
     }
 
     fn deliver(&mut self, envelope: Envelope, effects: &mut Vec<Effect>) {
-        let mut address = envelope.receiver();
-        if let paros_journal::roles::Message::Holds { segment, .. } = &envelope.message
-            && !self.roles.contains_key(&address)
-        {
-            // The answer to a new replica's `Holding`.
-            address = Address::replica(address.journal, address.node, *segment);
+        let address = envelope.receiver();
+        if let paros_journal::roles::Message::Holds { segment, .. } = &envelope.message {
+            // A `Holds` answers a leader or a new replica of its segment, and
+            // the message does not say which asked: both roles of the node
+            // get it. Each counts only what it asked for, and a "full"
+            // answer is a durable fact of its sender.
+            let replica = Address::replica(address.journal, address.node, *segment);
+            self.step_role(replica, envelope.from, envelope.message.clone(), effects);
         }
         let Envelope { from, message, .. } = envelope;
+        self.step_role(address, from, message, effects);
+    }
+
+    fn step_role(
+        &mut self,
+        address: Address,
+        from: NodeId,
+        message: paros_journal::roles::Message,
+        effects: &mut Vec<Effect>,
+    ) {
         match self.roles.get_mut(&address) {
             Some(Role::Acceptor(acceptor)) => {
                 let out = acceptor.step(from, message);

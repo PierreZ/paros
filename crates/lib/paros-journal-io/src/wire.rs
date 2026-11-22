@@ -90,8 +90,7 @@ impl Envelope {
     /// the replica of the segment that they name; every other message goes
     /// to an acceptor or a leader. A `Holds` answers the asker of `Holding`,
     /// a leader or a new replica, so its receiver is the node: the `Host`
-    /// gives it to the replica of its segment when no leader or acceptor of
-    /// the node is there.
+    /// also gives it to the replica of its segment on that node.
     #[must_use]
     pub fn receiver(&self) -> Address {
         match &self.message {
