@@ -25,6 +25,13 @@
 # change can break, the experiments too (`scripts/ci-plan.py`). A violation in an initial state counts as a
 # violation too (`grid/` checks constants only), and so does a violation of an
 # action property (`[][A]_vars`).
+#
+# After each folder, the script prints the minutes that its checks took. When
+# they are far from the folder's line in `scripts/tla-minutes.txt` (more than
+# 1.5 times the line plus one minute, or less than half the line minus one
+# minute), it prints a GitHub `::warning::` that asks for a new measure: the
+# plan packs the jobs from these lines, and a stale line can push a job past
+# its 30 minutes. A warning, not a failure: the speed of a runner varies.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 all=false
@@ -50,6 +57,7 @@ for dir in "${dirs[@]}"; do
     status=1
     continue
   fi
+  started=$SECONDS
   while read -r name expected where rest; do
     case "$name" in '' | '#'*) continue ;; esac
     bound=""
@@ -92,5 +100,13 @@ for dir in "${dirs[@]}"; do
     fi
     rm -rf "$meta"
   done <"$manifest"
+  folder=${dir#specs/tla/}
+  took=$((SECONDS - started))
+  line=$(awk -v f="$folder" '$1 == f { print $2 }' scripts/tla-minutes.txt)
+  echo "time  $folder: $(awk -v s="$took" 'BEGIN { printf "%.1f", s / 60 }') min (line: ${line:-none})"
+  if [ -n "$line" ] && awk -v s="$took" -v m="$line" \
+    'BEGIN { t = s / 60; exit !(t > 1.5 * m + 1 || t < m / 2 - 1) }'; then
+    echo "::warning::specs/tla/$folder took $((took / 60)) min, its line in scripts/tla-minutes.txt says $line: measure it again"
+  fi
 done
 exit "$status"
