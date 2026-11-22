@@ -105,17 +105,13 @@ controller takes no action from load (journal §J6).
 | 8 | **Every role is a pure actor** | A deterministic step, persist before send, a refusal is data. I/O is only in adapters. So each layer has its model, its walk and its trace check. |
 | 9 | **Proved before built** | No code before its TLA+ model, and no excuse in simulation. |
 | 10 | **Everything simulates, and it runs in the browser** | Every layer, and the whole service, runs in the deterministic simulation. The same code compiles to wasm and runs in a browser. |
-| 11 | **Easy to operate** | The service heals itself and scales itself, so a person runs it with few actions. An operator says what must be true and gets a true reason when the service cannot do it. |
+| 11 | **Easy to operate** | The service operates itself: it heals and it scales with no person in the loop. What a person would do by hand, a component does. Each component has one duty, and offers it as a call. |
 
-**Three habits of design serve goal 11** (Pierre, 2026-11-22). They are ways to reach the goal,
-not goals. A design that does not follow one says why.
-
-- A task of an operator is first a question: which component of the control plane does it? Such
-  a component reads the telemetry of the data plane and changes the system through calls. The
-  grid controller of a journal is the first one (journal §J6): it decides when and where, and
-  the protocol decides whether it is safe.
-- One component holds one duty.
-- A capability is a call over the network, which another component or a tool can use.
+**How goal 11 reads in a design** (Pierre, 2026-11-22). When a design leaves a task to a
+person, ask which component can do it. A component that does such a task observes the system
+and acts on it; it has one duty; and it offers that duty as a call, so that another component
+or a tool can use it. The grid controller of a journal is one example (journal §J6): it reads
+the measures of its roles and reshapes the journal. The examples are not the goal.
 
 **The eight root rules** are the consequences of these goals in the service. Each one replaced a
 stack of fixes of the code at the tag `v0.2.0-alpha.1`: rule 3 serves goals 3 and 4; rules 2, 4,
