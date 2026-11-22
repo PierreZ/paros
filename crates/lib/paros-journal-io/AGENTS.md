@@ -31,7 +31,9 @@ its result and runs in the `examples` job of CI.
 
 - **A pure crate** (§J4.3): it depends on workspace crates only, in `[dependencies]` and in
   `[dev-dependencies]` (`scripts/check-core-deps.sh`). No trait requires `Send`, an executor or
-  a runtime type. An adapter that does I/O is a crate of its own (#1330).
+  a runtime type. An adapter that does I/O is a crate of its own (the moonpool adapter is #1417, in the layered parosd).
+- **The traits are not stable yet**: they are called stable only once the moonpool adapter of #1417
+  runs on them. A change that the adapter needs is expected.
 - **The `Host` is pure**: no I/O, no clock, no randomness. Every input is recorded, and the
   time comes with it.
 - **The format is this crate's**: a backend stores keys and bytes and never reads them. A
