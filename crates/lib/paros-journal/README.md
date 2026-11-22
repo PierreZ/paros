@@ -2,8 +2,8 @@
 
 The pure core of the paros journal v1: one ordered log for each journal, with Paxos inside each
 segment. It holds the journal fold, the `Resolve` call, the held answers, the segment records,
-the journal's matchmaker register, the journal roles (acceptor, leader, segment replica) and the
-codec.
+the journal's matchmaker register, the journal roles (acceptor, leader, segment replica), the
+pure client and the codec.
 
 The crate is a library that a program uses through plain data and pure state machines. It does no
 I/O, reads no clock and draws no random number. It depends on `paros-consensus` alone, with no
@@ -24,7 +24,9 @@ Each example prints a trace and asserts what it shows. Read them in this order:
 
 The journal roles run on the traits and the generic driver of `paros-journal-io`: its examples
 `in_memory` (a journal on three processes) and `custom_storage` (a storage backend written by
-hand) show them.
+hand) show them. Its examples `single_writer` and `multi_writer` show the pure client of this
+crate (`paros_journal::client`): a program asks for a call, sends the requests that the client
+gives, and gives back the answers; the client settles every ambiguous answer itself.
 
 The examples depend on this crate alone: CI checks that their build pulls in no crate from
 outside the workspace (`scripts/check-core-deps.sh`).

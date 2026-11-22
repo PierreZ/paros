@@ -17,23 +17,14 @@ use paros_consensus::matchmaker::{
     ReconfigureRequest, RegistrationKind,
 };
 use paros_consensus::{Ballot, Message, Slot};
-use serde::{Deserialize, Serialize};
 
 use crate::paxos::view::{show_ballot, value_text};
 use crate::paxos::world::matchmakers::{show_members, show_set, why};
 use crate::paxos::world::{Envelope, InFlight};
+use crate::steps::Field;
 
 /// How many votes a sentence lists before it says "and N more".
 const LIST: usize = 3;
-
-/// One field of a message: `ballot` = `1.0 (round 1, node 0)`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Field {
-    /// The field's name, in plain words: `ballot`, `slot`, `value`.
-    pub name: String,
-    /// Its value, as a reader reads it.
-    pub value: String,
-}
 
 /// What a message says: its fields and one sentence in the sender's voice.
 #[derive(Clone, Debug, PartialEq, Eq)]

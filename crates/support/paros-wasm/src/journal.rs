@@ -24,11 +24,14 @@
 //! - [`keyed`] — the shell of an exercise whose moves are named by a key.
 //! - [`register`] — two controllers and three matchmakers of the register.
 //! - [`records`] — one register value and the moves of its records.
+//! - [`seal`] — the step-through of a reshape and a seal on the journal
+//!   roles, for `/journal/segments/` (#1365).
 
 pub mod keyed;
 pub mod lab;
 pub mod records;
 pub mod register;
+pub mod seal;
 pub mod world;
 
 // ---- the wasm surface -------------------------------------------------------
@@ -78,6 +81,22 @@ mod wasm {
                     .to_string()
             })
         }
+    }
+
+    /// The step-through trace of a Journal page (#1365 (reshape and seal
+    /// step-through)), recorded now from the journal roles, as JSON: the page
+    /// draws this live run in place of the recorded file.
+    ///
+    /// # Errors
+    ///
+    /// A JS exception when no page has that name, or when the trace does
+    /// not encode.
+    #[wasm_bindgen]
+    pub fn journal_trace(page: &str) -> Result<String, JsError> {
+        console_error_panic_hook::set_once();
+        let trace = crate::journal::seal::trace_of(page)
+            .ok_or_else(|| JsError::new(&format!("no Journal trace {page:?}")))?;
+        serde_json::to_string(&trace).map_err(|err| JsError::new(&err.to_string()))
     }
 
     /// The JSON of a keyed lab's view.

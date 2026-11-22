@@ -7,7 +7,8 @@ across seals, `SetLeader` with `None`, truncates, crashes of the replica that re
 and the `Resolve` call that settles each `Below`. A second walk drives the journal's matchmaker
 register across handovers of the set (#1325). A third walk drives the journal roles
 (`paros_journal::roles`, #1326): acceptors, leaders and segment replicas with disks, over a chain
-of segments. A fourth walk runs the generic driver of `paros-journal-io` (#1329) on three processes.
+of segments. A fourth walk runs the generic driver of `paros-journal-io` (#1329) on three processes. A fifth walk
+drives the pure journal client (#1331) against a journal that loses and holds answers.
 Test only: `publish = false`.
 
 ## Map
@@ -45,6 +46,10 @@ Test only: `publish = false`.
   `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
   walk's mailbox, crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
   `FLIGHT`, `ANSWER`), its reach sites and its planted mutants (`HostMutant`). `tests/host.rs`.
+- `src/client.rs`: the client walk (`ClientModel`, #1331): two programs with a `Client` of
+  `paros_journal::client`, a lossy mailbox, held and lost answers, seals, `Resolve`, reads; its
+  oracles (`WRITTEN`, `ONCE`, `REFUSED`, `LED`, `TAIL`, `PAGE`), judged on a log that the walk keeps, its
+  reach sites and its planted mutants (`ClientMutant`). `tests/client.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/register.rs`: the events of a register walk as a trace of

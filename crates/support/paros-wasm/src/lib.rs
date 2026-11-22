@@ -16,6 +16,9 @@
 //! (`scripts/build-wasm.sh`), and adds no wasm-only protocol path: the code it runs is the code
 //! paros ships.
 
+#[cfg(any(feature = "paxos", feature = "journal"))]
+pub mod steps;
+
 #[cfg(feature = "paxos")]
 pub mod paxos;
 

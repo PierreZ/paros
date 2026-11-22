@@ -1086,7 +1086,8 @@ leader and a reader outside its configuration whose own abandoned campaign is ab
 builds option (b) (`ColocatedNode::reader_fence`) for every quorum system, so option (b) is
 checked on majorities (`learner_own`), on the full `2 × 2` grid with the seal of the code
 (`learner_own_grid`, 2.0 million states, 1.7 min) and with a lagging pool (`learner_own_lag`,
-0.6 million states, 21 s). In the implementation model `node/`, a
+0.6 million states, 21 s). The two last are `long` checks: `reads` already fills the time of one
+CI job. In the implementation model `node/`, a
 campaign promises its own ballot at its `Prepare`, so the promise of a campaign that the
 matchmakers refused before its `Prepare` is not in a trace, and the basis of option (b) is an
 ordinary `Basis` step there.

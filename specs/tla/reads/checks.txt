@@ -20,9 +20,10 @@ reboot_belief_refuse pass      long
 reboot_promise_open_reader pass long
 learner_own         pass       ci
 # Option (b) of #890 on the full grid with the seal of the code, and with a
-# lagging pool (the reader ignores the newer configuration).
-learner_own_grid    pass       ci
-learner_own_lag     pass       ci
+# lagging pool (the reader ignores the newer configuration). They are `long`:
+# `reads` is at the 22 minutes that one CI job allows (`scripts/ci-plan.py`).
+learner_own_grid    pass       long
+learner_own_lag     pass       long
 learner_strict      pass       long
 learner_any         pass       long
 grid_full           violation  ci
