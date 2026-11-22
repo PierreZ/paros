@@ -72,7 +72,7 @@ const UUID: LeaderUuid = LeaderUuid(0xA);
 /// The controller's node in the register's term.
 const CONTROLLER: NodeId = NodeId(0);
 
-/// Each segment takes acceptors `1..=4`, proposers 5 and 6 lead, and
+/// Each segment takes three of acceptors `1..=4`, proposers 5 and 6 lead, and
 /// replica 7 serves segment 1, replica 8 segment 2. One replica for each
 /// segment keeps the drawing small; a replica set of `2F + 1` changes no
 /// step of the seal.
@@ -323,7 +323,7 @@ fn broken() -> Scenario {
                 "Acceptor 3 left the grid too early",
             ],
             0,
-            "The end must be one above the highest vote that a Phase 1 of the old grid sees. Any two acceptors of the old column hold w2, so that Phase 1 sees it, ends the segment at slot 4, and writes w2 again at slot 3.",
+            "The end must be one above the highest vote that a Phase 1 of the old grid sees. Any two acceptors of the old column include acceptor 2 or 3, which hold w2, so that Phase 1 sees it, ends the segment at slot 4, and writes w2 again at slot 3.",
         )
         .holds(|run| run.broken().is_some(), "two values are chosen at slot 3");
     run.finish(
@@ -352,9 +352,9 @@ enum Payload {
         refused: Option<ChangeRefusal>,
     },
     /// The client's `Resolve` at a replica.
-    Resolve { write: Write },
+    Resolve { name: String, write: Write },
     /// The replica's answer to `Resolve`.
-    Resolved(ResolveAnswer),
+    Resolved { name: String, answer: ResolveAnswer },
 }
 
 /// One message on the wire.
@@ -393,6 +393,8 @@ struct Run {
     chosen: BTreeMap<Slot, BTreeMap<String, u64>>,
     /// The answers each leader counted: (leader, `promises` or slot).
     counted: BTreeMap<(NodeId, Option<Slot>), BTreeSet<NodeId>>,
+    /// The slots that each leader committed: (leader, slot).
+    committed: BTreeSet<(NodeId, Slot)>,
     /// The disk writes of the step in progress, by lane.
     writes: BTreeMap<String, Vec<String>>,
     /// The engine's notes of the step in progress.
@@ -424,6 +426,7 @@ impl Run {
             next_token: 1,
             chosen: BTreeMap::new(),
             counted: BTreeMap::new(),
+            committed: BTreeSet::new(),
             writes: BTreeMap::new(),
             notes: Vec::new(),
             recording: false,
@@ -628,7 +631,15 @@ impl Run {
             .expect("the client resolves a write it sent")
             .write
             .clone();
-        self.send("c", replica, Payload::Resolve { write }, None);
+        self.send(
+            "c",
+            replica,
+            Payload::Resolve {
+                name: name.to_string(),
+                write,
+            },
+            None,
+        );
         self.event(
             &format!("the client resolves {name}"),
             &format!("The client sends Resolve for {name} to {}.", party(replica)),
@@ -924,36 +935,7 @@ impl Run {
     fn arrive(&mut self, flight: &InFlight) -> Option<Tally> {
         let to = flight.to.clone();
         match &flight.payload {
-            Payload::Role(message) => {
-                let from = node_of(&flight.from);
-                let node = node_of(&to);
-                if self.acceptors.contains_key(&node) {
-                    let effects = self
-                        .acceptors
-                        .get_mut(&node)
-                        .expect("an acceptor")
-                        .step(from, message.clone());
-                    self.acceptor_effects(node, effects);
-                    None
-                } else if self.leaders.contains_key(&node) {
-                    let effects = self
-                        .leaders
-                        .get_mut(&node)
-                        .expect("a leader")
-                        .step(from, message.clone());
-                    let tally = self.count(node, from, message, &effects);
-                    self.leader_effects(node, effects);
-                    tally
-                } else {
-                    let effects = self
-                        .replicas
-                        .get_mut(&node)
-                        .expect("a replica")
-                        .step(from, message.clone());
-                    self.replica_effects(node, effects);
-                    None
-                }
-            }
+            Payload::Role(message) => self.step_role(flight, message),
             Payload::Write { token, command } => {
                 let node = node_of(&to);
                 let leader = self.leaders.get_mut(&node).expect("a leader");
@@ -1003,24 +985,59 @@ impl Run {
                 }
                 None
             }
-            Payload::Resolve { write } => {
+            Payload::Resolve { name, write } => {
                 let node = node_of(&to);
                 let Fence::Leader { uuid, expected_seq } = write.fence else {
                     unreachable!("the client's writes are fenced");
                 };
                 let answer = self.replicas[&node].resolve(uuid, expected_seq, &write.records);
-                self.send(&to, &flight.from, Payload::Resolved(answer), None);
+                self.send(
+                    &to,
+                    &flight.from,
+                    Payload::Resolved {
+                        name: name.clone(),
+                        answer,
+                    },
+                    None,
+                );
                 None
             }
-            Payload::Resolved(answer) => {
-                let name = self
-                    .sent
-                    .values()
-                    .last()
-                    .map_or_else(String::new, |sent| sent.name.clone());
-                self.heard.insert(name, resolved_text(*answer));
+            Payload::Resolved { name, answer } => {
+                self.heard.insert(name.clone(), resolved_text(*answer));
                 None
             }
+        }
+    }
+
+    /// Hand a role message to the role of its receiver.
+    fn step_role(&mut self, flight: &InFlight, message: &Message) -> Option<Tally> {
+        let from = node_of(&flight.from);
+        let node = node_of(&flight.to);
+        if self.acceptors.contains_key(&node) {
+            let effects = self
+                .acceptors
+                .get_mut(&node)
+                .expect("an acceptor")
+                .step(from, message.clone());
+            self.acceptor_effects(node, effects);
+            None
+        } else if self.leaders.contains_key(&node) {
+            let effects = self
+                .leaders
+                .get_mut(&node)
+                .expect("a leader")
+                .step(from, message.clone());
+            let tally = self.count(node, from, message, &effects);
+            self.leader_effects(node, effects);
+            tally
+        } else {
+            let effects = self
+                .replicas
+                .get_mut(&node)
+                .expect("a replica")
+                .step(from, message.clone());
+            self.replica_effects(node, effects);
+            None
         }
     }
 
@@ -1251,9 +1268,12 @@ impl Run {
                 let members = self.counted.entry((leader, Some(*slot))).or_default();
                 members.insert(from);
                 let members = members.clone();
-                let chosen = effects.iter().any(|effect| {
+                if effects.iter().any(|effect| {
                     matches!(effect, LeaderEffect::Send { message: Message::Commit { slot: s, .. }, .. } if s == slot)
-                }) || self.chosen.contains_key(slot) && members.len() >= 2;
+                }) {
+                    self.committed.insert((leader, *slot));
+                }
+                let chosen = self.committed.contains(&(leader, *slot));
                 Some(Tally {
                     what: "votes".to_string(),
                     at: lane_of(leader),
@@ -1285,8 +1305,15 @@ impl Run {
         let from = party(&flight.from);
         let wrote = self.writes.get(&flight.to).cloned().unwrap_or_default();
         let mut says = match &flight.payload {
-            Payload::Role(Message::Prepare { .. }) if wrote.is_empty() => {
-                format!("{to} already holds this promise, and answers again.")
+            Payload::Role(Message::Prepare { ballot, .. }) if wrote.is_empty() => {
+                if self.acceptors[&node_of(&flight.to)].promised() == *ballot {
+                    format!("{to} already holds this promise, and answers again.")
+                } else {
+                    format!(
+                        "{to} holds a promise above ballot {}, so it refuses.",
+                        ballot_text(*ballot)
+                    )
+                }
             }
             Payload::Role(Message::Prepare { ballot, from: slot }) => format!(
                 "{to} writes its promise for ballot {}, then sends its votes from slot {}.",
@@ -1305,10 +1332,19 @@ impl Run {
                 value_name(command),
                 slot.0
             ),
-            Payload::Role(Message::Accept { ballot, .. }) => format!(
-                "{to} holds a promise above ballot {}, so it refuses.",
-                ballot_text(*ballot)
-            ),
+            Payload::Role(Message::Accept { ballot, slot, .. }) => {
+                if self.acceptors[&node_of(&flight.to)]
+                    .vote(*slot)
+                    .is_some_and(|(voted, _)| voted == ballot)
+                {
+                    format!("{to} already holds this vote, and answers again.")
+                } else {
+                    format!(
+                        "{to} holds a promise above ballot {}, so it refuses.",
+                        ballot_text(*ballot)
+                    )
+                }
+            }
             Payload::Role(Message::Accepted { slot, .. }) => {
                 format!(
                     "{to} counts the vote of {} for slot {}.",
@@ -1322,10 +1358,18 @@ impl Run {
                 value_name(command)
             ),
             Payload::Role(Message::Commit { slot, .. }) => {
-                format!(
-                    "{to} does not hold slot {}: it is not in its segment.",
-                    slot.0
-                )
+                if self
+                    .replicas
+                    .get(&node_of(&flight.to))
+                    .is_some_and(|replica| replica.chosen().contains_key(slot))
+                {
+                    format!("{to} already holds slot {}.", slot.0)
+                } else {
+                    format!(
+                        "{to} does not hold slot {}: it is not in its segment.",
+                        slot.0
+                    )
+                }
             }
             Payload::Role(Message::Applied { slot, answer, .. }) => format!(
                 "{to} learns that slot {} applied: {}.",
@@ -1342,7 +1386,9 @@ impl Run {
             Payload::Done { refused: None, .. } => format!("{to} learns that its write is done."),
             Payload::Done { .. } => format!("{to} learns that its write is refused."),
             Payload::Resolve { .. } => format!("{to} checks the seq in its fold of its segment."),
-            Payload::Resolved(answer) => format!("The client learns: {}.", resolved_text(*answer)),
+            Payload::Resolved { answer, .. } => {
+                format!("The client learns: {}.", resolved_text(*answer))
+            }
         };
         // A leader whose phase moved says so.
         for (node, leader) in &self.leaders {

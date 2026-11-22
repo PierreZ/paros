@@ -34871,7 +34871,7 @@
               "Acceptor 3 left the grid too early"
             ],
             "right": 0,
-            "why": "The end must be one above the highest vote that a Phase 1 of the old grid sees. Any two acceptors of the old column hold w2, so that Phase 1 sees it, ends the segment at slot 4, and writes w2 again at slot 3.",
+            "why": "The end must be one above the highest vote that a Phase 1 of the old grid sees. Any two acceptors of the old column include acceptor 2 or 3, which hold w2, so that Phase 1 sees it, ends the segment at slot 4, and writes w2 again at slot 3.",
             "after": true
           }
         }

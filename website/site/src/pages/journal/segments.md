@@ -117,7 +117,7 @@ The runs below are recorded from the journal roles of `paros-journal`: a client 
 the controller, the matchmaker register, two leaders (proposer 5 of the old grid, proposer 6 of the new one),
 four acceptors and one replica for each segment. Acceptors 1, 2 and 3 form the grid of segment
 1; a reshape opens segment 2 on acceptors 1, 2 and 4. Each step is one message that the driver
-delivers to the real role; the seal end, the boundary state and each answer come from the role
+delivers to the real role, or one call (a write, the reshape, a campaign, a `Resolve`); the seal end, the boundary state and each answer come from the role
 that sent it.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>

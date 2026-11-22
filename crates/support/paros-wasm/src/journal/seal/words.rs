@@ -214,7 +214,7 @@ pub(super) fn kind_of(payload: &Payload) -> &'static str {
         Payload::Change(_) => "Change",
         Payload::Done { .. } => "Done",
         Payload::Resolve { .. } => "Resolve",
-        Payload::Resolved(_) => "Resolved",
+        Payload::Resolved { .. } => "Resolved",
     }
 }
 
@@ -230,7 +230,7 @@ pub(super) fn phase_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::Pull { .. }) => "catchup",
         Payload::Write { .. } | Payload::Reply { .. } => "other",
         Payload::Change(_) | Payload::Done { .. } => "reconfigure",
-        Payload::Resolve { .. } | Payload::Resolved(_) => "read",
+        Payload::Resolve { .. } | Payload::Resolved { .. } => "read",
     }
 }
 
@@ -244,7 +244,7 @@ pub(super) fn is_reply(payload: &Payload) -> bool {
                 | Message::Applied { .. }
         ) | Payload::Reply { .. }
             | Payload::Done { .. }
-            | Payload::Resolved(_)
+            | Payload::Resolved { .. }
     )
 }
 
@@ -318,7 +318,7 @@ pub(super) fn label_of(payload: &Payload) -> String {
         Payload::Change(other) => format!("{other:?}"),
         Payload::Done { refused: None, .. } => "Done".to_string(),
         Payload::Done { .. } => "Refused".to_string(),
-        Payload::Resolve { write } => match write.fence {
+        Payload::Resolve { write, .. } => match write.fence {
             Fence::Leader { expected_seq, .. } => format!(
                 "Resolve {} · seq {}",
                 value_name(&Command::Write(write.clone())),
@@ -326,7 +326,7 @@ pub(super) fn label_of(payload: &Payload) -> String {
             ),
             Fence::Open => "Resolve".to_string(),
         },
-        Payload::Resolved(answer) => format!("Resolved · {}", resolved_text(*answer)),
+        Payload::Resolved { answer, .. } => format!("Resolved · {}", resolved_text(*answer)),
     }
 }
 
@@ -557,7 +557,7 @@ fn call_content(payload: &Payload) -> (Vec<Field>, String) {
                 format!("Refused: {why:?}."),
             ),
         },
-        Payload::Resolve { write } => {
+        Payload::Resolve { write, .. } => {
             let seq = match write.fence {
                 Fence::Leader { expected_seq, .. } => expected_seq.0.to_string(),
                 Fence::Open => "-".to_string(),
@@ -571,7 +571,7 @@ fn call_content(payload: &Payload) -> (Vec<Field>, String) {
                 format!("Did {name} take seq {seq} in your segment?"),
             )
         }
-        Payload::Resolved(answer) => (
+        Payload::Resolved { answer, .. } => (
             vec![field("answer", resolved_text(*answer))],
             match answer {
                 ResolveAnswer::Written { seq, .. } => {
