@@ -74,17 +74,25 @@ Slots == 0..(NS - 1)
 Values == Commands \cup {Noop}
 None == "none"
 
-ASSUME Alloc \in {"frontier", "prefix"}
-ASSUME Gap \in {"noop", "skip"}
-ASSUME Durable \in {"before", "after"}
-ASSUME Identity \in BOOLEAN
-ASSUME Down \subseteq Acceptors
-ASSUME Pick \in {"highest", "lowest"}
-ASSUME Restartable \subseteq Acceptors
-ASSUME Learners \subseteq Acceptors
-ASSUME Noop \notin Commands
-ASSUME Owner \in [Ballots -> Acceptors]
-ASSUME Q2 \in [Slots -> SUBSET SUBSET Acceptors]
+ASSUME AllocType == Alloc \in {"frontier", "prefix"}
+ASSUME GapType == Gap \in {"noop", "skip"}
+ASSUME DurableType == Durable \in {"before", "after"}
+ASSUME IdentityType == Identity \in BOOLEAN
+ASSUME DownType == Down \subseteq Acceptors
+ASSUME PickType == Pick \in {"highest", "lowest"}
+ASSUME RestartableType == Restartable \subseteq Acceptors
+ASSUME LearnersType == Learners \subseteq Acceptors
+ASSUME NoopNotCommand == Noop \notin Commands
+ASSUME OwnerType == Owner \in [Ballots -> Acceptors]
+ASSUME Q2Type == Q2 \in [Slots -> SUBSET SUBSET Acceptors]
+\* The facts below are what the proof of `Inv` (`MultiPaxosProof.tla`) uses
+\* about the constants. TLC checks each one on each configuration.
+ASSUME AcceptorsFinite == IsFiniteSet(Acceptors)
+ASSUME NBType == NB \in Nat
+ASSUME NSType == NS \in Nat
+ASSUME RestartsType == Restarts \in Nat
+ASSUME WipesType == Wipes \in Nat
+ASSUME NoneNotValue == None \notin Values
 Vote == [bal : 0..NB, val : Values \cup {None}]
 NoVote == [bal |-> 0, val |-> None]
 
@@ -458,27 +466,30 @@ RecordOK(a, s, r, below) ==
 ChosenBy(s, b, v) == \E c \in 1..b : ChosenAt(c, s, v)
 
 \* The state of each node.
-NodeInv ==
-  \A a \in Acceptors :
+\* The state of slot s at node a, when a is not wiped.
+NodeSlotOK(a, s) ==
+  \* Only a learner or a ballot owner learns.
+  /\ learned[a][s] # None => a \in Learners \cup {Owner[b] : b \in Ballots}
+  /\ RecordOK(a, s, vote[a][s], NB + 1)
+  /\ vote[a][s].bal <= prom[a]
+  \* A record that is not a vote comes from a learn.
+  /\ vote[a][s].bal > 0 /\ ~VotedFor(a, vote[a][s].bal, s, vote[a][s].val)
+       => ChosenBy(s, vote[a][s].bal, vote[a][s].val)
+  \* A learned slot holds its record, chosen at or below it.
+  /\ learned[a][s] # None =>
+       /\ vote[a][s].val = learned[a][s]
+       /\ ChosenBy(s, vote[a][s].bal, learned[a][s])
+
+NodeOK(a) ==
     IF a \in wiped
     THEN /\ prom[a] = 0
          /\ \A s \in Slots : vote[a][s] = NoVote /\ learned[a][s] = None
-    ELSE /\ \A s \in Slots :
-              \* Only a learner or a ballot owner learns.
-              /\ learned[a][s] # None => a \in Learners \cup {Owner[b] : b \in Ballots}
-              /\ RecordOK(a, s, vote[a][s], NB + 1)
-              /\ vote[a][s].bal <= prom[a]
-              \* A record that is not a vote comes from a learn.
-              /\ vote[a][s].bal > 0 /\ ~VotedFor(a, vote[a][s].bal, s, vote[a][s].val)
-                   => ChosenBy(s, vote[a][s].bal, vote[a][s].val)
-              \* A learned slot holds its record, chosen at or below it.
-              /\ learned[a][s] # None =>
-                   /\ vote[a][s].val = learned[a][s]
-                   /\ ChosenBy(s, vote[a][s].bal, learned[a][s])
+    ELSE \A s \in Slots : NodeSlotOK(a, s)
+
+NodeInv == \A a \in Acceptors : NodeOK(a)
 
 \* The state of each ballot.
-BallotInv ==
-  \A b \in Ballots :
+BallotOK(b) ==
     LET Has1a == \E m \in msgs : m.type = "1a" /\ m.bal = b
     IN /\ phase[b] = "idle" <=> ~Has1a
        /\ phase[b] \in {"idle", "p1"} => next[b] = 0 /\ front[b] = 0
@@ -491,9 +502,10 @@ BallotInv ==
        \* Each slot at or above the allocator is free.
        /\ phase[b] = "p2" => \A s \in Slots : s >= next[b] => FreeAt(b, s)
 
+BallotInv == \A b \in Ballots : BallotOK(b)
+
 \* What each message says is true.
-MsgInv ==
-  \A m \in msgs :
+MsgOK(m) ==
     /\ m.type = "1a" =>
          /\ \A n \in msgs : n.type = "1a" /\ n.bal = m.bal => n = m
          /\ \E n \in msgs : n.type = "1b" /\ n.bal = m.bal /\ n.acc = Owner[m.bal]
@@ -509,6 +521,8 @@ MsgInv ==
     /\ m.type = "2b" =>
          /\ Proposed(m.bal, m.slot, m.val)
          /\ m.acc \notin wiped => m.bal <= prom[m.acc]
+
+MsgInv == \A m \in msgs : MsgOK(m)
 
 Inv ==
   /\ TypeOK
