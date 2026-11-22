@@ -237,3 +237,37 @@ fn phase1_quorums_meet_matches_every_pair_of_small_grids() {
     }
     assert!(!QuorumSystem::grid(2, 2).phase1_quorums_meet());
 }
+
+/// A grid that is not full-column is admitted only when its Phase-1
+/// quorums meet: on `rows = 4, acks = 3` two Phase-1 quorums of two per
+/// column miss each other and no election seals the rows, and a leaderless
+/// read can miss a campaign (#1483 (read fence on a grid whose Phase-1
+/// quorums do not meet)).
+#[test]
+fn a_grid_whose_phase1_quorums_miss_is_refused_unless_full() {
+    let grid = |rows, acks| QuorumSystem::Grid {
+        rows,
+        cols: 2,
+        acks,
+    };
+    assert!(!grid(4, 3).admits(8), "rows 4, acks 3 is refused");
+    assert!(!grid(5, 4).admits(10), "rows 5, acks 4 is refused");
+    assert!(grid(4, 4).admits(8), "a full-column grid seals its rows");
+    assert!(grid(4, 2).admits(8), "rows 4, acks 2 meets");
+    assert!(QuorumSystem::partitions(2, 2).admits(10));
+    // Every small grid: admitted exactly when it tiles, its counts fit,
+    // and it seals its rows or its Phase-1 quorums meet.
+    for rows in 1..=7 {
+        for acks in 1..=rows {
+            for cols in 1..=3 {
+                let system = QuorumSystem::Grid { rows, cols, acks };
+                let reads_safely = acks == rows || system.phase1_quorums_meet();
+                assert_eq!(
+                    system.admits(rows * cols),
+                    reads_safely,
+                    "rows {rows}, cols {cols}, acks {acks}"
+                );
+            }
+        }
+    }
+}
