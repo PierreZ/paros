@@ -6,9 +6,11 @@ offline minting and derivation, and the verifier of each request. `publish = fal
 `docs/architecture/03-5-frontend-and-resolver.md` §3.5 "Tokens are Biscuits".
 
 The crate stands alone. It depends on no other paros crate, it uses no runtime, and no crate of
-the workspace depends on it yet. It is not a pure crate of `scripts/check-core-deps.sh` and it
-is not part of the `paros` facade: Biscuit's wasm32 clock needs JavaScript, so the crate does
-not build for `wasm32-unknown-unknown`.
+the workspace depends on it yet. It is in layer 6 of `scripts/layers.sh`, with the adapters:
+it implements the `Authz` port over an external crate (`biscuit-auth`, which draws on
+`getrandom`), so it is not a pure crate of `scripts/check-core-deps.sh`, and it is not part of
+the `paros` facade. Biscuit's wasm32 clock needs JavaScript, so the crate does not build for
+`wasm32-unknown-unknown` (a finding of #1411 (CI checks that hold the layering)).
 
 It came back from the tag `v0.2.0-alpha.1` on 2026-11-21 without its adapter to the old
 frontend (`src/frontend.rs`: `BiscuitAuthz`, `operation`, `since_epoch`). A new frontend writes

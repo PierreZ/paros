@@ -4,8 +4,10 @@
 # fails on a folder with no line. The numbers are about
 # (guards x minutes of the folder's checks) / 40: a mutant that survives runs
 # every check of its folder. A slice that its budget cuts reports `unfinished`
-# mutants: give its folder more slices. GitHub runs at most 256 slices.
+# mutants: give its folder more slices. A GitHub matrix holds at most 256
+# jobs, so the workflow runs the slices in two matrices (512 at most).
 abandoned-ballot 2
+batcher 1
 campaign-discovery 1
 cas-register 4
 cell-control 2
@@ -16,19 +18,23 @@ ctrl-segments 1
 decree 2
 degraded-reshape 7
 flight-rule 1
+generations 3
 grid 0
 grid-controller 4
 handover 5
 handover-chain 1
 handover-gc 1
 health 0
+journal-state 19
 leader-handoff 12
 matchmaker 3
 multi-paxos 14
 multi-writer 2
+node 42
 offload 1
 proxy-leader 1
 quorum-everywhere 3
+re-replication 9
 reads 28
 retire-fence 18
 seal-chain 3

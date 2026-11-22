@@ -35,8 +35,12 @@
 (*           takes no step (docs/architecture/05-failure-model-and-zones.md, *)
 (*           the rule of the matchmaker handover). FALSE: it answers as     *)
 (*           Identity says.                                                *)
-(*   Wipes   how many acceptors may be wiped, each at most one time.       *)
-(*   Down    the acceptors that never take a step (liveness checks only).  *)
+(*   Wipes   how many acceptors may be wiped; a wiped acceptor may be      *)
+(*           wiped again.                                                  *)
+(*   Down    the acceptors that are down: they may still take steps, but   *)
+(*           no step of theirs is owed (no fairness), so a liveness check  *)
+(*           also sees the run where they never take one. A crash and a    *)
+(*           slow acceptor look the same in an asynchronous run.           *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -90,15 +94,13 @@ Init ==
 
 Send(m) == msgs' = msgs \cup {m}
 
-\* The proposer of ballot b opens Phase 1.
+\* The proposer of ballot b opens Phase 1 (a second time changes nothing).
 Prepare(b) ==
-  /\ [type |-> "1a", bal |-> b] \notin msgs
   /\ Send([type |-> "1a", bal |-> b])
   /\ UNCHANGED <<prom, vbal, vval, wiped>>
 
 \* Acceptor a promises ballot b and reports its vote.
 Promise(a, b) ==
-  /\ a \notin Down
   /\ Refuse => a \notin wiped
   /\ [type |-> "1a", bal |-> b] \in msgs
   /\ prom[a] < b
@@ -116,23 +118,22 @@ Selectable(S) ==
       top == CHOOSE m \in rep : \A n \in rep : n.vbal <= m.vbal
   IN IF Pick = "ignore" \/ rep = {} THEN Values ELSE {top.vval}
 
-\* The proposer of ballot b closes Phase 1 on the promises S, one for each
-\* acceptor (the first that arrived; the proposer ignores a second promise of
-\* the same acceptor), and opens Phase 2 with one value.
+\* The proposer of ballot b closes Phase 1 on the promises S and opens
+\* Phase 2 with one value. An acceptor that is not wiped promises b at most
+\* one time (prom[a] < b), so S has one promise for each acceptor when
+\* Refuse holds; with Refuse off the controls fail anyway.
 Propose(b) ==
   /\ ~\E m \in msgs : m.type = "2a" /\ m.bal = b
   /\ \E S \in SUBSET {m \in msgs : m.type = "1b" /\ m.bal = b} :
-       /\ \A m, n \in S : m.acc = n.acc => m = n
        /\ Phase1Done({m.acc : m \in S})
        /\ \E v \in Selectable(S) : Send([type |-> "2a", bal |-> b, val |-> v])
   /\ UNCHANGED <<prom, vbal, vval, wiped>>
 
-\* Acceptor a votes for the value of ballot b.
+\* Acceptor a votes for the value of ballot b. Ballot b has one `2a`, so a
+\* second vote at b changes nothing.
 Accept(a, b) ==
-  /\ a \notin Down
   /\ Identity => a \notin wiped
   /\ prom[a] <= b
-  /\ vbal[a] # b
   /\ \E m \in msgs :
        /\ m.type = "2a" /\ m.bal = b
        /\ prom' = [prom EXCEPT ![a] = b]
@@ -143,8 +144,6 @@ Accept(a, b) ==
 
 \* Acceptor a loses its disk.
 Wipe(a) ==
-  /\ a \notin wiped
-  /\ a \notin Down
   /\ Cardinality(wiped) < Wipes
   /\ wiped' = wiped \cup {a}
   /\ prom' = [prom EXCEPT ![a] = 0]

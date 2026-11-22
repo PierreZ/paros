@@ -1,11 +1,11 @@
 # Leaderless quorum reads
 
-Group: Reads. Status: verified 2026-10-31.
+Group: Reads. Status: verified 2026-10-31; the Paxos Quorum Reads source added and verified 2026-11-22.
 
 A linearizable read that never touches the leader and never reads a clock. The reader asks a
 **Phase-1** quorum of acceptors for their **vote watermarks** (the highest slot each voted in),
 takes the maximum, and serves the read once its own applied prefix covers that index
-([SRSM §3.4], after Paxos Quorum Reads). Every write acknowledged before the read began is then
+([SRSM §3.4], after Paxos Quorum Reads [PQR §4]). Every write acknowledged before the read began is then
 visible to it. In paros every `Read` takes this path (`QuorumRead`, #143), on any node or
 replica: there is no lease read and no read through the leader.
 
@@ -17,7 +17,8 @@ A Multi-Paxos leader linearizes reads too, so reads load the leader and every re
 - a read through the log costs a full Phase 2;
 - a lease read on the leader trusts clocks (paros enforces no lease, `docs/architecture/02-data-plane.md`
   §2.3);
-- a plain read from any replica can be stale.
+- a plain read from any replica can be stale, and so can a plain read from a majority: a follower
+  knows what it accepted, not what was chosen [PQR §1].
 
 Reads do not modify state, so they need not be ordered by the leader, and only one replica needs
 to serve one ([SRSM §3.4]).
@@ -165,7 +166,18 @@ and does not read the segment table at a matchmaker quorum on each read (decided
 | On a replica | `paros-consensus/src/replica_node.rs`: `ReplicaNode::quorum_read_in` |
 | The decision | `docs/journal/02-data-plane.md` §J2.5 |
 
-**Sim gates and oracles** (`paros-sim/src/audit/node.rs` and `audit/state.rs`):
+**Judges today:**
+
+- `READ_SEES_WRITES`, "a read sees every write that completed before it started"
+  (`consensus-sim/src/oracle/reads.rs`); its control is `Mutant::LocalRead`.
+  `Mutant::BeliefFence` and `Mutant::HideWatermark` pass the oracle on most seeds and are refused
+  by the trace check (`specs/tla/node/ReadsTrace.tla`).
+- The model `specs/tla/reads/` and the flavors `Flavor::reads` and `Flavor::lagging_reads`, with
+  the walk sites "cluster: a node answered a leaderless read", "cluster: a replica answered a
+  leaderless read" and "quorum read: a promise above the basis opens no read".
+- Core probes of `quorum_read.rs` and `node/quorum_reads.rs`.
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/node.rs` and `audit/state.rs`):
 
 - `"quorum read: a read serves every slot chosen before it opened"`.
 - `"quorum read: a node serves only once its prefix covers the row's watermark"`.
@@ -184,8 +196,18 @@ and does not read the segment table at a matchmaker quorum on each read (decided
 - [SRSM §3.4] reads from a replica. paros serves from any node (leader, follower, spare) or
   replica.
 - An undecided slot under the watermark makes the server wait until it is decided or gap-filled
-  (the `quorum_read.rs` module doc). How Paxos Quorum Reads treats that slot waits for its
-  transcript (below).
+  (the `quorum_read.rs` module doc). This is PQR's **rinse** [PQR §4]: the client waits until the
+  highest accepted slot is executed, and one node is enough to ask, because "the command executes
+  only when all commands on prior slots have been committed". In paros the server asks itself:
+  its own applied prefix must cover the index (`Replica::covers`).
+- [PQR §4] reads from a majority of followers and leaves the leader out. paros asks any Phase-1
+  quorum, and the leader is one acceptor among the others.
+- [PQR §4.1] skips the rinse when the accepted and executed slots match on the quorum (in
+  general, or for one object). paros has no such shortcut: a read waits until the prefix covers
+  the index, which is at once when nothing is in flight.
+- [PQR §4.2] sizes the read quorum against Q2 with Flexible Paxos (with `N = 5` and `Q2 = 4`, a
+  read asks 2 nodes). paros asks a Phase-1 quorum of its quorum system: one row on a full-column
+  grid.
 - paros adds the read basis and its fence (#260); the papers assume one configuration.
 - [SRSM §3.6]'s sequentially and eventually consistent reads are not in the core: the first is
   client-side watermark bookkeeping, the second a plain read from any replica.
@@ -225,11 +247,15 @@ and does not read the segment table at a matchmaker quorum on each read (decided
   `docs/references/papers/scaling-rsm-compartmentalization/transcript.md` §3.4 (leaderless reads,
   PQR), §3.5 (correctness), §3.6 (non-linearizable reads).
 - frankenpaxos read batcher: `docs/references/frankenpaxos/04-compartmentalization.md` §5.
-- To add: Charapko, Ailijiang, Demirbas, *Linearizable Quorum Reads in Paxos*, HotStorage 2019
-  (<https://www.usenix.org/conference/hotstorage19/presentation/charapko>). No transcript yet:
-  `usenix.org` is outside the network allowlist of the session that wrote this card. No claim
-  in this card rests on it.
+- [PQR] Charapko, Ailijiang, Demirbas, *Linearizable Quorum Reads in Paxos*, HotStorage 2019:
+  `docs/references/papers/paxos-quorum-reads/transcript.md` §1 (a bare quorum read is not
+  linearizable), §4 (the quorum-read phase and the rinse), §4.1 (rinse-free reads), §4.2 (the
+  flexible-quorum read), §6 (Figure 6: reads without the rinse break linearizability).
 
 [SRSM §3.4]: ../../references/papers/scaling-rsm-compartmentalization/transcript.md
 [SRSM §3.5]: ../../references/papers/scaling-rsm-compartmentalization/transcript.md
 [SRSM §3.6]: ../../references/papers/scaling-rsm-compartmentalization/transcript.md
+[PQR §4]: ../../references/papers/paxos-quorum-reads/transcript.md
+[PQR §4.1]: ../../references/papers/paxos-quorum-reads/transcript.md
+[PQR §4.2]: ../../references/papers/paxos-quorum-reads/transcript.md
+[PQR §1]: ../../references/papers/paxos-quorum-reads/transcript.md
