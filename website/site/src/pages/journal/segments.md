@@ -4,6 +4,7 @@ kicker: Journal
 section: journal/
 status: journal
 lab: register
+trace: journal-seal
 title: Segments
 description: A segment is the run of slots of one acceptor grid. A reshape opens one, the first leader of the new grid seals the old one, and the boundary state carries the journal across.
 ---
@@ -110,6 +111,17 @@ record ends the read, so a read never misses a slot that the new grid chose. The
 this fence of the code, and a read does not read the segment records at a matchmaker quorum
 (§J3.3, `specs/tla/experiments/segments/reads/`).
 
+## Step through
+
+The runs below are recorded from the journal roles of `paros-journal`: a client with leader A,
+the controller, the matchmaker register, two leaders (proposer 5 of the old grid, proposer 6 of the new one),
+four acceptors and one replica for each segment. Acceptors 1, 2 and 3 form the grid of segment
+1; a reshape opens segment 2 on acceptors 1, 2 and 4. Each step is one message that the driver
+delivers to the real role; the seal end, the boundary state and each answer come from the role
+that sent it.
+
+<div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
+
 ## Your turn
 
 Move the records of the segments by hand. Each button is one compare-and-set on the value of the
@@ -135,4 +147,8 @@ of its own.
   The composed model is [`journal-state/`](https://github.com/PierreZ/paros/tree/main/specs/tla/journal-state).
 - [`paros-wasm`](https://github.com/PierreZ/paros/tree/main/crates/support/paros-wasm), feature
   `journal`: the exercises above, a driver of the register value with no rule of its own.
+- [`paros-wasm`](https://github.com/PierreZ/paros/tree/main/crates/support/paros-wasm), feature
+  `journal`: the step-through above, recorded from `JournalLeader`, `JournalAcceptor` and
+  `SegmentReplica` of [`roles`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-journal/src/roles)
+  and the register value, in [`journal/seal.rs`](https://github.com/PierreZ/paros/blob/main/crates/support/paros-wasm/src/journal/seal.rs).
 - Not built yet: the retire and the trim of the journal roles (#1326).

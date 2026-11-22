@@ -2,7 +2,7 @@
 // A reading page: the title block, the text, and the pages of its section.
 import Base from "./Base.astro";
 import { REPO, url } from "../nav";
-import { LESSONS, check, lessonsOf } from "../course";
+import { LESSONS, check, lessonsOf, pathOf } from "../course";
 
 interface Sibling { title: string; path: string }
 interface Props {
@@ -78,17 +78,23 @@ const course = fm.trace ? lessonsOf(fm.trace).map((l) => {
     n: l.n, id: l.id, title: l.title, of: LESSONS.length, labs: l.labs ?? [],
     runs: l.runs.map((id) => ({ id, label: byPage[l.page].scenarios.find((s) => s.id === id)!.label })),
     next: next && { n: l.n + 1, title: next.title, page: next.page,
-      href: url(`paxos/${next.page}/`) + `#run=${next.runs[0]}&${story(next.page) ? "beat" : "step"}=0` },
+      href: url(pathOf(next)) + `#run=${next.runs[0]}&${story(next.page) ? "beat" : "step"}=0` },
   };
 }) : [];
+// The engine that records the trace again in the browser: the Paxos pages run
+// paros-consensus (`paxos_trace`), the Journal pages the journal roles of
+// paros-journal (`journal_trace`, #1365).
+const engine = fm.trace?.startsWith("journal-")
+  ? { wasm: url("journal/wasm/paros_journal_lab.js"), call: "journal_trace", source: "paros-journal" }
+  : { wasm: url("paxos/wasm/paros_paxos.js"), call: "paxos_trace", source: "paros-consensus" };
 // A page of a design that is checked but not built yet says so at the top (#1349).
 const STATUS: Record<string, { tag: string; html: string }> = {
   journal: {
     tag: "design · checked in TLA+",
     html: `The journal v1 is designed, and each of its rules has a TLA+ model. Its code is being
       built (<a href="${REPO}/issues/1323">#1323</a>): the pure journal core and the
-      matchmaker register (<code>paros-journal</code>) exist, and the roles and the driver do not
-      exist yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
+      matchmaker register and the first roles (<code>paros-journal</code>) exist, and so do the IO
+      traits and the driver (<code>paros-journal-io</code>); the other roles do not exist yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
       this page explains them and links each section.`,
   },
   parosd: {
@@ -121,7 +127,7 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
       {status && <div class="callout status" data-tag={status.tag}><p set:html={status.html} /></div>}
       <slot />
     </article>
-    {trace && <script is:inline type="application/json" id="trace" data-wasm={url("paxos/wasm/paros_paxos.js")} set:html={JSON.stringify(trace).replace(/</g, "\\u003c")} />}
+    {trace && <script is:inline type="application/json" id="trace" data-wasm={engine.wasm} data-call={engine.call} data-source={engine.source} set:html={JSON.stringify(trace).replace(/</g, "\\u003c")} />}
     {trace && <script is:inline type="application/json" id="course" set:html={JSON.stringify({ lessons: course, map: url("paxos/#course") }).replace(/</g, "\\u003c")} />}
     {trace && <script is:inline src={url("course.js")} />}
     {trace && <script is:inline src={url("story.js")} />}

@@ -314,7 +314,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `cargo check --target wasm32-unknown-unknown -p paros-journal`, the same with
   `-p paros-journal-control` and with `-p paros-journal-io`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
-- the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
+- the `wasm` job: `cargo test -p paros-wasm --test paxos_traces --test journal_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - the site (`.github/workflows/pages.yml`, on pull requests that touch the site, `paros-wasm`,
   `paros-consensus`, `paros-journal` or the Cargo files): `scripts/build-wasm.sh`, the Astro
