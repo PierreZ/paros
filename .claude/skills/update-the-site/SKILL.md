@@ -20,6 +20,11 @@ teases the journal service being rewritten (the version before is at the tag `v0
 | quorum everywhere, the counts of `F + 1`, CTRL, zones (§J5) | `journal/quorums-and-failures.md` |
 | the controller, the fenced reshape, journal health (§J6) | `journal/controller.md` |
 | parosd, the ten goals (`docs/architecture/01-goal.md` §1.1), the version at the tag `v0.2.0-alpha.1` | `parosd/index.astro` |
+| the layers of the service and the checks that hold them (§4.4) | `parosd/layers.md` |
+| the control levels, the term by `SetLeader`, the info tables (§3.1, §3.3, §4.4) | `parosd/control.md` |
+| a machine: format, `cell init`, admission, bookings, release, the placement port (§3.1, §3.2, §4.4) | `parosd/machines.md` |
+| names, ids, the frontend, Biscuit tokens (§3.5, §3.8) | `parosd/names-and-tokens.md` |
+| the universe, the override and bucket tables, moves between cells (§3.7) | `parosd/universe.md` |
 | single decree | `paxos/single-decree.md` |
 | slots, the leader, persist-before-send, reads | `paxos/multi-paxos.md` |
 | matchmakers, reconfiguration, GC | `paxos/matchmaker.md` |

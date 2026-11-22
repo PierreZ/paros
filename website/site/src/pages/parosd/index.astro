@@ -1,19 +1,14 @@
 ---
-// parosd (#1349 (website page groups), group 3): what the service will be, that
-// it is rebuilt on the journal v1, and how to run the version before the
-// rewrite at the tag. Its other pages wait until its design is written again.
+// parosd (#1349 (website page groups), group 3; #1439 (the parosd page group)):
+// what the service will be, the ten goals, the stack of layers in one screen,
+// and how to run the version before the rewrite at the tag.
 import Doc from "../../layouts/Doc.astro";
 import { REPO, url } from "../../nav";
 const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
+const A = `${REPO}/blob/main/docs/architecture`;
 ---
-<Doc title="parosd" kicker="parosd · rewrite in progress" section="parosd/" siblings={[]}
-  description="The journal service: one binary on N machines that serves journals to many tenants and heals itself. It is being rebuilt on the journal v1.">
-  <div class="callout status" data-tag="being rebuilt">
-    <p>parosd is being rebuilt from the ground up, on top of the <a href={url("journal/")}>journal
-    v1</a>. Its design will be written again after the journal. Until then, this page is the only
-    parosd page.</p>
-  </div>
-
+<Doc title="parosd" kicker="parosd · rewrite in progress" section="parosd/" status="parosd"
+  description="The journal service: one binary on N machines that serves journals to many tenants and heals itself. It is being rebuilt on the journal v1, as a stack of layers.">
   <h2 id="what">What it will be</h2>
   <p>One binary, <code>parosd</code>, on N machines of a cell. It serves journals to many tenants
   over the four calls of the journal: <code>Write</code>, <code>Read</code>, <code>Truncate</code>
@@ -41,7 +36,46 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
   </ol>
   <p>The features of the first version stay. Its structure changes: the service becomes a stack
   of layers on the journal v1, and each layer is a crate with its own model and its own
-  simulation (<a href={`${REPO}/blob/main/docs/architecture/04-roles.md`}><code>docs/architecture/04-roles.md</code></a>, §4.4).</p>
+  simulation (<a href={`${A}/04-roles.md#44-the-layers-of-the-service`}>§4.4</a>).</p>
+
+  <h2 id="stack">The stack</h2>
+  <p>Eight layers. A layer depends only on the layers below it. Layers 0 to 5 are pure: no
+  runtime, no I/O, and they build for wasm. Only layer 6 does I/O. The names of the crates still
+  to build are <b>Open</b>.</p>
+  <div class="arch" role="img" aria-label="The stack of parosd, from the bottom. Layer 0, paros-consensus, the Paxos flavors. Layer 1, the journal v1, its grid controller and its client. Layer 2, the host of actors and the IO traits. Layer 3, a fold over a journal and the election. Layer 4, the universe, the cell and the tenant. Layer 5, the machine, the names and the tokens. Layer 6, the adapters, the only layer that does I/O. Layer 7, the programs. Layers 0 to 5 are pure.">
+    <div class="box">7 · the programs <small>parosd · parosctl · the bench</small></div>
+    <div class="box side">6 · the adapters <small>moonpool RPC · protobuf · disks · metrics: the only I/O</small></div>
+    <div class="cellframe">
+      <span class="cellname">pure · builds for wasm</span>
+      <div class="box">5 · the machine <small>format · bootstrap · admission · bookings · names · tokens</small></div>
+      <div class="box">4 · the control levels <small>universe · cell · tenant</small></div>
+      <div class="box">3 · a fold over a journal · the election <small>SetLeader as a library</small></div>
+      <div class="box">2 · the host of actors <small><code>paros-journal-io</code></small></div>
+      <div class="box">1 · the journal v1 <small><code>paros-journal</code> · <code>paros-journal-control</code> · the client</small></div>
+      <div class="box lead">0 · the Paxos flavors <small><code>paros-consensus</code> · no tenant, no cell</small></div>
+    </div>
+  </div>
+  <p>Two joints hold the layers apart:</p>
+  <ul>
+    <li><b>A booking becomes an <code>Assign</code>.</b> The cell records where a role runs:
+      a booking. On the machine, a booking becomes <code>Input::Assign</code> of the host, and a
+      release becomes <code>Input::Unassign</code>. The journal never reads a booking. The part
+      between the two is <a href={`${REPO}/issues/1424`}>#1424</a>. <a href={url("parosd/machines/")}>Machines</a>.</li>
+    <li><b>A coordinator changes a journal only through fenced calls.</b> It records each action
+      in its own control journal before it does it. Each order carries its term and names the
+      epoch of its target, and the target refuses an old one
+      (<a href={`${A}/03-3-coordinators-and-placement.md#rule-3-a-small-authority-one-writer`}>§3.3, rule 3</a>).
+      <a href={url("parosd/control/")}>One shape at every level</a>.</li>
+  </ul>
+
+  <h2 id="pages">The pages</h2>
+  <ul>
+    <li><a href={url("parosd/layers/")}>Layers that stand alone</a>: what each layer is, and the checks that hold the layering.</li>
+    <li><a href={url("parosd/control/")}>One shape at every level</a>: the universe, a cell and a tenant are one kit.</li>
+    <li><a href={url("parosd/machines/")}>Machines</a>: format, bootstrap, admission, bookings, release, and the heal of the cell.</li>
+    <li><a href={url("parosd/names-and-tokens/")}>Names and tokens</a>: names for people, ids for machines, Biscuit tokens at the frontend.</li>
+    <li><a href={url("parosd/universe/")}>The universe</a>: the override table, the bucket table, and a move.</li>
+  </ul>
 
   <h2 id="before">The version before the rewrite</h2>
   <p>A first version ran: a daemon on each machine, a CLI, many cells, Biscuit tokens and a
