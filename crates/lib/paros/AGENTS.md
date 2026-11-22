@@ -32,7 +32,7 @@ process on the in-memory backends: three acceptors, three replicas, one leader, 
 transport over tokio channels and a clock on `tokio::time` written in the example: it shows what a
 program writes to bring its own runtime. tokio is a dev-dependency of `paros` only; the library
 depends on no runtime.
-Each new example joins the `examples` job of `.github/workflows/rust.yml`.
+Each new example joins the `checks` job of `.github/workflows/rust.yml`.
 
 The journal layers of the old design were removed on 2026-11-19. They are at the git tag
 `v0.2.0-alpha.1`; `docs/archive/v0.2.0-alpha.1/README.md` maps them. `docs/architecture/` is the
