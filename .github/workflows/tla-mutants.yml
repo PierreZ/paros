@@ -12,8 +12,13 @@
 # (`--baseline-from`). `scripts/mutate-tla-shards.txt` gives the number of
 # slices of each folder, and lists every folder. A slice has a budget below its 30-minute job: a
 # mutant that the budget cuts is `unfinished`, the slice fails, and the fix is
-# more slices. The `report` job lists every survivor and every unfinished
-# mutant. It runs each week and on demand. A pull request only checks that
+# more slices. A GitHub matrix holds at most 256 jobs, so the slices run in
+# two matrices (`tla-mutants-slices.yml`), the first 256 and the rest, at the
+# same time. The `report` job lists every survivor and every unfinished
+# mutant. It runs each week and on demand. A run on demand can name its
+# folders (`folders`, the survivors of a fix judged again) and hold each
+# matrix to a number of jobs at a time (`max_parallel`; with both matrices,
+# twice that number run), so that the other workflows still get runners. A pull request only checks that
 # every mutant parses (`--parse`, the `spec` job of `tla.yml`): the run of
 # every mutant takes hours of CI.
 name: TLA mutants
@@ -22,6 +27,15 @@ on:
   schedule:
     - cron: '41 4 * * 6'
   workflow_dispatch:
+    inputs:
+      folders:
+        description: 'Folders of specs/tla/ to judge, separated by spaces (empty: every folder)'
+        required: false
+        default: ''
+      max_parallel:
+        description: 'At most this many slice jobs at a time in each matrix'
+        required: false
+        default: '256'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,28 +49,54 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       folders: ${{ steps.list.outputs.folders }}
-      slices: ${{ steps.list.outputs.slices }}
+      first: ${{ steps.list.outputs.first }}
+      rest: ${{ steps.list.outputs.rest }}
     steps:
       - uses: actions/checkout@v7
       - name: List the folders of specs/tla and the slices of each
         id: list
+        env:
+          FOLDERS: ${{ inputs.folders }}
+          MAX_PARALLEL: ${{ inputs.max_parallel || '256' }}
         run: |
-          list=$(for m in specs/tla/*/checks.txt specs/tla/experiments/*/*/checks.txt; do
+          if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::max_parallel must be a positive whole number, not '$MAX_PARALLEL'"
+            exit 1
+          fi
+          all=$(for m in specs/tla/*/checks.txt specs/tla/experiments/*/*/checks.txt; do
               [ -f "$m" ] && dirname "${m#specs/tla/}"; done)
-          for f in $list; do
+          for f in $all; do
             if ! awk -v f="$f" '$1 == f { ok = 1 } END { exit !ok }' scripts/mutate-tla-shards.txt; then
               echo "::error::$f has no line in scripts/mutate-tla-shards.txt"
               exit 1
             fi
           done
+          list=$all
+          if [ -n "$FOLDERS" ]; then
+            for f in $FOLDERS; do
+              if ! grep -qxF -- "$f" <<<"$all"; then
+                echo "::error::$f is not a folder of specs/tla with a checks.txt"
+                exit 1
+              fi
+              if [ "$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)" = 0 ]; then
+                echo "::error::$f has no guard to judge (0 slices)"
+                exit 1
+              fi
+            done
+            list=$(tr -s ' ' '\n' <<<"$FOLDERS" | sed '/^$/d' | sort -u)
+          fi
           slices=$(for f in $list; do
               n=$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)
               for i in $(seq 1 "$n"); do echo "$f $i/$n"; done
             done | jq -R . | jq -sc .)
           folders=$(echo "$list" | jq -R . | jq -sc .)
           test "$slices" != "[]"
-          echo "folders=$folders" >>"$GITHUB_OUTPUT"
-          echo "slices=$slices" >>"$GITHUB_OUTPUT"
+          test "$(jq length <<<"$slices")" -le 512
+          {
+            echo "folders=$folders"
+            echo "first=$(jq -c '.[:256]' <<<"$slices")"
+            echo "rest=$(jq -c '.[256:]' <<<"$slices")"
+          } >>"$GITHUB_OUTPUT"
 
   baseline:
     needs: slices
@@ -84,42 +124,22 @@ jobs:
   slice:
     needs: [slices, baseline]
     if: ${{ !cancelled() && needs.slices.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        slice: ${{ fromJSON(needs.slices.outputs.slices) }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: actions/download-artifact@v6
-        with:
-          pattern: baseline-*
-          path: baselines
-      - name: Mutate the guards of specs/tla/${{ matrix.slice }}
-        id: name
-        run: |
-          read -r folder shard <<<"${{ matrix.slice }}"
-          echo "artifact=mutants-$(echo "$folder-$shard" | tr '/' '_')" >>"$GITHUB_OUTPUT"
-          cat baselines/*/baseline.tsv >baseline.tsv
-          touch mutants.tsv
-          status=0
-          nix develop .#tla --command scripts/mutate-tla.py --workers 1 --budget 1320 \
-            --baseline-from baseline.tsv \
-            --shard "$shard" --out mutants.tsv "$folder" || status=$?
-          printf 'done\t%s\n' "${{ matrix.slice }}" >>mutants.tsv
-          exit "$status"
-      - uses: actions/upload-artifact@v5
-        if: ${{ !cancelled() }}
-        with:
-          name: ${{ steps.name.outputs.artifact || format('mutants-{0}', strategy.job-index) }}
-          path: mutants.tsv
+    uses: ./.github/workflows/tla-mutants-slices.yml
+    with:
+      slices: ${{ needs.slices.outputs.first }}
+      max_parallel: ${{ inputs.max_parallel || '256' }}
+
+  slice-rest:
+    needs: [slices, baseline]
+    if: ${{ !cancelled() && needs.slices.result == 'success' && needs.slices.outputs.rest != '[]' }}
+    uses: ./.github/workflows/tla-mutants-slices.yml
+    with:
+      slices: ${{ needs.slices.outputs.rest }}
+      max_parallel: ${{ inputs.max_parallel || '256' }}
 
   # One list of every surviving guard, and of every slice that did not end.
   report:
-    needs: [slices, baseline, slice]
+    needs: [slices, baseline, slice, slice-rest]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -138,3 +158,4 @@ jobs:
           test "${{ needs.slices.result }}" = success
           test "${{ needs.baseline.result }}" = success
           test "${{ needs.slice.result }}" = success
+          case "${{ needs.slice-rest.result }}" in success | skipped) ;; *) exit 1 ;; esac

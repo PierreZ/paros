@@ -27,6 +27,7 @@ Read this file first. The index of every concept, its card and its sources is
 | How a real system implements it | `../references/<repo>/` (etcd-raft, frankenpaxos, ceph, foundationdb) |
 | paros's own design note for a rule | `../analysis/` |
 | The target design of the journal service | `../architecture/` |
+| The journal v1 and its rules | `../journal/` (link to it; a card never copies a journal rule) |
 
 A design note in `../analysis/` is paros's own text. A card may point to it, but a design note
 is the **subject** of a card, never its only source.
@@ -34,14 +35,14 @@ is the **subject** of a card, never its only source.
 ## Reading order
 
 1. Kernel: single-decree Paxos, the Multi-Paxos log, persist before send, pipelining, catch-up.
-2. Leader: [election](concepts/election.md), [CheckQuorum](concepts/check-quorum.md),
-   [leader handoff](concepts/leader-handoff.md).
+2. Leader: [election](concepts/election.md), [paging a campaign](concepts/paging-a-campaign.md),
+   [CheckQuorum](concepts/check-quorum.md), [leader handoff](concepts/leader-handoff.md).
 3. Quorums: grid quorums, the zone rule.
 4. Compartmentalization: proxy leaders, batchers, the replica tier.
 5. Reads: leaderless quorum reads.
 6. Reconfiguration: matchmaking, reconfiguration as a round change, GC, matchmaker generations.
 7. Storage: corrupted storage recovery, truncation and the trim point, boot safety.
-8. On the log: the writer fence.
+8. On the log: the writer fence, [segments and the seal](concepts/segments-and-seal.md).
 
 `concepts.md` marks each card verified or planned, group by group. A card that waits for a source
 says so in its row.
@@ -66,8 +67,8 @@ Every card has these twelve sections, in this order:
 11. **Relatives**: the other cards it depends on or interacts with.
 12. **Sources**: paper sections and implementation `file:line`.
 
-Under the title, one line gives the group and the status (`verified <date>` once a second
-reviewer checked it).
+Under the title, one line gives the group and the status (`written <date>` until a second
+reviewer checked it, then `verified <date>`).
 
 ## Rules
 
@@ -83,5 +84,9 @@ reviewer checked it).
 - **Verification**: a second reviewer (not the author) checks each claim against its source and
   each symbol against the code, then the status line says `verified <date>`.
 - **Keep it current**: a PR that adds or changes a concept updates its card (AGENTS.md).
+- **Point to the tree, and mark the tag.** §9 names the code and the judges in the tree today
+  (the core probes, the `consensus-sim` and `journal-sim` oracles, the TLA+ models). Code that
+  only the git tag `v0.2.0-alpha.1` holds is marked so, with its recap in
+  `../archive/v0.2.0-alpha.1/`.
 - **Writing**: ASD-STE100 Simplified Technical English, most of the time. Say "cell", never
   "cluster" (a source's own word stays in a quote).

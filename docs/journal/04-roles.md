@@ -258,7 +258,7 @@ creates these crates, each in its own step. `paros-journal` and `journal-sim` ex
 
 | Crate | What it holds | Step |
 |---|---|---|
-| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the matchmaker register and its handover (`register`), the journal roles (`roles`, #1326), the codec with a release number in every header (`codec`), the record headers (`command`); later the pure client (no network) | #1324 (paros-journal), #1325 (the matchmaker register), #1331 (the pure journal client) |
+| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the matchmaker register and its handover (`register`), the journal roles (`roles`, #1326), the codec with a release number in every header (`codec`), the record headers (`command`), the pure client with no network (`client`, #1331) | #1324 (paros-journal), #1325 (the matchmaker register), #1331 (the pure journal client) |
 | `paros-journal-control` (`crates/lib/`) | The pure `decide` of the v1 controller and the controller role | #1328 (paros-journal-control) |
 | `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the register), the on-disk format, the pure `Host` (many journals in one process), the generic driver under the flight rule, the `Events` port, backends in memory and the contract suites. Its examples `in_memory` and `custom_storage` run the roles on it. Its traits are not stable until the moonpool adapter of #1417 runs on them (2026-11-22) | #1329 (paros-journal-io) |
 | `paros-journal-moonpool` (`crates/lib/`) | Not in v1: the adapter of the `paros-journal-io` traits on moonpool providers (compio through moonpool's `CompioProviders`, no trait requires `Send`; Pierre, 2026-11-19), with moonpool RPC and protobuf as its transport ("The wire" below). It is built by the layered parosd (Pierre, 2026-11-22) | #1417 (the moonpool adapter on the generic host), with #1330 |
@@ -294,8 +294,9 @@ re-exports it only behind an optional feature that is off by default. The facade
 where paros bundles moonpool's storage and network for a program that wants them (Pierre,
 2026-11-21): the bundle is a feature of `paros`, never a dependency of a pure crate. CI runs
 `scripts/check-core-deps.sh`: it fails when a pure crate, or the facade with its default
-features, gains a dependency outside the workspace and the observation crates. A new pure crate
-joins that script in the pull request that creates it. The examples of #1370 (journal examples)
+features, gains a dependency outside the workspace and the observation crates. The pure crates
+are the crates of layers 0 to 5 of the layer table `scripts/layers.sh` (architecture §4.4), so a
+new pure crate is checked as soon as the pull request that creates it gives it its row. The examples of #1370 (journal examples)
 show the rule: a backend written by hand, in memory, with no runtime crate (`paros-journal-io`'s
 `custom_storage`).
 
