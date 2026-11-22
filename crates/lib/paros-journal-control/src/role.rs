@@ -410,19 +410,20 @@ impl Controller {
             probe!(reachable, "role: a heal on an old read ends");
             return self.abandon();
         }
+        let down = view.liveness.get(&heal.add) == Some(&Liveness::Down);
         if heal.complete {
             // Once the compare-and-set is sent, a copy of it can still be in
             // the network: the heal ends only on an answer, so the new
             // replica keeps its copy until the register took or refused the
             // change (a down new replica that holds the copy is a member
             // that a later heal replaces).
-            if view.liveness.get(&heal.add) == Some(&Liveness::Down) {
+            if down {
                 probe!(reachable, "role: a sent heal outlives a down new replica");
             }
             probe!(reachable, "role: a heal's compare-and-set is sent again");
             return Ask::Call(heal.change());
         }
-        if view.liveness.get(&heal.add) == Some(&Liveness::Down) {
+        if down {
             probe!(reachable, "role: a heal whose new replica is down ends");
             self.abandon()
         } else {
