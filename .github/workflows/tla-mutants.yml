@@ -83,7 +83,7 @@ jobs:
                 exit 1
               fi
             done
-            list=$(printf '%s\n' $FOLDERS | sort -u)
+            list=$(tr -s ' ' '\n' <<<"$FOLDERS" | sed '/^$/d' | sort -u)
           fi
           slices=$(for f in $list; do
               n=$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)
@@ -92,9 +92,11 @@ jobs:
           folders=$(echo "$list" | jq -R . | jq -sc .)
           test "$slices" != "[]"
           test "$(jq length <<<"$slices")" -le 512
-          echo "folders=$folders" >>"$GITHUB_OUTPUT"
-          echo "first=$(jq -c '.[:256]' <<<"$slices")" >>"$GITHUB_OUTPUT"
-          echo "rest=$(jq -c '.[256:]' <<<"$slices")" >>"$GITHUB_OUTPUT"
+          {
+            echo "folders=$folders"
+            echo "first=$(jq -c '.[:256]' <<<"$slices")"
+            echo "rest=$(jq -c '.[256:]' <<<"$slices")"
+          } >>"$GITHUB_OUTPUT"
 
   baseline:
     needs: slices
