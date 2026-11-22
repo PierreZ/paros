@@ -36,11 +36,13 @@ on:
       - "specs/tla/**"
       - "scripts/check-tla.sh"
       - "scripts/check-proofs.sh"
+      - "scripts/proof-hashes.sh"
       - "scripts/mutate-tla.py"
       - "scripts/ci-plan.py"
       - "scripts/tla-minutes.txt"
       - "flake.nix"
       - "flake.lock"
+      - ".github/actions/nix/action.yml"
       - ".github/workflows/tla.yml"
   workflow_dispatch:
   pull_request:
@@ -49,11 +51,13 @@ on:
       - "specs/tla/**"
       - "scripts/check-tla.sh"
       - "scripts/check-proofs.sh"
+      - "scripts/proof-hashes.sh"
       - "scripts/mutate-tla.py"
       - "scripts/ci-plan.py"
       - "scripts/tla-minutes.txt"
       - "flake.nix"
       - "flake.lock"
+      - ".github/actions/nix/action.yml"
       - ".github/workflows/tla.yml"
 
 # A new push cancels a pull request's older run, never a run on main: each
@@ -78,6 +82,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Check the pin of the proved specs
+        # A proved model or proof changed and its proof did not run again
+        # locally (scripts/proof-hashes.sh, #1459 (pin the proved specs)).
+        run: scripts/proof-hashes.sh check
       # A pull request's checkout is its merge into the tip of main: the first
       # parent is that tip, so the diff holds what the pull request brings.
       - name: Plan the jobs that the change needs
@@ -103,8 +111,7 @@ jobs:
         folders: ${{ fromJSON(needs.plan.outputs.groups) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - name: Run TLC on specs/tla/ ${{ matrix.folders }}
         run: nix develop .#tla --command scripts/check-tla.sh ${{ matrix.folders }}
       # Each guard set to TRUE still parses, so that the weekly `TLA mutants`
@@ -123,8 +130,7 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - uses: Swatinem/rust-cache@v2
         with:
           key: traces
@@ -150,8 +156,7 @@ jobs:
         module: ${{ fromJSON(needs.plan.outputs.proofs) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - name: Check the TLAPS proof ${{ matrix.module }}
         run: nix develop .#proofs --command scripts/check-proofs.sh ${{ matrix.module }}
 

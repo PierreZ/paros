@@ -27,6 +27,7 @@ const CONFIG: HostConfig = HostConfig {
 const LEADER: Address = Address {
     journal: J,
     node: NodeId(100),
+    segment: None,
 };
 const ACCEPTORS: [u64; 3] = [1, 2, 3];
 const REPLICAS: [u64; 3] = [11, 12, 13];
@@ -516,7 +517,10 @@ fn a_role_unassigned_before_its_commit_writes_nothing() {
     driver.unassign(Address::new(J, NodeId(11)));
     assert_eq!(
         driver.take_stopped(),
-        vec![(Address::new(J, NodeId(11)), Stop::Unassigned)]
+        vec![(
+            Address::replica(J, NodeId(11), SegmentId(1)),
+            Stop::Unassigned
+        )]
     );
     assign(&mut driver, &[12]);
     driver.poll();
@@ -532,7 +536,7 @@ fn a_role_unassigned_before_its_commit_writes_nothing() {
     let records = |node| {
         disk.0
             .borrow_mut()
-            .scan(Address::new(J, NodeId(node)))
+            .scan(Address::replica(J, NodeId(node), SegmentId(1)))
             .expect("a scan")
     };
     assert_eq!(

@@ -167,13 +167,16 @@ backends in memory (`mem`) and the contract suites (`contract`).
   takes its periodic step. **Open**: `now`, timers and random draws inside each role (the roles
   keep `tick(page)` and take no random value yet), and reads of a slot range as effects
   (`ReadDone`), which wait for the leaderless reads and the offload of #1326.
-- *Rule 3.* The `Host` maps each `Address` (a journal and a node) to its role, routes each input,
-  and turns the role's effects into `Effect`s that name their journal. The driver gives every
+- *Rule 3.* The `Host` maps each `Address` (a journal, a node, and the segment of a replica) to
+  its role, routes each input, and turns the role's effects into `Effect`s that name their journal
+  and their sender. A replica node serves one replica for each segment of its journal, so a heal
+  keeps the live replicas of a column (Pierre, 2026-11-22, #1445 (simulate the whole journal in
+  memory)); an `Unassign` of the node with no segment stops every role of the node. The driver gives every
   send to the `Transport`, a send between two roles of one process too. One process may serve
   every role, or one role; the `Host` does not change.
 - *Rule 4.* `Storage` is one trait: `commit(ops, sync)`, atomic, and `scan(address)`, every
   record of one role in key order. The format is the crate's (`layout`): a `Key` is the journal,
-  the node, the kind of the record and an index (a slot), and its bytes sort as the key does,
+  the node, the segment of a replica (0 for every other role), the kind of the record and an index (a slot), and its bytes sort as the key does,
   so each op is namespaced by (journal, role). Each batch ends with the role's `Durable` record.
   The damage report is per role: a record the backend reports corrupt (`Entry::Corrupt`), or that
   does not decode as its kind, stops the role with `Stop::Damaged` and its keys. A

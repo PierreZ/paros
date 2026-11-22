@@ -129,14 +129,20 @@ removed replica that comes back during the heal; `specs/tla/heal-reuse/`: a node
 plan asks again, requests delivered twice and late and a node's own view of the register, with
 the highest copy per node, the term check, the heal count of the record, a sent heal that ends
 only on an answer, and a fresh register value before an abandon or a copy wipes a node; #1314
-(re-replication of a sealed segment's replica set)).
+(re-replication of a sealed segment's replica set)), the placement port between the grid controller and the cell
+(`specs/tla/placement-port/`: `standing`, `place` all or none in one write keyed by the caller's
+request id, `release`, the limit of moves in flight, and the cell's own control journal placed
+through the same port; #1421 (the placement port)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both
 `Inv` are also proved with TLAPS at every size (`specs/tla/decree/DecreeProof.tla`,
 `specs/tla/multi-paxos/MultiPaxosProof.tla` and the `*Proof.tla` modules it extends,
 `scripts/check-proofs.sh` in `nix develop .#proofs`, one `proofs` job for each module in the `TLA`
-workflow; `specs/tla/README.md`, "Proofs"). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
+workflow; LS4, built in the flake, checks the temporal last step; `specs/tla/PROVED.sha256` pins
+the proved files, and the `plan` job of the `TLA` workflow fails when one changed and the pin
+was not written again;
+`specs/tla/README.md`, "Proofs"). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
 journal's matchmaker register with its writer, its guard and the models that check it (#1315). Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
@@ -388,6 +394,9 @@ If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`
 Then use `nix develop`, on the web as locally. Every flake input is fetched over git
 (`git+https`), not as a GitHub tarball, because the web session's egress policy refuses GitHub
 tarballs (#727 (flake inputs over git)). Keep it that way: a new input never uses `github:`.
+In CI, every job sets up Nix with `.github/actions/nix` (never the installer and cache actions
+by hand): it also signs git in to github.com for each git input of `flake.lock`, because GitHub
+refuses anonymous fetches with 403 when many jobs fetch at once.
 Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix develop` (or direnv).
 
 **Use Nix-provided software for all tooling.** Never run the sandbox's preinstalled binaries
@@ -775,7 +784,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   over channels (tokio is a dev-dependency only).
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
   segments, the walk of the matchmaker register across handovers, the walk of the journal
-  roles, the walk of the generic driver of `paros-journal-io` on three processes, the sweep of
+  roles, the walk of the generic driver of `paros-journal-io` on three processes, the walk of the
+  whole journal on the in-memory IO (two journals, their controllers and a client; #1445), the sweep of
   the grid controller's decisions over every small view against a reference `decide`
   (`control`, #1261) and the walk of the controller role (`controller`), with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against

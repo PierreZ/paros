@@ -3,7 +3,8 @@
 //! and never reads them: every key and every value is built here.
 //!
 //! **The key.** A [`Key`] names one record of one role: its journal, its
-//! node, the kind of the record and an index (a slot, or 0). Its bytes
+//! node, its segment (a replica's; 0 for an acceptor), the kind of the
+//! record and an index (a slot, or 0). Its bytes
 //! ([`Key::to_bytes`]) sort as the key does, so a backend that sorts bytes
 //! (a B-tree, an LSM tree, a sorted file) gives each role's records as one
 //! range, in slot order. Each op is so namespaced by (journal, role).
@@ -33,7 +34,7 @@ use paros_consensus::journal::JournalId;
 use paros_journal::codec::{decode_boundary, decode_command, encode_boundary, encode_command};
 use paros_journal::register::Ballot;
 use paros_journal::roles::{AcceptorDisk, AcceptorOp, CopyId, PersistId, ReplicaDisk, ReplicaOp};
-use paros_journal::{NodeId, Slot};
+use paros_journal::{NodeId, SegmentId, Slot};
 
 use crate::wire::Address;
 
@@ -81,8 +82,11 @@ pub struct Key {
     pub index: u64,
 }
 
-/// The bytes of a [`Key`]: the journal, the node, the kind, the index.
-pub const KEY_LEN: usize = 8 + 8 + 1 + 8;
+/// The bytes that name a role: the journal, the node, the segment.
+pub const PREFIX_LEN: usize = 8 + 8 + 8;
+
+/// The bytes of a [`Key`]: the role, the kind, the index.
+pub const KEY_LEN: usize = PREFIX_LEN + 1 + 8;
 
 impl Key {
     /// The record `kind` at `index` of the role at `address`.
@@ -99,10 +103,9 @@ impl Key {
     #[must_use]
     pub fn to_bytes(&self) -> [u8; KEY_LEN] {
         let mut bytes = [0; KEY_LEN];
-        bytes[..8].copy_from_slice(&self.address.journal.0.to_be_bytes());
-        bytes[8..16].copy_from_slice(&self.address.node.0.to_be_bytes());
-        bytes[16] = self.kind as u8;
-        bytes[17..].copy_from_slice(&self.index.to_be_bytes());
+        bytes[..PREFIX_LEN].copy_from_slice(&Self::prefix(self.address));
+        bytes[PREFIX_LEN] = self.kind as u8;
+        bytes[PREFIX_LEN + 1..].copy_from_slice(&self.index.to_be_bytes());
         bytes
     }
 
@@ -114,17 +117,23 @@ impl Key {
         }
         let journal = JournalId(u64::from_be_bytes(bytes[..8].try_into().ok()?));
         let node = NodeId(u64::from_be_bytes(bytes[8..16].try_into().ok()?));
-        let kind = Kind::of(bytes[16])?;
-        let index = u64::from_be_bytes(bytes[17..].try_into().ok()?);
-        Some(Self::new(Address::new(journal, node), kind, index))
+        let segment = u64::from_be_bytes(bytes[16..PREFIX_LEN].try_into().ok()?);
+        let kind = Kind::of(bytes[PREFIX_LEN])?;
+        let index = u64::from_be_bytes(bytes[PREFIX_LEN + 1..].try_into().ok()?);
+        let address = match segment {
+            0 => Address::new(journal, node),
+            segment => Address::replica(journal, node, SegmentId(segment)),
+        };
+        Some(Self::new(address, kind, index))
     }
 
     /// The bytes that every key of the role at `address` starts with.
     #[must_use]
-    pub fn prefix(address: Address) -> [u8; 16] {
-        let mut bytes = [0; 16];
+    pub fn prefix(address: Address) -> [u8; PREFIX_LEN] {
+        let mut bytes = [0; PREFIX_LEN];
         bytes[..8].copy_from_slice(&address.journal.0.to_be_bytes());
-        bytes[8..].copy_from_slice(&address.node.0.to_be_bytes());
+        bytes[8..16].copy_from_slice(&address.node.0.to_be_bytes());
+        bytes[16..].copy_from_slice(&address.segment.map_or(0, |s| s.0).to_be_bytes());
         bytes
     }
 }

@@ -38,6 +38,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | The rules composed across three segments, with the acceptors' disk and the write orders | §J7.2 | `journal-state/` | #1189 (the journal state model), #1309 (the state is the disk) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
 | The controller's election and fenced reshape | §J6.1 | `grid-controller/` | #1259 (the fenced reshape call of the grid controller) |
+| The placement port between the grid controller and the cell, the cell's own control journal too | §J6.3 | `placement-port/` | #1421 (the placement port) |
 | The health measures and the journal states | §J6.2 | `health/` (v1: its `v1` and `v1_draft` checks, #1319 (a v1 switch in health/)) | #1260 (journal health measures) |
 
 ### J7.2 The composed model
@@ -138,8 +139,8 @@ faulty votes on the acceptors' disks (the leader's blocked slot has unit tests o
 the controller role heals a retired segment while replica machines are lost for good or come
 back with their disk, two controllers depose each other, requests and replies are lost and the
 segment is trimmed, and requests are duplicated and arrive late. The walk plays the replicas
-itself (the `SegmentReplica` of a heal has unit tests; the whole-journal walk, #1445, will run
-it): a copy moves only while a member of the set it read is up and full, a node runs the
+itself (the `SegmentReplica` of a heal has unit tests, and the whole-journal walk runs it on the
+`Host`): a copy moves only while a member of the set it read is up and full, a node runs the
 highest copy it was asked, and a replica in no set with no copy drops it. Three oracles judge
 it: `HELD` (every member of the set of a segment that is not trimmed holds a complete copy),
 `COMPARED` (a heal writes its set only if no set change came since its plan) and `CONVERGES`
@@ -230,6 +231,33 @@ answered `Truncated` and the client must follow the tail. Each has its planted m
 the program or the journal, never in the client. A finding of the walk: with fresh uuids and one
 call in flight, a `Resolve` that answers not written means that the writer was deposed, so the
 client's resend at the tail is answered `Fenced` (site `RESOLVED_AGAIN`).
+
+**The whole-journal walk** (#1445 (simulate the whole journal in memory),
+`journal-sim/tests/whole.rs`). Before the moonpool-sim too, `journal-sim` runs the whole journal on
+the in-memory IO of `paros-journal-io`: nine machines in three zones, two journals that share the
+machines and one matchmaker register, a `Driver` and its `Host` on each machine (acceptors, leaders
+and segment replicas of both journals), two controllers for each journal
+(`paros_journal_control::role`) that are elected, heal a column, seal and get deposed, a reshape
+token shared by the journals, a client that claims the writer, writes, sends again, resends with a
+stale position and resolves each `Below`, crashes and restarts of a machine, the loss of a zone for
+a while, register operations whose request or reply is lost, and disk faults inside the contract.
+Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
+at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
+`ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with
+its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
+and `ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
+(`WholeMutant`). At the end of the walk each journal converges: a controller holds the term, the
+newest segment is in force, the older ones are retired, and every replica of the newest segment
+holds the whole log. One replica node serves one replica for each segment of its journal, so a
+heal keeps the live replicas of a column (Pierre, 2026-11-22, #1445); the address and the disk key
+of a replica name its segment (§J4.2). A member of a retired segment that stays down long enough
+is healed by re-replication (#1314): the walk asks the new replica's driver to copy and to drop an
+abandoned copy (`Driver::join`, `Driver::abandon`, which read the register first, so the `Host`
+judges each ask on a value done after it was sent), and gives each complete copy to the
+controllers (sites `REREPLICATE`, `COPIED`, `REREPLICATED`). The mutant of `AGREE` loses the
+records of a machine's acceptors at a restart; its replicas keep theirs, since a lost replica disk
+loses chosen slots and the walk stalls before `AGREE` sees two values. **Open**: the walk loses a
+machine or a zone only for a while; a permanent loss joins the walk as the next step of #1314.
 
 ### J7.5 The controller's `decide`
 

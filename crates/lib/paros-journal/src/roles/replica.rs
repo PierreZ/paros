@@ -297,6 +297,10 @@ impl SegmentReplica {
     /// the new copy would wipe a member's disk (`specs/tla/heal-reuse/`,
     /// control `stale_view`).
     ///
+    /// `durable` is the highest batch that the node's disk holds for this
+    /// replica (the records of an earlier copy): the batches of the copy
+    /// follow it, so the flight rule never takes a new batch as durable.
+    ///
     /// # Panics
     ///
     /// When `id` is in `set`, or `initial` is a uuid.
@@ -307,9 +311,14 @@ impl SegmentReplica {
         set: Vec<NodeId>,
         initial: Leader,
         copy: CopyId,
+        durable: Option<PersistId>,
     ) -> (Self, Vec<ReplicaEffect>) {
         assert!(!set.contains(&id), "a new replica is not a member yet");
-        let mut replica = Self::recover(id, segment, set, initial, ReplicaDisk::default());
+        let disk = ReplicaDisk {
+            durable,
+            ..ReplicaDisk::default()
+        };
+        let mut replica = Self::recover(id, segment, set, initial, disk);
         let effects = replica.set_joining(Some(copy));
         assert!(replica.folded.is_none(), "a copy starts on an empty disk");
         replica.assert_invariants();

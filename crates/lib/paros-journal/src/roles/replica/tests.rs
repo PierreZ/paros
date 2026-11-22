@@ -579,8 +579,14 @@ const NEW: NodeId = NodeId(20);
 const COPY: CopyId = CopyId { term: 1, number: 3 };
 
 fn joiner() -> SegmentReplica {
-    let (replica, effects) =
-        SegmentReplica::join(NEW, SegmentId(1), nodes(&[11, 12, 13]), Leader::Unset, COPY);
+    let (replica, effects) = SegmentReplica::join(
+        NEW,
+        SegmentId(1),
+        nodes(&[11, 12, 13]),
+        Leader::Unset,
+        COPY,
+        None,
+    );
     assert_eq!(
         persists(&effects),
         vec![(PersistId(0), vec![ReplicaOp::Joining(Some(COPY))])],
@@ -691,7 +697,14 @@ fn a_replica_says_whether_it_holds_the_whole_sealed_segment() {
 #[test]
 #[should_panic(expected = "not a member yet")]
 fn a_new_replica_is_not_a_member() {
-    let _ = SegmentReplica::join(ME, SegmentId(1), nodes(&[11, 12, 13]), Leader::Unset, COPY);
+    let _ = SegmentReplica::join(
+        ME,
+        SegmentId(1),
+        nodes(&[11, 12, 13]),
+        Leader::Unset,
+        COPY,
+        None,
+    );
 }
 
 #[test]
@@ -863,8 +876,14 @@ fn a_new_replica_that_restarts_keeps_its_copy_while_its_plan_runs() {
             disk.apply(id, &ops);
         }
     };
-    let (mut replica, effects) =
-        SegmentReplica::join(NEW, SegmentId(1), nodes(&[11, 12, 13]), Leader::Unset, COPY);
+    let (mut replica, effects) = SegmentReplica::join(
+        NEW,
+        SegmentId(1),
+        nodes(&[11, 12, 13]),
+        Leader::Unset,
+        COPY,
+        None,
+    );
     let mut disk = ReplicaDisk::default();
     keep(&effects, &mut disk);
     keep(&replica.observe(&retired_two()), &mut disk);

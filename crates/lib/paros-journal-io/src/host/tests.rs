@@ -96,7 +96,11 @@ fn an_acceptor_starts_with_a_read_and_routes_by_journal() {
     let effects = host.step(Time(8), prepare(K, 1));
     let [
         Effect::Persist { address, id, ops },
-        Effect::Send { envelope, after },
+        Effect::Send {
+            sender: _,
+            envelope,
+            after,
+        },
     ] = effects.as_slice()
     else {
         panic!("a promise persists, then waits on its batch: {effects:?}");
@@ -231,7 +235,7 @@ fn a_leader_needs_a_register_value_and_answers_calls() {
     let effects = host.step(Time(0), assign);
     let prepares = effects
         .iter()
-        .filter(|e| matches!(e, Effect::Send { envelope, after: None } if matches!(envelope.message, Message::Prepare { .. })))
+        .filter(|e| matches!(e, Effect::Send { envelope, after: None, .. } if matches!(envelope.message, Message::Prepare { .. })))
         .count();
     assert_eq!(prepares, 3, "one Prepare to each acceptor of the grid");
     assert_eq!(
@@ -287,7 +291,10 @@ fn the_timer_ticks_every_role_and_arms_again() {
         }),
     );
     assert!(effects.contains(&Effect::SetTimer { at: Time(10) }));
-    host.step(Time(0), recovered(replica));
+    host.step(
+        Time(0),
+        recovered(Address::replica(J, NodeId(11), SegmentId(1))),
+    );
     let base = host.replica(replica).and_then(SegmentReplica::front);
     assert_eq!(
         base,
@@ -331,11 +338,17 @@ fn a_value_reaches_only_the_roles_of_its_journal() {
     };
     for journal in [J, K] {
         host.step(Time(0), replica(journal));
-        host.step(Time(0), recovered(at(journal, 11)));
+        host.step(
+            Time(0),
+            recovered(Address::replica(journal, NodeId(11), SegmentId(1))),
+        );
     }
     assert_eq!(
         host.addresses().collect::<Vec<_>>(),
-        vec![at(J, 11), at(K, 11)]
+        vec![
+            Address::replica(J, NodeId(11), SegmentId(1)),
+            Address::replica(K, NodeId(11), SegmentId(1))
+        ]
     );
     host.step(
         Time(0),
@@ -351,4 +364,366 @@ fn a_value_reaches_only_the_roles_of_its_journal() {
     assert_eq!(front(K), Some(Slot(0)), "the replica of K took its base");
     assert_eq!(front(J), None, "the replica of J did not");
     assert_eq!(host.value(J), None);
+}
+
+#[test]
+fn a_replica_node_holds_one_replica_for_each_segment() {
+    let mut host = Host::new(CONFIG);
+    let set = vec![NodeId(11), NodeId(12), NodeId(13)];
+    for segment in [SegmentId(1), SegmentId(2)] {
+        host.step(
+            Time(0),
+            Input::Assign(Assignment::Replica {
+                address: at(J, 11),
+                segment,
+                set: set.clone(),
+                initial: Leader::Unset,
+            }),
+        );
+        host.step(Time(0), recovered(Address::replica(J, NodeId(11), segment)));
+    }
+    let first = Address::replica(J, NodeId(11), SegmentId(1));
+    let second = Address::replica(J, NodeId(11), SegmentId(2));
+    assert_eq!(host.addresses().collect::<Vec<_>>(), vec![first, second]);
+    assert_eq!(
+        host.replica(at(J, 11)).map(SegmentReplica::segment),
+        Some(SegmentId(2)),
+        "a lookup with no segment finds the newest replica of the node"
+    );
+    assert_eq!(
+        host.replica(first).map(SegmentReplica::segment),
+        Some(SegmentId(1))
+    );
+    let pull = |segment| Envelope {
+        journal: J,
+        from: NodeId(12),
+        to: NodeId(11),
+        message: Message::Pull {
+            segment,
+            from: Slot(0),
+        },
+    };
+    assert_eq!(
+        pull(SegmentId(1)).receiver(),
+        first,
+        "a Pull names its replica"
+    );
+    assert_eq!(pull(SegmentId(2)).receiver(), second);
+    let stopped: Vec<Address> = host
+        .step(Time(1), Input::Unassign(at(J, 11)))
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Stopped { address, .. } => Some(address),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stopped, vec![first, second], "the node stops every replica");
+    assert_eq!(host.addresses().count(), 0);
+}
+
+/// `value()` with segment 2 opened, and segment 1 sealed at 2, its
+/// boundary written and retired.
+fn retired() -> RegisterValue {
+    let value = value();
+    value
+        .apply(&Change::Reshape {
+            opening: OpeningCall {
+                term: value.term().number,
+                expected: Some(SegmentId(1)),
+                grid: Grid::new(1, vec![vec![NodeId(1), NodeId(2), NodeId(3)]]).expect("a grid"),
+                replicas: vec![NodeId(21), NodeId(22), NodeId(23)],
+            },
+            release: RELEASE,
+        })
+        .and_then(|v| {
+            v.apply(&Change::Seal {
+                segment: SegmentId(1),
+                end: Slot(2),
+            })
+        })
+        .and_then(|v| {
+            v.apply(&Change::Boundary {
+                segment: SegmentId(1),
+                state: paros_journal::BoundaryState::fresh(Leader::Unset),
+            })
+        })
+        .and_then(|v| {
+            v.apply(&Change::Retire {
+                segment: SegmentId(1),
+                holders: 2,
+                unrepaired_damage: false,
+            })
+        })
+        .expect("segment 1 retires")
+}
+
+/// `value` with replica 13 of segment 1 replaced by 20.
+fn healed(value: &RegisterValue) -> RegisterValue {
+    value
+        .apply(&Change::Rereplicate {
+            segment: SegmentId(1),
+            read: value.segment(SegmentId(1)).expect("segment 1").clone(),
+            term: value.term().number,
+            remove: NodeId(13),
+            add: NodeId(20),
+        })
+        .expect("a heal")
+}
+
+const NEW: Address = Address {
+    journal: J,
+    node: NodeId(20),
+    segment: Some(SegmentId(1)),
+};
+
+fn copy(number: u64) -> CopyId {
+    CopyId { term: 1, number }
+}
+
+fn join(number: u64) -> Input {
+    Input::Join {
+        address: NEW,
+        set: vec![NodeId(11), NodeId(12), NodeId(13)],
+        initial: Leader::Unset,
+        copy: copy(number),
+    }
+}
+
+fn observe(value: RegisterValue) -> Input {
+    Input::Observe { journal: J, value }
+}
+
+/// A `Host` that holds `value` and runs copy 5 on node 20.
+fn joined(value: RegisterValue) -> Host {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(value));
+    let effects = host.step(Time(0), join(5));
+    assert!(effects.contains(&Effect::Read { address: NEW }));
+    let effects = host.step(Time(0), recovered(NEW));
+    let [Effect::Persist { ops, .. }, ..] = effects.as_slice() else {
+        panic!("the copy is on the disk first: {effects:?}");
+    };
+    assert_eq!(ops[0].key.kind, Kind::Joining);
+    assert_eq!(
+        host.replica(NEW).and_then(SegmentReplica::joining),
+        Some(copy(5))
+    );
+    host
+}
+
+#[test]
+fn a_join_starts_only_on_a_retired_segment_that_does_not_name_the_node() {
+    let mut host = Host::new(CONFIG);
+    assert!(host.step(Time(0), join(5)).is_empty(), "no value: nothing");
+    host.step(Time(0), observe(value()));
+    assert!(host.step(Time(0), join(5)).is_empty(), "in force: nothing");
+    host.step(Time(0), observe(healed(&retired())));
+    assert!(host.step(Time(0), join(5)).is_empty(), "a member: nothing");
+    assert!(!host.serves(NEW));
+    let no_segment = Input::Join {
+        address: at(J, 20),
+        set: vec![NodeId(11)],
+        initial: Leader::Unset,
+        copy: copy(5),
+    };
+    assert_eq!(host.step(Time(0), no_segment), Vec::new());
+    joined(retired());
+}
+
+#[test]
+fn a_node_runs_the_highest_copy_it_was_asked() {
+    let mut host = joined(retired());
+    assert!(host.step(Time(1), join(5)).is_empty(), "the same copy runs");
+    assert!(
+        host.step(Time(1), join(4)).is_empty(),
+        "a lower copy is refused"
+    );
+    assert_eq!(
+        host.replica(NEW).and_then(SegmentReplica::joining),
+        Some(copy(5))
+    );
+    let effects = host.step(Time(1), join(6));
+    assert_eq!(
+        effects,
+        vec![
+            Effect::Stopped {
+                address: NEW,
+                why: Stop::Replaced
+            },
+            Effect::Read { address: NEW }
+        ]
+    );
+    let durable = layout::replica_ops(
+        NEW,
+        PersistId(3),
+        &[paros_journal::roles::ReplicaOp::Joining(Some(copy(5)))],
+    );
+    let entries: Vec<(Key, Entry)> = durable
+        .into_iter()
+        .map(|op| (op.key, Entry::Value(op.value)))
+        .collect();
+    let effects = host.step(
+        Time(1),
+        Input::Recovered {
+            address: NEW,
+            entries,
+        },
+    );
+    let [Effect::Persist { id, .. }, ..] = effects.as_slice() else {
+        panic!("the higher copy is on the disk first: {effects:?}");
+    };
+    assert_eq!(*id, PersistId(4), "the new batches follow the disk's");
+    assert_eq!(
+        host.replica(NEW).and_then(SegmentReplica::joining),
+        Some(copy(6))
+    );
+}
+
+#[test]
+fn a_node_goes_on_with_a_higher_copy_on_its_disk() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(retired()));
+    host.step(Time(0), join(5));
+    let entries: Vec<(Key, Entry)> = layout::replica_ops(
+        NEW,
+        PersistId(2),
+        &[paros_journal::roles::ReplicaOp::Joining(Some(copy(7)))],
+    )
+    .into_iter()
+    .map(|op| (op.key, Entry::Value(op.value)))
+    .collect();
+    let effects = host.step(
+        Time(0),
+        Input::Recovered {
+            address: NEW,
+            entries,
+        },
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::Persist { ops, .. } if ops.iter().any(|op| op.key.kind == Kind::Joining)
+        )),
+        "no new copy is written: {effects:?}"
+    );
+    assert_eq!(
+        host.replica(NEW).and_then(SegmentReplica::joining),
+        Some(copy(7))
+    );
+}
+
+#[test]
+fn a_join_read_after_the_commit_starts_a_member() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(retired()));
+    host.step(Time(0), join(5));
+    host.step(Time(0), observe(healed(&retired())));
+    host.step(Time(0), recovered(NEW));
+    let replica = host.replica(NEW).expect("the replica runs");
+    assert_eq!(replica.joining(), None, "a member runs no copy");
+    assert!(replica.set().contains(&NodeId(20)));
+}
+
+#[test]
+fn an_abandon_drops_a_copy_that_the_value_does_not_name() {
+    let mut host = joined(retired());
+    let other = host.step(
+        Time(1),
+        Input::Abandon {
+            address: NEW,
+            copy: copy(4),
+        },
+    );
+    assert!(
+        !other.iter().any(|e| matches!(e, Effect::Stopped { .. })),
+        "an abandon of another copy keeps it"
+    );
+    let effects = host.step(
+        Time(1),
+        Input::Abandon {
+            address: NEW,
+            copy: copy(5),
+        },
+    );
+    assert!(effects.contains(&Effect::Stopped {
+        address: NEW,
+        why: Stop::Dropped
+    }));
+    assert!(!host.serves(NEW));
+}
+
+#[test]
+fn an_abandon_after_the_commit_keeps_a_member() {
+    let mut host = joined(retired());
+    host.step(Time(1), observe(healed(&retired())));
+    let effects = host.step(
+        Time(1),
+        Input::Abandon {
+            address: NEW,
+            copy: copy(5),
+        },
+    );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Stopped { .. })));
+    assert!(host.serves(NEW));
+}
+
+#[test]
+fn an_abandon_stops_a_copy_that_still_reads_its_disk() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(retired()));
+    host.step(Time(0), join(5));
+    assert_eq!(
+        host.step(
+            Time(0),
+            Input::Abandon {
+                address: NEW,
+                copy: copy(4)
+            }
+        ),
+        Vec::new()
+    );
+    assert!(host.serves(NEW), "another copy's abandon keeps the read");
+    assert_eq!(
+        host.step(
+            Time(0),
+            Input::Abandon {
+                address: at(J, 20),
+                copy: copy(5)
+            }
+        ),
+        Vec::new()
+    );
+    let effects = host.step(
+        Time(0),
+        Input::Abandon {
+            address: NEW,
+            copy: copy(5),
+        },
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::Stopped {
+            address: NEW,
+            why: Stop::Dropped
+        }]
+    );
+}
+
+#[test]
+fn an_abandon_of_a_member_that_reads_its_disk_keeps_it() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(retired()));
+    host.step(Time(0), join(5));
+    host.step(Time(0), observe(healed(&retired())));
+    assert_eq!(
+        host.step(
+            Time(0),
+            Input::Abandon {
+                address: NEW,
+                copy: copy(5)
+            }
+        ),
+        Vec::new()
+    );
+    assert!(host.serves(NEW));
 }

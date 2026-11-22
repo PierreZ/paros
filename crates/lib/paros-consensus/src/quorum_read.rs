@@ -430,6 +430,25 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         PreReadFold::Counted
     }
 
+    /// [`QuorumReads::abandon_superseded`] with a fence for each read's
+    /// configuration: drop every read whose ballot sits below
+    /// `fence(config)`. The reader's caller decides the fence of each
+    /// configuration; this tally only compares.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn abandon_below(&mut self, fence: impl Fn(&AcceptorConfig<Id>) -> Ballot) {
+        self.reads.retain(|r| r.config_since >= fence(&r.config));
+        assert!(
+            self.reads
+                .iter()
+                .all(|r| r.config_since >= fence(&r.config)),
+            "no read below the fence of its configuration survives"
+        );
+    }
+
     /// Abandon every read opened against a configuration bound below
     /// `config_since`: the reader learned a newer configuration, and a read
     /// over the superseded one may never complete.
@@ -439,11 +458,9 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     pub fn abandon_superseded(&mut self, config_since: Ballot) {
-        self.reads.retain(|r| r.config_since >= config_since);
-        assert!(
-            self.reads.iter().all(|r| r.config_since >= config_since),
-            "no read opened under a superseded configuration survives"
-        );
+        let before = self.reads.len();
+        self.abandon_below(|_| config_since);
+        assert!(self.reads.len() <= before, "abandoning opens no read");
     }
 
     /// Advance every read: a tallying read whose row is whole (a Phase-1

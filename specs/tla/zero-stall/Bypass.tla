@@ -89,6 +89,10 @@ Nodes   == {Owner[b] : b \in Ballots}
 Free    == "free"
 Pending == "pending"
 
+\* A gone acceptor is in the configuration of ballot 1 only, so it votes at
+\* ballot 1 only. Accept needs no guard of its own on Gone.
+ASSUME \A f \in CfgChoices : \A b \in Ballots \ {1} : f[b] \cap Gone = {}
+
 VARIABLES status,    \* ballot -> "matching" | "matched" | "leading" | "switched" | "dead"
           cfgOf,     \* ballot -> its configuration
           reg,       \* matchmaker -> set of <<ballot, config>>
@@ -141,9 +145,12 @@ Init == /\ status = [b \in Ballots |-> "matching"]
 
 \* Matchmaker m registers b if it holds no ballot at or above b and b is not
 \* below its watermark. It answers with what it held and with its watermark.
+\* The leader reads the answers only while it matches: its prior
+\* configurations are fixed once it matched (HistFixed). A second
+\* registration of b at m is refused by the check of the ballots that m
+\* holds: a GC drops b from m only with a watermark above b.
 Register(b, m) ==
     /\ status[b] = "matching"
-    /\ m \notin replied[b]
     /\ \A r \in reg[m] : r[1] < b
     /\ wm[m] <= b
     /\ reg' = [reg EXCEPT ![m] = @ \cup {<<b, cfgOf[b]>>}]
@@ -170,17 +177,20 @@ Covered(b) ==
 
 \* Acceptor a promises b and reports its votes. The owner of b sends a
 \* Prepare in a normal campaign, after a "p212" bypass, or for the decision
-\* hold after any bypass.
+\* hold after any bypass, never before its matching ended
+\* (PrepareAfterMatch). A Prepare can come two times: a promise only raises
+\* the ballot of the acceptor, and the acceptor reports its votes below b,
+\* which no longer change once it promised b, so a second promise adds
+\* nothing.
 Promise(a, b) ==
     /\ \/ status[b] = "matched"
        \/ status[b] = "leading" /\ (HasPending(b) \/ (Hold /\ ~ Covered(b)))
     /\ a \in UNION PriorCfgs(b)
     /\ a \in Gone => b = 1
     /\ promised[a] <= b
-    /\ ~ \E p \in promises : p[1] = a /\ p[2] = b
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ promises' = promises \cup
-          {<<a, b, {<<w[2], w[3], w[4]>> : w \in {x \in votes : x[1] = a}}>>}
+          {<<a, b, {<<w[2], w[3], w[4]>> : w \in {x \in votes : x[1] = a /\ x[3] < b}}>>}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, votes, safe, proposals, wm, maxwm, acked, seen, ext>>
 
 Reports(b) == UNION {p[3] : p \in {q \in promises : q[2] = b}}
@@ -210,12 +220,12 @@ Propose(b, s, v) ==
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, wm, maxwm, acked, seen,
                    holder, via, restarts>>
 
+\* A gone acceptor votes at ballot 1 only (the ASSUME on Gone). A second
+\* vote of the same round changes nothing.
 Accept(a, b, s, v) ==
     /\ <<b, s, v>> \in proposals
     /\ a \in cfgOf[b]
-    /\ a \in Gone => b = 1
     /\ promised[a] <= b
-    /\ <<a, s, b, v>> \notin votes
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ votes' = votes \cup {<<a, s, b, v>>}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promises, safe, proposals, wm, maxwm, acked, seen, ext>>
@@ -250,7 +260,10 @@ Bypassers(b) ==
         \cup (IF SuccessorBypass THEN {holder[b]} ELSE {})
 
 \* The switch: node n, which leads at b, moves to its next ballot b2 with
-\* no Phase 1 for the free slots.
+\* no Phase 1 for the free slots. With "p212", the slots that n proposed at
+\* b wait for the Phase 1 at b2. A slot that n did not propose is free at b
+\* (Settled) and stays free at b2, also below a slot that n proposed: the
+\* slots need not be a prefix.
 Bypass(b, b2) ==
     /\ Mode # "none"
     /\ status[b] = "leading"
@@ -260,8 +273,6 @@ Bypass(b, b2) ==
           /\ Settled(n, b)
           /\ Check => \A r \in hist[b2] : ~ (r[1] > b /\ r[1] < b2)
           /\ CheckWm => maxwm[b2] <= b
-          /\ Mode = "p212" =>
-                \A s \in ProposedAt(n, b) : \A t \in Slots : t < s => t \in ProposedAt(n, b)
           /\ status' = [status EXCEPT ![b] = "switched", ![b2] = "leading"]
           /\ safe' = [safe EXCEPT ![b2] =
                 [s \in Slots |->
@@ -291,9 +302,9 @@ HandOn(b, n) ==
                    acked, seen, via, restarts>>
 
 \* "p212" only: the Phase 1 at the new ballot for the slots below the frontier.
+\* With no slot that waits, it changes nothing.
 Phase1Low(b) ==
     /\ status[b] = "leading"
-    /\ HasPending(b)
     /\ Covered(b)
     /\ safe' = [safe EXCEPT ![b] =
           [s \in Slots |-> IF safe[b][s] = Pending THEN SafeAt(b, s) ELSE safe[b][s]]]
@@ -328,10 +339,9 @@ Collect(b, m) ==
 \* The leader of b acks slot s to its client. A leader that switched can
 \* still ack a slot that is chosen at its old ballot ("p212": the old rounds
 \* stay open; "carry": a late quorum at the old ballot).
+\* A slot chosen at b is chosen whatever the status of b, so the model also
+\* lets a dead leader ack it, and ack it again.
 Ack(b, s) ==
-    /\ Reads
-    /\ status[b] \in {"leading", "switched"}
-    /\ s \notin acked
     /\ ChosenAt(b, s)
     /\ Hold => Covered(b)
     /\ acked' = acked \cup {s}
@@ -344,6 +354,10 @@ Fence(b) == Max({0} \cup {s \in Slots : safe[b][s] # Free})
 \* The vote watermark of acceptor a: the highest slot that it voted in.
 Watermark(a) == Max({0} \cup {w[2] : w \in {x \in votes : x[1] = a}})
 
+\* The index of a leaderless read at b over the answers of Q: the highest
+\* watermark of the answers, and the fence or above.
+ReadIndex(b, Q) == Max({Fence(b)} \cup {Watermark(a) : a \in Q})
+
 \* A leaderless read on the basis of the leadership at b ends, and its client
 \* gets the slots at or below its index. The reader asks a quorum Q of the
 \* configuration of b, none of whose members promised above b (an answer
@@ -351,21 +365,18 @@ Watermark(a) == Max({0} \cup {w[2] : w \in {x \in votes : x[1] = a}})
 \* and at the fence or above. It serves only on its chosen prefix: each slot
 \* at or below the index is chosen, with ReadHold at a covered ballot.
 ReadReturn(b, Q) ==
-    /\ Reads
     /\ status[b] \in {"leading", "switched"}
     /\ Q \in Quorums(cfgOf[b])
     /\ \A a \in Q : promised[a] <= b
-    /\ LET i == Max({Fence(b)} \cup {Watermark(a) : a \in Q})
-       IN  /\ \A s \in Slots : s <= i =>
-                  \E c \in Ballots : ChosenAt(c, s) /\ (ReadHold => Covered(c))
-           /\ ~ {s \in Slots : s <= i} \subseteq seen
-           /\ seen' = seen \cup {s \in Slots : s <= i}
+    /\ \A s \in Slots : s <= ReadIndex(b, Q) =>
+          \E c \in Ballots : ChosenAt(c, s) /\ (ReadHold => Covered(c))
+    /\ seen' = seen \cup {s \in Slots : s <= ReadIndex(b, Q)}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
                    proposals, wm, maxwm, acked, ext>>
 
 \* Node n restarts: it forgets what it proposed. With the rule, every
 \* campaign and every leadership of n ends ("dead"): a dead ballot proposes,
-\* bypasses, collects and acks nothing. Its rounds stay in the votes.
+\* bypasses and collects nothing. Its rounds stay in the votes.
 Restart(n) ==
     /\ restarts < Restarts
     /\ restarts' = restarts + 1
@@ -385,8 +396,10 @@ Next ==
     \/ \E b, b2 \in Ballots : Bypass(b, b2)
     \/ \E b \in Ballots, n \in Nodes : HandOn(b, n)
     \/ \E b \in Ballots, m \in Matchmakers : Collect(b, m)
-    \/ \E b \in Ballots, s \in Slots : Ack(b, s)
-    \/ \E b \in Ballots, Q \in SUBSET Acceptors : ReadReturn(b, Q)
+    \* Reads = FALSE leaves the acks and the reads out of the run: only the
+    \* read checks look at `acked` and `seen`, and the run is smaller.
+    \/ Reads /\ \E b \in Ballots, s \in Slots : Ack(b, s)
+    \/ Reads /\ \E b \in Ballots, Q \in SUBSET Acceptors : ReadReturn(b, Q)
     \/ \E n \in Nodes : Restart(n)
 
 Spec == Init /\ [][Next]_vars
@@ -400,7 +413,7 @@ LiveSpec ==
           /\ WF_vars(MatchDone(b)) /\ WF_vars(Phase1Done(b)) /\ WF_vars(Phase1Low(b))
           /\ \A a \in Acceptors : WF_vars(Promise(a, b))
           /\ \A s \in Slots : WF_vars(\E v \in Values : Propose(b, s, v))
-          /\ \A s \in Slots : WF_vars(Ack(b, s))
+          /\ \A s \in Slots : WF_vars(Reads /\ Ack(b, s))
           /\ \A b2 \in Ballots : WF_vars(Bypass(b, b2))
     /\ \A a \in Acceptors, p \in Ballots \X Slots \X Values :
           WF_vars(Accept(a, p[1], p[2], p[3]))
@@ -430,6 +443,23 @@ ReadSafe ==
               /\ \E s \in acked \cup seen :
                     /\ s > Fence(b)
                     /\ \A a \in Q : ~ \E w \in votes : w[1] = a /\ w[2] >= s
+
+\* The index of each read that ends covers every slot that is acked or that
+\* an earlier read returned. ReadSafe says it of each read that could start;
+\* this says it of the reads that end, so it also judges the guards of
+\* ReadReturn.
+ReadsComplete ==
+    [][\A b \in Ballots, Q \in SUBSET Acceptors :
+          ReadReturn(b, Q) => acked \cup seen \subseteq {s \in Slots : s <= ReadIndex(b, Q)}]_vars
+
+\* Matchmaking ends before Phase 1 (Matchmaker Paxos): no acceptor promises
+\* a ballot that still matches.
+PrepareAfterMatch == \A p \in promises : status[p[2]] # "matching"
+
+\* The prior configurations of a ballot do not change once it matched: its
+\* Phase 1 and its bypass check read them.
+HistFixed == [][\A b \in Ballots :
+                  status[b] # "matching" => hist'[b] = hist[b] /\ maxwm'[b] = maxwm[b]]_vars
 
 \* Not a real invariant. TLC must find a trace where a bypass leader has a
 \* value chosen at its new ballot: this shows that the model reaches the case.

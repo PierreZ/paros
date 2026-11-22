@@ -15,14 +15,15 @@ use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, ChangeRefusal, RegisterValue};
 
 use crate::clock::Clock;
-use crate::layout::{Entry, KEY_LEN, Key, Op};
+use crate::layout::{Entry, KEY_LEN, Key, Op, PREFIX_LEN};
 use crate::register::Register;
 use crate::storage::{Storage, StorageError};
 use crate::transport::Transport;
 use crate::wire::{Address, Envelope, Time};
 
 /// A storage in memory: sorted keys to bytes. Every commit is durable at
-/// once. A test can mark a record corrupt, or make the next commit fail.
+/// once. A test can mark a record corrupt, make the next commit fail, or
+/// lose records.
 #[derive(Clone, Debug, Default)]
 pub struct MemStorage {
     records: BTreeMap<[u8; KEY_LEN], Vec<u8>>,
@@ -58,6 +59,19 @@ impl MemStorage {
     pub fn fail_next_commit(&mut self) {
         self.fail_next = true;
     }
+
+    /// Lose every record whose key `lost` names: a bug that a test plants,
+    /// never a fault of the contract (a commit that was durable stays).
+    ///
+    /// # Panics
+    ///
+    /// When the storage holds bytes that are not a key: a commit stores
+    /// keys only.
+    pub fn lose(&mut self, mut lost: impl FnMut(&Key) -> bool) {
+        self.records.retain(|bytes, _| {
+            !lost(&Key::from_bytes(bytes).expect("the storage holds keys only"))
+        });
+    }
 }
 
 impl Storage for MemStorage {
@@ -92,16 +106,16 @@ impl Storage for MemStorage {
     }
 }
 
-fn prefix_start(prefix: [u8; 16]) -> [u8; KEY_LEN] {
+fn prefix_start(prefix: [u8; PREFIX_LEN]) -> [u8; KEY_LEN] {
     let mut start = [0; KEY_LEN];
-    start[..16].copy_from_slice(&prefix);
+    start[..PREFIX_LEN].copy_from_slice(&prefix);
     start
 }
 
 /// The messages of a network in memory, by endpoint.
 #[derive(Debug, Default)]
 struct Network {
-    /// The endpoint that serves each role.
+    /// The endpoint that serves each node.
     routes: BTreeMap<Address, usize>,
     inboxes: Vec<VecDeque<Envelope>>,
 }
@@ -152,17 +166,24 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// From now on, the messages to the role at `address` come to this
-    /// endpoint.
+    /// From now on, the messages to the node of `address` come to this
+    /// endpoint (every role of the node: each segment of a replica node).
     pub fn route(&self, address: Address) {
-        self.network.borrow_mut().routes.insert(address, self.id);
+        self.network
+            .borrow_mut()
+            .routes
+            .insert(address.node_address(), self.id);
     }
 }
 
 impl Transport for Endpoint {
     fn send(&mut self, envelope: Envelope) {
         let mut network = self.network.borrow_mut();
-        if let Some(to) = network.routes.get(&envelope.receiver()).copied() {
+        if let Some(to) = network
+            .routes
+            .get(&envelope.receiver().node_address())
+            .copied()
+        {
             network.inboxes[to].push_back(envelope);
         }
     }

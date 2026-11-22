@@ -32,10 +32,9 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use paros_consensus::journal::JournalId;
-use paros_journal::Command;
-use paros_journal::SegmentId;
 use paros_journal::register::{Change, RegisterValue};
 use paros_journal::roles::{CopyId, PersistId};
+use paros_journal::{Command, Leader, NodeId, SegmentId};
 
 use crate::clock::Clock;
 use crate::events::{Event, Events};
@@ -101,7 +100,7 @@ pub struct Driver<S, T, C, R, E> {
     /// The batches of the next commit, in the order the roles emitted them.
     group: Vec<(Address, PersistId, Vec<Op>)>,
     /// The sends that wait on a batch of their sender.
-    held: Vec<(PersistId, Envelope)>,
+    held: Vec<(PersistId, Address, Envelope)>,
     /// The register changes that wait on a batch of their role.
     held_changes: Vec<(PersistId, Address, Change)>,
     /// The highest durable batch of each role that runs.
@@ -225,6 +224,29 @@ where
             command,
         });
         call
+    }
+
+    /// Start the new replica at `address` (its segment named) for the copy
+    /// `copy` of a heal, with `set`, the replica set that the grid
+    /// controller read ([`Input::Join`]). The driver reads the register
+    /// first, so the `Host` judges the ask on a value done after it was
+    /// sent (`specs/tla/heal-reuse/`, control `stale_view`).
+    pub fn join(&mut self, address: Address, set: Vec<NodeId>, initial: Leader, copy: CopyId) {
+        self.watch(address.journal);
+        self.input(Input::Join {
+            address,
+            set,
+            initial,
+            copy,
+        });
+    }
+
+    /// The plan of the copy `copy` of the new replica at `address` ended
+    /// with no new set ([`Input::Abandon`]). The driver reads the register
+    /// first, as for [`join`](Self::join).
+    pub fn abandon(&mut self, address: Address, copy: CopyId) {
+        self.watch(address.journal);
+        self.input(Input::Abandon { address, copy });
     }
 
     /// The answers of client calls since the last take.
@@ -353,12 +375,16 @@ where
                 );
                 self.group.push((address, id, ops));
             }
-            Effect::Send { envelope, after } => {
-                if self.is_durable(envelope.sender(), after) {
+            Effect::Send {
+                sender,
+                envelope,
+                after,
+            } => {
+                if self.is_durable(sender, after) {
                     self.transport.send(envelope);
                 } else {
                     let id = after.expect("a held send names a batch");
-                    self.held.push((id, envelope));
+                    self.held.push((id, sender, envelope));
                 }
             }
             Effect::Register {
@@ -418,7 +444,7 @@ where
                     self.settled.insert(address, id);
                 }
                 self.group.retain(|(role, ..)| other(*role));
-                self.held.retain(|(_, envelope)| other(envelope.sender()));
+                self.held.retain(|(_, sender, _)| other(*sender));
                 self.held_changes.retain(|(_, role, _)| other(*role));
                 self.durable.remove(&address);
                 self.stopped.push((address, why));
@@ -475,11 +501,11 @@ where
     /// Send what waited on a batch that is durable now.
     fn release(&mut self) {
         let held = std::mem::take(&mut self.held);
-        for (id, envelope) in held {
-            if self.is_durable(envelope.sender(), Some(id)) {
+        for (id, sender, envelope) in held {
+            if self.is_durable(sender, Some(id)) {
                 self.transport.send(envelope);
             } else {
-                self.held.push((id, envelope));
+                self.held.push((id, sender, envelope));
             }
         }
         let changes = std::mem::take(&mut self.held_changes);

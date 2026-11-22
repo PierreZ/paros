@@ -200,8 +200,9 @@ pub fn storage_reopen<S: Storage>(mut fresh: impl FnMut() -> S, mut reopen: impl
 
 /// The contract of [`Transport`] between two processes: `sender` and
 /// `receiver`, where `receiver` serves the role at `to`. Every message
-/// that arrives is one that was sent, to the role that it names; nothing
-/// arrives that was not sent. `settle` lets the network move (a real
+/// that arrives is one that was sent, to the node that it names (the
+/// `Host` of that node routes it to the role); nothing arrives that was not
+/// sent. `settle` lets the network move (a real
 /// network takes time; one in memory needs nothing).
 ///
 /// A message may be lost, repeated or reordered, so this suite does not
@@ -227,7 +228,7 @@ pub fn transport<T: Transport>(
             from: NodeId(i),
             to: to.node,
             message: Message::Pull {
-                segment: SegmentId(i),
+                segment: SegmentId(i + 1),
                 from: Slot(i),
             },
         })
@@ -242,9 +243,9 @@ pub fn transport<T: Transport>(
             "transport: a message arrives as it was sent: {envelope:?}"
         );
         assert_eq!(
-            envelope.receiver(),
-            to,
-            "transport: a message arrives at the role it names"
+            envelope.receiver().node_address(),
+            to.node_address(),
+            "transport: a message arrives at the node it names"
         );
     }
 }

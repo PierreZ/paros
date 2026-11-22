@@ -33,6 +33,7 @@ multi-paxos 14
 multi-writer 2
 node 42
 offload 1
+placement-port 4
 proxy-leader 1
 quorum-everywhere 3
 re-replication 9
