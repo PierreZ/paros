@@ -751,6 +751,15 @@ ResolveReadOnly == [][(\E s \in Slots : resolved'[s] # resolved[s]) =>
 \* A trimmed record stays trimmed.
 TrimStays == [][\A p \in Gens : rtrim[p] => rtrim'[p]]_vars
 
+\* An acceptor raises its promise to b only while its configuration runs
+\* (the acceptors of a retired configuration stop) and only when b reads
+\* that configuration: the leader of b sends its `Prepare` and its `Accept`
+\* to the configurations of `H_b` alone.
+PromiseRead == [][\A a \in Acceptors :
+                    mprom'[a] > mprom[a] =>
+                      /\ a \in Active
+                      /\ \E h \in bH[mprom'[a]] : a \in CfgOf[h]]_vars
+
 (***************************************************************************)
 (* Liveness. Every step is bounded; with weak fairness the journal runs    *)
 (* until no step is enabled. Then the chosen log has no hole, and every    *)
