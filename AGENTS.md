@@ -126,8 +126,11 @@ the same write; #1189 (the journal state model), #1309 (the state is the disk)),
 (`specs/tla/re-replication/`: a new replica counts only on its own complete copy from a full
 member of the set, the new set written by compare-and-set on the version of the register, a "done"
 report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
-removed replica that comes back during the heal; #1314 (re-replication of a sealed segment's
-replica set)), the placement port between the grid controller and the cell
+removed replica that comes back during the heal; `specs/tla/heal-reuse/`: a node that a later
+plan asks again, requests delivered twice and late and a node's own view of the register, with
+the highest copy per node, the term check, the heal count of the record, a sent heal that ends
+only on an answer, and a fresh register value before an abandon or a copy wipes a node; #1314
+(re-replication of a sealed segment's replica set)), the placement port between the grid controller and the cell
 (`specs/tla/placement-port/`: `standing`, `place` all or none in one write keyed by the caller's
 request id, `release`, the limit of moves in flight, and the cell's own control journal placed
 through the same port; #1421 (the placement port)), and, above the journal, the election over a
@@ -162,8 +165,10 @@ matchmaker register as an optional role)). The first journal roles are `paros_jo
 (the acceptor, the leader with its Phase 1 over the segments and the seal, the segment replica;
 #1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk
 and traced against `specs/tla/journal-state/RolesTrace.tla`;
-the other rule groups of #1326 (proxy leader, leaderless reads, retire, truncate,
-re-replication) are not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
+the leader's retire at `F + 1` holders and the heal of a retired segment's replica set (the new
+replica's copy, the register's `Rereplicate`, the controller's heal) are built; the controller's
+heal and the register are walked by `journal-sim`'s heal walk, which plays the replicas itself (#1314 (re-replication of a sealed segment's replica set)); the other
+rule groups of #1326 (proxy leader, leaderless reads, truncate) are not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
 (storage, transport, clock, register), the pure `Host` that serves many journals in one process,
 and the generic driver under the flight rule (#1329 (paros-journal-io)), judged by
 `journal-sim`'s driver walk. The pure journal client is `paros_journal::client` (the four calls,
@@ -313,7 +318,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   'test(edited) | test(no_record)'`. The `test` job leaves them out.
 - the `mutants` job (pull requests only): cargo-mutants on the lines of
   `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
-  pr.diff`), shared round-robin by two shards of the job (its time grows with the diff). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
+  pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). The
   same job runs the two passes on the changed lines of `crates/lib/paros-journal/src`
@@ -324,7 +329,10 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `journal-sim`'s sweep of the controller's decisions and its controller walks;
   `.cargo/mutants-control.toml`), and one pass on the changed lines of
   `crates/lib/paros-journal-io/src` (`scripts/mutants.sh --journal-io`: its tests and the driver
-  walk of `journal-sim`; `.cargo/mutants-journal-io.toml`). A
+  walk of `journal-sim`; `.cargo/mutants-journal-io.toml`). Each crate whose `src/` changed
+  runs in shards of its own, one job each (`--shard k/n --sharding round-robin`;
+  `scripts/mutants-plan.sh` gives one shard for each 250 changed lines outside the tests, 125
+  for `paros-consensus` with at least two shards, from the measures in its comment). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
@@ -824,5 +832,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutants.sh` and `mutants-plan.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

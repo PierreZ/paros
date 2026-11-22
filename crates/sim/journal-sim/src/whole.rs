@@ -27,10 +27,9 @@
 //! journals share. The controller's reshape call runs on the register; a
 //! request or its reply may be lost. The walk is the host's placement: it
 //! serves each acceptor and replica that the register names on its machine,
-//! campaigns a leader of the newest segment when none writes, and retires a
-//! sealed segment whose boundary state is written once `F + 1` replicas of
-//! its set hold it (the leader's retire is a later rule group of #1326, as
-//! in [`crate::roles`]).
+//! and campaigns a leader of the newest segment when none writes. The
+//! leader retires a sealed segment once `F + 1` replicas of its set hold it
+//! on their disk (§J3.1), as in [`crate::roles`].
 //!
 //! **The faults.** The walk crashes and restarts machines; a zone goes out
 //! (every machine of it crashes at once); a disk fails a commit inside the
@@ -64,6 +63,9 @@
 //!   (no lost acked write).
 //! - [`ALERTS`]: each alert of the controller is true of the machines as
 //!   they are, not as the view says.
+//! - [`HEAL_HELD`]: each node that a done heal added to the set of a
+//!   retired segment holds every slot of it on its disk while the set
+//!   names it.
 //!
 //! **The liveness claim** (goal 2, the heal bound: the settle budget of the
 //! walk): once the faults stop, every machine is up again; each journal has
@@ -72,12 +74,21 @@
 //! every call is answered and judged, every `Below` is resolved, and every
 //! replica of the newest segment applied the whole log.
 //!
-//! **Not in this walk yet** (#1445): a machine or a zone that never comes
-//! back. Its heal needs the re-replication of a sealed segment's replica set
-//! (§J3.1, #1314), a rule group of #1326 that is not built: `decide` puts
-//! the re-replication before the heal of the grid, so a run with a loss for
-//! good cannot converge until the roles run it. The walk counts each
-//! re-replication that `decide` asks ([`reach::REREPLICATE`]).
+//! **The heal of a retired segment** (#1314): when a member of a retired
+//! segment's set is down for the controller, the controller heals the set.
+//! The walk asks the new replica's driver to copy ([`Driver::join`]) and
+//! to drop an abandoned copy ([`Driver::abandon`]); each driver reads the
+//! register first, so it judges the ask on a value done after the ask was
+//! sent. In the chaos phase an ask may be lost, and the network may hold
+//! it and give it again later ([`reach::LATE_ASK`]). A complete copy
+//! reaches every live controller of the journal
+//! ([`reach::COPIED`]), and the heal's compare-and-set runs on the register
+//! like a reshape ([`reach::REREPLICATED`]).
+//!
+//! **Not in this walk yet**: a machine or a zone that never comes back.
+//! The walk loses a machine only for a while, so a heal of a retired set
+//! ends when the machine stays down long enough, and the liveness claim
+//! does not ask for it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -98,9 +109,10 @@ use paros_journal_control::{
     Tunables, View,
 };
 use paros_journal_io::mem::{ManualClock, MemRegister};
+use paros_journal_io::storage::Storage as _;
 use paros_journal_io::{
-    Address, Assignment, CallId, CallOutcome, Clock, Driver, Envelope, HostConfig, JournalId, Op,
-    Register,
+    Address, Assignment, CallId, CallOutcome, Clock, Driver, Envelope, HostConfig, JournalId,
+    Notice, Op, Register,
 };
 
 use crate::backend::{Disk, Wire};
@@ -121,6 +133,10 @@ pub const ONCE: &str = "whole journal: no record is written twice in the whole l
 pub const ACKED: &str = "whole journal: each acked write holds its position in the whole log";
 /// Oracle: each alert of the controller is true.
 pub const ALERTS: &str = "whole journal: each controller alert is true of the machines";
+/// Oracle: a node that a heal added to a retired set holds the whole
+/// segment on its disk while the set names it.
+pub const HEAL_HELD: &str =
+    "whole journal: a node a heal added holds the whole segment on its disk";
 
 /// The coverage sites of the whole journal walk.
 pub mod reach {
@@ -136,6 +152,12 @@ pub mod reach {
     pub const TAKEOVER: &str = "whole journal: a controller took the term from another";
     /// A heal reshape of a controller was done.
     pub const HEALED: &str = "whole journal: a controller's heal reshape was done";
+    /// A new replica reported its complete copy.
+    pub const COPIED: &str = "whole journal: a new replica reported its complete copy";
+    /// A copy or abandon ask arrived again, late.
+    pub const LATE_ASK: &str = "whole journal: a copy or abandon ask arrived again, late";
+    /// A heal of a retired segment's replica set was done.
+    pub const REREPLICATED: &str = "whole journal: a heal of a retired segment's set was done";
     /// A heal reshape was done with its reply lost.
     pub const HEAL_LOST: &str = "whole journal: a heal was done and its reply was lost";
     /// A first leader sealed the segment before.
@@ -174,6 +196,9 @@ pub mod reach {
         UNPLACEABLE,
         NO_TOKEN,
         REREPLICATE,
+        COPIED,
+        REREPLICATED,
+        LATE_ASK,
         DUPLICATE,
         UNKNOWN,
         BELOW,
@@ -207,6 +232,9 @@ pub enum WholeMutant {
     /// The host keeps a machine down in the view once it ever was.
     /// [`ALERTS`] catches it.
     StaleLiveness,
+    /// The walk reports a new replica's copy complete as soon as it asks
+    /// the copy. [`HEAL_HELD`] catches it.
+    EarlyCopied,
 }
 
 /// The weights of the walk's crash and restart steps: a machine comes
@@ -316,6 +344,8 @@ struct Journal {
     sealed_at: BTreeMap<SegmentId, u64>,
     /// The segments that a controller's reshape opened.
     healed: BTreeSet<SegmentId>,
+    /// The nodes that a done heal added to the set of a retired segment.
+    added: BTreeSet<(SegmentId, NodeId)>,
     ctls: Vec<Ctl>,
     claimed: bool,
     next: u64,
@@ -338,6 +368,9 @@ pub struct WholeModel {
     register: MemRegister,
     machines: BTreeMap<u64, Machine>,
     journals: Vec<Journal>,
+    /// The copy and abandon asks that the network still holds: each may
+    /// arrive again, late ([`WholeAction::Late`]).
+    late: Vec<(usize, Ask)>,
 }
 
 /// The walk with `mutant` planted.
@@ -366,14 +399,14 @@ pub enum WholeAction {
     Write,
     /// A controller takes one step.
     Control,
-    /// Placement retires the sealed segments that it may.
-    Retire,
     /// A writer resolves a `Below`.
     Resolve,
     /// The next commit of a machine fails.
     Fault,
     /// Every machine of a zone crashes.
     ZoneOut,
+    /// A copy or abandon ask that the network held arrives again, late.
+    Late,
 }
 
 impl Model for WholeModel {
@@ -393,23 +426,23 @@ impl Model for WholeModel {
             WholeAction::Campaign,
             WholeAction::Write,
             WholeAction::Control,
-            WholeAction::Retire,
             WholeAction::Resolve,
             WholeAction::Fault,
             WholeAction::ZoneOut,
+            WholeAction::Late,
         ]
     }
 
     fn weight(action: WholeAction, phase: Phase) -> u32 {
         match (action, phase) {
-            (WholeAction::Fault | WholeAction::ZoneOut, Phase::Chaos) => 1,
-            (WholeAction::Fault | WholeAction::ZoneOut, _) => 0,
+            (WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late, Phase::Chaos) => 1,
+            (WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late, _) => 0,
             (_, Phase::Settle) => 1,
             (WholeAction::Poll, _) => 120,
             (WholeAction::Tick | WholeAction::Campaign, _) => 8,
             (WholeAction::Write, _) => 10,
             (WholeAction::Control, _) => 4,
-            (WholeAction::Retire | WholeAction::Resolve, _) => 2,
+            (WholeAction::Resolve, _) => 2,
         }
     }
 
@@ -420,12 +453,13 @@ impl Model for WholeModel {
             WholeAction::Campaign => self.each(cx, Self::campaign),
             WholeAction::Write => self.each(cx, Self::write),
             WholeAction::Control => self.each(cx, Self::control),
-            WholeAction::Retire => self.each(cx, Self::retire),
             WholeAction::Resolve => self.each(cx, Self::resolve),
             WholeAction::Fault => self.fault(cx),
             WholeAction::ZoneOut => self.zone_out(cx),
+            WholeAction::Late => self.late(cx),
         }
         self.place();
+        self.judge_heals();
     }
 
     fn deliver(&mut self, envelope: Envelope, _cx: &mut Cx<'_, Self>) {
@@ -600,6 +634,7 @@ impl WholeModel {
                 opened_at: BTreeMap::new(),
                 sealed_at: BTreeMap::new(),
                 healed: BTreeSet::new(),
+                added: BTreeSet::new(),
                 ctls,
                 claimed: false,
                 next: 0,
@@ -618,6 +653,7 @@ impl WholeModel {
             register,
             machines: BTreeMap::new(),
             journals,
+            late: Vec::new(),
         };
         for m in MACHINES {
             model.machines.insert(
@@ -659,6 +695,12 @@ impl WholeModel {
     fn value(&self, j: usize) -> RegisterValue {
         self.register
             .value(self.journals[j].id)
+            .expect("each journal has a register")
+    }
+
+    fn value_of(&self, id: JournalId) -> RegisterValue {
+        self.register
+            .value(id)
             .expect("each journal has a register")
     }
 
@@ -938,10 +980,45 @@ impl WholeModel {
                 }
             }
             let replies = driver.take_replies();
+            let notices = driver.take_notices();
             self.flush(m, cx);
             for reply in replies {
                 self.on_reply(m, reply.address.journal, reply.call, reply.outcome);
             }
+            for notice in notices {
+                self.on_notice(&notice, cx);
+            }
+        }
+    }
+
+    /// A new replica's complete copy goes to every live controller of its
+    /// journal: only the one whose heal runs that copy counts it.
+    fn on_notice(&mut self, notice: &Notice, cx: &mut Cx<'_, Self>) {
+        let Notice::Copied {
+            address,
+            segment,
+            copy,
+        } = notice
+        else {
+            // A leader's done retire: the acceptors of the retired segment
+            // stop when placement no longer names them.
+            sometimes!(true, reach::RETIRED);
+            return;
+        };
+        let Some(j) = self
+            .journals
+            .iter()
+            .position(|journal| journal.id == address.journal)
+        else {
+            return;
+        };
+        sometimes!(true, reach::COPIED);
+        for c in 0..self.journals[j].ctls.len() {
+            let Some(role) = self.journals[j].ctls[c].role.as_mut() else {
+                continue;
+            };
+            let ask = role.copied(*segment, *copy);
+            self.act(j, c, ask, cx);
         }
     }
 
@@ -1369,11 +1446,32 @@ impl WholeModel {
                 reach::NO_TOKEN
             );
         }
+        self.act(j, c, ask, cx);
+    }
+
+    /// Run what the controller `c` of journal `j` asks.
+    fn act(&mut self, j: usize, c: usize, ask: Ask, cx: &mut Cx<'_, Self>) {
         match ask {
             Ask::Nothing => {}
+            Ask::Call(change @ Change::Rereplicate { .. }) => {
+                let (outcome, done) = self.operate(j, &change, cx);
+                if done && let Change::Rereplicate { segment, add, .. } = &change {
+                    sometimes!(true, reach::REREPLICATED);
+                    self.journals[j].added.insert((*segment, *add));
+                }
+                let Some(role) = self.journals[j].ctls[c].role.as_mut() else {
+                    return;
+                };
+                match role.rereplicated(&change, &outcome) {
+                    // A compare-and-set with no answer is sent again at the
+                    // controller's next step.
+                    Ask::Call(_) => {}
+                    next => self.act(j, c, next, cx),
+                }
+            }
             Ask::Call(change) => {
                 let Change::Reshape { opening, release } = &change else {
-                    panic!("a holder asks only a reshape, not {change:?}");
+                    panic!("a holder asks only a reshape or a heal, not {change:?}");
                 };
                 assert_eq!(*release, RELEASE, "a reshape at this release");
                 let (outcome, done) = self.operate(j, &change, cx);
@@ -1395,11 +1493,121 @@ impl WholeModel {
                     .reshaped(opening, &outcome);
             }
             Ask::Act(action) => {
-                // The repair and the re-replication are rule groups of
-                // #1326 that are not built: no role runs them yet.
-                sometimes!(
-                    matches!(action, Action::Rereplicate { .. }),
-                    reach::REREPLICATE
+                // The repair is a rule group of #1326 that is not built: no
+                // role runs it yet.
+                assert!(
+                    matches!(action, Action::Repair { .. }),
+                    "the role runs a re-replication as a heal, not {action:?}"
+                );
+            }
+            ask @ Ask::Copy { .. } => {
+                sometimes!(true, reach::REREPLICATE);
+                self.send_ask(j, c, &ask, cx);
+            }
+            ask @ Ask::Abandon { .. } => self.send_ask(j, c, &ask, cx),
+        }
+    }
+
+    /// A copy or abandon ask of controller `c` goes to the new replica's
+    /// driver. In the chaos phase the network may lose it, and may hold a
+    /// copy of it that arrives again later ([`WholeAction::Late`]).
+    fn send_ask(&mut self, j: usize, c: usize, ask: &Ask, cx: &mut Cx<'_, Self>) {
+        if cx.phase() == Phase::Chaos {
+            if cx.rng().chance(1, 4) {
+                self.late.push((j, ask.clone()));
+            }
+            if cx.rng().chance(1, 10) {
+                return;
+            }
+        }
+        if self.mutant == WholeMutant::EarlyCopied
+            && let Ask::Copy { segment, copy, .. } = &ask
+        {
+            let next = self.journals[j].ctls[c]
+                .role
+                .as_mut()
+                .map_or(Ask::Nothing, |role| role.copied(*segment, *copy));
+            self.deliver_ask(j, ask);
+            self.act(j, c, next, cx);
+            return;
+        }
+        self.deliver_ask(j, ask);
+    }
+
+    /// The new replica's driver takes the ask, when its machine is up.
+    fn deliver_ask(&mut self, j: usize, ask: &Ask) {
+        let id = self.journals[j].id;
+        let (node, address) = match ask {
+            Ask::Copy { segment, node, .. } | Ask::Abandon { segment, node, .. } => {
+                (*node, Address::replica(id, *node, *segment))
+            }
+            _ => unreachable!("only a copy or an abandon is held"),
+        };
+        let Some(driver) = self
+            .machines
+            .get_mut(&machine_of(node))
+            .and_then(|machine| machine.driver.as_mut())
+        else {
+            return;
+        };
+        match ask {
+            Ask::Copy { set, copy, .. } => {
+                driver.join(address, set.clone(), Leader::Unset, *copy);
+            }
+            Ask::Abandon { copy, .. } => driver.abandon(address, *copy),
+            _ => unreachable!("only a copy or an abandon is held"),
+        }
+    }
+
+    /// A held copy or abandon ask arrives again; the network keeps it or
+    /// not.
+    fn late(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(at) = cx.rng().index(self.late.len()) else {
+            return;
+        };
+        let (j, ask) = if cx.rng().chance(1, 2) {
+            self.late.swap_remove(at)
+        } else {
+            self.late[at].clone()
+        };
+        sometimes!(true, reach::LATE_ASK);
+        self.deliver_ask(j, &ask);
+    }
+
+    /// [`HEAL_HELD`]: each node that a done heal added to the set of a
+    /// retired segment holds every slot of the segment on its disk while
+    /// the set names it.
+    fn judge_heals(&self) {
+        for journal in &self.journals {
+            let value = self.value_of(journal.id);
+            for (segment, node) in &journal.added {
+                let Some(record) = value.segment(*segment) else {
+                    continue;
+                };
+                if record.state() != SegmentState::Retired || !record.replicas().contains(node) {
+                    continue;
+                }
+                let start = record.start().unwrap_or(Slot(0));
+                let end = record.end().expect("a retired segment has an end");
+                let address = Address::replica(journal.id, *node, *segment);
+                let entries = self.machines[&machine_of(*node)]
+                    .disk
+                    .store
+                    .borrow_mut()
+                    .scan(address)
+                    .expect("a scan of memory");
+                let held: BTreeSet<u64> = entries
+                    .iter()
+                    .filter(|(key, entry)| {
+                        key.kind == paros_journal_io::layout::Kind::Chosen
+                            && matches!(entry, paros_journal_io::layout::Entry::Value(_))
+                    })
+                    .map(|(key, _)| key.index)
+                    .collect();
+                let missing: Vec<u64> = (start.0..end.0).filter(|s| !held.contains(s)).collect();
+                assert!(
+                    missing.is_empty(),
+                    "{HEAL_HELD}: {node:?} of {segment:?} misses the slots {missing:?}"
                 );
             }
         }
@@ -1518,38 +1726,6 @@ impl WholeModel {
                     .filter(|m| !self.up(*m))
                     .collect::<Vec<_>>()
             );
-        }
-    }
-
-    /// Placement retires each sealed segment of journal `j` whose boundary
-    /// state is written, once `F + 1` replicas of its set hold it.
-    fn retire(&mut self, j: usize, _cx: &mut Cx<'_, Self>) {
-        let value = self.value(j);
-        let id = self.journals[j].id;
-        for record in value.segments().values() {
-            if record.state() != SegmentState::Sealed || record.boundary().is_none() {
-                continue;
-            }
-            let holders = record
-                .replicas()
-                .iter()
-                .filter(|node| {
-                    self.machines[&machine_of(**node)]
-                        .driver
-                        .as_ref()
-                        .and_then(|d| d.host().replica(Address::replica(id, **node, record.id())))
-                        .is_some_and(paros_journal::roles::SegmentReplica::full)
-                })
-                .count();
-            let retired = self.register.change(
-                id,
-                &Change::Retire {
-                    segment: record.id(),
-                    holders,
-                    unrepaired_damage: false,
-                },
-            );
-            sometimes!(retired.is_ok(), reach::RETIRED);
         }
     }
 

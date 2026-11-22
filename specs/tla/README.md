@@ -267,6 +267,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
 | The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the acceptor, the leader and the segment replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
+| The heal when a later plan asks a node again, the network delivers a request twice and late, and a node acts on its own view of the register: the highest copy per node, the term check of the heal's compare-and-set, the heal count of the record, a sent heal that ends only on an answer, and a fresh register value before an abandon or a copy wipes a node | `paros_journal::register` (`Rereplicate`, `SegmentRecord::heals`), `SegmentReplica::join`, the controller's heal in `paros_journal_control::role`; walked by `journal-sim`'s heal walk | `heal-reuse/` | #1314 (re-replication of a sealed segment's replica set) |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | The election over a journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after #1323 (build the paros journal v1)) | `election/` | #1420 (paros-election) |
@@ -3512,8 +3513,8 @@ The answer to #1314: the heal is safe and live with six rules, and no decision i
 - **The commit is a compare-and-set on the version of the register that the controller read.**
   The term check alone writes an old record over a trim (`cas_term`), and no check puts back a
   replica that dropped its copy (`cas_blind`). With the version, the term adds no safety
-  (`version_only`), because an election writes the register; it stays, to tell a deposed
-  controller to stop (#1259).
+  (`version_only`), because an election writes the register and no node is asked twice. With
+  node reuse and late requests it is needed (`heal-reuse/`, control `version_only`).
 - **A "done" report belongs to one copy** (`report_sticky`).
 - **A replica that does not hold the slot refuses the read** (`answer_partial`). A read routed
   with the set from before a heal stays correct: a removed replica holds the slot (the bytes never
@@ -3527,6 +3528,63 @@ majority. It passes with `F + 1` members of the set down (`heal_replica`).
 What is not in the model: the register across a matchmaker handover (`segment-records/`), a
 replica that comes back with an empty disk (a new replica stands for it), a source that the
 controller changes during a copy (the plan aborts and a new plan starts), and offload.
+
+### `heal-reuse/`: a node asked again, late requests and a node's own view, for #1314
+
+`re-replication/` commits a heal in one atomic step and never asks a node that runs a copy for a
+second one. The code does both. The controller's `decide` picks the first live candidate, so a
+deposed controller and the new one can ask the same node, and a removed member can be asked again.
+A copy ask, a compare-and-set, an abandon and their answers can arrive twice and late, and a node
+knows the set only from the last register value it saw. `HealReuse.tla` has those steps and checks
+the five rules of the code that `re-replication/` cannot see
+(`docs/journal/03-segments-and-records.md` §J3.1).
+
+The segment has `K` chosen slots; a node's copy is `[0, hi)`. The record is the replica set and
+`heals`, the count of its heals; the register also holds the controller term. A node keeps its
+disk across a crash, and any node can crash, a member too. Each node reads the register (`Read`)
+and keeps the last value it saw; a value that names it ends its copy (it is a member). A
+controller wins a term, plans a heal of a down member by a live node that is not a member (it may
+run another controller's copy), asks the copy with the id `<<term, number>>`, counts it on the
+report of that copy, and sends the compare-and-set. The register answers the same change again
+"ok", then checks the term, then the record. An answer ends a sent heal, and a refusal abandons
+its copy; a sent heal also ends on a record that is neither its read nor its result (the code's
+"a heal on an old read ends"). In the model a heal that sent nothing ends at any time, which
+covers the code's ends (its new replica down, its term gone, its read old). An abandon stops only
+the copy that it names. A node that its view leaves out of the set and that runs no copy drops its
+copy. A controller crash forgets the term and the heal. Every request and answer stays in the
+network, so each can be delivered again at any later time, or never.
+
+| Constant | Values (first: the design that passes) |
+|---|---|
+| `Order` | `highest`: a node takes an ask only above the copy it runs, and only if its view does not name it. `any`: it takes any other copy. |
+| `TermFence` | `TRUE`: the compare-and-set applies only at the controller's term. `FALSE`: the record alone. |
+| `HealCount` | `TRUE`: the compare-and-set compares the heal count too. `FALSE`: the set only. |
+| `SentEnds` | `TRUE`: a sent heal ends only on an answer or on a record that is neither its read nor its result. `FALSE`: also when its new replica is down. |
+| `FreshRead` | `TRUE`: a node acts on a copy ask or an abandon only on a register value that it saw done after the message was sent. `FALSE`: on the last value it saw. |
+
+Safety: `Held` (every member of the set holds the whole segment; the heal walk's oracle `HELD`)
+and `SetSize`. Four replicas, three in the first set (`F = 1`), two controllers, one slot, two
+crashes and two restarts of nodes, two terms, three plans. The source of a copy is not modelled
+(`re-replication/` checks it).
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass (642 thousand distinct states) |
+| `safety_wide` | ci | pass: three terms (4.0 million, about 2 minutes with 4 workers) |
+| `reach_heal`, `reach_reuse`, `reach_come_back`, `reach_two_answers`, `reach_lower_ask`, `reach_late_abandon` | ci | violation: a heal, one node asked by two terms, a set that comes back to the first set, a compare-and-set applied twice, a lower ask that reaches a node that runs a higher copy, an abandon of a copy that a commit made a member before the node saw it |
+| `copy_any` | ci | violation of `Held`: a plan ends before it sends anything, the next plan's copy on the same node completes and is counted, the first plan's late ask wipes it, and the compare-and-set adds an empty member |
+| `version_only` | ci | violation of `Held`: the new controller's ask wipes the deposed controller's complete copy, and the deposed controller's compare-and-set, on an unchanged record, adds the empty node |
+| `no_heals` | ci | violation of `Held`: the set heals away and back to the record that a late compare-and-set read; the set alone cannot tell, and the late write adds a node whose copy is gone |
+| `sent_abort` | ci | violation of `Held`: a sent heal ends when its new replica is down, its abandon ends the copy, the late copy ask starts it again empty, and the late compare-and-set adds it |
+| `stale_view` | ci | violation of `Held`: a heal commits; a later heal moves the record on, so the first controller ends its sent heal on an old read although it committed; the new replica, on a value from before the commit that named it, takes the abandon and then the late copy ask again, which wipes a member |
+
+The answer: with node reuse, late requests and a node's own view, the heal is safe with the five
+rules, and each rule is needed. They are proposals for Pierre (PR #1470, rules that
+`re-replication/` does not have).
+
+What is not in the model: reads, the trim and the floor (`re-replication/`), the register across a
+matchmaker handover (`segment-records/`), and a controller's own stale view of the register (the
+controller reads the current record).
 
 ### `election/`: the election over a journal, for #1420 (paros-election)
 

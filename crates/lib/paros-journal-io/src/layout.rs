@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use paros_consensus::journal::JournalId;
 use paros_journal::codec::{decode_boundary, decode_command, encode_boundary, encode_command};
 use paros_journal::register::Ballot;
-use paros_journal::roles::{AcceptorDisk, AcceptorOp, PersistId, ReplicaDisk, ReplicaOp};
+use paros_journal::roles::{AcceptorDisk, AcceptorOp, CopyId, PersistId, ReplicaDisk, ReplicaOp};
 use paros_journal::{NodeId, SegmentId, Slot};
 
 use crate::wire::Address;
@@ -51,15 +51,19 @@ pub enum Kind {
     Base = 3,
     /// A chosen slot that a replica holds.
     Chosen = 4,
+    /// The copy of a heal that a new replica runs (#1314): empty for none,
+    /// else the term and the number of the copy.
+    Joining = 5,
 }
 
 impl Kind {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Durable,
         Self::Promise,
         Self::Vote,
         Self::Base,
         Self::Chosen,
+        Self::Joining,
     ];
 
     fn of(byte: u8) -> Option<Self> {
@@ -200,6 +204,14 @@ pub fn replica_ops(address: Address, id: PersistId, ops: &[ReplicaOp]) -> Vec<Op
                 key: Key::new(address, Kind::Chosen, slot.0),
                 value: encode_command(command),
             },
+            ReplicaOp::Joining(copy) => Op {
+                key: Key::new(address, Kind::Joining, 0),
+                value: copy.map_or_else(Vec::new, |copy| {
+                    let mut bytes = copy.term.to_be_bytes().to_vec();
+                    bytes.extend(copy.number.to_be_bytes());
+                    bytes
+                }),
+            },
         })
         .collect();
     out.push(durable_op(address, id));
@@ -290,6 +302,7 @@ pub fn decode_acceptor(address: Address, entries: &[(Key, Entry)]) -> Result<Acc
 pub fn decode_replica(address: Address, entries: &[(Key, Entry)]) -> Result<ReplicaDisk, Damage> {
     let mut durable = None;
     let mut base = None;
+    let mut joining = None;
     let mut chosen = BTreeMap::new();
     let mut damage = Damage::default();
     for (key, entry) in entries {
@@ -306,6 +319,16 @@ pub fn decode_replica(address: Address, entries: &[(Key, Entry)]) -> Result<Repl
             (true, Kind::Chosen, Entry::Value(bytes)) => decode_command(bytes).ok().map(|c| {
                 chosen.insert(Slot(key.index), c);
             }),
+            (true, Kind::Joining, Entry::Value(bytes)) if bytes.is_empty() => Some(()),
+            (true, Kind::Joining, Entry::Value(bytes)) => bytes
+                .split_at_checked(8)
+                .and_then(|(term, number)| {
+                    Some(CopyId {
+                        term: u64_of(term)?,
+                        number: u64_of(number)?,
+                    })
+                })
+                .map(|copy| joining = Some(copy)),
             _ => None,
         };
         if read.is_none() {
@@ -316,6 +339,7 @@ pub fn decode_replica(address: Address, entries: &[(Key, Entry)]) -> Result<Repl
         Ok(ReplicaDisk {
             base,
             chosen,
+            joining,
             durable,
         })
     } else {

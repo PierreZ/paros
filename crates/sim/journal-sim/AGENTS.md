@@ -28,7 +28,7 @@ Test only: `publish = false`.
   grid; `WIDE`, two columns and promise pages of two), its oracles (`AGREE`, `SEALED`, `FOLD`,
   `VIEW`, `BOUNDARY`, `RESOLVE`; the truth is `Truth` over the chosen log), its reach sites and
   its planted mutants (`RolesMutant`), its events (`RolesEvent`, one action of `Journal.tla`
-  each) and the trace control `BoundaryBeforeDurable`.
+  each), the leader's retire judged by `RETIRE` (mutant `HoldsLie`) and the trace control `BoundaryBeforeDurable`.
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
   controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
   `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each
@@ -45,6 +45,14 @@ Test only: `publish = false`.
   one), its oracles (`FENCED`, `BOUNDED_RESHAPE_RATE`, `COST_BOUND`, `NO_OSCILLATION`,
   `BOUNDED_IN_FLIGHT`, `CONVERGES`), its reach sites and its planted mutants (`ControllerMutant`).
   `tests/controller.rs` also requires every `probe!` of the role (`role::PROBES`).
+- `src/heal.rs`: the heal walk (`HealModel`, #1314 (re-replication of a sealed segment's replica
+  set)): the controller role heals a retired segment while replica machines are lost for good or
+  come back, two controllers depose each other, requests and replies are lost and the segment is
+  trimmed, and requests arrive twice and late; the walk plays the replicas itself (copy from a
+  full member, the highest copy per node, drop outside the set, each on the current register value,
+  so it cannot see a stale view: `specs/tla/heal-reuse/` checks that). Its oracles (`HELD`,
+  `COMPARED`, `CONVERGES`), its reach sites and its planted mutants
+  (`HealMutant`). `tests/heal.rs`; `tests/controller.rs` runs it in the gate of the role's probes.
 - `src/host.rs`: the driver walk (`HostModel`, #1329): three processes, each a `Driver` of
   `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
   walk's mailbox, crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
@@ -59,8 +67,9 @@ Test only: `publish = false`.
 - `src/whole.rs`: the whole-journal walk (`WholeModel`, #1445): two journals on nine machines in
   three zones, a `Driver` on each machine, the controllers of each journal over one register, a
   shared reshape token, a client that writes, resends and resolves, crashes, the loss of a zone
-  for a while, lost register calls and disk faults; its oracles (`AGREE`, `SEALED`, `FLIGHT`,
-  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`), its reach sites and its planted mutants (`WholeMutant`).
+  for a while, lost register calls and disk faults, the leader's retire and the heal of a retired
+  segment's replica set on the `Host` (#1314); its oracles (`AGREE`, `SEALED`, `FLIGHT`,
+  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`), its reach sites and its planted mutants (`WholeMutant`).
   `tests/whole.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
@@ -110,3 +119,5 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
   `Below`, a `Resolve` answered both ways, two seals, and more). A rule no walk meets fails the
   test.
 - TLC must run: `require_tlc` fails the test when `tlc` is missing (the default nix shell has it).
+- **A test that runs TLC is named `tlc_*`**, and only such a test runs TLC: the mutants job runs
+  them in its second pass only (`.cargo/mutants-journal.toml`, `not test(/^tlc_/)`).

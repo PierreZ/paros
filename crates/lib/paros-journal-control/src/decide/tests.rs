@@ -289,9 +289,37 @@ fn matchmakers_below_a_majority_freeze_every_plan() {
     assert!(decision.alerts.contains(&Alert::MatchmakersAtRisk));
 }
 
+/// Segment 1 retired, with its boundary state; segment 2 in force.
+fn retired() -> RegisterValue {
+    let value = apply(
+        &sealed(),
+        &Change::Boundary {
+            segment: SegmentId(1),
+            state: paros_journal::BoundaryState::fresh(paros_journal::Leader::Unset),
+        },
+    );
+    apply(
+        &value,
+        &Change::Retire {
+            segment: SegmentId(1),
+            holders: 2,
+            unrepaired_damage: false,
+        },
+    )
+}
+
 #[test]
-fn a_sealed_segment_with_a_replica_down_is_re_replicated() {
+fn a_sealed_segment_retires_before_its_heal() {
     let fixture = Fixture::new(sealed()).set(12, Liveness::Down);
+    assert!(
+        !matches!(fixture.action(), Action::Rereplicate { .. }),
+        "the register heals only a retired record"
+    );
+}
+
+#[test]
+fn a_retired_segment_with_a_replica_down_is_re_replicated() {
+    let fixture = Fixture::new(retired()).set(12, Liveness::Down);
     assert_eq!(
         fixture.action(),
         Action::Rereplicate {

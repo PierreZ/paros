@@ -254,11 +254,11 @@ fn act(case: &Case, alerts: &mut BTreeSet<Alert>) -> Action {
     heal(case, in_force, state, reshaping, alerts)
 }
 
-/// The re-replication of the first sealed or retired segment with a
-/// replica that is down.
+/// The re-replication of the first retired segment with a replica that is
+/// down.
 fn rereplicate(case: &Case, alerts: &mut BTreeSet<Alert>) -> Option<Action> {
     let copy = case.register.segments().values().find(|r| {
-        matches!(r.state(), SegmentState::Sealed | SegmentState::Retired)
+        r.state() == SegmentState::Retired
             && r.replicas().iter().any(|m| is(case, *m, Liveness::Down))
     });
     if let Some(record) = copy {

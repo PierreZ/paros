@@ -212,6 +212,10 @@ pub fn refusal_text(refusal: &ChangeRefusal) -> String {
             format!("NoSuccessor: segment {} has no pending successor", id.0)
         }
         ChangeRefusal::Confirm(state) => format!("Confirm: the segment is {}", state_text(*state)),
+        ChangeRefusal::Stale(id) => format!(
+            "Stale: the record of segment {} changed since the controller read it",
+            id.0
+        ),
         ChangeRefusal::Record(id, refusal) => {
             format!(
                 "Record of segment {}: {}",

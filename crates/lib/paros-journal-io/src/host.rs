@@ -29,9 +29,10 @@ use std::collections::BTreeMap;
 use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, RegisterValue};
 use paros_journal::roles::{
-    AcceptorEffect, Campaign, JournalAcceptor, JournalLeader, LeaderEffect, PersistId, Proposed,
-    RESEND_BATCH, ReplicaEffect, SegmentReplica,
+    AcceptorEffect, Campaign, CopyId, JournalAcceptor, JournalLeader, LeaderEffect, PersistId,
+    Proposed, RESEND_BATCH, ReplicaEffect, SegmentReplica,
 };
+use paros_journal::segment::SegmentState;
 use paros_journal::{Command, Leader, NodeId, Reply, SegmentId};
 
 use crate::layout::{self, Damage, Entry, Key, Op};
@@ -146,6 +147,41 @@ pub enum Input {
     },
     /// The timer that [`Effect::SetTimer`] armed fired.
     TimerFired,
+    /// Start the new replica at `address` (its segment named) for the copy
+    /// `copy` of a heal of the retired segment (#1314), with `set`, the
+    /// replica set that the grid controller read, as the members to copy
+    /// from. The `Host` judges it on the register value it holds, which the
+    /// driver reads before it steps the input, so the value is done after
+    /// the ask was sent (`specs/tla/heal-reuse/`, control `stale_view`): a
+    /// node that the value names, or a segment that is not retired, starts
+    /// nothing. A node runs the highest copy it was asked: a lower or equal
+    /// copy changes nothing, and a higher one replaces the copy it runs
+    /// (control `copy_any`). A node that does not serve the address reads
+    /// its records first, and goes on with the copy on its disk when that
+    /// copy is not lower.
+    Join {
+        /// The new replica, with its segment.
+        address: Address,
+        /// The replica set that the controller read.
+        set: Vec<NodeId>,
+        /// The leader value of the fresh journal (`Unset` or `Multi`).
+        initial: Leader,
+        /// The copy.
+        copy: CopyId,
+    },
+    /// The plan of the copy `copy` of the new replica at `address` ended
+    /// with no new set, as its controller knows
+    /// ([`SegmentReplica::abandon`]). The replica judges it on the register
+    /// value that the `Host` holds, read by the driver before it steps the
+    /// input: it keeps its copy when that value names it, and drops it
+    /// otherwise. A replica that still reads its records stops before it
+    /// starts, unless the value names it.
+    Abandon {
+        /// The new replica, with its segment.
+        address: Address,
+        /// The copy.
+        copy: CopyId,
+    },
 }
 
 /// The answer to a client call.
@@ -172,6 +208,14 @@ pub enum Stop {
     /// The leader's segment is not in the register value that the `Host`
     /// holds, or is past in force.
     NoCampaign,
+    /// A higher copy of a heal replaced the copy that the new replica ran
+    /// ([`Input::Join`]): the role starts again from its records.
+    Replaced,
+    /// The replica dropped its copy: it is not in its segment's set and is
+    /// no plan's new replica, or the segment is trimmed (§J3.1). Its last
+    /// batches still reach the disk. Its records stay there: the storage has
+    /// no delete (**Open**, §J3.1).
+    Dropped,
 }
 
 /// One effect of a `Host` step.
@@ -222,6 +266,27 @@ pub enum Effect {
         /// The answer.
         outcome: CallOutcome,
     },
+    /// The new replica at `address` holds a complete copy `copy` of
+    /// `segment` (#1314): tell the grid controller of its plan once batch
+    /// `after` of the replica is durable.
+    Copied {
+        /// The new replica.
+        address: Address,
+        /// The segment.
+        segment: SegmentId,
+        /// The copy.
+        copy: CopyId,
+        /// The batch of the replica it waits on.
+        after: Option<PersistId>,
+    },
+    /// A done write retired `segment`: its acceptors that no later grid
+    /// names may stop (§J3.4, `RetireKept`).
+    Retired {
+        /// The leader that saw the done write.
+        address: Address,
+        /// The retired segment.
+        segment: SegmentId,
+    },
     /// Fire [`Input::TimerFired`] at `at`.
     SetTimer {
         /// The time.
@@ -241,9 +306,19 @@ pub enum Effect {
 enum Role {
     /// The role waits for its records.
     Recovering(Assignment),
+    /// A new replica of a heal waits for its records ([`Input::Join`]).
+    Joining(JoinAsk),
     Acceptor(JournalAcceptor),
     Replica(SegmentReplica),
     Leader(JournalLeader<CallId>),
+}
+
+/// The ask of a new replica that reads its records first.
+#[derive(Clone, Debug)]
+struct JoinAsk {
+    set: Vec<NodeId>,
+    initial: Leader,
+    copy: CopyId,
 }
 
 /// The roles of one process.
@@ -361,7 +436,10 @@ impl Host {
                 self.recovered(address, &entries, &mut effects);
             }
             Input::Unreadable { address } => {
-                if matches!(self.roles.get(&address), Some(Role::Recovering(_))) {
+                if matches!(
+                    self.roles.get(&address),
+                    Some(Role::Recovering(_) | Role::Joining(_))
+                ) {
                     self.stop(address, Stop::Unreadable, &mut effects);
                 }
             }
@@ -380,6 +458,22 @@ impl Host {
                 command,
             } => self.call(address, call, command, &mut effects),
             Input::TimerFired => self.tick(now, &mut effects),
+            Input::Join {
+                address,
+                set,
+                initial,
+                copy,
+            } => self.join(now, address, JoinAsk { set, initial, copy }, &mut effects),
+            Input::Abandon { address, copy } => self.abandon(address, copy, &mut effects),
+        }
+        let dropped: Vec<Address> = self
+            .roles
+            .iter()
+            .filter(|(_, role)| matches!(role, Role::Replica(replica) if replica.dropped()))
+            .map(|(address, _)| *address)
+            .collect();
+        for address in dropped {
+            self.stop(address, Stop::Dropped, &mut effects);
         }
         assert!(
             effects.iter().all(|effect| match effect {
@@ -399,12 +493,7 @@ impl Host {
             // Placement may say it again: the role already runs.
             return;
         }
-        if !self.armed {
-            self.armed = true;
-            effects.push(Effect::SetTimer {
-                at: now.after(self.config.tick),
-            });
-        }
+        self.arm(now, effects);
         match assignment {
             Assignment::Leader { campaign, .. } => {
                 let started = self
@@ -429,7 +518,135 @@ impl Host {
         }
     }
 
+    /// Arm the timer when it is not armed.
+    fn arm(&mut self, now: Time, effects: &mut Vec<Effect>) {
+        if !self.armed {
+            self.armed = true;
+            effects.push(Effect::SetTimer {
+                at: now.after(self.config.tick),
+            });
+        }
+    }
+
+    /// Whether the value that the `Host` holds lets the node of `address`
+    /// start a copy of its segment: the segment is retired and its set
+    /// does not name the node.
+    fn may_copy(&self, address: Address) -> bool {
+        let segment = address
+            .segment
+            .expect("a replica address names its segment");
+        self.values
+            .get(&address.journal)
+            .and_then(|value| value.segment(segment))
+            .is_some_and(|record| {
+                record.state() == SegmentState::Retired
+                    && !record.replicas().contains(&address.node)
+            })
+    }
+
+    fn join(&mut self, now: Time, address: Address, ask: JoinAsk, effects: &mut Vec<Effect>) {
+        // A set that names the node is no copy ask a correct controller
+        // sends: refused, as the value's own member check.
+        if address.segment.is_none() || !self.may_copy(address) || ask.set.contains(&address.node) {
+            return;
+        }
+        match self.roles.get(&address) {
+            Some(Role::Replica(replica))
+                if replica.joining().is_some_and(|runs| runs < ask.copy) =>
+            {
+                // The higher copy replaces the one the role runs. The role
+                // stops first, so the batches it did not commit are lost,
+                // and the read gives the disk's last batch, after which the
+                // new copy's batches come.
+                self.stop(address, Stop::Replaced, effects);
+                self.roles.insert(address, Role::Joining(ask));
+                effects.push(Effect::Read { address });
+            }
+            Some(_) => {}
+            None => {
+                self.arm(now, effects);
+                self.roles.insert(address, Role::Joining(ask));
+                effects.push(Effect::Read { address });
+            }
+        }
+    }
+
+    fn abandon(&mut self, address: Address, copy: CopyId, effects: &mut Vec<Effect>) {
+        if address.segment.is_none() {
+            return;
+        }
+        let may_copy = self.may_copy(address);
+        let Some(value) = self.values.get(&address.journal) else {
+            return;
+        };
+        match self.roles.get_mut(&address) {
+            Some(Role::Replica(replica)) => {
+                let out = replica.abandon(copy, value);
+                replica_effects(address, out, effects);
+            }
+            Some(Role::Joining(ask)) if ask.copy == copy && may_copy => {
+                self.stop(address, Stop::Dropped, effects);
+            }
+            _ => {}
+        }
+    }
+
+    /// The new replica at `address` read its records: it goes on with the
+    /// copy on its disk when that copy is not lower than the one asked,
+    /// else it starts the copy asked. When the value no longer lets it copy
+    /// (it names the node, or the segment is trimmed), the replica starts
+    /// from its disk as any replica, and the value makes it a member or
+    /// drops it.
+    fn joined(
+        &mut self,
+        address: Address,
+        ask: JoinAsk,
+        entries: &[(Key, Entry)],
+        effects: &mut Vec<Effect>,
+    ) {
+        let segment = address
+            .segment
+            .expect("a replica address names its segment");
+        let disk = match layout::decode_replica(address, entries) {
+            Ok(disk) => disk,
+            Err(damage) => {
+                self.stop(address, Stop::Damaged(damage), effects);
+                return;
+            }
+        };
+        let (replica, out) =
+            if self.may_copy(address) && disk.joining.is_none_or(|runs| runs < ask.copy) {
+                SegmentReplica::join(
+                    address.node,
+                    segment,
+                    ask.set,
+                    ask.initial,
+                    ask.copy,
+                    disk.durable,
+                )
+            } else {
+                (
+                    SegmentReplica::recover(address.node, segment, ask.set, ask.initial, disk),
+                    Vec::new(),
+                )
+            };
+        self.roles.insert(address, Role::Replica(replica));
+        replica_effects(address, out, effects);
+        if let (Some(Role::Replica(replica)), Some(value)) = (
+            self.roles.get_mut(&address),
+            self.values.get(&address.journal),
+        ) {
+            let out = replica.observe(value);
+            replica_effects(address, out, effects);
+        }
+    }
+
     fn recovered(&mut self, address: Address, entries: &[(Key, Entry)], effects: &mut Vec<Effect>) {
+        if let Some(Role::Joining(ask)) = self.roles.get(&address) {
+            let ask = ask.clone();
+            self.joined(address, ask, entries, effects);
+            return;
+        }
         let Some(Role::Recovering(assignment)) = self.roles.get(&address) else {
             // A read of a role that stopped, or that runs already.
             return;
@@ -496,7 +713,25 @@ impl Host {
 
     fn deliver(&mut self, envelope: Envelope, effects: &mut Vec<Effect>) {
         let address = envelope.receiver();
+        if let paros_journal::roles::Message::Holds { segment, .. } = &envelope.message {
+            // A `Holds` answers a leader or a new replica of its segment, and
+            // the message does not say which asked: both roles of the node
+            // get it. Each counts only what it asked for, and a "full"
+            // answer is a durable fact of its sender.
+            let replica = Address::replica(address.journal, address.node, *segment);
+            self.step_role(replica, envelope.from, envelope.message.clone(), effects);
+        }
         let Envelope { from, message, .. } = envelope;
+        self.step_role(address, from, message, effects);
+    }
+
+    fn step_role(
+        &mut self,
+        address: Address,
+        from: NodeId,
+        message: paros_journal::roles::Message,
+        effects: &mut Vec<Effect>,
+    ) {
         match self.roles.get_mut(&address) {
             Some(Role::Acceptor(acceptor)) => {
                 let out = acceptor.step(from, message);
@@ -512,7 +747,7 @@ impl Host {
             }
             // A role that recovers, or that the process does not serve,
             // loses the message, as a role that is down.
-            Some(Role::Recovering(_)) | None => {}
+            Some(Role::Recovering(_) | Role::Joining(_)) | None => {}
         }
     }
 
@@ -530,7 +765,7 @@ impl Host {
                     let out = replica.observe(&value);
                     replica_effects(*address, out, effects);
                 }
-                Role::Acceptor(_) | Role::Recovering(_) => {}
+                Role::Acceptor(_) | Role::Recovering(_) | Role::Joining(_) => {}
             }
         }
         self.values.insert(journal, value);
@@ -566,7 +801,7 @@ impl Host {
                     let out = replica.tick();
                     replica_effects(*address, out, effects);
                 }
-                Role::Acceptor(_) | Role::Recovering(_) => {}
+                Role::Acceptor(_) | Role::Recovering(_) | Role::Joining(_) => {}
             }
         }
         self.armed = true;
@@ -620,6 +855,19 @@ fn replica_effects(address: Address, out: Vec<ReplicaEffect>, effects: &mut Vec<
                 change,
                 after,
             },
+            ReplicaEffect::Copied {
+                segment,
+                copy,
+                after,
+            } => Effect::Copied {
+                address,
+                segment,
+                copy,
+                after,
+            },
+            // The `Host` stops a replica that dropped its copy after the
+            // step ([`Stop::Dropped`]).
+            ReplicaEffect::Drop => continue,
         });
     }
 }
@@ -642,6 +890,7 @@ fn leader_effects(address: Address, out: Vec<LeaderEffect<CallId>>, effects: &mu
                 call: token,
                 outcome: CallOutcome::Reply(reply),
             },
+            LeaderEffect::Retired { segment } => Effect::Retired { address, segment },
         });
     }
 }

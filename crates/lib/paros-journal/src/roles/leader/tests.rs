@@ -730,3 +730,173 @@ fn a_pending_segment_follows_one_with_no_end() {
     leader.segments[0].end = Some(Slot(3));
     leader.assert_invariants();
 }
+
+/// An open leader of segment 2, with segment 1 sealed at 3 (its replicas
+/// 11, 12, 13), and the register value it holds.
+fn open_on_sealed() -> (JournalLeader<u32>, RegisterValue) {
+    let sealed = two_segments()
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(3),
+        })
+        .expect("the seal");
+    let (mut leader, _) = campaign(&sealed, 3, 2, 3);
+    for node in [1, 2, 4, 5] {
+        leader.step(NodeId(node), promise(3, 3, page(&[], &[])));
+    }
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(3) });
+    (leader, sealed)
+}
+
+fn holds(segment: u64, full: bool) -> Message {
+    Message::Holds {
+        segment: SegmentId(segment),
+        full,
+    }
+}
+
+/// The receivers of the `Holding`s of `effects`.
+fn holding(effects: &[LeaderEffect<u32>]) -> Vec<NodeId> {
+    sends(effects)
+        .into_iter()
+        .filter_map(|(to, message)| {
+            (message
+                == Message::Holding {
+                    segment: SegmentId(1),
+                })
+            .then_some(to)
+        })
+        .collect()
+}
+
+fn retires(effects: &[LeaderEffect<u32>]) -> Vec<Change> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            LeaderEffect::Register(change @ Change::Retire { .. }) => Some(change.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_open_leader_retires_the_sealed_segment_at_f_plus_one_holders() {
+    let (mut leader, sealed) = open_on_sealed();
+    let effects = leader.tick(4);
+    assert_eq!(holding(&effects), nodes(&[11, 12, 13]));
+    assert!(retires(&effects).is_empty(), "no holder yet");
+    assert_eq!(leader.step(NodeId(11), holds(1, true)), vec![]);
+    leader.step(NodeId(12), holds(1, false));
+    leader.step(NodeId(99), holds(1, true));
+    leader.step(NodeId(13), holds(2, true));
+    let effects = leader.tick(4);
+    assert_eq!(
+        holding(&effects),
+        nodes(&[12, 13]),
+        "only a replica of the set that holds the segment counts (control retire_f)"
+    );
+    assert!(retires(&effects).is_empty(), "one holder of F + 1");
+    leader.step(NodeId(13), holds(1, true));
+    let effects = leader.tick(4);
+    assert_eq!(holding(&effects), nodes(&[12]));
+    let retire = Change::Retire {
+        segment: SegmentId(1),
+        holders: 2,
+        unrepaired_damage: false,
+    };
+    assert_eq!(retires(&effects), vec![retire.clone()]);
+    // The register refuses the retire until the boundary state is written
+    // (control retire_norecord): the leader is not stopped and asks again.
+    assert!(sealed.apply(&retire).is_err());
+    assert_eq!(leader.refused(), vec![]);
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(3) });
+    assert!(
+        leader.observe(&sealed).is_empty(),
+        "a value with the segment sealed changes nothing"
+    );
+    assert_eq!(retires(&leader.tick(4)), vec![retire.clone()]);
+    let retired = sealed
+        .apply(&Change::Boundary {
+            segment: SegmentId(1),
+            state: crate::fold::BoundaryState::fresh(crate::command::Leader::Unset),
+        })
+        .and_then(|value| value.apply(&retire))
+        .expect("the retire");
+    assert_eq!(
+        leader.observe(&retired),
+        vec![LeaderEffect::Retired {
+            segment: SegmentId(1)
+        }],
+        "the old acceptors stop only on a done retire (RetireKept)"
+    );
+    assert_eq!(leader.observe(&retired), vec![], "said once");
+    let effects = leader.tick(4);
+    assert_eq!(holding(&effects), vec![]);
+    assert_eq!(retires(&effects), vec![]);
+    assert_eq!(leader.step(NodeId(12), holds(1, true)), vec![]);
+}
+
+#[test]
+fn a_leader_with_no_sealed_segment_retires_nothing() {
+    let mut leader = open_leader();
+    leader.step(NodeId(11), holds(1, true));
+    leader.step(NodeId(12), holds(1, true));
+    let effects = leader.tick(4);
+    assert_eq!(holding(&effects), vec![]);
+    assert_eq!(retires(&effects), vec![]);
+    let (mut stopped, _) = open_on_sealed();
+    stopped.step(NodeId(11), holds(1, true));
+    stopped.stop();
+    stopped.step(NodeId(12), holds(1, true));
+    assert!(
+        stopped.tick(4).is_empty(),
+        "a stopped leader retires nothing"
+    );
+}
+
+#[test]
+fn a_sealing_leader_counts_no_holder() {
+    let value = two_segments();
+    let (mut leader, _) = campaign(&value, 2, 2, 0);
+    for node in [1, 2, 4, 5] {
+        leader.step(NodeId(node), promise(2, 0, page(&[], &[])));
+    }
+    assert!(matches!(leader.phase(), LeaderPhase::Sealing { .. }));
+    leader.step(NodeId(11), holds(1, true));
+    leader.step(NodeId(12), holds(1, true));
+    assert_eq!(retires(&leader.tick(4)), vec![]);
+}
+
+#[test]
+fn the_holders_a_retire_needs_are_f_plus_one_of_the_grid() {
+    let (leader, _) = open_on_sealed();
+    assert_eq!(leader.segments()[0].acks(), 2);
+    let wide = reshape(
+        &RegisterValue::new()
+            .apply(&Change::Elect { holder: NodeId(0) })
+            .expect("an election"),
+        &[&[1, 2, 3], &[4, 5, 6]],
+    );
+    let (leader, _) = campaign(&wide, 2, 1, 0);
+    assert_eq!(leader.segments()[0].acks(), 2);
+    let value = RegisterValue::new()
+        .apply(&Change::Elect { holder: NodeId(0) })
+        .expect("an election");
+    let five = value
+        .apply(&Change::Reshape {
+            opening: OpeningCall {
+                term: value.term().number,
+                expected: None,
+                grid: Grid::new(2, vec![nodes(&[1, 2, 3, 4, 5])]).expect("a grid"),
+                replicas: nodes(&[11, 12, 13, 14, 15]),
+            },
+            release: RELEASE,
+        })
+        .expect("a reshape");
+    let (leader, _) = campaign(&five, 2, 1, 0);
+    assert_eq!(
+        leader.segments()[0].acks(),
+        3,
+        "F = 2: three holders, a majority of five"
+    );
+}

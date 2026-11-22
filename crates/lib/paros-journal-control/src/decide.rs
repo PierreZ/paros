@@ -25,7 +25,7 @@
 //! 3. No plan while the register cannot take a write (the matchmakers are
 //!    below a majority, `ControlFrozen`) or while a signal is stale.
 //! 4. The cheap action first: the repair of a found damage (§J5.3).
-//! 5. The re-replication of a sealed segment's replica set (§J3.1, #1314),
+//! 5. The re-replication of a retired segment's replica set (§J3.1, #1314),
 //!    under a token of the rate limiter.
 //! 6. The heal reshape (§J6.2, the journal states), under the reshape
 //!    guard, the minimum interval and a token.
@@ -348,12 +348,13 @@ fn state_alert(state: GridState, alerts: &mut BTreeSet<Alert>) {
     alerts.insert(alert);
 }
 
-/// The re-replication of the first sealed or retired segment, not trimmed,
-/// whose replica set has a member that is down.
+/// The re-replication of the first retired segment, not trimmed, whose
+/// replica set has a member that is down. A sealed segment still has its
+/// acceptors: it retires first, at `F + 1` holders, and the register heals
+/// only a retired record (§J3.4, #1314).
 fn rereplicate(view: &View<'_>, alerts: &mut BTreeSet<Alert>) -> Option<Action> {
     let record = view.register.segments().values().find(|r| {
-        matches!(r.state(), SegmentState::Sealed | SegmentState::Retired)
-            && !down(r.replicas(), view.liveness).is_empty()
+        r.state() == SegmentState::Retired && !down(r.replicas(), view.liveness).is_empty()
     })?;
     let Some(to) = heal_replicas(record.replicas(), view.liveness, view.candidates) else {
         probe!(

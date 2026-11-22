@@ -269,27 +269,43 @@ jobs:
           nix develop --command cargo nextest run --profile ci --release
           -p consensus-sim --test coverage --no-capture
 
+  # The jobs of `mutants` (`scripts/mutants-plan.sh`): one for each shard of
+  # each crate whose `src/` the pull request changes. Its input is the diff of
+  # the four `src/` folders from the tip of main; a crate with an empty diff has
+  # no mutant to test, so no job of it runs.
+  mutants-plan:
+    needs: scope
+    if: ${{ github.event_name == 'pull_request' && needs.scope.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      any: ${{ steps.plan.outputs.any }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - id: plan
+        run: scripts/mutants-plan.sh HEAD^1
+
   # Mutation testing of the lines a pull request changes in paros-consensus,
   # in paros-journal, in paros-journal-control and in paros-journal-io
   # (`.cargo/mutants.toml`, `scripts/mutants.sh`): each mutant of a changed
-  # line must be caught by the core's tests or the simulation (the fast tests
+  # line must be caught by the crate's tests or the simulation (the fast tests
   # first, then the trace checks for the mutants they miss). A survivor fails
-  # the job: add the test that sees it in the same pull request. The `Mutants`
+  # the job: add the test that sees it in the same pull request. Each crate
+  # runs in shards of its own (`--shard k/n`, round-robin, so that the slow
+  # mutants of one function spread over the shards; `scripts/mutants-plan.sh`),
+  # so a large pull request stays inside the 90 minutes of a job. The `Mutants`
   # workflow runs every mutant of the core each week.
-  #
-  # The time of the core's pass grows with the lines a pull request changes
-  # (about 75 s for each mutant), so two shards share its mutants
-  # round-robin: a diff of 70 mutants took 88 minutes in one job. The other
-  # crates' passes run in shard 0 only.
   mutants:
-    needs: scope
-    if: ${{ github.event_name == 'pull_request' && needs.scope.outputs.rust == 'true' }}
+    needs: mutants-plan
+    if: ${{ needs.mutants-plan.outputs.any == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      matrix:
-        shard: [0, 1]
+      matrix: ${{ fromJSON(needs.mutants-plan.outputs.matrix) }}
+    name: mutants (${{ matrix.crate }} ${{ matrix.shard }}/${{ matrix.of }})
     steps:
       - uses: actions/checkout@v7
         with:
@@ -313,53 +329,20 @@ jobs:
             --prefer '^(paros_consensu|consensus_sim|paros_journal|journal_sim|flavors|walks|mutants|traces|coverage|host)' \
             --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
             > earlyoom.log 2>&1 &
+      # `scripts/mutants.sh` (no flag) is paros-consensus; `--journal` adds the
+      # trace checks of journal-sim as a second pass; `--control` and
+      # `--journal-io` run one pass.
       - name: Run the mutants of the changed lines
+        env:
+          CRATE: ${{ matrix.crate }}
+          FLAG: ${{ matrix.flag }}
+          SHARD: ${{ matrix.shard }}/${{ matrix.of }}
         run: |
           set -euo pipefail
-          git diff HEAD^1 HEAD -- crates/lib/paros-consensus/src > pr.diff
-          if [ ! -s pr.diff ]; then
-            echo "The pull request changes no line of paros-consensus/src."
-            exit 0
-          fi
-          nix develop --command scripts/mutants.sh --in-diff pr.diff \
-            --shard ${{ matrix.shard }}/2 --sharding round-robin
-      # The same for the journal core (`scripts/mutants.sh --journal`): its
-      # unit tests and the walks of journal-sim, then the trace checks of
-      # journal-sim for the mutants they miss.
-      - name: Run the mutants of the changed lines of paros-journal
-        if: ${{ matrix.shard == 0 }}
-        run: |
-          set -euo pipefail
-          git diff HEAD^1 HEAD -- crates/lib/paros-journal/src > journal.diff
-          if [ ! -s journal.diff ]; then
-            echo "The pull request changes no line of paros-journal/src."
-            exit 0
-          fi
-          nix develop --command scripts/mutants.sh --journal --in-diff journal.diff
-      # The same for the grid controller (`scripts/mutants.sh --control`): its
-      # unit tests and journal-sim's sweep of its decisions, in one pass.
-      - name: Run the mutants of the changed lines of paros-journal-control
-        if: ${{ matrix.shard == 0 }}
-        run: |
-          set -euo pipefail
-          git diff HEAD^1 HEAD -- crates/lib/paros-journal-control/src > control.diff
-          if [ ! -s control.diff ]; then
-            echo "The pull request changes no line of paros-journal-control/src."
-            exit 0
-          fi
-          nix develop --command scripts/mutants.sh --control --in-diff control.diff
-      # The same for the journal's traits and driver (`scripts/mutants.sh
-      # --journal-io`): its unit tests and the driver walk of journal-sim.
-      - name: Run the mutants of the changed lines of paros-journal-io
-        if: ${{ matrix.shard == 0 }}
-        run: |
-          set -euo pipefail
-          git diff HEAD^1 HEAD -- crates/lib/paros-journal-io/src > journal-io.diff
-          if [ ! -s journal-io.diff ]; then
-            echo "The pull request changes no line of paros-journal-io/src."
-            exit 0
-          fi
-          nix develop --command scripts/mutants.sh --journal-io --in-diff journal-io.diff
+          git diff HEAD^1 HEAD -- "crates/lib/$CRATE/src" > crate.diff
+          # shellcheck disable=SC2086 # FLAG is empty or one word.
+          nix develop --command scripts/mutants.sh $FLAG --in-diff crate.diff \
+            --shard "$SHARD" --sharding round-robin
       - name: Show the survivors
         if: failure()
         run: |
