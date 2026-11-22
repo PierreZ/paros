@@ -245,7 +245,10 @@ impl ColocatedNode {
             let fence = self
                 .reader_fence(&basis.config)
                 .expect("a matchmaker deployment carries a read fence");
-            assert!(fence <= wire, "the reader fence never exceeds the read fence");
+            assert!(
+                fence <= wire,
+                "the reader fence never exceeds the read fence"
+            );
             assert!(
                 fence >= self.acceptors_since,
                 "the reader fence covers the belief ballot"
