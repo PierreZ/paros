@@ -85,7 +85,7 @@ A `3 × 2` grid of partitions (`F = 1`): six acceptors, two columns of three.
   The driver moves a round that stayed open for its budget of re-sends to the next column, with
   the same slot, ballot and command (`ColocatedNode::move_round`, #533 (move a stuck round)). The
   budget doubles with each move, up to `MOVE_BACKOFF_CAP` = 6 doublings (`move_budget`,
-  `paros-roles/src/node/grid.rs`).
+  `paros-roles/src/node/grid.rs`, at the tag `v0.2.0-alpha.1`).
 - **A leader change.** Phase 1 holds `rows − acks + 1` of every column, so it meets the Phase-2
   quorum of every column at every lower ballot. The P2c merge works unchanged.
 - **A reconfiguration between grids, or between a grid and a majority.** Phase 1 needs a
@@ -142,7 +142,22 @@ because a short row or column would let a predicate answer for a cell that does 
 | The sim's draw | `paros-sim/src/shape/quorum.rs`: `QuorumPolicy::Grid`, `grid_layouts` (at the tag `v0.2.0-alpha.1`) |
 | The TLA+ models | `specs/tla/grid/Grid.tla`: the quorums as sets, shared by `config-register/` and `reads/`; `grid/GridCheck.tla`: `cross_intersects` and `tolerated_failures` on every layout up to nine members (#1102 (rework 1.13)) |
 
-**Sim gates and oracles:**
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- The model `specs/tla/grid/`, run by most other folders of `specs/tla/`.
+- `consensus-sim`'s grid flavors (`Flavor::grid`, `Flavor::partitions`, `Flavor::proxies_on_grid`).
+  The Phase-2 rule of the oracles is written again from the papers (`oracle/quorum.rs`,
+  `Phase2Rule`), and a test agrees with `AcceptorConfig::has_phase2_quorum` on every subset of
+  small systems.
+- Walk sites "cluster: a round ran on a column the driver named" and "cluster: a leader moved a
+  stuck round to another column" (`Action::MoveRound`); core probes "phase2: a leader moves a
+  stuck round to another column", "phase2: a moved round is chosen", "phase2: an Accepted from
+  outside the round's column or configuration is not counted".
+- The trace rule "a win on half of a grid" (`cluster/trace/rules.rs`).
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - Draws (`shape/quorum.rs`): `"a run draws an acceptor grid"`, `"a run draws acceptor
   partitions"`, `"a run draws the wide-grid scenario"`. The harness runs only layouts with

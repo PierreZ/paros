@@ -138,10 +138,23 @@ its caller drives the retries (the matchmaker reconfigurer, or the machine that 
 | The durable writes | `paros-consensus/src/contract/write.rs`: `AcceptorWrite::SetPromise`, `AcceptorWrite::AppendAccepted` |
 | Decree users | `paros-consensus/src/matchmaker/reconfigurer.rs` (the matchmaker handover, `SuccessorDecree`); `paros-machine` (`cell init`, #277) |
 
+The rows that name `paros-machine` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
 The rule is stated in the module docs of `acceptor.rs` (the acceptor knows nothing but its
 votes) and `decree.rs` (no separate kernel: a decree is the `Proposer` over one slot).
 
-**Sim gates and oracles:**
+**Judges today:**
+
+- The model `specs/tla/decree/`, with its inductive invariant `Inv` checked by TLC and proved
+  with TLAPS at every size (`DecreeProof.tla`).
+- `consensus-sim`'s decree walk (`src/decree.rs`) must reach "decree: a value was chosen",
+  "decree: Phase 1 adopted a prior vote", "decree: a proposal was preempted" and "decree: a later
+  ballot proposed the chosen value again"; each walk is traced against the model.
+- In the cluster walks, `ONE_VALUE` ("at most one value is chosen per slot") and
+  `PERSIST_BEFORE_SEND` (`oracle/ledger.rs`) judge every step; their controls are
+  `Mutant::ForgetVotes` and `Mutant::SkipPersist`.
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - `"a node's promised ballot never decreases"` (`paros-sim/src/audit/state.rs`) and
   `"a node's accepted ballot never exceeds its promised ballot"` (`audit/node.rs`).

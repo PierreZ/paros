@@ -75,7 +75,7 @@ sequenceDiagram
 **The leader exception** (#578, commit `25d00a7`). A leader's `Accept` promises nothing about
 the leader's own state: it asks the others to vote. So the driver sends a batch's `Accept`s
 **before** its flush, and the rest of the batch after it (`split_early` and `send_early` in
-`paros-roles/src/node/ready.rs`). The leader's own vote counts only once it is durable: the
+`paros-roles/src/node/ready.rs`, at the tag `v0.2.0-alpha.1`). The leader's own vote counts only once it is durable: the
 loop steps nothing of the journal until the flush returns. [PML §4.2] describes the same
 optimization: the master "writes after sending accept; others write before sending ack". etcd-raft
 documents it too, after Raft thesis §10.2.1 ([etcd-raft replication §1]).
@@ -143,6 +143,8 @@ crash. paros quarantines a journal on a storage fault and re-opens it later
 | The leader's early send | `paros-roles/src/node/ready.rs`: `split_early`, `send_early` |
 | The journal's flight rule (not built) | `docs/journal/04-roles.md` §J4.2; the model `specs/tla/flight-rule/` |
 
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
 The rule is stated in the `Ready` doc (the five steps) and the `HardState` doc (the durability
 contract). `docs/analysis/go-raft/etcd-raft-sans-io-patterns.md` §2 compares the shape with
 etcd-raft's.
@@ -152,9 +154,21 @@ etcd-raft's.
 - `"a batch persists no promise or record above the promise in memory"` (`Ready::writes`).
 - `"a promise or a vote is always fsync'd"` (`MustSync::for_batch`).
 - `"no Accept waits behind a flush that keeps the promise"` and `"every Accept of the batch left
-  before its flush"` (`paros-roles/src/node/ready.rs`).
+  before its flush"` (`paros-roles/src/node/ready.rs`, at the tag `v0.2.0-alpha.1`).
 
-**Sim gates and oracles:**
+**Judges today:**
+
+- `PERSIST_BEFORE_SEND`, "a vote leaves a node only once its disk holds it"
+  (`consensus-sim/src/oracle/ledger.rs`); its control is `Mutant::SkipPersist`. The walk crashes a
+  node before its batch is durable and between persist and send ("cluster: a node crashed before
+  its batch was durable", "cluster: a node crashed between persist and send"), and a crash may
+  lose a write that no fsync covered ("cluster: a crash lost a write no fsync covered"), with
+  `PREFIX_SHRINKS` as the oracle and `Mutant::LoseChosenIndex` as its control.
+- The journal's flight rule has its own model, `specs/tla/flight-rule/`, and the journal state
+  model treats the acceptor's state as memory, a queue of writes and a disk
+  (`specs/tla/journal-state/`, #1309 (the state is the disk)).
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - `"a sent Promise carries a durably promised ballot"` (`paros-sim/src/audit/node.rs`).
 - `"an outgoing Accepted names a durably accepted record"` (`paros-sim/src/audit.rs`).
