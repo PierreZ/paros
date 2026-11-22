@@ -174,9 +174,10 @@ Select(b, c) ==
   /\ UNCHANGED <<reg, wm, answers, matched, hist, p1, prom, vbal, vval, retired, msgs>>
 
 \* Matchmaker m registers ballot b and answers with its registrations below b.
+\* With MatchCheck, m answers b one time: it keeps <<b, cfg[b]>> while its
+\* watermark is at or below b, and refuses b once its watermark passes b.
 Register(m, b) ==
   /\ cfg[b] # {}
-  /\ ~\E r \in answers[b] : r.mm = m
   /\ b >= wm[m]
   /\ MatchCheck => ~\E e \in reg[m] : e[1] >= b
   \* A matchmaker refuses a configuration that names a retired acceptor.
@@ -207,9 +208,10 @@ Asked(b) == IF Phase1 = "own" THEN {cfg[b]} ELSE hist[b]
 \* 1a to the acceptors of the configurations that it asks. The acceptor's
 \* guard is the pool, not a configuration: a removed acceptor answers until
 \* it retires.
+\* `Asked(b)` is empty until `CloseMatch` sends the 1a of b (with Phase1 =
+\* "own", a control, it is the configuration of b from `Select` on).
 Promise(a, b) ==
   /\ a \notin retired
-  /\ [type |-> "1a", bal |-> b] \in msgs
   /\ a \in UNION Asked(b)
   /\ prom[a] < b
   /\ prom' = [prom EXCEPT ![a] = b]
@@ -233,8 +235,9 @@ Selectable(S) ==
 Propose(b) ==
   /\ matched[b]
   /\ p1[b] = "wait"
+  \* An acceptor promises b at most once (`prom[a] < b`, and `prom` only
+  \* grows), so S holds one promise of each acceptor.
   /\ \E S \in SUBSET {m \in msgs : m.type = "1b" /\ m.bal = b} :
-       /\ \A m, n \in S : m.acc = n.acc => m = n
        /\ Phase1Done(b, {m.acc : m \in S})
        /\ p1' = [p1 EXCEPT ![b] = IF \E m \in S : m.vbal > 0 THEN "found" ELSE "empty"]
        /\ \E v \in Selectable(S), c \in IF Reconfig = "edit" THEN Configs ELSE {cfg[b]} :
@@ -259,8 +262,8 @@ Accept(a, b) ==
 (***************************************************************************)
 
 \* The proposer of ballot b asks the matchmakers to forget the ballots below b.
+\* A second ask sends the same message again: a stutter.
 GcAsk(b) ==
-  /\ [type |-> "ga", bal |-> b] \notin msgs
   /\ CASE Gc = "paper" -> p1[b] = "empty" \/ \E v \in Values : ChosenAt(b, v)
        [] Gc = "early" -> p1[b] # "wait"
        [] Gc = "off" -> FALSE
@@ -326,6 +329,15 @@ HistoryOf(Q) == Union({[mm |-> m, hist |-> reg[m], w |-> wm[m]] : m \in Q})
 \* retire.
 Electable ==
   \A Q \in MQuorums : \A c \in HistoryOf(Q) : \E P \in Maj(c) : P \cap retired = {}
+
+\* A matchmaker holds no registration below its watermark: GC forgot them,
+\* and it registers no ballot below it.
+RegAboveWm == \A m \in Matchmakers : \A e \in reg[m] : e[1] >= wm[m]
+
+\* The history of a ballot is fixed once its matchmaking phase closed, and a
+\* retired acceptor neither promises nor votes again.
+HistFixed == [][\A b \in Ballots : matched[b] => hist'[b] = hist[b]]_vars
+RetiredFrozen == [][\A a \in retired : prom'[a] = prom[a] /\ vbal'[a] = vbal[a]]_vars
 
 \* Reachability controls: each must be violated.
 NoChoice == ~\E v \in Values : Chosen(v)

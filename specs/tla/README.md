@@ -1636,7 +1636,10 @@ not retire; the same name as in `retire-fence/`). `Electable` reads the history 
 The watermark refusal of a matchmaker (`b` below its watermark, `BelowWatermark`) has no
 control: removing it changes no state of `gc_two`. The registration check implies it here: the
 highest ballot that closed matchmaking keeps its registration at a quorum, and the check refuses
-every lower ballot there.
+every lower ballot there. `RegAboveWm` (a matchmaker holds no registration below its watermark)
+needs the refusal in `matchmaker`. `matchmaker` and `gc_two` also check `HistFixed` (the history
+of a ballot does not change once its matchmaking closed) and `RetiredFrozen` (a retired acceptor
+neither promises nor votes).
 
 The pool has five acceptors and two configurations, `A = {a1, a2, a3}` and `B = {a3, a4, a5}`.
 A move from `A` to `B` replaces `a1` and `a2`, and a majority of the union, `{a3, a4, a5}`, holds
@@ -3278,7 +3281,7 @@ says `Duplicate` or position taken); `OneFold` (each replica's fold is the fold 
 its front); `RecordTrue` (a done boundary state is the journal state at the end); `NoMoveBack`;
 `OneUnretired`; `ResolveTrue` (the answer to a `Resolve` is the answer of the whole log at the
 slot of the write, or `Truncated` once the floor is above the position); `Readable` (every record at or above the floor has a live copy: a disk quorum of
-a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `BoundOnce` (a boundary state written at a majority never changes), `TrimStays`, `ResolveReadOnly` (a `Resolve` changes nothing but its answer).
+a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `BoundOnce` (a boundary state written at a majority never changes), `EndAfterStart` (an end is written only once the start of its segment is known), `SealerStart` (a leader that sealed writes from its own end), `BaseOnce` (a replica takes one base), `TrimStays`, `ResolveReadOnly` (a `Resolve` changes nothing but its answer).
 Liveness: `Ends` (the chosen log has no hole and every chosen slot is answered).
 
 | Check | CI | Result |

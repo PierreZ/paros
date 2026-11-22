@@ -405,7 +405,8 @@ Phase1(b) == \E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : Phase1On(b, Qs)
 SealWrite(b) ==
   LET g == bgen[b] IN
   /\ bend[b] # None
-  /\ StartKnown(g - 1)
+  \* No guard on the start of g - 1: `Reshape` opens g only once the end of
+  \* g - 2 is done (retired, or in force), and a done end stays.
   \* No end, or a partial end that its read missed.
   /\ IF rend[g - 1] = None THEN TRUE
      ELSE ~rend[g - 1].done /\ rend[g - 1].v # bend[b]
@@ -553,10 +554,10 @@ Apply(r) ==
   LET g == GenOf(r)
       s == Front(r)
   IN
-  /\ g <= top
+  \* A replica holds a base only once its segment is open (g <= top) and its
+  \* start is known; with EndAct = "done" the start stays known (`EndOnce`).
+  \* A slot past the last one is never chosen, so the sources below bound s.
   /\ rbase[r] # None
-  /\ StartKnown(g)
-  /\ s < NS
   /\ IF EndKnown(g) THEN s < rend[g].v ELSE TRUE
   /\ ~rtrim[g]
   \* It learns the slot from a live source: a quorum of a grid that still
@@ -645,8 +646,9 @@ ResolveBelow(s, r) ==
 (***************************************************************************)
 Holders(p) == {r \in RepOf[p] : rbase[r] # None /\ Done(rend[p]) /\ Front(r) = rend[p].v}
 
+\* Only the first leader of p + 1 writes the end of p, so a done end has a
+\* successor (p < top).
 Retire(p) ==
-  /\ p < top
   /\ ~rret[p]
   /\ Done(rend[p])
   /\ IF RetireRule = "full"
@@ -748,6 +750,13 @@ EndOnce == [][\A p \in Gens : Done(rend[p]) => rend'[p] = rend[p]]_vars
 \* A replica that holds its base takes no other: a trace that takes one base
 \* two times is refused at the copy.
 BaseOnce == \A r \in Replicas : rbase[r] # None => ~ENABLED TakeBase(r)
+
+\* An end is written only once the start of its segment is known.
+EndAfterStart == \A p \in Gens : rend[p] # None => StartKnown(p)
+
+\* A leader that sealed writes from its own end: the end that its Phase 1
+\* chose (`Open`).
+SealerStart == \A b \in Ballots : bst[b] = "w" /\ bend[b] # None => bstart[b] = bend[b]
 
 \* A boundary state written at a majority never changes.
 BoundOnce == [][\A p \in Gens : Done(rbound[p]) => rbound'[p] = rbound[p]]_vars
