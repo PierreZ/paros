@@ -38,7 +38,7 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
     <li><strong>Every role is a pure actor.</strong> A deterministic step, persist before send, and I/O only in adapters.</li>
     <li><strong>Proved before built.</strong> No code before its TLA+ model, and no excuse in simulation.</li>
     <li><strong>Everything simulates, and it runs in the browser.</strong> Every layer and the whole service run in the deterministic simulation, and the same code compiles to wasm.</li>
-    <li><strong>Easy to operate.</strong> The service heals itself and scales itself, so a person runs it with few actions.</li>
+    <li><strong>Easy to operate.</strong> The service heals itself and scales itself, so a person runs it with few actions. A control component reads the telemetry of the data plane and changes the system through its calls.</li>
   </ol>
   <p>The features of the first version stay. Its structure changes: the service becomes a stack
   of layers on the journal v1, and each layer is a crate with its own model and its own
