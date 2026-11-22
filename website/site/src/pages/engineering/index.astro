@@ -155,7 +155,7 @@ const CONSENSUS: Claim[] = [
     mutants: [],
     state: "open",
     issue: { n: 1307, name: "inductive invariants, then proofs" },
-    note: "Decree: TLAPS proves that Inv holds at the start, that every step keeps it and that it implies Agreement (DecreeProof.tla); the temporal rule that joins them is not checked (no LS4 in the TLAPS of nixpkgs). Multi-Paxos: TLC checks drawn states only; no proof yet.",
+    note: "Decree: TLAPS proves that Inv holds at the start, that every step keeps it and that it implies Agreement (DecreeProof.tla); the temporal rule that joins them is not checked (no LS4 in the TLAPS of nixpkgs). Multi-Paxos: the same three facts are proved by TLAPS too (MultiPaxosProof.tla), with the same rule not checked.",
   },
 ];
 

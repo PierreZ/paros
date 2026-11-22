@@ -180,7 +180,11 @@ the `Journal live` workflow checks one fold walk with no end live for four hours
 
 A moonpool-sim of the whole journal runs the driver, the adapter, many journals in one process,
 disk faults inside the contract, machine and zone loss, the controller and clients that retry
-(#1330 (paros-journal-moonpool)). Every input is recorded (§J4.2, rule 2), so a red run replays.
+(#1330 (paros-journal-moonpool), now part of #1417 (the moonpool adapter on the generic host)).
+The moonpool-sim version is not part of the journal v1: the adapter moved to the layered parosd
+(#1409; Pierre, 2026-11-22). The v1 keeps the same scenarios with the same oracles as a
+`journal-sim` walk of the whole journal on the driver and the in-memory backends of
+`paros-journal-io` (#1445 (the whole journal on the in-memory IO)), so the move removes no check. Every input is recorded (§J4.2, rule 2), so a red run replays.
 A contract suite certifies a backend's API only; crash safety is claimed only on a disk that can
 inject faults (Pierre, 2026-11-19).
 
@@ -189,7 +193,7 @@ Its `Events` port feeds the live trace check of §J7.3, so a run of many hours i
 it (announce, make, confirm): after a kill, only the last announced write is uncertain, and the
 report at restart decides. A control tears a persist batch during a reconfiguration (as E3 of
 etcd-raft, a lost commit index across a membership change), and the live check must refuse it.
-**Open**: these three parts need the moonpool adapter, #1330 (paros-journal-moonpool). The
+**Open**: these three parts need the moonpool adapter, #1417 (after v1). The
 driver and its `Events` port are built (#1329 (paros-journal-io), §J4.2): the driver reports each
 step of the `Host` once its batches are settled. The announce, make and confirm of each write, the
 live check fed by the port, and the torn-batch control land with the adapter.

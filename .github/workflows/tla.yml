@@ -1,20 +1,32 @@
 # TLC, the TLA+ model checker, on the protocol specs of specs/tla/ (#579
 # (zero-stall reconfiguration)). The specs are small models of a protocol rule,
-# checked before the rule is written in paros-consensus. It runs only when a spec,
-# its script or the flake changes. Each folder of specs/tla/ runs in its own
-# job, so a new model adds a job and not time to one job; the job `tlc` is
-# green only when every folder's job is green. The job `traces` runs the trace
-# checks of consensus-sim and journal-sim (`tests/traces.rs` of each, and
-# `tests/register_traces.rs`, `tests/roles_traces.rs`,
-# `tests/controller_traces.rs` and `tests/live.rs` of journal-sim): a trace
-# spec EXTENDS its model,
-# so a change of a model or of a `*Trace.tla` alone must meet the walks too
-# (#1231 (traced walks reach the rules)). The Rust workflow runs them for a
-# change of the code. Each CI job has at most 30 minutes, so `traces` runs in
-# four shards (nextest `--partition count:i/4`: the tests in name order, dealt
-# out in turn). Each shard runs a quarter of the tests and every test runs in
-# one shard (#1340 (the traces job reaches its timeout)). The job `proofs`
-# checks the TLAPS proofs of specs/tla/ (`scripts/check-proofs.sh`).
+# checked before the rule is written in paros-consensus.
+#
+# GitHub runs at most 40 jobs at a time for the whole account (GitHub Pro), so
+# a job runs only when it can find something. The `plan` job asks
+# `scripts/ci-plan.py` which folders the change can break: a folder reads only
+# its own files and their symlink targets, so a folder runs when one of those
+# changed, and every folder runs when a tool changed (the scripts, the flake,
+# this file). A push to main is planned the same way from the commit before
+# the push, and a manual run (workflow_dispatch) runs every folder.
+#
+# The folders that run are packed into a few `spec` jobs, each at most 22
+# minutes of checks (`scripts/tla-minutes.txt`), inside the 30 minutes of a
+# job. The job `tlc` is green only when every job of the plan is green.
+#
+# The job `traces` runs the trace checks of consensus-sim and journal-sim
+# (`tests/traces.rs` of each, and `tests/register_traces.rs`,
+# `tests/roles_traces.rs`, `tests/controller_traces.rs` and `tests/live.rs` of
+# journal-sim): a trace
+# spec EXTENDS its model, so a change of a model or of a `*Trace.tla` alone
+# must meet the walks too (#1231 (traced walks reach the rules)). It runs when
+# a folder of a trace spec runs and the Rust workflow does not run its `test`
+# and `trace-edits` jobs, which run the same tests on the same specs. Each CI
+# job has at most 30 minutes, so `traces` runs in four shards (nextest
+# `--partition count:i/4`; #1340 (the traces job reaches its timeout)). The
+# job `proofs` checks the TLAPS proofs of specs/tla/ (`scripts/check-proofs.sh`),
+# one job for each `*Proof.tla` module of a folder that runs, or of every
+# folder when the proof script changes.
 name: TLA
 
 on:
@@ -25,9 +37,12 @@ on:
       - "scripts/check-tla.sh"
       - "scripts/check-proofs.sh"
       - "scripts/mutate-tla.py"
+      - "scripts/ci-plan.py"
+      - "scripts/tla-minutes.txt"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/tla.yml"
+  workflow_dispatch:
   pull_request:
     branches: [main]
     paths:
@@ -35,55 +50,71 @@ on:
       - "scripts/check-tla.sh"
       - "scripts/check-proofs.sh"
       - "scripts/mutate-tla.py"
+      - "scripts/ci-plan.py"
+      - "scripts/tla-minutes.txt"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/tla.yml"
 
+# A new push cancels a pull request's older run, never a run on main: each
+# merged commit gets its whole check.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'pr' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
 
 jobs:
-  specs:
+  plan:
     runs-on: ubuntu-latest
     outputs:
-      folders: ${{ steps.list.outputs.folders }}
+      groups: ${{ steps.plan.outputs.groups }}
+      any: ${{ steps.plan.outputs.any }}
+      traces: ${{ steps.plan.outputs.traces }}
+      proofs: ${{ steps.plan.outputs.proofs }}
+      any_proofs: ${{ steps.plan.outputs.any_proofs }}
     steps:
       - uses: actions/checkout@v7
-      - name: List the folders of specs/tla
-        id: list
+        with:
+          fetch-depth: 0
+      # A pull request's checkout is its merge into the tip of main: the first
+      # parent is that tip, so the diff holds what the pull request brings.
+      - name: Plan the jobs that the change needs
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          # The models of the plan, then the experiments (specs/tla/experiments/),
-          # each named by its path under specs/tla/.
-          folders=$(for m in specs/tla/*/checks.txt specs/tla/experiments/*/*/checks.txt; do
-              [ -f "$m" ] && dirname "${m#specs/tla/}"; done \
-            | jq -R . | jq -sc .)
-          test "$folders" != "[]"
-          echo "folders=$folders" >>"$GITHUB_OUTPUT"
+          case "$EVENT" in
+            pull_request) scripts/ci-plan.py tla --base HEAD^1 ;;
+            push) scripts/ci-plan.py tla --base "$BEFORE" ;;
+            *) scripts/ci-plan.py tla --all ;;
+          esac
 
   spec:
-    needs: specs
+    needs: plan
+    if: ${{ needs.plan.outputs.any == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        folder: ${{ fromJSON(needs.specs.outputs.folders) }}
+        folders: ${{ fromJSON(needs.plan.outputs.groups) }}
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Run TLC on specs/tla/${{ matrix.folder }}
-        run: nix develop .#tla --command scripts/check-tla.sh "${{ matrix.folder }}"
+      - name: Run TLC on specs/tla/ ${{ matrix.folders }}
+        run: nix develop .#tla --command scripts/check-tla.sh ${{ matrix.folders }}
       # Each guard set to TRUE still parses, so that the weekly `TLA mutants`
       # workflow judges every guard (#1311 (mutate spec guards)).
-      - name: Parse each guard mutant of specs/tla/${{ matrix.folder }}
-        run: nix develop .#tla --command scripts/mutate-tla.py --parse "${{ matrix.folder }}"
+      - name: Parse each guard mutant of specs/tla/ ${{ matrix.folders }}
+        run: nix develop .#tla --command scripts/mutate-tla.py --parse ${{ matrix.folders }}
 
   traces:
+    needs: plan
+    if: ${{ needs.plan.outputs.traces == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -106,24 +137,35 @@ jobs:
 
   # The TLAPS proofs (`*Proof.tla`, #1307 (inductive invariants, then
   # proofs)): every obligation is proved again, with no cache.
+  # One job for each proof module of the plan, so that a long proof is split
+  # into modules that each fit the 30 minutes of a job.
   proofs:
+    needs: plan
+    if: ${{ needs.plan.outputs.any_proofs == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.plan.outputs.proofs) }}
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Check the TLAPS proofs of specs/tla
-        run: nix develop .#proofs --command scripts/check-proofs.sh
+      - name: Check the TLAPS proof ${{ matrix.module }}
+        run: nix develop .#proofs --command scripts/check-proofs.sh ${{ matrix.module }}
 
+  # Green when every job of the plan is green; a job that the plan leaves out
+  # is `skipped`.
   tlc:
-    needs: [specs, spec, traces, proofs]
+    needs: [plan, spec, traces, proofs]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Every folder's job is green
+      - name: Every job of the plan is green
         run: |
-          test "${{ needs.specs.result }}" = success
-          test "${{ needs.spec.result }}" = success
-          test "${{ needs.traces.result }}" = success
-          test "${{ needs.proofs.result }}" = success
+          ok() { [ "$1" = success ] || { [ "$1" = skipped ] && [ "$2" != true ]; }; }
+          test "${{ needs.plan.result }}" = success
+          ok "${{ needs.spec.result }}" "${{ needs.plan.outputs.any }}"
+          ok "${{ needs.traces.result }}" "${{ needs.plan.outputs.traces }}"
+          ok "${{ needs.proofs.result }}" "${{ needs.plan.outputs.any_proofs }}"

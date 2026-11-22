@@ -21,7 +21,7 @@ register's (`paros_journal::register::value`, §J6.1).
 Each module keeps its unit tests in `<module>/tests.rs`.
 
 `examples/controller.rs` drives the role as a driver does, over a register written by hand (an
-election, a heal, a lost reply, a takeover). It asserts each step and runs in the `examples` job
+election, a heal, a lost reply, a takeover). It asserts each step and runs in the `checks` job
 of CI (root `AGENTS.md`, "Composing crates have examples"). A change to the role's API updates it.
 
 ## Rules
