@@ -19,8 +19,11 @@ The modules make three layers that point down only (#730 (paros-consensus rework
   one `Ready`. It never uses another deployment.
 
 `scripts/check-core-layers.sh` fails on a `crate::<module>` path that reaches up a layer (CI
-`checks` job). It reads only that form: a grouped `use crate::{..}` or a `super::` path escapes
-it, so the modules write each upward-looking import as `crate::<module>`. Test code (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt. A new module
+`checks` job). It maps each re-export of the crate root (`crate::ColocatedNode`) to its module,
+and fails on the two forms that hide a module: a grouped `use crate::{..}` and
+`super::super::`. So the modules write each upward-looking import as `crate::<module>::..`. Its
+`--self-test` runs it on `scripts/fixtures/core-layers/` (a good tree, and one bad tree per
+form); CI runs both. Test code (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt. A new module
 gets its layer in that script.
 
 ## Map
