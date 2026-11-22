@@ -276,11 +276,20 @@ jobs:
   # first, then the trace checks for the mutants they miss). A survivor fails
   # the job: add the test that sees it in the same pull request. The `Mutants`
   # workflow runs every mutant of the core each week.
+  #
+  # The time of the core's pass grows with the lines a pull request changes
+  # (about 75 s for each mutant), so two shards share its mutants
+  # round-robin: a diff of 70 mutants took 88 minutes in one job. The other
+  # crates' passes run in shard 0 only.
   mutants:
     needs: scope
     if: ${{ github.event_name == 'pull_request' && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -312,11 +321,13 @@ jobs:
             echo "The pull request changes no line of paros-consensus/src."
             exit 0
           fi
-          nix develop --command scripts/mutants.sh --in-diff pr.diff
+          nix develop --command scripts/mutants.sh --in-diff pr.diff \
+            --shard ${{ matrix.shard }}/2 --sharding round-robin
       # The same for the journal core (`scripts/mutants.sh --journal`): its
       # unit tests and the walks of journal-sim, then the trace checks of
       # journal-sim for the mutants they miss.
       - name: Run the mutants of the changed lines of paros-journal
+        if: ${{ matrix.shard == 0 }}
         run: |
           set -euo pipefail
           git diff HEAD^1 HEAD -- crates/lib/paros-journal/src > journal.diff
@@ -328,6 +339,7 @@ jobs:
       # The same for the grid controller (`scripts/mutants.sh --control`): its
       # unit tests and journal-sim's sweep of its decisions, in one pass.
       - name: Run the mutants of the changed lines of paros-journal-control
+        if: ${{ matrix.shard == 0 }}
         run: |
           set -euo pipefail
           git diff HEAD^1 HEAD -- crates/lib/paros-journal-control/src > control.diff
@@ -339,6 +351,7 @@ jobs:
       # The same for the journal's traits and driver (`scripts/mutants.sh
       # --journal-io`): its unit tests and the driver walk of journal-sim.
       - name: Run the mutants of the changed lines of paros-journal-io
+        if: ${{ matrix.shard == 0 }}
         run: |
           set -euo pipefail
           git diff HEAD^1 HEAD -- crates/lib/paros-journal-io/src > journal-io.diff

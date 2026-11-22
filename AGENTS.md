@@ -308,7 +308,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   'test(edited) | test(no_record)'`. The `test` job leaves them out.
 - the `mutants` job (pull requests only): cargo-mutants on the lines of
   `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
-  pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
+  pr.diff`), shared round-robin by two shards of the job (its time grows with the diff). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). The
   same job runs the two passes on the changed lines of `crates/lib/paros-journal/src`
