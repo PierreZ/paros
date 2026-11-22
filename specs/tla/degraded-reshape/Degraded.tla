@@ -161,21 +161,17 @@ Init == /\ status = [b \in Ballots |-> "matching"]
 (***************************************************************************)
 (* Matchmaking (Matchmaker Paxos, section 3).                              *)
 (***************************************************************************)
-\* The registration of b reaches matchmaker m, which keeps it. A registration
-\* can reach a matchmaker after its ballot ended its matching (a late or a
-\* repeated request): the matchmaker keeps it all the same, and the leader no
-\* longer reads the answer. A second registration of b at m is refused by
-\* the check of the ballots that m holds, as any registration at or below
-\* one that m holds.
+\* The registration of b reaches matchmaker m while b matches. A second
+\* registration of b at m is refused by the check of the ballots that m
+\* holds, as any registration at or below one that m holds.
 Register(b, m) ==
+    /\ status[b] = "matching"
     /\ \A r \in reg[m] : r[1] < b
     /\ wm[m] <= b
     /\ reg' = [reg EXCEPT ![m] = @ \cup {<<b, CfgOf[b]>>}]
-    /\ IF status[b] = "matching"
-       THEN /\ replied' = [replied EXCEPT ![b] = @ \cup {m}]
-            /\ hist' = [hist EXCEPT ![b] = @ \cup reg[m]]
-            /\ maxwm' = [maxwm EXCEPT ![b] = Max({@, wm[m]})]
-       ELSE UNCHANGED <<replied, hist, maxwm>>
+    /\ replied' = [replied EXCEPT ![b] = @ \cup {m}]
+    /\ hist' = [hist EXCEPT ![b] = @ \cup reg[m]]
+    /\ maxwm' = [maxwm EXCEPT ![b] = Max({@, wm[m]})]
     /\ UNCHANGED <<status, wm, promised, votes, promises, safe, proposals, acks, served,
                    down, segEnd, via>>
 
@@ -207,11 +203,9 @@ HoldOK(b) ==
 (* Phase 1, Phase 2 and the bypass.                                        *)
 (***************************************************************************)
 \* Acceptor a promises b. The leader of b sends a Prepare in a campaign, and,
-\* after a bypass, for the hold. A Prepare can also come late or two times,
-\* so an acceptor of a prior configuration may promise b in any status of b:
-\* a promise only raises the acceptor's ballot, and no check depends on when
-\* the Prepare came.
+\* after a bypass, for the hold.
 Promise(a, b) ==
+    /\ status[b] = "matched" \/ (status[b] = "leading" /\ ~HoldOK(b))
     /\ a \in UNION {Mem(c) : c \in PriorCfgs(b)}
     /\ a \notin down
     /\ promised[a] <= b
@@ -427,6 +421,15 @@ ReadSafeAcked ==
 \* below the floor of a later leader can match on a history that the GC
 \* emptied, and lead with no prior configuration to recover from.
 HeardNoFloorAbove == \A b \in Ballots : status[b] # "matching" => maxwm[b] <= b
+
+\* Matchmaking ends before Phase 1 (Matchmaker Paxos): no acceptor promises
+\* a ballot that still matches.
+PrepareAfterMatch == \A p \in promises : status[p[2]] # "matching"
+
+\* The prior configurations of a ballot do not change once it matched: its
+\* Phase 1 and its bypass check read them.
+HistFixed == [][\A b \in Ballots :
+                  status[b] # "matching" => hist'[b] = hist[b] /\ maxwm'[b] = maxwm[b]]_vars
 
 Bypassed == \E b \in Ballots : via[b] # 0
 

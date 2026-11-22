@@ -49,4 +49,4 @@ segment-replicas 17.5
 segment-truncate 11.5
 truncation 9.5
 truncation-reconfig 7
-zero-stall 10.5
+zero-stall 11
