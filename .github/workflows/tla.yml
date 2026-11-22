@@ -55,6 +55,10 @@ jobs:
       proofs: ${{ steps.list.outputs.proofs }}
     steps:
       - uses: actions/checkout@v7
+      - name: Check the pin of the proved specs
+        # A proved model or proof changed and its proof did not run again
+        # locally (scripts/proof-hashes.sh, #1459 (pin the proved specs)).
+        run: scripts/proof-hashes.sh check
       - name: List the folders of specs/tla
         id: list
         run: |

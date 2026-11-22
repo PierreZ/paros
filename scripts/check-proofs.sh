@@ -6,7 +6,7 @@
 # obligation to its backends (Z3, Zenon, and LS4 for a temporal step); the
 # script fails when one obligation is not proved or a step is omitted.
 #
-#   nix develop .#proofs --command scripts/check-proofs.sh                 # every proof
+#   nix develop .#proofs --command scripts/check-proofs.sh                 # every proof, then the pin
 #   nix develop .#proofs --command scripts/check-proofs.sh decree          # one folder
 #   nix develop .#proofs --command scripts/check-proofs.sh \
 #     multi-paxos/MultiPaxosWinProof.tla                                     # one module
@@ -73,4 +73,8 @@ for proof in "${modules[@]}"; do
   fi
   rm -rf "$dir/${name%.tla}.tlaps" "$log"
 done
+# A full pass pins the files that the proofs cover (specs/tla/PROVED.sha256).
+if [ "$#" -eq 0 ] && [ "$status" -eq 0 ]; then
+  scripts/proof-hashes.sh write
+fi
 exit "$status"
