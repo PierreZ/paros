@@ -324,7 +324,10 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `journal-sim`'s sweep of the controller's decisions and its controller walks;
   `.cargo/mutants-control.toml`), and one pass on the changed lines of
   `crates/lib/paros-journal-io/src` (`scripts/mutants.sh --journal-io`: its tests and the driver
-  walk of `journal-sim`; `.cargo/mutants-journal-io.toml`). A
+  walk of `journal-sim`; `.cargo/mutants-journal-io.toml`). Each crate whose `src/` changed
+  runs in shards of its own, one job each (`--shard k/n`; `scripts/mutants-plan.sh` gives one
+  shard for each 250 changed lines outside the tests, measured on PR #1470 (re-replication of a
+  sealed segment's replica set), whose one job reached its 90 minutes). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
@@ -823,5 +826,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutants.sh` and `mutants-plan.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

@@ -733,6 +733,18 @@ fn a_new_replica_copies_from_a_full_member_and_reports_its_copy() {
         "a node outside the set is no source (control live_outside)"
     );
     assert_eq!(replica.step(NEW, holds(true)), vec![]);
+    assert!(
+        replica
+            .step(
+                NodeId(11),
+                Message::Holds {
+                    segment: SegmentId(2),
+                    full: true,
+                }
+            )
+            .is_empty(),
+        "an answer about another segment names no source"
+    );
     assert_eq!(
         asks(&replica.step(NodeId(11), holds(true))),
         (vec![], vec![(NodeId(11), Slot(0))]),
@@ -759,6 +771,11 @@ fn a_new_replica_copies_from_a_full_member_and_reports_its_copy() {
     );
     assert!(replica.full());
     assert_eq!(copied(&replica.tick()), vec![(COPY, Some(PersistId(3)))]);
+    assert_eq!(
+        asks(&replica.step(NodeId(12), holds(true))),
+        (vec![], vec![]),
+        "a complete copy pulls from no new source"
+    );
     assert_eq!(
         asks(&replica.tick()),
         (vec![], vec![]),

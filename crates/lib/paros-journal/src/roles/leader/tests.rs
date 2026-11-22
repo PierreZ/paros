@@ -879,4 +879,24 @@ fn the_holders_a_retire_needs_are_f_plus_one_of_the_grid() {
     );
     let (leader, _) = campaign(&wide, 2, 1, 0);
     assert_eq!(leader.segments()[0].acks(), 2);
+    let value = RegisterValue::new()
+        .apply(&Change::Elect { holder: NodeId(0) })
+        .expect("an election");
+    let five = value
+        .apply(&Change::Reshape {
+            opening: OpeningCall {
+                term: value.term().number,
+                expected: None,
+                grid: Grid::new(2, vec![nodes(&[1, 2, 3, 4, 5])]).expect("a grid"),
+                replicas: nodes(&[11, 12, 13, 14, 15]),
+            },
+            release: RELEASE,
+        })
+        .expect("a reshape");
+    let (leader, _) = campaign(&five, 2, 1, 0);
+    assert_eq!(
+        leader.segments()[0].acks(),
+        3,
+        "F = 2: three holders, a majority of five"
+    );
 }
