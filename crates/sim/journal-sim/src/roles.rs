@@ -103,6 +103,12 @@ pub const TRIM: &str = "a segment is trimmed only once the decided floor covers 
 /// when the read started (§J3.2, `holder` of `specs/tla/segment-truncate/`).
 pub const FLOOR: &str = "a read serves no record below the floor of the whole log";
 
+/// Oracle: every record of a chosen write carries one leader time, the
+/// time of a proposal of that write (§J2.8): the leader stamps it at
+/// propose, in the chosen value, and no replica stamps at apply.
+pub const STAMPED: &str =
+    "every record of a chosen write carries the leader time of a proposal of it";
+
 /// Oracle: a proxy leader commits a slot only once `F + 1` acceptors of the
 /// column of the round hold a vote at the round's ballot or above on their
 /// disk (`specs/tla/proxy-leader/`).
@@ -252,6 +258,9 @@ pub enum RolesMutant {
     /// reader's own segment, so a read never meets a later segment.
     /// [`READ`] catches it.
     ReadNoFence,
+    /// The driver gives each acceptor an `Accept` whose write lost its
+    /// leader time. [`STAMPED`] catches it.
+    UnstampedAccept,
     /// The driver trims a sealed segment on the intent to truncate: at the
     /// proposal of a `Truncate`, before it is decided. [`TRIM`] catches it.
     TrimIntent,
@@ -564,6 +573,8 @@ pub struct RolesModel {
     records: BTreeMap<u64, Record>,
     /// The open reads, by id.
     reads: BTreeMap<u64, OpenRead>,
+    /// The time of each proposal: its call's token.
+    stamps: BTreeSet<u64>,
     /// The reads of an older segment whose floor read was not served, with
     /// the floor when the reader started: the reader asks the floor again
     /// later.
@@ -678,6 +689,17 @@ impl Model for RolesModel {
             // that is not retired takes a step (`Active` of the model).
             if !self.active(to) {
                 return;
+            }
+            let mut message = message;
+            if let Message::Accept {
+                command: Command::Write(write),
+                ..
+            } = &mut message
+                && self.mutant == RolesMutant::UnstampedAccept
+            {
+                for record in &mut write.records {
+                    record.headers.leader_time = None;
+                }
             }
             let node = self.acceptors.get_mut(&to).expect("an acceptor");
             if let Some(role) = &mut node.role {
@@ -970,6 +992,7 @@ impl RolesModel {
             traced: BTreeMap::new(),
             records: BTreeMap::new(),
             reads: BTreeMap::new(),
+            stamps: BTreeSet::new(),
             waiting: Vec::new(),
             held_reads: BTreeMap::new(),
             read_ids: 0,
@@ -1467,8 +1490,15 @@ impl RolesModel {
                     }
                 }
                 // A replica of a trimmed segment drops its copy: it answers
-                // no read and takes no step after it.
-                ReplicaEffect::Drop => {}
+                // no read and takes no step after it, and the writes of the
+                // copy still in flight never land.
+                ReplicaEffect::Drop => {
+                    let replica = self.replicas.get_mut(&node).expect("a replica");
+                    replica.batches.clear();
+                    replica.held.clear();
+                    replica.changes.clear();
+                    self.held_reads.remove(&node);
+                }
                 ReplicaEffect::Copied { .. } => {
                     unreachable!("the roles walk has no heal: {node:?}")
                 }
@@ -1479,6 +1509,14 @@ impl RolesModel {
     /// A leader saw `slot` chosen: the oracles [`AGREE`] and [`SEALED`],
     /// and the truth over the chosen prefix.
     fn commit_seen(&mut self, slot: Slot, command: &Command, ballot: (u64, NodeId)) {
+        if let Command::Write(write) = command {
+            let time = write.records.first().and_then(|r| r.headers.leader_time);
+            assert!(
+                time.is_some_and(|t| self.stamps.contains(&t))
+                    && write.records.iter().all(|r| r.headers.leader_time == time),
+                "{STAMPED}: slot {slot:?} chose {write:?}"
+            );
+        }
         if let Some((held, ..)) = self.chosen.get(&slot) {
             assert!(
                 held == command,
@@ -1567,6 +1605,7 @@ impl RolesModel {
         {
             *state = base.0;
         }
+        let mut trimmed = None;
         match self.register.apply(&change) {
             Ok(value) => {
                 match (&change, origin) {
@@ -1613,6 +1652,7 @@ impl RolesModel {
                                 r: node.0,
                             });
                         }
+                        trimmed = Some(*segment);
                         sometimes!(true, reach::SEGMENT_TRIMMED);
                     }
                     (Change::Seal { segment, end }, _) => {
@@ -1630,6 +1670,14 @@ impl RolesModel {
                     _ => {}
                 }
                 self.register = value;
+                // The replicas of a trimmed segment learn the trim with its
+                // write, slow or not: `Journal.tla` has no replica that
+                // applies a slot of a trimmed segment.
+                if let Some(segment) = trimmed {
+                    for node in Self::set_of(segment) {
+                        self.observe_replica(node, cx);
+                    }
+                }
                 self.observe_all(cx);
             }
             Err(_) => {
@@ -1917,7 +1965,10 @@ impl RolesModel {
         let token = self.tokens;
         let leader = self.leaders.get_mut(&node).expect("a leader");
         let ballot = leader.ballot();
-        let (proposed, effects) = leader.propose(token, command.clone());
+        // The walk's clock is the count of its calls: each proposal has its
+        // own time.
+        self.stamps.insert(token);
+        let (proposed, effects) = leader.propose(token, command.clone(), token);
         if let Proposed::Slot(slot) = proposed {
             self.calls.insert(
                 token,

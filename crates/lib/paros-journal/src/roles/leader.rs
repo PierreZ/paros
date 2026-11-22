@@ -393,16 +393,24 @@ impl<T> JournalLeader<T> {
             .find(|segment| segment.start.is_some_and(|s| s <= slot))
     }
 
-    /// Propose `command` for the caller `token`.
+    /// Propose `command` for the caller `token`, at `time`, the clock of
+    /// the leader's host in nanoseconds: a write carries it as its leader
+    /// time (§J2.8, [`Command::stamped`]).
     ///
     /// # Panics
     ///
     /// When an assertion on its own postconditions fails: a programmer
     /// error, never an operating condition.
-    pub fn propose(&mut self, token: T, command: Command) -> (Proposed, Vec<LeaderEffect<T>>) {
+    pub fn propose(
+        &mut self,
+        token: T,
+        command: Command,
+        time: u64,
+    ) -> (Proposed, Vec<LeaderEffect<T>>) {
         if !matches!(self.phase, LeaderPhase::Open { .. }) {
             return (Proposed::NotLeader, Vec::new());
         }
+        let command = command.stamped(time);
         let slot = self.next;
         self.next = Slot(slot.0 + 1);
         self.held.hold(slot, token, command.clone());

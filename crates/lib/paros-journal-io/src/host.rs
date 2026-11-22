@@ -493,7 +493,7 @@ impl Host {
                 address,
                 call,
                 command,
-            } => self.call(address, call, command, &mut effects),
+            } => self.call(now, address, call, command, &mut effects),
             Input::TimerFired => self.tick(now, &mut effects),
             Input::Join {
                 address,
@@ -848,7 +848,16 @@ impl Host {
         self.values.insert(journal, value);
     }
 
-    fn call(&mut self, address: Address, call: CallId, command: Command, out: &mut Vec<Effect>) {
+    /// A client call to the leader at `address`, at `now`: the leader
+    /// stamps a write with its time (§J2.8).
+    fn call(
+        &mut self,
+        now: Time,
+        address: Address,
+        call: CallId,
+        command: Command,
+        out: &mut Vec<Effect>,
+    ) {
         let not_leader = Effect::Reply {
             address,
             call,
@@ -858,7 +867,7 @@ impl Host {
             out.push(not_leader);
             return;
         };
-        match leader.propose(call, command) {
+        match leader.propose(call, command, now.0) {
             (Proposed::Slot(_), effects) => leader_effects(address, effects, out),
             (Proposed::NotLeader, effects) => {
                 assert!(effects.is_empty(), "a refused call changes nothing");

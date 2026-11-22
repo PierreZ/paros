@@ -939,7 +939,8 @@ impl Run {
             Payload::Write { token, command } => {
                 let node = node_of(&to);
                 let leader = self.leaders.get_mut(&node).expect("a leader");
-                let (proposed, effects) = leader.propose(*token, command.clone());
+                // The lab has no clock: the id of the delivery is its time.
+                let (proposed, effects) = leader.propose(*token, command.clone(), flight.id);
                 match proposed {
                     Proposed::Slot(slot) => self.notes.push(format!(
                         "{} holds the write at slot {}.",

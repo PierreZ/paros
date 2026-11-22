@@ -50,7 +50,7 @@ use paros_journal_io::{
 
 use crate::backend::{Disk, Wire};
 
-use crate::oracle::{Truth, label};
+use crate::oracle::{Truth, as_written, label};
 
 /// Oracle: one command is chosen at each slot.
 pub const AGREE: &str = "driver walk: no two Commits name two commands at one slot";
@@ -687,8 +687,10 @@ impl HostModel {
             states.push((before, verdict, command));
         }
         while let Some((command, answer)) = self.answers.get(self.judged) {
-            let at: Vec<&(u64, &str, &Command)> =
-                states.iter().filter(|(_, _, c)| *c == command).collect();
+            let at: Vec<&(u64, &str, &Command)> = states
+                .iter()
+                .filter(|(_, _, c)| as_written(c) == as_written(command))
+                .collect();
             if at.is_empty() {
                 return;
             }
