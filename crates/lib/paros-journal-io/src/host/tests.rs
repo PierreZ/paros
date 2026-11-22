@@ -212,6 +212,7 @@ fn a_leader_needs_a_register_value_and_answers_calls() {
     };
     let assign = Input::Assign(Assignment::Leader {
         address: leader,
+        proxies: Vec::new(),
         campaign: campaign.clone(),
     });
     let mut host = Host::new(CONFIG);

@@ -460,6 +460,16 @@ impl SegmentReplica {
             } if segment == self.segment => self.commit(from, slot, command),
             Message::Pull { segment, from: at } if segment == self.segment => self.pull(from, at),
             Message::Holding { segment } if segment == self.segment => {
+                probe!(
+                    sometimes,
+                    self.full(),
+                    "replica: it holds the whole segment"
+                );
+                probe!(
+                    sometimes,
+                    !self.full(),
+                    "replica: it does not hold the whole segment yet"
+                );
                 vec![ReplicaEffect::Send {
                     to: from,
                     message: Message::Holds {
@@ -493,10 +503,15 @@ impl SegmentReplica {
             if record.state() == SegmentState::Trimmed
                 || (self.joining.is_none() && !record.replicas().contains(&self.id))
             {
+                probe!(
+                    reachable,
+                    "replica: a replica outside the set drops its copy"
+                );
                 return self.drop_copy();
             }
             if record.replicas().contains(&self.id) && self.joining.is_some() {
                 // The heal that added this replica is done: it is a member.
+                probe!(reachable, "replica: a new replica becomes a member");
                 effects.extend(self.set_joining(None));
             }
             self.set = record.replicas().to_vec();
@@ -577,6 +592,10 @@ impl SegmentReplica {
     ) -> (ResolveAnswer, Option<PersistId>) {
         let after = self.flight.last();
         let Some(folded) = &self.folded else {
+            probe!(
+                reachable,
+                "replica: a Resolve before the base is not covered"
+            );
             return (ResolveAnswer::NotCovered, after);
         };
         let answer = resolve(&folded.state, uuid, expected_seq, records, |seq| {
@@ -637,9 +656,18 @@ impl SegmentReplica {
                 }],
             });
         } else {
+            probe!(
+                reachable,
+                "replica: a Commit outside its segment is dropped"
+            );
             return effects;
         }
         let mut applied = self.walk();
+        probe!(
+            sometimes,
+            applied.is_empty() && !self.full(),
+            "replica: a chosen slot waits behind a hole"
+        );
         if applied.iter().all(|(s, ..)| *s != slot)
             && let Some(folded) = &self.folded
             && let Some(answer) = folded.answers.get(&slot)
@@ -675,6 +703,7 @@ impl SegmentReplica {
             return Vec::new();
         }
         self.sources.insert(from);
+        probe!(reachable, "replica: a new replica finds a full source");
         match self.front() {
             Some(front) if !self.full() => vec![ReplicaEffect::Send {
                 to: from,
@@ -691,11 +720,14 @@ impl SegmentReplica {
     /// The report of a complete copy, while the replica is a new replica.
     fn copied(&self) -> Vec<ReplicaEffect> {
         match self.joining {
-            Some(copy) if self.full() => vec![ReplicaEffect::Copied {
-                segment: self.segment,
-                copy,
-                after: self.flight.last(),
-            }],
+            Some(copy) if self.full() => {
+                probe!(reachable, "replica: a new replica reports its copy");
+                vec![ReplicaEffect::Copied {
+                    segment: self.segment,
+                    copy,
+                    after: self.flight.last(),
+                }]
+            }
             _ => Vec::new(),
         }
     }
@@ -710,6 +742,11 @@ impl SegmentReplica {
 
     fn pull(&self, from: NodeId, at: Slot) -> Vec<ReplicaEffect> {
         let after = self.flight.last();
+        probe!(
+            sometimes,
+            self.chosen.range(at..).next().is_some(),
+            "replica: a Pull is served from its slots"
+        );
         self.chosen
             .range(at..)
             .take(PULL_PAGE)
@@ -754,13 +791,19 @@ impl SegmentReplica {
     /// sealed segment and no done value showed it written.
     fn boundary(&self) -> Vec<ReplicaEffect> {
         match (&self.folded, self.full(), self.boundary_written) {
-            (Some(folded), true, false) => vec![ReplicaEffect::Register {
-                change: Change::Boundary {
-                    segment: self.segment,
-                    state: folded.state.boundary(),
-                },
-                after: self.flight.last(),
-            }],
+            (Some(folded), true, false) => {
+                probe!(
+                    reachable,
+                    "replica: a full replica writes the boundary state"
+                );
+                vec![ReplicaEffect::Register {
+                    change: Change::Boundary {
+                        segment: self.segment,
+                        state: folded.state.boundary(),
+                    },
+                    after: self.flight.last(),
+                }]
+            }
             _ => Vec::new(),
         }
     }

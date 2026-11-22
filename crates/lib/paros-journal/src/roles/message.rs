@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use paros_consensus::{Ballot, Slot};
+use paros_consensus::{Ballot, NodeId, Slot};
 
 use crate::command::Command;
 use crate::fold::Answer;
@@ -58,6 +58,31 @@ pub enum Message {
         slot: Slot,
         /// The command proposed.
         command: Command,
+    },
+    /// Leader to proxy leader: run the Phase 2 of `slot` at `ballot` with
+    /// `command` on `column`, and commit it to `replicas`, the replica set
+    /// of `segment`.
+    Delegate {
+        /// The leader's ballot.
+        ballot: Ballot,
+        /// The slot.
+        slot: Slot,
+        /// The command proposed.
+        command: Command,
+        /// The acceptors of the column of the leader's grid that writes the
+        /// slot: `2F + 1`, a majority of them decides.
+        column: Vec<NodeId>,
+        /// The segment of the slot.
+        segment: SegmentId,
+        /// The replica set of the segment.
+        replicas: Vec<NodeId>,
+    },
+    /// Proxy leader to leader: `slot` is chosen at `ballot`.
+    Chosen {
+        /// The ballot.
+        ballot: Ballot,
+        /// The slot.
+        slot: Slot,
     },
     /// Acceptor to leader: the vote of `slot` at `ballot` is durable.
     Accepted {

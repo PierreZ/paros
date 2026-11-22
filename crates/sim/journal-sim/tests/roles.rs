@@ -3,7 +3,7 @@
 
 use journal_sim::campaign::campaign;
 use journal_sim::roles::{
-    AGREE, BOUNDARY, FOLD, RESOLVE, RETIRE, RolesMutant, SEALED, Shape, VIEW, reach, walk,
+    AGREE, BOUNDARY, FOLD, PROXY, RESOLVE, RETIRE, RolesMutant, SEALED, Shape, VIEW, reach, walk,
 };
 
 /// The seeds of each walk in CI.
@@ -82,4 +82,9 @@ fn resolve_catches_a_resolve_at_the_segment_in_force() {
 #[test]
 fn retire_catches_a_leader_that_counts_a_lagging_replica() {
     caught(RolesMutant::HoldsLie, RETIRE);
+}
+
+#[test]
+fn proxy_catches_a_proxy_that_counts_forged_votes() {
+    caught(RolesMutant::ForgedAccepted, PROXY);
 }

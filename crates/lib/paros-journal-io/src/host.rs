@@ -29,8 +29,8 @@ use std::collections::BTreeMap;
 use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, RegisterValue};
 use paros_journal::roles::{
-    AcceptorEffect, Campaign, CopyId, JournalAcceptor, JournalLeader, LeaderEffect, PersistId,
-    Proposed, RESEND_BATCH, ReplicaEffect, SegmentReplica,
+    AcceptorEffect, Campaign, CopyId, JournalAcceptor, JournalLeader, JournalProxy, LeaderEffect,
+    PersistId, Proposed, ProxyEffect, RESEND_BATCH, ReplicaEffect, SegmentReplica,
 };
 use paros_journal::segment::SegmentState;
 use paros_journal::{Command, Leader, NodeId, Reply, SegmentId};
@@ -78,6 +78,14 @@ pub enum Assignment {
         address: Address,
         /// The ballot, its segment and the first slot it reads.
         campaign: Campaign,
+        /// The proxy leaders it delegates its rounds to; empty: it runs
+        /// Phase 2 itself.
+        proxies: Vec<NodeId>,
+    },
+    /// A proxy leader (§J4.1): no disk, no records to read.
+    Proxy {
+        /// The role.
+        address: Address,
     },
 }
 
@@ -88,7 +96,9 @@ impl Assignment {
     #[must_use]
     pub fn address(&self) -> Address {
         match self {
-            Self::Acceptor { address, .. } | Self::Leader { address, .. } => *address,
+            Self::Acceptor { address, .. }
+            | Self::Leader { address, .. }
+            | Self::Proxy { address } => *address,
             Self::Replica {
                 address, segment, ..
             } => Address::replica(address.journal, address.node, *segment),
@@ -311,6 +321,7 @@ enum Role {
     Acceptor(JournalAcceptor),
     Replica(SegmentReplica),
     Leader(JournalLeader<CallId>),
+    Proxy(JournalProxy),
 }
 
 /// The ask of a new replica that reads its records first.
@@ -495,13 +506,20 @@ impl Host {
         }
         self.arm(now, effects);
         match assignment {
-            Assignment::Leader { campaign, .. } => {
+            Assignment::Proxy { .. } => {
+                self.roles
+                    .insert(address, Role::Proxy(JournalProxy::new(address.node)));
+            }
+            Assignment::Leader {
+                campaign, proxies, ..
+            } => {
                 let started = self
                     .values
                     .get(&address.journal)
                     .and_then(|value| JournalLeader::campaign(campaign, value));
                 match started {
-                    Some((leader, out)) => {
+                    Some((mut leader, out)) => {
+                        leader.delegate_to(proxies);
                         self.roles.insert(address, Role::Leader(leader));
                         leader_effects(address, out, effects);
                     }
@@ -668,7 +686,9 @@ impl Host {
                     disk,
                 ))
             }),
-            Assignment::Leader { .. } => unreachable!("a leader has no disk to recover"),
+            Assignment::Leader { .. } | Assignment::Proxy { .. } => {
+                unreachable!("a leader and a proxy have no disk to recover")
+            }
         };
         match started {
             Ok(role) => {
@@ -745,6 +765,10 @@ impl Host {
                 let out = leader.step(from, message);
                 leader_effects(address, out, effects);
             }
+            Some(Role::Proxy(proxy)) => {
+                let out = proxy.step(from, message);
+                proxy_effects(address, out, effects);
+            }
             // A role that recovers, or that the process does not serve,
             // loses the message, as a role that is down.
             Some(Role::Recovering(_) | Role::Joining(_)) | None => {}
@@ -765,7 +789,7 @@ impl Host {
                     let out = replica.observe(&value);
                     replica_effects(*address, out, effects);
                 }
-                Role::Acceptor(_) | Role::Recovering(_) | Role::Joining(_) => {}
+                Role::Acceptor(_) | Role::Proxy(_) | Role::Recovering(_) | Role::Joining(_) => {}
             }
         }
         self.values.insert(journal, value);
@@ -801,6 +825,10 @@ impl Host {
                     let out = replica.tick();
                     replica_effects(*address, out, effects);
                 }
+                Role::Proxy(proxy) => {
+                    let out = proxy.tick(self.config.resend_page);
+                    proxy_effects(*address, out, effects);
+                }
                 Role::Acceptor(_) | Role::Recovering(_) | Role::Joining(_) => {}
             }
         }
@@ -817,6 +845,16 @@ fn envelope(address: Address, to: NodeId, message: paros_journal::roles::Message
         from: address.node,
         to,
         message,
+    }
+}
+
+fn proxy_effects(address: Address, out: Vec<ProxyEffect>, effects: &mut Vec<Effect>) {
+    for ProxyEffect { to, message } in out {
+        effects.push(Effect::Send {
+            sender: address,
+            envelope: envelope(address, to, message),
+            after: None,
+        });
     }
 }
 

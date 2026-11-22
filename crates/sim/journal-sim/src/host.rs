@@ -585,6 +585,7 @@ impl HostModel {
             .retain(|e| e.to != address.node);
         driver.assign(Assignment::Leader {
             address,
+            proxies: Vec::new(),
             campaign: Campaign {
                 ballot: Ballot {
                     round: self.round,

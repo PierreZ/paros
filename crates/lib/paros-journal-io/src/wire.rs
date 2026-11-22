@@ -104,7 +104,9 @@ impl Envelope {
             | Message::Accept { .. }
             | Message::Accepted { .. }
             | Message::Applied { .. }
-            | Message::Holds { .. } => Address::new(self.journal, self.to),
+            | Message::Holds { .. }
+            | Message::Delegate { .. }
+            | Message::Chosen { .. } => Address::new(self.journal, self.to),
         }
     }
 }

@@ -206,6 +206,12 @@ impl JournalAcceptor {
         match self.acceptor.prepare(ballot, slot, &mut ops) {
             PrepareOutcome::Promised { raised } => {
                 assert!(raised != ops.is_empty(), "a raised promise writes");
+                probe!(sometimes, raised, "acceptor: a Prepare raises the promise");
+                probe!(
+                    sometimes,
+                    !raised,
+                    "acceptor: a Prepare at the promise writes nothing"
+                );
                 let mut effects = self.persist(ops);
                 let page = self.acceptor.promise_page(slot, self.page);
                 effects.push(AcceptorEffect::Send {
@@ -225,6 +231,10 @@ impl JournalAcceptor {
             }
             PrepareOutcome::Refused | PrepareOutcome::BelowFloor => {
                 assert!(ops.is_empty(), "a refusal writes nothing");
+                probe!(
+                    reachable,
+                    "acceptor: a Prepare below the promise is refused"
+                );
                 vec![self.nack(from, ballot)]
             }
         }
@@ -240,6 +250,10 @@ impl JournalAcceptor {
         match self.acceptor.admit(ballot, slot) {
             AcceptOutcome::Admitted => {}
             AcceptOutcome::Refused | AcceptOutcome::BelowFloor => {
+                probe!(
+                    reachable,
+                    "acceptor: an Accept below the promise is refused"
+                );
                 return vec![self.nack(from, ballot)];
             }
         }
@@ -247,6 +261,16 @@ impl JournalAcceptor {
         // at or below it: a held vote at this ballot means the promise is it.
         let held = self.acceptor.record(slot) == Some(&(ballot, command.clone()));
         let mut effects = Vec::new();
+        probe!(
+            sometimes,
+            held,
+            "acceptor: an Accept it holds writes nothing"
+        );
+        probe!(
+            sometimes,
+            ballot > self.acceptor.promised(),
+            "acceptor: an Accept raises the promise"
+        );
         if !held {
             // The promise first, then the vote, in one atomic batch.
             let mut ops = Vec::new();

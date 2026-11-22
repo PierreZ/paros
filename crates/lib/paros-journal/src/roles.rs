@@ -20,6 +20,10 @@
 //!   ([`Rounds`](paros_consensus::proposer::Rounds)); it sends each chosen
 //!   slot to the replica set of the slot's segment (#1271); it holds the
 //!   answer of each command it proposed until the slot is applied (#1232).
+//! - [`proxy`]: [`JournalProxy`], a proxy leader: the Phase 2 of the rounds
+//!   that a leader delegates to it, on the column that the delegation names,
+//!   and the `Commit` to the replica set of the slot's segment
+//!   (Compartmentalized Paxos §3.1, `specs/tla/proxy-leader/`).
 //! - [`replica`]: [`SegmentReplica`], one replica of one segment. It applies
 //!   the chosen slots of its segment in order and folds them from the
 //!   boundary state of the segment before it (#1303), stops at the end of
@@ -46,6 +50,7 @@
 pub mod acceptor;
 pub mod leader;
 pub mod message;
+pub mod proxy;
 pub mod replica;
 
 pub use acceptor::{AcceptorDisk, AcceptorEffect, AcceptorOp, JournalAcceptor};
@@ -53,6 +58,7 @@ pub use leader::{Campaign, JournalLeader, LeaderEffect, LeaderPhase, Proposed};
 pub use message::{Message, PromisePage};
 pub use paros_consensus::contract::limits::{PROMISE_BATCH, RESEND_BATCH};
 pub use paros_consensus::contract::write::AcceptorWrite;
+pub use proxy::{JournalProxy, ProxyEffect};
 pub use replica::{CopyId, ReplicaDisk, ReplicaEffect, ReplicaOp, SegmentReplica};
 
 /// The id of one persist batch of a role (§J4.2, rule 1). Ids grow for the

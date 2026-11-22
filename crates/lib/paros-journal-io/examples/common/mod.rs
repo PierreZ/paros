@@ -84,6 +84,7 @@ pub fn replica(node: u64, id: u64) -> Assignment {
 pub fn leader(node: u64, round: u64, id: u64, from: Slot) -> Assignment {
     Assignment::Leader {
         address: at(node),
+        proxies: Vec::new(),
         campaign: Campaign {
             ballot: Ballot {
                 round,

@@ -192,6 +192,7 @@ fn assign(driver: &mut TestDriver, nodes: &[u64]) {
             },
             _ => Assignment::Leader {
                 address,
+                proxies: Vec::new(),
                 campaign: Campaign {
                     ballot: Ballot {
                         round: 1,
@@ -383,6 +384,7 @@ fn a_new_driver_serves_the_roles_again_from_their_records() {
     let next = Address::new(J, NodeId(101));
     drivers[0].assign(Assignment::Leader {
         address: next,
+        proxies: Vec::new(),
         campaign: Campaign {
             ballot: Ballot {
                 round: 2,
@@ -605,6 +607,7 @@ fn a_second_leader_seals_the_first_segment_through_the_register() {
         .expect("a front");
     drivers[0].assign(Assignment::Leader {
         address: next,
+        proxies: Vec::new(),
         campaign: Campaign {
             ballot: Ballot {
                 round: 2,

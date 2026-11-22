@@ -61,9 +61,9 @@ use paros_journal::resolve::ResolveAnswer;
 use paros_journal::roles::acceptor::AcceptorDisk;
 use paros_journal::roles::replica::ReplicaDisk;
 use paros_journal::roles::{
-    AcceptorEffect, AcceptorWrite, Campaign, JournalAcceptor, JournalLeader, LeaderEffect,
-    LeaderPhase, Message, PROMISE_BATCH, PersistId, Proposed, ReplicaEffect, ReplicaOp,
-    SegmentReplica,
+    AcceptorEffect, AcceptorWrite, Campaign, JournalAcceptor, JournalLeader, JournalProxy,
+    LeaderEffect, LeaderPhase, Message, PROMISE_BATCH, PersistId, Proposed, ProxyEffect,
+    ReplicaEffect, ReplicaOp, SegmentReplica,
 };
 use paros_journal::segment::{OpeningCall, SegmentId, SegmentRecord, SegmentState};
 use paros_journal::{
@@ -89,6 +89,12 @@ pub const RESOLVE: &str = "a Resolve at a replica answers the fate that the whol
 /// Oracle: a leader retires a segment only once `F + 1` replicas of its
 /// set hold every slot of it on their disk (`retire_f`).
 pub const RETIRE: &str = "a segment retires only with F + 1 replicas of its set holding it on disk";
+
+/// Oracle: a proxy leader commits a slot only once `F + 1` acceptors of the
+/// column of the round hold a vote at the round's ballot or above on their
+/// disk (`specs/tla/proxy-leader/`).
+pub const PROXY: &str =
+    "a proxy commits a slot only once F + 1 acceptors of its column voted it on disk";
 
 /// The coverage sites of the roles walk.
 pub mod reach {
@@ -126,13 +132,33 @@ pub mod reach {
     pub const PAGED: &str = "roles walk: a promise came in more than one page";
     /// An acceptor restarted from its disk with a vote.
     pub const RESTARTED: &str = "roles walk: an acceptor restarted from its disk with a vote";
+    /// A slot chosen by a proxy leader.
+    pub const PROXIED: &str = "roles walk: a proxy leader chose a slot";
+    /// A slot chosen by a proxy leader after a proxy crashed.
+    pub const PROXY_CRASHED: &str = "roles walk: a slot chosen after a proxy leader crashed";
     /// A slot chosen in a grid of two columns (wide only).
     pub const COLUMNS: &str = "roles walk: a slot chosen in a grid of two columns";
 
     /// The sites of every roles walk.
     pub const ALL: &[&str] = &[
-        SEALED, SEAL_LOST, GAP_NOOP, REPROPOSED, THIRD, BOUNDARY, RETIRED, PULLED, NACKED, UNKNOWN,
-        BELOW, RESOLVED, DUPLICATE, TRIMMED, TO_MULTI, RESTARTED,
+        SEALED,
+        SEAL_LOST,
+        GAP_NOOP,
+        REPROPOSED,
+        THIRD,
+        BOUNDARY,
+        RETIRED,
+        PULLED,
+        NACKED,
+        UNKNOWN,
+        BELOW,
+        RESOLVED,
+        DUPLICATE,
+        TRIMMED,
+        TO_MULTI,
+        RESTARTED,
+        PROXIED,
+        PROXY_CRASHED,
     ];
     /// The sites of the wide walk.
     pub const WIDE: &[&str] = &[COLUMNS, PAGED];
@@ -189,6 +215,10 @@ pub enum RolesMutant {
     /// "full", so the leader counts a replica that lags. [`RETIRE`] catches
     /// it.
     HoldsLie,
+    /// The driver gives a proxy leader each `Accepted` once from every
+    /// acceptor of the pool, so the proxy counts votes nobody cast.
+    /// [`PROXY`] catches it.
+    ForgedAccepted,
 }
 
 /// One step of the roles walk that changes the state of
@@ -415,6 +445,8 @@ const POOL: u64 = 6;
 const RESEND_PAGE: usize = 4;
 /// The proposers.
 const PROPOSERS: [u64; 3] = [101, 102, 103];
+/// The proxy leaders: a campaign delegates to them on one seed in two.
+const PROXIES: [u64; 3] = [201, 202, 203];
 /// The writers.
 const WRITERS: usize = 3;
 /// The most segments of one walk.
@@ -430,6 +462,10 @@ pub struct RolesModel {
     acceptors: BTreeMap<NodeId, AcceptorNode>,
     replicas: BTreeMap<NodeId, ReplicaNode>,
     leaders: BTreeMap<NodeId, JournalLeader<u64>>,
+    /// The proxy leaders; `None` while one is down.
+    proxies: BTreeMap<NodeId, Option<JournalProxy>>,
+    /// Whether some proxy leader crashed.
+    proxy_crashed: bool,
     /// The segment each ballot is bound to.
     bound: BTreeMap<(u64, NodeId), SegmentId>,
     round: u64,
@@ -565,6 +601,18 @@ impl Model for RolesModel {
                 sometimes!(pulled && role.front() > before, reach::PULLED);
                 self.replica_effects(to, effects, cx);
             }
+        } else if let Some(Some(proxy)) = self.proxies.get_mut(&to) {
+            let forged = match message {
+                Message::Accepted { .. } if self.mutant == RolesMutant::ForgedAccepted => {
+                    (1..=POOL).map(NodeId).collect()
+                }
+                _ => Vec::new(),
+            };
+            let mut effects = proxy.step(from, message.clone());
+            for node in forged {
+                effects.extend(proxy.step(node, message.clone()));
+            }
+            self.proxy_effects(to, effects, cx);
         } else if let Some(leader) = self.leaders.get_mut(&to) {
             let nack = matches!(message, Message::Nack { .. });
             sometimes!(
@@ -603,6 +651,7 @@ impl Model for RolesModel {
             .chain(self.replicas.keys())
             .copied()
             .chain(PROPOSERS.iter().map(|p| NodeId(*p)))
+            .chain(PROXIES.iter().map(|p| NodeId(*p)))
             .collect()
     }
 
@@ -611,6 +660,8 @@ impl Model for RolesModel {
             acceptor.role.is_some()
         } else if let Some(replica) = self.replicas.get(node) {
             replica.role.is_some()
+        } else if let Some(proxy) = self.proxies.get(node) {
+            proxy.is_some()
         } else {
             true
         }
@@ -624,6 +675,9 @@ impl Model for RolesModel {
             acceptor.crash();
         } else if let Some(replica) = self.replicas.get_mut(node) {
             replica.crash();
+        } else if let Some(proxy) = self.proxies.get_mut(node) {
+            self.proxy_crashed |= proxy.as_ref().is_some_and(|p| p.open() > 0);
+            *proxy = None;
         } else if let Some(leader) = self.leaders.remove(node) {
             // The callers of a crashed leader time out: the fate of each
             // call is unknown.
@@ -663,6 +717,10 @@ impl Model for RolesModel {
                 SegmentReplica::recover(*node, segment, set, self.initial, replica.disk.clone());
             self.replicas.get_mut(node).expect("a replica").role = Some(role);
             self.observe_replica(*node, cx);
+        } else if let Some(proxy) = self.proxies.get_mut(node)
+            && proxy.is_none()
+        {
+            *proxy = Some(JournalProxy::new(*node));
         }
     }
 
@@ -683,7 +741,7 @@ impl Model for RolesModel {
 
     fn converged(&self) -> Result<(), String> {
         if !self.queue.is_empty() {
-            return Err("register changes are queued".into());
+            return Err(format!("register changes are queued: {:?}", self.queue));
         }
         if self.acceptors.values().any(|a| !a.batches.is_empty())
             || self.replicas.values().any(|r| !r.batches.is_empty())
@@ -782,6 +840,11 @@ impl RolesModel {
             acceptors,
             replicas: BTreeMap::new(),
             leaders: BTreeMap::new(),
+            proxies: PROXIES
+                .iter()
+                .map(|p| (NodeId(*p), Some(JournalProxy::new(NodeId(*p)))))
+                .collect(),
+            proxy_crashed: false,
             bound: BTreeMap::new(),
             round: 0,
             chosen: BTreeMap::new(),
@@ -913,7 +976,7 @@ impl RolesModel {
         }
         let from = self.applied_from(&value, segment);
         self.bound.insert((ballot.round, ballot.node), segment);
-        let Some((leader, effects)) = JournalLeader::campaign(
+        let Some((mut leader, effects)) = JournalLeader::campaign(
             Campaign {
                 ballot,
                 segment,
@@ -923,6 +986,9 @@ impl RolesModel {
         ) else {
             return;
         };
+        if cx.rng().chance(1, 2) {
+            leader.delegate_to(PROXIES.iter().map(|p| NodeId(*p)).collect());
+        }
         cx.record(RolesEvent::Register {
             b: ballot.round,
             from: from.0,
@@ -1055,6 +1121,12 @@ impl RolesModel {
                         ballot,
                         slot,
                         command,
+                    }
+                    | Message::Delegate {
+                        ballot,
+                        slot,
+                        command,
+                        ..
                     } = &message
                     {
                         match self.proposed.entry((ballot.round, *slot)) {
@@ -1091,6 +1163,73 @@ impl RolesModel {
                 LeaderEffect::Retired { .. } => {}
             }
         }
+    }
+
+    fn proxy_effects(&mut self, node: NodeId, effects: Vec<ProxyEffect>, cx: &mut Cx<'_, Self>) {
+        // The ballot of each slot this step chose, from the `Chosen` it
+        // tells the leader.
+        let chosen: BTreeMap<Slot, paros_journal::register::Ballot> = effects
+            .iter()
+            .filter_map(|effect| match effect.message {
+                Message::Chosen { ballot, slot } => Some((slot, ballot)),
+                _ => None,
+            })
+            .collect();
+        for ProxyEffect { to, message } in effects {
+            match &message {
+                Message::Accept {
+                    ballot,
+                    slot,
+                    command,
+                } => assert_eq!(
+                    self.proposed.get(&(ballot.round, *slot)),
+                    Some(command),
+                    "a proxy sends the command its leader delegated"
+                ),
+                Message::Commit { slot, command, .. } => {
+                    let ballot = chosen[slot];
+                    self.judge_proxy(*slot, ballot);
+                    sometimes!(true, reach::PROXIED);
+                    sometimes!(self.proxy_crashed, reach::PROXY_CRASHED);
+                    self.commit_seen(*slot, command, (ballot.round, ballot.node));
+                }
+                _ => {}
+            }
+            cx.send(Envelope {
+                from: node,
+                to,
+                message,
+            });
+        }
+    }
+
+    /// The oracle [`PROXY`]: `F + 1` acceptors of the column of `slot` in
+    /// the grid of `ballot`'s segment hold a vote at `ballot` or above on
+    /// their disk.
+    fn judge_proxy(&self, slot: Slot, ballot: paros_journal::register::Ballot) {
+        let segment = self.bound[&(ballot.round, ballot.node)];
+        let grid = self
+            .register
+            .segment(segment)
+            .expect("a bound segment is in the register")
+            .grid();
+        let columns = grid.columns();
+        let count = u64::try_from(columns.len()).expect("few columns");
+        let column = &columns[usize::try_from(slot.0 % count).expect("small")];
+        let voted = column
+            .iter()
+            .filter(|node| {
+                self.acceptors[node]
+                    .disk
+                    .votes
+                    .get(&slot)
+                    .is_some_and(|(b, _)| *b >= ballot)
+            })
+            .count();
+        assert!(
+            voted > column.len() / 2,
+            "{PROXY}: slot {slot:?} committed at {ballot:?} with {voted} votes on disk in {column:?}"
+        );
     }
 
     fn acceptor_effects(
@@ -1526,6 +1665,17 @@ impl RolesModel {
                     .tick(RESEND_PAGE);
                 self.leader_effects(node, effects, cx);
             }
+        }
+        let proxies: Vec<NodeId> = self.proxies.keys().copied().collect();
+        for node in proxies {
+            if !(all || cx.rng().chance(1, 3)) {
+                continue;
+            }
+            let Some(Some(proxy)) = self.proxies.get_mut(&node) else {
+                continue;
+            };
+            let effects = proxy.tick(RESEND_PAGE);
+            self.proxy_effects(node, effects, cx);
         }
         let replicas: Vec<NodeId> = self.replicas.keys().copied().collect();
         for node in replicas {

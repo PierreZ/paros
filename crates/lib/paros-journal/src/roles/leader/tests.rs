@@ -900,3 +900,179 @@ fn the_holders_a_retire_needs_are_f_plus_one_of_the_grid() {
         "F = 2: three holders, a majority of five"
     );
 }
+
+/// An open leader of segment 1 that delegates to proxies 201 and 202.
+fn delegating_leader() -> JournalLeader<u32> {
+    let value = one_segment();
+    let (mut leader, _) = campaign(&value, 2, 1, 0);
+    leader.delegate_to(nodes(&[201, 202]));
+    leader.step(NodeId(1), promise(2, 0, page(&[], &[])));
+    leader.step(NodeId(2), promise(2, 0, page(&[], &[])));
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(0) });
+    leader
+}
+
+#[test]
+fn a_delegating_leader_gives_each_round_to_a_proxy() {
+    let mut leader = delegating_leader();
+    let (_, first) = leader.propose(1, write(1));
+    let (_, second) = leader.propose(2, write(2));
+    let first = sends(&first);
+    assert_eq!(first.len(), 1, "one delegation, no Accept: {first:?}");
+    let (to, message) = &first[0];
+    assert_eq!(*to, NodeId(201), "slot 0 goes to the proxy at 0");
+    let Message::Delegate {
+        slot,
+        column,
+        segment,
+        replicas,
+        ..
+    } = message
+    else {
+        panic!("a delegation: {message:?}");
+    };
+    assert_eq!(*slot, Slot(0));
+    assert_eq!(*column, nodes(&[1, 2, 3]));
+    assert_eq!(*segment, SegmentId(1));
+    assert_eq!(*replicas, nodes(&[11, 12, 13]));
+    assert_eq!(sends(&second)[0].0, NodeId(202), "slot 1 goes to the next");
+    // An `Accepted` that reaches the leader for a delegated round is not
+    // counted: the votes are the proxy's.
+    for acceptor in [1, 2, 3] {
+        let effects = leader.step(
+            NodeId(acceptor),
+            Message::Accepted {
+                ballot: ballot(2),
+                slot: Slot(0),
+            },
+        );
+        assert!(effects.is_empty());
+    }
+}
+
+#[test]
+fn a_chosen_from_a_proxy_commits_the_slot_and_holds_the_answer() {
+    let mut leader = delegating_leader();
+    leader.propose(1, write(1));
+    // A `Chosen` of another ballot changes nothing.
+    assert!(
+        leader
+            .step(
+                NodeId(201),
+                Message::Chosen {
+                    ballot: ballot(1),
+                    slot: Slot(0),
+                },
+            )
+            .is_empty()
+    );
+    let effects = leader.step(
+        NodeId(201),
+        Message::Chosen {
+            ballot: ballot(2),
+            slot: Slot(0),
+        },
+    );
+    let commits: Vec<NodeId> = sends(&effects)
+        .into_iter()
+        .filter(|(_, m)| matches!(m, Message::Commit { slot: Slot(0), .. }))
+        .map(|(to, _)| to)
+        .collect();
+    assert_eq!(commits, nodes(&[11, 12, 13]));
+    assert!(
+        replies(&effects).is_empty(),
+        "the answer waits for a replica"
+    );
+    // A second `Chosen` finds no open round.
+    assert!(
+        leader
+            .step(
+                NodeId(202),
+                Message::Chosen {
+                    ballot: ballot(2),
+                    slot: Slot(0),
+                },
+            )
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_stalled_delegation_moves_to_the_next_proxy() {
+    let mut leader = delegating_leader();
+    leader.propose(1, write(1));
+    let mut proxies = Vec::new();
+    for _ in 0..=MOVE_AFTER {
+        let effects = leader.tick(4);
+        proxies.extend(
+            sends(&effects)
+                .into_iter()
+                .filter_map(|(to, m)| matches!(m, Message::Delegate { .. }).then_some(to)),
+        );
+    }
+    assert_eq!(
+        proxies.first(),
+        Some(&NodeId(201)),
+        "the first re-sends go to the same proxy"
+    );
+    assert_eq!(
+        proxies.last(),
+        Some(&NodeId(202)),
+        "after MOVE_AFTER re-sends the round moves"
+    );
+}
+
+#[test]
+fn a_nack_that_a_proxy_relays_stops_the_leader() {
+    let mut leader = delegating_leader();
+    leader.propose(1, write(1));
+    let effects = leader.step(
+        NodeId(201),
+        Message::Nack {
+            ballot: ballot(2),
+            promised: ballot(3),
+        },
+    );
+    assert_eq!(*leader.phase(), LeaderPhase::Stopped);
+    assert_eq!(replies(&effects), vec![(1, Reply::Unknown)]);
+}
+
+#[test]
+#[should_panic(expected = "the leader delegates before it opens a round")]
+fn a_leader_delegates_only_before_its_first_round() {
+    let mut leader = open_leader();
+    leader.propose(1, write(1));
+    leader.delegate_to(nodes(&[201]));
+}
+
+#[test]
+fn a_retire_seen_in_phase_one_is_kept_once_the_leader_opens() {
+    let sealed = two_segments()
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(3),
+        })
+        .expect("the seal");
+    let (mut leader, _) = campaign(&sealed, 3, 2, 3);
+    let retired = sealed
+        .apply(&Change::Boundary {
+            segment: SegmentId(1),
+            state: crate::fold::BoundaryState::fresh(crate::command::Leader::Unset),
+        })
+        .and_then(|value| {
+            value.apply(&Change::Retire {
+                segment: SegmentId(1),
+                holders: 2,
+                unrepaired_damage: false,
+            })
+        })
+        .expect("another leader retired segment 1");
+    assert!(leader.observe(&retired).is_empty());
+    for node in [1, 2, 4, 5] {
+        leader.step(NodeId(node), promise(3, 3, page(&[], &[])));
+    }
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(3) });
+    let effects = leader.tick(4);
+    assert_eq!(holding(&effects), vec![], "the leader asks no holder");
+    assert_eq!(retires(&effects), vec![], "and writes no retire again");
+}

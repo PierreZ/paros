@@ -1384,6 +1384,12 @@ impl Run {
                 answer_text(answer)
             ),
             Payload::Role(Message::Pull { .. }) => format!("{to} sends the slots it holds."),
+            Payload::Role(Message::Delegate { slot, .. }) => {
+                format!("{to} sends the Accept of slot {} to its column.", slot.0)
+            }
+            Payload::Role(Message::Chosen { slot, .. }) => {
+                format!("{to} learns that slot {} is chosen.", slot.0)
+            }
             Payload::Role(message @ (Message::Holding { .. } | Message::Holds { .. })) => {
                 holding_says(message, &to, &from)
             }

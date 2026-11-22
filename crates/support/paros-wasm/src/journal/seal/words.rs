@@ -229,6 +229,8 @@ pub(super) fn kind_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::Pull { .. }) => "Pull",
         Payload::Role(Message::Holding { .. }) => "Holding",
         Payload::Role(Message::Holds { .. }) => "Holds",
+        Payload::Role(Message::Delegate { .. }) => "Delegate",
+        Payload::Role(Message::Chosen { .. }) => "Chosen",
         Payload::Write { .. } => "Write",
         Payload::Reply { .. } => "Reply",
         Payload::Change(Change::Reshape { .. }) => "Reshape",
@@ -247,8 +249,8 @@ pub(super) fn phase_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::Prepare { .. }) => "prepare",
         Payload::Role(Message::Promise { .. }) => "promise",
         Payload::Role(Message::Nack { .. }) => "nack",
-        Payload::Role(Message::Accept { .. }) => "accept",
-        Payload::Role(Message::Accepted { .. }) => "accepted",
+        Payload::Role(Message::Accept { .. } | Message::Delegate { .. }) => "accept",
+        Payload::Role(Message::Accepted { .. } | Message::Chosen { .. }) => "accepted",
         Payload::Role(Message::Commit { .. } | Message::Applied { .. }) => "commit",
         Payload::Role(Message::Pull { .. } | Message::Holding { .. } | Message::Holds { .. }) => {
             "catchup"
@@ -268,6 +270,7 @@ pub(super) fn is_reply(payload: &Payload) -> bool {
                 | Message::Accepted { .. }
                 | Message::Applied { .. }
                 | Message::Holds { .. }
+                | Message::Chosen { .. }
         ) | Payload::Reply { .. }
             | Payload::Done { .. }
             | Payload::Resolved { .. }
@@ -324,6 +327,20 @@ pub(super) fn label_of(payload: &Payload) -> String {
             format!("Pull · segment {} · from slot {}", segment.0, from.0)
         }
         Payload::Role(Message::Holding { segment }) => format!("Holding · segment {}", segment.0),
+        Payload::Role(Message::Delegate {
+            ballot,
+            slot,
+            command,
+            ..
+        }) => format!(
+            "Delegate {} · slot {} · {}",
+            ballot_text(*ballot),
+            slot.0,
+            value_name(command)
+        ),
+        Payload::Role(Message::Chosen { ballot, slot }) => {
+            format!("Chosen {} · slot {}", ballot_text(*ballot), slot.0)
+        }
         Payload::Role(Message::Holds { segment, full }) => {
             format!(
                 "Holds · segment {} · {}",
@@ -544,6 +561,35 @@ fn role_content(message: &Message) -> (Vec<Field>, String) {
             format!(
                 "Send me the slots of segment {} from slot {}.",
                 segment.0, from.0
+            ),
+        ),
+        Message::Delegate {
+            ballot,
+            slot,
+            command,
+            ..
+        } => (
+            vec![
+                field("ballot", ballot_text(*ballot)),
+                field("slot", slot.0.to_string()),
+                field("value", value_name(command)),
+            ],
+            format!(
+                "Run Phase 2 of slot {} for {}, ballot {}.",
+                slot.0,
+                value_name(command),
+                ballot_text(*ballot)
+            ),
+        ),
+        Message::Chosen { ballot, slot } => (
+            vec![
+                field("ballot", ballot_text(*ballot)),
+                field("slot", slot.0.to_string()),
+            ],
+            format!(
+                "Slot {} is chosen at ballot {}.",
+                slot.0,
+                ballot_text(*ballot)
             ),
         ),
         Message::Holding { segment } => (

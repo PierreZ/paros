@@ -1213,6 +1213,7 @@ impl WholeModel {
         let mut replies = driver.take_replies();
         driver.assign(Assignment::Leader {
             address: Address::new(id, node),
+            proxies: Vec::new(),
             campaign: Campaign {
                 ballot: Ballot {
                     round: self.journals[j].round,

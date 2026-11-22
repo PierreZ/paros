@@ -38,6 +38,10 @@
 //! release. What a client or a peer can send is never asserted on: it is an
 //! answer or a refusal.
 
+// First: `probe!` is a textual-scope macro the modules below use.
+#[macro_use]
+mod probe;
+
 pub mod client;
 pub mod codec;
 pub mod command;
