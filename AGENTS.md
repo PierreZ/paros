@@ -156,7 +156,8 @@ a probe on every branch; #1328 (paros-journal-control), #1261 (grid controller d
 judged by `journal-sim`'s sweep of every small view against a reference `decide` that shares no
 code with it. The controller role (`paros_journal_control::role`) is walked by `journal-sim`'s
 controller walk with two controllers and traced against `specs/tla/grid-controller/ControllerTrace.tla`;
-the moonpool-sim scenarios of the controller wait for its driver.
+the controller runs in the whole journal in #1445 (the whole journal on the in-memory IO); its
+moonpool-sim version is #1417, in the layered parosd.
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
 2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
 the build steps of #1323 (build the paros journal v1). Start there for any journal work.
@@ -720,7 +721,7 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
   `paros::journal`, `paros::journal_io`). A program depends on `paros` alone. Wasm-safe and provider-free
   with its default features; it is where moonpool's storage and network get bundled, behind a
-  feature, once the adapter exists (#1330). Its examples (`examples/`) run a journal through
+  feature, once the adapter exists (#1417 (the moonpool adapter on the generic host), in the layered parosd). Its examples (`examples/`) run a journal through
   `paros::` paths alone: `journal` in one process, `tokio_tasks` on three tokio tasks that talk
   over channels (tokio is a dev-dependency only).
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
