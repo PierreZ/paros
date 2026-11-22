@@ -7,7 +7,9 @@ on:
   # tooling, or a crate that its wasm or its pages show (#1362). The Concepts
   # page is built from the knowledge base (concepts.astro reads
   # docs/knowledge/concepts.md and docs/knowledge/concepts/*.md, the only files
-  # outside website/ that a page reads), so a change there builds the site too.
+  # outside website/ that a page is built from), so a change there builds the
+  # site too. The link check also reads the repository files that the site
+  # links to; this filter does not cover all of them yet (#1469).
   pull_request:
     paths:
       - "website/**"
