@@ -155,10 +155,12 @@ jobs:
         run: nix develop .#proofs --command scripts/check-proofs.sh ${{ matrix.module }}
 
   # Green when every job of the plan is green; a job that the plan leaves out
-  # is `skipped`.
+  # is `skipped`. A run that a newer push cancels ends `cancelled`, with no red
+  # `tlc` on the old head; a job that fails or is cancelled in a live run still
+  # turns `tlc` red.
   tlc:
     needs: [plan, spec, traces, proofs]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Every job of the plan is green
