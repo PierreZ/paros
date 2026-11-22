@@ -159,10 +159,12 @@ Before(x, i, t) ==
        IN Records(SelectSeq(lane, LAMBDA u : u # t))
 
 \* A writer hears the range of write t: at position seq, n records. A copy
-\* of an answer heard before adds nothing to `answers`: a stutter step.
+\* of an answer heard before changes nothing: it is no step, so that
+\* `BatcherTrace` refuses a repeated answer (`AnswerOnce`).
 Answer(t, seq, n) ==
   /\ Made(t)
   /\ n = writes[t].n
+  /\ [tok |-> t, seq |-> seq, n |-> n] \notin answers
   /\ \E x \in landed : \E i \in 1..Len(batches[x.id].ws) :
        /\ batches[x.id].ws[i] = t
        /\ seq = x.seq + Before(x, i, t)
@@ -222,6 +224,11 @@ SendOrder ==
     LET of == SelectSeq([x \in 1..Len(batches) |-> batches[x]], LAMBDA b : b.jr = j)
         Flat[k \in 0..Len(of)] == IF k = 0 THEN <<>> ELSE Flat[k - 1] \o of[k].ws
     IN Sub(Flat[Len(of)], pushed)
+
+\* An answer heard before enables no `Answer`: a trace that hears one
+\* answer two times is refused at the copy.
+AnswerOnce ==
+  \A a \in answers : ~ENABLED Answer(a.tok, a.seq, a.n)
 
 \* Reachability controls: each must be violated.
 NoAnswer == answers = {}
