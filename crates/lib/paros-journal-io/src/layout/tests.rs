@@ -28,13 +28,16 @@ fn key_bytes_sort_as_keys_and_read_back() {
     let mut keys = Vec::new();
     for journal in [0, 1, 255, 256, u64::MAX] {
         for node in [0, 1, 256] {
-            for kind in Kind::ALL {
-                for index in [0, 1, 255, 256, u64::MAX] {
-                    keys.push(Key::new(
-                        Address::new(JournalId(journal), NodeId(node)),
-                        kind,
-                        index,
-                    ));
+            for segment in [None, Some(1), Some(256), Some(u64::MAX)] {
+                let address = Address {
+                    journal: JournalId(journal),
+                    node: NodeId(node),
+                    segment: segment.map(SegmentId),
+                };
+                for kind in Kind::ALL {
+                    for index in [0, 1, 255, 256, u64::MAX] {
+                        keys.push(Key::new(address, kind, index));
+                    }
                 }
             }
         }

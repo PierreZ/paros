@@ -192,10 +192,11 @@ and segment replicas of both journals), two controllers for each journal
 token shared by the journals, a client that claims the writer, writes, sends again, resends with a
 stale position and resolves each `Below`, crashes and restarts of a machine, the loss of a zone for
 a while, register operations whose request or reply is lost, and disk faults inside the contract.
-Its oracles share no code with the code they judge: `AGREE`, `SEALED` (no two `Commit`s name two
-commands at one slot of one segment), `FLIGHT`, `ANSWER`, `ONCE` (a write with its
-`expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position) and
-`ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
+Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
+at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
+`ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with
+its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
+and `ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
 (`WholeMutant`). At the end of the walk each journal converges: a controller holds the term, the
 newest segment is in force, the older ones are retired, and every replica of the newest segment
 holds the whole log. One replica node serves one replica for each segment of its journal, so a

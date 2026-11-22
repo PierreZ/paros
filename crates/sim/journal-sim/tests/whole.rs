@@ -2,7 +2,9 @@
 //! campaign reaches every site, and each oracle catches its mutant.
 
 use journal_sim::campaign::{campaign, try_campaign};
-use journal_sim::whole::{ACKED, AGREE, ALERTS, ANSWER, FLIGHT, ONCE, WholeMutant, reach, walk};
+use journal_sim::whole::{
+    ACKED, AGREE, ALERTS, ANSWER, FLIGHT, ONCE, SEALED, WholeMutant, reach, walk,
+};
 
 /// Two journals on nine machines in three zones, with their controllers,
 /// retrying writers, machine and zone outages, commit faults and a lossy
@@ -28,6 +30,11 @@ fn flight_catches_a_disk_that_lies_about_a_commit() {
 #[test]
 fn agree_catches_a_machine_that_loses_its_disk() {
     caught(WholeMutant::WipeDisk, AGREE);
+}
+
+#[test]
+fn sealed_catches_a_commit_at_the_end_of_a_sealed_segment() {
+    caught(WholeMutant::CommitAtEnd, SEALED);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! The whole journal on the in-memory IO of `paros-journal-io` (#1445
 //! (journal-sim: the whole journal on the in-memory IO),
-//! `docs/journal/07-verification.md` §J7.3).
+//! `docs/journal/07-verification.md` §J7.4).
 //!
 //! **The deployment.** Nine machines in three zones (`a`: 1 to 3, `b`: 4
 //! to 6, `c`: 7 to 9). Each machine is one process: one generic [`Driver`]
@@ -53,7 +53,8 @@
 //!   of a journal.
 //! - [`SEALED`]: no `Commit` of a segment is at or above the end of that
 //!   segment once it is sealed.
-//! - [`FLIGHT`]: a reply leaves only once the state it reports is durable.
+//! - [`FLIGHT`]: an acceptor's `Accepted` or `Promise` leaves only once the
+//!   vote or the promise it reports is on its disk.
 //! - [`ANSWER`]: each answer is the whole log's ([`Truth`]) at a slot of the
 //!   command, or `Below` for a resend across a seal; each `Resolve` gives the
 //!   fate that the whole log gives.
@@ -110,7 +111,8 @@ pub const AGREE: &str = "whole journal: no two Commits name two commands at one 
 /// Oracle: a sealed segment chooses nothing at or above its end.
 pub const SEALED: &str = "whole journal: no Commit of a sealed segment is at or above its end";
 /// Oracle: the flight rule.
-pub const FLIGHT: &str = "whole journal: a reply leaves only once the state it reports is durable";
+pub const FLIGHT: &str =
+    "whole journal: an Accepted or a Promise leaves only once its state is on the disk";
 /// Oracle: each answer and each `Resolve` is the whole log's.
 pub const ANSWER: &str = "whole journal: each answer is the whole log's at a slot of the command";
 /// Oracle: exactly-once.
@@ -199,6 +201,9 @@ pub enum WholeMutant {
     /// The client keeps an acked write one position too high. [`ACKED`]
     /// catches it.
     AckOffByOne,
+    /// The wire moves a `Commit` of a sealed segment to the segment's end.
+    /// [`SEALED`] catches it.
+    CommitAtEnd,
     /// The host keeps a machine down in the view once it ever was.
     /// [`ALERTS`] catches it.
     StaleLiveness,
@@ -944,9 +949,24 @@ impl WholeModel {
     /// the wire.
     fn flush(&mut self, m: u64, cx: &mut Cx<'_, Self>) {
         let sent: Vec<Envelope> = self.machines[&m].outbox.borrow_mut().drain(..).collect();
-        for envelope in sent {
+        for mut envelope in sent {
+            if self.mutant == WholeMutant::CommitAtEnd {
+                self.commit_at_end(&mut envelope);
+            }
             self.on_wire(&envelope);
             cx.send(envelope);
+        }
+    }
+
+    /// The planted bug [`WholeMutant::CommitAtEnd`]: a `Commit` of a
+    /// sealed segment leaves at the segment's end.
+    fn commit_at_end(&self, envelope: &mut Envelope) {
+        let Message::Commit { segment, slot, .. } = &mut envelope.message else {
+            return;
+        };
+        let j = self.journal_index(envelope.journal);
+        if let Some(end) = self.value(j).segment(*segment).and_then(SegmentRecord::end) {
+            *slot = end;
         }
     }
 
@@ -1545,7 +1565,7 @@ impl WholeModel {
         let value = self.value(j);
         let id = self.journals[j].id;
         let in_force = value.in_force().map(SegmentRecord::id);
-        let mut answer = None;
+        let mut answers = Vec::new();
         for record in value.segments().values() {
             if Some(record.id()) == in_force {
                 continue;
@@ -1559,26 +1579,28 @@ impl WholeModel {
                 if let Some(found) = found
                     && found != ResolveAnswer::NotCovered
                 {
-                    answer = Some(found);
+                    answers.push(found);
                 }
             }
         }
-        let Some(answer) = answer else {
+        if answers.is_empty() {
             return;
-        };
+        }
         let Some(verdicts) = self.verdicts_of(j, &Command::Write(write.clone())) else {
             return;
         };
-        let truth = match answer {
-            ResolveAnswer::Written { .. } => verdicts.iter().any(|(_, v)| *v == "dup"),
-            ResolveAnswer::NotWritten => verdicts.iter().any(|(_, v)| *v == "taken"),
-            ResolveAnswer::Truncated | ResolveAnswer::NotCovered => false,
-        };
-        assert!(
-            truth,
-            "{ANSWER}: journal {} {write:?} resolved {answer:?}, the whole log gives {verdicts:?}",
-            id.0
-        );
+        for answer in answers {
+            let truth = match answer {
+                ResolveAnswer::Written { .. } => verdicts.iter().any(|(_, v)| *v == "dup"),
+                ResolveAnswer::NotWritten => verdicts.iter().any(|(_, v)| *v == "taken"),
+                ResolveAnswer::Truncated | ResolveAnswer::NotCovered => false,
+            };
+            assert!(
+                truth,
+                "{ANSWER}: journal {} {write:?} resolved {answer:?}, the whole log gives {verdicts:?}",
+                id.0
+            );
+        }
         sometimes!(true, reach::RESOLVED);
         self.journals[j].belows.remove(0);
     }
@@ -1660,14 +1682,13 @@ impl WholeModel {
             );
         }
         for (seq, payload) in &journal.acked {
-            if *seq < truth.next {
-                assert!(
-                    positions.get(seq) == Some(payload),
-                    "{ACKED}: journal {} acked {payload:?} at {seq}, the log holds {:?}",
-                    journal.id.0,
-                    positions.get(seq)
-                );
-            }
+            assert!(
+                positions.get(seq) == Some(payload),
+                "{ACKED}: journal {} acked {payload:?} at {seq}, the log holds {:?} (next {})",
+                journal.id.0,
+                positions.get(seq),
+                truth.next
+            );
         }
         self.journals[j].judged = judged;
     }
