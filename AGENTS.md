@@ -147,8 +147,10 @@ matchmaker register as an optional role)). The first journal roles are `paros_jo
 (the acceptor, the leader with its Phase 1 over the segments and the seal, the segment replica;
 #1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk
 and traced against `specs/tla/journal-state/RolesTrace.tla`;
-the other rule groups of #1326 (proxy leader, leaderless reads, retire, truncate,
-re-replication) are not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
+the leader's retire at `F + 1` holders and the heal of a retired segment's replica set (the new
+replica's copy, the register's `Rereplicate`, the controller's heal) are built and walked by
+`journal-sim`'s heal walk (#1314 (re-replication of a sealed segment's replica set)); the other
+rule groups of #1326 (proxy leader, leaderless reads, truncate) are not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
 (storage, transport, clock, register), the pure `Host` that serves many journals in one process,
 and the generic driver under the flight rule (#1329 (paros-journal-io)), judged by
 `journal-sim`'s driver walk. The grid controller's pure decision is

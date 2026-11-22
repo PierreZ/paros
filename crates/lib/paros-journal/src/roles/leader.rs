@@ -35,10 +35,18 @@
 //! 6. **Held answers** (#1232): the answer of a command the leader proposed
 //!    goes to its caller when the slot applied that command, else `Unknown`.
 //!    A leader that stops answers `Unknown` for every held command.
+//! 7. **The retire** (§J3.1, §J3.4): an open leader whose Phase 1 read a
+//!    sealed segment asks its replicas `Holding`, and retires it by
+//!    compare-and-set once `F + 1` replicas of its set answered that they
+//!    hold every slot (control `retire_f`). The register refuses the retire
+//!    until the boundary state is written (control `retire_norecord`); the
+//!    leader asks again at its next tick. Only once a done value shows the
+//!    segment retired does the leader say that the old acceptors may stop
+//!    ([`LeaderEffect::Retired`], `RetireKept`).
 
 pub mod phase1;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use paros_consensus::contract::limits::RESEND_BATCH;
 use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
@@ -88,6 +96,12 @@ pub enum LeaderEffect<T> {
         token: T,
         /// The answer.
         reply: Reply,
+    },
+    /// A done write retired `segment`: its acceptors that no later grid
+    /// names may stop (§J3.4, `RetireKept`). Given once.
+    Retired {
+        /// The retired segment.
+        segment: SegmentId,
     },
 }
 
@@ -164,6 +178,20 @@ impl ReadSegment {
         columns
     }
 
+    /// The replicas of the set that must hold every slot before the retire:
+    /// `F + 1`, the write quorum of a column of the grid (§J3.1).
+    ///
+    /// # Panics
+    ///
+    /// When the grid has no column.
+    #[must_use]
+    pub fn acks(&self) -> usize {
+        assert!(!self.columns.is_empty(), "a grid has a column");
+        let rows = self.columns[0].members().len();
+        assert!(rows % 2 == 1, "a column has 2F + 1 acceptors");
+        rows / 2 + 1
+    }
+
     /// Whether Phase 1 reads `slot` here: below the end of a sealed segment.
     #[must_use]
     pub fn reads(&self, slot: Slot) -> bool {
@@ -215,6 +243,11 @@ pub struct JournalLeader<T> {
     next: Slot,
     held: Held<T>,
     unapplied: BTreeMap<Slot, Unapplied>,
+    /// The replicas of the sealed segment before the leader's own that
+    /// answered that they hold every slot of it.
+    holders: BTreeSet<NodeId>,
+    /// Whether a done value showed that segment retired.
+    retired: bool,
 }
 
 impl<T> JournalLeader<T> {
@@ -267,6 +300,8 @@ impl<T> JournalLeader<T> {
             next: Slot(0),
             held: Held::new(),
             unapplied: BTreeMap::new(),
+            holders: BTreeSet::new(),
+            retired: false,
         };
         let effects = leader.prepares();
         leader.assert_invariants();
@@ -384,6 +419,16 @@ impl<T> JournalLeader<T> {
                 command,
                 answer,
             } => self.applied(segment, slot, &command, &answer),
+            Message::Holds { segment, full } => {
+                if full
+                    && let Some(sealed) = self.sealed()
+                    && sealed.id == segment
+                    && sealed.replicas.contains(&from)
+                {
+                    self.holders.insert(from);
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         };
         self.assert_invariants();
@@ -398,6 +443,11 @@ impl<T> JournalLeader<T> {
     /// When an assertion on its own postconditions fails: a programmer
     /// error, never an operating condition.
     pub fn observe(&mut self, value: &RegisterValue) -> Vec<LeaderEffect<T>> {
+        if let LeaderPhase::Open { .. } = self.phase {
+            let effects = self.observe_retire(value);
+            self.assert_invariants();
+            return effects;
+        }
         let LeaderPhase::Sealing { end } = self.phase else {
             return Vec::new();
         };
@@ -438,6 +488,7 @@ impl<T> JournalLeader<T> {
         self.phase = LeaderPhase::Stopped;
         self.rounds.clear();
         self.unapplied.clear();
+        self.holders.clear();
         let effects: Vec<LeaderEffect<T>> = self
             .held
             .release_all()
@@ -486,10 +537,70 @@ impl<T> JournalLeader<T> {
                 for (slot, segment, command) in unapplied {
                     effects.extend(self.commits(segment, slot, &command));
                 }
+                effects.extend(self.retire());
                 effects
             }
             LeaderPhase::Stopped => Vec::new(),
         }
+    }
+
+    /// The sealed segment before the leader's own, once the leader is open
+    /// and until a done value shows it retired.
+    fn sealed(&self) -> Option<&ReadSegment> {
+        if self.retired || !matches!(self.phase, LeaderPhase::Open { .. }) {
+            return None;
+        }
+        let [.., sealed, _] = &self.segments[..] else {
+            return None;
+        };
+        assert!(
+            sealed.end.is_some(),
+            "an open leader's segment before is sealed"
+        );
+        Some(sealed)
+    }
+
+    /// The retire step of a tick: ask the replicas that did not answer
+    /// "full" yet, and retire at `F + 1` holders.
+    fn retire(&self) -> Vec<LeaderEffect<T>> {
+        let Some(sealed) = self.sealed() else {
+            return Vec::new();
+        };
+        let mut effects: Vec<LeaderEffect<T>> = sealed
+            .replicas
+            .iter()
+            .filter(|replica| !self.holders.contains(replica))
+            .map(|replica| LeaderEffect::Send {
+                to: *replica,
+                message: Message::Holding { segment: sealed.id },
+            })
+            .collect();
+        if self.holders.len() >= sealed.acks() {
+            effects.push(LeaderEffect::Register(Change::Retire {
+                segment: sealed.id,
+                holders: self.holders.len(),
+                unrepaired_damage: false,
+            }));
+        }
+        effects
+    }
+
+    /// A done value that shows the sealed segment retired: the old
+    /// acceptors may stop.
+    fn observe_retire(&mut self, value: &RegisterValue) -> Vec<LeaderEffect<T>> {
+        let Some(sealed) = self.sealed() else {
+            return Vec::new();
+        };
+        let segment = sealed.id;
+        if value
+            .segment(segment)
+            .is_some_and(|record| record.state() >= SegmentState::Retired)
+        {
+            self.retired = true;
+            self.holders.clear();
+            return vec![LeaderEffect::Retired { segment }];
+        }
+        Vec::new()
     }
 
     fn prepares(&self) -> Vec<LeaderEffect<T>> {
@@ -702,6 +813,17 @@ impl<T> JournalLeader<T> {
             );
         } else {
             assert!(self.unapplied.is_empty(), "only an open leader chooses");
+            assert!(
+                self.holders.is_empty(),
+                "only an open leader counts holders"
+            );
+        }
+        match self.sealed() {
+            Some(sealed) => assert!(
+                self.holders.iter().all(|h| sealed.replicas.contains(h)),
+                "a holder is a replica of the sealed segment"
+            ),
+            None => assert!(self.holders.is_empty(), "holders of a sealed segment only"),
         }
         assert!(
             self.unapplied

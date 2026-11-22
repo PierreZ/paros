@@ -95,4 +95,21 @@ pub enum Message {
         /// The first slot the asker misses.
         from: Slot,
     },
+    /// Leader or new replica to a replica of `segment`: does it hold every
+    /// slot of the sealed segment? The leader counts the holders for the
+    /// retire (§J3.1); a new replica of a heal looks for a source that holds
+    /// the whole segment (#1314).
+    Holding {
+        /// The sealed segment.
+        segment: SegmentId,
+    },
+    /// Replica to the asker of `Holding`: whether its disk holds every slot
+    /// of `segment` up to the end of the done seal. It waits on the
+    /// replica's last batch, so a "full" answer is durable.
+    Holds {
+        /// The segment.
+        segment: SegmentId,
+        /// Whether the replica holds every slot of the sealed segment.
+        full: bool,
+    },
 }

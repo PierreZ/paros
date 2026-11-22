@@ -25,7 +25,7 @@ Test only: `publish = false`.
   grid; `WIDE`, two columns and promise pages of two), its oracles (`AGREE`, `SEALED`, `FOLD`,
   `VIEW`, `BOUNDARY`, `RESOLVE`; the truth is `Truth` over the chosen log), its reach sites and
   its planted mutants (`RolesMutant`), its events (`RolesEvent`, one action of `Journal.tla`
-  each) and the trace control `BoundaryBeforeDurable`.
+  each), the leader's retire judged by `RETIRE` (mutant `HoldsLie`) and the trace control `BoundaryBeforeDurable`.
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
   controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
   `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each
@@ -42,6 +42,12 @@ Test only: `publish = false`.
   one), its oracles (`FENCED`, `BOUNDED_RESHAPE_RATE`, `COST_BOUND`, `NO_OSCILLATION`,
   `BOUNDED_IN_FLIGHT`, `CONVERGES`), its reach sites and its planted mutants (`ControllerMutant`).
   `tests/controller.rs` also requires every `probe!` of the role (`role::PROBES`).
+- `src/heal.rs`: the heal walk (`HealModel`, #1314 (re-replication of a sealed segment's replica
+  set)): the controller role heals a retired segment while replica machines are lost for good or
+  come back, two controllers depose each other, requests and replies are lost and the segment is
+  trimmed; the walk plays the replicas (copy from a full member, the highest copy per node, drop
+  outside the set). Its oracles (`HELD`, `CONVERGES`), its reach sites and its planted mutants
+  (`HealMutant`). `tests/heal.rs`; `tests/controller.rs` runs it in the gate of the role's probes.
 - `src/host.rs`: the driver walk (`HostModel`, #1329): three processes, each a `Driver` of
   `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
   walk's mailbox, crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,

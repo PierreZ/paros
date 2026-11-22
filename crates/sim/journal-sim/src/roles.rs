@@ -85,6 +85,9 @@ pub const VIEW: &str = "each replica's fold is the fold of the whole log at its 
 pub const BOUNDARY: &str = "a boundary state is the fold of the whole log at the segment end";
 /// Oracle: a `Resolve` answers the fate that the whole log gives.
 pub const RESOLVE: &str = "a Resolve at a replica answers the fate that the whole log gives";
+/// Oracle: a leader retires a segment only once `F + 1` replicas of its
+/// set hold every slot of it on their disk (`retire_f`).
+pub const RETIRE: &str = "a segment retires only with F + 1 replicas of its set holding it on disk";
 
 /// The coverage sites of the roles walk.
 pub mod reach {
@@ -181,6 +184,10 @@ pub enum RolesMutant {
     /// slots, so every oracle passes; `RolesTrace.tla` refuses it, as
     /// `BoundWrite` needs every slot of the segment on the replica's disk.
     BoundaryBeforeDurable,
+    /// The driver turns a replica's "not full" answer to `Holding` into
+    /// "full", so the leader counts a replica that lags. [`RETIRE`] catches
+    /// it.
+    HoldsLie,
 }
 
 /// One step of the roles walk that changes the state of
@@ -329,8 +336,6 @@ pub enum RolesAction {
     Truncate,
     /// The grid controller opens the next segment.
     Reshape,
-    /// The walk retires a sealed segment.
-    Retire,
     /// The register runs one queued change.
     Register,
     /// A role's batch becomes durable.
@@ -479,7 +484,6 @@ impl Model for RolesModel {
             RolesAction::Multi,
             RolesAction::Truncate,
             RolesAction::Reshape,
-            RolesAction::Retire,
             RolesAction::Register,
             RolesAction::Flush,
             RolesAction::Tick,
@@ -494,8 +498,7 @@ impl Model for RolesModel {
                 | RolesAction::Register
                 | RolesAction::Flush
                 | RolesAction::Tick
-                | RolesAction::Resolve
-                | RolesAction::Retire,
+                | RolesAction::Resolve,
                 Phase::Settle,
             ) => 1,
             (_, Phase::Settle) => 0,
@@ -504,18 +507,12 @@ impl Model for RolesModel {
             (RolesAction::Tick, _) => 6,
             (RolesAction::Resolve, _) => 4,
             (_, Phase::Quiet) => match action {
-                RolesAction::Campaign | RolesAction::Retire => 1,
+                RolesAction::Campaign => 1,
                 _ => 0,
             },
             (RolesAction::Write, _) => 12,
             (RolesAction::Resend, _) => 5,
-            (
-                RolesAction::Claim
-                | RolesAction::Reshape
-                | RolesAction::Retire
-                | RolesAction::Stale,
-                _,
-            ) => 2,
+            (RolesAction::Claim | RolesAction::Reshape | RolesAction::Stale, _) => 2,
             (RolesAction::Campaign | RolesAction::Multi | RolesAction::Truncate, _) => 1,
         }
     }
@@ -530,7 +527,6 @@ impl Model for RolesModel {
             RolesAction::Multi => self.multi(cx),
             RolesAction::Truncate => self.truncate(cx),
             RolesAction::Reshape => self.reshape(cx),
-            RolesAction::Retire => self.retire(cx),
             RolesAction::Register => self.register_step(cx),
             RolesAction::Flush => self.flush(cx),
             RolesAction::Tick => self.tick(cx),
@@ -877,34 +873,6 @@ impl RolesModel {
         self.open_segment(grid, cx);
     }
 
-    /// The walk's retire: a sealed segment whose boundary state is written,
-    /// once `F + 1` replicas of its set hold every slot of it on their disk.
-    fn retire(&mut self, cx: &mut Cx<'_, Self>) {
-        let sealed: Vec<SegmentId> = self
-            .register
-            .segments()
-            .values()
-            .filter(|r| r.state() == SegmentState::Sealed && r.boundary().is_some())
-            .map(SegmentRecord::id)
-            .collect();
-        for segment in sealed {
-            let end = self.register.segment(segment).and_then(SegmentRecord::end);
-            let holders = Self::set_of(segment)
-                .iter()
-                .filter(|node| end.is_some() && self.disk_front(**node) == end)
-                .count();
-            if let Ok(value) = self.register.apply(&Change::Retire {
-                segment,
-                holders,
-                unrepaired_damage: false,
-            }) {
-                self.register = value;
-                cx.record(RolesEvent::Retire { p: segment.0 });
-                sometimes!(true, reach::RETIRED);
-            }
-        }
-    }
-
     /// A proposer campaigns: a new ballot, bound to the newest segment.
     fn campaign(&mut self, cx: &mut Cx<'_, Self>) {
         let newest = self.register.newest().expect("a segment").id();
@@ -1096,6 +1064,9 @@ impl RolesModel {
                     self.queue.push((Origin::Leader(node, round), change));
                 }
                 LeaderEffect::Reply { token, reply } => self.reply(token, reply),
+                // The walk's acceptors of a retired segment stop on their
+                // own: the walk asks no step of them after the retire.
+                LeaderEffect::Retired { .. } => {}
             }
         }
     }
@@ -1147,6 +1118,11 @@ impl RolesModel {
                     mut message,
                     after,
                 } => {
+                    if let Message::Holds { full, .. } = &mut message
+                        && self.mutant == RolesMutant::HoldsLie
+                    {
+                        *full = true;
+                    }
                     if let Message::Applied { slot, answer, .. } = &mut message {
                         if self.mutant == RolesMutant::DuplicateAsTaken
                             && let Answer::Duplicate { .. } = answer
@@ -1185,6 +1161,9 @@ impl RolesModel {
                         }
                         _ => self.queue.push((Origin::Replica(node), change)),
                     }
+                }
+                ReplicaEffect::Copied { .. } | ReplicaEffect::Drop => {
+                    unreachable!("the roles walk has no heal and no trim of a record: {node:?}")
                 }
             }
         }
@@ -1288,6 +1267,19 @@ impl RolesModel {
                         if let Origin::Replica(node) = origin {
                             cx.record(RolesEvent::Boundary { r: node.0 });
                         }
+                    }
+                    (Change::Retire { segment, .. }, Origin::Leader(_, b)) => {
+                        let end = value.segment(*segment).and_then(SegmentRecord::end);
+                        let holders = Self::set_of(*segment)
+                            .iter()
+                            .filter(|node| end.is_some() && self.disk_front(**node) == end)
+                            .count();
+                        assert!(
+                            holders > Self::set_of(*segment).len() / 2,
+                            "{RETIRE}: {segment:?} retired by ballot {b} with {holders} holders on disk"
+                        );
+                        cx.record(RolesEvent::Retire { p: segment.0 });
+                        sometimes!(true, reach::RETIRED);
                     }
                     (Change::Seal { segment, end }, _) => {
                         for (slot, (_, round, node)) in &self.chosen {

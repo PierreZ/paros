@@ -134,6 +134,20 @@ check: `Journal.tla` chooses a slot at a quorum of the whole grid, not of one co
 **Open**: the coverage gate over the journal's probes (the next rule group of #1326); CTRL
 faulty votes on the acceptors' disks (the leader's blocked slot has unit tests only).
 
+**The heal walk** (#1314 (re-replication of a sealed segment's replica set), `src/heal.rs`):
+the controller role heals a retired segment while replica machines are lost for good or come
+back with their disk, two controllers depose each other, requests and replies are lost and the
+segment is trimmed. The walk plays the replicas: a copy moves only while a member of the set it
+read is up and full, a node runs the highest copy it was asked, and a replica in no set with no
+copy drops it. Two oracles judge it: `HELD` (every member of the set of a segment that is not
+trimmed holds a complete copy) and `CONVERGES` (once the faults stop, the set is all up, or the
+segment is trimmed and no live machine keeps it). Their mutants: a copy reported when it starts
+(`EarlyReport`), a lower copy taken (`AnyCopy`), a heal written with no compare (`NoCompare`)
+or with no term check (`NoTermCheck`), and a compare-and-set never sent again (`NoResend`). The
+roles walk's retire is the leader's now, judged by `RETIRE` (a retire counts `F + 1` replicas
+that hold the whole segment on their disk; mutant `HoldsLie`). **Open**: a trace check of the
+heal walk against `re-replication/`.
+
 **The walk of the register** (#1325 (the matchmaker register as an optional role),
 `src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
 of §J3.4 and handovers of the matchmaker set, with crashes that lose what a member did not

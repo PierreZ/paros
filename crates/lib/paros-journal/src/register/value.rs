@@ -81,6 +81,27 @@ pub enum Change {
         /// Whether a found damage of the segment is still not repaired.
         unrepaired_damage: bool,
     },
+    /// The grid controller's heal of the retired `segment` (§J3.1, #1314):
+    /// `remove` leaves its replica set and `add` takes its place, once
+    /// `add`'s own report says that its copy reached the segment end. A
+    /// compare-and-set on what the controller read: the term of the
+    /// register is `term`, and the record is `read`, the record the
+    /// controller planned on. A trim, a heal of another controller or a new
+    /// term since the read refuses it (controls `cas_term`, `cas_blind` of
+    /// `specs/tla/re-replication/`). A heal that the register already took
+    /// gets "ok" again, so a retry after a lost reply is safe.
+    Rereplicate {
+        /// The retired segment.
+        segment: SegmentId,
+        /// The record the controller read when it planned the heal.
+        read: SegmentRecord,
+        /// The controller term of the heal.
+        term: u64,
+        /// The member that leaves the set.
+        remove: NodeId,
+        /// The new replica, whose copy is complete.
+        add: NodeId,
+    },
     /// The offloader marks `segment` offloaded (after v1).
     Offload {
         /// The segment.
@@ -134,6 +155,9 @@ pub enum ChangeRefusal {
     NoSuccessor(SegmentId),
     /// A confirm found the segment in another state.
     Confirm(SegmentState),
+    /// A heal read a record that the register no longer holds: the record
+    /// changed since the controller's read.
+    Stale(SegmentId),
     /// The record of the segment refused the step.
     Record(SegmentId, RecordRefusal),
 }
@@ -224,6 +248,13 @@ impl RegisterValue {
             } => next.record(*segment, |record| {
                 record.retire(*holders, *unrepaired_damage)
             })?,
+            Change::Rereplicate {
+                segment,
+                read,
+                term,
+                remove,
+                add,
+            } => next.rereplicate(*segment, read, *term, *remove, *add)?,
             Change::Offload { segment } => next.record(*segment, SegmentRecord::mark_offloaded)?,
             Change::Trim { segment, first_seq } => {
                 next.record(*segment, |record| record.trim(*first_seq))?;
@@ -324,6 +355,37 @@ impl RegisterValue {
         self.record(next, |record| record.put_in_force(end))
             .expect("a pending successor goes in force");
         Ok(())
+    }
+
+    /// `Rereplicate`: the heal that the register took already is "ok"
+    /// again; else the term, then the record the controller read, then the
+    /// guard of the record.
+    fn rereplicate(
+        &mut self,
+        segment: SegmentId,
+        read: &SegmentRecord,
+        term: u64,
+        remove: NodeId,
+        add: NodeId,
+    ) -> Result<(), ChangeRefusal> {
+        let held = self
+            .segments
+            .get(&segment)
+            .ok_or(ChangeRefusal::NoSegment(segment))?;
+        let mut healed = read.clone();
+        if read.id() == segment && healed.replace_replica(remove, add).is_ok() && *held == healed {
+            return Ok(());
+        }
+        if term != self.term.number {
+            return Err(ChangeRefusal::Term {
+                held: self.term.number,
+                asked: term,
+            });
+        }
+        if held != read {
+            return Err(ChangeRefusal::Stale(segment));
+        }
+        self.record(segment, |record| record.replace_replica(remove, add))
     }
 
     fn record(

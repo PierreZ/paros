@@ -33,8 +33,9 @@ use std::collections::{BTreeMap, VecDeque};
 
 use paros_consensus::journal::JournalId;
 use paros_journal::Command;
+use paros_journal::SegmentId;
 use paros_journal::register::{Change, RegisterValue};
-use paros_journal::roles::PersistId;
+use paros_journal::roles::{CopyId, PersistId};
 
 use crate::clock::Clock;
 use crate::events::{Event, Events};
@@ -54,6 +55,30 @@ pub struct CallReply {
     pub call: CallId,
     /// The answer.
     pub outcome: CallOutcome,
+}
+
+/// What a role tells the outside of its journal through the driver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// The new replica at `address` holds a complete, durable copy `copy`
+    /// of `segment`: the grid controller of the plan may write the new set
+    /// (#1314).
+    Copied {
+        /// The new replica.
+        address: Address,
+        /// The segment.
+        segment: SegmentId,
+        /// The copy.
+        copy: CopyId,
+    },
+    /// A done write retired `segment`: its acceptors that no later grid
+    /// names may stop (§J3.4).
+    Retired {
+        /// The leader that saw the done write.
+        address: Address,
+        /// The segment.
+        segment: SegmentId,
+    },
 }
 
 /// A step of the `Host` that the driver has not reported yet, with the
@@ -90,6 +115,7 @@ pub struct Driver<S, T, C, R, E> {
     timer: Option<Time>,
     calls: CallId,
     replies: Vec<CallReply>,
+    notices: Vec<Notice>,
     stopped: Vec<(Address, Stop)>,
 }
 
@@ -129,6 +155,7 @@ where
             timer: None,
             calls: 0,
             replies: Vec::new(),
+            notices: Vec::new(),
             stopped: Vec::new(),
         }
     }
@@ -203,6 +230,13 @@ where
     /// The answers of client calls since the last take.
     pub fn take_replies(&mut self) -> Vec<CallReply> {
         std::mem::take(&mut self.replies)
+    }
+
+    /// What the roles told their outside since the last call: a new
+    /// replica's complete copy, for the grid controller of its plan, and a
+    /// done retire, for placement (the old acceptors may stop).
+    pub fn take_notices(&mut self) -> Vec<Notice> {
+        std::mem::take(&mut self.notices)
     }
 
     /// The roles that stopped since the last take, and why.
@@ -350,6 +384,25 @@ where
             }),
             Effect::SetTimer { at } => {
                 self.timer = Some(self.timer.map_or(at, |armed| armed.min(at)));
+            }
+            Effect::Copied {
+                address,
+                segment,
+                copy,
+                after,
+            } => {
+                // A report of a copy whose last batch is not durable yet is
+                // dropped: the replica reports again at its next tick.
+                if self.is_durable(address, after) {
+                    self.notices.push(Notice::Copied {
+                        address,
+                        segment,
+                        copy,
+                    });
+                }
+            }
+            Effect::Retired { address, segment } => {
+                self.notices.push(Notice::Retired { address, segment });
             }
             Effect::Stopped { address, why } => {
                 // A stopped role writes and sends nothing more: its batches

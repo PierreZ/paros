@@ -15,6 +15,7 @@
 //! | `InForce` | the seal end of the predecessor ([`SegmentRecord::put_in_force`]) | from `Pending` |
 //! | `Sealed` | the seal end, written once ([`SegmentRecord::seal`]) | from `InForce`, end at or above start |
 //! | `Retired` | the leader, after `F + 1` holders and the boundary state ([`SegmentRecord::retire`]) | from `Sealed`, boundary written, `F + 1` holders, no found damage left |
+//! | `Retired`, a new replica set | the grid controller's heal ([`SegmentRecord::replace_replica`], #1314) | from `Retired` only, one member out and one new replica in |
 //! | `Offloaded` | the offloader, after v1 ([`SegmentRecord::mark_offloaded`]) | from `Sealed` or `Retired` |
 //! | `Trimmed` | a replica whose fold has `first_seq` at or above the segment's last `seq` ([`SegmentRecord::trim`]) | from `Sealed`, `Retired` or `Offloaded` |
 //!
@@ -187,6 +188,10 @@ pub enum RecordRefusal {
     /// A found damage of the segment is not repaired (a margin, Pierre,
     /// 2026-11-20, #1263).
     Damage,
+    /// A heal removes a node that is not a member of the set.
+    NotMember(NodeId),
+    /// A heal adds a node that is a member of the set already.
+    AlreadyMember(NodeId),
     /// The trim floor is below the last `seq` of the segment.
     FloorBelowEnd {
         /// The floor of the fold.
@@ -428,6 +433,46 @@ impl SegmentRecord {
             record.state = SegmentState::Retired;
             Ok(())
         })
+    }
+
+    /// The grid controller's heal of a retired segment (§J3.1, #1314):
+    /// `remove` leaves the replica set and `add` takes its place. The new
+    /// replica's own report says that its copy reached the segment end; the
+    /// register checks that the record is the one the controller read
+    /// ([`Change::Rereplicate`](crate::register::Change::Rereplicate)). The
+    /// set keeps its size and its order.
+    ///
+    /// # Errors
+    ///
+    /// When the segment is not `Retired` (a sealed segment still has its
+    /// acceptors, and a trimmed one stays trimmed), `remove` is not a
+    /// member, or `add` is a member already.
+    ///
+    /// # Panics
+    ///
+    /// When an assertion on its own postconditions fails: a programmer error, never
+    /// an operating condition.
+    pub fn replace_replica(&mut self, remove: NodeId, add: NodeId) -> Result<(), RecordRefusal> {
+        let size = self.replicas.len();
+        self.step(&[SegmentState::Retired], |record| {
+            let Some(at) = record.replicas.iter().position(|node| *node == remove) else {
+                return Err(RecordRefusal::NotMember(remove));
+            };
+            if record.replicas.contains(&add) {
+                return Err(RecordRefusal::AlreadyMember(add));
+            }
+            record.replicas[at] = add;
+            Ok(())
+        })?;
+        assert!(
+            self.replicas.len() == size,
+            "a heal keeps the size of the set"
+        );
+        assert!(
+            self.replicas.contains(&add) && !self.replicas.contains(&remove),
+            "a heal swaps one member"
+        );
+        Ok(())
     }
 
     /// The offloader marks the segment offloaded (after v1: nothing calls it

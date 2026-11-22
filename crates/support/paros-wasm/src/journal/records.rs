@@ -56,6 +56,15 @@ pub fn record_text(refusal: &RecordRefusal) -> String {
             format!("FewHolders: {holders} replica holds the segment, the retire needs {needed}")
         }
         RecordRefusal::Damage => "Damage: a found damage is not repaired".into(),
+        RecordRefusal::NotMember(node) => {
+            format!("NotMember: node {} is not in the replica set", node.0)
+        }
+        RecordRefusal::AlreadyMember(node) => {
+            format!(
+                "AlreadyMember: node {} is in the replica set already",
+                node.0
+            )
+        }
         RecordRefusal::FloorBelowEnd { first_seq, last } => format!(
             "FloorBelowEnd: first_seq {} is below the segment's next_seq {}",
             first_seq.0, last.0

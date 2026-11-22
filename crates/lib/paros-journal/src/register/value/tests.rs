@@ -256,6 +256,146 @@ fn a_sealed_segment_retires_is_offloaded_and_trimmed() {
     );
 }
 
+/// Term 1, segment 1 retired with the replicas 10, 11, 12, segment 2 in
+/// force.
+fn retired_one() -> RegisterValue {
+    let one = SegmentId(1);
+    [
+        Change::Seal {
+            segment: one,
+            end: Slot(6),
+        },
+        Change::Boundary {
+            segment: one,
+            state: boundary(),
+        },
+        Change::Retire {
+            segment: one,
+            holders: 2,
+            unrepaired_damage: false,
+        },
+    ]
+    .iter()
+    .try_fold(two_segments(), |value, step| value.apply(step))
+    .expect("segment 1 retires")
+}
+
+fn heal(read: &RegisterValue, term: u64, remove: u64, add: u64) -> Change {
+    Change::Rereplicate {
+        segment: SegmentId(1),
+        read: read.segment(SegmentId(1)).expect("segment 1").clone(),
+        term,
+        remove: NodeId(remove),
+        add: NodeId(add),
+    }
+}
+
+fn replicas(value: &RegisterValue) -> Vec<NodeId> {
+    value
+        .segment(SegmentId(1))
+        .expect("segment 1")
+        .replicas()
+        .to_vec()
+}
+
+#[test]
+fn a_heal_swaps_a_member_of_the_record_it_read() {
+    let value = retired_one();
+    let healed = value.apply(&heal(&value, 1, 11, 20)).expect("a heal");
+    assert_eq!(replicas(&healed), [NodeId(10), NodeId(20), NodeId(12)]);
+    assert_eq!(healed.term(), value.term());
+    assert_eq!(
+        healed.apply(&heal(&value, 1, 11, 20)),
+        Ok(healed.clone()),
+        "a heal the register took is ok again"
+    );
+}
+
+#[test]
+fn a_heal_is_fenced_by_the_term() {
+    let value = retired_one();
+    let elected = elect(&value);
+    assert_eq!(
+        elected.apply(&heal(&value, 1, 11, 20)),
+        Err(ChangeRefusal::Term { held: 2, asked: 1 }),
+        "a deposed controller stops"
+    );
+    assert!(elected.apply(&heal(&elected, 2, 11, 20)).is_ok());
+}
+
+#[test]
+fn a_heal_on_an_old_read_is_refused() {
+    let value = retired_one();
+    let other = value.apply(&heal(&value, 1, 12, 21)).expect("a heal");
+    assert_eq!(
+        other.apply(&heal(&value, 1, 11, 20)),
+        Err(ChangeRefusal::Stale(SegmentId(1))),
+        "a heal of another plan since the read (control cas_blind)"
+    );
+    let trimmed = value
+        .apply(&Change::Trim {
+            segment: SegmentId(1),
+            first_seq: Seq(4),
+        })
+        .expect("trimmed");
+    assert_eq!(
+        trimmed.apply(&heal(&value, 1, 11, 20)),
+        Err(ChangeRefusal::Stale(SegmentId(1))),
+        "a heal never undoes a trim (control cas_term)"
+    );
+    assert_eq!(
+        trimmed.apply(&heal(&trimmed, 1, 11, 20)),
+        Err(ChangeRefusal::Record(
+            SegmentId(1),
+            RecordRefusal::State(SegmentState::Trimmed)
+        )),
+        "a trimmed record stays trimmed"
+    );
+}
+
+#[test]
+fn a_heal_names_a_retired_segment_and_a_member() {
+    let value = retired_one();
+    let mut wrong = heal(&value, 1, 11, 20);
+    if let Change::Rereplicate { segment, .. } = &mut wrong {
+        *segment = SegmentId(9);
+    }
+    assert_eq!(
+        value.apply(&wrong),
+        Err(ChangeRefusal::NoSegment(SegmentId(9)))
+    );
+    let mut other = heal(&value, 1, 11, 20);
+    if let Change::Rereplicate { segment, .. } = &mut other {
+        *segment = SegmentId(2);
+    }
+    assert_eq!(
+        value.apply(&other),
+        Err(ChangeRefusal::Stale(SegmentId(2))),
+        "the record read is of another segment"
+    );
+    assert_eq!(
+        value.apply(&heal(&value, 1, 30, 20)),
+        Err(ChangeRefusal::Record(
+            SegmentId(1),
+            RecordRefusal::NotMember(NodeId(30))
+        ))
+    );
+    let sealed = two_segments()
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(6),
+        })
+        .expect("sealed");
+    assert_eq!(
+        sealed.apply(&heal(&sealed, 1, 11, 20)),
+        Err(ChangeRefusal::Record(
+            SegmentId(1),
+            RecordRefusal::State(SegmentState::Sealed)
+        )),
+        "a sealed segment retires before a heal"
+    );
+}
+
 #[test]
 #[should_panic(expected = "a record is keyed by its id")]
 fn a_record_under_another_id_is_refused() {

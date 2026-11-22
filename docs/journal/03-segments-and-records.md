@@ -138,7 +138,14 @@ checked, each with a control that TLC breaks:
     (`cas_term`). A write with no check lets a deposed controller and an old read put back a
     replica that dropped its copy (`cas_blind`). With the version, the term check adds no safety
     (`version_only` passes), because the election writes the register; it stays, to tell a
-    deposed controller to stop (§J6.1).
+    deposed controller to stop (§J6.1). The model never asks a node twice for a copy. In the
+    code a later plan can pick the same node, and there the term check is needed: a deposed
+    controller's compare-and-set, on a record that did not change, could count a copy that the
+    new holder's copy wiped (`journal-sim`'s heal walk, mutant `NoTermCheck`; #1314).
+  - **A node runs one copy of a segment, the highest `CopyId` it was asked** (the term of the
+    plan, then its number in that term; #1314, found by the heal walk). A higher copy replaces
+    the one it runs, and a lower one, from a deposed controller, is refused (mutant `AnyCopy`).
+    **Open**: a model of a node that a later plan asks again (`re-replication/` with reuse).
   - **A "done" report belongs to one copy.** A new plan starts a new copy. A report kept from an
     aborted copy (`report_sticky`) counts a replica that dropped its copy since.
   - **A replica that does not hold a slot refuses the read**, and the reader reads the record and
@@ -154,6 +161,20 @@ checked, each with a control that TLC breaks:
   The heal waits for one member that holds the segment and a matchmaker majority (§J5.1). The
   model has no register across a matchmaker handover (`segment-records/` checks it) and no replica
   that comes back with an empty disk (a new replica stands for it).
+
+  **As built** (#1314): the register's `Change::Rereplicate { segment, read, term, remove, add }`
+  writes the new set only if the record equals `read` and the term is the register's, and only
+  from `retired` (`SegmentRecord::replace_replica`); the same change again answers "ok". The
+  record equality stands for the version: the record holds the state, the set and the boundary.
+  The controller role plans one heal at a time, the first member that is down, asks the new
+  replica to copy (`Ask::Copy` with its `CopyId`), counts it on its own report of that copy, and
+  gives the compare-and-set until it is answered; a read that changed, a new replica that is down
+  or a refusal ends the heal (`Ask::Abandon`). The new replica (`SegmentReplica::join`) persists
+  its copy id (`ReplicaOp::Joining`, so a restart keeps the copy while the plan runs), pulls only
+  from members of the set that say they hold the whole segment (`Holding`, `Holds`), and reports
+  `Copied` when it is full. A replica in no set that runs no copy, or of a trimmed segment, drops
+  its copy and stops (`Stop::Dropped` in the `Host`). `decide` heals only a retired segment: a
+  sealed one retires first.
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in

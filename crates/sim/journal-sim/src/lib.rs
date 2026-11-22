@@ -12,6 +12,7 @@ pub mod campaign;
 pub mod control;
 pub mod controller;
 pub mod fold;
+pub mod heal;
 pub mod host;
 pub mod oracle;
 pub mod register;

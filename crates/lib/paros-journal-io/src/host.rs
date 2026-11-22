@@ -29,8 +29,8 @@ use std::collections::BTreeMap;
 use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, RegisterValue};
 use paros_journal::roles::{
-    AcceptorEffect, Campaign, JournalAcceptor, JournalLeader, LeaderEffect, PersistId, Proposed,
-    RESEND_BATCH, ReplicaEffect, SegmentReplica,
+    AcceptorEffect, Campaign, CopyId, JournalAcceptor, JournalLeader, LeaderEffect, PersistId,
+    Proposed, RESEND_BATCH, ReplicaEffect, SegmentReplica,
 };
 use paros_journal::{Command, Leader, NodeId, Reply, SegmentId};
 
@@ -168,6 +168,10 @@ pub enum Stop {
     /// The leader's segment is not in the register value that the `Host`
     /// holds, or is past in force.
     NoCampaign,
+    /// The replica dropped its copy: it is not in its segment's set and is
+    /// no plan's new replica, or the segment is trimmed (§J3.1). Its records
+    /// may be deleted.
+    Dropped,
 }
 
 /// One effect of a `Host` step.
@@ -215,6 +219,27 @@ pub enum Effect {
         call: CallId,
         /// The answer.
         outcome: CallOutcome,
+    },
+    /// The new replica at `address` holds a complete copy `copy` of
+    /// `segment` (#1314): tell the grid controller of its plan once batch
+    /// `after` of the replica is durable.
+    Copied {
+        /// The new replica.
+        address: Address,
+        /// The segment.
+        segment: SegmentId,
+        /// The copy.
+        copy: CopyId,
+        /// The batch of the replica it waits on.
+        after: Option<PersistId>,
+    },
+    /// A done write retired `segment`: its acceptors that no later grid
+    /// names may stop (§J3.4, `RetireKept`).
+    Retired {
+        /// The leader that saw the done write.
+        address: Address,
+        /// The retired segment.
+        segment: SegmentId,
     },
     /// Fire [`Input::TimerFired`] at `at`.
     SetTimer {
@@ -364,6 +389,15 @@ impl Host {
                 command,
             } => self.call(address, call, command, &mut effects),
             Input::TimerFired => self.tick(now, &mut effects),
+        }
+        let dropped: Vec<Address> = self
+            .roles
+            .iter()
+            .filter(|(_, role)| matches!(role, Role::Replica(replica) if replica.dropped()))
+            .map(|(address, _)| *address)
+            .collect();
+        for address in dropped {
+            self.stop(address, Stop::Dropped, &mut effects);
         }
         assert!(
             effects.iter().all(|effect| match effect {
@@ -586,6 +620,19 @@ fn replica_effects(address: Address, out: Vec<ReplicaEffect>, effects: &mut Vec<
                 change,
                 after,
             },
+            ReplicaEffect::Copied {
+                segment,
+                copy,
+                after,
+            } => Effect::Copied {
+                address,
+                segment,
+                copy,
+                after,
+            },
+            // The `Host` stops a replica that dropped its copy after the
+            // step ([`Stop::Dropped`]).
+            ReplicaEffect::Drop => continue,
         });
     }
 }
@@ -607,6 +654,7 @@ fn leader_effects(address: Address, out: Vec<LeaderEffect<CallId>>, effects: &mu
                 call: token,
                 outcome: CallOutcome::Reply(reply),
             },
+            LeaderEffect::Retired { segment } => Effect::Retired { address, segment },
         });
     }
 }

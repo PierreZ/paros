@@ -328,8 +328,9 @@ alert, in this order:
    window (`ReshapeStalled`).
 3. No action while the matchmakers are frozen or a signal is stale.
 4. The cheap action first: the repair of a found damage, with no token.
-5. The re-replication of the first sealed or retired segment that has a replica down, under a
-   token.
+5. The re-replication of the first retired segment that has a replica down, under a token. A
+   sealed segment retires first (the leader's write at `F + 1` holders), and the register heals
+   only a retired record (#1314).
 6. The heal reshape of the segment in force, when the state is AtRisk and a member is down, or a
    replica of its set is down: it waits for the retire of every older segment, the minimum
    interval and a token. The new grid keeps every member that is not down in its place and puts
@@ -350,6 +351,13 @@ takes back the outcome (done, refused, or no answer). It gives the call in fligh
 call is answered, and plans nothing else meanwhile; a refusal for the term, or a view of another
 term, makes it idle. The driver decides when to send a call again: after a timeout, it reports
 "no answer" and sends the same call, which the register answers "ok" if it already took it.
+The role also holds the heal in flight of a retired segment (#1314, §J3.1 "As built"): it asks the
+new replica to copy (`Ask::Copy`), counts the copy on its report (`copied`), gives the
+compare-and-set `Change::Rereplicate` until it is answered (`rereplicated`), and ends the heal on
+a read that changed, a new replica that is down or a refusal (`Ask::Abandon`). `journal-sim`'s
+heal walk (`src/heal.rs`, `tests/heal.rs`) runs it with two controllers, replica machines lost
+for good or back with their disk, lost requests and replies, and a trim during the heal; with
+the controller walks it reaches every `probe!` of the role.
 
 Test 3 runs in `journal-sim`'s controller walk (`src/controller.rs`, `tests/controller.rs`):
 controllers that race, crash between plan and call, and get deposed; lost requests and replies;

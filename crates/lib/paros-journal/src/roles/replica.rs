@@ -28,6 +28,33 @@
 //!   set applied it").
 //! - **`Resolve`** (#1320) is answered from the fold and the positions of
 //!   the segment, read only.
+//! - **`Holding`** is answered with whether the disk holds every slot of the
+//!   sealed segment: the leader counts the holders for the retire, and a new
+//!   replica of a heal finds its source.
+//!
+//! **The heal of a retired segment** (#1314, §J3.1, checked by
+//! `specs/tla/re-replication/`). The grid controller starts a new replica
+//! of a retired segment with [`SegmentReplica::join`], for one copy
+//! ([`CopyId`]). The new replica:
+//!
+//! - **copies only from a member of the set that holds every slot up to the
+//!   segment end** (control `copy_any`, `live_outside`): it asks the members
+//!   `Holding` and pulls only from a member that answered "full";
+//! - **knows the end from the record**, a done write of the seal, never from
+//!   its source: its copy is complete only when its fold reaches that end;
+//! - **reports its complete copy once its slots are durable**
+//!   ([`ReplicaEffect::Copied`]), and the report names its copy: a new plan
+//!   starts a new copy on an empty disk (control `report_sticky`);
+//! - **never answers past its copy** (control `answer_partial`): `Resolve`
+//!   answers `NotCovered` for a position its fold has not reached, so a
+//!   partial copy never answers as the tail of an open segment.
+//!
+//! **A replica that is not in the set and is no plan's new replica drops its
+//! copy** ([`ReplicaEffect::Drop`]): a removed member, also one that comes
+//! back after a restart, and a new replica whose plan ended. To join again
+//! it copies again. A trimmed record makes every replica drop its copy.
+//! The replica acts on register values in the register's order: each value
+//! that [`SegmentReplica::observe`] takes is at or after the last one.
 
 use std::collections::BTreeMap;
 
@@ -40,10 +67,20 @@ use crate::command::{Command, Leader, Record, Write};
 use crate::fold::{Answer, BoundaryState, JournalState};
 use crate::register::{Change, RegisterValue};
 use crate::resolve::{ResolveAnswer, resolve};
-use crate::segment::SegmentId;
+use crate::segment::{SegmentId, SegmentState};
 
 /// The most chosen slots one `Pull` answer carries.
 pub const PULL_PAGE: usize = 64;
+
+/// The copy of one heal (#1314): the controller term of the plan and its
+/// number in that term. A "done" report belongs to one copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CopyId {
+    /// The controller term of the plan.
+    pub term: u64,
+    /// The plan's number in its term.
+    pub number: u64,
+}
 
 /// One durable write of a replica.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +100,11 @@ pub enum ReplicaOp {
         /// The command.
         command: Command,
     },
+    /// The copy of a heal that the replica runs as a new replica, or `None`
+    /// once the plan ended or the replica is a member (#1314). It is on the
+    /// disk, so a new replica that restarts during its plan keeps its copy:
+    /// the plan may still write it into the set.
+    Joining(Option<CopyId>),
 }
 
 /// What one step of the replica asks of its driver.
@@ -96,6 +138,20 @@ pub enum ReplicaEffect {
         /// The batch the change waits on.
         after: Option<PersistId>,
     },
+    /// Tell the grid controller that the copy `copy` of `segment` is
+    /// complete, once the batch `after` is durable (#1314).
+    Copied {
+        /// The segment.
+        segment: SegmentId,
+        /// The copy.
+        copy: CopyId,
+        /// The batch the report waits on: the last slot of the copy.
+        after: Option<PersistId>,
+    },
+    /// Drop the replica's copy of the segment and stop the replica: it is
+    /// not in the set and is no plan's new replica, or the segment is
+    /// trimmed. The replica takes no step after it.
+    Drop,
 }
 
 /// What the disk of a replica holds: the input of a restart.
@@ -105,6 +161,8 @@ pub struct ReplicaDisk {
     pub base: Option<(BoundaryState, Slot)>,
     /// The chosen slots it holds.
     pub chosen: BTreeMap<Slot, Command>,
+    /// The copy of a heal that the replica runs as a new replica.
+    pub joining: Option<CopyId>,
     /// The highest batch the disk holds.
     pub durable: Option<PersistId>,
 }
@@ -134,6 +192,7 @@ impl ReplicaDisk {
                         "a chosen slot keeps its command"
                     );
                 }
+                ReplicaOp::Joining(copy) => self.joining = *copy,
             }
         }
         self.durable = Some(id);
@@ -166,6 +225,13 @@ pub struct SegmentReplica {
     end: Option<Slot>,
     /// Whether a done value showed the segment's boundary state written.
     boundary_written: bool,
+    /// The copy of a heal that this new replica runs, until its plan ends.
+    joining: Option<CopyId>,
+    /// The members that answered that they hold the whole segment: the
+    /// sources of a new replica.
+    sources: std::collections::BTreeSet<NodeId>,
+    /// Whether the replica dropped its copy.
+    dropped: bool,
     flight: Flight,
 }
 
@@ -173,11 +239,14 @@ impl SegmentReplica {
     /// The replica `id` of `segment`, whose replica set is `set`, that
     /// starts from what its disk holds. `initial` is the leader value of the
     /// fresh journal (`Unset`, or `Multi` for a journal that starts
-    /// multi-writer, §J2.4.1): the first segment folds from it.
+    /// multi-writer, §J2.4.1): the first segment folds from it. A replica
+    /// that is not in `set` (a removed member, or a new replica of a heal
+    /// that stopped: its plan ends with it) drops its copy at the first
+    /// register value it observes.
     ///
     /// # Panics
     ///
-    /// When `id` is not in `set`, or `initial` is a uuid.
+    /// When `initial` is a uuid.
     #[must_use]
     pub fn recover(
         id: NodeId,
@@ -186,7 +255,6 @@ impl SegmentReplica {
         initial: Leader,
         disk: ReplicaDisk,
     ) -> Self {
-        assert!(set.contains(&id), "a replica is in its own set");
         assert!(
             matches!(initial, Leader::Unset | Leader::Multi),
             "a fresh journal is unset or multi-writer"
@@ -200,6 +268,9 @@ impl SegmentReplica {
             folded: None,
             end: None,
             boundary_written: false,
+            joining: disk.joining,
+            sources: std::collections::BTreeSet::new(),
+            dropped: false,
             flight: Flight::after(disk.durable),
         };
         if let Some((boundary, start)) = disk.base {
@@ -210,6 +281,82 @@ impl SegmentReplica {
         }
         replica.assert_invariants();
         replica
+    }
+
+    /// A new replica `id` of the retired `segment`, for the copy `copy` of a
+    /// heal (#1314), and the batch that records its copy: an empty disk,
+    /// and `set`, the replica set of the record that the controller read, as
+    /// the members to copy from. The driver deletes the records of an
+    /// earlier copy on this node first: a new plan starts a new copy. The
+    /// driver starts a copy only above the copy the node runs: a lower one
+    /// comes from a deposed controller and is refused, so the copy that a
+    /// later term counts stays on the disk.
+    ///
+    /// # Panics
+    ///
+    /// When `id` is in `set`, or `initial` is a uuid.
+    #[must_use]
+    pub fn join(
+        id: NodeId,
+        segment: SegmentId,
+        set: Vec<NodeId>,
+        initial: Leader,
+        copy: CopyId,
+    ) -> (Self, Vec<ReplicaEffect>) {
+        assert!(!set.contains(&id), "a new replica is not a member yet");
+        let mut replica = Self::recover(id, segment, set, initial, ReplicaDisk::default());
+        let effects = replica.set_joining(Some(copy));
+        assert!(replica.folded.is_none(), "a copy starts on an empty disk");
+        replica.assert_invariants();
+        (replica, effects)
+    }
+
+    /// The copy of a heal that this new replica runs.
+    #[must_use]
+    pub fn joining(&self) -> Option<CopyId> {
+        self.joining
+    }
+
+    /// Whether the replica dropped its copy.
+    #[must_use]
+    pub fn dropped(&self) -> bool {
+        self.dropped
+    }
+
+    /// The replica set the replica last saw: its peers.
+    #[must_use]
+    pub fn set(&self) -> &[NodeId] {
+        &self.set
+    }
+
+    /// The plan of the copy `copy` ended with no new set: the controller
+    /// lost its term, its read became old, or the record was trimmed. The
+    /// replica is no plan's new replica any more; the next register value
+    /// keeps it as a member or drops its copy.
+    ///
+    /// # Panics
+    ///
+    /// When an assertion on its own postconditions fails: a programmer
+    /// error, never an operating condition.
+    pub fn abandon(&mut self, copy: CopyId) -> Vec<ReplicaEffect> {
+        let effects = if self.joining == Some(copy) && !self.dropped {
+            self.set_joining(None)
+        } else {
+            Vec::new()
+        };
+        assert!(self.joining != Some(copy), "an abandoned copy is over");
+        self.assert_invariants();
+        effects
+    }
+
+    /// Record the copy that the replica runs, in one batch.
+    fn set_joining(&mut self, copy: Option<CopyId>) -> Vec<ReplicaEffect> {
+        self.joining = copy;
+        let id = self.flight.batch();
+        vec![ReplicaEffect::Persist {
+            id,
+            ops: vec![ReplicaOp::Joining(copy)],
+        }]
     }
 
     /// The replica's node.
@@ -275,6 +422,9 @@ impl SegmentReplica {
     /// at that slot: two commands chosen at one slot break Paxos (a
     /// detected safety violation).
     pub fn step(&mut self, from: NodeId, message: Message) -> Vec<ReplicaEffect> {
+        if self.dropped {
+            return Vec::new();
+        }
         let effects = match message {
             Message::Commit {
                 segment,
@@ -282,6 +432,17 @@ impl SegmentReplica {
                 command,
             } if segment == self.segment => self.commit(from, slot, command),
             Message::Pull { segment, from: at } if segment == self.segment => self.pull(from, at),
+            Message::Holding { segment } if segment == self.segment => {
+                vec![ReplicaEffect::Send {
+                    to: from,
+                    message: Message::Holds {
+                        segment,
+                        full: self.full(),
+                    },
+                    after: self.flight.last(),
+                }]
+            }
+            Message::Holds { segment, full } if segment == self.segment => self.holds(from, full),
             _ => Vec::new(),
         };
         self.assert_invariants();
@@ -297,8 +458,21 @@ impl SegmentReplica {
     /// When the value moves a fact the replica already holds: a done end or
     /// a done base never changes (`EndOnce`, `RecordTrue`).
     pub fn observe(&mut self, value: &RegisterValue) -> Vec<ReplicaEffect> {
+        if self.dropped {
+            return Vec::new();
+        }
         let mut effects = Vec::new();
         if let Some(record) = value.segment(self.segment) {
+            if record.state() == SegmentState::Trimmed
+                || (self.joining.is_none() && !record.replicas().contains(&self.id))
+            {
+                return self.drop_copy();
+            }
+            if record.replicas().contains(&self.id) && self.joining.is_some() {
+                // The heal that added this replica is done: it is a member.
+                effects.extend(self.set_joining(None));
+            }
+            self.set = record.replicas().to_vec();
             if let Some(end) = record.end() {
                 assert!(
                     self.end.is_none_or(|known| known == end),
@@ -315,19 +489,37 @@ impl SegmentReplica {
             }
         }
         effects.extend(self.boundary());
+        effects.extend(self.copied());
         self.assert_invariants();
         effects
     }
 
     /// The periodic step: ask the peers for the slots the replica misses,
-    /// and ask again for the write of the boundary state.
+    /// and ask again for the write of the boundary state. A new replica asks
+    /// the members whether they hold the whole segment, pulls only from
+    /// those that do, and reports its complete copy again.
     #[must_use]
     pub fn tick(&self) -> Vec<ReplicaEffect> {
+        if self.dropped {
+            return Vec::new();
+        }
         let mut effects = Vec::new();
+        let peers = self.set.iter().filter(|peer| **peer != self.id);
+        if self.joining.is_some() && !self.full() {
+            for peer in peers.clone() {
+                effects.push(ReplicaEffect::Send {
+                    to: *peer,
+                    message: Message::Holding {
+                        segment: self.segment,
+                    },
+                    after: None,
+                });
+            }
+        }
         if let Some(front) = self.front()
             && !self.full()
         {
-            for peer in self.set.iter().filter(|peer| **peer != self.id) {
+            for peer in peers.filter(|peer| self.joining.is_none() || self.sources.contains(peer)) {
                 effects.push(ReplicaEffect::Send {
                     to: *peer,
                     message: Message::Pull {
@@ -339,6 +531,7 @@ impl SegmentReplica {
             }
         }
         effects.extend(self.boundary());
+        effects.extend(self.copied());
         effects
     }
 
@@ -440,7 +633,52 @@ impl SegmentReplica {
             });
         }
         effects.extend(self.boundary());
+        effects.extend(self.copied());
         effects
+    }
+
+    /// A member's answer to the new replica's `Holding`: a member that holds
+    /// the whole segment is a source, and the copy pulls from it now.
+    fn holds(&mut self, from: NodeId, full: bool) -> Vec<ReplicaEffect> {
+        if self.joining.is_none() || !self.set.contains(&from) || from == self.id {
+            return Vec::new();
+        }
+        if !full {
+            self.sources.remove(&from);
+            return Vec::new();
+        }
+        self.sources.insert(from);
+        match self.front() {
+            Some(front) if !self.full() => vec![ReplicaEffect::Send {
+                to: from,
+                message: Message::Pull {
+                    segment: self.segment,
+                    from: front,
+                },
+                after: None,
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The report of a complete copy, while the replica is a new replica.
+    fn copied(&self) -> Vec<ReplicaEffect> {
+        match self.joining {
+            Some(copy) if self.full() => vec![ReplicaEffect::Copied {
+                segment: self.segment,
+                copy,
+                after: self.flight.last(),
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    fn drop_copy(&mut self) -> Vec<ReplicaEffect> {
+        self.dropped = true;
+        self.joining = None;
+        self.sources.clear();
+        assert!(self.dropped, "a dropped replica takes no step");
+        vec![ReplicaEffect::Drop]
     }
 
     fn pull(&self, from: NodeId, at: Slot) -> Vec<ReplicaEffect> {
@@ -507,6 +745,14 @@ impl SegmentReplica {
     /// When the front passed the end, or the fold is behind a slot it holds
     /// with no hole before it.
     pub fn assert_invariants(&self) {
+        assert!(
+            self.joining.is_none() || !self.dropped,
+            "a dropped replica is no plan's new replica"
+        );
+        assert!(
+            self.sources.iter().all(|source| *source != self.id),
+            "a new replica copies from another replica"
+        );
         if let Some(folded) = &self.folded {
             folded.state.assert_invariants();
             assert!(folded.front >= folded.start, "the front is in the segment");

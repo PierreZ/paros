@@ -951,7 +951,10 @@ impl ControllerModel {
                 self.send(j, c, opening, cx);
             }
             Ask::Call(other) => panic!("a holder asks only a reshape, not {other:?}"),
-            Ask::Act(action) => panic!("the walk has no repair or re-replication: {action:?}"),
+            Ask::Act(action) => panic!("the walk has no repair: {action:?}"),
+            ask @ (Ask::Copy { .. } | Ask::Abandon { .. }) => {
+                panic!("the walk retires no segment, so it heals none: {ask:?}")
+            }
         }
     }
 
