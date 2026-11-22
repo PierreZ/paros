@@ -47,3 +47,8 @@ seal_chosen              violation  ci
 # A ballot below the GC floor of a later leader never ends its matching
 # (the watermark check of Register; HeardNoFloorAbove).
 gc_floor                 pass       ci
+# The bypass carries what the leader proposed: it proposes each value that
+# its Phase 1 recovered first, and it runs Phase 1 when a rival registered
+# a ballot between its two ballots.
+bypass_recovered         pass       ci
+bypass_between           pass       ci

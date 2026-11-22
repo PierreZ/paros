@@ -276,3 +276,181 @@ fn a_match_reply_from_a_stranger_matchmaker_is_ignored() {
         MatchStep::Registered { remaining: 1 }
     );
 }
+
+// ---------------------------------------------------------------------------
+// The sender of a learn, of history and of a trim point: a pooled node, or a
+// proxy of the deployment for a `Commit`.
+// ---------------------------------------------------------------------------
+
+/// A plain follower of `{0, 1, 2}` with nothing learned.
+fn follower() -> ColocatedNode {
+    let storage = MemStorage::for_node(1, &[0, 1, 2]);
+    ColocatedNode::new(&storage, Limits::DEFAULT)
+}
+
+fn commit(from: Party, round: u64) -> Message {
+    Message::Commit {
+        from,
+        ballot: ballot(round, 0),
+        slot: Slot(0),
+        command: ucmd(1, 1, 1),
+    }
+}
+
+/// A `Commit` from outside the pool, or from a proxy rank past the cap,
+/// teaches nothing: a learn raises the durable promise to the wire ballot,
+/// and one misrouted `Commit` at the top ballot would end every later
+/// campaign. The same `Commit` from a pooled node, or a proxy, is learned.
+#[test]
+fn a_commit_from_a_stranger_is_ignored() {
+    let mut n = follower();
+    for stranger in [
+        Party::Node(NodeId(9)),
+        Party::Proxy(ProxyId(MAX_ROLE_COUNT as u64)),
+    ] {
+        n.step(commit(stranger, u64::MAX));
+        assert_eq!(n.acceptor.promised(), Ballot::zero(), "{stranger:?}");
+        assert!(n.replica.chosen().is_empty(), "{stranger:?}");
+    }
+    n.step(commit(Party::Proxy(ProxyId(0)), 3));
+    assert_eq!(n.acceptor.promised(), ballot(3, 0));
+    n.step(commit(Party::Node(NodeId(0)), 3));
+    assert_eq!(n.replica.chosen().len(), 1);
+}
+
+/// A `CatchUpResponse` from outside the pool teaches nothing; the same
+/// page from a pooled peer is learned.
+#[test]
+fn a_catch_up_page_from_a_stranger_is_ignored() {
+    let mut n = follower();
+    let entries: BTreeMap<Slot, (Ballot, crate::journal::Command)> =
+        [(Slot(0), (ballot(7, 0), ucmd(1, 1, 1)))]
+            .into_iter()
+            .collect();
+    n.step(Message::CatchUpResponse {
+        from: NodeId(9),
+        entries: entries.clone(),
+    });
+    assert_eq!(n.acceptor.promised(), Ballot::zero());
+    assert!(n.replica.chosen().is_empty());
+    n.step(Message::CatchUpResponse {
+        from: NodeId(2),
+        entries,
+    });
+    assert_eq!(n.acceptor.promised(), ballot(7, 0));
+    assert_eq!(n.replica.chosen().len(), 1);
+}
+
+/// A trim point from outside the pool moves no floor; the same point from
+/// a pooled peer does.
+#[test]
+fn a_trim_point_from_a_stranger_is_ignored() {
+    let mut n = follower();
+    let trimmed = |from| Message::TrimmedTo {
+        from,
+        point: Slot(4),
+        state: crate::journal::state::JournalState::default(),
+    };
+    n.step(trimmed(NodeId(9)));
+    assert_eq!(n.acceptor.first_slot(), Slot(0));
+    n.step(trimmed(NodeId(0)));
+    assert_eq!(n.acceptor.first_slot(), Slot(4));
+}
+
+/// A catch-up request from outside the pool is not answered; the same
+/// request from a pooled peer is.
+#[test]
+fn a_catch_up_request_from_a_stranger_is_not_answered() {
+    let mut n = follower();
+    n.step(commit(Party::Node(NodeId(0)), 1));
+    let _ = drain(&mut n);
+    n.step(Message::CatchUpRequest {
+        from: NodeId(9),
+        from_slot: Slot(0),
+    });
+    assert!(drain(&mut n).is_empty(), "a stranger is served nothing");
+    n.step(Message::CatchUpRequest {
+        from: NodeId(2),
+        from_slot: Slot(0),
+    });
+    assert!(
+        drain(&mut n)
+            .iter()
+            .any(|(to, m)| *to == NodeId(2) && matches!(m, Message::CatchUpResponse { .. })),
+        "a pooled peer is served"
+    );
+}
+
+/// A message in the node's own name is a transport echo, and `step` drops
+/// it for every variant: a leader's own beat does not depose it, and its
+/// own `Promise` does not reach the campaign (which asserts it never pages
+/// itself).
+#[test]
+fn a_message_in_the_nodes_own_name_is_dropped() {
+    let mut nodes = super::cluster::<3>();
+    super::make_leader(&mut nodes, 0);
+    let ballot = nodes[0].ballot();
+    let echoes = [
+        Message::Heartbeat {
+            from: NodeId(0),
+            ballot: crate::types::Ballot {
+                round: ballot.round + 1,
+                node: NodeId(0),
+            },
+            commit: None,
+            config: None,
+            fence: None,
+            gc_floor: None,
+        },
+        Message::Promise {
+            from: NodeId(0),
+            ballot,
+            from_slot: Slot(0),
+            accepted: BTreeMap::new(),
+            faulty: BTreeMap::new(),
+            next_from_slot: Some(Slot(1)),
+            prepared: None,
+        },
+        Message::TrimmedTo {
+            from: NodeId(0),
+            point: Slot(9),
+            state: crate::journal::state::JournalState::default(),
+        },
+    ];
+    for echo in echoes {
+        let hard = nodes[0].hard_state();
+        nodes[0].step(echo);
+        assert!(nodes[0].is_leader(), "an echo deposes nobody");
+        assert_eq!(nodes[0].ballot(), ballot);
+        assert_eq!(nodes[0].hard_state(), hard, "an echo moves nothing durable");
+        assert!(drain(&mut nodes[0]).is_empty(), "an echo is not answered");
+    }
+    assert_eq!(nodes[0].acceptor.first_slot(), Slot(0));
+}
+
+/// `Message::sender` names the party each variant comes from: the reply
+/// address of a request, the `from` of a reply.
+#[test]
+fn the_sender_of_a_request_is_its_reply_address() {
+    let prepare = Message::Prepare {
+        reply_to: NodeId(2),
+        ballot: ballot(1, 2),
+        from_slot: Slot(0),
+        config: None,
+    };
+    assert_eq!(prepare.sender(), Party::Node(NodeId(2)));
+    assert_eq!(
+        accept(Party::Proxy(ProxyId(1))).sender(),
+        Party::Proxy(ProxyId(1))
+    );
+    assert_eq!(
+        commit(Party::Proxy(ProxyId(0)), 1).sender(),
+        Party::Proxy(ProxyId(0))
+    );
+    let ack = Message::HeartbeatAck {
+        from: NodeId(4),
+        ballot: ballot(1, 0),
+        chosen: None,
+    };
+    assert_eq!(ack.sender(), Party::Node(NodeId(4)));
+}

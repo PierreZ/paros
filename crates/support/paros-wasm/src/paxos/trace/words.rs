@@ -331,12 +331,31 @@ fn prepare(to: &str, ballot: &str, before: Option<&NodeView>, after: Option<&Nod
         out
     } else if after.promised.as_deref() == Some(ballot) {
         format!("{to} already promised ballot {ballot}. It answers again.")
+    } else if !after.alive {
+        format!("{to} is down. It does not answer.")
     } else {
-        format!(
-            "{to} refuses ballot {ballot}: it promised ballot {}, which is higher.",
-            after.promised.clone().unwrap_or_default()
-        )
+        refusal(to, "refuses ballot", ballot, after)
     }
+}
+
+/// The sentence of an acceptor that took no step for `ballot`: a refusal
+/// by its promise names that promise only when it is above `ballot`.
+fn refusal(to: &str, verb: &str, ballot: &str, after: &NodeView) -> String {
+    let promised = after.promised.clone().unwrap_or_default();
+    if ballot_order(&promised) > ballot_order(ballot) {
+        format!("{to} {verb} {ballot}: it promised ballot {promised}, which is higher.")
+    } else {
+        format!("{to} {verb} {ballot}.")
+    }
+}
+
+/// A ballot `round.node` as the core orders it: by round, then by node. A
+/// text that is not a ballot orders lowest.
+fn ballot_order(ballot: &str) -> (u64, u64) {
+    ballot
+        .split_once('.')
+        .and_then(|(round, node)| Some((round.parse().ok()?, node.parse().ok()?)))
+        .unwrap_or((0, 0))
 }
 
 fn accept(
@@ -371,10 +390,8 @@ fn accept(
             "{to} votes for {} in slot {} at ballot {ballot}.",
             record.value, record.slot
         ),
-        None => format!(
-            "{to} does not vote: it promised ballot {}, which is higher than {ballot}.",
-            after.promised.clone().unwrap_or_default()
-        ),
+        None if !after.alive => format!("{to} is down. It does not vote."),
+        None => refusal(to, "does not vote for ballot", ballot, after),
     }
 }
 

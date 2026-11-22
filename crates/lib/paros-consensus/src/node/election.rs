@@ -845,12 +845,14 @@ impl ColocatedNode {
                 break;
             };
             processed += 1;
-            let (command, is_gap) = match step {
-                RecoveryStep::Recovered(command) => (command, false),
-                RecoveryStep::Fill => (Command::Control(Control::Noop), true),
+            let planned = match step {
+                RecoveryStep::Recovered(command) => Some((command, false)),
+                RecoveryStep::Fill => Some((Command::Control(Control::Noop), true)),
                 // A slot the predecessor did not describe: an inherited
                 // recovery skips it (see `RecoveryPolicy::Inherited`).
                 RecoveryStep::Undescribed => continue,
+                // A blocked slot (Case 3: wait) is the open repair probe's.
+                RecoveryStep::Blocked => None,
             };
 
             // A previous page can decide and compact slots underneath the
@@ -863,11 +865,9 @@ impl ColocatedNode {
                 );
                 continue;
             }
-            // A blocked slot (Case 3: wait) is neither re-proposed nor
-            // no-op-filled here: the open repair probe owns its resolution.
-            if self.proposer.recovery_blocked(slot) {
+            let Some((command, is_gap)) = planned else {
                 continue;
-            }
+            };
             if is_gap {
                 // Only a Phase-1-backed recovery may invent a value: the
                 // promise quorum's silence is the licence. A handoff-installed

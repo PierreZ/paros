@@ -162,7 +162,11 @@ no checked model takes. The trace specs today are:
   floor and every registration a majority held reaches each later generation.
 - `batcher/BatcherTrace`: the batcher and the unbatcher, on the batcher walk. `Batcher.tla` has
   the walk's network (a batch lands whole, maybe twice, with no Paxos under it) and checks that
-  each answer holds its own records and that a batch keeps push order.
+  each answer holds its own records and that a batch keeps push order. `limits` (ci) adds
+  `BatchFits` (a batch holds a write; a lane batch fits the limits and holds no write that goes
+  alone) and `SendOrder` (the batches of a journal leave in the order the batcher got their
+  writes: a write that goes alone flushes its lane first), on an empty write and writes that
+  pass one limit each together.
 - `journal-state/FoldTrace`: the journal fold of `paros-journal`, on the fold walk of
   `journal-sim` (#1324 (paros-journal)). `Journal.tla` holds the fold as operators (`Res`,
   `Step`, `Bound`, `CoversOn`, `ResolveOn`), not as one action, because each replica of the
@@ -221,7 +225,10 @@ Each experiment has one folder for each design, with the same layout as a model,
 - `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
   ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
   the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
-  and a decree round on disk.
+  and a decree round on disk. `Asked` (a matchmaker answers only a `Stop` or a `Prepare` that the
+  node sent) and `FoldOnce` (the stop quorum counts one reply of each member, in phase "stop")
+  hold in `nonce`, `durable` and `retry_one` (retries in one incarnation, nonce, 224 thousand
+  states).
 
 ## The Paxos flavors and their models
 
@@ -264,6 +271,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | The election over a journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after #1323 (build the paros journal v1)) | `election/` | #1420 (paros-election) |
+| The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -1425,7 +1433,7 @@ model has:
   `Accept` of a slot goes to its column, and the column decides.
 
 Not in the model: the `Nack` (it only closes a round, and a round that stays open decides
-nothing more), the re-send beat and `expire_stale` (with no lost message they change nothing),
+nothing more), the re-send beat and the retention of `ProxyLeader::tick` (with no lost message they change nothing),
 and the GC of `H_b`. One command for each ballot and slot is assumed here (`prop[b][s]` is
 fixed); `leader-handoff/` checks it (`DurableFrontier`).
 
@@ -1533,7 +1541,7 @@ Each rule has a constant whose first value is the code, and a control:
 | `FrontierGuard` | a successor refuses a payload below its frontier | `replay`: `OneProposal` breaks |
 | `DurableFrontier` | a leader records its own rounds | `volatile_frontier`: `OneProposal` breaks |
 | `Pending` | `"keep"`: the successor proposes the pending slots again | `live_drop_pending`: `Ends` breaks |
-| `BeatGuard` | `TRUE`: a beat at the leader's own ballot keeps it leader (rework 2.7; the code of today has `FALSE`) | `live_late_beat`: `Ends` breaks |
+| `BeatGuard` | `TRUE`: a beat at the leader's own ballot keeps it leader (`on_heartbeat` has it since #902 (node handler gaps)) | `live_late_beat`: `Ends` breaks |
 | `PromiseGuard` | a successor refuses a payload below its promise | `promise_guard_off`: `OneProposal` breaks in 11 states (ballot 1 hands on to a node that promised ballot 2; the successor opens slot 0 with no record, restarts, installs the replayed payload and opens slot 0 again with another command) |
 | `RecordAll` | a leader records every round, in a column it is not in too | `grid_in_column_only`: `OneProposal` breaks in 10 states on the grid (the successor opens a slot of the other column with no record, restarts, installs the replay and opens it again) |
 | `Abdicate` | the leader steps down in the step that sends the payload | `keep_leading`: `OneHolder` breaks in 6 states |
@@ -1553,7 +1561,7 @@ Results (`leader-handoff/checks.txt`):
 | `reach` | `NoHandoffLearns`, a reachability control: a successor learns a slot | violation (8 states) |
 | `safety` | NB 1, NS 2, two commands, one restart | pass (875 thousand states) |
 | `safety_elect` | NB 2, NS 1, one restart, a later election | pass (2.5 million states) |
-| `late_beat_safe` | `safety` with the beat of today's code (`BeatGuard = FALSE`) | pass (950 thousand states) |
+| `late_beat_safe` | `safety` with the beat of the code before #902 (`BeatGuard = FALSE`) | pass (950 thousand states) |
 | `live`, `live_gone` | `Ends` with a lost `Accept`, and with a lost payload or a restarted successor | pass (115 thousand, 441 thousand states) |
 | `grid` (`long`) | the 2 x 2 full grid, NB 1, NS 2, no restart | pass (2.5 million states, 7 minutes) |
 | `owner_twice` (`long`) | `safety_elect` where one node owns every ballot: the predecessor campaigns again after it hands on | pass (2.7 million states, 6 minutes) |
@@ -1630,7 +1638,10 @@ not retire; the same name as in `retire-fence/`). `Electable` reads the history 
 The watermark refusal of a matchmaker (`b` below its watermark, `BelowWatermark`) has no
 control: removing it changes no state of `gc_two`. The registration check implies it here: the
 highest ballot that closed matchmaking keeps its registration at a quorum, and the check refuses
-every lower ballot there.
+every lower ballot there. `RegAboveWm` (a matchmaker holds no registration below its watermark)
+needs the refusal in `matchmaker`. `matchmaker` and `gc_two` also check `HistFixed` (the history
+of a ballot does not change once its matchmaking closed) and `RetiredFrozen` (a retired acceptor
+neither promises nor votes).
 
 The pool has five acceptors and two configurations, `A = {a1, a2, a3}` and `B = {a3, a4, a5}`.
 A move from `A` to `B` replaces `a1` and `a2`, and a majority of the union, `{a3, a4, a5}`, holds
@@ -2483,6 +2494,8 @@ answers, so that a registration that an ack waited for is seen.
 |---|---|---|
 | `reach_degraded_ack` | ci | violation of `NoDegradedAck`: a bypass ballot acks a slot while a column of the old grid is below quorum |
 | `live_phase1_small`, `retire_phase1_small`, `live_phase1`, `retire_phase1` | ci, long | violation: with the decision hold of #579, the bypass ballot's writes are chosen in the new grid, but it never acks, and the old grid never retires (12 thousand states on `LShrink`) |
+| `bypass_recovered` | ci | pass of `Agreement`: ballot 2 recovers by Phase 1 what ballot 1 wrote, and its leader moves to ballot 3 in the new grid. It proposes each recovered value before the bypass; without that, ballot 3 finds the slot free and chooses another value |
+| `bypass_between` | ci | pass of `Agreement`: a rival registers ballot 2 between the leader's ballots 1 and 3, so the bypass check sends the leader to Phase 1 |
 | `live_record_small`, `live_record`, `live_record_plus` | ci | pass: with the record check and no hold, the bypass ballot acks and the old grid retires; `_plus` adds a crash in the healthy column (`F` down there) |
 | `live_block_propose_small`, `live_block_propose` | ci, long | pass: with the hold `block` before Phase 2, the same (23 thousand states, 17 minutes for the 3 × 2 grid) |
 | `safe_record` | ci | pass: `ReadSafe` on `LSwap` with the column below quorum (51 thousand states) |
@@ -3163,11 +3176,12 @@ chosen value.
 | Check | CI | Result |
 |---|---|---|
 | `grid4` | ci | pass: a grid of two columns of two (acks 1), two ballots, two commands, one damaged record, the repair of a chosen value (77 thousand states) |
-| `grid4_restart` | ci | pass: the same with one restart (263 thousand states) |
+| `grid4_restart` | ci | pass: the same with one restart, and `DeadSilent` (a ballot whose owner booted again proposes nothing) (263 thousand states) |
 | `majority` | ci | pass: a majority of three, three ballots, so that a faulty report can sit above a readable one (2.8 million states, 7 min) |
 | `two_one` | ci | pass: two configurations, `c1` (a1, a2, a3; ballot 1) and `c2` (a3, a4; ballots 2 and 3), one command |
 | `two` | long | pass: the same with two commands (3.0 million states, 8 min) |
 | `drop_first_up` | long | pass: a repair in two writes (delete, then write) with no restart |
+| `drop_first_two`, `drop_first_lead` | ci | pass: the same with two ballots; in `drop_first_lead` the repairing acceptor owns the next ballot. The acceptor that deleted its record promises and campaigns only once it wrote the new one: without that, its empty promise fills a chosen slot. `drop_first_two` also checks `InBounds` (the faults and restarts stay in the bounds of the check) and `OwnRecords` (a won campaign's allocator is past every record of the owner's own promise) |
 | `repair_none` | long | pass: no repair, only a later `Accept` heals: the repair adds a copy, it never decides |
 | `live` | long | pass: `Ends`, the last ballot settles and every faulty record of a learned slot is repaired |
 | `grid` | long, 60 min | pass (bounded): the default grid of the journal, two columns of three, acks 2; no violation in 60 min (10.9 million distinct states, depth 19), a bounded run, not a proof |
@@ -3196,10 +3210,15 @@ left it reports data loss. The survive promise is `F` failed machine copies at o
 copy is failed until its repair, a lost machine for ever. The object store is outside the
 promise (`ObjFaults`). `Survive`: with no damaged object, every slot keeps a good copy.
 `TrueLoss`: a loss report is true. `Repairable`: a found damage always has a source.
+`FoundBad`: a found damage is still there until a repair, a drop, a loss or the retire.
+`ObjAfterRetire`: no object exists while S1 is sealed. `LostForEver`: a lost machine stays lost.
+`SegForward`: the segment record moves forward only. `NoResurrection`: a slot with no good copy
+never gets one back (no unsafe recover in v1).
 
 | Check | CI | Result |
 |---|---|---|
 | `safety`, `safety_k2` | ci | pass: three acceptors, three replicas, `F = 1`, one or two slots; retire at `F + 1`, offload, drop |
+| `loss_all` | ci | pass: every machine copy may fail (`F = 6`): `TrueLoss` and `NoResurrection` |
 | `live` | ci | pass: `Kept` (each slot ends with a good copy) and `Heals` (every found damage ends repaired) |
 | `retire_any` | ci | pass: a replica whose damage a scrub found and no repair fixed counts for the retire. The damaged copy is the one failed copy of the promise, so the other counted replica stays good and the repair reads it, never the retired grid |
 | `object`, `live_object` | ci | pass: one damaged object is replaced from a replica, or reported once no replica holds the segment; a report is always true |
@@ -3264,7 +3283,7 @@ says `Duplicate` or position taken); `OneFold` (each replica's fold is the fold 
 its front); `RecordTrue` (a done boundary state is the journal state at the end); `NoMoveBack`;
 `OneUnretired`; `ResolveTrue` (the answer to a `Resolve` is the answer of the whole log at the
 slot of the write, or `Truncated` once the floor is above the position); `Readable` (every record at or above the floor has a live copy: a disk quorum of
-a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `TrimStays`, `ResolveReadOnly` (a `Resolve` changes nothing but its answer).
+a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `BoundOnce` (a boundary state written at a majority never changes), `EndAfterStart` (an end is written only once the start of its segment is known), `SealerStart` (a leader that sealed writes from its own end), `BaseOnce` (a replica takes one base), `TrimStays`, `ResolveReadOnly` (a `Resolve` changes nothing but its answer).
 Liveness: `Ends` (the chosen log has no hole and every chosen slot is answered).
 
 | Check | CI | Result |
@@ -3526,8 +3545,8 @@ That costs one term: in a first liveness check with a tight uuid budget, it used
 
 What is not in the model: Paxos inside the journal (one atomic object), the lease as a clock (a
 challenge waits until there is no live holder, or comes at any time with `Eager`), more than one
-receiver, the recovery pass of a coordinator after it wins (#1422 (the takeover by a new
-controller)), and the `expected_seq` of the writes of a holder (`multi-writer/`).
+receiver, the recovery pass of a coordinator after it wins (`takeover/`), and the `expected_seq`
+of the writes of a holder (`multi-writer/`).
 
 ### `journal-ids/`: one id names at most one journal, forever, for #1419
 
@@ -3586,3 +3605,98 @@ of a tenant (the same tombstone rule in the fold of the universe), the move of a
 cells (its id does not change), a control journal rebuilt by recovery (§3.10, deferred; it forgets
 its tombstones, the case for a birth nonce in `Assign`), and a peer that forges ids (out of scope).
 
+### `takeover/`: the takeover by a new coordinator, for #1422 (the takeover by a new controller)
+
+This model checks what a coordinator knows and does when it wins a term after another
+coordinator (`docs/architecture/04-roles.md` §4.4, "The takeover by a new coordinator"). The term
+is the election of `election/`, taken here as one atomic step. The pattern is FoundationDB's
+`moveKeysLock`: a new holder fences the old one out of every machine, then builds its view again.
+
+The steps:
+
+- **Book.** A coordinator books a role for a request on a machine that its view shows. The booking
+  is a record of its control journal, written under its term, and names the machine by its
+  durable id. The journal refuses the write of a deposed coordinator, which then stops.
+- **Order.** A coordinator orders the machine of each booked request with `Assign(request, term)`
+  until an ack or a registration shows the role. A deposed coordinator does this too, with its old
+  term.
+- **Free.** A coordinator frees a booked request that it believes no machine hosts: the
+  registration in its view does not name the role, no ack of its term names it, and it sent no
+  order for it in its term. This is the step that trusts the view. It stands for every decision
+  that a coordinator takes from its view (a free, a move, a heal).
+- **Register.** A machine learns each new term from the journal and registers with its holder: its
+  incarnation and the roles that it hosts. A machine sends its registration again until the holder
+  acks it, so the model never loses a registration.
+- **Fence.** A machine refuses an order below the highest term on its disk, with a nack.
+- **Gone.** A message to an activation that is gone (an old term of a coordinator, an old
+  incarnation of a machine) does not reach the new activation. An order to a gone incarnation
+  comes back to its coordinator as `gone`. The coordinator then marks the machine as unknown and
+  asks the fixed directory of the machine ("which reference serves this id now", §4.4) for its
+  current registration. The reference of a machine changes at each incarnation because a dynamic
+  reference of moonpool RPC names one incarnation. The model takes this as given, not as a rule.
+
+The faults: a coordinator is deposed and keeps sending orders of its old term. A coordinator
+crashes, loses its memory and acts again only after it wins a new term. A message is late,
+reordered, sent two times or lost. A machine restarts as a new incarnation, and its disk stays.
+
+The properties:
+
+- `EffectBooked`: a role is hosted only on the machine that its booking names. So no role is
+  hosted that the journal freed: a role that a coordinator freed from a wrong view is a ghost that
+  no booking names.
+- `OnceEach`: no role is hosted two times for one request.
+- `NoLateEffect`: an order of an old term never takes effect after the machine wrote a newer term.
+- `Complete`: for each registration of the current incarnation in the holder's view, every role
+  that the machine hosts is in the registration, in an ack of the term or in an order of the term.
+  It is the invariant that makes `Free` safe.
+- `Settles`: once the faults stop, every request that is not freed is booked and hosted, and the
+  holder knows it.
+- `Quiet`: once the faults stop, the network is empty. So a deposed coordinator stops ordering.
+
+The rules are constants, and `TRUE` is the rule: `OneWrite` (the machine checks the term of an
+order and does its effect in one atomic write), `Idem` (`Assign` is idempotent by its request id),
+`ClearView` (a new term starts with an empty view), `CoordRef` (a coordinator has a new reference
+at each term), `IdInBooking` (a booking names the durable id; the reference of an order comes from
+the view of the term), `RegFence` (a registration with term `t` raises the machine's highest term
+to `t` in the same write), `NackStops` (a refused order stops its coordinator) and `GoneAsks` (a
+`gone` marks the machine as unknown and asks its directory for its current registration).
+
+| Check | Where | Result |
+|---|---|---|
+| `safety` | ci | pass: `EffectBooked`, `OnceEach`, `NoLateEffect` and `Complete`, two coordinators, one machine, one request, three terms, one crash, one restart and one loss |
+| `safety_dup` | ci | pass: the same, with one copy of a message and two terms |
+| `live` | ci | pass: `Settles` and `Quiet` under weak fairness, with the faults of `safety` and two terms |
+| `live_dup` | ci | pass: the same, with one copy, two terms, and no crash or loss |
+| `two_writes` | ci | violation of `EffectBooked`: the machine checks an order of the old term, registers with the new term, then does the effect. The registration does not name the role, and the new holder frees it |
+| `two_writes_late` | ci | violation of `NoLateEffect`: the same trace, judged at the effect |
+| `no_idem` | ci | violation of `OnceEach`: a copy of an order hosts the role two times |
+| `keep_view` | ci | violation of `EffectBooked`: a coordinator wins a term again and keeps its view of its first term. It frees the role from the kept view while an order of the term between is in flight, and the order then takes effect |
+| `fallback` | ci | violation of `EffectBooked`: a registration of an earlier term reaches the new term of the same coordinator through a fixed endpoint, does not name a role, and the coordinator frees it |
+| `ref_in_booking` | ci | violation of `Settles`: after a restart, the order goes to the reference in the booking, which is gone, again and again |
+| `reg_nofence` | ci | violation of `EffectBooked`: an order of the old term takes effect after the registration with the new term. The registration does not name the role, and the new holder frees it |
+| `nack_ignored` | ci | violation of `Quiet`: a deposed coordinator sends its refused order again for ever |
+| `gone_ignored` | ci | violation of `Quiet`: a coordinator whose view names a dead incarnation orders it for ever |
+| `safety_full` | long, 30 minutes | pass: the faults of `safety` and one copy, with three terms |
+| `live_full` | long, 30 minutes | pass: `live` with three terms |
+| `safety_two` | long, 30 minutes | pass: two machines and two requests |
+
+What the model found:
+
+- **A registration raises the fence in the same write** (`reg_nofence`). Without it, an order of
+  the old term that comes after the registration takes effect, and the new holder frees a role
+  that is hosted.
+- **A deposed coordinator must stop on a nack** (`nack_ignored`), **and a `gone` must ask the
+  directory of the machine** (`gone_ignored`). An order to a dead incarnation never meets the
+  fence of the machine, so the nack alone does not stop it.
+- **"The newest incarnation wins in a view" is not a rule.** A registration of an older
+  incarnation can replace a newer one with no harm, once a `gone` asks the directory: the order to
+  the dead incarnation comes back, and the answer of the directory names the live one. With that
+  rule off, `safety_dup` and `live` pass.
+
+What is not in the model: the election itself (`election/`), Paxos inside the control journal,
+the placement of a role on another machine (`placement-port/`), a machine that loses its disk (a
+new machine), a machine that reads the term of the journal late (it learns each term at once
+here), the ack of a registration (a registration is never lost), and the birth nonce of the key
+that `Assign` carries (#1419 (the tenancy wrapper and paros-names), `journal-ids/`). The model
+does not check a machine reference that survives a restart: the reference of moonpool RPC changes
+at each incarnation.

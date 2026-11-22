@@ -68,6 +68,7 @@ mod failure_domain;
 mod ids;
 mod matchmaker_set;
 mod quorum_system;
+mod shape_error;
 mod zone_rule;
 
 pub use acceptor_config::AcceptorConfig;
@@ -75,4 +76,5 @@ pub use failure_domain::{FailureDomain, MAX_FAILURE_DOMAIN_BYTES};
 pub use ids::{MAX_ROLE_COUNT, MatchmakerId, ProxyId, ReplicaId};
 pub use matchmaker_set::{MatchmakerGeneration, MatchmakerSet};
 pub use quorum_system::QuorumSystem;
+pub use shape_error::ShapeError;
 pub use zone_rule::ZoneRule;

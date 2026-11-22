@@ -355,6 +355,7 @@ pub const EDITS: &[Edit] = &[
         })?;
         Some((at, remove(events, at)))
     }),
+    repeat_edit!("a base taken twice", "base"),
     repeat_edit!("a boundary written twice", "boundary"),
     repeat_edit!("a retire repeated", "retire"),
     repeat_edit!("a reshape repeated", "reshape"),

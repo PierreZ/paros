@@ -30,11 +30,11 @@ TraceInit == Init /\ l = 1
 
 Step ==
   \/ /\ e.event = "write" /\ Has("tok") /\ Has("jr") /\ Has("n") /\ Has("bytes")
-     /\ Write(e.tok, e.jr, e.n, e.bytes)
+     /\ e.jr \in Journals /\ Write(e.tok, e.jr, e.n, e.bytes)
   \/ /\ e.event = "push" /\ Has("tok")
      /\ Push(e.tok)
   \/ /\ e.event = "flush" /\ Has("jr") /\ Has("ws")
-     /\ Flush(e.jr, e.ws)
+     /\ e.jr \in Journals /\ Flush(e.jr, e.ws)
   \/ /\ e.event = "crash"
      /\ Crash
   \/ /\ e.event = "land" /\ Has("id") /\ Has("seq")

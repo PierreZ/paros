@@ -214,7 +214,13 @@ fn a_stalled_delegation_is_taken_back_and_decided_colocated() {
     nodes[0].take_back_delegated(2);
     assert!(nodes[0].delegated_rounds().is_empty(), "taken back");
     assert!(nodes[0].proposer().rounds().contains_key(&Slot(0)));
-    let out = raw(&mut nodes[0]);
+    let ready = nodes[0].ready();
+    assert!(
+        ready.writes().is_empty(),
+        "the round's record is held already: a take-back writes it no second time"
+    );
+    let out = ready.messages().to_vec();
+    ready.advance();
     assert!(
         matches!(
             out.as_slice(),
@@ -288,7 +294,7 @@ fn a_fresh_leaderships_recovery_is_never_delegated() {
     let ballot = nodes[0].ballot();
     let _ = nodes[0].propose(entry(1, 1, 1));
     let delegation = raw(&mut nodes[0]);
-    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone());
+    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone(), Limits::DEFAULT);
     for (_, m) in delegation {
         proxy.step(m);
     }
@@ -340,7 +346,7 @@ fn a_relayed_nack_deposes_the_delegating_leader() {
     let ballot = nodes[0].ballot();
     let _ = nodes[0].propose(entry(1, 1, 1));
     let _ = raw(&mut nodes[0]);
-    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone());
+    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone(), Limits::DEFAULT);
     proxy.step(Message::Accept {
         reply_to: Party::Proxy(ProxyId(0)),
         leader: NodeId(0),

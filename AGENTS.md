@@ -49,7 +49,7 @@ flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain
 (`specs/tla/multi-paxos/`: Phase 1 recovery, the allocator frontier, the `Noop` gap fill,
 commit and catch-up, restarts; #1185 (rework 1.14)), the cooperative leader handoff
 (`specs/tla/leader-handoff/`: one hop, the frontier guard, the durable frontier, the pending
-rounds proposed again, and the beat guard that rework 2.7 adds; #1187 (rework 2.8)), grid quorums
+rounds proposed again, and the beat guard of `on_heartbeat` (#902 (node handler gaps)); #1187 (rework 2.8)), grid quorums
 (`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
@@ -135,7 +135,11 @@ request id, `release`, the limit of moves in flight, and the cell's own control 
 through the same port; #1421 (the placement port)), and, above the journal, the election over a
 journal (`specs/tla/election/`: the term won by `SetLeader(new, old)`, the term number from the
 fold, the stop at the first refused write, the hand on, the fence of an order by its term, the
-interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)).
+interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)), and the
+takeover by a new coordinator (`specs/tla/takeover/`: the view of a term from its own
+registrations, the registration that raises the fence, the order checked and done in one write, a
+reference per term, the stop of a deposed coordinator, the directory asked after a gone order;
+#1422 (the takeover by a new controller)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both
@@ -325,9 +329,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `.cargo/mutants-control.toml`), and one pass on the changed lines of
   `crates/lib/paros-journal-io/src` (`scripts/mutants.sh --journal-io`: its tests and the driver
   walk of `journal-sim`; `.cargo/mutants-journal-io.toml`). Each crate whose `src/` changed
-  runs in shards of its own, one job each (`--shard k/n`; `scripts/mutants-plan.sh` gives one
-  shard for each 250 changed lines outside the tests, measured on PR #1470 (re-replication of a
-  sealed segment's replica set), whose one job reached its 90 minutes). A
+  runs in shards of its own, one job each (`--shard k/n --sharding round-robin`;
+  `scripts/mutants-plan.sh` gives one shard for each 250 changed lines outside the tests, 125
+  for `paros-consensus` with at least two shards, from the measures in its comment). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
@@ -688,7 +692,8 @@ sideways, on the identifier of a higher crate in `src/`, and on a fault switch i
   decree ballot): a `Stopped` sent to an earlier incarnation can reach a later one, so the stop
   quorum's maximum decree promise alone does not keep two incarnations apart), and above that
   maximum promise, which only skips rounds the matchmakers refuse; any node that meets `Stopped { successor: None }` finishes
-  the handover. `MatchmakerSet::new` / `AcceptorConfig::new` are the only constructors.
+  the handover. `MatchmakerSet::new` / `AcceptorConfig::new` and their fallible `try_*` forms (for wire
+  and operator input) are the only constructors.
 
 Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,
 `node/gc.rs` (`may_retire`), `matchmaker.rs`, `matchmaker/reconfigurer.rs`,

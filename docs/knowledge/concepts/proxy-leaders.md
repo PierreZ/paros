@@ -73,14 +73,14 @@ The leader now handles two messages per command, not `3f + 4` ([SRSM §3.1]).
   relays the `Nack` to the leader, which steps down by the ordinary rule. A proxy never decides
   what a refusal means.
 - **A lost vote.** On each beat the proxy re-fans-out its open rounds
-  (`ProxyLeader::resend_pending`). Skipping a beat is safe.
+  (`ProxyLeader::tick`). Skipping a beat is safe.
 - **A proxy that crashed.** The leader re-delegates its open rounds on its own re-send
   (pipelining card). A duplicate delegation at an open round re-fans-out (P2b-idempotent).
 - **A proxy that never answers.** After the driver's budget of re-delegations without a
   `Commit`, the leader takes the round back and runs it colocated
   (`ColocatedNode::take_back_delegated`). Liveness is the leader's, never a proxy's.
 - **A round no acceptor answers** (a slot every acceptor compacted past). The proxy evicts it
-  after `DriverTunables::proxy_round_resends` re-fan-outs (`ProxyLeader::expire_stale`).
+  after `Limits::proxy_retention` re-fan-outs (`ProxyLeader::tick` evicts it).
   Eviction is not a decision: no `Commit`.
 - **A new leadership.** A delegation at a higher ballot closes every round of a lower one; a
   delegation below the proxy's ballot is ignored.
@@ -126,7 +126,7 @@ open, commits a value that no quorum chose (`belief_any`).
 
 | What | Where |
 |---|---|
-| The proxy's state machine | `paros-consensus/src/proxy_leader.rs`: `ProxyLeader`, `step`, `resend_pending`, `expire_stale`, `ready`, `delegator` |
+| The proxy's state machine | `paros-consensus/src/proxy_leader.rs`: `ProxyLeader`, `step`, `tick`, `ready`, `delegator` |
 | The leader's delegation | `paros-consensus/src/node.rs`: `Delegation`, `ColocatedNode::propose_in`; `paros-consensus/src/node/policy.rs`: `take_back_delegated` |
 | The proxy for a slot | `paros-consensus/src/membership/ids.rs`: `ProxyId`, `ProxyId::of` |
 | The model checker | `paros-consensus/src/models/proxy.rs` |
@@ -175,7 +175,7 @@ The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: 
 - **A round no `Commit` reaches.** A proxy is not a learner, so a round the leader took back and
   decided itself stayed open until the beat re-sent it (model checker, seeds 20 and 87).
 - **A round re-fanned-out for ever.** A slot every acceptor compacted past is never answered.
-  `expire_stale` bounds the retention.
+  `Limits::proxy_retention` bounds the retention.
 - **Mutation survivors.** `Round::column -> None`, `Rounds::close_below -> vec![]` and
   `Rounds::stalled -> vec![]` survived the mutation hunt until the stalled-proxy scenario (#341,
   commit `89c223c`).

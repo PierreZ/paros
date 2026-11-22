@@ -277,6 +277,7 @@ fn main() {
                         (0..NODES).map(NodeId).collect(),
                         GRID,
                     ),
+                    paros_consensus::Limits::DEFAULT,
                 ))
             })
             .collect(),
@@ -410,6 +411,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
     *cluster.proxy(ProxyId(1)) = Some(ProxyLeader::new(
         ProxyId(1),
         paros_consensus::membership::AcceptorConfig::new((0..NODES).map(NodeId).collect(), GRID),
+        paros_consensus::Limits::DEFAULT,
     ));
 }
 

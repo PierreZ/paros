@@ -394,7 +394,7 @@ fn a_campaign_configuration_is_no_read_basis() {
     let mut n = deployed_node(3, &[0, 1, 2, 3], &[0, 1, 2, 3], 1);
 
     // No won leadership heard this incarnation: no basis, no read.
-    n.quorum_read(1);
+    assert_eq!(n.quorum_read(1), crate::quorum_read::ReadOpen::NoBasis);
     assert!(n.quorum_reads().is_empty());
     assert_eq!(n.membership_counters().reads_without_basis, 1);
 
@@ -766,6 +766,79 @@ fn a_lagging_reader_that_promised_above_its_basis_serves_no_read() {
     assert_eq!(
         nodes[1].membership_counters().reads_without_basis,
         without + 1
+    );
+}
+
+/// A far watermark is filled one page at a time: the ack opens one page of
+/// `Noop` rounds, and each tick opens the next while the read waits on the
+/// watermark it counted.
+#[test]
+fn a_far_watermark_is_filled_one_page_a_tick() {
+    let limits = Limits {
+        recovery_page: 2,
+        ..Limits::DEFAULT
+    };
+    let mut nodes: Vec<ColocatedNode> = (0..3)
+        .map(|id| limited_node(id, &[0, 1, 2], limits))
+        .collect();
+    make_leader(&mut nodes, 0);
+    let _ = drain(&mut nodes[0]);
+    let frontier = nodes[0].proposer().next_slot();
+    nodes[0].quorum_read(9);
+    let _ = drain(&mut nodes[0]);
+    nodes[0].step(Message::PreReadAck {
+        from: NodeId(2),
+        ctx: 9,
+        watermark: Some(Slot(frontier.0 + 5)),
+        config_since: None,
+    });
+    assert_eq!(nodes[0].watermark_fills(), 2, "one page per call");
+    assert_eq!(nodes[0].proposer().next_slot(), Slot(frontier.0 + 2));
+    nodes[0].tick();
+    assert_eq!(
+        nodes[0].watermark_fills(),
+        4,
+        "the tick fills the next page"
+    );
+    nodes[0].tick();
+    assert_eq!(
+        nodes[0].watermark_fills(),
+        6,
+        "the last page stops past the watermark"
+    );
+    assert_eq!(nodes[0].proposer().next_slot(), Slot(frontier.0 + 6));
+    nodes[0].tick();
+    assert_eq!(nodes[0].watermark_fills(), 6, "nothing is left to fill");
+}
+
+/// A token still open is a result, never a panic: the core expires reads
+/// on its own clock, so a driver cannot know a token is free. The second
+/// ask changes nothing and sends nothing; a fresh token opens.
+#[test]
+fn a_token_in_use_is_a_result() {
+    let mut nodes = grid_with_three_chosen();
+    assert_eq!(
+        nodes[4].quorum_read(1),
+        crate::quorum_read::ReadOpen::Opened
+    );
+    let asks = drain(&mut nodes[4]);
+    assert_eq!(pre_read_targets(&asks), vec![NodeId(3), NodeId(5)]);
+    assert_eq!(
+        nodes[4].quorum_read_in(1, Some(0)),
+        crate::quorum_read::ReadOpen::TokenInUse
+    );
+    assert!(
+        drain(&mut nodes[4]).is_empty(),
+        "a token in use sends nothing"
+    );
+    assert_eq!(
+        nodes[4].quorum_reads().pending().len(),
+        1,
+        "the first read is kept"
+    );
+    assert_eq!(
+        nodes[4].quorum_read(3),
+        crate::quorum_read::ReadOpen::Opened
     );
 }
 

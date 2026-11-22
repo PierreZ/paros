@@ -520,6 +520,10 @@ impl ColocatedNode {
     pub fn step(&mut self, msg: Message) {
         let marks = self.durable_marks();
         let ticks = self.tick_count;
+        // A transport echo changes nothing: it is dropped whole.
+        if self.is_own_echo(&msg) {
+            return;
+        }
         match msg {
             Message::Prepare {
                 reply_to,
@@ -557,14 +561,14 @@ impl ColocatedNode {
                 from, ballot, slot, ..
             } => self.on_nack(from, ballot, slot),
             Message::Commit {
+                from,
                 ballot,
                 slot,
                 command,
-                ..
-            } => self.on_commit(ballot, slot, &command),
+            } => self.on_commit(from, ballot, slot, &command),
             Message::CatchUpRequest { from, from_slot } => self.on_catchup_request(from, from_slot),
-            Message::CatchUpResponse { entries, .. } => self.on_catchup_response(entries),
-            Message::TrimmedTo { point, state, .. } => self.on_trimmed_to(point, state),
+            Message::CatchUpResponse { from, entries } => self.on_catchup_response(from, entries),
+            Message::TrimmedTo { from, point, state } => self.on_trimmed_to(from, point, state),
             Message::Relinquish {
                 from,
                 to,
@@ -1096,12 +1100,12 @@ impl ColocatedNode {
                     for member in prior.iter().flat_map(|c| c.members().iter()) {
                         if !probe.answered().contains(member) {
                             assert!(
-                                query.to.contains(member),
+                                query.to.iter().any(|(to, _)| to == member),
                                 "a repair probe re-asks every unanswered prior member"
                             );
                         }
                     }
-                    for to in &query.to {
+                    for (to, _) in &query.to {
                         assert!(
                             !probe.answered().contains(to),
                             "a repair probe never re-asks a member that answered"
@@ -1119,7 +1123,9 @@ impl ColocatedNode {
                     "a repair probe queries at the leader's ballot"
                 );
                 let config = self.phase1_wire_config();
-                self.send_prepare(query.to, query.ballot, query.from_slot, config);
+                for (to, from_slot) in query.to {
+                    self.send_prepare([to], query.ballot, from_slot, config.clone());
+                }
             }
         }
         // The fold's hole covers every faulty slot under the chosen prefix
@@ -1229,6 +1235,8 @@ impl ColocatedNode {
         &self.pending_read_states
     }
 
+    /// The matchmaking requests of the batch. The one place their shape is
+    /// asserted: the plain path never speaks to a matchmaker.
     pub(crate) fn pending_match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
         if !self.pending_match_requests.is_empty() {
             assert!(

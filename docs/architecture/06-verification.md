@@ -223,9 +223,9 @@ a control that fails: a handoff leader that hands on again (two holders), a succ
 a replayed payload below its frontier, a leader that does not record its own rounds (a restart
 forgets the frontier and a replayed payload rewinds it), and a successor that drops the open
 rounds (a slot stays open for ever). The model also shows review finding 3 of paros-consensus:
-with `on_heartbeat` as it is today, a late beat of the predecessor deposes the successor. That
+with `on_heartbeat` as it was before #902 (node handler gaps), a late beat of the predecessor deposes the successor. That
 costs liveness only, never safety: the control `live_late_beat` fails and `late_beat_safe`
-passes. The fix of step 2.7 is the `BeatGuard` rule of the model, the guard that `on_accept`
+passes. The fix (#902) is the `BeatGuard` rule of the model, the guard that `on_accept`
 has: a leader keeps its role on a beat at the ballot that it holds. Since #1230 (rules no check
 tests), the model also has the leader that opens a round it cannot record (its promise passed
 its ballot), a learn that writes a record and raises the promise (`mark_chosen`), and a 2 x 2

@@ -407,6 +407,7 @@ fn recover(
                 noop()
             }
             RecoveryStep::Undescribed => unreachable!("a Phase-1-backed recovery never skips"),
+            RecoveryStep::Blocked => unreachable!("no faulty record blocks a slot in this lesson"),
         };
         steps.push((slot, step));
         let chosen = accept_round(cluster, leader, ballot, slot, &command, &everyone());

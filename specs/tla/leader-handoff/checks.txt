@@ -14,7 +14,8 @@ live_gone          pass       ci
 live_drop_pending  violation  ci
 live_late_beat     violation  ci
 safety_long        pass       long
-# The beat guard is not in the code yet (rework 2.7): the code of today.
+# The beat of the code before the beat guard (#902 (node handler gaps)):
+# safe, and only `live_late_beat` loses liveness without the guard.
 late_beat_safe     pass       ci
 # A leader that a higher promise passed opens a round it cannot record; the
 # promise guard of the successor refuses the replayed payload. The control

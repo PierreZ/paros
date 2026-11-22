@@ -88,6 +88,12 @@ pub struct Limits {
     /// journals one `Bootstrap` carries (#338, #439), in
     /// `1..=REGISTRY_PAGE`.
     pub registry_page: usize,
+    /// How many re-fan-outs a proxy leader gives an open round before
+    /// [`crate::ProxyLeader::tick`] evicts it (bounded retention), at least
+    /// one. An eviction is never a decision: the leader's re-delegation and
+    /// take-back recover a round that is still needed. `u64::MAX` keeps
+    /// every round until it closes.
+    pub proxy_retention: u64,
 }
 
 impl Limits {
@@ -99,6 +105,7 @@ impl Limits {
         apply_page: APPLY_BATCH,
         read_window: READ_TTL_TICKS,
         registry_page: REGISTRY_PAGE,
+        proxy_retention: u64::MAX,
     };
 
     /// Checks every page against its range.
@@ -148,6 +155,10 @@ impl Limits {
             self.registry_page <= REGISTRY_PAGE,
             "a registry page never exceeds its ceiling"
         );
+        assert!(
+            self.proxy_retention > 0,
+            "a proxy keeps a round for at least one re-fan-out"
+        );
     }
 
     /// The read window the core keeps: the driver's, raised to the floor.
@@ -178,6 +189,7 @@ const _: () = assert!(Limits::DEFAULT.resend_page > 0);
 const _: () = assert!(Limits::DEFAULT.apply_page > 0);
 const _: () = assert!(Limits::DEFAULT.registry_page > 0);
 const _: () = assert!(Limits::DEFAULT.read_window >= READ_TTL_TICKS);
+const _: () = assert!(Limits::DEFAULT.proxy_retention > 0);
 
 #[cfg(test)]
 mod tests;

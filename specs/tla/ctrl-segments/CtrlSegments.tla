@@ -121,10 +121,10 @@ GoodCopy(s) ==
 (* replicas drop.                                                          *)
 
 \* Replica r learns slot s from the grid, from a live peer or from the
-\* object.
+\* object. A lost replica holds "gone" at every slot, never "none", so the
+\* step needs no `Alive` guard.
 Learn(r, s) ==
   /\ rep[r][s] = "none"
-  /\ Alive(r)
   /\ GridGood(s) \/ ReplicaGood(s) \/ ObjectGood(s)
   /\ rep' = [rep EXCEPT ![r][s] = "good"]
   /\ UNCHANGED <<acc, obj, seg, found, lost, objFaults>>
@@ -152,18 +152,18 @@ Upload(r, s) ==
   /\ obj' = [obj EXCEPT ![s] = rep[r][s]]
   /\ UNCHANGED <<acc, rep, seg, found, lost, objFaults>>
 
-\* The compare-and-set "offloaded", once every put returned.
+\* The compare-and-set "offloaded", once every put returned. An object exists
+\* only once S1 retired (`ObjAfterRetire`), and a second mark changes
+\* nothing, so the step needs no guard on the record.
 Mark ==
-  /\ seg = "retired"
   /\ \A s \in Slots : obj[s] # "none"
   /\ seg' = "offloaded"
   /\ UNCHANGED <<acc, rep, obj, found, lost, objFaults>>
 
-\* Replica r drops its copy of S1.
+\* Replica r drops its copy of S1. A drop of an empty copy changes nothing.
 Drop(r) ==
   /\ IF DropWhen = "mark" THEN seg = "offloaded" ELSE seg # "sealed"
   /\ Alive(r)
-  /\ \E s \in Slots : rep[r][s] # "none"
   /\ rep' = [rep EXCEPT ![r] = [s \in Slots |-> "none"]]
   /\ found' = {p \in found : p[1] # r}
   /\ UNCHANGED <<acc, obj, seg, lost, objFaults>>
@@ -184,16 +184,16 @@ RotRep(r, s) ==
   /\ rep' = [rep EXCEPT ![r][s] = "bad"]
   /\ UNCHANGED <<acc, obj, seg, found, lost, objFaults>>
 
-\* A machine is lost for ever, inside the same budget.
+\* A machine is lost for ever, inside the same budget. A machine that is
+\* lost already holds "gone" at every slot and has no found damage, so a
+\* second loss changes nothing and the step needs no `Alive` guard.
 LoseAcc(a) ==
-  /\ Alive(a)
   /\ Cardinality(Failed \cup {a}) <= F
   /\ acc' = [acc EXCEPT ![a] = [s \in Slots |-> "gone"]]
   /\ found' = {p \in found : p[1] # a}
   /\ UNCHANGED <<rep, obj, seg, lost, objFaults>>
 
 LoseRep(r) ==
-  /\ Alive(r)
   /\ Cardinality(Failed \cup {r}) <= F
   /\ rep' = [rep EXCEPT ![r] = [s \in Slots |-> "gone"]]
   /\ found' = {p \in found : p[1] # r}
@@ -211,17 +211,17 @@ RotObj(s) ==
 CopyOf(h, s) == IF h \in Acceptors THEN acc[h][s] ELSE IF h \in Replicas THEN rep[h][s] ELSE obj[s]
 
 \* A scrub of the controller reads the copy of holder h at slot s and finds
-\* its damage.
+\* its damage (a second find adds nothing).
 Scrub(h, s) ==
   /\ CopyOf(h, s) = "bad"
-  /\ <<h, s>> \notin found
   /\ found' = found \cup {<<h, s>>}
   /\ UNCHANGED <<acc, rep, obj, seg, lost, objFaults>>
 
-\* The repair of a found damaged copy, from a good copy.
+\* The repair of a found damaged copy, from a good copy (`NoResurrection`).
+\* A found copy is bad (`FoundBad`), and the retire leaves no acceptor
+\* record, so a found acceptor copy is one of a sealed S1.
 RepairAcc(a, s) ==
   /\ <<a, s>> \in found
-  /\ seg = "sealed"
   /\ GridGood(s) \/ ReplicaGood(s)
   /\ acc' = [acc EXCEPT ![a][s] = "good"]
   /\ found' = found \ {<<a, s>>}
@@ -245,11 +245,11 @@ RepairObj(s) ==
   /\ found' = found \ {<<Obj, s>>}
   /\ UNCHANGED <<acc, rep, seg, lost, objFaults>>
 
-\* The controller reports data loss: a scrub found a damaged copy of slot s
-\* and no good copy is left.
+\* The controller reports data loss: no good copy of slot s is left. It
+\* reads its view, not only its scrubs: a slot whose copies are all on lost
+\* machines has no damaged copy to find (docs/journal/06-controller.md
+\* §J6.2, `data_lost`). A second report adds nothing.
 ReportLoss(s) ==
-  /\ s \notin lost
-  /\ \E h \in Holders : <<h, s>> \in found
   /\ ~GoodCopy(s)
   /\ lost' = lost \cup {s}
   /\ UNCHANGED <<acc, rep, obj, seg, found, objFaults>>
@@ -310,6 +310,27 @@ Kept == <>[](\A s \in Slots : GoodCopy(s))
 Heals ==
   \A h \in Holders, s \in Slots :
     [](<<h, s>> \in found => <>(<<h, s>> \notin found \/ s \in lost))
+
+\* The damage that the controller found is still there: only a repair, a
+\* drop, a loss or the retire takes a copy out of `found`.
+FoundBad == \A p \in found : CopyOf(p[1], p[2]) = "bad"
+
+\* A lost machine stays lost: no step brings a "gone" copy back.
+LostForEver ==
+  [][/\ \A a \in Acceptors, s \in Slots : acc[a][s] = "gone" => acc'[a][s] = "gone"
+     /\ \A r \in Replicas, s \in Slots : rep[r][s] = "gone" => rep'[r][s] = "gone"]_vars
+
+\* The segment record moves forward only, each step a compare-and-set on
+\* the state before it.
+SegForward ==
+  [][seg' # seg => <<seg, seg'>> \in {<<"sealed", "retired">>, <<"retired", "offloaded">>}]_vars
+
+\* The offloader puts the object of S1 only once S1 retired.
+ObjAfterRetire == seg = "sealed" => \A s \in Slots : obj[s] = "none"
+
+\* Every copy comes from a good copy: a slot with no good copy never gets
+\* one back (no unsafe recover in v1).
+NoResurrection == [][\A s \in Slots : ~GoodCopy(s) => ~GoodCopy(s)']_vars
 
 \* Reachability controls: each must be violated.
 NoOffload == seg # "offloaded" \/ \E r \in Replicas, s \in Slots : rep[r][s] \notin {"none", "gone"}

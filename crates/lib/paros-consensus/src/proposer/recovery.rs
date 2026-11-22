@@ -146,6 +146,10 @@ pub enum RecoveryStep<V> {
     /// Nobody described the slot and the policy is [`RecoveryPolicy::Inherited`]:
     /// skip it.
     Undescribed,
+    /// The Phase-1 tally could not decide the slot (Case 3: wait): the open
+    /// repair probe resolves it, so the pump neither re-proposes nor fills
+    /// it.
+    Blocked,
 }
 
 impl<Id: Copy + Ord, V> Proposer<Id, V> {
@@ -233,40 +237,28 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
         );
         recovery.cursor = Slot(recovery.cursor.0.saturating_add(1));
         assert!(recovery.cursor > slot, "the recovery cursor only advances");
-        let step = match recovery.recovered.remove(&slot) {
-            Some(command) => RecoveryStep::Recovered(command),
-            // Only a Phase-1-backed recovery may invent a value for a slot
-            // nobody reported (see `RecoveryPolicy`).
-            None => match recovery.policy {
-                RecoveryPolicy::Phase1Backed => RecoveryStep::Fill,
-                RecoveryPolicy::Inherited => RecoveryStep::Undescribed,
-            },
+        let reported = recovery.recovered.remove(&slot);
+        let step = if recovery.is_blocked(slot) {
+            // A blocked slot (Case 3: wait) is the open repair probe's to
+            // resolve: the pump neither re-proposes nor fills it.
+            RecoveryStep::Blocked
+        } else {
+            match reported {
+                Some(command) => RecoveryStep::Recovered(command),
+                // Only a Phase-1-backed recovery may invent a value for a
+                // slot nobody reported (see `RecoveryPolicy`).
+                None => match recovery.policy {
+                    RecoveryPolicy::Phase1Backed => RecoveryStep::Fill,
+                    RecoveryPolicy::Inherited => RecoveryStep::Undescribed,
+                },
+            }
         };
+        // Negative space: a fill is never handed out for a blocked slot.
+        assert!(
+            !matches!(step, RecoveryStep::Fill) || !recovery.blocked.contains(&slot),
+            "the pump never fills a blocked slot"
+        );
         Some((slot, step))
-    }
-
-    /// Whether the open recovery holds `slot` blocked on the repair probe.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    #[must_use]
-    pub fn recovery_blocked(&self, slot: Slot) -> bool {
-        let blocked = self
-            .recovery
-            .as_ref()
-            .is_some_and(|recovery| recovery.is_blocked(slot));
-        // A slot blocked on the recovery is the repair probe's to resolve.
-        if blocked {
-            assert!(
-                self.recovery
-                    .as_ref()
-                    .is_some_and(|r| r.policy == RecoveryPolicy::Phase1Backed),
-                "only a Phase-1-backed recovery blocks a slot"
-            );
-        }
-        blocked
     }
 
     /// How many slots the open recovery has still to sweep (0 when none).

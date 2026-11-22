@@ -57,6 +57,12 @@ Cfg2 == <<"old", "new">>
 \* A rival leads at ballot 3 in the new grid after the bypass.
 Owner3 == <<1, 1, 2>>
 Cfg3 == <<"old", "new", "new">>
+\* Ballot 2 recovers by Phase 1 what ballot 1 wrote, and its leader moves
+\* to its next ballot 3 in the new grid.
+OwnerRec == <<1, 2, 2>>
+CfgRec == <<"old", "old", "new">>
+\* A rival campaigns at ballot 2 between the leader's ballots 1 and 3.
+OwnerBetween == <<1, 2, 1>>
 
 Symmetry == Permutations(Values) \cup Permutations(Matchmakers)
 =============================================================================

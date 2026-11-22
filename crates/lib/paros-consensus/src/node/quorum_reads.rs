@@ -19,7 +19,7 @@ use super::{BeliefSource, ColocatedNode, Message, NodeId, NodeRole, ReadState, S
 use crate::journal::{Command, Control};
 use crate::membership::QuorumSystem;
 use crate::node::{Delegation, ProposeResult};
-use crate::quorum_read::PreReadFold;
+use crate::quorum_read::{PreReadFold, ReadOpen};
 use crate::types::Ballot;
 
 pub(crate) use crate::contract::limits::READ_TTL_TICKS;
@@ -44,16 +44,19 @@ impl ColocatedNode {
     /// the driver owns the client-facing timeout, and the client records it
     /// *ambiguous*, never aborted.
     ///
+    /// Returns what the ask did ([`ReadOpen`]): a token already open, or no
+    /// read basis yet, opens nothing and is a result, never a panic.
+    ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
-    /// operating condition): a driver token is opened at most once.
+    /// operating condition).
     ///
     /// [`AcceptorConfig::row_of`]: crate::membership::AcceptorConfig::row_of
     /// [`Ready::read_states`]: crate::Ready::read_states
     /// [`Replica::covers`]: crate::replica::Replica::covers
-    pub fn quorum_read(&mut self, ctx: u64) {
-        self.quorum_read_in(ctx, None);
+    pub fn quorum_read(&mut self, ctx: u64) -> ReadOpen {
+        self.quorum_read_in(ctx, None)
     }
 
     /// [`ColocatedNode::quorum_read`] with the **row named by the caller**
@@ -73,8 +76,14 @@ impl ColocatedNode {
     /// [`AcceptorConfig::row_of`]: crate::membership::AcceptorConfig::row_of
     /// [`AcceptorConfig::read_row`]: crate::membership::AcceptorConfig::read_row
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
-    pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
+    pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) -> ReadOpen {
         let me = self.config.id;
+        // A token still open is the driver's to wait on: nothing moves, not
+        // even the gap fill below.
+        if self.quorum_reads.is_open(ctx) {
+            self.assert_invariants();
+            return ReadOpen::TokenInUse;
+        }
         let marks = self.durable_marks();
         // No basis, no read (#260): the read opens nothing, and the driver's
         // retry sweep answers it unserved — the client asks again, here or
@@ -100,7 +109,7 @@ impl ColocatedNode {
             );
             self.assert_marks_monotone(marks);
             self.assert_invariants();
-            return;
+            return ReadOpen::NoBasis;
         };
         // The reader is its own first answer when it sits in the row: its
         // watermark is a fact its durable log holds, exactly what a peer's
@@ -127,7 +136,8 @@ impl ColocatedNode {
         let config = basis.config.clone();
         let addressees = self
             .quorum_reads
-            .open(ctx, row, basis, self.tick_count, own);
+            .open(ctx, row, basis, self.tick_count, own)
+            .expect("the token was checked free above");
         // The row's other members, and nobody outside the configuration.
         assert!(
             !addressees.contains(&me),
@@ -146,6 +156,7 @@ impl ColocatedNode {
         // A read touches no durable state.
         self.assert_marks_monotone(marks);
         self.assert_invariants();
+        ReadOpen::Opened
     }
 
     /// Acceptor: answer a `PreRead` with this node's vote watermark. No
@@ -156,11 +167,8 @@ impl ColocatedNode {
     /// to a pooled reader or a replica (#144: a replica reads the same way).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = reply_to.0, ctx)))]
     pub(super) fn on_pre_read(&mut self, reply_to: NodeId, ctx: u64) {
-        // Wire hygiene: an ack never answers an arbitrary id — a node of the
-        // pool, or, on a deployment with a replica tier, a replica (its id is
-        // outside the pool by construction; the driver routes it through the
-        // deployment map and drops an address it does not know).
-        if !self.in_pool(reply_to) && !self.acceptors.has_replicas() {
+        // Wire hygiene: an ack never answers an arbitrary id.
+        if !self.is_reply_addressable(reply_to) {
             return;
         }
         // An answer carries this node's read fence (its promise, or its
@@ -222,6 +230,10 @@ impl ColocatedNode {
         if !self.in_pool(from) {
             return;
         }
+        // A watermark is a fact of a pooled acceptor's log, whether or not
+        // the read tally counts the ack: a late ack of a read already served
+        // still names an orphan vote the next read would wait on. The fill
+        // is paged, so no ack opens more than one page of rounds.
         self.fill_to_watermark(watermark);
         match self.quorum_reads.fold(ctx, from, watermark, config_since) {
             PreReadFold::Ignored | PreReadFold::Superseded => {}
@@ -254,6 +266,11 @@ impl ColocatedNode {
     /// orphan sits at the successor's frontier and every read at every
     /// member waits on it for ever.
     ///
+    /// One call opens at most `limits.recovery_page` rounds, as every other
+    /// bulk path of the node is paged: a far watermark is filled over
+    /// several calls, and [`ColocatedNode::tick_quorum_reads`] calls again
+    /// on each tick for the highest watermark an open read counted.
+    ///
     /// [`Control::Noop`]: crate::journal::Control::Noop
     fn fill_to_watermark(&mut self, watermark: Option<Slot>) {
         let Some(watermark) = watermark else {
@@ -266,18 +283,23 @@ impl ColocatedNode {
         {
             return;
         }
-        while self.proposer.next_slot() <= watermark {
-            let filled =
+        let page = self.limits.recovery_page;
+        let mut filled = 0_usize;
+        while filled < page && self.proposer.next_slot() <= watermark {
+            let opened =
                 self.open_proposal(None, Delegation::Auto, Command::Control(Control::Noop));
             assert!(
-                matches!(filled, ProposeResult::Accepted(_)),
+                matches!(opened, ProposeResult::Accepted(_)),
                 "a leader's fill opens a proposal"
             );
+            filled += 1;
             self.counters.watermark_fills += 1;
         }
+        // One page, and it stops short of the watermark only when full.
+        assert!(filled <= page, "a watermark fill is paged");
         assert!(
-            self.proposer.next_slot() > watermark,
-            "a watermark fill leaves the frontier past the watermark"
+            filled == page || self.proposer.next_slot() > watermark,
+            "a watermark fill stops short only at its page"
         );
     }
 
@@ -355,6 +377,16 @@ impl ColocatedNode {
     pub(super) fn tick_quorum_reads(&mut self) {
         let now = self.tick_count;
         self.quorum_reads.expire(now, self.limits.read_window);
+        // A fill stopped at its page goes on, one page a tick, while a read
+        // still waits on the watermark it counted.
+        let waited = self
+            .quorum_reads
+            .pending()
+            .iter()
+            .flat_map(|read| read.watermarks().values().copied())
+            .max()
+            .flatten();
+        self.fill_to_watermark(waited);
         self.serve_quorum_reads();
     }
 }

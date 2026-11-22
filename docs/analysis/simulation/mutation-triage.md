@@ -56,7 +56,7 @@ Each line names the rule and the mutants it kills.
 - Quorum reads (node and replica): a read names a row exactly under a grid,
   and a reader answers itself only from inside its row (`read_row`, `row_of`,
   `is_phase1_addressee`).
-- `take_back_delegated`, `ProxyLeader::expire_stale`: no round past its budget
+- `take_back_delegated`, `ProxyLeader::tick`: no round past its budget
   stays delegated or retained (`stalled_delegations`). `Rounds::stalled ->
   vec![]` survived until the stalled-proxy scenario (#341, below).
 - `on_nack`: a Nack at the work in flight deposes it, and a Nack at no work in

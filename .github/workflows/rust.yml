@@ -293,8 +293,9 @@ jobs:
   # line must be caught by the crate's tests or the simulation (the fast tests
   # first, then the trace checks for the mutants they miss). A survivor fails
   # the job: add the test that sees it in the same pull request. Each crate
-  # runs in shards of its own (`--shard k/n`, `scripts/mutants-plan.sh`), so a
-  # large pull request stays inside the 90 minutes of a job. The `Mutants`
+  # runs in shards of its own (`--shard k/n`, round-robin, so that the slow
+  # mutants of one function spread over the shards; `scripts/mutants-plan.sh`),
+  # so a large pull request stays inside the 90 minutes of a job. The `Mutants`
   # workflow runs every mutant of the core each week.
   mutants:
     needs: mutants-plan
@@ -340,7 +341,8 @@ jobs:
           set -euo pipefail
           git diff HEAD^1 HEAD -- "crates/lib/$CRATE/src" > crate.diff
           # shellcheck disable=SC2086 # FLAG is empty or one word.
-          nix develop --command scripts/mutants.sh $FLAG --in-diff crate.diff --shard "$SHARD"
+          nix develop --command scripts/mutants.sh $FLAG --in-diff crate.diff \
+            --shard "$SHARD" --sharding round-robin
       - name: Show the survivors
         if: failure()
         run: |

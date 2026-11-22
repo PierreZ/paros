@@ -19,6 +19,7 @@ teases the journal service being rewritten (the version before is at the tag `v0
 | the matchmaker register, its records and guards (§J3.4) | `journal/matchmakers.md` |
 | quorum everywhere, the counts of `F + 1`, CTRL, zones (§J5) | `journal/quorums-and-failures.md` |
 | the controller, the fenced reshape, journal health (§J6) | `journal/controller.md` |
+| a technique that checks the journal: a model, a walk, an oracle, a trace check, a mutant job, a CI job (§J7) | `journal/checks.md` |
 | parosd, the eleven goals (`docs/architecture/01-goal.md` §1.1), the version at the tag `v0.2.0-alpha.1` | `parosd/index.astro` |
 | the layers of the service and the checks that hold them (§4.4) | `parosd/layers.md` |
 | the control levels, the term by `SetLeader`, the info tables (§3.1, §3.3, §4.4) | `parosd/control.md` |

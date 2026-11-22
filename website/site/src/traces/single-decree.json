@@ -2285,7 +2285,7 @@
             "title": "Phase 1 · ballot 1.5",
             "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
           },
-          "says": "Acceptor 3 refuses ballot 1.5: it promised ballot 0.0, which is higher.",
+          "says": "Acceptor 3 is down. It does not answer.",
           "notes": [
             "Prepare at 1.5 for slots from 0 reaches acceptor 3, which is down. The message is lost."
           ],
@@ -2786,7 +2786,7 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 3 does not vote: it promised ballot 0.0, which is higher than 1.5.",
+          "says": "Acceptor 3 is down. It does not vote.",
           "notes": [
             "Accept alpha at 1.5 for slot 0 reaches acceptor 3, which is down. The message is lost."
           ],
@@ -5651,7 +5651,7 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 2 does not vote: it promised ballot 1.8, which is higher than 1.5.",
+          "says": "Acceptor 2 does not vote for ballot 1.5: it promised ballot 1.8, which is higher.",
           "notes": [
             "Acceptor 2 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -5783,7 +5783,7 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 3 does not vote: it promised ballot 1.8, which is higher than 1.5.",
+          "says": "Acceptor 3 does not vote for ballot 1.5: it promised ballot 1.8, which is higher.",
           "notes": [
             "Acceptor 3 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -8546,7 +8546,7 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 1 does not vote: it promised ballot 1.8, which is higher than 1.5.",
+          "says": "Acceptor 1 does not vote for ballot 1.5: it promised ballot 1.8, which is higher.",
           "notes": [
             "Acceptor 1 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -8671,7 +8671,7 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 2 does not vote: it promised ballot 1.8, which is higher than 1.5.",
+          "says": "Acceptor 2 does not vote for ballot 1.5: it promised ballot 1.8, which is higher.",
           "notes": [
             "Acceptor 2 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -8796,7 +8796,7 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 3 does not vote: it promised ballot 1.8, which is higher than 1.5.",
+          "says": "Acceptor 3 does not vote for ballot 1.5: it promised ballot 1.8, which is higher.",
           "notes": [
             "Acceptor 3 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -10131,7 +10131,7 @@
             "title": "Phase 2 · ballot 1.8",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 1 does not vote: it promised ballot 2.5, which is higher than 1.8.",
+          "says": "Acceptor 1 does not vote for ballot 1.8: it promised ballot 2.5, which is higher.",
           "notes": [
             "Acceptor 1 receives Accept 1.8 for bravo. It promised 2.5, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -10256,7 +10256,7 @@
             "title": "Phase 2 · ballot 1.8",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 2 does not vote: it promised ballot 2.5, which is higher than 1.8.",
+          "says": "Acceptor 2 does not vote for ballot 1.8: it promised ballot 2.5, which is higher.",
           "notes": [
             "Acceptor 2 receives Accept 1.8 for bravo. It promised 2.5, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -10381,7 +10381,7 @@
             "title": "Phase 2 · ballot 1.8",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 3 does not vote: it promised ballot 2.5, which is higher than 1.8.",
+          "says": "Acceptor 3 does not vote for ballot 1.8: it promised ballot 2.5, which is higher.",
           "notes": [
             "Acceptor 3 receives Accept 1.8 for bravo. It promised 2.5, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -20494,7 +20494,7 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 2 does not vote: it promised ballot 1.8, which is higher than 1.5.",
+          "says": "Acceptor 2 does not vote for ballot 1.5: it promised ballot 1.8, which is higher.",
           "notes": [
             "Acceptor 2 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
@@ -20636,7 +20636,7 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Acceptor 3 does not vote: it promised ballot 1.8, which is higher than 1.5.",
+          "says": "Acceptor 3 does not vote for ballot 1.5: it promised ballot 1.8, which is higher.",
           "notes": [
             "Acceptor 3 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
