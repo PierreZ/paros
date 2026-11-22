@@ -385,6 +385,9 @@ If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`
 Then use `nix develop`, on the web as locally. Every flake input is fetched over git
 (`git+https`), not as a GitHub tarball, because the web session's egress policy refuses GitHub
 tarballs (#727 (flake inputs over git)). Keep it that way: a new input never uses `github:`.
+In CI, every job sets up Nix with `.github/actions/nix` (never the installer and cache actions
+by hand): it also signs git in to github.com for each git input of `flake.lock`, because GitHub
+refuses anonymous fetches with 403 when many jobs fetch at once.
 Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix develop` (or direnv).
 
 **Use Nix-provided software for all tooling.** Never run the sandbox's preinstalled binaries

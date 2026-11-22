@@ -24,6 +24,7 @@ on:
       - "scripts/build-wasm.sh"
       - "flake.nix"
       - "flake.lock"
+      - ".github/actions/nix/action.yml"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -44,8 +45,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - name: Build the wasm tools and stage them at /paxos/wasm/ and /journal/wasm/
         run: nix develop --command scripts/build-wasm.sh
       - name: Build the site (Astro, #810 (website redo 1/4))
