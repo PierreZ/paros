@@ -234,13 +234,21 @@ impl ColocatedNode {
         // promises its campaign, and that campaign may have chosen a write
         // that the basis's Phase-1 quorums need not meet. The reader counts
         // its own watermark with no fence, so only this gate covers it.
+        let wire = self
+            .wire_read_fence()
+            .expect("a matchmaker deployment carries a read fence");
+        assert!(
+            wire >= self.acceptors_since,
+            "the read fence covers the belief ballot"
+        );
         let basis = self.read_basis.clone().filter(|basis| {
             let fence = self
                 .reader_fence(&basis.config)
                 .expect("a matchmaker deployment carries a read fence");
+            assert!(fence <= wire, "the reader fence never exceeds the read fence");
             assert!(
                 fence >= self.acceptors_since,
-                "the read fence covers the belief ballot"
+                "the reader fence covers the belief ballot"
             );
             basis.since >= fence
         });

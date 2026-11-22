@@ -868,6 +868,30 @@ fn a_learner_above_the_leader_by_its_own_unprepared_campaign_reads() {
     );
 }
 
+/// The exception is volatile: a node that reboots with its own ballot as
+/// its durable promise cannot tell whether that campaign sent a `Prepare`
+/// before the crash, so it keeps the strict rule and a beat below the
+/// promise gives it no basis.
+#[test]
+fn a_rebooted_learner_keeps_the_strict_rule() {
+    let (n, own, lead) = stranded_learner(&[0, 1, 2]);
+    let mut storage = MemStorage::for_node(3, &[1, 2, 3]);
+    storage.config.nodes = (0..4).map(NodeId).collect();
+    storage.config.matchmakers = vec![MatchmakerId(0)];
+    storage.hard_state.max_promised_ballot = own;
+    drop(n);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    assert_eq!(n.hard_state().max_promised_ballot, own);
+    assert!(
+        !n.promise_is_own_unprepared(),
+        "a reboot forgets that the campaign sent no Prepare"
+    );
+    n.step(beat(lead, &[0, 1, 2]));
+    let _ = drain(&mut n);
+    assert!(n.read_basis.is_none(), "the rebooted node takes no basis");
+    assert!(n.read_basis().is_none());
+}
+
 /// The read stays judged: a `Prepare` of another campaign above the leader
 /// raises the promise, which is no longer the node's own, so the open read
 /// is abandoned and the basis no longer counts.

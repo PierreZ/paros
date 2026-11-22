@@ -40,7 +40,7 @@ offload 2
 proxy-leader 2
 quorum-everywhere 16.5
 re-replication 10
-reads 15.5
+reads 17.5
 retire-fence 16.5
 seal-chain 2.5
 seal-ctrl 12

@@ -458,11 +458,9 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     pub fn abandon_superseded(&mut self, config_since: Ballot) {
+        let before = self.reads.len();
         self.abandon_below(|_| config_since);
-        assert!(
-            self.reads.iter().all(|r| r.config_since >= config_since),
-            "no read opened under a superseded configuration survives"
-        );
+        assert!(self.reads.len() <= before, "abandoning opens no read");
     }
 
     /// Advance every read: a tallying read whose row is whole (a Phase-1

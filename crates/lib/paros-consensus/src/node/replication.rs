@@ -136,11 +136,10 @@ impl ColocatedNode {
             // (`reader_fence`). The beat is still not followed and not
             // acked: the promise stands.
             probe!(reachable, "beat: a stranded learner takes the read basis");
+            let (leader, own) = (self.leader, self.ballot);
             self.learn_read_basis(basis, ballot, fence);
-            assert!(
-                self.acceptor.promised() > ballot,
-                "the exception leaves the promise above the beat"
-            );
+            assert_eq!(self.leader, leader, "the exception follows no leader");
+            assert_eq!(self.ballot, own, "the exception adopts no ballot");
         }
         // Commit-replay catch-up reconciles the sender's advertised contiguous
         // chosen prefix (`commit`) against ours, in **both** directions. It is

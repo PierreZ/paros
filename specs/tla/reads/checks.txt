@@ -19,6 +19,10 @@ reboot_promise_open pass       ci
 reboot_belief_refuse pass      long
 reboot_promise_open_reader pass long
 learner_own         pass       ci
+# Option (b) of #890 on the full grid with the seal of the code, and with a
+# lagging pool (the reader ignores the newer configuration).
+learner_own_grid    pass       ci
+learner_own_lag     pass       ci
 learner_strict      pass       long
 learner_any         pass       long
 grid_full           violation  ci
