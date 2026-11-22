@@ -214,6 +214,23 @@ driver: `AGREE` (no two `Commit`s on the wire name two commands at one slot), `F
 that lies about a commit (`LyingDisk`), a process that loses its disk (`WipeDisk`), and a client
 that takes a `Taken` as written (`TakenAsWritten`). The driver has no trace check yet.
 
+**The client walk** (#1331 (the pure journal client), `journal-sim/tests/client.rs`). Two programs,
+each with a `paros_journal::client::Client`, claim the journal with fresh uuids and depose each
+other, make it multi-writer and back, write batches, truncate and read. Requests and answers go
+through the walk's mailbox (lost, repeated, reordered); a command applies and loses its answer,
+applies and is answered `Unknown`, or takes no slot (`Unknown`, `NotLeader`); the walk seals the
+segment in force, so a resend is answered `Below` and settled by `Resolve`; a replica lags and a
+read is unserved. The oracles read the whole log the walk keeps, never the client: `WRITTEN` (a
+write reported written holds its positions), `ONCE` (a fenced write lands at most once),
+`REFUSED` (a fenced write reported refused is never in the log), `LED` (a copy of a `SetLeader`
+reported set applied), `TAIL` (the first copy of a new write of the uuid that leads names the tail)
+and `PAGE` (a page holds the log's records). A late copy of an old command (a truncate one past the
+tail, most often) reaches the journal after the client moved on, so a write of the leading uuid is
+answered `Truncated` and the client must follow the tail. Each has its planted mutant in
+the program or the journal, never in the client. A finding of the walk: with fresh uuids and one
+call in flight, a `Resolve` that answers not written means that the writer was deposed, so the
+client's resend at the tail is answered `Fenced` (site `RESOLVED_AGAIN`).
+
 ### J7.5 The controller's `decide`
 
 Property tests, a second `decide` with no shared code, and the controller walks in

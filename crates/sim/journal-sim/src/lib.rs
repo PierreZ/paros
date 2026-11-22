@@ -9,6 +9,7 @@
 //! another crate.
 
 pub mod campaign;
+pub mod client;
 pub mod control;
 pub mod controller;
 pub mod fold;

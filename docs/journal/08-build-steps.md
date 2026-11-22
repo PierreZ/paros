@@ -20,7 +20,7 @@ less than this table.
 | 7 | #1328 (paros-journal-control) | The pure `decide` and the v1 controller role; #1261 (grid controller decision tests) is part of it (`decide` and its sweep, the role, its walk and its trace check built; its scenarios in the whole journal are #1445; their moonpool-sim version is #1417, outside v1) | §J6 |
 | 8 | #1329 (paros-journal-io) | The traits, the driver under the flight rule and the contract suites (built: `crates/lib/paros-journal-io`, the driver walk of `journal-sim`) | §J4.2 |
 | 9 | #1445 (the whole journal on the in-memory IO) | A `journal-sim` walk of the whole journal on the driver and the in-memory backends of `paros-journal-io`: every role, the controller, clients that retry, machine and zone loss, disk faults inside the contract, with the oracles of §J7.4. The moonpool adapter and the moonpool-sim version moved out of v1: #1330 (paros-journal-moonpool) is part of #1417 (the moonpool adapter on the generic host) under #1409 (build the layered parosd) (Pierre, 2026-11-22) | §J7.3, §J7.4 |
-| 10 | #1331 (the pure journal client) | The client state machine of the four calls. After step 3; it can run beside steps 7 to 9 | §J2 |
+| 10 | #1331 (the pure journal client) | The client state machine of the four calls (`paros_journal::client`), walked by `journal-sim`'s client walk. After step 3; it can run beside steps 7 to 9. Not yet: several writes in flight (#597), and a server for `Read` | §J2 |
 
 **The examples** (#1370 (journal examples), Pierre 2026-11-21). The examples of the journal crates
 show that the journal is a library: a program implements the storage, the transport and the clock
@@ -32,7 +32,7 @@ result, and each lands with the step that it needs:
 | `fold` | The journal fold alone (§J2): writes, resends, a seal, `Below` and `Resolve`, multi-writer | Step 3: done |
 | `in_memory` | A journal on three processes, on the traits and the driver of `paros-journal-io` with its backends in memory; a process crashes and starts again from its storage, and a second segment seals the first | Step 8: done (`paros-journal-io`) |
 | `custom_storage` | A storage backend of the user (an append-only log), checked by the contract suite of the storage trait, with a journal on it | Step 8: done (`paros-journal-io`) |
-| `single_writer`, `multi_writer` | The pure client: exactly-once with `expected_seq`; `SetLeader(None)` and back | Step 10 |
+| `single_writer`, `multi_writer` | The pure client: exactly-once with `expected_seq` across a lost reply and a seal (`Below` settled by `Resolve`); `SetLeader(None)`, a resend that lands twice, and back | Step 10: done (`paros_journal::client`, examples in `paros-journal-io`) |
 | `moonpool`, `simulation` | The same journal on the moonpool host, then under moonpool-sim with faults | #1417, after v1 (parosd) |
 
 **Rules for every step** (#1323):

@@ -17,13 +17,16 @@ export interface Lesson {
   title: string;
   /** What the reader can do at the end of the lesson. */
   goal: string;
-  /** The trace of the page: `src/traces/<page>.json`, `paxos/<page>/`. */
+  /** The trace of the page: `src/traces/<page>.json`. */
   page: string;
+  /** Where the page is, when it is not `paxos/<page>/`. */
+  path?: string;
   /** The runs of the page, in the order of the lesson. */
   runs: string[];
   /** The exercises at the end of the lesson ("your turn"), by their id in
-   * `crates/support/paros-wasm/src/paxos/lab.rs`. The page that holds the
-   * lesson draws them under `## Your turn`. */
+   * `crates/support/paros-wasm/src/paxos/lab.rs` (or of the journal labs,
+   * `src/journal/`). The page that holds the lesson draws them under
+   * `## Your turn`. */
   labs?: string[];
   /** One TLC run of a model of `specs/tla/` that checks the idea of the
    * lesson. The figure is copied from TLC's output of that run, never
@@ -41,9 +44,12 @@ export interface Tlc {
   states: number;
   /** What TLC checked, as the end of "TLC checked that ...". */
   checks: string;
+  /** The day of this run, when it is not `TLC_RUN.date`. */
+  date?: string;
 }
 
-/** The day of the TLC runs of every lesson, and the TLC that ran them. */
+/** The day of the TLC runs of the lessons (a lesson may name its own day),
+ * and the TLC that ran them. */
 export const TLC_RUN = { date: "2026-11-19", tool: "TLC 2.19" };
 
 export const LESSONS: Lesson[] = [
@@ -110,7 +116,22 @@ export const LESSONS: Lesson[] = [
     labs: ["old-set"],
     tlc: { model: "matchmaker", config: "matchmaker", states: 1421865, checks: "two values are never chosen across a reconfiguration, with three matchmakers and two ballots" },
   },
+  {
+    id: "seal",
+    title: "The journal: a reshape and a seal",
+    goal: "say where the first leader of a new grid ends the old segment, and why a write sent again across the seal is answered Below.",
+    page: "journal-seal",
+    path: "journal/segments/",
+    runs: ["base", "slow-acceptor", "break-the-rule"],
+    labs: ["records-retire", "records-trim", "records-third"],
+    tlc: { model: "journal-state", config: "register", states: 686322, date: "2026-11-22", checks: "no two values are chosen at one slot and a sealed segment never changes, with two segments, two leaders of the new grid that race to seal, and register writes that are partial or lost" },
+  },
 ];
+
+/** Where the page of a trace is. */
+export function pathOf(lesson: Pick<Lesson, "page" | "path">): string {
+  return lesson.path ?? `paxos/${lesson.page}/`;
+}
 
 interface TraceLike { scenarios: { id: string; label: string; beats?: unknown[] }[] }
 

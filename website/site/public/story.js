@@ -47,7 +47,8 @@
   var ARROW = "M-9 -1.6 H0 V-5.5 L9 0 L0 5.5 V1.6 H-9 Z";
   var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   // Rows of the drawing, top to bottom, by the role of a lane.
-  var ROWS = ["proposer", "batcher", "matchmaker", "proxy", "node", "acceptor", "replica"];
+  // The client and the controller of a Journal page sit above the proposers.
+  var ROWS = ["client", "controller", "proposer", "batcher", "matchmaker", "proxy", "node", "acceptor", "replica"];
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -74,7 +75,7 @@
   var head = el("div", "panel-head label");
   head.appendChild(el("span", "title", "Story"));
   var chip = el("span", "chip-status", "recorded");
-  chip.title = "recorded from paros-consensus at build time";
+  chip.title = "recorded from " + (data.dataset.source || "paros-consensus") + " at build time";
   head.appendChild(chip);
   var counter = el("span", "meta tnum");
   head.appendChild(counter);

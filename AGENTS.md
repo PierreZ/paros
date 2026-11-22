@@ -157,7 +157,9 @@ heal and the register are walked by `journal-sim`'s heal walk, which plays the r
 rule groups of #1326 (proxy leader, leaderless reads, truncate) are not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
 (storage, transport, clock, register), the pure `Host` that serves many journals in one process,
 and the generic driver under the flight rule (#1329 (paros-journal-io)), judged by
-`journal-sim`'s driver walk. The grid controller's pure decision is
+`journal-sim`'s driver walk. The pure journal client is `paros_journal::client` (the four calls,
+one call in flight, exactly-once for a single writer through `expected_seq`, `Below` settled by
+`Resolve`; #1331 (the pure journal client)), walked by `journal-sim`'s client walk. The grid controller's pure decision is
 `crates/lib/paros-journal-control` (`decide`: heal, repair, re-replicate, or hold and alert, with
 a probe on every branch; #1328 (paros-journal-control), #1261 (grid controller decision tests)),
 judged by `journal-sim`'s sweep of every small view against a reference `decide` that shares no
@@ -283,7 +285,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
   the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
   `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
-  `multi_writer`; #1370 (journal examples)), the grid controller's example:
+  `single_writer`, `multi_writer`; #1370 (journal examples)), the grid controller's example:
   `cargo run -p paros-journal-control --example controller`, and the facade examples:
   `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
@@ -323,10 +325,10 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `--no-default-features`, `cargo check -p paros-consensus --features serde`,
   `scripts/check-layers.sh --wasm` (each crate of layers 0 to 5), and
   `cargo check --target wasm32-unknown-unknown -p paros`
-- the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
+- the `wasm` job: `cargo test -p paros-wasm --test paxos_traces --test journal_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - the site (`.github/workflows/pages.yml`, on pull requests that touch the site, `paros-wasm`,
-  `paros-consensus`, `paros-journal` or the Cargo files): `scripts/build-wasm.sh`, the Astro
+  `paros-consensus`, `paros-journal`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
   build, the link check of the built site (`npm run check-links`) and the browser smoke test
   of its live parts (`nix develop .#site --command npm test`, Playwright and Chromium;
   `website/site/AGENTS.md`, "Tests")
@@ -424,8 +426,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
-  (the facade), `paros-journal`, `paros-journal-control` and `paros-journal-io`; later the moonpool adapter and the
-  journal client. A user programs against these crates, so each one has runnable examples in
+  (the facade), `paros-journal`, `paros-journal-control` and `paros-journal-io`; later the moonpool adapter (the
+  journal client is a module of `paros-journal`, #1331). A user programs against these crates, so each one has runnable examples in
   `examples/` that use its public API as a user would (the facade's examples import `paros::`
   paths only). An example asserts what it shows, so CI runs it as a test: add each new example
   to the examples steps of the `checks` job of `.github/workflows/rust.yml`. A change that reshapes the public API of
@@ -746,7 +748,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
 - `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
   fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
-  journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
+  journal roles (`roles`: acceptor, leader, segment replica), the pure client (`client`, #1331)
+  and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
   Its examples (`examples/`): `fold` drives the fold alone, `register` the compare-and-sets of the
   matchmaker register.
 - `crates/lib/paros-journal-control` — the grid controller of the journal v1

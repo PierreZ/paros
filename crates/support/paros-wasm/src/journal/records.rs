@@ -4,7 +4,7 @@
 //!
 //! The world is one value of the journal's matchmaker register. Each move is
 //! one compare-and-set of [`RegisterValue::apply`]: its guard runs on the
-//! value, and a refused move shows its [`ChangeRefusal`] (for a guard of one
+//! value, and a refused move shows its `ChangeRefusal` (for a guard of one
 //! record, the [`RecordRefusal`] of `SegmentRecord`). The matchmakers that
 //! hold the value are on the register lab ([`super::register`]); here each
 //! move is a write seen done.
