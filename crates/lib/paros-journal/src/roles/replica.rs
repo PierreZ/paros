@@ -84,10 +84,18 @@ pub enum ReplicaEffect {
         /// The batch the send waits on.
         after: Option<PersistId>,
     },
-    /// Run this compare-and-set on the journal's register, and give the
-    /// replica the value once the write is done
-    /// ([`SegmentReplica::observe`]).
-    Register(Change),
+    /// Run this compare-and-set on the journal's register once the batch
+    /// `after` is durable, and give the replica the value once the write is
+    /// done ([`SegmentReplica::observe`]). The boundary state that the
+    /// change writes is the fold of the replica's disk, as every answer of
+    /// the replica (`BoundWrite` of `specs/tla/journal-state/`: a replica
+    /// that holds every slot of its segment on its disk).
+    Register {
+        /// The change.
+        change: Change,
+        /// The batch the change waits on.
+        after: Option<PersistId>,
+    },
 }
 
 /// What the disk of a replica holds: the input of a restart.
@@ -246,6 +254,12 @@ impl SegmentReplica {
         self.end.is_some() && self.front() == self.end
     }
 
+    /// The answer of the fold at `slot`, once the walk applied it.
+    #[must_use]
+    pub fn answer(&self, slot: Slot) -> Option<&Answer> {
+        self.folded.as_ref()?.answers.get(&slot)
+    }
+
     /// The chosen slots the replica holds.
     #[must_use]
     pub fn chosen(&self) -> &BTreeMap<Slot, Command> {
@@ -328,21 +342,27 @@ impl SegmentReplica {
         effects
     }
 
-    /// The answer to `Resolve(uuid, expected_seq, records)` (#1320): read
-    /// only. `NotCovered` until the replica has its base.
+    /// The answer to `Resolve(uuid, expected_seq, records)` (#1320), and
+    /// the batch it waits on: read only. The answer reads the replica's
+    /// fold, which slots of batches still in flight may have moved, so it
+    /// goes to the client once `after` is durable, as every answer of the
+    /// replica (the flight rule, §J4.2). `NotCovered` until the replica has
+    /// its base.
     #[must_use]
     pub fn resolve(
         &self,
         uuid: LeaderUuid,
         expected_seq: Seq,
         records: &[Record],
-    ) -> ResolveAnswer {
+    ) -> (ResolveAnswer, Option<PersistId>) {
+        let after = self.flight.last();
         let Some(folded) = &self.folded else {
-            return ResolveAnswer::NotCovered;
+            return (ResolveAnswer::NotCovered, after);
         };
-        resolve(&folded.state, uuid, expected_seq, records, |seq| {
+        let answer = resolve(&folded.state, uuid, expected_seq, records, |seq| {
             folded.positions.get(&seq)
-        })
+        });
+        (answer, after)
     }
 
     /// The boundary state of the segment before, from `value`: the fresh
@@ -469,10 +489,13 @@ impl SegmentReplica {
     /// sealed segment and no done value showed it written.
     fn boundary(&self) -> Vec<ReplicaEffect> {
         match (&self.folded, self.full(), self.boundary_written) {
-            (Some(folded), true, false) => vec![ReplicaEffect::Register(Change::Boundary {
-                segment: self.segment,
-                state: folded.state.boundary(),
-            })],
+            (Some(folded), true, false) => vec![ReplicaEffect::Register {
+                change: Change::Boundary {
+                    segment: self.segment,
+                    state: folded.state.boundary(),
+                },
+                after: self.flight.last(),
+            }],
             _ => Vec::new(),
         }
     }

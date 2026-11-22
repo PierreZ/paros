@@ -119,9 +119,21 @@ force. The narrow shape is the default grid (one column of three); the wide shap
 two columns and promises in pages of two. Each campaign reaches its named sites (a seal lost, a
 `Noop` below the start, an old vote chosen again in a new grid, a third segment, a retire, a
 pull from a peer, a leader stopped on a higher promise, `Unknown`, `Below`, `Resolve`, and
-more). **Open**: the trace check of this walk against `Journal.tla` and the coverage gate over
-its probes (the next rule group of #1326); CTRL faulty votes on the acceptors' disks (the
-leader's blocked slot has unit tests only).
+more). TLC checks the walks of the narrow shape against `journal-state/RolesTrace.tla`, which
+extends `Journal.tla` and binds each event to an action of the model with the parameters the
+code chose (`Register`, `Promise`, `Accept`, `Flush`, `Crash`, `Phase1On`, `SealWrite`, `Open`,
+`Propose`, `TakeBase`, `Apply`, `BoundWrite`, `Retire`, `ResolveBelow`). The checked walks meet
+16 named rules (a lost seal, a `Noop` below and above the start, an old vote proposed again, a
+promise after its Phase 1 closed, a crash that lost a queued write, a third segment, `Below`,
+`Resolve`, and more). A boundary write before its batch is durable is the control: the oracles
+pass it, TLC refuses the write. TLC refuses 27 named edits of the recorded walks. The trace check
+found three steps of the code that the model did not have; each is now a rule of both: a leader
+keeps the read set and the first slot of its campaign (`Register` takes them), the gap fill
+writes a `Noop` above the start below the highest vote it saw, and the replica's boundary write
+and its `Resolve` answer wait on the replica's batch. The wide shape (two columns) has no trace
+check: `Journal.tla` chooses a slot at a quorum of the whole grid, not of one column.
+**Open**: the coverage gate over the journal's probes (the next rule group of #1326); CTRL
+faulty votes on the acceptors' disks (the leader's blocked slot has unit tests only).
 
 **The walk of the register** (#1325 (the matchmaker register as an optional role),
 `src/register.rs`) runs `paros_journal::register` over four machines: operations of every change

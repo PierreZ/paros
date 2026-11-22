@@ -291,6 +291,12 @@ impl<T> JournalLeader<T> {
         &self.phase
     }
 
+    /// The leader's Phase 1: the reports it gathered.
+    #[must_use]
+    pub fn phase1(&self) -> &Phase1 {
+        &self.phase1
+    }
+
     /// The segments the leader's Phase 1 reads, oldest first.
     #[must_use]
     pub fn segments(&self) -> &[ReadSegment] {

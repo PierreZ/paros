@@ -135,8 +135,10 @@ impl Phase1 {
         }
     }
 
-    /// The acceptors that answered completely.
-    fn complete(&self) -> BTreeSet<NodeId> {
+    /// The acceptors that answered completely: the reports that
+    /// [`Self::close`] reads.
+    #[must_use]
+    pub fn complete(&self) -> BTreeSet<NodeId> {
         self.reports
             .iter()
             .filter(|(_, report)| report.complete)

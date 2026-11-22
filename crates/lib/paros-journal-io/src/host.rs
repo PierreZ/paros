@@ -581,10 +581,10 @@ fn replica_effects(address: Address, out: Vec<ReplicaEffect>, effects: &mut Vec<
                 envelope: envelope(address, to, message),
                 after,
             },
-            ReplicaEffect::Register(change) => Effect::Register {
+            ReplicaEffect::Register { change, after } => Effect::Register {
                 address,
                 change,
-                after: None,
+                after,
             },
         });
     }

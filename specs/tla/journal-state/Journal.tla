@@ -155,9 +155,11 @@ VARIABLES
   bgen,    \* ballot -> the configuration it registered, 0 before
   \* Leaders, in memory.
   bst,     \* ballot -> "new", "p1" (Phase 1 done), "w" (writes)
+  bH,      \* ballot -> the configurations its Phase 1 reads, fixed at Register
+  bE,      \* ballot -> configuration -> its seal end at Register, or None
   bsafe,   \* ballot -> slot -> the vote that its Phase 1 saw, or None
   bend,    \* ballot -> the seal end it computed, or None
-  blo,     \* ballot -> the first slot that it writes
+  blo,     \* ballot -> the first slot that it writes, fixed at Register
   bstart,  \* ballot -> the start of its segment when it opened, or None
   prop,    \* ballot -> slot -> its proposal, or None
   \* Acceptors: memory, the queue of writes, disk.
@@ -173,7 +175,7 @@ VARIABLES
   resolved \* slot -> the answer to the Resolve of a `Below`, or None
 
 reg == <<top, rend, rbound, rret, rtrim, bgen>>
-ldr == <<bst, bsafe, bend, blo, bstart, prop>>
+ldr == <<bst, bH, bE, bsafe, bend, blo, bstart, prop>>
 acc == <<mprom, mvote, pend, dprom, dvote, crashes, p1b, sent2b>>
 rep == <<rapp, rbase, rstart, acked, resolved>>
 vars == <<reg, ldr, acc, rep>>
@@ -277,6 +279,8 @@ Init ==
   /\ rtrim = [g \in Gens |-> FALSE]
   /\ bgen = [b \in Ballots |-> 0]
   /\ bst = [b \in Ballots |-> "new"]
+  /\ bH = [b \in Ballots |-> {}]
+  /\ bE = [b \in Ballots |-> [h \in Gens |-> None]]
   /\ bsafe = [b \in Ballots |-> [s \in Slots |-> None]]
   /\ bend = [b \in Ballots |-> None]
   /\ blo = [b \in Ballots |-> 0]
@@ -313,18 +317,33 @@ Reshape ==
 (***************************************************************************)
 (* Matchmaking and Phase 1.                                                *)
 (***************************************************************************)
-\* Ballot b registers the newest configuration, in ballot order.
+\* The configurations that the Phase 1 of a ballot of g reads.
+H(g) == {h \in Live : h <= g}
+
+\* Ballot b registers the newest configuration, in ballot order. The
+\* leader takes what its Phase 1 reads from the register value of its
+\* campaign, and keeps it (`JournalLeader::campaign`): the configurations
+\* that are not retired, the end of each one that is sealed, and the first
+\* slot it writes, the applied prefix of the oldest configuration it reads
+\* (its replicas hold every slot below). A retire or a seal after the
+\* campaign does not change them: the leader of a retired configuration's
+\* acceptors waits, and a seal by another first leader stops this one.
+\* A ballot registers once, above every registered ballot: the second guard
+\* also refuses b itself once it registered.
 Register(b) ==
-  /\ bgen[b] = 0
+  LET m == Min(H(top)) IN
   /\ \A c \in Ballots : bgen[c] # 0 => c < b
   /\ <<b, top>> \in GenOK
   /\ bgen' = [bgen EXCEPT ![b] = top]
-  /\ UNCHANGED <<top, rend, rbound, rret, rtrim, ldr, acc, rep>>
+  /\ bH' = [bH EXCEPT ![b] = H(top)]
+  /\ bE' = [bE EXCEPT ![b] = [h \in Gens |-> IF Done(rend[h]) THEN rend[h].v ELSE None]]
+  /\ blo' = [blo EXCEPT ![b] =
+       Max({Start(m)} \cup {Front(r) : r \in {r \in RepOf[m] : rbase[r] # None}})]
+  /\ UNCHANGED <<top, rend, rbound, rret, rtrim, bst, bsafe, bend, bstart, prop, acc, rep>>
 
-\* The configurations that the Phase 1 of a ballot of g reads.
-H(g) == {h \in Live : h <= g}
-\* The slots of h that it reads: below the end, once the end is done.
-ReadSet(h) == IF Done(rend[h]) THEN 0..(rend[h].v - 1) ELSE Slots
+\* The slots of h that the Phase 1 of b reads: below the end, once the end
+\* was done at its Register.
+ReadSet(b, h) == IF bE[b][h] # None THEN 0..(bE[b][h] - 1) ELSE Slots
 
 \* The reports of Phase 1 of b from the acceptors of Q: <<a, votes>>. With
 \* `Direct`, the promises are durable in the step, so Phase 1 takes them from
@@ -337,42 +356,42 @@ Promised(b, Q) ==
   IF Direct THEN \A a \in Q : a \in Active /\ mprom[a] < b
   ELSE \A a \in Q : \E m \in p1b : m.a = a /\ m.b = b
 
-Phase1(b) ==
+\* The Phase 1 of b on the promise quorum Qs[h] of each configuration h
+\* that it reads. `RolesTrace.tla` names the quorums that the code read.
+Phase1On(b, Qs) ==
   LET g == bgen[b] IN
-  /\ g # 0
+  \* A registered ballot: `Live` holds no 0.
   /\ g \in Live
   /\ bst[b] = "new"
-  /\ \E Qs \in [H(g) -> UNION {QOf[h] : h \in Gens}] :
-       /\ \A h \in H(g) : Qs[h] \in QOf[h] /\ Promised(b, Qs[h])
-       /\ LET \* The votes seen at each slot, in the read set of each grid.
-              seen(s) == {x[2][s] : x \in UNION {Reports(b, Qs[h]) : h \in {h \in H(g) : s \in ReadSet(h)}}}
-              voted(s) == {x \in seen(s) : x[1] > 0}
-              top1(s) == CHOOSE x \in voted(s) : \A y \in voted(s) : y[1] <= x[1]
-              \* The slots with a vote in the old grid.
-              old == IF g >= 2 /\ g - 1 \in H(g)
-                     THEN {s \in Slots : \E x \in Reports(b, Qs[g - 1]) : x[2][s][1] > 0}
-                     ELSE {}
-              all == UNION {Qs[h] : h \in H(g)}
-          IN /\ bsafe' = [bsafe EXCEPT ![b] =
-                  [s \in Slots |-> IF voted(s) # {} THEN top1(s)[2] ELSE None]]
-             /\ bend' = [bend EXCEPT ![b] =
-                  IF g >= 2 /\ rend[g - 1] = None
-                  THEN IF EndRule = "voted"
-                       THEN Max({Start(g - 1)} \cup {s + 1 : s \in old})
-                       ELSE Max({Start(g - 1)} \cup
-                                {Front(r) : r \in {r \in RepOf[g - 1] : rbase[r] # None}})
-                  ELSE None]
-             \* It writes from the applied prefix of the oldest segment it
-             \* reads: the replicas of that segment hold the slots below.
-             /\ blo' = [blo EXCEPT ![b] =
-                  LET m == Min(H(g)) IN
-                  Max({Start(m)} \cup {Front(r) : r \in {r \in RepOf[m] : rbase[r] # None}})]
-             /\ IF Direct
-                THEN /\ mprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE mprom[a]]
-                     /\ dprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE dprom[a]]
-                ELSE UNCHANGED <<mprom, dprom>>
+  /\ \A h \in bH[b] : Qs[h] \in QOf[h] /\ Promised(b, Qs[h])
+  /\ LET \* The votes seen at each slot, in the read set of each grid.
+          seen(s) == {x[2][s] : x \in UNION {Reports(b, Qs[h]) : h \in {h \in bH[b] : s \in ReadSet(b, h)}}}
+          voted(s) == {x \in seen(s) : x[1] > 0}
+          top1(s) == CHOOSE x \in voted(s) : \A y \in voted(s) : y[1] <= x[1]
+          \* The slots with a vote in the old grid.
+          old == IF g >= 2 /\ g - 1 \in bH[b]
+                 THEN {s \in Slots : \E x \in Reports(b, Qs[g - 1]) : x[2][s][1] > 0}
+                 ELSE {}
+          all == UNION {Qs[h] : h \in bH[b]}
+      IN /\ bsafe' = [bsafe EXCEPT ![b] =
+              [s \in Slots |-> IF voted(s) # {} THEN top1(s)[2] ELSE None]]
+         \* A first leader of g: the end of g - 1 was not written at its
+         \* Register. The end is at or above the first slot it writes.
+         /\ bend' = [bend EXCEPT ![b] =
+              IF g >= 2 /\ bE[b][g - 1] = None
+              THEN IF EndRule = "voted"
+                   THEN Max({Start(g - 1), blo[b]} \cup {s + 1 : s \in old})
+                   ELSE Max({Start(g - 1)} \cup
+                            {Front(r) : r \in {r \in RepOf[g - 1] : rbase[r] # None}})
+              ELSE None]
+         /\ IF Direct
+            THEN /\ mprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE mprom[a]]
+                 /\ dprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE dprom[a]]
+            ELSE UNCHANGED <<mprom, dprom>>
   /\ bst' = [bst EXCEPT ![b] = "p1"]
-  /\ UNCHANGED <<reg, prop, bstart, mvote, pend, dvote, crashes, p1b, sent2b, rep>>
+  /\ UNCHANGED <<reg, bH, bE, blo, prop, bstart, mvote, pend, dvote, crashes, p1b, sent2b, rep>>
+
+Phase1(b) == \E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : Phase1On(b, Qs)
 
 (***************************************************************************)
 (* The seal (section J3.1): the first leader of g writes the end of g - 1  *)
@@ -412,7 +431,7 @@ Open(b) ==
   /\ IF g >= 2 /\ bend[b] # None THEN rend[g - 1].v = bend[b] ELSE TRUE
   /\ bst' = [bst EXCEPT ![b] = "w"]
   /\ bstart' = [bstart EXCEPT ![b] = Start(g)]
-  /\ UNCHANGED <<reg, bsafe, bend, blo, prop, acc, rep>>
+  /\ UNCHANGED <<reg, bH, bE, bsafe, bend, blo, prop, acc, rep>>
 
 (***************************************************************************)
 (* Phase 2. The leader of b writes every slot of its segment, and below    *)
@@ -425,28 +444,32 @@ Writable(b) ==
                     \/ bsafe[b][s] # None
                     \/ GapFill}
 
+\* One above the highest slot where the Phase 1 of b saw a vote.
+TopSeen(b) == Max({0} \cup {s + 1 : s \in {s \in Slots : bsafe[b][s] # None}})
+
+\* The gap fill writes a `Noop` at each slot with no vote below the start of
+\* the segment and below the highest vote seen (`JournalLeader::open`).
 Propose(b, s, v) ==
   /\ bst[b] = "w"
   /\ s \in Writable(b)
   /\ prop[b][s] = None
   /\ \A t \in Writable(b) : t < s => prop[b][t] # None
   /\ v \in IF bsafe[b][s] # None THEN {bsafe[b][s]}
-           ELSE IF s < bstart[b] THEN {Noop}
+           ELSE IF s < bstart[b] \/ s < TopSeen(b) THEN {Noop}
            ELSE Values[s]
   /\ prop' = [prop EXCEPT ![b][s] = v]
-  /\ UNCHANGED <<reg, bst, bsafe, bend, blo, bstart, acc, rep>>
+  /\ UNCHANGED <<reg, bst, bH, bE, bsafe, bend, blo, bstart, acc, rep>>
 
 (***************************************************************************)
 (* Acceptors: a step changes memory and queues its writes. A write is      *)
 (* <<kind, s, b, v, send>>: kind "p" (promise b), "v" (vote <<b, v>> at s) *)
 (* or "pv" (both). send tells whether the write's flush sends the reply.   *)
 (***************************************************************************)
+\* `bH[b]` is empty until b registers, so only a registered ballot is promised.
 Promise(a, b) ==
   /\ ~Direct
-  /\ bgen[b] # 0
   /\ a \in Active
-  /\ \E h \in H(bgen[b]) : a \in CfgOf[h]
-  /\ bst[b] = "new"
+  /\ \E h \in bH[b] : a \in CfgOf[h]
   /\ mprom[a] < b
   /\ mprom' = [mprom EXCEPT ![a] = b]
   /\ CASE Reply1b = "mem" ->
@@ -727,6 +750,15 @@ ResolveReadOnly == [][(\E s \in Slots : resolved'[s] # resolved[s]) =>
 
 \* A trimmed record stays trimmed.
 TrimStays == [][\A p \in Gens : rtrim[p] => rtrim'[p]]_vars
+
+\* An acceptor raises its promise to b only while its configuration runs
+\* (the acceptors of a retired configuration stop) and only when b reads
+\* that configuration: the leader of b sends its `Prepare` and its `Accept`
+\* to the configurations of `H_b` alone.
+PromiseRead == [][\A a \in Acceptors :
+                    mprom'[a] > mprom[a] =>
+                      /\ a \in Active
+                      /\ \E h \in bH[mprom'[a]] : a \in CfgOf[h]]_vars
 
 (***************************************************************************)
 (* Liveness. Every step is bounded; with weak fairness the journal runs    *)
