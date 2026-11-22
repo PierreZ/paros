@@ -11,6 +11,10 @@ grid4           pass       ci
 grid4_restart   pass       ci
 majority        pass       ci
 two_one         pass       ci
+# A repair in two writes with no restart, two ballots: the acceptor that
+# deleted its record promises and campaigns only once it wrote the new one.
+drop_first_two  pass       ci
+drop_first_lead pass       ci
 # Reach: a check that must break, so that the passing checks are not empty.
 reach_faulty    violation  ci
 reach_block     violation  ci

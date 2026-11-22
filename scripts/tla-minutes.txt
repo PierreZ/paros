@@ -17,10 +17,10 @@ cas-register 19
 cell-control 5
 compartments 2.5
 config-register 14.5
-ctrl-grid 11
+ctrl-grid 13
 ctrl-segments 1
 decree 8.5
-degraded-reshape 13
+degraded-reshape 15
 election 8
 experiments/segments/a 4
 experiments/segments/b 3.5

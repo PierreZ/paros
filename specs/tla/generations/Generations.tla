@@ -134,9 +134,11 @@ Closed(g, w, regs) ==
            /\ Closes({[wm |-> wm[m], regs |-> reg[m]] : m \in Q}, w, regs)
 
 \* Member m of the set s proposed for generation g holds its bootstrap.
+\* Generation g - 1 is chosen here with no guard of its own: a close needs
+\* the frozen records of a majority of Set(g - 1), and the empty set has no
+\* majority and no member.
 Boot(m, g, s, w, regs) ==
   /\ g \in 1..NG /\ s \in Targets /\ m \in s
-  /\ Set(g - 1) # {}
   /\ \/ \E r \in boots : r.gen = g /\ r.set = s /\ r.wm = w /\ r.regs = regs
      \/ Closed(g, w, regs)
   /\ boots' = boots \cup {[mm |-> m, gen |-> g, set |-> s, wm |-> w, regs |-> regs]}

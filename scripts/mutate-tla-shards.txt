@@ -14,13 +14,13 @@ cas-register 4
 cell-control 2
 compartments 3
 config-register 8
-ctrl-grid 14
+ctrl-grid 18
 ctrl-segments 1
 decree 2
-degraded-reshape 7
+degraded-reshape 12
 election 3
 flight-rule 1
-generations 3
+generations 8
 grid 0
 grid-controller 4
 handover 5
@@ -28,7 +28,7 @@ handover-chain 1
 handover-gc 1
 health 0
 journal-ids 3
-journal-state 19
+journal-state 24
 leader-handoff 12
 matchmaker 3
 multi-paxos 14
@@ -52,4 +52,4 @@ zero-stall 17
 experiments/segments/a 2
 experiments/segments/b 2
 experiments/segments/reads 6
-experiments/stale-stopped/restart 8
+experiments/stale-stopped/restart 10

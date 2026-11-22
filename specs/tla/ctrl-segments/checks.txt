@@ -8,6 +8,8 @@
 # failed machine copy at a time (#1263 (CTRL recovery in the journal)).
 safety          pass       ci
 safety_k2       pass       ci
+# Every machine copy may fail: a lost slot never gets a good copy back.
+loss_all        pass       ci
 live            pass       ci
 # Item 2: a replica whose damage a scrub found and no repair fixed may
 # count for the retire. Safe: the damage is the one failed copy.

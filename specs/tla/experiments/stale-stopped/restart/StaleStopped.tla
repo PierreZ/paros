@@ -192,8 +192,10 @@ Selected(S) ==
 \* first.
 Propose ==
   /\ phase = "p1"
+  \* S can hold two promises of one member at this round (the code keeps
+  \* one): each is a promise at the round, so P2c holds for the highest
+  \* vote among all of them.
   /\ \E S \in SUBSET {m \in msgs : m.type = "1b" /\ m.bal = round} :
-       /\ \A m, n \in S : m.acc = n.acc => m = n
        /\ \E Q \in Quorums : Q = {m.acc : m \in S}
        /\ target' = Selected(S)
        /\ Send([type |-> "2a", bal |-> round, val |-> Selected(S)])
@@ -259,6 +261,23 @@ LearnOnlyChosen == \A v \in learned : Chosen(v)
 OneValuePerRound ==
   \A m, n \in msgs :
     (m.type = "2b" /\ n.type = "2b" /\ m.bal = n.bal) => m.val = n.val
+
+\* A matchmaker answers only a request that a node sent: a `Stopped`
+\* answers a `Stop` of its incarnation, and a promise answers a `Prepare`
+\* of its round. The floor that a reply carries so comes from the rounds
+\* of this node.
+Asked ==
+  /\ \A m \in msgs : m.type = "stopped" => [type |-> "stop", inc |-> m.inc] \in msgs
+  /\ \A m \in msgs : m.type = "1b" => [type |-> "1a", bal |-> m.bal] \in msgs
+
+\* The stop quorum: the node counts replies in phase "stop" only, one
+\* reply of each member, and clears them as it starts a stop again. A
+\* reply counted twice could only raise the floor, but it is not the
+\* code's count.
+FoldOnce ==
+  [][\/ acks' = {} /\ floor' = 0
+     \/ phase = "stop" /\ acks' # acks
+     \/ UNCHANGED <<acks, floor>>]_vars
 
 \* Reachability controls: each must be violated.
 NoLearn == learned = {}

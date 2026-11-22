@@ -162,7 +162,11 @@ no checked model takes. The trace specs today are:
   floor and every registration a majority held reaches each later generation.
 - `batcher/BatcherTrace`: the batcher and the unbatcher, on the batcher walk. `Batcher.tla` has
   the walk's network (a batch lands whole, maybe twice, with no Paxos under it) and checks that
-  each answer holds its own records and that a batch keeps push order.
+  each answer holds its own records and that a batch keeps push order. `limits` (ci) adds
+  `BatchFits` (a batch holds a write; a lane batch fits the limits and holds no write that goes
+  alone) and `SendOrder` (the batches of a journal leave in the order the batcher got their
+  writes: a write that goes alone flushes its lane first), on an empty write and writes that
+  pass one limit each together.
 - `journal-state/FoldTrace`: the journal fold of `paros-journal`, on the fold walk of
   `journal-sim` (#1324 (paros-journal)). `Journal.tla` holds the fold as operators (`Res`,
   `Step`, `Bound`, `CoversOn`, `ResolveOn`), not as one action, because each replica of the
@@ -221,7 +225,10 @@ Each experiment has one folder for each design, with the same layout as a model,
 - `experiments/stale-stopped/`: #1229 (a stale `Stopped` reply reuses a decree ballot). The
   ballot of the handover's decree across a restart of the reconfigurer (`restart/`): the rule of
   the code today as the control, against a nonce of the incarnation in `Stop` and `Stopped`
-  and a decree round on disk.
+  and a decree round on disk. `Asked` (a matchmaker answers only a `Stop` or a `Prepare` that the
+  node sent) and `FoldOnce` (the stop quorum counts one reply of each member, in phase "stop")
+  hold in `nonce`, `durable` and `retry_one` (retries in one incarnation, nonce, 224 thousand
+  states).
 
 ## The Paxos flavors and their models
 
@@ -2482,6 +2489,8 @@ answers, so that a registration that an ack waited for is seen.
 |---|---|---|
 | `reach_degraded_ack` | ci | violation of `NoDegradedAck`: a bypass ballot acks a slot while a column of the old grid is below quorum |
 | `live_phase1_small`, `retire_phase1_small`, `live_phase1`, `retire_phase1` | ci, long | violation: with the decision hold of #579, the bypass ballot's writes are chosen in the new grid, but it never acks, and the old grid never retires (12 thousand states on `LShrink`) |
+| `bypass_recovered` | ci | pass of `Agreement`: ballot 2 recovers by Phase 1 what ballot 1 wrote, and its leader moves to ballot 3 in the new grid. It proposes each recovered value before the bypass; without that, ballot 3 finds the slot free and chooses another value |
+| `bypass_between` | ci | pass of `Agreement`: a rival registers ballot 2 between the leader's ballots 1 and 3, so the bypass check sends the leader to Phase 1 |
 | `live_record_small`, `live_record`, `live_record_plus` | ci | pass: with the record check and no hold, the bypass ballot acks and the old grid retires; `_plus` adds a crash in the healthy column (`F` down there) |
 | `live_block_propose_small`, `live_block_propose` | ci, long | pass: with the hold `block` before Phase 2, the same (23 thousand states, 17 minutes for the 3 × 2 grid) |
 | `safe_record` | ci | pass: `ReadSafe` on `LSwap` with the column below quorum (51 thousand states) |
@@ -3162,11 +3171,12 @@ chosen value.
 | Check | CI | Result |
 |---|---|---|
 | `grid4` | ci | pass: a grid of two columns of two (acks 1), two ballots, two commands, one damaged record, the repair of a chosen value (77 thousand states) |
-| `grid4_restart` | ci | pass: the same with one restart (263 thousand states) |
+| `grid4_restart` | ci | pass: the same with one restart, and `DeadSilent` (a ballot whose owner booted again proposes nothing) (263 thousand states) |
 | `majority` | ci | pass: a majority of three, three ballots, so that a faulty report can sit above a readable one (2.8 million states, 7 min) |
 | `two_one` | ci | pass: two configurations, `c1` (a1, a2, a3; ballot 1) and `c2` (a3, a4; ballots 2 and 3), one command |
 | `two` | long | pass: the same with two commands (3.0 million states, 8 min) |
 | `drop_first_up` | long | pass: a repair in two writes (delete, then write) with no restart |
+| `drop_first_two`, `drop_first_lead` | ci | pass: the same with two ballots; in `drop_first_lead` the repairing acceptor owns the next ballot. The acceptor that deleted its record promises and campaigns only once it wrote the new one: without that, its empty promise fills a chosen slot. `drop_first_two` also checks `InBounds` (the faults and restarts stay in the bounds of the check) and `OwnRecords` (a won campaign's allocator is past every record of the owner's own promise) |
 | `repair_none` | long | pass: no repair, only a later `Accept` heals: the repair adds a copy, it never decides |
 | `live` | long | pass: `Ends`, the last ballot settles and every faulty record of a learned slot is repaired |
 | `grid` | long, 60 min | pass (bounded): the default grid of the journal, two columns of three, acks 2; no violation in 60 min (10.9 million distinct states, depth 19), a bounded run, not a proof |
@@ -3195,10 +3205,15 @@ left it reports data loss. The survive promise is `F` failed machine copies at o
 copy is failed until its repair, a lost machine for ever. The object store is outside the
 promise (`ObjFaults`). `Survive`: with no damaged object, every slot keeps a good copy.
 `TrueLoss`: a loss report is true. `Repairable`: a found damage always has a source.
+`FoundBad`: a found damage is still there until a repair, a drop, a loss or the retire.
+`ObjAfterRetire`: no object exists while S1 is sealed. `LostForEver`: a lost machine stays lost.
+`SegForward`: the segment record moves forward only. `NoResurrection`: a slot with no good copy
+never gets one back (no unsafe recover in v1).
 
 | Check | CI | Result |
 |---|---|---|
 | `safety`, `safety_k2` | ci | pass: three acceptors, three replicas, `F = 1`, one or two slots; retire at `F + 1`, offload, drop |
+| `loss_all` | ci | pass: every machine copy may fail (`F = 6`): `TrueLoss` and `NoResurrection` |
 | `live` | ci | pass: `Kept` (each slot ends with a good copy) and `Heals` (every found damage ends repaired) |
 | `retire_any` | ci | pass: a replica whose damage a scrub found and no repair fixed counts for the retire. The damaged copy is the one failed copy of the promise, so the other counted replica stays good and the repair reads it, never the retired grid |
 | `object`, `live_object` | ci | pass: one damaged object is replaced from a replica, or reported once no replica holds the segment; a report is always true |
@@ -3263,7 +3278,7 @@ says `Duplicate` or position taken); `OneFold` (each replica's fold is the fold 
 its front); `RecordTrue` (a done boundary state is the journal state at the end); `NoMoveBack`;
 `OneUnretired`; `ResolveTrue` (the answer to a `Resolve` is the answer of the whole log at the
 slot of the write, or `Truncated` once the floor is above the position); `Readable` (every record at or above the floor has a live copy: a disk quorum of
-a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `TrimStays`, `ResolveReadOnly` (a `Resolve` changes nothing but its answer).
+a live grid, or a replica of its segment that is not trimmed); `EndOnce`, `BoundOnce` (a boundary state written at a majority never changes), `TrimStays`, `ResolveReadOnly` (a `Resolve` changes nothing but its answer).
 Liveness: `Ends` (the chosen log has no hole and every chosen slot is answered).
 
 | Check | CI | Result |
