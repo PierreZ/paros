@@ -393,6 +393,12 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   have caught, add the check in the same PR as the fix: a lint, a `scripts/check-*.sh` in CI, a
   test or an oracle, or else a rule in this file. A fix of only the one instance lets the
   mistake come back.
+- **A new crate adds only the CI it needs** (Pierre, 2026-11-22). When you add a crate, keep CI
+  time down: a job or a step for the crate runs only when the crate, a crate it depends on, or
+  the job itself changes (a path filter, or the "changes no line of" guard that the mutants steps
+  of `.github/workflows/rust.yml` use). Do not add a full workspace job for one crate. A filter
+  never skips a check that the change can break: a crate that depends on the changed one is in
+  scope too (`REVIEW.md`, a new `paths-ignore` is a loosened judge).
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
