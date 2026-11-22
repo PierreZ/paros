@@ -320,5 +320,8 @@ The table today, as a proposal (the names and the numbers are **Open**, open poi
 | 7 | `paros` | The facade. It will bundle the adapters of layer 6 behind a feature. |
 | 8 | `consensus-sim`, `journal-sim`, `paros-wasm` | Crates that only test or show the others. Nothing depends on them. |
 
-**Open**: the layer table and the calls of the placement port. They are proposals until Pierre
-agrees.
+The calls of the placement port are `standing`, `place` and `release`, and the cell places its
+own control journal through the same port (Pierre, 2026-11-22, #1421 (the placement port);
+`docs/journal/06-controller.md` §J6.3, `specs/tla/placement-port/`).
+
+**Open**: the layer table. It is a proposal until Pierre agrees.

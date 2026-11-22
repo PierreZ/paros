@@ -222,6 +222,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, boundary write, retire, offload mark, trim, acceptor compaction, matchmaker handover, grid controller election, reshape call, heal of a sealed segment) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | built (`paros_journal_control::role`; its walk is traced against `ControllerTrace.tla`) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
+| The placement port between the grid controller and the cell: `standing`, `place` (all or none, keyed by a request id the caller draws, one write), `release`; the limit of moves in flight; the cell's own control journal through the same port | not built (the trait in `paros-journal-control` and its answer in `paros-cell` wait for #1323) | `placement-port/` | #1421 (the placement port) |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (now the whole state in the segment record, `seal-chain/`; first checked as `next_seq` in the segment record, the uuid in the journal's matchmaker record and a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
@@ -2351,6 +2352,61 @@ The answer to #1259:
   `Plan`, `Call`, `Process`, `Receive`, `SealIn`, `Retire`) are the events a trace spec will
   follow once the `journal-sim` walk of the controller loop exists (#1261 (grid controller
   decision tests), after #1189).
+
+### `placement-port/`: the placement port between the grid controller and the cell, for #1421 (the placement port)
+
+Pierre's decisions (2026-11-22): the grid controller of a journal owns the loop that changes its
+membership (ask, reshape, release); the cell answers where, through a port with three calls,
+`standing`, `place` and `release`; a grant in flight is the token of the rate limit of the cell;
+"gone" is a durable record of the cell; and the cell's own control journal uses the same port, so
+the cell answers itself (`docs/journal/06-controller.md` §J6.3). A coarse model: a journal is a
+set of members, a reshape swaps them in one step when a majority of the members is up (the
+journal's own models judge that step), and every step of the cell is a write of its control
+journal, which needs a majority of that journal's members up.
+
+The cell writes a grant and its bookings in one write, keyed by the request id that the
+controller drew; the cell sends the answer of a grant again at any time, so a repeated request gets
+the same answer (`PlaceAgain`, a read of the fold); a cell at the limit answers
+"busy" and writes nothing (no step in the model: the request waits, and the controller sends it
+again); a cell with no machine that fits records a refusal under the id, and the controller asks
+again with a new id only after the records that decide a placement (gone, draining, bookings)
+change. `release(request id, members)` ends the grant and frees its bookings on the machines that
+are not members now. A journal below a majority cannot reshape: its controller abandons the grant
+with a release that names the members it has, so the grant stops holding the limit.
+The faults: machines that fail for good (the cell records them gone), one drain by an operator,
+lost and repeated messages, a restart of the cell coordinator (its memory is lost). A crash or a
+takeover of a grid controller is #1422 (takeover by a new controller), not this model.
+
+Two journals, the cell's control journal on `m1..m3` and one journal on `m3..m5`, five machines,
+two roles at most on a machine, one move in flight in the cell.
+
+Properties: `OneGrantPerRid`, `GrantWhole` (all or none), `InFlight` (the limit), `Capacity`,
+`KeepsSize` (a member leaves only in the reshape that puts its replacement in), `MembersBooked`,
+`NoOrphan` (each booking belongs to a member, to a move in flight or to a write the coordinator
+still holds), `ReleasedFree`, `Writes` (an action property: every write of the cell and every
+reshape waits for a majority), `MovesInFlight` (at most `Limit` controllers are between a grant
+and a reshape), and under weak fairness once the faults stop, `Healed`: no grant is in flight,
+and each journal is settled. A journal is settled when it is off the machines that failed or
+drain, or it is below a majority (nothing can heal it: hold and page), or its last ask was refused
+and the records did not change since.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: every safety property, one failure, one drain, one lost message (61 thousand distinct states) |
+| `live` | ci | pass: `Healed`, with the faults of `safety` |
+| `live_two` | ci | pass: `Healed` with two failures, so the cell or a journal can be below a majority (320 thousand distinct states) |
+| `live_tight` | ci | pass: `Healed` with two drains, so the cell refuses and the controller waits for a change of the records |
+| `safety_two` | ci | pass: two failures, so the cell and a journal can be below a majority |
+| `safety_tight` | ci | pass: two failures and two drains, so the cell also refuses (1.8 million distinct states) |
+| `book_first_nocrash` | ci | pass: the bookings first and the grant in a later write is safe while the coordinator keeps its memory |
+| `book_first` | ci | violation of `NoOrphan`: a restart between the two writes leaves bookings that nobody frees (the control of "the id is in the fold before any machine is booked") |
+| `no_dedup` | ci | violation of `OneGrantPerRid`: a repeated request gets a second grant |
+| `partial` | ci | violation of `KeepsSize`: a partial grant shrinks the journal |
+| `no_limit` | ci | violation of `MovesInFlight`: with no limit, two controllers reshape at the same time |
+| `no_free` | ci | violation of `ReleasedFree` |
+| `fixed` | ci | violation of `Healed`: a cell control journal that does not use the port never leaves a failed machine |
+| `no_abandon` | ci | violation of `Healed`: a journal below a majority keeps its grant, and the limit blocks every other journal |
+| `reach_cell_heal`, `reach_busy`, `reach_refusal`, `reach_two_moves`, `reach_abandon` | ci | violation: the model reaches a heal of the cell's own journal, a busy cell, a refusal, two moves one after the other, and an abandoned grant |
 
 ### `degraded-reshape/`: a reshape when a column is below quorum, for #1258 (reshape with a column below quorum)
 

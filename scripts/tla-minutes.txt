@@ -41,6 +41,7 @@ multi-paxos 20
 multi-writer 5
 node 12.5
 offload 1.5
+placement-port 5.5
 proxy-leader 2
 quorum-everywhere 15.5
 re-replication 8
