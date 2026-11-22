@@ -127,7 +127,19 @@ The compaction floor and the GC watermark never wait on each other: one is per n
 | The client | `paros-client/src/lib.rs`: `truncate`; `paros-client/src/checkpoint.rs`: `Checkpointer`, `truncate_to` |
 | The decision | `docs/journal/02-data-plane.md` §J2 |
 
-**Sim gates and oracles** (`paros-sim/src/audit/node.rs` unless named):
+The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- The models `specs/tla/truncation/`, `specs/tla/truncation-reconfig/` and
+  `specs/tla/segment-truncate/`, and the trace spec `specs/tla/node/TruncationTrace.tla`.
+- `consensus-sim`'s flavors `Flavor::compaction` and `Flavor::compartments_compacting`, with the
+  sites "cluster: a node's disk dropped a truncated prefix", "cluster: a node jumped to a trim
+  point" and "cluster: a truncate raised first_seq".
+- Controls: `Mutant::CompactPastFold` (refused by the trace check) and `Mutant::CorruptTrimJump`
+  (caught by `JOURNAL_FOLD`).
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/node.rs` unless named):
 
 - `"a node truncates its log prefix behind the chosen index"`, `"a compaction floor never
   regresses"`, `"a compaction floor never passes the quorum-decided frontier"`.

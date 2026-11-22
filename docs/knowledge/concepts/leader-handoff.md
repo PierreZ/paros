@@ -172,6 +172,8 @@ from which A4 and the rest of the safety proof follow.
 | The durable frontier | `paros-consensus/src/node/phase2.rs`: `record_own_round` |
 | Who calls it | `paros-roles/src/node/stop.rs`: `hand_on` (a clean stop hands each leadership on, #560); `paros-roles/src/node/shared.rs`: `offer_handoff` (the driver's BUGGIFY site); `paros-roles/src/node/operator.rs`: `handoff`, the internal `Handoff` RPC, on request of the cell coordinator (a move off the leader's machine, or a leader balance, #687 (rebalance a cell)), as etcd-raft's leader transfer is asked for (`../references/etcd-raft/check-quorum.md` §6) |
 
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
 The rule is stated in the module doc of `node/handoff.rs` (what authority is, why no durable
 fence is needed, authority uniqueness) and in the doc of `can_relinquish` (one hop only). The
 full design note is [the design note]. AGENTS.md lists it under "Protocol invariants to
@@ -185,8 +187,8 @@ disks:
 - `ONE_PROPOSAL`, "a ballot proposes one command per slot" (`oracle/ledger.rs`): every `Accept`
   that a node or a proxy sends at one `(slot, ballot)` carries one command. It judges the
   proposer side, so it fires even when the acceptors' own check holds a second command back.
-  Its control is `Mutant::RewindHandoff` (`tests/mutants.rs`). The old `paros-sim` had this
-  oracle; it came back after #1292 (duplicated Relinquish).
+  Its control is `Mutant::RewindHandoff` (`tests/mutants.rs`). The removed `paros-sim`
+  (at the tag `v0.2.0-alpha.1`) had this oracle; it came back after #1292 (duplicated Relinquish).
 - `ONE_VALUE`, `COMMIT_BACKED`, `PERSIST_BEFORE_SEND` and `LEARNED_CHOSEN` judge the votes and
   the decisions.
 - The trace check: each walk is a behaviour of `specs/tla/node/LeaderHandoffTrace.tla`, and TLC

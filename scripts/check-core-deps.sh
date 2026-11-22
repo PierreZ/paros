@@ -21,14 +21,18 @@
 # moonpool host, #1330 (paros-journal-moonpool)) is an optional feature of the
 # facade, off by default, and lives in its own crate.
 #
-# A new pure crate of the journal (paros-journal-control, the client) joins PURE in the pull request that creates it. A crate that does I/O
-# (an adapter such as paros-journal-moonpool) never joins it.
+# The pure crates are the crates of layers 0 to 5 of the layer table,
+# `scripts/layers.sh` (docs/architecture/04-roles.md §4.4): a new crate of
+# those layers is checked here as soon as it has its row. A crate that does
+# I/O (an adapter such as paros-journal-moonpool) is in layer 6 or above.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 root="$(pwd)"
 
-PURE=(paros-consensus paros-journal paros-journal-control paros-journal-io)
+# shellcheck source=scripts/layers.sh
+. scripts/layers.sh
+mapfile -t PURE < <(crates_in_layers 0 "$PURE_TOP")
 FACADE=paros
 
 # The crates that the observation features of the pure crates pull in.

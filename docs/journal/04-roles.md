@@ -294,8 +294,9 @@ re-exports it only behind an optional feature that is off by default. The facade
 where paros bundles moonpool's storage and network for a program that wants them (Pierre,
 2026-11-21): the bundle is a feature of `paros`, never a dependency of a pure crate. CI runs
 `scripts/check-core-deps.sh`: it fails when a pure crate, or the facade with its default
-features, gains a dependency outside the workspace and the observation crates. A new pure crate
-joins that script in the pull request that creates it. The examples of #1370 (journal examples)
+features, gains a dependency outside the workspace and the observation crates. The pure crates
+are the crates of layers 0 to 5 of the layer table `scripts/layers.sh` (architecture §4.4), so a
+new pure crate is checked as soon as the pull request that creates it gives it its row. The examples of #1370 (journal examples)
 show the rule: a backend written by hand, in memory, with no runtime crate (`paros-journal-io`'s
 `custom_storage`).
 

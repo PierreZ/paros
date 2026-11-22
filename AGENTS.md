@@ -272,6 +272,10 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `-p paros-journal`, `-p paros-journal-control` and `-p paros-journal-io`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
+- `scripts/check-layers.sh` (the layers of the crates, from the table `scripts/layers.sh`;
+  `docs/architecture/04-roles.md` §4.4, "How CI holds the layers"), and
+  `scripts/check-layers.sh --wasm`: each pure crate (layers 0 to 5) builds for
+  `wasm32-unknown-unknown`
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
   the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
   `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
@@ -313,8 +317,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   that changes nothing, with its reason.
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`,
-  `cargo check --target wasm32-unknown-unknown -p paros-journal`, the same with
-  `-p paros-journal-control` and with `-p paros-journal-io`, and
+  `scripts/check-layers.sh --wasm` (each crate of layers 0 to 5), and
   `cargo check --target wasm32-unknown-unknown -p paros`
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
@@ -579,8 +582,10 @@ depend on no async runtime (tokio, compio, smol), no storage engine and no netwo
 and their traits require no `Send` or executor. With no feature on, a pure crate depends on
 workspace crates only; its features only observe (`serde`, `tracing`, `assertions`). A crate that
 does I/O is an adapter of its own (`paros-journal-moonpool`), behind a facade feature that is off
-by default. `scripts/check-core-deps.sh` enforces it in CI; a new pure crate joins its `PURE` list
-in the pull request that creates it.
+by default. `scripts/check-core-deps.sh` enforces it in CI. Its pure crates are layers 0 to 5 of
+the layer table `scripts/layers.sh`: a new crate gets its row in the pull request that creates it
+(`scripts/check-layers.sh` fails on a crate with no row, on a dependency that points up or
+sideways, on the identifier of a higher crate in `src/`, and on a fault switch in a pure crate).
 
 ## Matchmaking, reconfiguration, GC, generations
 
@@ -797,5 +802,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-core-deps.sh`, `check-examples.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

@@ -117,7 +117,17 @@ Two facts paros asserts make this hold:
 | The analysis | `docs/analysis/consensus/matchmaker-interaction-verification.md` |
 | The TLA+ model | `specs/tla/matchmaker/` (#1200): the phase, `H_b` above the maximum watermark, Phase 1 over every configuration, each rule with a control |
 
-**Sim gates and oracles** (`paros-sim/src/audit.rs` and `audit/`):
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- The model `specs/tla/matchmaker/` and the trace specs `MatchmakerTrace.tla` and
+  `MatchmakerGridTrace.tla` (`specs/tla/node/`).
+- `consensus-sim`'s flavor `Flavor::matchmakers`; `ONE_VALUE` binds each ballot to the
+  configuration the matchmakers registered for it (`oracle/ledger.rs`, `Ledger`).
+- The many core probes of `node/matchmaking.rs` and `matchmaker.rs`, all reached in CI.
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit.rs` and `audit/`):
 
 - `"matchmaking: no Prepare leaves before a matchmaker quorum registered its ballot"` (`audit.rs`).
 - `"matchmaking: the watermark used is the maximum reported"`, `"matchmaking: the prior set is the
