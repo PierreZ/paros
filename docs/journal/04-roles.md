@@ -46,9 +46,14 @@ flight rule:
   from a done seal, writes the boundary state when it is full, pulls missing slots from its
   peers, and answers `Resolve` (#1320).
 
-The proxy leader, the leaderless read, the retire that the leader asks, the truncate across
-segments with the compaction of the acceptors, the re-replication and the repair of a blocked
-slot (CTRL) are the next rule groups of #1326.
+The retire and the re-replication (#1314) are built too. The leader asks each replica of the
+sealed segment whether it holds the whole segment (`Holding`, `Holds`) and writes `retired` at
+`F + 1` holders (`LeaderEffect::Retired` once the write is seen). A new replica of a retired
+segment joins for one copy of a heal, copies from the full members of the set and reports
+`Copied`; a replica that is in no set and runs no copy drops its copy (§J3.1, "As built").
+
+The proxy leader, the leaderless read, the truncate across segments with the compaction of the
+acceptors and the repair of a blocked slot (CTRL) are the next rule groups of #1326.
 
 **The default deployment** is three machines, each with every role in one process (Pierre, in
 the journal design); the `Host` also supports one process for each role (§J4.2, rule 3).

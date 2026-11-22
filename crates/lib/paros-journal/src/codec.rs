@@ -318,6 +318,7 @@ impl Out {
         }
         self.nodes(&opening.replicas);
         self.nodes(record.replicas());
+        self.u64(record.heals());
         self.u8(match record.state() {
             SegmentState::Pending => 0,
             SegmentState::InForce => 1,
@@ -547,6 +548,7 @@ impl<'a> In<'a> {
             replicas: self.nodes()?,
         };
         let replicas = self.nodes()?;
+        let heals = self.u64()?;
         let state = match self.u8()? {
             0 => SegmentState::Pending,
             1 => SegmentState::InForce,
@@ -564,8 +566,10 @@ impl<'a> In<'a> {
         let start = self.option("start", |input| input.u64().map(Slot))?;
         let end = self.option("end", |input| input.u64().map(Slot))?;
         let boundary = self.option("boundary", Self::boundary)?;
-        SegmentRecord::from_parts(id, release, opening, replicas, state, start, end, boundary)
-            .map_err(|_| DecodeError::Invalid("the fields of a segment record disagree"))
+        SegmentRecord::from_parts(
+            id, release, opening, replicas, heals, state, start, end, boundary,
+        )
+        .map_err(|_| DecodeError::Invalid("the fields of a segment record disagree"))
     }
 
     fn boundary(&mut self) -> Result<BoundaryState, DecodeError> {

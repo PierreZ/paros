@@ -116,11 +116,15 @@ fn replica_batches_read_back_as_the_roles_disk() {
         ),
         (
             PersistId(5),
-            vec![ReplicaOp::Chosen {
-                slot: Slot(4),
-                command: Command::Noop,
-            }],
+            vec![
+                ReplicaOp::Joining(Some(paros_journal::roles::CopyId { term: 3, number: 9 })),
+                ReplicaOp::Chosen {
+                    slot: Slot(4),
+                    command: Command::Noop,
+                },
+            ],
         ),
+        (PersistId(6), vec![ReplicaOp::Joining(None)]),
     ];
     let mut storage = MemStorage::new();
     let mut expected = ReplicaDisk::default();

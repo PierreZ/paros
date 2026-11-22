@@ -4,8 +4,11 @@
 # journal core.
 #
 # The judge: the unit tests of paros-journal and the walks of journal-sim
-# (the oracles and their controls). The trace checks of journal-sim run in the
-# second pass, only on the mutants that this pass missed.
+# (the oracles and their controls). The tests of journal-sim that run TLC (the
+# trace checks and the live check) run in the second pass, only on the mutants
+# that this pass missed. A first pass that also ran the trace checks of the
+# controller walk and the live check reached its timeout of 120 s on many
+# mutants on a CI runner (two mutants at once, each with its JVMs).
 
 # Equivalent mutants only, each with its reason (AGENTS.md, the absolute
 # rule: no allow list).
@@ -13,6 +16,8 @@ exclude_re = []
 
 test_package = ["paros-journal", "journal-sim"]
 test_tool = "nextest"
-additional_cargo_test_args = ["-E", "not (binary(traces) | binary(register_traces) | binary(roles_traces))"]
+# Every test that runs TLC is named `tlc_*` (`crates/sim/journal-sim/AGENTS.md`):
+# the trace checks of each walk and the live check. They run in the second pass.
+additional_cargo_test_args = ["-E", "not test(/^tlc_/)"]
 profile = "mutants"
 minimum_test_timeout = 120

@@ -364,3 +364,271 @@ fn every_probe_message_is_named_once() {
     assert_eq!(names.len(), PROBES.len());
     assert!(PROBES.iter().all(|p| p.starts_with("role: ")));
 }
+
+/// `one_segment`, then segment 2 in force on 4, 5, 6 with replicas 14, 15,
+/// 16, and segment 1 sealed at 3 and retired.
+fn retired() -> RegisterValue {
+    let value = apply(
+        &one_segment(),
+        &Change::Reshape {
+            opening: OpeningCall {
+                term: 1,
+                expected: Some(SegmentId(1)),
+                grid: Grid::new(1, vec![nodes(&[4, 5, 6])]).expect("a v1 grid"),
+                replicas: nodes(&[14, 15, 16]),
+            },
+            release: RELEASE,
+        },
+    );
+    [
+        Change::Seal {
+            segment: SegmentId(1),
+            end: paros_journal::Slot(3),
+        },
+        Change::Boundary {
+            segment: SegmentId(1),
+            state: paros_journal::BoundaryState::fresh(paros_journal::Leader::Unset),
+        },
+        Change::Retire {
+            segment: SegmentId(1),
+            holders: 2,
+            unrepaired_damage: false,
+        },
+    ]
+    .iter()
+    .fold(value, |value, change| apply(&value, change))
+}
+
+const FIRST: CopyId = CopyId { term: 1, number: 0 };
+
+fn copy_ask(copy: CopyId) -> Ask {
+    Ask::Copy {
+        segment: SegmentId(1),
+        node: NodeId(20),
+        set: nodes(&[11, 12, 13]),
+        copy,
+    }
+}
+
+fn heal_change(register: &RegisterValue) -> Change {
+    Change::Rereplicate {
+        segment: SegmentId(1),
+        read: register.segment(SegmentId(1)).expect("segment 1").clone(),
+        term: 1,
+        remove: NodeId(12),
+        add: NodeId(20),
+    }
+}
+
+fn abandon_ask(copy: CopyId) -> Ask {
+    Ask::Abandon {
+        segment: SegmentId(1),
+        node: NodeId(20),
+        copy,
+    }
+}
+
+/// A holding controller that started the heal of replica 12 by 20.
+fn healing(register: &RegisterValue, signals: &Signals) -> Controller {
+    let mut controller = holding();
+    let (ask, decision) = controller.step(&signals.view(ME, 1, register), &TUNABLES);
+    assert!(matches!(
+        decision.map(|d| d.action),
+        Some(Action::Rereplicate { .. })
+    ));
+    assert_eq!(ask, copy_ask(FIRST));
+    controller
+}
+
+#[test]
+fn a_heal_copies_then_writes_the_new_set_on_the_complete_copy() {
+    let register = retired();
+    let signals = Signals::with_down(&[12]);
+    let mut controller = healing(&register, &signals);
+    let heal = controller.heal().expect("a heal in flight").clone();
+    assert_eq!(
+        (heal.remove, heal.add, heal.complete),
+        (NodeId(12), NodeId(20), false)
+    );
+    assert_eq!(
+        heal.read,
+        register.segment(SegmentId(1)).expect("segment 1").clone()
+    );
+    let view = signals.view(ME, 1, &register);
+    assert_eq!(
+        controller.step(&view, &TUNABLES),
+        (copy_ask(FIRST), None),
+        "the copy is asked again until it reports"
+    );
+    let change = heal_change(&register);
+    assert_eq!(
+        controller.rereplicated(&change, &Outcome::NoAnswer),
+        Ask::Nothing,
+        "no write before the copy is complete (control count_start)"
+    );
+    assert_eq!(
+        controller.copied(SegmentId(1), CopyId { term: 1, number: 7 }),
+        Ask::Nothing,
+        "a report of another copy is not counted (control report_sticky)"
+    );
+    assert_eq!(controller.copied(SegmentId(2), FIRST), Ask::Nothing);
+    assert_eq!(
+        controller.copied(SegmentId(1), FIRST),
+        Ask::Call(change.clone())
+    );
+    assert_eq!(
+        controller.step(&view, &TUNABLES),
+        (Ask::Call(change.clone()), None)
+    );
+    assert_eq!(
+        controller.rereplicated(&change, &Outcome::NoAnswer),
+        Ask::Call(change.clone())
+    );
+    let other = Change::Elect { holder: ME };
+    assert_eq!(
+        controller.rereplicated(&other, &Outcome::NoAnswer),
+        Ask::Nothing
+    );
+    let healed = apply(&register, &change);
+    assert_eq!(
+        controller.rereplicated(&change, &Outcome::Done(healed.clone())),
+        Ask::Nothing
+    );
+    assert_eq!(controller.heal(), None);
+    assert_eq!(controller.term(), Some(1));
+    let (ask, decision) = controller.step(&signals.view(ME, 1, &healed), &TUNABLES);
+    assert_eq!(ask, Ask::Nothing);
+    assert!(
+        !matches!(decision.map(|d| d.action), Some(Action::Rereplicate { .. })),
+        "the set has no member down"
+    );
+    assert_eq!(controller.copied(SegmentId(1), FIRST), Ask::Nothing);
+    assert_eq!(
+        controller.rereplicated(&change, &Outcome::NoAnswer),
+        Ask::Nothing
+    );
+}
+
+#[test]
+fn a_heal_whose_new_replica_is_down_ends() {
+    let register = retired();
+    let mut controller = healing(&register, &Signals::with_down(&[12]));
+    let signals = Signals::with_down(&[12, 20]);
+    assert_eq!(
+        controller.step(&signals.view(ME, 1, &register), &TUNABLES),
+        (abandon_ask(FIRST), None)
+    );
+    assert_eq!(controller.heal(), None);
+    let (ask, _) = controller.step(&signals.view(ME, 1, &register), &TUNABLES);
+    let Ask::Copy { node, copy, .. } = ask else {
+        panic!("a new plan, got {ask:?}");
+    };
+    assert_eq!(node, NodeId(21), "the next candidate");
+    assert_eq!(
+        copy,
+        CopyId { term: 1, number: 1 },
+        "a new plan, a new copy"
+    );
+}
+
+#[test]
+fn a_sent_heal_outlives_a_new_replica_that_goes_down() {
+    let register = retired();
+    let mut controller = healing(&register, &Signals::with_down(&[12]));
+    let change = heal_change(&register);
+    assert_eq!(
+        controller.copied(SegmentId(1), FIRST),
+        Ask::Call(change.clone())
+    );
+    // A copy of the compare-and-set can still be in the network: ending the
+    // heal here would let the new replica drop its copy, and the late copy
+    // would then write an empty member.
+    let signals = Signals::with_down(&[12, 20]);
+    assert_eq!(
+        controller.step(&signals.view(ME, 1, &register), &TUNABLES),
+        (Ask::Call(change), None)
+    );
+    assert!(controller.heal().is_some());
+}
+
+#[test]
+fn a_heal_on_an_old_read_ends() {
+    let register = retired();
+    let signals = Signals::with_down(&[12]);
+    let mut controller = healing(&register, &signals);
+    let trimmed = apply(
+        &register,
+        &Change::Trim {
+            segment: SegmentId(1),
+            first_seq: paros_journal::Seq(0),
+        },
+    );
+    assert_eq!(
+        controller.step(&signals.view(ME, 1, &trimmed), &TUNABLES),
+        (abandon_ask(FIRST), None),
+        "a trim ends the heal"
+    );
+}
+
+#[test]
+fn a_view_that_shows_the_heal_ends_it() {
+    let register = retired();
+    let signals = Signals::with_down(&[12]);
+    let mut controller = healing(&register, &signals);
+    controller.copied(SegmentId(1), FIRST);
+    let healed = apply(&register, &heal_change(&register));
+    assert_eq!(
+        controller.step(&signals.view(ME, 1, &healed), &TUNABLES),
+        (Ask::Nothing, None),
+        "a reply was lost, and the write is done"
+    );
+    assert_eq!(controller.heal(), None);
+}
+
+#[test]
+fn a_refused_heal_ends_and_a_term_refusal_stops_the_controller() {
+    let register = retired();
+    let signals = Signals::with_down(&[12]);
+    let mut controller = healing(&register, &signals);
+    let change = heal_change(&register);
+    controller.copied(SegmentId(1), FIRST);
+    assert_eq!(
+        controller.rereplicated(
+            &change,
+            &Outcome::Refused(ChangeRefusal::Stale(SegmentId(1)))
+        ),
+        abandon_ask(FIRST)
+    );
+    assert_eq!(controller.term(), Some(1), "an old read is not a lost term");
+    let (ask, _) = controller.step(&signals.view(ME, 1, &register), &TUNABLES);
+    let second = CopyId { term: 1, number: 1 };
+    assert_eq!(ask, copy_ask(second));
+    controller.copied(SegmentId(1), second);
+    assert_eq!(
+        controller.rereplicated(
+            &change,
+            &Outcome::Refused(ChangeRefusal::Term { held: 2, asked: 1 })
+        ),
+        abandon_ask(second)
+    );
+    assert_eq!(controller.standing(), &Standing::Idle);
+    assert_eq!(controller.heal(), None);
+}
+
+#[test]
+fn a_new_term_numbers_its_copies_from_zero() {
+    let register = retired();
+    let signals = Signals::with_down(&[12]);
+    let mut controller = healing(&register, &signals);
+    controller.copied(SegmentId(1), FIRST);
+    controller.rereplicated(
+        &heal_change(&register),
+        &Outcome::Refused(ChangeRefusal::Term { held: 2, asked: 1 }),
+    );
+    let change = controller.campaign();
+    let value = apply(&register, &change);
+    controller.elected(&Outcome::Done(value.clone()));
+    assert_eq!(controller.term(), Some(2));
+    let (ask, _) = controller.step(&signals.view(ME, 2, &value), &TUNABLES);
+    assert_eq!(ask, copy_ask(CopyId { term: 2, number: 0 }));
+}

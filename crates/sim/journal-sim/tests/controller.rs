@@ -1,6 +1,7 @@
 //! The controller walks (#1261 (grid controller decision tests), §J6.2
 //! test 3): every seed passes every oracle and settles, the campaign
-//! reaches every site and every `probe!` of the controller role, and each
+//! reaches every site and every `probe!` of the controller role (with the
+//! heal walk, `journal_sim::heal`), and each
 //! oracle catches its mutant.
 
 use journal_sim::campaign::{try_campaign, try_sites};
@@ -8,6 +9,7 @@ use journal_sim::controller::{
     BOUNDED_IN_FLIGHT, BOUNDED_RESHAPE_RATE, CONVERGES, COST_BOUND, ControllerMutant, FENCED,
     NO_OSCILLATION, Shape, reach, walk,
 };
+use journal_sim::heal::{self, HealMutant};
 use moonpool_assertions::AssertKind;
 use paros_journal_control::role;
 
@@ -67,6 +69,10 @@ fn the_walks_reach_every_probe_of_the_role() {
                     .try_run()
                     .map_err(|error| error.to_string())?;
             }
+            // The heals of a retired segment's replica set.
+            heal::walk(HealMutant::None, 1000, STEPS)
+                .try_run()
+                .map_err(|error| error.to_string())?;
             Ok("the walks passed")
         },
         role::PROBES,

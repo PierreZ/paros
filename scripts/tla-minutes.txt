@@ -33,6 +33,7 @@ grid-controller 2.5
 handover 10
 handover-chain 7.5
 handover-gc 1.5
+heal-reuse 4
 health 3.5
 journal-ids 6
 journal-state 17

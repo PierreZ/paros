@@ -86,16 +86,25 @@ impl Envelope {
         Address::new(self.journal, self.from)
     }
 
-    /// The role of the receiver. A `Commit` and a `Pull` go to the replica
-    /// of the segment that they name; every other message goes to an
-    /// acceptor or a leader.
+    /// The role of the receiver. A `Commit`, a `Pull` and a `Holding` go to
+    /// the replica of the segment that they name; every other message goes
+    /// to an acceptor or a leader. A `Holds` answers the asker of `Holding`,
+    /// a leader or a new replica, so its receiver is the node: the `Host`
+    /// also gives it to the replica of its segment on that node.
     #[must_use]
     pub fn receiver(&self) -> Address {
         match &self.message {
-            Message::Commit { segment, .. } | Message::Pull { segment, .. } => {
-                Address::replica(self.journal, self.to, *segment)
-            }
-            _ => Address::new(self.journal, self.to),
+            Message::Commit { segment, .. }
+            | Message::Pull { segment, .. }
+            | Message::Holding { segment } => Address::replica(self.journal, self.to, *segment),
+            // No wildcard: a new message kind chooses its receiver here.
+            Message::Prepare { .. }
+            | Message::Promise { .. }
+            | Message::Nack { .. }
+            | Message::Accept { .. }
+            | Message::Accepted { .. }
+            | Message::Applied { .. }
+            | Message::Holds { .. } => Address::new(self.journal, self.to),
         }
     }
 }
