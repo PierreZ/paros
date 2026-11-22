@@ -206,7 +206,10 @@ impl ColocatedNode {
     /// quorums need not meet. The same holds when it only promised a newer
     /// campaign whose configuration its pool made it ignore: the gate is
     /// the higher of the promise and the belief ballot. On plain Multi-Paxos, always the static
-    /// configuration with no fence.
+    /// configuration with no fence. A node outside the basis's configuration
+    /// whose promise is only its own campaign that sent no `Prepare` is
+    /// gated on its belief ballot (#890 (learner above the leader)): that
+    /// campaign chose nothing, and the node does not answer its own read.
     ///
     /// # Panics
     ///
@@ -231,14 +234,27 @@ impl ColocatedNode {
         // promises its campaign, and that campaign may have chosen a write
         // that the basis's Phase-1 quorums need not meet. The reader counts
         // its own watermark with no fence, so only this gate covers it.
-        let fence = self
+        let wire = self
             .wire_read_fence()
             .expect("a matchmaker deployment carries a read fence");
         assert!(
-            fence >= self.acceptors_since,
+            wire >= self.acceptors_since,
             "the read fence covers the belief ballot"
         );
-        let basis = self.read_basis.clone().filter(|basis| basis.since >= fence);
+        let basis = self.read_basis.clone().filter(|basis| {
+            let fence = self
+                .reader_fence(&basis.config)
+                .expect("a matchmaker deployment carries a read fence");
+            assert!(
+                fence <= wire,
+                "the reader fence never exceeds the read fence"
+            );
+            assert!(
+                fence >= self.acceptors_since,
+                "the reader fence covers the belief ballot"
+            );
+            basis.since >= fence
+        });
         if let Some(basis) = &basis {
             assert!(
                 basis.config.is_drawn_from(&self.pool),

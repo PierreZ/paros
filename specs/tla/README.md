@@ -949,7 +949,7 @@ Constants select the rule:
 | `Restarters` | The acceptors that can restart. The promise and the votes are durable. The belief goes back to the bootstrap, bound to no ballot, and the node did not hear what is in force until its membership probe answers. A reader also forgets its read basis and its open read. |
 | `Refuse` | `TRUE`: an acceptor that did not hear answers no `PreRead` (`on_pre_read`, the code). |
 | `Hold` | `TRUE`: the decision hold of #579 (zero-stall reconfiguration). `zero-stall/` holds the full checks of the hold. |
-| `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis, and opens or serves no read on it (`main` today). `own`: option (b), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
+| `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis, and opens or serves no read on it (the code before option (b)). `own`: option (b), the code (`ColocatedNode::reader_fence`), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
 | `Q1s`, `Q2s`, `Targets` | The quorum system, for each configuration (#1102 (rework 1.13)): the Phase-1 quorums, the Phase-2 quorums, and the sets of acceptors that a reader asks. A majority asks the whole membership. A grid takes them from `grid/Grid.tla`: the partitions ask the whole membership, the full grid asks one row (`row_of`). |
 | `Seal` | `quorum`: Phase 1 takes a Phase-1 quorum of each prior configuration (the code). `reads`: a candidate rule, not in the code: Phase 1 also takes one promise in each read target of each prior configuration, so each row of an old full grid hears of the campaign. |
 | `ReadAgain` | `TRUE`: a client gets the answer of a served read (`ReadClose`), and a second read can start. `ReadSeesAcked` then also orders reads: a served read covers each slot that an earlier read returned. |
@@ -999,8 +999,8 @@ Results (`reads/checks.txt`):
 | `reads_bypass_hold_again_prefix_chain`: the rule, three ballots of one proposer, so two bypasses in a row (`long`) | no violation in 50.2 million distinct states (bounded: 30 minutes, 2 workers) |
 | `reads_two_slots`: `reads_plain` with two slots (`long`) | no violation in 30.7 million distinct states, to depth 24 (bounded: 50 minutes, 1 worker) |
 | `reads_three`: `reads_plain` with three ballots, `OwnerParos3`, so a reader can hold the basis of the middle leadership (`long`) | no violation in 33.4 million distinct states, to depth 25 (bounded: 50 minutes, 1 worker) |
-| #890, `strict` (`main` today) | pass |
-| #890, option (b) | pass |
+| #890, `strict` (the code before option (b)) | pass |
+| #890, option (b) (the code) | pass |
 | #890, the node ignores its promise | pass |
 | `grid_full`: the full grid, a change of members, the row read (the code) | violation (300 thousand states, 15 seconds) |
 | `grid_full_static`: the full grid, no change of members | pass (588 thousand states, 35 seconds) |
@@ -1083,7 +1083,15 @@ must gate the chosen prefix, which every read uses. `zero-stall/` checks the sam
 
 Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
 leader and a reader outside its configuration whose own abandoned campaign is above it.
-`learner_own_serves` finds a read that option (b) serves and that `strict` refuses.
+`learner_own_serves` finds a read that option (b) serves and that `strict` refuses. The code
+builds option (b) (`ColocatedNode::reader_fence`) for every quorum system, so option (b) is
+checked on majorities (`learner_own`), on the full `2 × 2` grid with the seal of the code
+(`learner_own_grid`, 2.0 million states, 1.7 min) and with a lagging pool (`learner_own_lag`,
+0.6 million states, 21 s). The two last are `long` checks: `reads` already fills the time of one
+CI job. In the implementation model `node/`, a
+campaign promises its own ballot at its `Prepare`, so the promise of a campaign that the
+matchmakers refused before its `Prepare` is not in a trace, and the basis of option (b) is an
+ordinary `Basis` step there.
 
 Option (a) of #890, where the leader campaigns above the promise, adds no rule to the model: it
 is one more ordinary campaign, and `reads_plain` covers it. Its cost is a leader change for each
