@@ -53,11 +53,12 @@ SPECS = ROOT / "specs" / "tla"
 MINUTES = ROOT / "scripts" / "tla-minutes.txt"
 
 # A job of the TLA workflow has 30 minutes, and the same group of folders
-# takes from half to more than 1.35 times its measured minutes from one
+# takes from half to more than 1.36 times its measured minutes from one
 # runner to the next. A group holds at most `GROUP_MINUTES` of measured
 # checks, so a runner twice as slow still finishes. A folder above it runs
-# alone in its job, and no folder may be above `FOLDER_MINUTES`: such a
-# folder splits its checks.
+# alone in its job, with less margin (a folder at `FOLDER_MINUTES` fits a
+# runner 1.5 times as slow), and no folder may be above `FOLDER_MINUTES`:
+# such a folder splits its checks.
 GROUP_MINUTES = 15.0
 FOLDER_MINUTES = 20.0
 
