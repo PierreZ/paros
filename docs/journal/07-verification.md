@@ -38,6 +38,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | The rules composed across three segments, with the acceptors' disk and the write orders | §J7.2 | `journal-state/` | #1189 (the journal state model), #1309 (the state is the disk) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
 | The controller's election and fenced reshape | §J6.1 | `grid-controller/` | #1259 (the fenced reshape call of the grid controller) |
+| The placement port between the grid controller and the cell, the cell's own control journal too | §J6.3 | `placement-port/` | #1421 (the placement port) |
 | The health measures and the journal states | §J6.2 | `health/` (v1: its `v1` and `v1_draft` checks, #1319 (a v1 switch in health/)) | #1260 (journal health measures) |
 
 ### J7.2 The composed model

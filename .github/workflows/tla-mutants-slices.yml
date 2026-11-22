@@ -32,8 +32,7 @@ jobs:
         slice: ${{ fromJSON(inputs.slices) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - uses: actions/download-artifact@v6
         with:
           pattern: baseline-*

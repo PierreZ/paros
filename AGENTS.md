@@ -126,7 +126,10 @@ the same write; #1189 (the journal state model), #1309 (the state is the disk)),
 member of the set, the new set written by compare-and-set on the version of the register, a "done"
 report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
 removed replica that comes back during the heal; #1314 (re-replication of a sealed segment's
-replica set)).
+replica set)), the placement port between the grid controller and the cell
+(`specs/tla/placement-port/`: `standing`, `place` all or none in one write keyed by the caller's
+request id, `release`, the limit of moves in flight, and the cell's own control journal placed
+through the same port; #1421 (the placement port)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both
@@ -385,6 +388,9 @@ If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`
 Then use `nix develop`, on the web as locally. Every flake input is fetched over git
 (`git+https`), not as a GitHub tarball, because the web session's egress policy refuses GitHub
 tarballs (#727 (flake inputs over git)). Keep it that way: a new input never uses `github:`.
+In CI, every job sets up Nix with `.github/actions/nix` (never the installer and cache actions
+by hand): it also signs git in to github.com for each git input of `flake.lock`, because GitHub
+refuses anonymous fetches with 403 when many jobs fetch at once.
 Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix develop` (or direnv).
 
 **Use Nix-provided software for all tooling.** Never run the sandbox's preinstalled binaries

@@ -1,15 +1,15 @@
 # The minutes of each folder of specs/tla/ in a job of the `TLA` workflow
 # (`.github/workflows/tla.yml`): TLC on its `ci` checks plus the parse of its
-# guard mutants, measured on GitHub's runners, rounded up to a half minute.
-# `scripts/ci-plan.py` packs the folders that a change needs into as few
-# jobs as it can, each at most `GROUP_MINUTES` of checks, so that each job
-# stays inside its 30 minutes on a slow runner too. Every folder is listed:
-# the plan fails on a folder with no line, and on a line with no folder.
-# When a folder's checks grow, measure them again (the step time of its job)
-# and update its line.
-# Measured on runs 44972036856, 44972223841 and 44978685157 (2026-11-22):
-# the largest time of each folder, with a folder that a timeout cut
-# estimated from its checks that did not run.
+# guard mutants. Each line is the largest time the folder took on GitHub's
+# runners, rounded up to a half minute (measured on runs 44972036856,
+# 44972223841 and 44978685157; a folder that a timeout cut adds the time of
+# its checks that did not run, from a full run). `scripts/ci-plan.py` packs the folders that a
+# change needs into as few jobs as it can, each at most `GROUP_MINUTES` of
+# checks, so that each job stays inside its 30 minutes on a slow runner too.
+# Every folder is listed: the plan fails on a folder with no line, on a line
+# with no folder, and on two lines for one folder. `scripts/check-tla.sh`
+# prints the minutes of each folder and warns when they drift far from its
+# line: measure the folder again (the `time` line of its job) and update it.
 abandoned-ballot 5.5
 batcher 1
 campaign-discovery 1.5
@@ -33,6 +33,7 @@ handover 10
 handover-chain 7.5
 handover-gc 1.5
 health 3.5
+journal-ids 6
 journal-state 17
 leader-handoff 15
 matchmaker 6.5
@@ -40,6 +41,7 @@ multi-paxos 20
 multi-writer 5
 node 12.5
 offload 1.5
+placement-port 5.5
 proxy-leader 2
 quorum-everywhere 15.5
 re-replication 8

@@ -69,7 +69,7 @@ FOLDER_MINUTES = 22.0
 NOT_RUST = re.compile(
     r"^(website/|docs/|specs/|scripts/build-wasm\.sh$|scripts/check-tla\.sh$"
     r"|scripts/check-proofs\.sh$|scripts/proof-hashes\.sh$|scripts/mutate-tla\.py$|scripts/tla-minutes\.txt$"
-    r"|scripts/mutate-tla-shards\.txt$|\.github/workflows/tla-mutants\.yml$"
+    r"|scripts/mutate-tla-shards\.txt$|\.github/workflows/tla-mutants(-slices)?\.yml$"
     r"|\.github/workflows/tla\.yml$)|\.md$"
 )
 
@@ -83,12 +83,14 @@ TLA_TOOLS = {
     "scripts/ci-plan.py",
     "flake.nix",
     "flake.lock",
+    ".github/actions/nix/action.yml",
     ".github/workflows/tla.yml",
 }
 
 # The files that the proofs read besides their folder.
-PROOF_TOOLS = {"scripts/check-proofs.sh", "scripts/proof-hashes.sh", "flake.nix", "flake.lock",
-               ".github/workflows/tla.yml", "scripts/ci-plan.py"}
+PROOF_TOOLS = {"scripts/check-proofs.sh", "scripts/proof-hashes.sh", "flake.nix", "flake.lock", ".github/workflows/tla.yml",
+               ".github/actions/nix/action.yml",
+               "scripts/ci-plan.py"}
 
 
 def changed_files(base: str | None) -> list[str] | None:
@@ -135,6 +137,8 @@ def minutes(all_folders: list[str]) -> dict[str, float]:
         if not line:
             continue
         name, value = line.split()
+        if name in table:
+            sys.exit(f"scripts/tla-minutes.txt: two lines for {name}")
         table[name] = float(value)
     missing = sorted(set(all_folders) - set(table))
     extra = sorted(set(table) - set(all_folders))
