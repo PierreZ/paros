@@ -16,3 +16,5 @@ address         violation  ci
 safety_small    pass       ci
 live            pass       ci
 safety         pass       ci
+# Two wipes in a set of three: the kill policy of Wipe stops the second.
+wipe_two       pass       ci

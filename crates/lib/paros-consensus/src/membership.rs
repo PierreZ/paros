@@ -41,7 +41,11 @@
 //! ([`QuorumSystem::is_phase1_quorum_in`]); on any other grid it asks the
 //! whole membership. An election's `Prepare` goes to the whole membership,
 //! and any Phase-1 quorum (one acceptor of every column on a full-column
-//! grid) completes it.
+//! grid) completes it for its own configuration `C_b`. Every other
+//! configuration of `H_b` must be **sealed**
+//! ([`QuorumSystem::is_phase1_seal`], decision 31, #1209): on a full-column
+//! grid that is also one promise in each row, so a quorum read over any of
+//! its rows hears of the new ballot.
 //!
 //! **Zones are labels, judged through the same predicates** (#215 (zones)).
 //! A configuration may carry a [`FailureDomain`] beside each member, bound

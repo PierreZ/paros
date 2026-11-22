@@ -8,5 +8,8 @@ MemAB == [c \in AB |-> IF c = "A" THEN {"a1", "a2", "a3"} ELSE {"a2", "a3", "a4"
 Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 QAB == [c \in AB |-> Maj(MemAB[c])]
 
+\* A alone: the register never changes the configuration.
+OnlyA == {"A"}
+
 Symmetry == Permutations(Values) \cup Permutations(Matchmakers)
 =============================================================================

@@ -11,7 +11,12 @@ direct             violation  ci
 rejoin             violation  ci
 release_early      violation  ci
 live_mm_small      violation  ci
+# A read needs a live matchmaker: with the crash guard of Read off, it wins.
+live_mm_stay       violation  ci
 agree              pass       ci
+# Three matchmakers: a read or a write that skips a majority (EndRead,
+# Write's generation check) shows here.
+agree_mm3_small    pass       ci
 resize             pass       ci
 mixed              violation  long
 partitioned        pass       long

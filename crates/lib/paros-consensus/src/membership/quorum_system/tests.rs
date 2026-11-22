@@ -151,3 +151,49 @@ fn a_column_out_of_the_grid_holds_no_phase2_quorum() {
     assert!(system.is_phase2_quorum_in(&members, &voters, Some(0)));
     assert!(!system.is_phase2_quorum_in(&members, &voters, Some(3)));
 }
+
+/// The seal of decision 31 (#1209): on a full-column grid a Phase-1 quorum
+/// and one voter in each row; elsewhere the Phase-1 quorum alone.
+#[test]
+fn a_seal_asks_one_voter_in_each_row_of_a_full_grid_only() {
+    use std::collections::BTreeSet;
+    let set = |v: &[u8]| v.iter().copied().collect::<BTreeSet<u8>>();
+    // A 3 x 2 full grid: rows {0, 1}, {2, 3}, {4, 5}; columns {0, 2, 4}
+    // and {1, 3, 5}.
+    let members: Vec<u8> = (0..6).collect();
+    let full = QuorumSystem::grid(3, 2);
+    assert!(full.is_phase1_quorum(&members, &set(&[2, 3])));
+    assert!(
+        !full.is_phase1_seal(&members, &set(&[2, 3])),
+        "one row is a Phase-1 quorum, not a seal"
+    );
+    assert!(
+        !full.is_phase1_seal(&members, &set(&[0, 2, 3])),
+        "the row {{4, 5}} heard nothing"
+    );
+    assert!(full.is_phase1_seal(&members, &set(&[0, 3, 4])));
+    assert!(
+        !full.is_phase1_seal(&members, &set(&[0, 2, 4])),
+        "one voter in each row is no seal without a Phase-1 quorum"
+    );
+    assert!(
+        !full.is_phase1_seal(&members, &set(&[0, 7, 9])),
+        "a stranger seals no row"
+    );
+    // A partitioned grid and a majority read the whole membership: the
+    // seal is the Phase-1 quorum.
+    let partitions = QuorumSystem::partitions(1, 2);
+    for voters in [set(&[0, 2, 1, 3]), set(&[0, 2, 4, 1]), set(&[0, 1])] {
+        assert_eq!(
+            partitions.is_phase1_seal(&members, &voters),
+            partitions.is_phase1_quorum(&members, &voters)
+        );
+    }
+    let majority = QuorumSystem::Majority;
+    for voters in [set(&[0, 1, 2]), set(&[0, 1, 2, 3]), set(&[5])] {
+        assert_eq!(
+            majority.is_phase1_seal(&members, &voters),
+            majority.is_phase1_quorum(&members, &voters)
+        );
+    }
+}

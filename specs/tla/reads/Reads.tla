@@ -64,9 +64,13 @@
 (*           the grids with `Grid.tla` (`specs/tla/grid/`).                  *)
 (* Seal  : "quorum" = Phase 1 takes a Phase-1 quorum of each prior           *)
 (*                    configuration (the code).                              *)
-(*         "reads"  = a candidate rule, not in the code: Phase 1 also takes  *)
-(*                    one promise in each read target of each prior          *)
-(*                    configuration, so each row hears of the campaign.      *)
+(*         "reads"  = Phase 1 also takes one promise in each read target   *)
+(*                    of each prior configuration, so each row hears of the  *)
+(*                    campaign (decision 31, #1209).                         *)
+(*         "others" = the rule of the code (#1209): as "reads", but not for  *)
+(*                    a prior configuration equal to the ballot's own one.   *)
+(*                    A column of that configuration chooses at b, and each  *)
+(*                    of its rows meets that column already.                 *)
 (*                                                                           *)
 (* ReadAgain : TRUE = a client gets the answer of a served read, and a     *)
 (*         second read can start: `ReadSeesAcked` then also orders reads.    *)
@@ -97,7 +101,7 @@ CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode
           Readers, Basis, Fence, Laggers, Restarters, Refuse, Hold, Learner, Q1s, Q2s,
           Targets, Seal, ReaderGate, ReadAgain, ReadHold, LiveLeader
 
-ASSUME Seal \in {"quorum", "reads"}
+ASSUME Seal \in {"quorum", "reads", "others"}
 ASSUME ReaderGate \in {"promise", "belief"}
 ASSUME Fence \in {"promise", "belief", "none"}
 ASSUME Laggers \cup Restarters \subseteq Acceptors
@@ -208,11 +212,16 @@ Promise(a, b) ==
 PromisedAt(b) == {p[1] : p \in {q \in promises : q[2] = b}}
 
 \* A promise quorum of EVERY prior configuration. With Seal = "reads", also
-\* one promise in each read target of each.
+\* one promise in each read target of each; with Seal = "others", of each
+\* that is not the configuration of b.
+SealsReads(b, c) ==
+    \/ Seal = "reads"
+    \/ Seal = "others" /\ c # cfgOf[b]
+
 Covered(b) ==
     \A c \in PriorCfgs(b) :
         /\ \E Q \in Q1s[c] : Q \subseteq PromisedAt(b)
-        /\ Seal = "reads" => \A T \in Targets[c] : T \cap PromisedAt(b) # {}
+        /\ SealsReads(b, c) => \A T \in Targets[c] : T \cap PromisedAt(b) # {}
 
 Reports(b) == UNION {p[3] : p \in {q \in promises : q[2] = b}}
 

@@ -8,6 +8,8 @@ Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 AB == {"A", "B"}
 MemAB == [c \in AB |-> IF c = "A" THEN {"a1", "a2", "a3"} ELSE {"a2", "a3", "a4"}]
 QAB == [c \in AB |-> Maj(MemAB[c])]
+\* A alone: no move is possible.
+OnlyA == {"A"}
 
 \* A resize: A over a1..a3 and R over a1..a5 (a successor of another size).
 AR == {"A", "R"}

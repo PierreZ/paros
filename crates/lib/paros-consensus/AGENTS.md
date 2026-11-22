@@ -19,7 +19,7 @@ The modules make three layers that point down only (#730 (paros-consensus rework
   one `Ready`. It never uses another deployment.
 
 `scripts/check-core-layers.sh` fails on a `crate::<module>` path that reaches up a layer (CI
-`fmt` job). It reads only that form: a grouped `use crate::{..}` or a `super::` path escapes
+`checks` job). It reads only that form: a grouped `use crate::{..}` or a `super::` path escapes
 it, so the modules write each upward-looking import as `crate::<module>`. Test code (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt. A new module
 gets its layer in that script.
 
@@ -103,7 +103,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
 - Examples: `examples/{single_decree,multi_paxos,matchmaker,acceptor_grid,quorum_read,
   proxy_leader,replica_tier}.rs` are the lessons, and `examples/{quickstart,journal_calls,
   leader_handoff,reconfiguration}.rs` drive `ColocatedNode` as a driver does. Each one asserts
-  the property that it shows. A new example gets a step in the CI `examples` job, a row in
+  the property that it shows. A new example gets a step in the CI `checks` job, a row in
   `README.md` and in the table of `src/lib.rs`, and an item in the root `README.md`.
 - `examples/common/cluster.rs` → `Cluster`, the toy cluster of the four driver examples: the
   nodes, one `MemStorage` for each node, optional `Matchmaker`s with a `MemRegistry` each, and a
@@ -115,7 +115,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
   with no clock; `Config::with_peers` sorts and deduplicates a membership; `Message::kind`
   names a variant for a trace or a metric; `NodeId`, `Slot` and `Ballot` (`round.node`) have
   `Display`.
-- A doc example is a test: `cargo test --doc -p paros-consensus` (CI `examples` job). A new
+- A doc example is a test: `cargo test --doc -p paros-consensus` (CI `checks` job). A new
   public entry point of a driver gets one.
 - A boot assertion on `Config` names the field that is wrong (`Config::assert_valid`, which
   `ColocatedNode::new` and `ReplicaNode::new` run; a driver can run it on a configuration it
@@ -149,10 +149,10 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` (`models/support.rs`, `env_or`).
 - `cargo run -p paros-consensus --example <name>` for each of the eleven examples, and
-  `cargo test --doc -p paros-consensus` for the doc examples (CI `examples` job).
+  `cargo test --doc -p paros-consensus` for the doc examples (CI `checks` job).
 - `cargo check --target wasm32-unknown-unknown -p paros-consensus` with and without
   `--no-default-features`; `cargo check -p paros-consensus --features serde` (CI `portability`).
-- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps` (CI `clippy` job).
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps` (CI `checks` job).
 - `scripts/mutants.sh` (`.cargo/mutants.toml`): a mutant of this crate must fail a test of
   this crate or of `consensus-sim` (add `-f <file>` to cut the set). CI runs the mutants of the changed lines on
   each pull request and every mutant each week (`.github/workflows/mutants.yml`).

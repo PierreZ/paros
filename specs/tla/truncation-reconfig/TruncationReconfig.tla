@@ -192,7 +192,6 @@ Prepare(b) ==
   IN /\ phase[b] = "idle"
      /\ Up(o)
      /\ \A c \in Ballots : c > b => phase[c] = "idle"
-     /\ prom[o] < b
      /\ phase' = [phase EXCEPT ![b] = "p1"]
      /\ from' = [from EXCEPT ![b] = f]
      /\ hist' = [hist EXCEPT ![b] =
@@ -201,16 +200,21 @@ Prepare(b) ==
      /\ SendAll({[type |-> "1a", bal |-> b, from |-> f], PromiseMsg(o, b, f)})
      /\ UNCHANGED <<wiped, vote, floor, learned, next, fence, wm>>
 
-\* A floor refused the campaign of ballot b, and a jump or a catch-up since
-\* moved the first unchosen slot of its owner: the owner asks again.
+\* The owner of ballot b asks again from its first unchosen slot. It does so
+\* when a floor refused the campaign and a jump or a catch-up moved that
+\* slot, but the model lets it ask at any time in Phase 1: a `1a` is safe
+\* to send from any slot, and Win takes only the promises from slots at or
+\* below `from[b]`. The owner sends its own promise again, so it must still
+\* be at ballot b: without that guard, a `1b` of ballot b leaves before
+\* Prepare or after a higher promise. A wipe sets the promise to 0, so an
+\* owner at ballot b is up. The phase guard bounds the
+\* state space: a re-ask after Win sends promises that no step reads, and
+\* without the guard `safety` grows from 0.4 to 3.7 million states.
 AskAgain(b) ==
   LET o == Owner[b]
       f == FirstUnchosen(o)
   IN /\ phase[b] = "p1"
-     /\ Up(o)
      /\ prom[o] = b
-     /\ \E a \in UNION Confs(b) : prom[a] < b /\ from[b] < floor[a]
-     /\ f > from[b]
      /\ from' = [from EXCEPT ![b] = f]
      /\ SendAll({[type |-> "1a", bal |-> b, from |-> f], PromiseMsg(o, b, f)})
      /\ UNCHANGED <<wiped, prom, vote, floor, learned, phase, next, fence, hist, wm>>
@@ -249,15 +253,15 @@ Refill(S, b, s) ==
   [type |-> "2a", bal |-> b, slot |-> s,
    val |-> IF Top(S, s).bal > 0 THEN Top(S, s).val ELSE Noop]
 
-\* The owner of ballot b wins Phase 1 on its own promise and a Phase-1
-\* quorum of each configuration of `H_b` and of its own. It proposes again
+\* The owner of ballot b wins Phase 1 on a Phase-1 quorum of each
+\* configuration of `H_b` and of its own; its own promise need not be among
+\* them (Paxos needs only the quorums). An owner that was wiped after it
+\* opened the ballot may go on: it sends no promise once wiped. It proposes again
 \* each slot from its campaign up to its frontier; the fence `F` is the
 \* frontier minus 1.
 Win(b) ==
   /\ phase[b] = "p1"
-  /\ Up(Owner[b])
   /\ \E S \in PromiseSets(b) :
-       /\ Owner[b] \in {m.acc : m \in S}
        /\ \A C \in Confs(b) : \E Q \in Maj(C) : Q \subseteq {m.acc : m \in S}
        /\ LET f == Frontier(S, from[b])
           IN /\ next' = [next EXCEPT ![b] = f]
@@ -271,7 +275,6 @@ Win(b) ==
 
 Allocate(b, c) ==
   /\ phase[b] = "p2"
-  /\ Up(Owner[b])
   /\ next[b] < NS
   /\ next' = [next EXCEPT ![b] = @ + 1]
   /\ Send([type |-> "2a", bal |-> b, slot |-> next[b], val |-> c])
@@ -302,8 +305,7 @@ LearnRecord(r, c, v) == IF r.val = v /\ r.bal >= c THEN r ELSE [bal |-> c, val |
 \* The leader of ballot b learns slot s at a Phase-2 quorum, and records it.
 Decide(b, s) ==
   LET o == Owner[b]
-  IN /\ phase[b] = "p2"
-     /\ Up(o)
+  IN /\ Up(o)
      /\ ~Holds(o, s)
      /\ \E v \in Values :
           /\ ChosenAt(b, s, v)
@@ -318,10 +320,8 @@ Decide(b, s) ==
 CatchUp(n, p) ==
   LET new == {s \in Slots : ~Holds(n, s) /\ learned[p][s] # None}
       top == Max({prom[n]} \cup {vote[p][s].bal : s \in new})
-  IN /\ n \in Learners
-     /\ Up(n)
+  IN /\ Up(n)
      /\ FirstUnchosen(n) >= floor[p]
-     /\ new # {}
      /\ learned' = [learned EXCEPT ![n] = [s \in Slots |->
                       IF s \in new THEN learned[p][s] ELSE @[s]]]
      /\ vote' = [vote EXCEPT ![n] = [s \in Slots |->

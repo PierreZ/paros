@@ -198,8 +198,8 @@ Test only: `publish = false`, never a dependency of another crate.
   seeds, `EXPLORE` = 10), and CI runs it as it is. Each walk runs in a process of its own (the
   ignored test `one_walk`, started again from the same binary), one per CPU (`COVERAGE_JOBS`):
   a process has its own branch counters, so a walk branches the same way whatever runs beside
-  it. CI splits the walks over four shards, each a job of at most 30 minutes: a shard
-  (`COVERAGE_SHARD=i/4`) walks the walks whose index is `i` modulo 4 and saves what each
+  it. CI splits the walks over two shards, each a job of at most 30 minutes: a shard
+  (`COVERAGE_SHARD=i/2`) walks the walks whose index is `i` modulo 2 and saves what each
   reached (`COVERAGE_SAVE`), and the `coverage` job judges the union of the saved walks
   (`COVERAGE_FROM`), which fails when a walk is missing. Branch coverage needs the instrumented
   build that CI's `coverage-shard` jobs run:
@@ -243,7 +243,7 @@ Test only: `publish = false`, never a dependency of another crate.
   when a rule stays unmet. About eight minutes in release on four CPUs. TLC (`tlc`) is in the nix
   dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
   in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
-  a change of `specs/tla/` alone. That job runs in four shards (`--partition count:i/4`), so each
+  a change of `specs/tla/` alone that reaches a folder of a trace spec (`scripts/ci-plan.py`). That job runs in four shards (`--partition count:i/4`), so each
   shard stays well under the 30 minutes of a CI job. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
   `TRACE_CHAOS`, `TRACE_MAX_EVENTS`, `TRACE_DUMP`.
 - A long run: `MOONPOOL_WALK_SEEDS=1500 cargo nextest run --release -p consensus-sim`. One seed:

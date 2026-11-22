@@ -30,6 +30,7 @@ noidem               violation  ci
 # Reachability: the model reaches each case of #1259.
 reach_lost_race            violation  ci
 reach_deposed              violation  ci
+reach_stood                violation  ci
 reach_stale_refused        violation  ci
 reach_takeover             violation  ci
 reach_open_after_takeover  violation  ci

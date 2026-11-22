@@ -203,6 +203,17 @@ Call(c) ==
   /\ reqs' = reqs \cup {Req(c)}
   /\ UNCHANGED <<term, holder, top, rec, st, ctl, reps, failed, crashes, losses, ev>>
 
+\* A holder reads the record, sees another term and stops: it was deposed.
+\* It has no plan then (a holder with a plan waits for its answer). The
+\* code's `decide` asks this first, on the view of each step.
+Stand(c) ==
+  /\ ctl[c].st = "lead"
+  /\ ctl[c].plan = NoGrid
+  /\ ctl[c].tm # term
+  /\ ctl' = [ctl EXCEPT ![c] = Idle]
+  /\ ev' = ev \cup Note("stood")
+  /\ UNCHANGED <<term, holder, top, rec, st, reqs, reps, failed, crashes, losses>>
+
 (***************************************************************************)
 (* The compare-and-set at the matchmaker record.                           *)
 (***************************************************************************)
@@ -310,7 +321,8 @@ Fail(a) ==
   /\ UNCHANGED <<term, holder, top, rec, st, ctl, reqs, reps, crashes, losses>>
 
 Next ==
-  \/ \E c \in Ctrls : ReadTerm(c) \/ Elect(c) \/ Plan(c) \/ Call(c) \/ Crash(c) \/ Restart(c)
+  \/ \E c \in Ctrls : ReadTerm(c) \/ Elect(c) \/ Plan(c) \/ Call(c) \/ Stand(c)
+                    \/ Crash(c) \/ Restart(c)
   \/ \E m \in reqs : Process(m) \/ LoseReq(m)
   \/ \E m \in reps : Receive(m) \/ LoseRep(m)
   \/ \E g \in 2..NG : SealIn(g)
@@ -371,7 +383,8 @@ SettlesBounded ==
   \A g \in Gens : st[g] = "pending" /\ Bounded(rec[g].grid) ~> st[g] # "pending"
 
 \* A controller's life: a holder gives up the lead only when a refusal for
-\* its term tells it, or at a crash (it keeps calling until then); only a
+\* its term tells it, when it reads another term with no plan, or at a
+\* crash (it keeps calling until then); only a
 \* candidate becomes the holder; a candidate goes back to idle only when it
 \* lost the compare-and-set; a controller that is down only restarts.
 CtlSteps ==
@@ -379,6 +392,7 @@ CtlSteps ==
        /\ ctl[c].st = "lead" /\ ctl'[c].st # "lead" =>
             \/ crashes' > crashes
             \/ \E m \in reps \ reps' : m.c = c /\ m.ans = "term"
+            \/ ctl[c].tm # term /\ ctl[c].plan = NoGrid
        /\ ctl'[c].st = "lead" /\ ctl[c].st # "lead" => ctl[c].st = "cand"
        /\ ctl[c].st = "cand" /\ ctl'[c].st = "idle" => term # ctl[c].seen
        /\ ctl[c].st = "down" => ctl'[c].st \in {"down", "idle"}]_vars
