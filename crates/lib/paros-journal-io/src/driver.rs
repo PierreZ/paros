@@ -32,14 +32,14 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use paros_consensus::journal::JournalId;
-use paros_journal::Command;
 use paros_journal::register::{Change, RegisterValue};
-use paros_journal::roles::PersistId;
+use paros_journal::roles::{CopyId, PersistId};
+use paros_journal::{Command, Leader, NodeId, SegmentId};
 
 use crate::clock::Clock;
 use crate::events::{Event, Events};
 use crate::host::{Assignment, CallId, CallOutcome, Effect, Host, HostConfig, Input, Stop};
-use crate::layout::{self, Op};
+use crate::layout::{self, Entry, Key, Op};
 use crate::register::Register;
 use crate::storage::Storage;
 use crate::transport::Transport;
@@ -54,6 +54,30 @@ pub struct CallReply {
     pub call: CallId,
     /// The answer.
     pub outcome: CallOutcome,
+}
+
+/// What a role tells the outside of its journal through the driver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// The new replica at `address` holds a complete, durable copy `copy`
+    /// of `segment`: the grid controller of the plan may write the new set
+    /// (#1314).
+    Copied {
+        /// The new replica.
+        address: Address,
+        /// The segment.
+        segment: SegmentId,
+        /// The copy.
+        copy: CopyId,
+    },
+    /// A done write retired `segment`: its acceptors that no later grid
+    /// names may stop (§J3.4).
+    Retired {
+        /// The leader that saw the done write.
+        address: Address,
+        /// The segment.
+        segment: SegmentId,
+    },
 }
 
 /// A step of the `Host` that the driver has not reported yet, with the
@@ -90,6 +114,7 @@ pub struct Driver<S, T, C, R, E> {
     timer: Option<Time>,
     calls: CallId,
     replies: Vec<CallReply>,
+    notices: Vec<Notice>,
     stopped: Vec<(Address, Stop)>,
 }
 
@@ -129,6 +154,7 @@ where
             timer: None,
             calls: 0,
             replies: Vec::new(),
+            notices: Vec::new(),
             stopped: Vec::new(),
         }
     }
@@ -200,9 +226,39 @@ where
         call
     }
 
+    /// Start the new replica at `address` (its segment named) for the copy
+    /// `copy` of a heal, with `set`, the replica set that the grid
+    /// controller read ([`Input::Join`]). The driver reads the register
+    /// first, so the `Host` judges the ask on a value done after it was
+    /// sent (`specs/tla/heal-reuse/`, control `stale_view`).
+    pub fn join(&mut self, address: Address, set: Vec<NodeId>, initial: Leader, copy: CopyId) {
+        self.watch(address.journal);
+        self.input(Input::Join {
+            address,
+            set,
+            initial,
+            copy,
+        });
+    }
+
+    /// The plan of the copy `copy` of the new replica at `address` ended
+    /// with no new set ([`Input::Abandon`]). The driver reads the register
+    /// first, as for [`join`](Self::join).
+    pub fn abandon(&mut self, address: Address, copy: CopyId) {
+        self.watch(address.journal);
+        self.input(Input::Abandon { address, copy });
+    }
+
     /// The answers of client calls since the last take.
     pub fn take_replies(&mut self) -> Vec<CallReply> {
         std::mem::take(&mut self.replies)
+    }
+
+    /// What the roles told their outside since the last call: a new
+    /// replica's complete copy, for the grid controller of its plan, and a
+    /// done retire, for placement (the old acceptors may stop).
+    pub fn take_notices(&mut self) -> Vec<Notice> {
+        std::mem::take(&mut self.notices)
     }
 
     /// The roles that stopped since the last take, and why.
@@ -304,6 +360,7 @@ where
                         self.durable.insert(address, id);
                         self.settled.insert(address, id);
                     }
+                    let entries = self.with_group(address, entries);
                     self.inputs.push_back(Input::Recovered { address, entries });
                 }
                 Err(_) => self.inputs.push_back(Input::Unreadable { address }),
@@ -355,26 +412,67 @@ where
             Effect::SetTimer { at } => {
                 self.timer = Some(self.timer.map_or(at, |armed| armed.min(at)));
             }
-            Effect::Stopped { address, why } => {
-                // A stopped role writes and sends nothing more: its batches
-                // leave the group, settled, and what waited on them is
-                // dropped.
-                let other = |role: Address| role != address;
-                if let Some(id) = self
-                    .group
-                    .iter()
-                    .rev()
-                    .find_map(|(role, id, _)| (!other(*role)).then_some(*id))
-                {
-                    self.settled.insert(address, id);
+            Effect::Copied {
+                address,
+                segment,
+                copy,
+                after,
+            } => {
+                // A report of a copy whose last batch is not durable yet is
+                // dropped: the replica reports again at its next tick.
+                if self.is_durable(address, after) {
+                    self.notices.push(Notice::Copied {
+                        address,
+                        segment,
+                        copy,
+                    });
                 }
-                self.group.retain(|(role, ..)| other(*role));
+            }
+            Effect::Retired { address, segment } => {
+                self.notices.push(Notice::Retired { address, segment });
+            }
+            Effect::Stopped { address, why } => {
+                // A stopped role writes and sends nothing more: what waited
+                // on its batches is dropped. A replica that dropped its copy
+                // stopped by its own step, so its last batches (a copy that
+                // ends) stay in the group and reach the disk; any other stop
+                // takes them out of the group, settled.
+                let other = |role: Address| role != address;
+                if why != Stop::Dropped {
+                    if let Some(id) = self
+                        .group
+                        .iter()
+                        .rev()
+                        .find_map(|(role, id, _)| (!other(*role)).then_some(*id))
+                    {
+                        self.settled.insert(address, id);
+                    }
+                    self.group.retain(|(role, ..)| other(*role));
+                }
                 self.held.retain(|(_, sender, _)| other(*sender));
                 self.held_changes.retain(|(_, role, _)| other(*role));
                 self.durable.remove(&address);
                 self.stopped.push((address, why));
             }
         }
+    }
+
+    /// The records of the role at `address` as the disk will hold them
+    /// once the group commits: `entries`, with the ops of the role's
+    /// batches that the group still holds on top (a later op at a key
+    /// wins). A role that starts again before the commit reads its own
+    /// last writes, and its new batches follow the last one.
+    fn with_group(&self, address: Address, entries: Vec<(Key, Entry)>) -> Vec<(Key, Entry)> {
+        let mut records: BTreeMap<[u8; layout::KEY_LEN], (Key, Entry)> = entries
+            .into_iter()
+            .map(|(key, entry)| (key.to_bytes(), (key, entry)))
+            .collect();
+        for (_, _, ops) in self.group.iter().filter(|(role, ..)| *role == address) {
+            for op in ops {
+                records.insert(op.key.to_bytes(), (op.key, Entry::Value(op.value.clone())));
+            }
+        }
+        records.into_values().collect()
     }
 
     fn is_durable(&self, address: Address, after: Option<PersistId>) -> bool {

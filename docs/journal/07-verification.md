@@ -34,7 +34,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | Quorum everywhere and the grid bound | §J5.1 | `quorum-everywhere/`, `grid/` | #1257 (quorum everywhere); #1318 (the rows of the boundary write and the acceptor compaction) |
 | CTRL on a grid and across segments | §J5.3 | `ctrl-grid/`, `ctrl-segments/` | #1263 (CTRL recovery in the journal) |
 | The seal end against a faulty record: a faulty vote counts | §J3.1, §J5.3 | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record) |
-| Re-replication of a sealed segment | §J3.1, §J5.2 | `re-replication/`, its row in `quorum-everywhere/` | #1314 (re-replication of a sealed segment's replica set) |
+| Re-replication of a sealed segment | §J3.1, §J5.2 | `re-replication/`, `heal-reuse/` (a node asked again, late requests, a node's own view), its row in `quorum-everywhere/` | #1314 (re-replication of a sealed segment's replica set) |
 | The rules composed across three segments, with the acceptors' disk and the write orders | §J7.2 | `journal-state/` | #1189 (the journal state model), #1309 (the state is the disk) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
 | The controller's election and fenced reshape | §J6.1 | `grid-controller/` | #1259 (the fenced reshape call of the grid controller) |
@@ -135,6 +135,25 @@ check: `Journal.tla` chooses a slot at a quorum of the whole grid, not of one co
 **Open**: the coverage gate over the journal's probes (the next rule group of #1326); CTRL
 faulty votes on the acceptors' disks (the leader's blocked slot has unit tests only).
 
+**The heal walk** (#1314 (re-replication of a sealed segment's replica set), `src/heal.rs`):
+the controller role heals a retired segment while replica machines are lost for good or come
+back with their disk, two controllers depose each other, requests and replies are lost and the
+segment is trimmed, and requests are duplicated and arrive late. The walk plays the replicas
+itself (the `SegmentReplica` of a heal has unit tests, and the whole-journal walk runs it on the
+`Host`): a copy moves only while a member of the set it read is up and full, a node runs the
+highest copy it was asked, and a replica in no set with no copy drops it. Three oracles judge
+it: `HELD` (every member of the set of a segment that is not trimmed holds a complete copy),
+`COMPARED` (a heal writes its set only if no set change came since its plan) and `CONVERGES`
+(once the faults stop, the set is all up, or the segment is trimmed and no live machine keeps
+it). Their mutants: a copy reported when it starts (`EarlyReport`), a lower copy taken
+(`AnyCopy`), a heal written with no compare (`NoCompare`), with no term check (`NoTermCheck`) or
+with no count of heals (`NoHealCount`), and a compare-and-set never sent again (`NoResend`). The
+roles walk's retire is the leader's now, judged by `RETIRE` (a retire counts `F + 1` replicas
+that hold the whole segment on their disk; mutant `HoldsLie`). `specs/tla/heal-reuse/` checks the five rules of the code that these mutants
+remove and one more (highest copy, term check, heal count, a sent heal that ends only on an answer,
+and a fresh register value before an abandon or a copy wipes a node), each with a control. The
+heal walk plays its replicas on the current register value, so it cannot see the last rule. **Open**: a trace check of the heal walk against `heal-reuse/`.
+
 **The walk of the register** (#1325 (the matchmaker register as an optional role),
 `src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
 of §J3.4 and handovers of the matchmaker set, with crashes that lose what a member did not
@@ -228,13 +247,18 @@ at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end),
 its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
 and `ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
 (`WholeMutant`). At the end of the walk each journal converges: a controller holds the term, the
-newest segment is in force, the older ones are retired, and every replica of the newest segment
+newest segment is in force, the older ones are retired (by the leader, §J3.1), and every replica of the newest segment
 holds the whole log. One replica node serves one replica for each segment of its journal, so a
 heal keeps the live replicas of a column (Pierre, 2026-11-22, #1445); the address and the disk key
-of a replica name its segment (§J4.2). **Open**: the walk retires a sealed segment in place of the
-leader, whose retire is not built, and it loses a machine or a zone only for a while. A permanent
-loss needs re-replication (#1314, a rule group of #1326), which `decide` asks before the heal; it
-joins the walk with that rule group.
+of a replica name its segment (§J4.2). A member of a retired segment that stays down long enough
+is healed by re-replication (#1314): the walk asks the new replica's driver to copy and to drop an
+abandoned copy (`Driver::join`, `Driver::abandon`, which read the register first, so the `Host`
+judges each ask on a value done after it was sent), may lose an ask or give it again later
+(site `LATE_ASK`), and gives each complete copy to the controllers (sites `REREPLICATE`,
+`COPIED`, `REREPLICATED`). The oracle `HEAL_HELD` judges that each node a done heal added holds
+every slot of the retired segment on its disk while the set names it (mutant `EarlyCopied`: the
+walk reports a copy complete when it asks it). **Open**: the walk loses a
+machine or a zone only for a while; a permanent loss joins the walk as the next step of #1314.
 
 ### J7.5 The controller's `decide`
 

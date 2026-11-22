@@ -3,7 +3,7 @@
 
 use journal_sim::campaign::campaign;
 use journal_sim::roles::{
-    AGREE, BOUNDARY, FOLD, RESOLVE, RolesMutant, SEALED, Shape, VIEW, reach, walk,
+    AGREE, BOUNDARY, FOLD, RESOLVE, RETIRE, RolesMutant, SEALED, Shape, VIEW, reach, walk,
 };
 
 /// The seeds of each walk in CI.
@@ -77,4 +77,9 @@ fn boundary_catches_a_stale_boundary_state() {
 #[test]
 fn resolve_catches_a_resolve_at_the_segment_in_force() {
     caught(RolesMutant::ResolveInForce, RESOLVE);
+}
+
+#[test]
+fn retire_catches_a_leader_that_counts_a_lagging_replica() {
+    caught(RolesMutant::HoldsLie, RETIRE);
 }

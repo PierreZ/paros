@@ -15,7 +15,7 @@ register's (`paros_journal::register::value`, §J6.1).
 | `measure.rs` | `Liveness`, `Spares`, `GridState` (the six v1 states), `column_spares`, `electable`, `writable`, `grid_state`: the P measures of a v1 grid, each asked through `membership/` | §J6.2 |
 | `placement.rs` | `GridZones` and `grid_zones` (the zone rule of a grid is the rule of each column), `heal_grid` (each member that is down replaced by a candidate, by backtracking), `heal_replicas` | §J6.2, "A zone loss" |
 | `decide.rs` | `View`, `Tunables`, `Decision`, `Action`, `Wait`, `Alert`, `decide` and `PROBES`: the one decision, in the order of its module doc | §J6 |
-| `role.rs` | `Controller`, `Standing`, `Ask`, `Outcome` and `PROBES`: the controller role, its election by a term and its fenced reshape call, as asks to a driver that runs each register operation; no state but the term and the call in flight | §J6.1 |
+| `role.rs` | `Controller`, `Standing`, `Ask`, `Outcome` and `PROBES`: the controller role, its election by a term and its fenced reshape call, as asks to a driver that runs each register operation; no state but the term, the call in flight and the heal of a retired segment in flight (#1314) | §J6.1 |
 | `probe.rs` | the `probe!` shim, as in `paros-consensus` | §J6.2, test 6 |
 
 Each module keeps its unit tests in `<module>/tests.rs`.

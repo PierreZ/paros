@@ -51,6 +51,23 @@ pub(super) fn party(lane: &str) -> String {
     }
 }
 
+/// The sentence of a delivered `Holding` or `Holds`: the leader's question
+/// before a retire, and a replica's answer.
+pub(super) fn holding_says(message: &Message, to: &str, from: &str) -> String {
+    match message {
+        Message::Holds { full: true, .. } => {
+            format!("{to} counts {}: it holds the whole segment.", lower(from))
+        }
+        Message::Holds { .. } => {
+            format!(
+                "{to} hears that {} does not hold the whole segment.",
+                lower(from)
+            )
+        }
+        _ => format!("{to} says whether it holds the whole segment."),
+    }
+}
+
 pub(super) fn lower(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| {
@@ -193,6 +210,10 @@ pub(super) fn replica_write(op: &ReplicaOp) -> String {
         ReplicaOp::Chosen { slot, command } => {
             format!("slot {}: chosen {}", slot.0, value_name(command))
         }
+        ReplicaOp::Joining(Some(copy)) => {
+            format!("copy {}.{} of a heal", copy.term, copy.number)
+        }
+        ReplicaOp::Joining(None) => "no copy of a heal".to_string(),
     }
 }
 
@@ -206,6 +227,8 @@ pub(super) fn kind_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::Commit { .. }) => "Commit",
         Payload::Role(Message::Applied { .. }) => "Applied",
         Payload::Role(Message::Pull { .. }) => "Pull",
+        Payload::Role(Message::Holding { .. }) => "Holding",
+        Payload::Role(Message::Holds { .. }) => "Holds",
         Payload::Write { .. } => "Write",
         Payload::Reply { .. } => "Reply",
         Payload::Change(Change::Reshape { .. }) => "Reshape",
@@ -227,7 +250,9 @@ pub(super) fn phase_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::Accept { .. }) => "accept",
         Payload::Role(Message::Accepted { .. }) => "accepted",
         Payload::Role(Message::Commit { .. } | Message::Applied { .. }) => "commit",
-        Payload::Role(Message::Pull { .. }) => "catchup",
+        Payload::Role(Message::Pull { .. } | Message::Holding { .. } | Message::Holds { .. }) => {
+            "catchup"
+        }
         Payload::Write { .. } | Payload::Reply { .. } => "other",
         Payload::Change(_) | Payload::Done { .. } => "reconfigure",
         Payload::Resolve { .. } | Payload::Resolved { .. } => "read",
@@ -242,6 +267,7 @@ pub(super) fn is_reply(payload: &Payload) -> bool {
                 | Message::Nack { .. }
                 | Message::Accepted { .. }
                 | Message::Applied { .. }
+                | Message::Holds { .. }
         ) | Payload::Reply { .. }
             | Payload::Done { .. }
             | Payload::Resolved { .. }
@@ -296,6 +322,14 @@ pub(super) fn label_of(payload: &Payload) -> String {
         }
         Payload::Role(Message::Pull { segment, from }) => {
             format!("Pull · segment {} · from slot {}", segment.0, from.0)
+        }
+        Payload::Role(Message::Holding { segment }) => format!("Holding · segment {}", segment.0),
+        Payload::Role(Message::Holds { segment, full }) => {
+            format!(
+                "Holds · segment {} · {}",
+                segment.0,
+                if *full { "whole" } else { "not whole" }
+            )
         }
         Payload::Write { command, .. } => match command {
             Command::Write(write) => match write.fence {
@@ -511,6 +545,21 @@ fn role_content(message: &Message) -> (Vec<Field>, String) {
                 "Send me the slots of segment {} from slot {}.",
                 segment.0, from.0
             ),
+        ),
+        Message::Holding { segment } => (
+            vec![field("segment", segment.0.to_string())],
+            format!("Do you hold the whole of segment {}?", segment.0),
+        ),
+        Message::Holds { segment, full } => (
+            vec![
+                field("segment", segment.0.to_string()),
+                field("whole", full.to_string()),
+            ],
+            if *full {
+                format!("I hold the whole of segment {}.", segment.0)
+            } else {
+                format!("I do not hold the whole of segment {}.", segment.0)
+            },
         ),
     }
 }

@@ -290,9 +290,11 @@ pub const EDITS: &[Edit] = &[
     }),
     Edit::new("a seal of another ballot", |events| {
         // Another ballot of the walk, so that the edit names a ballot of the
-        // model.
+        // model: one that registers after the seal, so it has no Phase 1 at
+        // the seal (a ballot of the same segment that already read the old
+        // grid may seal there too).
         let at = events.iter().position(|e| is(e, "seal"))?;
-        let other = events.iter().find_map(|e| {
+        let other = events[at..].iter().find_map(|e| {
             (is(e, "register") && num(e, "b") != num(&events[at], "b"))
                 .then(|| fields(e)["b"].clone())
         })?;

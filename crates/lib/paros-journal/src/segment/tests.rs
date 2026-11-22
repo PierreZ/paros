@@ -211,6 +211,7 @@ fn from_parts_refuses_fields_that_disagree() {
             record.release(),
             record.opening().clone(),
             record.replicas().to_vec(),
+            0,
             state,
             start,
             end,
@@ -261,6 +262,7 @@ fn from_parts_refuses_a_replica_named_twice() {
             record.release(),
             record.opening().clone(),
             replicas,
+            0,
             SegmentState::Sealed,
             Some(Slot(5)),
             Some(Slot(9)),
@@ -283,6 +285,7 @@ fn an_empty_segment_ends_at_its_start() {
             record.release(),
             record.opening().clone(),
             record.replicas().to_vec(),
+            0,
             SegmentState::Sealed,
             Some(Slot(5)),
             Some(Slot(5)),
@@ -298,4 +301,65 @@ fn the_invariants_see_no_replica() {
     let mut record = sealed();
     record.replicas.clear();
     record.assert_invariants();
+}
+
+fn retired() -> SegmentRecord {
+    let mut record = sealed();
+    record.write_boundary(boundary(4)).expect("boundary");
+    record.retire(2, false).expect("retired");
+    record
+}
+
+#[test]
+fn a_heal_swaps_one_member_of_a_retired_segment_in_place() {
+    let mut record = retired();
+    record
+        .replace_replica(NodeId(11), NodeId(20))
+        .expect("a heal of a retired segment");
+    assert_eq!(record.replicas(), nodes(&[10, 20, 12]));
+    assert_eq!(record.state(), SegmentState::Retired);
+    assert_eq!(
+        record.opening().replicas,
+        nodes(&[10, 11, 12]),
+        "the opening call keeps the set it named"
+    );
+}
+
+#[test]
+fn a_heal_starts_only_from_retired() {
+    let mut sealed = sealed();
+    sealed.write_boundary(boundary(4)).expect("boundary");
+    let before = sealed.clone();
+    assert_eq!(
+        sealed.replace_replica(NodeId(11), NodeId(20)),
+        Err(RecordRefusal::State(SegmentState::Sealed)),
+        "a sealed segment still has its acceptors: it retires first"
+    );
+    assert_eq!(sealed, before);
+    let mut trimmed = retired();
+    trimmed.trim(Seq(4)).expect("trimmed");
+    assert_eq!(
+        trimmed.replace_replica(NodeId(11), NodeId(20)),
+        Err(RecordRefusal::State(SegmentState::Trimmed)),
+        "a trimmed record stays trimmed"
+    );
+}
+
+#[test]
+fn a_heal_removes_a_member_and_adds_a_new_node() {
+    let mut record = retired();
+    let before = record.clone();
+    assert_eq!(
+        record.replace_replica(NodeId(30), NodeId(20)),
+        Err(RecordRefusal::NotMember(NodeId(30)))
+    );
+    assert_eq!(
+        record.replace_replica(NodeId(11), NodeId(12)),
+        Err(RecordRefusal::AlreadyMember(NodeId(12)))
+    );
+    assert_eq!(
+        record.replace_replica(NodeId(11), NodeId(11)),
+        Err(RecordRefusal::AlreadyMember(NodeId(11)))
+    );
+    assert_eq!(record, before, "a refusal changes nothing");
 }
