@@ -776,7 +776,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   over channels (tokio is a dev-dependency only).
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
   segments, the walk of the matchmaker register across handovers, the walk of the journal
-  roles, the walk of the generic driver of `paros-journal-io` on three processes, the sweep of
+  roles, the walk of the generic driver of `paros-journal-io` on three processes, the walk of the
+  whole journal on the in-memory IO (two journals, their controllers and a client; #1445), the sweep of
   the grid controller's decisions over every small view against a reference `decide`
   (`control`, #1261) and the walk of the controller role (`controller`), with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
