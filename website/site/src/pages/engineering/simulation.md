@@ -85,8 +85,8 @@ A rare branch of the core that a walk must reach is a `probe!` at its line. The 
 the runs that reach a new probe or a new edge of the core (branch coverage with SanitizerCoverage),
 and a gate judges every probe over all the walks: CI fails when one is not reached. There is no
 list of excused probes. A probe that no walk reaches gets a walk move, a flavor or a steer, never
-only a larger budget. Each CI job has 30 minutes, so four shards walk a quarter each and one job
-judges their union. A nightly run walks new seeds.
+only a larger budget. Each CI job has 30 minutes, so two shards walk half each and one job judges
+their union. A nightly run walks new seeds.
 
 ## What is not there yet
 

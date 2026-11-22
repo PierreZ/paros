@@ -54,11 +54,13 @@ stays valid: find its file in the section map.
 10. [03-7-universe.md](03-7-universe.md): §3.7 The universe
 11. [03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md): §3.8 Identifiers; §3.9 Checkpoints; §3.10 Recovery (deferred); §3.11 Transport security
 12. [04-roles.md](04-roles.md): §4 Roles; §4.2 The journal's sans-IO contract (a link); §4.3 The consensus core is a library for everyone; §4.4 The layers of the service
-13. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones; §5.1 Journal health (a link)
-14. [06-verification.md](06-verification.md): §6 Verification
-15. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
-16. [10-sources.md](10-sources.md): §10 Sources
-17. [11-alternatives.md](11-alternatives.md): §11 Alternatives considered
+13. [04-5-old-duties.md](04-5-old-duties.md): §4.5 The duty table of the old coordinator and machine
+14. [04-6-parity.md](04-6-parity.md): §4.6 The features of the tag and their home
+15. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones; §5.1 Journal health (a link)
+16. [06-verification.md](06-verification.md): §6 Verification
+17. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
+18. [10-sources.md](10-sources.md): §10 Sources
+19. [11-alternatives.md](11-alternatives.md): §11 Alternatives considered
 
 ## Section map
 
@@ -100,6 +102,8 @@ stays valid: find its file in the section map.
 | §4.2 | The journal's sans-IO contract (moved to journal §J4.2) | [04-roles.md](04-roles.md) |
 | §4.3 | The consensus core is a library for everyone | [04-roles.md](04-roles.md) |
 | §4.4 | The layers of the service | [04-roles.md](04-roles.md) |
+| §4.5 | The duty table of the old coordinator and machine | [04-5-old-duties.md](04-5-old-duties.md) |
+| §4.6 | The features of the tag and their home | [04-6-parity.md](04-6-parity.md) |
 | §5 | Failure model and zones | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §5.1 | Journal health (moved to journal §J6.2) | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §6 | Verification | [06-verification.md](06-verification.md) |

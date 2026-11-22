@@ -8,7 +8,7 @@ completely, and the simulation tests the code that ships.
 
     nix develop .#tla --command scripts/check-tla.sh          # the checks that CI runs
     nix develop .#tla --command scripts/check-tla.sh --all    # the long checks too
-    nix develop .#tla --command scripts/check-tla.sh reads    # one folder; CI runs one job for each folder
+    nix develop .#tla --command scripts/check-tla.sh reads    # one folder
 
 `tlc` is also in the default dev shell. CI runs the first command in the `TLA` workflow, only
 when a spec, the script or the flake changes.
@@ -47,16 +47,20 @@ covered), `multi-paxos/` with `Durable = "before"` and `Identity = TRUE`. A pass
 
 A proof holds at every size: every number of acceptors, values and ballots, and every quorum
 system whose quorums intersect. A proof is a module `<Model>Proof.tla` beside its model, checked
-by TLAPS (`nix develop .#proofs --command scripts/check-proofs.sh`; CI's `proofs` job of the
-`TLA` workflow proves every obligation again, with no cache). This is step 2 of #1307.
+by TLAPS (`nix develop .#proofs --command scripts/check-proofs.sh`; CI's `proofs` jobs of the
+`TLA` workflow prove every obligation again, with no cache, one job for each `*Proof.tla`
+module). A long proof is split into several `*Proof.tla` modules so that each module fits the 30
+minutes of a job; the module that extends them all is the map of the proof. This is step 2 of
+#1307.
 
 | Model | Proof | What it proves |
 |---|---|---|
 | `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 679 obligations, Z3 and Zenon, about 2 minutes |
+| `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Persist`, `Restart`, `Wipe`) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,283 obligations, Z3 and Zenon, at most 6 minutes for each module |
 
 The TLAPS of nixpkgs (1.4.5) has no Isabelle and no LS4. So a proof uses no induction lemma (they
 need Isabelle; a least or highest member of a set of naturals comes from `WFMin`, which is first
-order, as `MinExists` and `MaxExists` of `DecreeProof.tla` do), and the last step of `Safety` (`Spec => []Agreement`), the TLA rule INV1 applied
+order, as `MinExists` and `MaxExists` of `DecreeProof.tla` and `MultiPaxosFactsProof.tla` do), and the last step of `Safety` (`Spec => []Agreement`), the TLA rule INV1 applied
 to the three theorems, is `PROOF OMITTED`: LS4, the PTL backend, is the one tool that checks it.
 The constant facts that a proof uses are named `ASSUME`s of the model (`AcceptorsFinite`,
 `QuorumsType`, `NoneNotValue` and others), so TLC checks them on each configuration. A proof has a
@@ -176,7 +180,7 @@ uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked in
 not models of the plan, and no rule of `paros-consensus` comes from them until Pierre decides.
 Each experiment has one folder for each design, with the same layout as a model, and a
 `README.md` with the report. `scripts/check-tla.sh` runs an experiment only when it is named
-(`scripts/check-tla.sh experiments/segments/a`); CI runs a job for each experiment folder too.
+(`scripts/check-tla.sh experiments/segments/a`); CI checks each experiment folder too.
 
 - `experiments/segments/`: #1213 (segments in the protocol or in storage). Design A, the segment
   table in the matchmakers (`a/`), against design B, plain Matchmaker Paxos with chunks local to
@@ -215,7 +219,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, boundary write, retire, offload mark, trim, acceptor compaction, matchmaker handover, grid controller election, reshape call, heal of a sealed segment) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
-| The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | not built (`paros-journal-control`, after #1189) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
+| The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | built (`paros_journal_control::role`; its walk is traced against `ControllerTrace.tla`) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (now the whole state in the segment record, `seal-chain/`; first checked as `next_seq` in the segment record, the uuid in the journal's matchmaker record and a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
@@ -2292,9 +2296,14 @@ in force and every older one retired), `BoundGuard` (the record checks the bound
 `Idempotent` (the record keeps the identity of the request that opened each segment and answers a
 retry "ok").
 
+A holder with no plan that reads another term in the record stops (`Stand`): the code's `decide`
+asks this first, on the view of each step (#1261 (grid controller decision tests)).
+`ControllerTrace.tla` extends the model and checks the controller walk of `journal-sim`
+(`tests/controller_traces.rs`): each event of the walk is one action of the model.
+
 | Check | CI | Result |
 |---|---|---|
-| `safety` | ci | pass: every rule, `PlanOnlyLead` (only a holder has a plan), `Chain` (each configuration of the table moves one way, one state at a time) and `CtlSteps` (a holder gives up the lead only on a refusal for its term or a crash, only a candidate becomes the holder, a candidate goes back to idle only when it lost the compare-and-set, a controller that is down only restarts); two controllers, terms up to 2, one controller crash, one lost message, six grids (two member sets, `acks` 1 to 3) |
+| `safety` | ci | pass: every rule, `PlanOnlyLead` (only a holder has a plan), `Chain` (each configuration of the table moves one way, one state at a time) and `CtlSteps` (a holder gives up the lead only on a refusal for its term or a crash, only a candidate becomes the holder, a candidate goes back to idle only when it lost the compare-and-set, a controller that is down only restarts; a holder also stops when it reads another term with no plan); two controllers, terms up to 2, one controller crash, one lost message, six grids (two member sets, `acks` 1 to 3) |
 | `safety_long` | long | pass: every rule with terms up to 3 and one acceptor failure too (24.6 million distinct states, 7 minutes locally with 4 workers) |
 | `live_ci` | ci | pass: `Answered` and `Settles`, with every rule, one lost message and one acceptor down, no controller crash (257 thousand distinct states, under 2 minutes) |
 | `live` | long | pass: the same with one controller crash too (1.8 million distinct states, 14 minutes locally with 4 workers while two other TLC runs shared the machine) |
@@ -2310,7 +2319,7 @@ retry "ok").
 | `live_nobound_p1`, `live_nobound_p2` | ci | violation of `Settles`: the only other grid is outside the bound, `acks = 1` (Phase 1 of the new grid needs every member) or `acks = 3` (Phase 2 needs every member); one acceptor down blocks the seal into it |
 | `live_nobound_old` | ci | violation of `SettlesBounded`: a grid with `acks = 1` comes into force, an acceptor fails, and the seal into the next grid, one that meets the bound, needs Phase 1 of the old grid and never comes |
 | `noidem` | ci | violation of `AnswerTrue`: the "ok" is lost, and the retry is refused for its expected configuration although the reshape took place |
-| `reach_<event>` | ci | violation of `NotReached`, one for each case the issue names: `lost_race` (two candidates read one term, one loses the compare-and-set), `deposed` (a candidate deposes a live holder), `stale_refused` (the deposed controller's call is refused for its term), `takeover` and `open_after_takeover` (a candidate takes the term of a crashed holder, then opens a segment), `crash_after_plan` and `open_after_crash` (a controller crashes between its plan and its call, and the journal still reshapes), `sealed_refused` (a reshape asked while a segment is sealed but not retired is refused), `ok_lost` (an "ok" is lost), `fail_after_plan` (an acceptor fails after a plan named it), `inforce_with_failed` (that grid still comes into force) |
+| `reach_<event>` | ci | violation of `NotReached`, one for each case the issue names: `lost_race` (two candidates read one term, one loses the compare-and-set), `deposed` (a candidate deposes a live holder), `stood` (a deposed holder reads the record and stops), `stale_refused` (the deposed controller's call is refused for its term), `takeover` and `open_after_takeover` (a candidate takes the term of a crashed holder, then opens a segment), `crash_after_plan` and `open_after_crash` (a controller crashes between its plan and its call, and the journal still reshapes), `sealed_refused` (a reshape asked while a segment is sealed but not retired is refused), `ok_lost` (an "ok" is lost), `fail_after_plan` (an acceptor fails after a plan named it), `inforce_with_failed` (that grid still comes into force) |
 
 The answer to #1259:
 

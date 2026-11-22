@@ -45,6 +45,14 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "Quorums and failures", path: "journal/quorums-and-failures/" },
     { title: "The controller", path: "journal/controller/" },
   ],
+  "parosd/": [
+    { title: "parosd", path: "parosd/" },
+    { title: "Layers that stand alone", path: "parosd/layers/" },
+    { title: "One shape at every level", path: "parosd/control/" },
+    { title: "Machines", path: "parosd/machines/" },
+    { title: "Names and tokens", path: "parosd/names-and-tokens/" },
+    { title: "The universe", path: "parosd/universe/" },
+  ],
   "engineering/": [
     { title: "The safety case", path: "engineering/" },
     { title: "TLA+ models", path: "engineering/tla/" },
@@ -82,6 +90,14 @@ const STATUS: Record<string, { tag: string; html: string }> = {
       matchmaker register (<code>paros-journal</code>) exist, and the roles and the driver do not
       exist yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
       this page explains them and links each section.`,
+  },
+  parosd: {
+    tag: "design · not built",
+    html: `The design of parosd is written in
+      <a href="${REPO}/tree/main/docs/architecture"><code>docs/architecture/</code></a>, and its
+      code is not built. The layers are built after the journal v1, in the order of
+      <a href="${REPO}/issues/1409">#1409</a>. This page explains the design and links each
+      section; the rules are in the docs.`,
   },
 };
 const statusName = Astro.props.status ?? fm.status;

@@ -35,7 +35,7 @@ nix develop .#tla --command scripts/check-tla.sh          # the checks that CI r
 nix develop .#tla --command scripts/check-tla.sh reads    # one folder
 ```
 
-CI runs one job for each folder. A `long` line runs only with `--all`; a long line with a time
+CI runs the folders that a change can break, packed into a few jobs. A `long` line runs only with `--all`; a long line with a time
 bound stops at that bound and is a bounded run, never a proof. The README of
 [`specs/tla/`](https://github.com/PierreZ/paros/blob/main/specs/tla/README.md) lists every model
 with its checks and its controls. The [safety case](../) names, for each claim, the model, the
@@ -69,10 +69,13 @@ at the start, and every step from a state where `Inv` holds goes to a state wher
   implies `Agreement`. The last step, the TLA rule that joins the three, is not checked by
   the prover: the TLAPS of nixpkgs has no LS4, its temporal backend.
 - **`multi-paxos/`**: the decree invariant for each slot, and the rules of the log, the
-  allocator and the disk. The states are too many to list, so TLC draws 100,000 of them with a
-  fixed seed. A pass says that no drawn state breaks `Inv`; it is not a proof.
+  allocator, the recovery of a new leader and the disk. The states are too many to list, so
+  TLC draws 100,000 of them with a fixed seed. TLAPS proves it at every size, for every number
+  of slots and every quorum system where each Phase-1 quorum meets each Phase-2 quorum
+  (`MultiPaxosProof.tla` and the five modules it extends, 2,283 obligations). The same last
+  step is not checked by the prover.
 
-The proofs (TLAPS, then Lean) are the later steps of #1307 and are **open**.
+The Lean proofs are a later step of #1307 and are **open**.
 
 ## Guard mutants: the checks are checked
 

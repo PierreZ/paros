@@ -1,4 +1,4 @@
-[← 03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md) · [Index](README.md) · [05-failure-model-and-zones.md →](05-failure-model-and-zones.md)
+[← 03-8-identifiers-checkpoints-recovery-security.md](03-8-identifiers-checkpoints-recovery-security.md) · [Index](README.md) · [04-5-old-duties.md →](04-5-old-duties.md)
 
 ## 4. Roles
 
@@ -280,7 +280,8 @@ These points are decided:
   where a new member goes, and how many moves run at one time. A grant of the port is also the
   token of the rate limit of the cell. "Gone" is a durable record of the cell, not the memory of
   one coordinator. The sets of a tenant, the frontends of a tenant, the move of a tenant between
-  cells and the `Configure` of a tenant stay with the tenant and the cell.
+  cells and the `Configure` of a tenant stay with the tenant and the cell. Section 4.5 gives each
+  module of the old coordinator and machine its new home (#1412 (the duty table)).
 - **The placement across cells is the one of section 3.7** (Pierre, 2026-11-22: "follow the hash
   assignment" of his post "Notes about cell-based architecture"). The override table is read
   first, then the hash of the name gives a bucket, and a fixed table gives the cell of each
