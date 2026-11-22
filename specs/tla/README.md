@@ -56,9 +56,12 @@ minutes of a job; the module that extends them all is the map of the proof. This
 `specs/tla/PROVED.sha256` pins the files that the proofs cover: each `*Proof.tla` module and each
 module of its folder that a proof extends (step 4 of #1307, #1459 (pin the proved specs)). A full
 pass of `scripts/check-proofs.sh` (no argument) writes it with `scripts/proof-hashes.sh write`.
-The `specs` job of the `TLA` workflow runs `scripts/proof-hashes.sh check`, which fails when a
-pinned file changed, or when a covered file is not pinned. So a change to a proved model comes
-with a proof run and a new pin in the same pull request.
+The `plan` job of the `TLA` workflow runs `scripts/proof-hashes.sh check`, which fails when a
+pinned file changed and the pin was not written again, or when a covered file is not pinned. The
+pin shows a reader which files the proofs cover. It does not prove that a proof ran: the
+`proofs` jobs do, since the plan runs them on each change of a proof folder. The pin follows only
+the modules of the folder that a `*Proof.tla` names after `EXTENDS`, not the modules that those
+modules extend in turn: today `Decree.tla` and `MultiPaxos.tla` extend standard modules only.
 
 | Model | Proof | What it proves |
 |---|---|---|

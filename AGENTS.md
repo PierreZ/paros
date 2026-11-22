@@ -134,7 +134,8 @@ the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proo
 `specs/tla/multi-paxos/MultiPaxosProof.tla` and the `*Proof.tla` modules it extends,
 `scripts/check-proofs.sh` in `nix develop .#proofs`, one `proofs` job for each module in the `TLA`
 workflow; LS4, built in the flake, checks the temporal last step; `specs/tla/PROVED.sha256` pins
-the proved files, and the `specs` job fails when one changed without a new proof run;
+the proved files, and the `plan` job of the `TLA` workflow fails when one changed and the pin
+was not written again;
 `specs/tla/README.md`, "Proofs"). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
 journal's matchmaker register with its writer, its guard and the models that check it (#1315). Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of

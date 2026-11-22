@@ -14,7 +14,8 @@
 # The TLAPS of nixpkgs has no Isabelle and no LS4 (the PTL backend). The
 # proofs shell of the flake adds LS4 and `ptl_to_trp`, built from source, so
 # a temporal step such as `Spec => []Inv` is checked too. A `PROOF OMITTED`
-# step fails the check: an omitted step is a step that nothing checks.
+# step, or a step with no proof at all (tlapm proves no obligation for it),
+# fails the check: such a step is a step that nothing checks.
 #
 # `--method smt,zenon,ls4` names the backends that exist. With the default
 # method, tlapm also tries Isabelle on an obligation that the others fail,
@@ -59,17 +60,21 @@ for proof in "${modules[@]}"; do
   if (cd "$dir" && tlapm --cleanfp --method smt,zenon,ls4 --threads "$threads" --stretch 2 "$name") \
       >"$log" 2>&1 \
     && ! grep -q "Could not prove or check" "$log"; then
-    echo "ok    $proof"
+    proved=true
   else
-    echo "FAIL  $proof" >&2
+    proved=false
     grep -A40 -E "^File|Error" "$log" | grep -v "isabelle-process\|^/nix/store\|Executable .* not found\|PATH" >&2 || true
-    status=1
   fi
   summary=$( (cd "$dir" && tlapm --summary "$name") 2>/dev/null || true)
-  echo "$summary" | grep -E "obligations_count|omitted|incomplete" || true
-  if echo "$summary" | grep -q "omitted_proofs_count"; then
-    echo "FAIL  $proof: a step is PROOF OMITTED" >&2
+  echo "$summary" | grep -E "obligations_count|omitted|missing|incomplete" || true
+  if [ "$proved" = false ]; then
+    echo "FAIL  $proof" >&2
     status=1
+  elif echo "$summary" | grep -qE "omitted_proofs_count|missing_proofs_count"; then
+    echo "FAIL  $proof: a step is PROOF OMITTED or has no proof" >&2
+    status=1
+  else
+    echo "ok    $proof"
   fi
   rm -rf "$dir/${name%.tla}.tlaps" "$log"
 done

@@ -11,7 +11,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../specs/tla"
 pin=PROVED.sha256
 
-# Each file that a proof covers, as a path under specs/tla/, sorted.
+# Each file that a proof covers, as a path under specs/tla/, sorted: each
+# *Proof.tla, and each module of its folder that it names after EXTENDS. The
+# walk is one level deep: a module that such a model extends in turn is not
+# followed, so a proved model that extends a sibling module needs this walk
+# to grow first.
 covered() {
   for proof in */*Proof.tla; do
     [ -f "$proof" ] || continue

@@ -59,7 +59,7 @@ GROUP_MINUTES = 22.0
 # `.github/workflows/rust.yml`, which is a subset of this list.
 NOT_RUST = re.compile(
     r"^(website/|docs/|specs/|scripts/build-wasm\.sh$|scripts/check-tla\.sh$"
-    r"|scripts/check-proofs\.sh$|scripts/mutate-tla\.py$|scripts/tla-minutes\.txt$"
+    r"|scripts/check-proofs\.sh$|scripts/proof-hashes\.sh$|scripts/mutate-tla\.py$|scripts/tla-minutes\.txt$"
     r"|\.github/workflows/tla\.yml$)|\.md$"
 )
 
@@ -75,8 +75,8 @@ TLA_TOOLS = {
 }
 
 # The files that the proofs read besides their folder.
-PROOF_TOOLS = {"scripts/check-proofs.sh", "flake.nix", "flake.lock", ".github/workflows/tla.yml",
-               "scripts/ci-plan.py"}
+PROOF_TOOLS = {"scripts/check-proofs.sh", "scripts/proof-hashes.sh", "flake.nix", "flake.lock",
+               ".github/workflows/tla.yml", "scripts/ci-plan.py"}
 
 
 def changed_files(base: str | None) -> list[str] | None:
