@@ -543,6 +543,17 @@ fn a_step_while_a_batch_flies_panics() {
     n.tick();
 }
 
+/// A call that changes nothing still refuses a node in flight: `propose` on
+/// a follower returns early, before any invariant check, and the entry
+/// assertion stops it first.
+#[test]
+#[should_panic(expected = "no input reaches a node while its batch is in flight")]
+fn a_proposal_to_a_follower_in_flight_panics() {
+    let mut n = node(0, &[0, 1, 2]);
+    let _flight = n.ready().release();
+    let _ = n.propose(entry(1, 0, 7));
+}
+
 /// No batch is drained while an earlier one flies.
 #[test]
 #[should_panic(expected = "no batch is drained while an earlier batch is in flight")]
@@ -564,6 +575,25 @@ fn a_flight_given_to_another_node_panics() {
     b.durable(flight);
 }
 
+/// One process serves many journals under one node id: a flight goes back
+/// to the journal that released it.
+#[test]
+#[should_panic(expected = "a flight is given back to the journal that released it")]
+fn a_flight_given_to_another_journal_of_the_node_panics() {
+    use crate::journal::{JournalId, JournalIdentifier, TenantId};
+    let mut a = node(0, &[0, 1, 2]);
+    let config = crate::contract::config::Config::new(
+        NodeId(0),
+        JournalIdentifier::new(TenantId(1), JournalId(2)),
+    )
+    .with_peers([NodeId(0), NodeId(1), NodeId(2)]);
+    let mut b = ColocatedNode::new(&MemStorage::new(config), Limits::DEFAULT);
+    let flight = a.ready().release();
+    let other = b.ready().release();
+    assert_eq!(flight.batch, other.batch, "both journals number from zero");
+    b.durable(flight);
+}
+
 /// A token of an earlier flight is stale.
 #[test]
 #[should_panic(expected = "a flight is given back once, while it is in flight")]
@@ -572,6 +602,7 @@ fn a_stale_flight_panics() {
     let first = n.ready().release();
     let copy = crate::node::Flight {
         node: first.node,
+        journal: first.journal,
         batch: first.batch,
     };
     n.durable(first);

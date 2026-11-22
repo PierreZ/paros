@@ -396,6 +396,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, target = target.0)))]
     pub fn relinquish_to(&mut self, target: NodeId) -> Option<Handoff> {
+        self.assert_landed();
         if !self.can_relinquish() || target == self.config.id || !self.acceptors.contains(target) {
             return None;
         }

@@ -719,8 +719,8 @@ impl ReplicaNode {
             self.counters.ignored += 1;
             return;
         }
-        if self.catchup_asked.is_none_or(|asked| asked >= point) {
-            self.request_catch_up(from, self.replica.first_unchosen());
+        if self.open_catch_up().is_none_or(|asked| asked >= point) {
+            self.request_catch_up(from, self.catch_up_need());
             return;
         }
         self.trim_to(point, state);
@@ -778,12 +778,47 @@ impl ReplicaNode {
         grew
     }
 
+    /// The lowest slot this replica still misses: its first faulty record,
+    /// or else its first unchosen slot.
+    fn catch_up_need(&self) -> Slot {
+        let first_unchosen = self.replica.first_unchosen();
+        let need = self
+            .faulty
+            .first()
+            .map_or(first_unchosen, |faulty| (*faulty).min(first_unchosen));
+        assert!(
+            need <= first_unchosen,
+            "the need is at or below the first unchosen slot"
+        );
+        assert!(
+            need >= self.floor,
+            "a replica never misses a slot below its floor"
+        );
+        need
+    }
+
+    /// The open catch-up request of this replica (`catchup_asked`), if it
+    /// still asks for a slot the replica misses; a request below
+    /// [`Self::catch_up_need`] is answered and dropped here.
+    fn open_catch_up(&mut self) -> Option<Slot> {
+        let need = self.catch_up_need();
+        if self.catchup_asked.is_some_and(|asked| asked < need) {
+            self.catchup_asked = None;
+        }
+        assert!(
+            self.catchup_asked.is_none_or(|asked| asked >= need),
+            "an open request asks for a slot the replica misses"
+        );
+        self.catchup_asked
+    }
+
     fn request_catch_up(&mut self, to: NodeId, from_slot: Slot) {
         // A pull goes to an acceptor, never to a replica (itself included).
         assert!(to != self.config.id, "a replica never pulls from itself");
         assert!(self.in_pool(to), "a replica pulls only from a pooled node");
         self.counters.catch_up_requests += 1;
-        self.catchup_asked = Some(self.catchup_asked.map_or(from_slot, |a| a.min(from_slot)));
+        let open = self.open_catch_up();
+        self.catchup_asked = Some(open.map_or(from_slot, |a| a.min(from_slot)));
         self.pending_messages.push((
             Audience::Node(to),
             Message::CatchUpRequest {

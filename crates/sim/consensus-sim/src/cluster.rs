@@ -1140,8 +1140,6 @@ impl Cluster {
         }
     }
 
-    /// [`Mutant::EarlyGc`]: node `id` asks every matchmaker for GC at the
-    /// ballot it leads, once, whatever its configuration learned.
     /// Give a flushed batch back to its node: its writes are durable. The
     /// driver persists after it lets go of the buckets, so the core holds
     /// the rule of one batch in flight (`Ready::release`). A crash drops the
@@ -1170,6 +1168,8 @@ impl Cluster {
         self.trace_batch(id, Traced::empty(seen), before, cx);
     }
 
+    /// [`Mutant::EarlyGc`]: node `id` asks every matchmaker for GC at the
+    /// ballot it leads, once, whatever its configuration learned.
     fn early_gc(
         &mut self,
         id: NodeId,

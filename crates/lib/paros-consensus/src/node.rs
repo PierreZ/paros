@@ -529,6 +529,7 @@ impl ColocatedNode {
     /// error, never an operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn step(&mut self, msg: Message) {
+        self.assert_landed();
         let marks = self.durable_marks();
         let ticks = self.tick_count;
         // A transport echo changes nothing: it is dropped whole.
@@ -645,6 +646,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, leader = %entry.leader, seq = entry.seq.0)))]
     pub fn propose(&mut self, entry: Entry) -> ProposeResult {
+        self.assert_landed();
         let result = self.propose_in(entry, None, Delegation::Auto);
         if let ProposeResult::Accepted(slot) = result {
             assert!(
@@ -808,6 +810,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control)))]
     pub fn propose_control(&mut self, control: Control) -> ProposeResult {
+        self.assert_landed();
         let result = self.propose_control_in(control, Delegation::Auto);
         if let ProposeResult::Accepted(slot) = result {
             assert!(
@@ -883,6 +886,7 @@ impl ColocatedNode {
     /// clamped inside the chosen prefix.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, up_to = up_to.0)))]
     pub fn compact(&mut self, up_to: Slot) -> Slot {
+        self.assert_landed();
         let Some(target) = self.replica.compaction_target() else {
             return self.acceptor.first_slot();
         };
@@ -931,6 +935,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, slot = slot.0)))]
     pub fn repair_record(&mut self, slot: Slot) -> Option<Ballot> {
+        self.assert_landed();
         let marks = self.durable_marks();
         let writes_before = self.pending_writes.len();
         let chosen = self.replica.chosen_index();
@@ -967,6 +972,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn tick(&mut self) {
+        self.assert_landed();
         let marks = self.durable_marks();
         let ticks = self.tick_count;
         self.tick_count += 1;
@@ -1208,10 +1214,18 @@ impl ColocatedNode {
     )]
     pub fn durable(&mut self, flight: Flight) {
         // The token is consumed here: a driver cannot give it back twice.
-        let Flight { node, batch } = flight;
+        let Flight {
+            node,
+            journal,
+            batch,
+        } = flight;
         assert!(
             node == self.config.id,
             "a flight is given back to the node that released it"
+        );
+        assert!(
+            journal == self.config.journal,
+            "a flight is given back to the journal that released it"
         );
         assert!(
             self.flight == Some(batch),
@@ -1239,6 +1253,7 @@ impl ColocatedNode {
         assert!(self.flights > batch, "each flight has its own number");
         Flight {
             node: self.config.id,
+            journal: self.config.journal,
             batch,
         }
     }

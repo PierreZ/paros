@@ -415,11 +415,48 @@ impl ColocatedNode {
         );
     }
 
+    /// The lowest slot this node still misses: the first faulty slot of the
+    /// fold's hole, or else the first unchosen slot. A catch-up request asked
+    /// below it is answered (the node holds that range now) and no longer
+    /// opens the trim-point gate.
+    pub(super) fn catch_up_need(&self) -> Slot {
+        let first_unchosen = self.first_unchosen();
+        let need = self
+            .replica
+            .fold_hole()
+            .map_or(first_unchosen, |hole| hole.min(first_unchosen));
+        assert!(
+            need <= first_unchosen,
+            "the need is at or below the first unchosen slot"
+        );
+        assert!(
+            need >= self.acceptor.first_slot(),
+            "a node never misses a slot below its floor"
+        );
+        need
+    }
+
+    /// The open catch-up request of this node (`catchup_asked`), if it still
+    /// asks for a slot the node misses. A request below
+    /// [`Self::catch_up_need`] is answered and dropped here.
+    pub(super) fn open_catch_up(&mut self) -> Option<Slot> {
+        let need = self.catch_up_need();
+        if self.catchup_asked.is_some_and(|asked| asked < need) {
+            self.catchup_asked = None;
+        }
+        assert!(
+            self.catchup_asked.is_none_or(|asked| asked >= need),
+            "an open request asks for a slot the node misses"
+        );
+        self.catchup_asked
+    }
+
     /// A `CatchUpRequest` from this node for the decided range from
-    /// `from_slot`. It records the lowest slot asked since the last trim-point
-    /// jump (`catchup_asked`): a `TrimmedTo` is taken only as an answer.
+    /// `from_slot`. It records the lowest open slot asked (`catchup_asked`):
+    /// a `TrimmedTo` is taken only as an answer to an open request.
     pub(super) fn catch_up_request(&mut self, from_slot: Slot) -> Message {
-        self.catchup_asked = Some(self.catchup_asked.map_or(from_slot, |a| a.min(from_slot)));
+        let open = self.open_catch_up();
+        self.catchup_asked = Some(open.map_or(from_slot, |a| a.min(from_slot)));
         assert!(
             self.catchup_asked.is_some_and(|a| a <= from_slot),
             "a request is recorded as asked"

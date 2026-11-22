@@ -1273,3 +1273,41 @@ fn a_replica_takes_a_trim_point_only_as_an_answer() {
     assert_eq!(replica.first_slot(), Slot(4), "the answer is taken");
     assert_eq!(replica.counters().trim_jumps, 1);
 }
+
+/// A replica's request is open only while it misses the slot it asked for:
+/// once it learns that range by entries, a later trim point is unasked
+/// again, and the replica asks from the first slot it now misses.
+#[test]
+fn a_replica_request_answered_by_entries_closes_the_trim_point_gate() {
+    let mut replica = plain_replica(Limits::DEFAULT);
+    replica.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(4),
+        state: JournalState::default(),
+    });
+    let _ = sent(&mut replica);
+    let entries: BTreeMap<Slot, (Ballot, Command)> =
+        (0..3).map(|s| (Slot(s), (ballot(1), cmd(s)))).collect();
+    replica.step(Message::CatchUpResponse {
+        from: NodeId(0),
+        entries,
+    });
+    assert!(replica.replica().is_chosen(Slot(2)));
+    let _ = sent(&mut replica);
+    replica.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(8),
+        state: JournalState::default(),
+    });
+    assert_eq!(
+        replica.first_slot(),
+        Slot(0),
+        "an answered request does not open the gate"
+    );
+    let asked = sent(&mut replica);
+    assert!(
+        asked.iter().any(|(to, m)| *to == NodeId(0)
+            && matches!(m, Message::CatchUpRequest { from_slot, .. } if *from_slot == Slot(3))),
+        "the replica asks from the first slot it misses: {asked:?}"
+    );
+}

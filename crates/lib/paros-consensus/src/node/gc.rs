@@ -240,6 +240,7 @@ impl ColocatedNode {
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn resend_gc(&mut self) {
+        self.assert_landed();
         if !self.gc_pending() {
             return;
         }
@@ -440,6 +441,7 @@ impl ColocatedNode {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     pub fn check_retirement(&mut self, watermark: Ballot) -> bool {
+        self.assert_landed();
         if !self.config.has_matchmakers() {
             assert!(self.probe.is_none(), "a plain deployment never probes");
             return false;
@@ -516,6 +518,7 @@ impl ColocatedNode {
     /// leadership's beat carried: what a driver asks for a released slot
     /// that may not retire yet. `false` while no floor was heard.
     pub fn check_retirement_heard(&mut self) -> bool {
+        self.assert_landed();
         match self.gc_floor_heard {
             Some(floor) => self.check_retirement(floor),
             None => false,
@@ -722,6 +725,7 @@ impl ColocatedNode {
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = ack.matchmaker.0)))]
     pub fn on_gc_ack(&mut self, ack: &GcAck) -> GcStep {
+        self.assert_landed();
         let Some(believed) = self.matchmakers.as_ref() else {
             return GcStep::Ignored;
         };

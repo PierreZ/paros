@@ -118,6 +118,7 @@ impl ColocatedNode {
     /// operating condition — every refusal is a result value).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, members = config.members().len())))]
     pub fn reconfigure(&mut self, config: &AcceptorConfig) -> ReconfigureResult {
+        self.assert_landed();
         if self.role != NodeRole::Leader {
             return ReconfigureResult::NotLeader(self.leader);
         }

@@ -42,6 +42,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn resend_pending(&mut self) {
+        self.assert_landed();
         if self.role != NodeRole::Leader {
             return;
         }
@@ -97,6 +98,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, after_resends)))]
     pub fn take_back_delegated(&mut self, after_resends: u64) -> Vec<(Slot, ProxyId)> {
+        self.assert_landed();
         if self.role != NodeRole::Leader {
             return Vec::new();
         }
@@ -167,6 +169,7 @@ impl ColocatedNode {
     /// or an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, slot = slot.0, column)))]
     pub fn move_round(&mut self, slot: Slot, column: usize) -> bool {
+        self.assert_landed();
         if self.role != NodeRole::Leader {
             return false;
         }
@@ -202,6 +205,7 @@ impl ColocatedNode {
     /// If an internal role/recovery invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn advance_recovery(&mut self) {
+        self.assert_landed();
         let marks = self.durable_marks();
         let writes_before = self.pending_writes.len();
         self.advance_chosen_index();
@@ -242,6 +246,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn step_down(&mut self) {
+        self.assert_landed();
         if self.role != NodeRole::Leader {
             return;
         }
@@ -274,6 +279,7 @@ impl ColocatedNode {
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
     pub fn campaign(&mut self) {
+        self.assert_landed();
         self.campaign_above(Ballot::zero());
     }
 
@@ -298,6 +304,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, round = seen.round)))]
     pub fn campaign_above(&mut self, seen: Ballot) {
+        self.assert_landed();
         if self.role == NodeRole::Leader || self.matchmaking.is_some() {
             return;
         }
@@ -336,6 +343,7 @@ impl ColocatedNode {
     /// cleared: a programmer error.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ticks)))]
     pub fn set_election_timeout(&mut self, ticks: u64) {
+        self.assert_landed();
         self.election_timeout = ticks;
         self.needs_election_timeout = false;
         assert!(
@@ -365,6 +373,7 @@ impl ColocatedNode {
     /// If an internal invariant is broken (a programmer error).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, nodes = nodes.len())))]
     pub fn extend_pool(&mut self, nodes: &[NodeId]) -> bool {
+        self.assert_landed();
         if !self.config.has_matchmakers() {
             return false;
         }
@@ -400,6 +409,7 @@ impl ColocatedNode {
     /// If an internal invariant is broken (a programmer error).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmakers = matchmakers.len())))]
     pub fn extend_matchmaker_pool(&mut self, matchmakers: &[MatchmakerId]) -> bool {
+        self.assert_landed();
         if !self.config.has_matchmakers() {
             assert!(
                 self.matchmakers.is_none(),

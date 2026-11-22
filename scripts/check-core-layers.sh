@@ -108,7 +108,13 @@ while IFS= read -r file; do
       fi
     fi
     target_layer="$(layer "$target")"
-    [ "$target_layer" = unknown ] && continue
+    if [ "$target_layer" = unknown ]; then
+      # A lowercase name that is no module is a re-export of a function or
+      # a macro: it hides its module like an uppercase one.
+      echo "check-core-layers: $rel:$line: crate::$name is neither a module with a layer nor a re-export of the table; add it to this script" >&2
+      status=1
+      continue
+    fi
     [ "$target" = "$own" ] && continue
     if [ "$target_layer" -gt "$own_layer" ] || { [ "$own_layer" = 2 ] && [ "$target_layer" = 2 ]; }; then
       echo "check-core-layers: $rel:$line: '$own' (layer $own_layer) uses crate::$name (layer $target_layer)" >&2

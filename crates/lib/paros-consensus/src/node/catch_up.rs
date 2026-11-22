@@ -195,12 +195,14 @@ impl ColocatedNode {
         if !self.in_pool(from) || point <= self.acceptor.first_slot() {
             return;
         }
-        // A jump is taken only as the answer to a request of this node that
-        // asked below the point (`catchup_asked`). A peer also sends a trim
-        // point unasked, when it pushes a decided prefix to a node whose beat
-        // is behind; such a node asks the peer, and takes the answer.
-        if self.catchup_asked.is_none_or(|asked| asked >= point) {
-            let request = self.catch_up_request(self.first_unchosen());
+        // A jump is taken only as the answer to an open request of this node
+        // that asked below the point (`open_catch_up`): a request whose range
+        // the node already holds is answered and closed. A peer also sends a
+        // trim point unasked, when it pushes a decided prefix to a node whose
+        // beat is behind; such a node asks the peer from the first slot it
+        // misses, and takes the answer.
+        if self.open_catch_up().is_none_or(|asked| asked >= point) {
+            let request = self.catch_up_request(self.catch_up_need());
             self.send(from, request);
             return;
         }

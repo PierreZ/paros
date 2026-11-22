@@ -3,7 +3,7 @@
 
 use crate::contract::message::{Audience, Message};
 use crate::contract::write::{AcceptorWrite, WriteOp};
-use crate::journal::Command;
+use crate::journal::{Command, JournalIdentifier};
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
 use crate::node::ColocatedNode;
@@ -307,11 +307,12 @@ impl<'a> Ready<'a> {
 
 /// A batch in flight ([`Ready::release`]): the token a driver gives back to
 /// [`ColocatedNode::durable`] once every write of the batch is durable. It
-/// names its node and its batch, so a token given back twice or to another
-/// node panics.
+/// names its node, its journal and its batch, so a token given back twice,
+/// to another node or to another journal of the same node panics.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a Flight must be given back to ColocatedNode::durable once its batch is durable; the node takes no input until then"]
 pub struct Flight {
     pub(crate) node: NodeId,
+    pub(crate) journal: JournalIdentifier,
     pub(crate) batch: u64,
 }

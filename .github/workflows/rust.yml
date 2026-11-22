@@ -68,9 +68,9 @@ jobs:
       - name: Check the paros-consensus layers
         run: scripts/check-core-layers.sh && scripts/check-core-layers.sh --self-test
       # #248 (TigerStyle assertions): the assertions per function of paros-consensus only go up.
-      # The floor is the density on main; raise it when a pull request raises the density.
+      # The floor is the density of main, to four places; a pull request that raises the density raises it.
       - name: Check the paros-consensus assertion density
-        run: python3 scripts/count-assertions.py --min 1.65
+        run: scripts/count-assertions.py --min 1.6525
       # docs/journal/04-roles.md §J4.3: no runtime, I/O or storage dependency in the pure crates.
       - name: Check the pure crates' dependencies
         run: nix develop --command scripts/check-core-deps.sh

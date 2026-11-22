@@ -20,6 +20,20 @@ use crate::proposer::Round;
 pub(super) type DurableMarks = (Ballot, Option<Slot>, Slot);
 
 impl ColocatedNode {
+    /// At the entry of every public mutating call: no batch is in flight
+    /// ([`crate::node::Ready::release`]), so the call changes nothing before
+    /// it panics.
+    pub(super) fn assert_landed(&self) {
+        assert!(
+            self.flight.is_none_or(|batch| batch < self.flights),
+            "a batch in flight has a number already drawn"
+        );
+        assert!(
+            self.flight.is_none(),
+            "no input reaches a node while its batch is in flight"
+        );
+    }
+
     /// The durable watermarks as they stand: see [`DurableMarks`].
     pub(super) fn durable_marks(&self) -> DurableMarks {
         let marks = (
