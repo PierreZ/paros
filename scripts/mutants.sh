@@ -46,17 +46,16 @@ cd "$(dirname "$0")/.."
 crate=paros-consensus
 first=.cargo/mutants.toml
 second=.cargo/mutants-tlc.toml
-# The trace checks of the second pass, run once on the unmutated tree: the
-# filter of the second pass's config.
-baseline_args=(--features paros-consensus/serde -p paros-consensus -p consensus-sim
-  -E 'binary(traces) and not test(edited) and not test(no_record)')
+# The packages of the trace checks of the second pass, run once on the
+# unmutated tree. Their filter is read from the second pass's config below, so
+# the baseline runs every test that the second pass runs.
+baseline_args=(--features paros-consensus/serde -p paros-consensus -p consensus-sim)
 if [ "${1:-}" = "--journal" ]; then
   shift
   crate=paros-journal
   first=.cargo/mutants-journal.toml
   second=.cargo/mutants-journal-tlc.toml
-  baseline_args=(-p paros-journal -p journal-sim
-    -E '(binary(traces) | binary(register_traces)) and not test(edited)')
+  baseline_args=(-p paros-journal -p journal-sim)
 elif [ "${1:-}" = "--control" ]; then
   shift
   crate=paros-journal-control
@@ -123,13 +122,18 @@ done < mutants.first/missed.txt
 
 echo "Second pass: $((${#filters[@]} / 2)) survivors of the first pass, against the trace checks."
 # A timeout counts as caught, so the timeout of this pass comes from a run of
-# the same trace checks on the unmutated tree (the filter of
-# `.cargo/mutants-tlc.toml`): three times its time, and at
+# the same trace checks on the unmutated tree (the `-E` filter of the second
+# pass's config, read from it): three times its time, and at
 # least 60 s. With a fixed timeout below that time, every mutant timed out
 # and was counted as caught. The run also proves that the trace checks pass
 # without a mutant, so a mutant that fails them is caught by its own change.
+filter=$(sed -n 's/^.*"-E", "\([^"]*\)".*$/\1/p' "$second")
+if [ -z "$filter" ] || [ "$(printf '%s\n' "$filter" | wc -l)" -ne 1 ]; then
+  echo "error: $second must hold one \"-E\" filter" >&2
+  exit 1
+fi
 start=$(date +%s)
-cargo nextest run --cargo-profile mutants "${baseline_args[@]}" --test-threads 2
+cargo nextest run --cargo-profile mutants "${baseline_args[@]}" -E "$filter" --test-threads 2
 baseline=$(($(date +%s) - start))
 timeout=$((baseline * 3 > 60 ? baseline * 3 : 60))
 echo "Second pass: the unmutated trace checks took ${baseline} s; the timeout of a mutant is ${timeout} s."

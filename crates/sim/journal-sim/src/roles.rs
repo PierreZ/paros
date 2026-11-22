@@ -51,6 +51,7 @@
 //! segment, every sealed segment has its boundary state, and every `Below`
 //! is resolved.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use moonpool_walk::{Cx, Model, Phase, Walk, sometimes};
@@ -443,8 +444,10 @@ pub struct RolesModel {
     belows: Vec<(Write, Slot)>,
     /// The calls answered `Unknown`, which their client sends again.
     unknown: Vec<(Option<usize>, Command)>,
-    /// The slots each ballot proposed, by round.
-    proposed: BTreeSet<(u64, Slot)>,
+    /// The command each ballot proposed at each slot, by round. A ballot
+    /// proposes one command at a slot: the trace records the first `Accept`
+    /// of each `(round, slot)`, and the model's `Accept` votes that proposal.
+    proposed: BTreeMap<(u64, Slot), Command>,
     /// The durable front each replica's `Apply` events reached.
     traced: BTreeMap<NodeId, Slot>,
 }
@@ -796,7 +799,7 @@ impl RolesModel {
             uuids: 0,
             belows: Vec::new(),
             unknown: Vec::new(),
-            proposed: BTreeSet::new(),
+            proposed: BTreeMap::new(),
             traced: BTreeMap::new(),
         };
         model.register = model
@@ -1041,10 +1044,17 @@ impl RolesModel {
 
     /// The event of an acceptor's queued batch: a vote, or a promise alone.
     fn queued(node: NodeId, ops: &[paros_journal::roles::AcceptorOp]) -> RolesEvent {
-        let vote = ops.iter().find_map(|op| match op {
-            AcceptorWrite::AppendAccepted { slot, ballot, .. } => Some((*slot, *ballot)),
-            AcceptorWrite::SetPromise(_) => None,
-        });
+        let votes: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                AcceptorWrite::AppendAccepted { slot, ballot, .. } => Some((*slot, *ballot)),
+                AcceptorWrite::SetPromise(_) => None,
+            })
+            .collect();
+        // The model's `Accept` queues one vote: a batch with two would trace
+        // only one of them.
+        assert!(votes.len() <= 1, "a batch holds one vote at most: {ops:?}");
+        let vote = votes.first().copied();
         match (vote, ops) {
             (Some((slot, ballot)), _) => RolesEvent::Accept {
                 a: node.0,
@@ -1077,13 +1087,24 @@ impl RolesModel {
                         slot,
                         command,
                     } = &message
-                        && self.proposed.insert((ballot.round, *slot))
                     {
-                        cx.record(RolesEvent::Propose {
-                            b: ballot.round,
-                            s: slot.0,
-                            command: command.clone(),
-                        });
+                        match self.proposed.entry((ballot.round, *slot)) {
+                            Entry::Occupied(first) => assert_eq!(
+                                first.get(),
+                                command,
+                                "ballot {} proposed two commands at slot {}",
+                                ballot.round,
+                                slot.0
+                            ),
+                            Entry::Vacant(entry) => {
+                                entry.insert(command.clone());
+                                cx.record(RolesEvent::Propose {
+                                    b: ballot.round,
+                                    s: slot.0,
+                                    command: command.clone(),
+                                });
+                            }
+                        }
                     }
                     cx.send(Envelope {
                         from: node,
