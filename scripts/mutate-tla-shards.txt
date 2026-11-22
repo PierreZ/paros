@@ -27,6 +27,7 @@ matchmaker 3
 multi-paxos 14
 multi-writer 2
 offload 1
+placement-port 2
 proxy-leader 1
 quorum-everywhere 3
 reads 28

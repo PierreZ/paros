@@ -2350,7 +2350,8 @@ journal's own models judge that step), and every step of the cell is a write of 
 journal, which needs a majority of that journal's members up.
 
 The cell writes a grant and its bookings in one write, keyed by the request id that the
-controller drew; the same id gets the same answer (`PlaceAgain`); a cell at the limit answers
+controller drew; the cell sends the answer of a grant again at any time, so a repeated request gets
+the same answer (`PlaceAgain`, a read of the fold); a cell at the limit answers
 "busy" and writes nothing (no step in the model: the request waits, and the controller sends it
 again); a cell with no machine that fits records a refusal under the id, and the controller asks
 again with a new id. A release ends the grant and frees the bookings of the members that left.
@@ -2373,6 +2374,7 @@ journal is off the machines that failed or drain, and no move is in flight).
 | `safety` | ci | pass: every safety property, one failure, one drain, one lost message (61 thousand distinct states) |
 | `live` | ci | pass: `Healed`, with the faults of `safety` |
 | `safety_two` | ci | pass: two failures, so the cell and a journal can be below a majority |
+| `safety_tight` | ci | pass: two failures and two drains, so the cell also refuses (1.1 million distinct states) |
 | `book_first_nocrash` | ci | pass: the bookings first and the grant in a later write is safe while the coordinator keeps its memory |
 | `book_first` | ci | violation of `NoOrphan`: a restart between the two writes leaves bookings that nobody frees (the control of "the id is in the fold before any machine is booked") |
 | `no_dedup` | ci | violation of `OneGrantPerRid`: a repeated request gets a second grant |

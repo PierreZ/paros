@@ -9,6 +9,9 @@ safety               pass       ci
 live                 pass       ci
 # Two failures: the cell and the journals stop writing below a majority.
 safety_two           pass       ci
+# Two failures and two drains: the cell refuses, and records each refusal only
+# with a majority.
+safety_tight         pass       ci
 # Bookings first and the grant later is safe while the coordinator keeps its
 # memory; book_first breaks it with one restart between the two writes.
 book_first_nocrash   pass       ci

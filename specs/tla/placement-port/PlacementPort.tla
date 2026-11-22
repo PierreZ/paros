@@ -123,7 +123,6 @@ Init ==
 (* Faults and the operator. *)
 
 Fail(m) ==
-    /\ m \notin down
     /\ faults.fail < MaxFail
     /\ down' = down \cup {m}
     /\ faults' = [faults EXCEPT !.fail = @ + 1]
@@ -132,7 +131,6 @@ Fail(m) ==
 \* `cell drain-machine`: a record of the cell.
 Drain(m) ==
     /\ CellUp
-    /\ m \notin Leaving \cup down
     /\ faults.drain < MaxDrain
     /\ draining' = draining \cup {m}
     /\ faults' = [faults EXCEPT !.drain = @ + 1]
@@ -173,15 +171,12 @@ Book(r, S) == {[j |-> r.j, m |-> m, rid |-> r.rid] : m \in S}
 
 Busy == CheckLimit /\ Cardinality(Active) + Cardinality(staged) >= Limit
 
-\* A request whose rid is in the fold: the same answer, no write.
-PlaceAgain(r) ==
-    /\ CellUp
-    /\ r.t = "place"
-    /\ \E g \in grants :
-         /\ g.rid = r.rid
-         /\ Send({IF g.state = "refused"
-                  THEN [t |-> "refused", rid |-> r.rid]
-                  ELSE [t |-> "granted", rid |-> r.rid, add |-> g.add]})
+\* The answer of a grant again, at any time: a repeated request gets the same
+\* answer. It reads the fold and writes nothing.
+PlaceAgain(g) ==
+    /\ Send({IF g.state = "refused"
+             THEN [t |-> "refused", rid |-> g.rid]
+             ELSE [t |-> "granted", rid |-> g.rid, add |-> g.add]})
     /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, ctl, faults>>
 
 New(r) ==
@@ -217,12 +212,12 @@ CommitStaged(p) ==
     /\ Send({[t |-> "granted", rid |-> p.rid, add |-> p.add]})
     /\ UNCHANGED <<members, down, gone, draining, bookings, ctl, faults>>
 
-\* No machine fits: the refusal is recorded under the same rid.
+\* No machine fits: the refusal is recorded under the same rid, at the limit
+\* or not.
 PlaceRefuse(r) ==
     /\ CellUp
     /\ r.t = "place"
     /\ New(r)
-    /\ ~Busy
     /\ Choices(r) = {}
     /\ grants' = grants \cup {[rid |-> r.rid, j |-> r.j, leave |-> r.leave,
                               add |-> {}, state |-> "refused"]}
@@ -268,8 +263,9 @@ AskAgain(j) ==
        /\ Send({r})
        /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, ctl, faults>>
 
+\* A rid that got a refusal never gets a grant (OneGrantPerRid), so the
+\* refusal finds the controller asking.
 GotRefused(j) ==
-    /\ ctl[j].ph = "asked"
     /\ [t |-> "refused", rid |-> RidOf(j)] \in net
     /\ ctl' = [ctl EXCEPT ![j].ph = "idle"]
     /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, net, faults>>
@@ -295,8 +291,9 @@ ReleaseAgain(j) ==
     /\ Send({[t |-> "release", rid |-> RidOf(j)]})
     /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, ctl, faults>>
 
+\* Only a release sends "released", so it finds the controller releasing, or
+\* idle already.
 GotReleased(j) ==
-    /\ ctl[j].ph = "release"
     /\ [t |-> "released", rid |-> RidOf(j)] \in net
     /\ ctl' = [ctl EXCEPT ![j] = [ph |-> "idle", n |-> @.n, leave |-> {}, add |-> {}]]
     /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, net, faults>>
@@ -304,7 +301,8 @@ GotReleased(j) ==
 -----------------------------------------------------------------------------
 CellStep ==
     \/ \E m \in Machines : RecordGone(m)
-    \/ \E r \in net : PlaceAgain(r) \/ PlaceGrant(r) \/ PlaceRefuse(r) \/ Release(r)
+    \/ \E g \in grants : PlaceAgain(g)
+    \/ \E r \in net : PlaceGrant(r) \/ PlaceRefuse(r) \/ Release(r)
     \/ \E p \in staged : CommitStaged(p)
 
 CtlStep(j) ==
@@ -324,7 +322,8 @@ Spec == Init /\ [][Next]_vars
 \* controller does.
 Fairness ==
     /\ \A m \in Machines : WF_vars(RecordGone(m))
-    /\ WF_vars(\E r \in net : PlaceAgain(r) \/ PlaceGrant(r) \/ PlaceRefuse(r) \/ Release(r))
+    /\ WF_vars(\E g \in grants : PlaceAgain(g))
+    /\ WF_vars(\E r \in net : PlaceGrant(r) \/ PlaceRefuse(r) \/ Release(r))
     /\ WF_vars(\E p \in staged : CommitStaged(p))
     /\ \A j \in Journals : WF_vars(CtlStep(j))
 
