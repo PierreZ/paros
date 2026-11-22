@@ -2,6 +2,11 @@
 
 Group: Storage. Status: verified 2026-10-31.
 
+The code this card maps (the format marker, the boot claim and the amnesia refusal) was in
+`paros-storage`, `paros-roles` and `paros-machine`, which were removed on 2026-11-19. It is at
+the git tag `v0.2.0-alpha.1` (recaps in `docs/archive/v0.2.0-alpha.1/`). The rule stays: the
+journal v1 must build it again on its own storage. §9 says what the tree holds today.
+
 An acceptor's promise is a statement about its own future that no other node holds. A node that
 lost its disk and boots empty would answer a Phase 1 with "nothing accepted" for slots it once
 voted on: it **reneges** on its promises ([PML §5.1]). An empty disk looks exactly like a first
@@ -33,7 +38,7 @@ replaced by a handover.
 |---|---|---|
 | Operator | the claim: `BootKind::FirstBoot` or `BootKind::ExistingMember` | no: configuration data |
 | Store (journal or matchmaker registry) | the format marker and the `Config` it was written under (#147, #183, #207) | yes, in the metainfo, before the first promise |
-| Machine (`parosd`) | its `node_id`, random, minted at format (#225) | yes, in the machine record |
+| Machine (`parosd`, at the tag `v0.2.0-alpha.1`) | its `node_id`, random, minted at format (#225) | yes, in the machine record |
 
 ## 4. Normal flow
 
@@ -43,7 +48,7 @@ replaced by a handover.
    the ordering every refusal relies on (`check_format_marker`).
 2. **A restart.** The operator claims `ExistingMember`; the marker is there and names the same
    recorded `Config`; the boot scan loads the store and the core rebuilds from it.
-3. **The checks** (`check_format_marker`, in `paros-roles` `node/boot.rs` and `matchmaker.rs`):
+3. **The checks** (`check_format_marker`, in `paros-roles` `node/boot.rs` and `matchmaker.rs`, at the tag `v0.2.0-alpha.1`):
 
 | Claim | Store | Result |
 |---|---|---|
@@ -79,7 +84,7 @@ sequenceDiagram
   ([matchmaker generations](matchmaker-generations.md)).
 - **A wiped `parosd`.** Its `node_id` is minted at format, so a wiped disk is a new machine: "a
   wiped identity never rejoins" holds by construction. A disk with stores and no machine record
-  is refused as amnesia (`paros-machine/src/lifecycle.rs`).
+  is refused as amnesia (`paros-machine/src/lifecycle.rs`, at the tag `v0.2.0-alpha.1`).
 - **A configuration mismatch.** The operator restores the configuration the store was formatted
   with, and changes the membership by reconfiguration. Nothing was written, so the node comes back
   as the member it was.
@@ -97,7 +102,7 @@ sequenceDiagram
 - **The matchmaker rule is load-bearing.** With the `Amnesia` arm removed, a 3,000-seed hunt went
   red on 4 seeds ("matchmaker: a restart recovers every durable registration", "a recovered gc
   watermark never regresses"; witness 5299901180798451264 on that build), and green with it (the
-  `check_format_marker` doc in `paros-roles/src/matchmaker.rs`).
+  `check_format_marker` doc in `paros-roles/src/matchmaker.rs`, at the tag `v0.2.0-alpha.1`).
 
 ## 7. Liveness
 
@@ -122,7 +127,20 @@ sequenceDiagram
 | The marker in the store | `paros-storage/src/journal.rs`: the metainfo (two local copies) |
 | The machine identity | `paros-machine/src/lifecycle.rs` (the machine record); `docs/architecture/03-2-machines.md` |
 
-**Sim gates and oracles** (`paros-sim/src/process/node.rs` unless named):
+The rows that name `paros-machine`, `paros-roles`, `paros-storage` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- In the tree today, only the core's half: `ColocatedNode::new` boots from its `Storage`
+  (`paros-consensus/src/node/boot.rs`, probe "boot: the fold stops at a hole under the chosen
+  prefix"), and a retired node rejoins through its `RetireMark` at the next incarnation. The
+  walks restart nodes from their disks ("cluster: a node restarted from a disk with a promise").
+- The journal's on-disk format refuses a damaged entry (`paros-journal-io/src/layout.rs`,
+  `Damage`).
+- The format marker and the amnesia refusal below were in `paros-storage` and `paros-roles`; they
+  are not built again yet.
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/process/node.rs` unless named):
 
 - `"storage: an amnesia refusal names a wiped identity"`: only a wiped disk is ever amnesiac.
 - `"storage: a first boot never meets a formatted store"`, `"storage: a configuration refusal

@@ -52,7 +52,13 @@ Step ==
      /\ ChosenAt(e.bal, e.val)
      /\ UNCHANGED vars
 
-TraceNext == l <= Len(Trace) /\ Step /\ l' = l + 1
+\* The walk records a step only when it changes the state of the model, so
+\* every event but "chosen" must change it. `Decree` lets a step repeat
+\* (a second `Prepare` or a second vote at one ballot changes nothing),
+\* and this conjunct refuses a recorded event that repeats.
+Changes == e.event = "chosen" \/ vars' # vars
+
+TraceNext == l <= Len(Trace) /\ Step /\ Changes /\ l' = l + 1
 
 TraceSpec == TraceInit /\ [][TraceNext]_<<l, vars>>
 
