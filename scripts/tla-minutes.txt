@@ -30,6 +30,7 @@ handover 12.5
 handover-chain 5
 handover-gc 1
 health 4
+journal-ids 4
 journal-state 16
 leader-handoff 18.5
 matchmaker 6

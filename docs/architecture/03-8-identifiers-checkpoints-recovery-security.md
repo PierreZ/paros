@@ -59,8 +59,32 @@ the core) tracks the change.
   the id, and the fold checks it at apply and refuses an id that is in use: the fold of the
   universe for a `TenantId`, the fold of a tenant for a `JournalId`, which is unique inside its
   tenant (Pierre, 2026-11-22). A counter in the fold was refused: the tenant of a cell exists
-  before the cell joins a universe, so no counter of the universe can give its id. **Open**: the
-  role that draws, the genesis records of the first tenants, and a birth nonce in `Assign`.
+  before the cell joins a universe, so no counter of the universe can give its id.
+- **The rule "one id names at most one journal, forever"** (#1419 (the tenancy wrapper and
+  paros-names); Pierre, 2026-11-22, who took the recommendations of the issue). The model is
+  `specs/tla/journal-ids/`. The rule has four parts. A tenant fold gives a `JournalId` to at most
+  one journal over the whole history, deletes included: a deleted id stays a tombstone. The
+  universe fold gives a `TenantId` to at most one tenant. On a host, one key holds the records of
+  at most one journal, because the host key is the pair `(TenantId, JournalId)`. A host holds
+  records under a key only after the fold gave that key to the journal: a slot is booked only
+  under an id that is in the fold.
+- **Who draws.** The coordinator of the level draws the id: it is the single writer of the
+  level's fold. The universe coordinator draws a `TenantId`, and the tenant coordinator draws a
+  `JournalId`. The frontend passes only the name and the request id. When the fold refuses an
+  id, the coordinator draws again. A create resumes by its request id: the fold keeps the id it
+  gave, so a coordinator that restarts reads the id back and draws nothing.
+- **Genesis.** At `cell init`, the cell tenant draws its `TenantId` and writes it in the cell
+  plan. `JoinFleet` records that id in the universe fold, which refuses an id in use. A refused
+  cell stays out of the universe, because its id is already on its disks and it cannot draw
+  again. Safety does not depend on a fresh draw; only the join does (the chance of a collision is
+  about `2^-64`). A counter in the cell is refused: every cell would get the same first id.
+- **Token.** A Biscuit token is pinned to a tenant id: it carries the tenant's `u64` as a fact
+  from its mint, and the frontend checks it against the id that the name resolves to. So a token
+  for a deleted tenant fails after its name is used again.
+- **Birth nonce.** No birth nonce in `Assign` in the first build: the tombstones and the order
+  (the id is in the fold before a booking) keep the rule without it (`journal-ids/`). **Open**
+  (§3.10, recovery): a control journal that recovery rebuilds forgets its tombstones; a nonce in
+  `Assign`, or the tombstones rebuilt from the hosts, is decided with recovery.
 - `paros-consensus` and `paros-journal` know no tenant (section 4.4). So a peer message of the
   core carries one journal id, and the pair `(TenantId, JournalId)` is made above the core: the
   host is generic over its key, and the tenancy crate keys it by the pair.
