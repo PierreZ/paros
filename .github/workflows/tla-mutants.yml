@@ -13,11 +13,12 @@
 # slices of each folder, and lists every folder. A slice has a budget below its 30-minute job: a
 # mutant that the budget cuts is `unfinished`, the slice fails, and the fix is
 # more slices. A GitHub matrix holds at most 256 jobs, so the slices run in
-# two matrices (`tla-mutants-slices.yml`): the first 256, then the rest. The
-# `report` job lists every survivor and every unfinished mutant. It runs each
-# week and on demand. A run on demand can name its folders (`folders`, the
-# survivors of a fix judged again) and hold its slices to a number of jobs at
-# a time (`max_parallel`), so that the other workflows still get runners. A pull request only checks that
+# two matrices (`tla-mutants-slices.yml`), the first 256 and the rest, at the
+# same time. The `report` job lists every survivor and every unfinished
+# mutant. It runs each week and on demand. A run on demand can name its
+# folders (`folders`, the survivors of a fix judged again) and hold each
+# matrix to a number of jobs at a time (`max_parallel`; with both matrices,
+# twice that number run), so that the other workflows still get runners. A pull request only checks that
 # every mutant parses (`--parse`, the `spec` job of `tla.yml`): the run of
 # every mutant takes hours of CI.
 name: TLA mutants
@@ -56,7 +57,12 @@ jobs:
         id: list
         env:
           FOLDERS: ${{ inputs.folders }}
+          MAX_PARALLEL: ${{ inputs.max_parallel || '256' }}
         run: |
+          if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::max_parallel must be a positive whole number, not '$MAX_PARALLEL'"
+            exit 1
+          fi
           all=$(for m in specs/tla/*/checks.txt specs/tla/experiments/*/*/checks.txt; do
               [ -f "$m" ] && dirname "${m#specs/tla/}"; done)
           for f in $all; do
@@ -72,8 +78,12 @@ jobs:
                 echo "::error::$f is not a folder of specs/tla with a checks.txt"
                 exit 1
               fi
+              if [ "$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)" = 0 ]; then
+                echo "::error::$f has no guard to judge (0 slices)"
+                exit 1
+              fi
             done
-            list=$(printf '%s\n' $FOLDERS)
+            list=$(printf '%s\n' $FOLDERS | sort -u)
           fi
           slices=$(for f in $list; do
               n=$(awk -v f="$f" '$1 == f { print $2 }' scripts/mutate-tla-shards.txt)
