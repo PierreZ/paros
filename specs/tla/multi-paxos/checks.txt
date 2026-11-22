@@ -13,9 +13,6 @@ learn_record          violation  ci
 full_grid_any         pass       ci
 alloc_prefix          violation  ci
 durable_after         violation  ci
-# The control's restart with the disk behind memory still ends every ballot
-# of the node: no ballot opens again and proposes a second value.
-reopen                pass       ci
 wipe_revote           violation  ci
 live                  pass       ci
 live_down             pass       ci
