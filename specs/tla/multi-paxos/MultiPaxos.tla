@@ -215,12 +215,15 @@ Recovery(S, b, from, f) ==
                  s \in {t \in from..(f - 1) : Top(S, t).bal = 0}}
         ELSE {})
 
-\* The owner of ballot b wins Phase 1 on the promises S, one for each
-\* acceptor, its own among them, and a Phase-1 quorum. It opens the recovery.
+\* The owner of ballot b wins Phase 1 on the promises S, its own among them
+\* (`OwnRecords`), and a Phase-1 quorum. It opens the recovery. An acceptor
+\* promises a ballot once (`prom[a] < b`; `MsgOK` in `Inv`), so S holds one
+\* promise for each acceptor with no guard; where a control forgets a
+\* promise (Durable = "after", Identity = FALSE), a second promise of the
+\* same acceptor only adds reports.
 Win(b) ==
   /\ phase[b] = "p1"
   /\ \E S \in SUBSET {m \in msgs : m.type = "1b" /\ m.bal = b} :
-       /\ \A m, n \in S : m.acc = n.acc => m = n
        /\ Owner[b] \in {m.acc : m \in S}
        /\ \E Q \in Q1 : Q \subseteq {m.acc : m \in S}
        /\ LET from == (CHOOSE m \in msgs : m.type = "1a" /\ m.bal = b).from
@@ -256,11 +259,13 @@ Accept(a, b, s) ==
        /\ Send([type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> m.val])
   /\ UNCHANGED <<learned, phase, next, front, wiped, restarts>>
 
-\* The late write of an acceptor that answered first (Durable = "after").
+\* The late write of an acceptor that answered first (Durable = "after"): the
+\* disk catches up with memory. With Durable = "before" the disk already
+\* holds memory (`Inv`: dprom = prom, dvote = vote), and so does a node that
+\* is down (it never moved) or wiped (both are empty). A write of what the
+\* disk holds changes no variable, so the step needs no guard on the mode,
+\* on the difference or on `Live`.
 Persist(a) ==
-  /\ Durable = "after"
-  /\ Live(a)
-  /\ <<dprom[a], dvote[a]>> # <<prom[a], vote[a]>>
   /\ dprom' = [dprom EXCEPT ![a] = prom[a]]
   /\ dvote' = [dvote EXCEPT ![a] = vote[a]]
   /\ UNCHANGED <<prom, vote, learned, phase, next, front, wiped, restarts, msgs>>
@@ -291,9 +296,12 @@ LearnAll(n, rec) ==
                                     THEN "dead" ELSE phase[c]]
 
 \* The leader of ballot b learns slot s at a Phase-2 quorum and commits it.
+\* A learn of a slot that the leader learned already writes the record of
+\* the chosen value again (`mark_chosen`, `LearnRecordsHeld`) and, as every
+\* learn, ends the leader's campaigns below its promise, so the step needs
+\* no guard on what the leader learned.
 Decide(b, s) ==
   /\ phase[b] = "p2"
-  /\ learned[Owner[b]][s] = None
   /\ \E v \in Values, Q \in Q2[s] :
        /\ \A a \in Q : [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
        /\ LearnAll(Owner[b], [t \in {s} |-> [bal |-> b, val |-> v]])
@@ -315,9 +323,11 @@ CatchUp(n, p) ==
 (* Faults *)
 
 \* Node a restarts: memory goes back to the disk, its ballots die, and it
-\* keeps a prefix of what it learned (up to its durable chosen index).
+\* keeps a prefix of what it learned (up to its durable chosen index). A node
+\* that is down or wiped holds on disk what it holds in memory, learned
+\* nothing it can keep and owns no live ballot, so its restart only spends
+\* the budget, and the step needs no `Live` guard.
 Restart(a) ==
-  /\ Live(a)
   /\ a \in Restartable
   /\ restarts < Restarts
   /\ restarts' = restarts + 1
@@ -409,6 +419,16 @@ LearnRecordsHeld ==
 \* slot that its recovery proposes.
 OneProposal ==
   \A m, n \in msgs : m.type = "2a" /\ n.type = "2a" /\ m.bal = n.bal /\ m.slot = n.slot => m = n
+
+\* A won campaign's frontier is past every vote that its owner's own promise
+\* reported: the candidate's own records seed its tally (`open_phase1` takes
+\* `acceptor.records()`), so a leader never allocates a fresh command at a
+\* slot it holds a vote at.
+OwnRecords ==
+  [][\A b \in Ballots :
+       phase[b] = "p1" /\ phase'[b] = "p2" =>
+         \A m \in msgs : m.type = "1b" /\ m.bal = b /\ m.acc = Owner[b] =>
+           \A s \in Slots : m.rep[s].bal > 0 => s < front'[b]]_vars
 
 -----------------------------------------------------------------------------
 (* The inductive invariant (#1307 (inductive invariants, then proofs)).    *)

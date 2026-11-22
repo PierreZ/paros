@@ -66,7 +66,7 @@ modules extend in turn: today `Decree.tla` and `MultiPaxos.tla` extend standard 
 | Model | Proof | What it proves |
 |---|---|---|
 | `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 692 obligations, Z3, Zenon and LS4, about 2 minutes |
-| `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Persist`, `Restart`, `Wipe`) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,289 obligations, Z3, Zenon and LS4, at most 6 minutes for each module |
+| `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Restart`, `Wipe`, and `Persist` as a stutter step) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,295 obligations, Z3, Zenon and LS4, at most 6 minutes for each module |
 
 The TLAPS of nixpkgs (1.4.5) has no Isabelle. So a proof uses no induction lemma (they
 need Isabelle; a least or highest member of a set of naturals comes from `WFMin`, which is first
@@ -1306,7 +1306,10 @@ The safety invariants are `Agreement` (one command for each slot), `LearnedChose
 learned was chosen), `OneProposal` (one proposal for each slot and ballot: a new leader
 allocates above each slot that its Phase 1 reported, so a fresh command never lands on a slot
 that its recovery proposes) and `LearnRecordsHeld` (a learned slot holds its record: the
-code's assertion "a chosen slot holds its authoritative accepted record"). A value is chosen when a Phase-2 quorum of the slot sent its `2b`
+code's assertion "a chosen slot holds its authoritative accepted record"). The action property
+`OwnRecords` says that a won campaign's frontier is past every vote that the owner's own promise
+reported: the candidate's records seed its tally (`open_phase1`), so a leader never allocates a
+fresh command at a slot where it holds a vote. A value is chosen when a Phase-2 quorum of the slot sent its `2b`
 at one ballot, so a restart cannot unchoose it. The liveness property is `Ends` under
 `LiveSpec`: the last ballot is the leader that no higher ballot preempts, and it learns every
 slot below its frontier and every slot that it proposed. `Spreads` adds that each live node
@@ -1319,7 +1322,7 @@ two slots, one command and `Noop`; the CI set runs in about nine minutes):
 |---|---|---|---|
 | `reach` | ci | `NoChoice`, a reachability control | violation |
 | `reach_gap` | ci | `NoNoopChosen`, a reachability control: a gap fill is chosen below a chosen command | violation |
-| `majority` | ci | the rules of the code | pass (470 thousand states) |
+| `majority` | ci | the rules of the code, and `OwnRecords` | pass (470 thousand states) |
 | `three_ballots` | ci | three ballots, one slot, two commands: two reports of different ballots meet at one slot | pass (108 thousand states) |
 | `three_ballots_lowest` | ci | the same, Phase 1 takes the lowest reported ballot | `Agreement` violation |
 | `three_ballots_restart` | ci | the same, `a1` owns ballots 1 and 3, one restart: the old leader campaigns again over its own durable log | pass (558 thousand states) |
@@ -1327,6 +1330,7 @@ two slots, one command and `Noop`; the CI set runs in about nine minutes):
 | `full_grid_any` | ci | 2 x 2 full grid, a slot chosen in any column, one slot, two commands | pass (79 thousand states) |
 | `alloc_prefix` | ci | fresh commands start at `from`, two commands | `Agreement` violation |
 | `durable_after` | ci | an acceptor answers before its write is on disk, one restart | `Agreement` violation |
+| `reopen` | ci | the same control, one ballot, one slot, two commands: the restart ends the ballot, so it never opens again and proposes a second value even when its owner forgot the promise | `OneProposal` pass (3 thousand states) |
 | `wipe_revote` | ci | a wiped acceptor votes again as the old one, one wipe | `Agreement` violation |
 | `live` | ci | the rules of the code | `Ends` pass |
 | `live_down` | ci | one of three acceptors down | `Ends` pass |

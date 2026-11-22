@@ -1,31 +1,38 @@
 ------------------------ MODULE MultiPaxosLearnProof ------------------------
 (***************************************************************************)
-(* Learning and faults keep `Inv`: `Persist`, `Restart`, `Wipe`, `Decide`  *)
-(* and `CatchUp` (#1307, step 2).                                          *)
+(* Learning and faults keep `Inv`: `Restart`, `Wipe`, `Decide` and        *)
+(* `CatchUp`; `Persist` is a stutter step (#1307, step 2).                 *)
 (***************************************************************************)
 EXTENDS MultiPaxosFactsProof
 
 USE NBType, NSType, NoneNotValue, NoopNotCommand, OwnerType, LearnersType
     DEF Ballots, Slots, Values, NoVote
 
-THEOREM PersistInv ==
-  ASSUME Inv, Hyp, NEW a \in Acceptors, Persist(a)
-  PROVE  Inv'
-BY DEF Persist, Hyp, InvApplies
+\* With the disk equal to memory (`Inv`), `Persist` writes what the disk holds:
+\* a stutter step.
+THEOREM PersistStutter ==
+  ASSUME Inv, NEW a \in Acceptors, Persist(a)
+  PROVE  UNCHANGED vars
+<1>1. TypeOK /\ dprom = prom /\ dvote = vote
+  BY DEF Inv
+<1>2. dprom' = dprom /\ dvote' = dvote
+  BY <1>1 DEF Persist, TypeOK
+<1> QED
+  BY <1>2 DEF Persist, vars
 
 THEOREM RestartInv ==
   ASSUME Inv, Hyp, NEW a \in Acceptors, Restart(a)
   PROVE  Inv'
 <1>0. TypeOK /\ dprom = prom /\ dvote = vote
   BY DEF Inv
-<1>1. /\ a \notin wiped /\ restarts < Restarts /\ restarts' = restarts + 1
+<1>1. /\ restarts < Restarts /\ restarts' = restarts + 1
       /\ prom' = prom /\ vote' = vote
       /\ phase' = [c \in Ballots |-> IF Owner[c] = a /\ phase[c] \in {"p1", "p2"} THEN "dead" ELSE phase[c]]
       /\ UNCHANGED <<dprom, dvote, next, front, wiped, msgs>>
   <2>1. prom' = [prom EXCEPT ![a] = prom[a]] /\ vote' = [vote EXCEPT ![a] = vote[a]]
     BY <1>0 DEF Restart
   <2> QED
-    BY <2>1, <1>0 DEF Restart, Live, Hyp, InvApplies, TypeOK
+    BY <2>1, <1>0 DEF Restart, TypeOK
 <1>2. PICK k \in 0..FirstUnlearned(a) :
         learned' = [learned EXCEPT ![a] = [s \in Slots |-> IF s < k THEN @[s] ELSE None]]
   BY DEF Restart
