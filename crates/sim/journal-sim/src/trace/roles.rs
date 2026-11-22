@@ -1,0 +1,366 @@
+//! Model-based trace checking of the roles walk: its events as a trace of
+//! `specs/tla/journal-state/RolesTrace.tla` (the actions of `Journal.tla`),
+//! and the named edits of recorded roles traces (#1308 (mutate recorded
+//! traces)).
+//!
+//! The encoding: an acceptor, a replica, a segment and a slot are their
+//! numbers; a ballot is its round; a command is written as in
+//! `FoldTrace.tla` (`op`, then its fields); an answer is its name in the
+//! model. The trace defines the model's sizes: `TraceGrids` (the acceptors
+//! of each segment), `TraceSlots`, `TraceBallots`, `TraceCrashes`,
+//! `TraceFresh` and `TraceValues` (the commands other than `Noop` that a
+//! leader proposed at each slot).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use moonpool_tla::Value;
+use paros_journal::{Command, Leader};
+
+use super::mutate::{Edit, change_first, fields, is, num, text, with};
+use super::{Trace, TraceCheck, command_fields, int, leader, specs_dir};
+use crate::roles::RolesEvent;
+
+/// The check of `RolesTrace` in `specs/tla/journal-state/`.
+#[must_use]
+pub fn roles_spec() -> TraceCheck {
+    TraceCheck::new(specs_dir().join("journal-state"), "RolesTrace")
+}
+
+/// The grid of the first segment of every roles walk.
+const FIRST_GRID: [u64; 3] = [1, 2, 3];
+
+fn set(items: impl IntoIterator<Item = u64>) -> Value {
+    Value::Set(items.into_iter().map(int).collect())
+}
+
+fn command(command: &Command) -> Value {
+    let mut fields = Vec::new();
+    command_fields(&mut fields, command);
+    Value::record(fields)
+}
+
+/// The sizes of the model that the events of a walk give.
+struct Sizes {
+    grids: Vec<Value>,
+    slots: u64,
+    ballots: u64,
+    crashes: u64,
+    values: BTreeMap<u64, BTreeSet<Value>>,
+}
+
+/// The events of one roles walk, whose fresh journal is `fresh`, as a
+/// trace of `RolesTrace.tla`.
+///
+/// # Panics
+///
+/// When an event holds what the model does not have (an `Upgrade`).
+#[must_use]
+pub fn trace(fresh: Leader, events: &[RolesEvent]) -> Trace {
+    let mut sizes = Sizes {
+        grids: vec![set(FIRST_GRID)],
+        slots: 1,
+        ballots: 1,
+        crashes: 0,
+        values: BTreeMap::new(),
+    };
+    let encoded: Vec<_> = events.iter().map(|e| encode(e, &mut sizes)).collect();
+    let mut trace = Trace::new();
+    trace.define("TraceGrids", Value::Seq(sizes.grids));
+    trace.define("TraceSlots", int(sizes.slots));
+    trace.define("TraceBallots", int(sizes.ballots));
+    trace.define("TraceCrashes", int(sizes.crashes));
+    trace.define("TraceFresh", leader(fresh));
+    trace.define(
+        "TraceValues",
+        Value::Seq(
+            (0..sizes.slots)
+                .map(|s| {
+                    Value::Set(
+                        sizes
+                            .values
+                            .remove(&s)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect(),
+                    )
+                })
+                .collect(),
+        ),
+    );
+    for (name, fields) in encoded {
+        trace.event(name, fields);
+    }
+    trace
+}
+
+/// One event as an event of `RolesTrace.tla`, and the sizes it gives.
+fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static str, Value)>) {
+    match event {
+        RolesEvent::Reshape { g, grid } => {
+            assert_eq!(
+                usize::try_from(*g).ok(),
+                Some(sizes.grids.len() + 1),
+                "segments open in order"
+            );
+            sizes.grids.push(set(grid.iter().copied()));
+            (
+                "reshape",
+                vec![("g", int(*g)), ("grid", set(grid.iter().copied()))],
+            )
+        }
+        RolesEvent::Register { b, from } => {
+            sizes.ballots = sizes.ballots.max(*b);
+            ("register", vec![("b", int(*b)), ("from", int(*from))])
+        }
+        RolesEvent::Promise { a, b } => ("promise", vec![("a", int(*a)), ("b", int(*b))]),
+        RolesEvent::Accept { a, b, s } => {
+            sizes.slots = sizes.slots.max(*s + 1);
+            (
+                "accept",
+                vec![("a", int(*a)), ("b", int(*b)), ("s", int(*s))],
+            )
+        }
+        RolesEvent::Flush { a } => ("flush", vec![("a", int(*a))]),
+        RolesEvent::Crash { a } => {
+            sizes.crashes += 1;
+            ("crash", vec![("a", int(*a))])
+        }
+        RolesEvent::Phase1 { b, q, end } => {
+            let mut fields = vec![("b", int(*b)), ("q", set(q.iter().copied()))];
+            fields.extend(end.map(|end| ("end", int(end))));
+            ("phase1", fields)
+        }
+        RolesEvent::Seal { b } => ("seal", vec![("b", int(*b))]),
+        RolesEvent::Open { b, start } => ("open", vec![("b", int(*b)), ("start", int(*start))]),
+        RolesEvent::Propose { b, s, command: c } => {
+            sizes.slots = sizes.slots.max(*s + 1);
+            if *c != Command::Noop {
+                sizes.values.entry(*s).or_default().insert(command(c));
+            }
+            let mut fields = vec![("b", int(*b)), ("s", int(*s))];
+            command_fields(&mut fields, c);
+            ("propose", fields)
+        }
+        RolesEvent::Base { r } => ("base", vec![("r", int(*r))]),
+        RolesEvent::Apply {
+            r,
+            s,
+            command: c,
+            res,
+        } => {
+            sizes.slots = sizes.slots.max(*s + 1);
+            let mut fields = vec![("r", int(*r)), ("s", int(*s))];
+            command_fields(&mut fields, c);
+            // The model has one refusal for a truncate.
+            let res = if matches!(c, Command::Truncate { .. }) && *res == "wrong" {
+                "fenced"
+            } else {
+                res
+            };
+            fields.push(("res", Value::from(res)));
+            ("apply", fields)
+        }
+        RolesEvent::Boundary { r } => ("boundary", vec![("r", int(*r))]),
+        RolesEvent::Retire { p } => ("retire", vec![("p", int(*p))]),
+        RolesEvent::Resolve { s, r, res } => (
+            "resolve",
+            vec![("s", int(*s)), ("r", int(*r)), ("res", Value::from(*res))],
+        ),
+    }
+}
+
+fn remove(events: &[Value], at: usize) -> Vec<Value> {
+    let mut edited = events.to_vec();
+    edited.remove(at);
+    edited
+}
+
+fn repeat(events: &[Value], at: usize) -> Vec<Value> {
+    let mut edited = events.to_vec();
+    edited.insert(at + 1, events[at].clone());
+    edited
+}
+
+fn plus(event: &Value, name: &str, by: i64) -> Value {
+    with(event, name, Value::Int(num(event, name).unwrap_or(0) + by))
+}
+
+fn same(a: &Value, b: &Value, names: &[&str]) -> bool {
+    names.iter().all(|n| fields(a).get(*n) == fields(b).get(*n))
+}
+
+/// The answer of the first apply answered `from` becomes `to`.
+macro_rules! answer_edit {
+    ($name:expr, $from:expr, $to:expr) => {
+        Edit::new($name, |events| {
+            change_first(
+                events,
+                |e, i| is(&e[i], "apply") && text(&e[i], "res") == $from,
+                |e| with(e, "res", Value::from($to)),
+            )
+        })
+    };
+}
+
+/// The first event of `kind` that `pick` selects, repeated.
+macro_rules! repeat_edit {
+    ($name:expr, $kind:expr) => {
+        Edit::new($name, |events| {
+            let at = events.iter().position(|e| is(e, $kind))?;
+            Some((at + 1, repeat(events, at)))
+        })
+    };
+}
+
+/// The named edits of recorded roles traces.
+pub const EDITS: &[Edit] = &[
+    answer_edit!("an accepted command refused", "ok", "fenced"),
+    answer_edit!("a duplicate called taken", "dup", "taken"),
+    answer_edit!("a Below called a duplicate", "below", "dup"),
+    answer_edit!("a Noop answered as a write", "noop", "ok"),
+    Edit::new("an apply at the next slot", |events| {
+        change_first(events, |e, i| is(&e[i], "apply"), |e| plus(e, "s", 1))
+    }),
+    Edit::new("an apply of another write", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "apply") && text(&e[i], "op") == "w",
+            |e| plus(e, "id", 100),
+        )
+    }),
+    Edit::new("an apply dropped", |events| {
+        let at = (0..events.len()).find(|&i| {
+            is(&events[i], "apply")
+                && events[i + 1..]
+                    .iter()
+                    .any(|e| is(e, "apply") && same(e, &events[i], &["r"]))
+        })?;
+        Some((at, remove(events, at)))
+    }),
+    Edit::new("a campaign that writes from one slot more", |events| {
+        change_first(events, |e, i| is(&e[i], "register"), |e| plus(e, "from", 1))
+    }),
+    repeat_edit!("a campaign repeated", "register"),
+    Edit::new("a seal end one higher", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "phase1") && num(&e[i], "end").is_some(),
+            |e| plus(e, "end", 1),
+        )
+    }),
+    Edit::new("a first leader with no seal end", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "phase1") && num(&e[i], "end").is_some(),
+            |e| {
+                let mut changed = fields(e).clone();
+                changed.remove("end");
+                Value::Record(changed)
+            },
+        )
+    }),
+    Edit::new("a Phase 1 on one report", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "phase1"),
+            |e| {
+                let Some(Value::Set(q)) = fields(e).get("q") else {
+                    panic!("a Phase 1 names its reports");
+                };
+                with(e, "q", Value::Set(q[..1].to_vec()))
+            },
+        )
+    }),
+    Edit::new("a Phase 1 before its promises", |events| {
+        let phase1 = events.iter().position(|e| is(e, "phase1"))?;
+        let at = events[..phase1]
+            .iter()
+            .position(|e| is(e, "promise") && same(e, &events[phase1], &["b"]))?;
+        let mut edited = events.to_vec();
+        let moved = edited.remove(phase1);
+        edited.insert(at, moved);
+        Some((at, edited))
+    }),
+    Edit::new("an open at the next slot", |events| {
+        change_first(events, |e, i| is(&e[i], "open"), |e| plus(e, "start", 1))
+    }),
+    Edit::new("a seal dropped", |events| {
+        let at = events.iter().position(|e| is(e, "seal"))?;
+        Some((at, remove(events, at)))
+    }),
+    Edit::new("a seal of another ballot", |events| {
+        // Another ballot of the walk, so that the edit names a ballot of the
+        // model.
+        let at = events.iter().position(|e| is(e, "seal"))?;
+        let other = events.iter().find_map(|e| {
+            (is(e, "register") && num(e, "b") != num(&events[at], "b"))
+                .then(|| fields(e)["b"].clone())
+        })?;
+        let mut edited = events.to_vec();
+        edited[at] = with(&events[at], "b", other);
+        Some((at, edited))
+    }),
+    Edit::new("a proposal that skips a slot", |events| {
+        change_first(events, |e, i| is(&e[i], "propose"), |e| plus(e, "s", 1))
+    }),
+    Edit::new("a Noop proposed where a write was", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "propose") && text(&e[i], "op") == "w",
+            |e| {
+                Value::record([
+                    ("event", Value::from("propose")),
+                    ("b", fields(e)["b"].clone()),
+                    ("s", fields(e)["s"].clone()),
+                    ("op", Value::from("noop")),
+                ])
+            },
+        )
+    }),
+    Edit::new("a vote before its proposal", |events| {
+        let accept = events.iter().position(|e| is(e, "accept"))?;
+        let at = events[..accept]
+            .iter()
+            .position(|e| is(e, "propose") && same(e, &events[accept], &["b", "s"]))?;
+        let mut edited = events.to_vec();
+        let moved = edited.remove(accept);
+        edited.insert(at, moved);
+        Some((at, edited))
+    }),
+    repeat_edit!("a promise repeated", "promise"),
+    Edit::new("a crash before a flush", |events| {
+        let at = events.iter().position(|e| is(e, "flush"))?;
+        let mut edited = events.to_vec();
+        edited.insert(
+            at,
+            Value::record([
+                ("event", Value::from("crash")),
+                ("a", fields(&events[at])["a"].clone()),
+            ]),
+        );
+        Some((at, edited))
+    }),
+    Edit::new("a flush dropped", |events| {
+        let at = events.iter().position(|e| is(e, "flush"))?;
+        Some((at, remove(events, at)))
+    }),
+    Edit::new("a base dropped", |events| {
+        let at = (0..events.len()).find(|&i| {
+            is(&events[i], "base")
+                && events[i + 1..]
+                    .iter()
+                    .any(|e| is(e, "apply") && same(e, &events[i], &["r"]))
+        })?;
+        Some((at, remove(events, at)))
+    }),
+    repeat_edit!("a boundary written twice", "boundary"),
+    repeat_edit!("a retire repeated", "retire"),
+    repeat_edit!("a reshape repeated", "reshape"),
+    Edit::new("a written Resolve called not written", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "resolve") && text(&e[i], "res") == "dup",
+            |e| with(e, "res", Value::from("taken")),
+        )
+    }),
+];

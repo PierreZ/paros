@@ -23,8 +23,11 @@ Each module keeps its unit tests in `<module>/tests.rs`. The driver walk of
 under faults.
 
 `examples/`: `in_memory` (a journal on three processes), `custom_storage` (a backend written
-by hand, checked by the contract suite) and `multi_writer` (`SetLeader(None)`, open writes from
-two writers, and back to one writer). Shared code is in `examples/common/mod.rs`. Each asserts
+by hand, checked by the contract suite), `single_writer` (the pure client of
+`paros_journal::client`: exactly-once across a lost reply and a seal, `Below` settled by
+`Resolve`, a deposed writer) and `multi_writer` (the client with `SetLeader(None)`, open writes
+from two writers, a resend that lands twice, and back to one writer). `common::Program` is the
+glue a program writes around a client. Shared code is in `examples/common/mod.rs`. Each asserts
 its result and runs in the `checks` job of CI.
 
 ## Rules
@@ -48,7 +51,7 @@ its result and runs in the `checks` job of CI.
 ## Gates
 
 `cargo nextest run -p paros-journal-io -p journal-sim`, `cargo run -p paros-journal-io --example
-in_memory`, `--example custom_storage` and `--example multi_writer`, `cargo test --doc -p paros-journal-io`,
+in_memory`, `--example custom_storage`, `--example single_writer` and `--example multi_writer`, `cargo test --doc -p paros-journal-io`,
 `cargo clippy --all-targets -- -D warnings`,
 `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-journal-io --no-deps`,
 `cargo check --target wasm32-unknown-unknown -p paros-journal-io`,

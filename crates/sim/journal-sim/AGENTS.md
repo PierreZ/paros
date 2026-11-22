@@ -7,7 +7,10 @@ across seals, `SetLeader` with `None`, truncates, crashes of the replica that re
 and the `Resolve` call that settles each `Below`. A second walk drives the journal's matchmaker
 register across handovers of the set (#1325). A third walk drives the journal roles
 (`paros_journal::roles`, #1326): acceptors, leaders and segment replicas with disks, over a chain
-of segments. A fourth walk runs the generic driver of `paros-journal-io` (#1329) on three processes.
+of segments. A fourth walk runs the generic driver of `paros-journal-io` (#1329) on three processes. A fifth walk
+drives the pure journal client (#1331) against a journal that loses and holds answers.
+A sixth walk runs the whole journal on the in-memory IO of `paros-journal-io` (#1445): two
+journals on nine machines in three zones, with their controllers and a client.
 Test only: `publish = false`.
 
 ## Map
@@ -24,7 +27,8 @@ Test only: `publish = false`.
 - `src/roles.rs`: the walk of the roles (`RolesModel`, #1326), its shapes (`NARROW`, the default
   grid; `WIDE`, two columns and promise pages of two), its oracles (`AGREE`, `SEALED`, `FOLD`,
   `VIEW`, `BOUNDARY`, `RESOLVE`; the truth is `Truth` over the chosen log), its reach sites and
-  its planted mutants (`RolesMutant`). Its trace check against `Journal.tla` is not built yet.
+  its planted mutants (`RolesMutant`), its events (`RolesEvent`, one action of `Journal.tla`
+  each) and the trace control `BoundaryBeforeDurable`.
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
   controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
   `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each
@@ -45,15 +49,31 @@ Test only: `publish = false`.
   `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
   walk's mailbox, crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
   `FLIGHT`, `ANSWER`), its reach sites and its planted mutants (`HostMutant`). `tests/host.rs`.
+- `src/client.rs`: the client walk (`ClientModel`, #1331): two programs with a `Client` of
+  `paros_journal::client`, a lossy mailbox, held and lost answers, seals, `Resolve`, reads; its
+  oracles (`WRITTEN`, `ONCE`, `REFUSED`, `LED`, `TAIL`, `PAGE`), judged on a log that the walk keeps, its
+  reach sites and its planted mutants (`ClientMutant`). `tests/client.rs`.
+- `src/backend.rs`: the backends of the driver walk and the whole walk: `Disk`, a disk that
+  survives its process and fails commits inside the contract, and `Wire`, a transport that judges
+  the flight rule at each send.
+- `src/whole.rs`: the whole-journal walk (`WholeModel`, #1445): two journals on nine machines in
+  three zones, a `Driver` on each machine, the controllers of each journal over one register, a
+  shared reshape token, a client that writes, resends and resolves, crashes, the loss of a zone
+  for a while, lost register calls and disk faults; its oracles (`AGREE`, `SEALED`, `FLIGHT`,
+  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`), its reach sites and its planted mutants (`WholeMutant`).
+  `tests/whole.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
+- `src/trace/roles.rs`: the events of a roles walk as a trace of
+  `specs/tla/journal-state/RolesTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/register.rs`: the events of a register walk as a trace of
   `specs/tla/segment-records/RegisterTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/controller.rs`: the events of a controller walk as a trace of
   `specs/tla/grid-controller/ControllerTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/mutate.rs`: the named edits of recorded traces (#1308 (mutate recorded traces)).
 - `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/roles.rs` (the roles walks and
-  their mutants); `tests/register.rs` (the register
+  their mutants); `tests/roles_traces.rs` (the roles trace check on the narrow shape, its rules, its
+  control `BoundaryBeforeDurable` and its edits); `tests/register.rs` (the register
   walks and their mutants) and `tests/register_traces.rs` (the register trace check, its rules,
   its control `ForgedBootstrap` and its edits); `tests/controller.rs` (the controller walks, their
   mutants and the role's probes) and `tests/controller_traces.rs` (the controller trace check, its
@@ -78,12 +98,15 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
   `CoversOn`, `ResolveOn`). A step of the code that the model does not have becomes a step of the
   model, with its check, in the same PR.
 - **`RegisterTrace` extends `SegmentRecords.tla`**, and **`ControllerTrace` extends
-  `GridController.tla`**, in the same way: each event is an action of the model.
-- **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register: the
+  `GridController.tla`**, in the same way: each event is an action of the model. **`RolesTrace`
+  extends `Journal.tla`**: each event of the roles walk is one action of the model, with the
+  parameters that the code chose.
+- **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register;
+  `BoundaryBeforeDurable` for the roles: the
   oracles pass it, TLC refuses it) and **refuses the edits** of the recorded walks at the edited event or after it: at least 20 edits
   with a place. A new event kind gets its edits in the same PR.
-- **The checked walks meet every rule** of `RULES` in `tests/traces.rs` and
-  `tests/register_traces.rs` (a resend answered
+- **The checked walks meet every rule** of `RULES` in `tests/traces.rs`,
+  `tests/register_traces.rs` and `tests/roles_traces.rs` (a resend answered
   `Below`, a `Resolve` answered both ways, two seals, and more). A rule no walk meets fails the
   test.
 - TLC must run: `require_tlc` fails the test when `tlc` is missing (the default nix shell has it).

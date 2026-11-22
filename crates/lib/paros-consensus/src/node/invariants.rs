@@ -84,6 +84,26 @@ impl ColocatedNode {
             self.acceptor.first_slot() <= self.first_unchosen(),
             "the compaction floor never outruns the chosen prefix"
         );
+        // The unprepared campaign is this node's own ballot, never above
+        // its promise, and no Phase 1 runs at it: `start_phase1` clears it
+        // before the first `Prepare` leaves. Without this pair a path that
+        // sends a `Prepare` another way leaves the read gate of #890 open.
+        if let Some(own) = self.unprepared_campaign {
+            assert!(
+                own.node == self.config.id,
+                "an unprepared campaign is this node's own ballot"
+            );
+            assert!(
+                own <= self.acceptor.promised(),
+                "an unprepared campaign is never above the promise"
+            );
+            if self.proposer.election().is_some() {
+                assert!(
+                    own != self.ballot,
+                    "a Phase 1 never runs at an unprepared campaign"
+                );
+            }
+        }
         // The replica's and the proposer's own maps against the acceptor's
         // floor.
         self.acceptor.assert_invariants();

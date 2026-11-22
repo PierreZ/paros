@@ -17,6 +17,10 @@ read_p212_nohold   violation  ci
 read_carry_nohold  violation  ci
 read_p212_hold     pass       ci
 read_carry_hold    pass       ci
+# A read that ends returns every acked slot (ReadsComplete): the fence of
+# ReadReturn on a reconfiguration, where the reader's quorum and the new
+# leader's quorum do not meet.
+read_reconfig      pass       ci
 # A read also covers what an earlier read returned (#1270 (bypass read order)).
 # The control: a reader counts a slot that a ballot chose before its fence
 # Phase 1 (ReadHold = FALSE).

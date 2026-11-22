@@ -36,6 +36,76 @@
           targets = rustTargets;
         };
 
+        # LS4, the PTL prover that TLAPS calls for a temporal step such as
+        # `Spec => []Inv`, and `ptl_to_trp`, the translator that tlapm pipes
+        # into it (`ptl_to_trp -i $file | ls4`). nixpkgs's tlaps has neither.
+        # Both are built from source as tlapm's own installer builds them:
+        # LS4 1.0 with the `mkLit` patch of tlapm's `deps/ls4/ls4.patch`, and
+        # the `translate` folder of tlapm. Sources come over git, never as a
+        # GitHub tarball (#727 (flake inputs over git)).
+        ls4 = pkgs.stdenv.mkDerivation {
+          pname = "ls4";
+          version = "1.0";
+          src = pkgs.fetchgit {
+            url = "https://github.com/quickbeam123/ls4";
+            rev = "f7383bd5d3f1c1e9399a23a16e7f12f8153d41e5"; # tag v1.0
+            hash = "sha256-yZuxc3cFVVMx1sWfEpWUe6TdO4zovK/5Q/CHtksKg6E=";
+          };
+          buildInputs = [ pkgs.zlib ];
+          postPatch = ''
+            substituteInPlace core/SolverTypes.h \
+              --replace-fail "friend Lit mkLit(Var var, bool sign = false);" \
+                             "friend Lit mkLit(Var var, bool sign);" \
+              --replace-fail "inline  Lit  mkLit     (Var var, bool sign) {" \
+                             "inline  Lit  mkLit     (Var var, bool sign = false) {"
+          '';
+          # The repository ships a prebuilt aiger.o; build it from aiger.c.
+          buildPhase = ''
+            runHook preBuild
+            cd core
+            rm -f aiger.o
+            $CC -O2 -c aiger.c -o aiger.o
+            make r
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            install -Dm755 ls4_release $out/bin/ls4
+            runHook postInstall
+          '';
+        };
+
+        ptl-to-trp = pkgs.stdenv.mkDerivation {
+          pname = "ptl_to_trp";
+          version = "2024-06-24";
+          src = pkgs.fetchgit {
+            url = "https://github.com/tlaplus/tlapm";
+            rev = "c26e34795928f107bd208768e0b9df4d9659e53d"; # tag 2024_06_24_UTC_06_19
+            sparseCheckout = [ "translate" ];
+            hash = "sha256-QFKNGg0eCef812udbMUiAME9tmuVEn5fTmRFvKowZxY=";
+          };
+          nativeBuildInputs = [ pkgs.ocaml ];
+          buildPhase = ''
+            runHook preBuild
+            cd translate
+            ocamlopt -c fotypes.mli
+            ocamllex folex.mll
+            ocamlopt -c fofunctions.ml
+            ocamlyacc foyacc.mly
+            ocamlopt -c foyacc.mli
+            ocamlopt -c folex.ml
+            ocamlopt -c foyacc.ml
+            ocamlopt -c main.ml
+            ocamlopt -o ptl_to_trp fofunctions.cmx folex.cmx foyacc.cmx main.cmx
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            install -Dm755 ptl_to_trp $out/bin/ptl_to_trp
+            runHook postInstall
+          '';
+        };
+
       in
       {
         devShells.default = pkgs.mkShell {
@@ -110,11 +180,12 @@
           buildInputs = [ pkgs.tlaplus pkgs.python3 ];
         };
 
-        # TLAPS, the TLA+ proof system, with Z3 (its default SMT backend), for
+        # TLAPS, the TLA+ proof system, with Z3 (its default SMT backend) and
+        # LS4 with ptl_to_trp (its PTL backend, built above), for
         # the proofs of specs/tla/ (`nix develop .#proofs --command
         # scripts/check-proofs.sh`, #1307 (inductive invariants, then proofs)).
         devShells.proofs = pkgs.mkShell {
-          buildInputs = [ pkgs.tlaps pkgs.z3 ];
+          buildInputs = [ pkgs.tlaps pkgs.z3 ls4 ptl-to-trp ];
         };
       }
     );

@@ -249,11 +249,17 @@ fn a_full_replica_writes_the_boundary_state_until_a_done_value_shows_it() {
         segment: SegmentId(1),
         state,
     };
-    assert_eq!(effects, vec![ReplicaEffect::Register(boundary.clone())]);
-    assert_eq!(
-        replica.tick(),
-        vec![ReplicaEffect::Register(boundary.clone())]
-    );
+    // The boundary write waits on the batch of the last slot it folds.
+    let [ReplicaEffect::Register { change, after }] = effects.as_slice() else {
+        panic!("one register change: {effects:?}");
+    };
+    assert_eq!(*change, boundary);
+    assert!(after.is_some(), "the boundary write waits on a batch");
+    let register = ReplicaEffect::Register {
+        change: boundary.clone(),
+        after: *after,
+    };
+    assert_eq!(replica.tick(), vec![register]);
     let done = value.apply(&boundary).expect("the boundary");
     assert_eq!(replica.observe(&done).len(), 0);
     assert!(
@@ -384,19 +390,29 @@ fn a_restart_folds_its_disk_again() {
 #[test]
 fn a_resolve_reads_the_fold() {
     assert_eq!(
-        replica().resolve(LeaderUuid(7), Seq(0), &[Record::new(vec![1])]),
+        replica()
+            .resolve(LeaderUuid(7), Seq(0), &[Record::new(vec![1])])
+            .0,
         ResolveAnswer::NotCovered,
         "a replica with no base covers nothing"
     );
     let mut replica = based();
     replica.step(LEADER, commit(1, 0, claim(7)));
-    replica.step(LEADER, commit(1, 1, write(7, 0, 1)));
-    assert!(matches!(
-        replica.resolve(LeaderUuid(7), Seq(0), &[Record::new(vec![1])]),
-        ResolveAnswer::Written { .. }
-    ));
+    let effects = replica.step(LEADER, commit(1, 1, write(7, 0, 1)));
+    let last = effects.iter().find_map(|effect| match effect {
+        ReplicaEffect::Persist { id, .. } => Some(*id),
+        _ => None,
+    });
+    let (written, after) = replica.resolve(LeaderUuid(7), Seq(0), &[Record::new(vec![1])]);
+    assert!(matches!(written, ResolveAnswer::Written { .. }));
     assert_eq!(
-        replica.resolve(LeaderUuid(7), Seq(0), &[Record::new(vec![2])]),
+        after, last,
+        "the answer waits on the batch of the last slot it read"
+    );
+    assert_eq!(
+        replica
+            .resolve(LeaderUuid(7), Seq(0), &[Record::new(vec![2])])
+            .0,
         ResolveAnswer::NotWritten
     );
 }

@@ -161,9 +161,11 @@ Init == /\ status = [b \in Ballots |-> "matching"]
 (***************************************************************************)
 (* Matchmaking (Matchmaker Paxos, section 3).                              *)
 (***************************************************************************)
+\* The registration of b reaches matchmaker m while b matches. A second
+\* registration of b at m is refused by the check of the ballots that m
+\* holds, as any registration at or below one that m holds.
 Register(b, m) ==
     /\ status[b] = "matching"
-    /\ m \notin replied[b]
     /\ \A r \in reg[m] : r[1] < b
     /\ wm[m] <= b
     /\ reg' = [reg EXCEPT ![m] = @ \cup {<<b, CfgOf[b]>>}]
@@ -412,6 +414,22 @@ ReadSafeAcked ==
         \E Q \in Q1(CfgOf[b]) :
            /\ ReadPasses(b, Q)
            /\ \E s \in Acked : s > ReadIdx(b, Q)
+
+\* A ballot that ended its matching heard no GC floor above itself: a
+\* matchmaker refuses a registration below its watermark
+\* (`MatchRefusal::BelowWatermark` of matchmaker.rs). Without it, a ballot
+\* below the floor of a later leader can match on a history that the GC
+\* emptied, and lead with no prior configuration to recover from.
+HeardNoFloorAbove == \A b \in Ballots : status[b] # "matching" => maxwm[b] <= b
+
+\* Matchmaking ends before Phase 1 (Matchmaker Paxos): no acceptor promises
+\* a ballot that still matches.
+PrepareAfterMatch == \A p \in promises : status[p[2]] # "matching"
+
+\* The prior configurations of a ballot do not change once it matched: its
+\* Phase 1 and its bypass check read them.
+HistFixed == [][\A b \in Ballots :
+                  status[b] # "matching" => hist'[b] = hist[b] /\ maxwm'[b] = maxwm[b]]_vars
 
 Bypassed == \E b \in Ballots : via[b] # 0
 

@@ -58,7 +58,13 @@ A Paxos page names its trace in its front matter (`trace: single-decree`) and pu
 `src/traces/<name>.json`, and `public/steps.js` draws it: one lane per role, one row per
 message, play / step / back / restart, and one button per "what if" run. Then `steps.js`
 loads `paros-consensus` compiled to wasm (`public/paxos/wasm/`, staged by `scripts/build-wasm.sh`,
-gitignored), calls `paxos_trace(page)` and draws the live run at the same step. The JSON is
+gitignored), calls `paxos_trace(page)` and draws the live run at the same step. A Journal page
+names a `journal-` trace (`trace: journal-seal`, the Segments page, #1365 (reshape and seal
+step-through)): `Doc.astro` then points `steps.js` at the `journal` bundle
+(`public/journal/wasm/`) and its export `journal_trace(page)` (`data-wasm`, `data-call`,
+`data-source` on the trace's script tag). That trace is recorded from the journal roles of
+`paros-journal` by `crates/support/paros-wasm/src/journal/seal.rs`, and
+`cargo test -p paros-wasm --test journal_traces` writes it. The JSON is
 the fallback when the wasm does not load (`npm run dev` without `scripts/build-wasm.sh`).
 `cargo test -p paros-wasm --test paxos_traces` writes the JSON from the same scripts
 (`crates/support/paros-wasm/src/paxos/trace/pages.rs`) and proves a page recorded alone is
@@ -87,8 +93,8 @@ wasm bundle which quorums `paros-consensus` finds; without the wasm the picker s
 A page whose trace has a run with `beats` opens in story mode: `public/story.js` (loaded
 before `steps.js` by `src/layouts/Doc.astro`) puts its panel before `<div data-steps>` and
 hides the step-through until the reader asks for it. One screen per beat: the sentence of the
-beat, the lanes as nodes in a fixed layout (rows by role: proposer, batcher, matchmaker,
-proxy, node, acceptor, replica; a grid lane sits at its cell), and the messages of the beat
+beat, the lanes as nodes in a fixed layout (rows by role: client, controller, proposer, batcher,
+matchmaker, proxy, node, acceptor, replica; a grid lane sits at its cell), and the messages of the beat
 moving from sender to receiver. A broadcast leaves as one (`fan`), a lost message stops half
 way and fades, a node that is down goes dark, and a disk write shows under the node before
 its reply leaves. The end of a beat shows its `choices`. Back, Continue (Skip while a beat
@@ -104,13 +110,15 @@ document. A "Break the rule" run ends with a "find the bug" question (`after`): 
 first, then the screen asks what went wrong in it, and an answer marks the right one with no
 second play. Every page has one: single decree (an acceptor loses its disk), quorums (two
 quorums that do not meet), Multi-Paxos (a node skips Phase 1), compartmentalized (a proxy
-leader commits after one vote) and matchmaker (skip the matchmakers). A page with no beats
+leader commits after one vote), matchmaker (skip the matchmakers) and the Journal's segments
+(a seal below a chosen vote). A page with no beats
 keeps the step-through alone. The story draws the recorded trace only; the step-through
 switches to the live wasm run.
 
 ## The course (`src/course.ts`)
 
-The Paxos pages are one course of seven lessons. A lesson is a group of recorded runs of one
+The course has eight lessons: seven on the Paxos pages, then one on the Segments page of the
+Journal (`path` in `src/course.ts`, `pathOf`; #1365). A lesson is a group of recorded runs of one
 page, in order, with one goal ("After it, you can ..."); a page can hold more than one lesson
 (Multi-Paxos holds the log and the reads, Quorums holds the majority and the grids). The map
 is on `/paxos/#course`. `src/layouts/Doc.astro` gives a page its lessons (`<script
@@ -129,7 +137,8 @@ Each lesson names one TLC run of a model of `specs/tla/` (`tlc` in `src/course.t
 map shows its count of distinct states with the day of the run (`TLC_RUN`). The figures come
 from TLC's output, never from an estimate. To refresh them, run for each lesson, in
 `specs/tla/<model>/`: `nix develop .#tla --command tlc -workers auto -deadlock -config
-<config>.cfg MC.tla`, copy "distinct states found", and change `TLC_RUN` the same day.
+<config>.cfg MC.tla`, copy "distinct states found", and change `TLC_RUN` the same day. A lesson whose run alone is
+new names its own day (`date` of its `tlc`).
 
 ## Your turn (`public/lab.js`)
 
@@ -187,7 +196,8 @@ performance numbers on the site (Pierre, 2026-10-31). The widgets that ran the p
 ## Tests (#1362 (browser smoke test and link check))
 
 `.github/workflows/pages.yml` runs both on each pull request that touches the site,
-`paros-wasm`, `paros-consensus`, `paros-journal` or the Cargo files, and before each deploy.
+`paros-wasm`, `paros-consensus`, `paros-journal`, the knowledge base cards (the Concepts
+page is built from them) or the Cargo files, and before each deploy.
 Both run on the built site, so build the wasm and the site first.
 
 - **Link check**, `npm run check-links` (`scripts/check-links.mjs`, in `nix develop`): every

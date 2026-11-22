@@ -38,6 +38,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | The rules composed across three segments, with the acceptors' disk and the write orders | §J7.2 | `journal-state/` | #1189 (the journal state model), #1309 (the state is the disk) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
 | The controller's election and fenced reshape | §J6.1 | `grid-controller/` | #1259 (the fenced reshape call of the grid controller) |
+| The placement port between the grid controller and the cell, the cell's own control journal too | §J6.3 | `placement-port/` | #1421 (the placement port) |
 | The health measures and the journal states | §J6.2 | `health/` (v1: its `v1` and `v1_draft` checks, #1319 (a v1 switch in health/)) | #1260 (journal health measures) |
 
 ### J7.2 The composed model
@@ -118,9 +119,21 @@ force. The narrow shape is the default grid (one column of three); the wide shap
 two columns and promises in pages of two. Each campaign reaches its named sites (a seal lost, a
 `Noop` below the start, an old vote chosen again in a new grid, a third segment, a retire, a
 pull from a peer, a leader stopped on a higher promise, `Unknown`, `Below`, `Resolve`, and
-more). **Open**: the trace check of this walk against `Journal.tla` and the coverage gate over
-its probes (the next rule group of #1326); CTRL faulty votes on the acceptors' disks (the
-leader's blocked slot has unit tests only).
+more). TLC checks the walks of the narrow shape against `journal-state/RolesTrace.tla`, which
+extends `Journal.tla` and binds each event to an action of the model with the parameters the
+code chose (`Register`, `Promise`, `Accept`, `Flush`, `Crash`, `Phase1On`, `SealWrite`, `Open`,
+`Propose`, `TakeBase`, `Apply`, `BoundWrite`, `Retire`, `ResolveBelow`). The checked walks meet
+16 named rules (a lost seal, a `Noop` below and above the start, an old vote proposed again, a
+promise after its Phase 1 closed, a crash that lost a queued write, a third segment, `Below`,
+`Resolve`, and more). A boundary write before its batch is durable is the control: the oracles
+pass it, TLC refuses the write. TLC refuses 27 named edits of the recorded walks. The trace check
+found three steps of the code that the model did not have; each is now a rule of both: a leader
+keeps the read set and the first slot of its campaign (`Register` takes them), the gap fill
+writes a `Noop` above the start below the highest vote it saw, and the replica's boundary write
+and its `Resolve` answer wait on the replica's batch. The wide shape (two columns) has no trace
+check: `Journal.tla` chooses a slot at a quorum of the whole grid, not of one column.
+**Open**: the coverage gate over the journal's probes (the next rule group of #1326); CTRL
+faulty votes on the acceptors' disks (the leader's blocked slot has unit tests only).
 
 **The walk of the register** (#1325 (the matchmaker register as an optional role),
 `src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
@@ -182,6 +195,46 @@ driver: `AGREE` (no two `Commit`s on the wire name two commands at one slot), `F
 (each answer is the whole log's at a slot of the command). Each has its planted mutant: a disk
 that lies about a commit (`LyingDisk`), a process that loses its disk (`WipeDisk`), and a client
 that takes a `Taken` as written (`TakenAsWritten`). The driver has no trace check yet.
+
+**The client walk** (#1331 (the pure journal client), `journal-sim/tests/client.rs`). Two programs,
+each with a `paros_journal::client::Client`, claim the journal with fresh uuids and depose each
+other, make it multi-writer and back, write batches, truncate and read. Requests and answers go
+through the walk's mailbox (lost, repeated, reordered); a command applies and loses its answer,
+applies and is answered `Unknown`, or takes no slot (`Unknown`, `NotLeader`); the walk seals the
+segment in force, so a resend is answered `Below` and settled by `Resolve`; a replica lags and a
+read is unserved. The oracles read the whole log the walk keeps, never the client: `WRITTEN` (a
+write reported written holds its positions), `ONCE` (a fenced write lands at most once),
+`REFUSED` (a fenced write reported refused is never in the log), `LED` (a copy of a `SetLeader`
+reported set applied), `TAIL` (the first copy of a new write of the uuid that leads names the tail)
+and `PAGE` (a page holds the log's records). A late copy of an old command (a truncate one past the
+tail, most often) reaches the journal after the client moved on, so a write of the leading uuid is
+answered `Truncated` and the client must follow the tail. Each has its planted mutant in
+the program or the journal, never in the client. A finding of the walk: with fresh uuids and one
+call in flight, a `Resolve` that answers not written means that the writer was deposed, so the
+client's resend at the tail is answered `Fenced` (site `RESOLVED_AGAIN`).
+
+**The whole-journal walk** (#1445 (simulate the whole journal in memory),
+`journal-sim/tests/whole.rs`). Before the moonpool-sim too, `journal-sim` runs the whole journal on
+the in-memory IO of `paros-journal-io`: nine machines in three zones, two journals that share the
+machines and one matchmaker register, a `Driver` and its `Host` on each machine (acceptors, leaders
+and segment replicas of both journals), two controllers for each journal
+(`paros_journal_control::role`) that are elected, heal a column, seal and get deposed, a reshape
+token shared by the journals, a client that claims the writer, writes, sends again, resends with a
+stale position and resolves each `Below`, crashes and restarts of a machine, the loss of a zone for
+a while, register operations whose request or reply is lost, and disk faults inside the contract.
+Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
+at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
+`ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with
+its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
+and `ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
+(`WholeMutant`). At the end of the walk each journal converges: a controller holds the term, the
+newest segment is in force, the older ones are retired, and every replica of the newest segment
+holds the whole log. One replica node serves one replica for each segment of its journal, so a
+heal keeps the live replicas of a column (Pierre, 2026-11-22, #1445); the address and the disk key
+of a replica name its segment (§J4.2). **Open**: the walk retires a sealed segment in place of the
+leader, whose retire is not built, and it loses a machine or a zone only for a while. A permanent
+loss needs re-replication (#1314, a rule group of #1326), which `decide` asks before the heal; it
+joins the walk with that rule group.
 
 ### J7.5 The controller's `decide`
 

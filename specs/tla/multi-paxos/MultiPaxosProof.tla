@@ -23,9 +23,11 @@ USE NBType, NSType, NoneNotValue, NoopNotCommand, OwnerType, LearnersType
 THEOREM StepInv ==
   ASSUME Inv, Hyp, [Next]_vars
   PROVE  Inv'
-<1>1. CASE UNCHANGED vars
+<1>1. CASE UNCHANGED vars \/ \E a \in Acceptors : Persist(a)
+  <2>a. UNCHANGED vars
+    BY <1>1, PersistStutter
   <2>0. TypeOK /\ UNCHANGED <<prom, vote, dprom, dvote, learned, phase, next, front, wiped, restarts, msgs>>
-    BY <1>1 DEF Inv, vars
+    BY <2>a DEF Inv, vars
   <2>1. \A x, c, s, v : VotedFor(x, c, s, v)' = VotedFor(x, c, s, v)
     BY <2>0 DEF VotedFor
   <2>2. \A x \in Acceptors : prom'[x] \in Nat /\ prom'[x] >= prom[x]
@@ -62,25 +64,26 @@ THEOREM StepInv ==
     BY <2>4, <2>5, <2>6, <2>7 DEF Inv
 <1> QED
   BY <1>1, PrepareInv, WinInv, AllocateInv, PromiseInv, AcceptInv, DecideInv, CatchUpInv,
-     PersistInv, RestartInv, WipeInv DEF Next
+     RestartInv, WipeInv DEF Next
 
 -----------------------------------------------------------------------------
 (* The theorem. `InitInv` and `StepInv` are the two premises of the TLA   *)
 (* proof rule INV1 (Lamport, "The Temporal Logic of Actions", 1994):      *)
 (*   Init => Inv,  Inv /\ [Next]_vars => Inv'  |-  Init /\ [][Next]_vars => []Inv. *)
-(* TLAPS checks a use of that rule with its PTL backend, LS4, which the   *)
-(* TLAPS of nixpkgs does not ship. So the last step is the one step that  *)
-(* TLAPS does not check here: it is the rule itself, applied as written.  *)
+(* TLAPS checks the use of that rule with its PTL backend, LS4, which the *)
+(* proofs shell of the flake builds from source.                          *)
 (***************************************************************************)
 
 THEOREM Safety == Hyp => (Spec => []Agreement)
-<1>1. Hyp /\ Init => Inv
+<1> SUFFICES ASSUME Hyp PROVE Spec => []Agreement
+  OBVIOUS
+<1>1. Init => Inv
   BY InitInv
-<1>2. Hyp /\ Inv /\ [Next]_vars => Inv'
+<1>2. Inv /\ [Next]_vars => Inv'
   BY StepInv
-<1>3. Inv /\ Hyp => Agreement
+<1>3. Inv => Agreement
   BY InvAgreement
 <1> QED
-  PROOF OMITTED
+  BY <1>1, <1>2, <1>3, PTL DEF Spec
 
 =============================================================================

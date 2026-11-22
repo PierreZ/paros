@@ -9,8 +9,10 @@
 `PAROS_*`, `parosctl` and the simulation's BUGGIFY knobs. That code is not in the tree
 (`docs/archive/v0.2.0-alpha.1/README.md`). The rule is the target; the name is a pointer to the
 old code. The v1 names come with the journal crates: the fold, the segment record and the codec
-are in `paros-journal` (#1324 (paros-journal), `crates/lib/paros-journal/`), the client comes with
-#1331 (the pure journal client).
+are in `paros-journal` (#1324 (paros-journal), `crates/lib/paros-journal/`), and so is the client,
+`paros_journal::client` (#1331 (the pure journal client)). The v1 client sends one call at a time;
+the pipeline and the merge of fenced writes below (`paros::client::Pipeline`, #597, #709) are not
+built yet.
 
 Every journal exposes four calls (and the recovery call `Resolve` of §J2.2), in one of two **modes**: **single-writer**, where one leader
 appends under its leader uuid, and **multi-writer**, where anyone with access appends. The mode

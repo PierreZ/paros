@@ -1,7 +1,7 @@
 //! The roles walks: every seed passes every oracle, the campaign reaches
 //! every site, and each oracle catches its mutant.
 
-use journal_sim::campaign::{campaign, try_campaign};
+use journal_sim::campaign::campaign;
 use journal_sim::roles::{
     AGREE, BOUNDARY, FOLD, RESOLVE, RolesMutant, SEALED, Shape, VIEW, reach, walk,
 };
@@ -25,12 +25,27 @@ fn the_wide_roles_walk() {
     campaign(&walk(Shape::WIDE, RolesMutant::None, SEEDS, 3000), &sites);
 }
 
+/// Some seed of `mutant` fails on `oracle`. A planted bug can break more
+/// than one oracle; each seed stops at the first it breaks.
 fn caught(mutant: RolesMutant, oracle: &str) {
-    let text = try_campaign(&walk(Shape::NARROW, mutant, 300, 400), &[])
-        .expect_err("a seed of the mutant fails");
+    let walk = walk(Shape::NARROW, mutant, 1, 1000);
+    let mut failures = Vec::new();
+    for seed in 1..=300 {
+        if let Err(failure) = walk.replay(seed) {
+            let text = failure.to_string();
+            if text.contains(oracle) {
+                return;
+            }
+            failures.push(text);
+        }
+    }
     assert!(
-        text.contains(oracle),
-        "{mutant:?} failed on another check:\n{text}"
+        !failures.is_empty(),
+        "{mutant:?}: no seed of the mutant fails"
+    );
+    panic!(
+        "{mutant:?}: no seed fails on {oracle}, the first failure:\n{}",
+        failures[0]
     );
 }
 
