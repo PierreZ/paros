@@ -267,6 +267,7 @@ impl World {
         let index = self.require_live(id)?;
         self.clock += 1;
         let restore = self.election_timeouts[index];
+        let forged = self.forged[index];
         self.narrate(
             NarrationKind::Election,
             format!(
@@ -277,8 +278,14 @@ impl World {
             ),
         );
         self.drive(id, index, move |node| {
-            node.set_election_timeout(1);
-            node.tick();
+            if let Some(forged) = forged {
+                // A node that forged Accepts minted that ballot: its next
+                // campaign opens above it.
+                node.campaign_above(forged);
+            } else {
+                node.set_election_timeout(1);
+                node.tick();
+            }
             node.set_election_timeout(restore);
         });
         Ok(())

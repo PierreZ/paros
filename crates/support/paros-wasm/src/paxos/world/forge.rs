@@ -17,9 +17,11 @@ use crate::paxos::view::show_ballot;
 use crate::paxos::world::{Envelope, Party, World};
 
 impl World {
-    /// `id` sends an `Accept` for `slot` with `value` to every node of the
-    /// pool, at its next ballot (one round above its own promise), with no
-    /// Phase 1.
+    /// `id` sends an `Accept` for `slot` with `value` to every other node of
+    /// the pool, at its next ballot (one round above its own promise), with
+    /// no Phase 1. The core never addresses a message to its own node (it
+    /// drops one in its own name), so `id` casts no vote of its own; its
+    /// next election opens above the forged ballot ([`World::start_election`]).
     ///
     /// # Errors
     ///
@@ -49,7 +51,8 @@ impl World {
             seq: Seq(0),
             records: vec![Value(value.as_bytes().to_vec())],
         });
-        for to in self.pool.clone() {
+        self.forged[index] = Some(ballot);
+        for to in self.pool.clone().into_iter().filter(|to| *to != id) {
             self.send(
                 Party::Node(id),
                 Party::Node(to),
@@ -67,7 +70,7 @@ impl World {
             NarrationKind::Accept,
             format!(
                 "{} skips Phase 1. It sends Accepts for slot {slot} with {value} at ballot {} \
-                 to every node, and it asked no acceptor what it voted. paros has no such \
+                 to every other node, and it asked no acceptor what it voted. paros has no such \
                  path: the engine writes these messages, as a leader with this bug would.",
                 who(id),
                 show_ballot(ballot)

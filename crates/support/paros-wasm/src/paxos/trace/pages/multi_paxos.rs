@@ -820,8 +820,8 @@ fn break_the_rule() -> Scenario {
     .settle_dropping(touches(0))
     .holds(voted_at(1, 0, "bravo"), "node 1 votes for bravo at slot 0");
     run.beat(
-        "Node 2 starts an election and wins with nodes 1 and 2. Both report bravo, the vote at \
-         the highest ballot, so node 2 proposes bravo again and it is chosen.",
+        "Node 2 starts an election and wins with nodes 1 and 2. Node 1 reports bravo, the vote \
+         at the highest ballot, so node 2 proposes bravo again and it is chosen.",
     )
     .find(
         "Node 0 holds alpha chosen at slot 0, and nodes 1 and 2 hold bravo. What broke Paxos?",
