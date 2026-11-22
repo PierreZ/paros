@@ -12,7 +12,8 @@
 #
 # The folders that run are packed into a few `spec` jobs, each at most 15
 # measured minutes of checks (`scripts/tla-minutes.txt`; a larger folder runs
-# alone), inside the 30 minutes of a job. The job `tlc` is green only when every job of the plan is green.
+# alone), inside the 30 minutes of a job. The plan also fails on a folder
+# with no line in `scripts/tla-minutes.txt` or `scripts/mutate-tla-shards.txt`. The job `tlc` is green only when every job of the plan is green.
 #
 # The job `traces` runs the trace checks of consensus-sim and journal-sim
 # (`tests/traces.rs` of each, and `tests/register_traces.rs`,
