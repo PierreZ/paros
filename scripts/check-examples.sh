@@ -4,7 +4,7 @@
 # A composing crate is a library crate of `crates/lib/` that depends on
 # another library crate of the workspace: `paros` (the facade),
 # `paros-journal`, `paros-journal-control` and `paros-journal-io` today, and later the moonpool adapter
-# and the journal client. A user programs against these crates, so each one
+# (the journal client is a module of paros-journal, #1331). A user programs against these crates, so each one
 # shows its abstractions and its developer experience in a runnable example.
 # The examples are how a reviewer judges the API.
 #

@@ -3,51 +3,54 @@
 # guard mutants, measured on GitHub's runners, rounded up to a half minute.
 # `scripts/ci-plan.py` packs the folders that a change needs into as few
 # jobs as it can, each at most `GROUP_MINUTES` of checks, so that each job
-# stays inside its 30 minutes. Every folder is listed: the plan fails on a
-# folder with no line, and on a line with no folder. When a folder's checks
-# grow, measure them again (the step time of its job) and update its line.
-# Measured on run 44961887578 (2026-11-22).
-abandoned-ballot 4
+# stays inside its 30 minutes on a slow runner too. Every folder is listed:
+# the plan fails on a folder with no line, and on a line with no folder.
+# When a folder's checks grow, measure them again (the step time of its job)
+# and update its line.
+# Measured on runs 44972036856, 44972223841 and 44978685157 (2026-11-22):
+# the largest time of each folder, with a folder that a timeout cut
+# estimated from its checks that did not run.
+abandoned-ballot 5.5
 batcher 1
-campaign-discovery 1
-cas-register 3.5
-cell-control 3
-compartments 3
-config-register 10
-ctrl-grid 9.5
-ctrl-segments 1.5
+campaign-discovery 1.5
+cas-register 19
+cell-control 5
+compartments 2.5
+config-register 14.5
+ctrl-grid 11
+ctrl-segments 1
 decree 8.5
-degraded-reshape 7.5
-experiments/segments/a 3.5
+degraded-reshape 13
+experiments/segments/a 4
 experiments/segments/b 3.5
-experiments/segments/reads 9.5
-experiments/stale-stopped/restart 16
-flight-rule 3
-generations 10
-grid 1
+experiments/segments/reads 6
+experiments/stale-stopped/restart 12
+flight-rule 2.5
+generations 17
+grid 0.5
 grid-controller 2.5
-handover 12.5
-handover-chain 5
-handover-gc 1
-health 4
-journal-ids 7
-journal-state 16
-leader-handoff 18.5
-matchmaker 6
-multi-paxos 14.5
-multi-writer 3
-node 13
-offload 2
+handover 10
+handover-chain 7.5
+handover-gc 1.5
+health 3.5
+journal-ids 6
+journal-state 17
+leader-handoff 15
+matchmaker 6.5
+multi-paxos 20
+multi-writer 5
+node 12.5
+offload 1.5
 proxy-leader 2
-quorum-everywhere 16.5
-re-replication 10
-reads 15.5
-retire-fence 16.5
+quorum-everywhere 15.5
+re-replication 8
+reads 22
+retire-fence 16
 seal-chain 2.5
-seal-ctrl 12
-segment-records 9.5
-segment-replicas 17.5
-segment-truncate 11.5
-truncation 9.5
-truncation-reconfig 7
-zero-stall 10.5
+seal-ctrl 13.5
+segment-records 10
+segment-replicas 17
+segment-truncate 19
+truncation 7.5
+truncation-reconfig 12.5
+zero-stall 14
