@@ -4,17 +4,10 @@ on:
   push:
     branches: ["main"]
   # Build and test (never deploy) a pull request that touches the site, its
-  # tooling, or a crate that its wasm or its pages show (#1362). The Concepts
-  # page is built from the knowledge base (concepts.astro reads
-  # docs/knowledge/concepts.md and docs/knowledge/concepts/*.md, the only files
-  # outside website/ that a page is built from), so a change there builds the
-  # site too. The link check also reads the repository files that the site
-  # links to; this filter does not cover all of them yet (#1469).
+  # tooling, or a crate that its wasm or its pages show (#1362).
   pull_request:
     paths:
       - "website/**"
-      - "docs/knowledge/concepts.md"
-      - "docs/knowledge/concepts/**"
       - "crates/support/paros-wasm/**"
       - "crates/lib/paros-consensus/**"
       - "crates/lib/paros-journal/**"

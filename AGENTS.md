@@ -317,7 +317,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - the site (`.github/workflows/pages.yml`, on pull requests that touch the site, `paros-wasm`,
-  `paros-consensus`, `paros-journal`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
+  `paros-consensus`, `paros-journal` or the Cargo files): `scripts/build-wasm.sh`, the Astro
   build, the link check of the built site (`npm run check-links`) and the browser smoke test
   of its live parts (`nix develop .#site --command npm test`, Playwright and Chromium;
   `website/site/AGENTS.md`, "Tests")

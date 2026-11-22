@@ -57,6 +57,5 @@ cd website/site && npm run dev                                      # live previ
 
 Look at each page you changed at 390 px and 1280 px, light and dark. The site is built,
 link-checked and smoke-tested by `.github/workflows/pages.yml` on every pull request that
-touches `website/`, `paros-wasm`, `paros-consensus`, `paros-journal` or the knowledge base
-cards (`docs/knowledge/concepts*`), and deployed on
+touches `website/`, `paros-wasm`, `paros-consensus` or `paros-journal`, and deployed on
 push to `main` (`website/site/AGENTS.md`, "Tests").
