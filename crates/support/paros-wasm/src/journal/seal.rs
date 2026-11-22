@@ -990,7 +990,9 @@ impl Run {
                 let Fence::Leader { uuid, expected_seq } = write.fence else {
                     unreachable!("the client's writes are fenced");
                 };
-                let answer = self.replicas[&node].resolve(uuid, expected_seq, &write.records);
+                // Each disk write of the story is durable at once, so the
+                // batch that the answer waits on is on the disk.
+                let (answer, _) = self.replicas[&node].resolve(uuid, expected_seq, &write.records);
                 self.send(
                     &to,
                     &flight.from,
@@ -1229,7 +1231,7 @@ impl Run {
                 ReplicaEffect::Send { to, message, .. } => {
                     out.push((lane_of(to), Payload::Role(message)));
                 }
-                ReplicaEffect::Register(change) => {
+                ReplicaEffect::Register { change, .. } => {
                     out.push(("m".to_string(), Payload::Change(change)));
                 }
             }
