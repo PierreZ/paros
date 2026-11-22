@@ -14,7 +14,8 @@
 # four shards (nextest `--partition count:i/4`: the tests in name order, dealt
 # out in turn). Each shard runs a quarter of the tests and every test runs in
 # one shard (#1340 (the traces job reaches its timeout)). The job `proofs`
-# checks the TLAPS proofs of specs/tla/ (`scripts/check-proofs.sh`).
+# checks the TLAPS proofs of specs/tla/ (`scripts/check-proofs.sh`), one job
+# for each `*Proof.tla` module.
 name: TLA
 
 on:
@@ -51,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       folders: ${{ steps.list.outputs.folders }}
+      proofs: ${{ steps.list.outputs.proofs }}
     steps:
       - uses: actions/checkout@v7
       - name: List the folders of specs/tla
@@ -63,6 +65,12 @@ jobs:
             | jq -R . | jq -sc .)
           test "$folders" != "[]"
           echo "folders=$folders" >>"$GITHUB_OUTPUT"
+          # Each TLAPS proof module, named by its path under specs/tla/.
+          proofs=$(for p in specs/tla/*/*Proof.tla; do
+              [ -f "$p" ] && echo "${p#specs/tla/}"; done \
+            | jq -R . | jq -sc .)
+          test "$proofs" != "[]"
+          echo "proofs=$proofs" >>"$GITHUB_OUTPUT"
 
   spec:
     needs: specs
@@ -106,15 +114,22 @@ jobs:
 
   # The TLAPS proofs (`*Proof.tla`, #1307 (inductive invariants, then
   # proofs)): every obligation is proved again, with no cache.
+  # One job for each proof module, so that a long proof is split into
+  # modules that each fit the 30 minutes of a job.
   proofs:
+    needs: specs
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.specs.outputs.proofs) }}
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Check the TLAPS proofs of specs/tla
-        run: nix develop .#proofs --command scripts/check-proofs.sh
+      - name: Check the TLAPS proof ${{ matrix.module }}
+        run: nix develop .#proofs --command scripts/check-proofs.sh ${{ matrix.module }}
 
   tlc:
     needs: [specs, spec, traces, proofs]
