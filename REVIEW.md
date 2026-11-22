@@ -31,7 +31,7 @@ These paths are judges. Read each change to them line by line.
 | an `assert!` in `crates/lib/paros-consensus/` | an assertion deleted or made weaker with no Paxos rule named in its place |
 | `specs/tla/` | an expected result changed in `checks.txt`; a control deleted; a constant made smaller so that a check passes |
 | `crates/lib/paros-consensus/src/models/` (the model checkers) | a property deleted; fewer seeds or a shorter schedule |
-| `.github/workflows/`, `scripts/check-*.sh` | a job or a step removed; a new `paths-ignore`; `continue-on-error`; a retry |
+| `.github/workflows/`, `scripts/check-*.sh`, `scripts/ci-plan.py` | a job or a step removed; a new `paths-ignore` or plan rule that skips a job when one of its inputs changed (`AGENTS.md`, "A job runs only when it can find something"); `continue-on-error`; a retry |
 | `clippy.toml`, `[workspace.lints]`, a new `#[allow]` | a lint turned off |
 | a test | `#[ignore]`, a deleted test, a retry loop, a longer timeout, a weaker assertion |
 
