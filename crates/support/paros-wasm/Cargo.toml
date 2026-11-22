@@ -31,6 +31,10 @@ name = "paxos_traces"
 required-features = ["paxos"]
 
 [[test]]
+name = "journal_traces"
+required-features = ["journal"]
+
+[[test]]
 name = "paxos_world"
 required-features = ["paxos"]
 

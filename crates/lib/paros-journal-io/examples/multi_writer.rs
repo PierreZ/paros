@@ -6,100 +6,64 @@
 //! A journal has two modes (§J2.4). In single-writer mode one writer holds
 //! the leader uuid, and each write names its position (`expected_seq`), so
 //! a resend is exactly-once. `SetLeader(None, old)` moves the journal to
-//! multi-writer mode: writes carry no fence ([`Fence::Open`]), any writer
-//! may write, and the journal gives each write the next position at apply.
+//! multi-writer mode: writes carry no fence, any writer may write, and the
+//! journal gives each write the next position at apply.
 //! `SetLeader(Some(uuid), Multi)` moves it back.
 //!
-//! One process serves every role of the journal (three acceptors, three
-//! replicas, one leader), on the backends of `paros_journal_io::mem`.
+//! Each writer is a program with a [`Client`](paros_journal::client::Client)
+//! of `paros_journal::client` (#1331): a client that won no `SetLeader` of
+//! a uuid writes unfenced. One process serves every role of the journal
+//! (three acceptors, three replicas, one leader), on the backends of
+//! `paros_journal_io::mem`.
 //!
 //! # What the run shows
 //!
-//! 1. Segment 1 opens and the leader runs Phase 1.
-//! 2. `SetLeader(None, Unset)`: the journal is multi-writer.
-//! 3. Writers X and Y send their writes at the same time, before the
-//!    process runs. The journal orders them: each gets its own position.
-//! 4. A fenced write answers `Fenced`: no uuid holds the journal.
-//! 5. `SetLeader(B, Multi)`: writer B holds the journal again, and writes at
-//!    the next position with `expected_seq`.
+//! 1. Segment 1 opens, and writer X makes the journal multi-writer.
+//! 2. Writers X and Y write at the same time. The journal orders them: each
+//!    write gets its own position.
+//! 3. A reply of Y is lost. An unfenced write has no position, so the
+//!    client's resend lands a second time: at-least-once.
+//! 4. Writer B claims the journal (`SetLeader(B, Multi)`) and writes at the
+//!    next position with `expected_seq`. X's unfenced write is now refused
+//!    `WrongMode`.
 //!
 //! Each step asserts its result, so CI runs this example as a test.
 
 mod common;
 
-use paros_journal::{
-    Answer, Command, Fence, JournalView, Leader, LeaderUuid, Record, Reply, Seq, Slot, Write,
-};
-use paros_journal_io::mem::{Endpoint, ManualClock, MemNetwork, MemRegister, MemStorage};
-use paros_journal_io::{CallId, CallOutcome, CallReply, Driver, HostConfig, Register};
+use paros_journal::client::{CallId, Mode, Outcome};
+use paros_journal::{Answer, Leader, LeaderUuid, Record, Seq};
 
-use common::{
-    JOURNAL, TICK, acceptor, at, elected, leader, open, replica, reply_of, reshape, show, written,
-};
+use common::{OneProcess, Program, show};
 
 const LEADER: u64 = 100;
 const B: LeaderUuid = LeaderUuid(0xB);
 
+fn records(text: &str) -> Vec<Record> {
+    vec![Record::new(text.as_bytes().to_vec())]
+}
+
 fn main() {
-    let clock = ManualClock::new();
-    let mut register = MemRegister::new();
-    register.create(JOURNAL, elected());
-    let value = register.read(JOURNAL).expect("the register");
-    register
-        .change(JOURNAL, &reshape(&value, 1))
-        .expect("the reshape");
-    let mut process = Driver::new(
-        HostConfig {
-            tick: TICK,
-            resend_page: 16,
-        },
-        MemStorage::new(),
-        MemNetwork::new().endpoint(),
-        clock.clone(),
-        register,
-        (),
-    );
-    let mut roles = vec![leader(LEADER, 1, 1, Slot(0))];
-    for node in 1..=3 {
-        roles.push(acceptor(node));
-        roles.push(replica(10 + node, 1));
-    }
-    for role in roles {
-        process.transport_mut().route(role.address());
-        process.assign(role);
-    }
-    let mut writers = Writers {
-        process,
-        clock,
-        replies: Vec::new(),
-    };
+    let mut journal = OneProcess::new(LEADER);
+    let mut x = Program::new(LEADER);
+    let mut y = Program::new(LEADER);
 
-    println!("1. Segment 1 opens; the leader runs Phase 1.");
-    writers.run_until(|w| open(&w.process, LEADER));
+    println!("1. Segment 1 opens; X makes the journal multi-writer.");
+    let call = x.client.set_leader(None, Leader::Unset);
+    let outcome = x.run(&mut journal, call);
+    show("X: set_leader(None, Unset)", &outcome);
+    assert!(matches!(outcome, Outcome::LeaderSet(v) if v.leader == Leader::Multi));
+    assert_eq!(x.client.mode(), Mode::Open);
 
-    println!("2. SetLeader(None, Unset): the journal is multi-writer.");
-    let answer = writers.call(Command::SetLeader {
-        new: None,
-        old: Leader::Unset,
-    });
-    show("SetLeader(None, Unset)", &answer);
-    assert_eq!(answer, view_answer(Leader::Multi, 0));
-
-    println!("3. Writers X and Y write at the same time; the journal orders them.");
-    let x = writers.process.call(at(LEADER), open_write("x0"));
-    let y = writers.process.call(at(LEADER), open_write("y0"));
-    let x2 = writers.process.call(at(LEADER), open_write("x1"));
-    writers.run_until(|w| {
-        [x, y, x2]
-            .iter()
-            .all(|c| reply_of(&w.replies, *c).is_some())
-    });
+    println!("2. X and Y write at the same time; the journal orders them.");
+    let x0 = x.client.write(records("x0"));
+    let x1 = x.client.write(records("x1"));
+    let y0 = y.client.write(records("y0"));
     let mut seqs = Vec::new();
-    for (name, call) in [("X: x0", x), ("Y: y0", y), ("X: x1", x2)] {
-        let answer = writers.take(call);
-        show(&format!("Write(open, [{name}])"), &answer);
-        let CallOutcome::Reply(Reply::Answer(Answer::Written { seq, count: 1 })) = answer else {
-            panic!("an open write is written: {answer:?}");
+    for (name, program, call) in run_both(&mut journal, &mut x, &mut y, &[x0, x1], &[y0]) {
+        show(&format!("{name}: write"), &program);
+        let Outcome::Written { seq, count: 1 } = program else {
+            panic!("an open write is written: {call:?} {program:?}");
         };
         seqs.push(seq);
     }
@@ -110,91 +74,76 @@ fn main() {
         "one position for each write"
     );
 
-    println!("4. A fenced write is refused: no uuid holds the journal.");
-    let answer = writers.call(fenced(3, "b3"));
-    show("Write(B, expected_seq 3)", &answer);
-    assert_eq!(
-        answer,
-        CallOutcome::Reply(Reply::Answer(Answer::Fenced(view(Leader::Multi, 3))))
-    );
-
-    println!("5. SetLeader(B, Multi): back to one writer.");
-    let answer = writers.call(Command::SetLeader {
-        new: Some(B),
-        old: Leader::Multi,
-    });
-    show("SetLeader(B, Multi)", &answer);
-    assert_eq!(answer, view_answer(Leader::Uuid(B), 3));
-    let answer = writers.call(fenced(3, "b3"));
-    show("Write(B, expected_seq 3)", &answer);
-    assert_eq!(answer, written(3));
-    println!("ok: three open writes, three positions, then one writer again.");
-}
-
-/// The one process, and the answers of its calls not taken yet.
-struct Writers {
-    process: Driver<MemStorage, Endpoint, ManualClock, MemRegister, ()>,
-    clock: ManualClock,
-    replies: Vec<CallReply>,
-}
-
-impl Writers {
-    /// Poll the process until it has no work, then move the clock one
-    /// tick, until `done` holds.
-    fn run_until(&mut self, done: impl Fn(&Self) -> bool) {
-        for _ in 0..100 {
-            while self.process.poll() {}
-            self.replies.extend(self.process.take_replies());
-            if done(self) {
-                return;
-            }
-            self.clock.advance(TICK);
+    println!("3. A reply of Y is lost; the resend lands again: at-least-once.");
+    let call = y.client.write(records("y1"));
+    y.send(&mut journal);
+    let lost = journal.settle();
+    show("the reply nobody reads", &lost[0].outcome);
+    y.lose();
+    let outcome = y.run(&mut journal, call);
+    show("Y: write(y1), after the resend", &outcome);
+    assert!(matches!(
+        outcome,
+        Outcome::Written {
+            seq: Seq(4),
+            count: 1
         }
-        panic!("not reached in 100 ticks");
-    }
+    ));
+    assert_eq!(journal.fold(11).next_seq(), Seq(5), "y1 is at 3 and at 4");
 
-    /// The answer of `call`, taken out of the answers not taken yet.
-    fn take(&mut self, call: CallId) -> CallOutcome {
-        let outcome = reply_of(&self.replies, call).expect("a reply").clone();
-        self.replies.retain(|r| r.call != call);
-        outcome
-    }
-
-    /// One call to the leader, and its answer.
-    fn call(&mut self, command: Command) -> CallOutcome {
-        let call = self.process.call(at(LEADER), command);
-        self.run_until(|w| reply_of(&w.replies, call).is_some());
-        self.take(call)
-    }
+    println!("4. B claims the journal; back to one writer.");
+    let mut b = Program::new(LEADER);
+    let call = b.client.set_leader(Some(B), Leader::Multi);
+    let outcome = b.run(&mut journal, call);
+    show("B: set_leader(B, Multi)", &outcome);
+    assert!(matches!(outcome, Outcome::LeaderSet(_)));
+    let call = b.client.write(records("b5"));
+    let outcome = b.run(&mut journal, call);
+    show("B: write(b5) at expected_seq 5", &outcome);
+    assert_eq!(
+        outcome,
+        Outcome::Written {
+            seq: Seq(5),
+            count: 1
+        }
+    );
+    let call = x.client.write(records("x2"));
+    let outcome = x.run(&mut journal, call);
+    show("X: write(x2), unfenced", &outcome);
+    assert!(matches!(outcome, Outcome::Refused(Answer::WrongMode(_))));
+    println!("ok: open writes ordered, one landed twice, then one writer again.");
 }
 
-/// A multi-writer write of one record: no fence.
-fn open_write(text: &str) -> Command {
-    Command::Write(Write {
-        fence: Fence::Open,
-        records: vec![Record::new(text.as_bytes().to_vec())],
-    })
-}
-
-/// A single-writer write of one record by writer B at `seq`.
-fn fenced(seq: u64, text: &str) -> Command {
-    Command::Write(Write {
-        fence: Fence::Leader {
-            uuid: B,
-            expected_seq: Seq(seq),
-        },
-        records: vec![Record::new(text.as_bytes().to_vec())],
-    })
-}
-
-fn view(leader: Leader, next: u64) -> JournalView {
-    JournalView {
-        leader,
-        next_seq: Seq(next),
-        first_seq: Seq(0),
+/// Run programs `x` and `y` together until every call of `xs` and `ys`
+/// ended: each call's name, outcome and id.
+fn run_both(
+    journal: &mut OneProcess,
+    x: &mut Program,
+    y: &mut Program,
+    xs: &[CallId],
+    ys: &[CallId],
+) -> Vec<(&'static str, Outcome, CallId)> {
+    let mut ended = Vec::new();
+    for _ in 0..100 {
+        x.send(journal);
+        y.send(journal);
+        let replies = journal.settle();
+        x.receive(&replies);
+        y.receive(&replies);
+        for call in xs {
+            if let Some(outcome) = x.outcome(*call) {
+                ended.push(("X", outcome, *call));
+            }
+        }
+        for call in ys {
+            if let Some(outcome) = y.outcome(*call) {
+                ended.push(("Y", outcome, *call));
+            }
+        }
+        if ended.len() == xs.len() + ys.len() {
+            return ended;
+        }
+        journal.clock.advance(common::TICK);
     }
-}
-
-fn view_answer(leader: Leader, next: u64) -> CallOutcome {
-    CallOutcome::Reply(Reply::Answer(Answer::LeaderSet(view(leader, next))))
+    panic!("the writes did not end in 100 ticks");
 }
