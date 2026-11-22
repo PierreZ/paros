@@ -740,3 +740,34 @@ fn a_copy_asked_again_before_the_commit_reads_the_last_writes() {
     driver.poll();
     assert_eq!(joining_on(&disk), Some(copy_of(1, 7)));
 }
+
+#[test]
+fn a_complete_copy_is_a_notice_once_its_batch_is_durable() {
+    // Segment 1 ends at slot 0: the new replica holds the whole segment as
+    // soon as it has its base.
+    let world = retired_world();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[]);
+    driver.join(
+        NEW,
+        REPLICAS.map(NodeId).to_vec(),
+        Leader::Unset,
+        copy_of(2, 1),
+    );
+    let mut notices = Vec::new();
+    for _ in 0..10 {
+        while driver.poll() {}
+        notices.extend(driver.take_notices());
+        world.clock.advance(TICK);
+    }
+    assert!(
+        notices.contains(&Notice::Copied {
+            address: NEW,
+            segment: SegmentId(1),
+            copy: copy_of(2, 1),
+        }),
+        "the copy is reported: {notices:?}"
+    );
+    assert_eq!(joining_on(&disk), Some(copy_of(2, 1)));
+    assert!(driver.take_notices().is_empty(), "a take empties the port");
+}
