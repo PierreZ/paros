@@ -260,6 +260,18 @@ impl ColocatedNode {
                     );
                     self.mark_chosen(slot, &command, ballot);
                 } else {
+                    // Agreement (P2c): once a value is chosen at a slot, every
+                    // later ballot proposes it there, so an `Accept` for a
+                    // slot chosen here carries the chosen command. A correct
+                    // leader cannot send another one (decision 30, the trust
+                    // rule): its Phase 1 met a quorum that holds the chosen
+                    // value. Another command is a detected safety violation.
+                    if let Some(known) = self.replica.chosen_at(slot) {
+                        assert!(
+                            *known == command,
+                            "an Accept for a chosen slot carries the chosen command"
+                        );
+                    }
                     self.record_accepted(slot, ballot, command);
                 }
                 // The `Accepted` reply's durability claim: the promise sits

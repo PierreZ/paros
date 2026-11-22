@@ -416,8 +416,14 @@ impl ColocatedNode {
     }
 
     /// A `CatchUpRequest` from this node for the decided range from
-    /// `from_slot`.
-    pub(super) fn catch_up_request(&self, from_slot: Slot) -> Message {
+    /// `from_slot`. It records the lowest slot asked since the last trim-point
+    /// jump (`catchup_asked`): a `TrimmedTo` is taken only as an answer.
+    pub(super) fn catch_up_request(&mut self, from_slot: Slot) -> Message {
+        self.catchup_asked = Some(self.catchup_asked.map_or(from_slot, |a| a.min(from_slot)));
+        assert!(
+            self.catchup_asked.is_some_and(|a| a <= from_slot),
+            "a request is recorded as asked"
+        );
         Message::CatchUpRequest {
             from: self.config.id,
             from_slot,

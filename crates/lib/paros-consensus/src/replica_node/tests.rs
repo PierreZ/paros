@@ -9,8 +9,10 @@ use crate::contract::mem_storage::MemStorage;
 use crate::contract::message::{Audience, Message, Party};
 use crate::contract::write::WriteOp;
 use crate::journal::state::{JournalState, WriterMode};
+use std::collections::BTreeMap;
+
 use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
-use crate::membership::{AcceptorConfig, MatchmakerId, QuorumSystem, ReplicaId};
+use crate::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem, ReplicaId};
 use crate::node::ColocatedNode;
 use crate::quorum_read::{ReadBasis, ReadState};
 use crate::replica::LogRead;
@@ -1181,4 +1183,93 @@ fn a_floor_above_the_prefix_fails_the_invariants() {
     tier.replicas[0].step(commit(0));
     tier.replicas[0].floor = Slot(9);
     tier.replicas[0].assert_invariants();
+}
+
+/// Wire hygiene on a replica, as on a node (#1100 (contract and
+/// assertions)): a `Commit` from a stranger, history from a stranger, and a
+/// catch-up page over the bound teach nothing; the same inputs from a
+/// pooled node, or a `Commit` from a proxy of the deployment, do.
+#[test]
+fn a_replica_learns_only_from_the_pool_and_a_proxy() {
+    use crate::contract::limits::CATCHUP_BATCH;
+    let commit = |from: Party, slot: u64| Message::Commit {
+        from,
+        ballot: ballot(1),
+        slot: Slot(slot),
+        command: cmd(slot),
+    };
+    let mut replica = plain_replica(Limits::DEFAULT);
+    replica.step(commit(Party::Node(NodeId(9)), 0));
+    assert!(
+        !replica.replica().is_chosen(Slot(0)),
+        "a stranger teaches nothing"
+    );
+    replica.step(commit(Party::Node(NodeId(0)), 0));
+    assert!(replica.replica().is_chosen(Slot(0)));
+    replica.step(commit(Party::Proxy(ProxyId(0)), 1));
+    assert!(
+        replica.replica().is_chosen(Slot(1)),
+        "a proxy teaches a decision"
+    );
+    let page = |len: u64| -> BTreeMap<Slot, (Ballot, Command)> {
+        (2..2 + len)
+            .map(|s| (Slot(s), (ballot(1), cmd(s))))
+            .collect()
+    };
+    replica.step(Message::CatchUpResponse {
+        from: NodeId(9),
+        entries: page(1),
+    });
+    assert!(
+        !replica.replica().is_chosen(Slot(2)),
+        "a stranger's history is ignored"
+    );
+    replica.step(Message::CatchUpResponse {
+        from: NodeId(0),
+        entries: page(CATCHUP_BATCH as u64 + 1),
+    });
+    assert!(
+        !replica.replica().is_chosen(Slot(2)),
+        "an over-long page is ignored"
+    );
+    replica.step(Message::CatchUpResponse {
+        from: NodeId(0),
+        entries: page(1),
+    });
+    assert!(replica.replica().is_chosen(Slot(2)));
+    assert_eq!(replica.counters().ignored, 3);
+}
+
+/// A replica takes a trim point only as the answer to its own request
+/// below the point; an unasked point from a pooled node makes it ask that
+/// node, and a stranger's point is ignored even when asked.
+#[test]
+fn a_replica_takes_a_trim_point_only_as_an_answer() {
+    let trimmed = |from: u64| Message::TrimmedTo {
+        from: NodeId(from),
+        point: Slot(4),
+        state: JournalState::default(),
+    };
+    let mut replica = plain_replica(Limits::DEFAULT);
+    replica.step(trimmed(0));
+    assert_eq!(
+        replica.first_slot(),
+        Slot(0),
+        "an unasked point is not taken"
+    );
+    let asked = sent(&mut replica);
+    assert!(
+        matches!(asked.as_slice(), [(to, Message::CatchUpRequest { from_slot, .. })]
+            if *to == NodeId(0) && *from_slot == Slot(0)),
+        "the replica asks the node that sent the point: {asked:?}"
+    );
+    replica.step(trimmed(9));
+    assert_eq!(
+        replica.first_slot(),
+        Slot(0),
+        "a stranger's point is ignored"
+    );
+    replica.step(trimmed(0));
+    assert_eq!(replica.first_slot(), Slot(4), "the answer is taken");
+    assert_eq!(replica.counters().trim_jumps, 1);
 }

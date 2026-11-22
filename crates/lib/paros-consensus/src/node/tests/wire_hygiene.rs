@@ -16,6 +16,8 @@ use super::{
 };
 use crate::contract::limits::Limits;
 use crate::contract::limits::REGISTRY_PAGE;
+use crate::contract::message::Audience;
+use crate::journal::Command;
 use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{MAX_ROLE_COUNT, ProxyId};
@@ -341,8 +343,8 @@ fn a_catch_up_page_from_a_stranger_is_ignored() {
     assert_eq!(n.replica.chosen().len(), 1);
 }
 
-/// A trim point from outside the pool moves no floor; the same point from
-/// a pooled peer does.
+/// A trim point from outside the pool moves no floor, even as the answer
+/// to a request; the same point from a pooled peer does.
 #[test]
 fn a_trim_point_from_a_stranger_is_ignored() {
     let mut n = follower();
@@ -351,10 +353,91 @@ fn a_trim_point_from_a_stranger_is_ignored() {
         point: Slot(4),
         state: crate::journal::state::JournalState::default(),
     };
+    let _ = n.catch_up_request(Slot(0));
     n.step(trimmed(NodeId(9)));
     assert_eq!(n.acceptor.first_slot(), Slot(0));
     n.step(trimmed(NodeId(0)));
     assert_eq!(n.acceptor.first_slot(), Slot(4));
+}
+
+/// A pooled peer's trim point that answers no request of this node moves
+/// no floor: the node asks that peer from its first unchosen slot, and
+/// takes the point when it answers the request (#1100 (contract and
+/// assertions)).
+#[test]
+fn an_unasked_trim_point_makes_the_node_ask() {
+    let mut n = follower();
+    let trimmed = Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(4),
+        state: crate::journal::state::JournalState::default(),
+    };
+    n.step(trimmed.clone());
+    assert_eq!(
+        n.acceptor.first_slot(),
+        Slot(0),
+        "an unasked point is not taken"
+    );
+    let asked: Vec<_> = n
+        .ready()
+        .messages()
+        .iter()
+        .filter(|(to, m)| {
+            *to == Audience::Node(NodeId(0))
+                && matches!(m, Message::CatchUpRequest { from_slot, .. } if *from_slot == Slot(0))
+        })
+        .cloned()
+        .collect();
+    assert_eq!(asked.len(), 1, "the node asks the peer that sent the point");
+    let _ = drain(&mut n);
+    n.step(trimmed);
+    assert_eq!(n.acceptor.first_slot(), Slot(4), "the answer is taken");
+    // The jump answered every open request: the same point again is
+    // stale, and a higher one unasked.
+    n.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(8),
+        state: crate::journal::state::JournalState::default(),
+    });
+    assert_eq!(
+        n.acceptor.first_slot(),
+        Slot(4),
+        "a jump closes the request"
+    );
+}
+
+/// A catch-up page longer than the bound a correct server cuts it at is
+/// ignored whole; a page at the bound is learned.
+#[test]
+fn a_catch_up_page_over_the_bound_is_ignored() {
+    use crate::contract::limits::CATCHUP_BATCH;
+    let page = |len: usize| -> BTreeMap<Slot, (crate::types::Ballot, Command)> {
+        (0..len as u64)
+            .map(|s| {
+                (
+                    Slot(s),
+                    (
+                        ballot(7, 0),
+                        Command::Control(crate::journal::Control::Noop),
+                    ),
+                )
+            })
+            .collect()
+    };
+    let mut n = follower();
+    n.step(Message::CatchUpResponse {
+        from: NodeId(2),
+        entries: page(CATCHUP_BATCH + 1),
+    });
+    assert!(
+        n.replica.chosen().is_empty(),
+        "an over-long page teaches nothing"
+    );
+    n.step(Message::CatchUpResponse {
+        from: NodeId(2),
+        entries: page(CATCHUP_BATCH),
+    });
+    assert_eq!(n.replica.chosen().len(), CATCHUP_BATCH);
 }
 
 /// A catch-up request from outside the pool is not answered; the same

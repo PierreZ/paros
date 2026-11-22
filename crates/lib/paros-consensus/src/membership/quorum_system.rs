@@ -377,6 +377,39 @@ impl QuorumSystem {
         intersects
     }
 
+    /// Whether every two Phase-1 quorums of one configuration meet. Paxos
+    /// safety does not need it (it needs [`QuorumSystem::cross_intersects`]),
+    /// but the read fence does: a read that asks a Phase-1 quorum sees a
+    /// campaign that ran over another one only when the two meet. A majority
+    /// meets itself. A grid meets itself when `2 * (rows - acks + 1) > rows`:
+    /// true of the partitions ([`QuorumSystem::partitions`]), false of a
+    /// full-column grid ([`QuorumSystem::grid`]), where two rows do not meet
+    /// and an election seals each row instead ([`QuorumSystem::is_phase1_seal`]).
+    /// `specs/tla/grid/` checks the formula (`Phase1Meets`, with its control
+    /// `grid_full_rows`).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn phase1_quorums_meet(self) -> bool {
+        match self {
+            QuorumSystem::Majority => true,
+            QuorumSystem::Grid { rows, .. } => {
+                let per_column = self
+                    .phase1_per_column()
+                    .expect("a grid has a Phase-1 count per column");
+                let meet = per_column.saturating_mul(2) > rows;
+                // A full-column grid asks one acceptor per column: with two
+                // rows or more, two rows do not meet.
+                if per_column == 1 && rows >= 2 {
+                    assert!(!meet, "two rows of a full-column grid do not meet");
+                }
+                meet
+            }
+        }
+    }
+
     /// Whether this quorum system can be run over a membership of `members`
     /// at all: each phase's quorum is at least one acceptor and at most the
     /// membership, and the two cross-intersect. This is the

@@ -12,7 +12,7 @@ use super::{
     BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Control, Delegation, LeadershipOrigin,
     Message, NodeId, NodeRole, Slot,
 };
-use crate::contract::limits::RECOVERY_BATCH;
+use crate::contract::limits::{PROMISE_BATCH, RECOVERY_BATCH};
 use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::Matchmaking;
 use crate::membership::AcceptorConfig;
@@ -322,7 +322,8 @@ impl ColocatedNode {
         // win (a won election gap-fills only *accepted* slots it can re-proposes;
         // this learns *chosen* ones outright). Harmless when we are not behind — a
         // peer with nothing past `from_slot` simply sends nothing.
-        self.broadcast(self.catch_up_request(from_slot));
+        let request = self.catch_up_request(from_slot);
+        self.broadcast(request);
         self.try_become_leader();
         // Phase 1 is open, or it was already won (a configuration this node's
         // own promise covers alone).
@@ -361,7 +362,10 @@ impl ColocatedNode {
         // misrouted or misconfigured sender is not a quorum member). Which
         // *configurations* the promise counts toward is the per-configuration
         // tally's business, not this guard's.
-        if !self.in_pool(from) {
+        // A correct acceptor cuts each page at `PROMISE_BATCH`
+        // (`Acceptor::promise_page`), so a longer page is ignored whole: no
+        // handler takes an input of unbounded size (decision 30).
+        if !self.in_pool(from) || accepted.len() + faulty.len() > PROMISE_BATCH {
             return;
         }
         if self.role == NodeRole::Leader {

@@ -197,3 +197,43 @@ fn a_seal_asks_one_voter_in_each_row_of_a_full_grid_only() {
         );
     }
 }
+
+/// The formula of `phase1_quorums_meet` against a brute force over every
+/// pair of Phase-1 quorums of small grids, as `specs/tla/grid/` checks
+/// `Phase1Meets`: the partitions meet themselves, a full-column grid does not
+/// once it has two rows, and a majority always does.
+#[test]
+fn phase1_quorums_meet_matches_every_pair_of_small_grids() {
+    use std::collections::BTreeSet;
+    assert!(QuorumSystem::Majority.phase1_quorums_meet());
+    for f in 0..=3 {
+        assert!(QuorumSystem::partitions(f, 2).phase1_quorums_meet());
+    }
+    for rows in 1..=4usize {
+        for cols in 1..=2usize {
+            for acks in 1..=rows {
+                let system = QuorumSystem::Grid { rows, cols, acks };
+                let members: Vec<u32> = (0..u32::try_from(rows * cols).unwrap()).collect();
+                let quorums: Vec<BTreeSet<u32>> = (0u32..(1 << members.len()))
+                    .map(|mask| {
+                        members
+                            .iter()
+                            .copied()
+                            .filter(|m| mask & (1 << m) != 0)
+                            .collect()
+                    })
+                    .filter(|set| system.is_phase1_quorum(&members, set))
+                    .collect();
+                let brute = quorums
+                    .iter()
+                    .all(|p| quorums.iter().all(|r| p.intersection(r).next().is_some()));
+                assert_eq!(
+                    system.phase1_quorums_meet(),
+                    brute,
+                    "rows {rows}, cols {cols}, acks {acks}"
+                );
+            }
+        }
+    }
+    assert!(!QuorumSystem::grid(2, 2).phase1_quorums_meet());
+}

@@ -400,6 +400,8 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
     assert_eq!(n.hard_state().chosen_index, None);
     let promised = n.hard_state().max_promised_ballot;
 
+    // A trim point is taken only as the answer to a request.
+    let _ = n.catch_up_request(Slot(0));
     n.step(Message::TrimmedTo {
         from: NodeId(0),
         point: Slot(6),
@@ -474,6 +476,8 @@ fn a_trim_point_jump_advances_over_an_out_of_order_chosen_slot() {
     assert!(x.replica.is_chosen(Slot(10)));
 
     // A peer answers the below-floor catch-up with its trim point 10.
+    // A trim point is taken only as the answer to a request.
+    let _ = x.catch_up_request(Slot(0));
     x.step(Message::TrimmedTo {
         from: NodeId(2),
         point: Slot(10),

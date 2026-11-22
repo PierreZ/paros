@@ -1,13 +1,7 @@
 use super::{BTreeMap, Ballot, ColocatedNode, Command, Message, NodeId, Slot};
 use crate::journal::state::JournalState;
 
-/// Maximum number of decided slots one [`Message::CatchUpResponse`] carries. A
-/// lagging peer that needs more re-requests on the next heartbeat, so a large
-/// backlog is drained over several rounds rather than one unbounded message.
-const CATCHUP_BATCH: usize = 64;
-
-// A replay page that carries nothing could never heal a laggard.
-const _: () = assert!(CATCHUP_BATCH > 0);
+use crate::contract::limits::CATCHUP_BATCH;
 
 impl ColocatedNode {
     /// Serve a lagging peer's catch-up request by replaying the decided range.
@@ -159,8 +153,10 @@ impl ColocatedNode {
         entries: BTreeMap<Slot, (Ballot, Command)>,
     ) {
         // Wire hygiene: each learned entry raises the durable promise to
-        // its ballot, so only a pooled peer teaches history.
-        if !self.in_pool(from) {
+        // its ballot, so only a pooled peer teaches history. A correct peer
+        // cuts each page at `CATCHUP_BATCH`, so a longer page is ignored
+        // whole: no handler takes an input of unbounded size.
+        if !self.in_pool(from) || entries.len() > CATCHUP_BATCH {
             return;
         }
         let chosen = self.replica.chosen_index();
@@ -199,12 +195,23 @@ impl ColocatedNode {
         if !self.in_pool(from) || point <= self.acceptor.first_slot() {
             return;
         }
+        // A jump is taken only as the answer to a request of this node that
+        // asked below the point (`catchup_asked`). A peer also sends a trim
+        // point unasked, when it pushes a decided prefix to a node whose beat
+        // is behind; such a node asks the peer, and takes the answer.
+        if self.catchup_asked.is_none_or(|asked| asked >= point) {
+            let request = self.catch_up_request(self.first_unchosen());
+            self.send(from, request);
+            return;
+        }
         let promised = self.acceptor.promised();
         let old_floor = self.acceptor.first_slot();
         let old_chosen_index = self.replica.chosen_index();
         let sealed = self.replica.trim_to(point, state);
         self.acceptor
             .trim_to(point, sealed, &mut self.pending_writes);
+        // The jump answers every request open below the point.
+        self.catchup_asked = None;
         // A probe blocked below the point is resolved by the jump as well:
         // the slot is chosen and gone cluster-wide (#409, the split-floor
         // outage reaches it).

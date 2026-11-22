@@ -448,7 +448,9 @@ impl ProxyLeader {
             return;
         };
         // Decision provenance, restated: the tally decided at the round's
-        // own ballot, and the value it decided is the delegated command.
+        // own ballot, and the value it decided is the delegated command. The
+        // tally already refused an `Accepted` that names another command
+        // (`Rounds::fold_accepted`, P2b and the trust rule of decision 30).
         assert!(
             command_fingerprint(&command) == vhash,
             "a proxy decides the command it was delegated"

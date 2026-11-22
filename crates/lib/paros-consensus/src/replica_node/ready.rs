@@ -38,9 +38,32 @@ impl ReplicaReady<'_> {
 
     /// Outbound messages: catch-up requests and quorum-read `PreRead`s,
     /// each to one node.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn messages(&self) -> &[(Audience, Message)] {
-        &self.node.pending_messages
+        let me = self.node.config.id;
+        let messages = &self.node.pending_messages;
+        // A replica speaks only in its own name, and each message asks one
+        // pooled node: it never fans out and never addresses itself.
+        for (audience, message) in messages {
+            assert!(
+                match message {
+                    Message::CatchUpRequest { from, .. } => *from == me,
+                    Message::PreRead { reply_to, .. } => *reply_to == me,
+                    _ => false,
+                },
+                "a replica sends only its own catch-up requests and pre-reads"
+            );
+            assert!(
+                matches!(audience, Audience::Node(to) if *to != me && self.node.in_pool(*to)),
+                "a replica's message asks one pooled node"
+            );
+        }
+        messages
     }
 
     /// Quorum reads this replica can now answer from its own state: the

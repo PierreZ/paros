@@ -35,7 +35,7 @@ pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
 pub use self::matchmaking::MatchStep;
-pub use self::ready::Ready;
+pub use self::ready::{Flight, Ready};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
@@ -417,6 +417,10 @@ pub struct ColocatedNode {
     /// ([`PULL_FALLBACK_BEATS`]). `0` beats is a fresh pull.
     pull_index: Option<Slot>,
     pull_beats: u64,
+    /// The lowest slot a `CatchUpRequest` of this node asked from since its
+    /// last trim-point jump: a `TrimmedTo` is taken only when it answers a
+    /// request below its point (#1100 (contract and assertions)). Volatile.
+    catchup_asked: Option<Slot>,
     /// Driver-supplied randomized election timeout, in ticks. `0` disables the
     /// election clock (the sentinel until the driver seeds one).
     election_timeout: u64,
@@ -505,6 +509,13 @@ pub struct ColocatedNode {
     /// Monotone cooperative-handoff counters this incarnation, for the
     /// driver's audit report.
     handoff: HandoffCounters,
+    /// The batch in flight ([`Ready::release`]): its number while the driver
+    /// flushes it, `None` once [`ColocatedNode::durable`] took it back. No
+    /// input arrives while a batch flies (`assert_invariants`).
+    flight: Option<u64>,
+    /// The batches this incarnation released: the number of the next
+    /// [`Flight`].
+    flights: u64,
 }
 
 impl ColocatedNode {
@@ -1147,7 +1158,8 @@ impl ColocatedNode {
             // election covers it either way (the campaign range starts at the
             // first faulty slot). Once per tick — the same cadence
             // heartbeat-driven catch-up uses.
-            self.broadcast(self.catch_up_request(first_faulty));
+            let request = self.catch_up_request(first_faulty);
+            self.broadcast(request);
         }
     }
 
@@ -1156,7 +1168,81 @@ impl ColocatedNode {
     /// is a **compile error**.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub fn ready(&mut self) -> Ready<'_> {
+        assert!(
+            self.flight.is_none(),
+            "no batch is drained while an earlier batch is in flight"
+        );
         Ready::new(self)
+    }
+
+    /// Take back a batch that [`Ready::release`] put in flight: every write
+    /// of that batch is durable, so the node takes inputs again.
+    ///
+    /// # Panics
+    ///
+    /// If `flight` is not the batch in flight of this node: a driver that
+    /// gives back a token twice, a token of another node, or a token that
+    /// was never released.
+    ///
+    /// ```
+    /// use paros_consensus::contract::MemStorage;
+    /// use paros_consensus::journal::JournalIdentifier;
+    /// use paros_consensus::{ColocatedNode, Config, Limits, NodeId};
+    ///
+    /// let config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([NodeId(1)]);
+    /// let mut disk = MemStorage::new(config);
+    /// let mut node = ColocatedNode::new(&disk, Limits::DEFAULT);
+    /// node.campaign();
+    /// let ready = node.ready();
+    /// let writes = ready.writes().to_vec();
+    /// let flight = ready.release();
+    /// assert!(node.in_flight());
+    /// // An async driver awaits its flush here; nothing steps the node.
+    /// for op in &writes {
+    ///     disk.apply(op);
+    /// }
+    /// node.durable(flight);
+    /// assert!(!node.in_flight());
+    /// ```
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the token is taken by value so that a driver cannot give one flight back twice"
+    )]
+    pub fn durable(&mut self, flight: Flight) {
+        // The token is consumed here: a driver cannot give it back twice.
+        let Flight { node, batch } = flight;
+        assert!(
+            node == self.config.id,
+            "a flight is given back to the node that released it"
+        );
+        assert!(
+            self.flight == Some(batch),
+            "a flight is given back once, while it is in flight"
+        );
+        self.flight = None;
+        assert!(self.flight.is_none(), "a durable batch ends its flight");
+        self.assert_invariants();
+    }
+
+    /// Whether a batch is in flight: released by [`Ready::release`] and not
+    /// yet given back with [`ColocatedNode::durable`].
+    #[must_use]
+    pub fn in_flight(&self) -> bool {
+        self.flight.is_some()
+    }
+
+    /// Put the drained batch in flight ([`Ready::release`]).
+    pub(crate) fn begin_flight(&mut self) -> Flight {
+        assert!(self.flight.is_none(), "one batch is in flight at a time");
+        self.clear_pending();
+        let batch = self.flights;
+        self.flights += 1;
+        self.flight = Some(batch);
+        assert!(self.flights > batch, "each flight has its own number");
+        Flight {
+            node: self.config.id,
+            batch,
+        }
     }
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----

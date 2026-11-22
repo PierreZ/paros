@@ -1068,7 +1068,8 @@ impl Cluster {
                 .collect();
             let mut gc: Vec<(MatchmakerId, GcRequest)> = ready.gc_requests().to_vec();
             out.extend(to_matchmakers(ready.match_requests(), &gc));
-            ready.advance();
+            // The batch flies until its persist below (`Cluster::land`).
+            let flight = ready.release();
             if mutant == Some(Mutant::EarlyGc) {
                 self.early_gc(id, &seen, &mut gc, &mut out);
             }
@@ -1079,11 +1080,7 @@ impl Cluster {
                 && read_states.is_empty()
                 && !more
             {
-                // An empty batch can still follow a change of leadership
-                // (a win with nothing to recover): the tracer records it.
-                let before = self.node(id).disk.hard_state().chosen_index;
-                let traced = Traced::empty(seen);
-                self.trace_batch(id, traced, before, cx);
+                self.land_empty(id, flight, seen, cx);
                 return;
             }
             if mutant == Some(Mutant::EarlyCommit) {
@@ -1100,6 +1097,7 @@ impl Cluster {
             if mutant != Some(Mutant::SkipPersist) {
                 self.persist_node(id, &writes);
             }
+            self.land(id, flight);
             let traced = Traced {
                 seen,
                 writes: &writes,
@@ -1144,6 +1142,34 @@ impl Cluster {
 
     /// [`Mutant::EarlyGc`]: node `id` asks every matchmaker for GC at the
     /// ballot it leads, once, whatever its configuration learned.
+    /// Give a flushed batch back to its node: its writes are durable. The
+    /// driver persists after it lets go of the buckets, so the core holds
+    /// the rule of one batch in flight (`Ready::release`). A crash drops the
+    /// flight with the node.
+    fn land(&mut self, id: NodeId, flight: paros_consensus::node::Flight) {
+        let node = self
+            .node_mut(id)
+            .live
+            .as_mut()
+            .expect("a batch in flight has a live node");
+        node.durable(flight);
+        assert!(!node.in_flight(), "a landed batch is out of flight");
+    }
+
+    /// Land an empty batch. It can still follow a change of leadership (a
+    /// win with nothing to recover): the tracer records it.
+    fn land_empty(
+        &mut self,
+        id: NodeId,
+        flight: paros_consensus::node::Flight,
+        seen: Seen,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        self.land(id, flight);
+        let before = self.node(id).disk.hard_state().chosen_index;
+        self.trace_batch(id, Traced::empty(seen), before, cx);
+    }
+
     fn early_gc(
         &mut self,
         id: NodeId,

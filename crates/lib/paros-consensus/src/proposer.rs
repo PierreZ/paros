@@ -371,6 +371,11 @@ fn merge_report<V: PartialEq>(
     match tally.get(&slot) {
         Some((held, _)) if ballot < *held => return,
         Some((held, recorded)) if ballot == *held => {
+            // One command per (slot, ballot) (P2b), seen across two
+            // acceptors. The trust rule (decision 30): two correct acceptors
+            // that voted at one ballot voted for the one `Accept` its owner
+            // sent for the slot, so their reports agree. A disagreement is a
+            // detected safety violation.
             assert!(
                 *recorded == command,
                 "two Phase-1 reports of one (slot, ballot) agree on the command"
