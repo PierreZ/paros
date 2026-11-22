@@ -102,6 +102,12 @@ def inputs(folder: str) -> set[str]:
     """The files that the checks of `folder` read: its files and their symlink targets."""
     result = set()
     for path in (SPECS / folder).rglob("*"):
+        if path.is_symlink():
+            target = path.parent / os.readlink(path)
+            # One link to one file: then the link and its target are all the
+            # inputs. A link to a link or to a folder would hide an input.
+            if target.is_symlink() or target.is_dir():
+                sys.exit(f"{path}: a link must name a file, not a link or a folder")
         if path.is_dir():
             continue
         result.add(str(path.relative_to(ROOT)))
@@ -159,7 +165,9 @@ def plan_tla(changed: list[str] | None) -> dict[str, str]:
             selected.append(folder)
     trace_folders = {f for f in all_folders if any((SPECS / f).glob("*Trace.tla"))}
     proof_folders = {f for f in all_folders if any((SPECS / f).glob("*Proof.tla"))}
-    traces = bool(trace_folders & set(selected)) and not needs_rust(changed)
+    # With no diff (a full plan), the Rust workflow may not run (a manual run,
+    # or a push to main that touched specs only), so the traces run here.
+    traces = bool(trace_folders & set(selected)) and (changed is None or not needs_rust(changed))
     proofs = bool(proof_folders & set(selected)) or changed is None \
         or any(f in PROOF_TOOLS for f in changed)
     groups = [" ".join(g) for g in pack(selected, table)]

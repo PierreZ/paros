@@ -350,7 +350,7 @@ merges a release pull request, and only Pierre starts the `release` job (workflo
 which publishes. An agent never merges a release pull request and never starts that job. A new
 public crate (for example `parosd`) gets the crates.io metadata, a `version` on
 its workspace dependency line, and a `[[package]]` entry in the `paros` group of
-`release-plz.toml`, in the PR that creates it. The `portability` job checks that the public
+`release-plz.toml`, in the PR that creates it. The portability steps of the `checks` job check that the public
 crates package and build as crates.io builds them (`cargo publish --dry-run --workspace`): each
 git dependency is replaced by its `version`, so a moonpool pin that needs an API not yet on
 crates.io turns that job red until moonpool publishes it.

@@ -19,7 +19,7 @@ The modules make three layers that point down only (#730 (paros-consensus rework
   one `Ready`. It never uses another deployment.
 
 `scripts/check-core-layers.sh` fails on a `crate::<module>` path that reaches up a layer (CI
-`fmt` job). It reads only that form: a grouped `use crate::{..}` or a `super::` path escapes
+`checks` job). It reads only that form: a grouped `use crate::{..}` or a `super::` path escapes
 it, so the modules write each upward-looking import as `crate::<module>`. Test code (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt. A new module
 gets its layer in that script.
 
@@ -148,7 +148,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
   `cargo test --doc -p paros-consensus` for the doc examples (CI `checks` job).
 - `cargo check --target wasm32-unknown-unknown -p paros-consensus` with and without
   `--no-default-features`; `cargo check -p paros-consensus --features serde` (CI `portability`).
-- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps` (CI `clippy` job).
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps` (CI `checks` job).
 - `scripts/mutants.sh` (`.cargo/mutants.toml`): a mutant of this crate must fail a test of
   this crate or of `consensus-sim` (add `-f <file>` to cut the set). CI runs the mutants of the changed lines on
   each pull request and every mutant each week (`.github/workflows/mutants.yml`).
