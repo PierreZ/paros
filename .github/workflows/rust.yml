@@ -4,10 +4,10 @@ name: Tests
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', 'scripts/check-proofs.sh', 'scripts/mutate-tla.py', 'scripts/tla-minutes.txt', 'scripts/mutate-tla-shards.txt', '.github/workflows/tla.yml', '.github/workflows/tla-mutants.yml', '.github/workflows/tla-mutants-slices.yml']
+    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', 'scripts/check-proofs.sh', 'scripts/proof-hashes.sh', 'scripts/mutate-tla.py', 'scripts/tla-minutes.txt', 'scripts/mutate-tla-shards.txt', '.github/workflows/tla.yml', '.github/workflows/tla-mutants.yml', '.github/workflows/tla-mutants-slices.yml']
   pull_request:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', 'scripts/check-proofs.sh', 'scripts/mutate-tla.py', 'scripts/tla-minutes.txt', 'scripts/mutate-tla-shards.txt', '.github/workflows/tla.yml', '.github/workflows/tla-mutants.yml', '.github/workflows/tla-mutants-slices.yml']
+    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', 'scripts/check-proofs.sh', 'scripts/proof-hashes.sh', 'scripts/mutate-tla.py', 'scripts/tla-minutes.txt', 'scripts/mutate-tla-shards.txt', '.github/workflows/tla.yml', '.github/workflows/tla-mutants.yml', '.github/workflows/tla-mutants-slices.yml']
 
 # A new push cancels a pull request's older run, never a run on main
 # (#920 (sweep budget)): each merged commit gets its whole sweep, so a red on
