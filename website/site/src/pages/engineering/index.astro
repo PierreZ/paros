@@ -1,6 +1,7 @@
 ---
 // The safety case (#1361 (a safety case for consensus and journal)): one row
-// per safety claim of paros-consensus and of the journal, with the TLA+ model,
+// per safety claim of paros-consensus, of the journal and of the layered
+// parosd (#1444 (Engineering pages), part 1), with the TLA+ model,
 // the trace spec, the walk and the mutants behind it. The open rows stay: the
 // page says what is not proved. Every name below exists in the repository.
 import Doc from "../../layouts/Doc.astro";
@@ -163,24 +164,20 @@ const JOURNAL: Claim[] = [
   {
     claim: "Each answer to a write is the answer of the whole log, or Below for a resend across a seal.",
     models: [{ dir: "journal-state", inv: ["AckTrue", "OneFold"] }, { dir: "seal-chain", inv: ["AckTrue", "OneFold"] }],
-    trace: ["journal-state/FoldTrace.tla"],
-    walk: "fold walk · FOLD, VIEW",
+    trace: ["journal-state/FoldTrace.tla", "journal-state/RolesTrace.tla"],
+    walk: "fold walk, roles walk · FOLD, VIEW",
     controls: ["gap_off", "lookup_local"],
-    mutants: ["LostLog", "StaleBoundary"],
+    mutants: ["LostLog", "StaleBoundary", "roles: DuplicateAsTaken, StaleBase"],
     state: "checked",
-    issue: { n: 1326, name: "journal roles" },
-    note: "Checked on the fold of paros-journal. The roles that carry a write are not built yet.",
   },
   {
     claim: "A single writer gets exactly-once writes; a fenced write is judged under its uuid.",
     models: [{ dir: "multi-writer", inv: ["ExactlyOnce", "FenceTrue", "RefusalFinal"] }],
     trace: ["journal-state/FoldTrace.tla"],
-    walk: "fold walk · FOLD",
+    walk: "fold walk, client walk · FOLD, ONCE, REFUSED",
     controls: ["dedup_after", "fence_propose", "basis_stale"],
-    mutants: ["LostLog"],
+    mutants: ["LostLog", "client: LostAsFenced"],
     state: "checked",
-    issue: { n: 1326, name: "journal roles" },
-    note: "The fold walk switches to multi-writer and back; the roles are not built yet.",
   },
   {
     claim: "A Resolve answers the fate that the whole log gives the write.",
@@ -212,22 +209,20 @@ const JOURNAL: Claim[] = [
   {
     claim: "A seal ends where the boundary state says: a sealed grid chooses nothing at or above its end, and next_seq never moves back.",
     models: [{ dir: "journal-state", inv: ["SealedFrozen", "RecordTrue", "NoMoveBack"] }, { dir: "seal-chain", inv: ["RecordTrue"] }, { dir: "seal-ctrl", inv: [] }],
-    trace: [],
-    walk: "",
+    trace: ["journal-state/RolesTrace.tla"],
+    walk: "roles walk, whole journal · SEALED, BOUNDARY",
     controls: ["end_read", "end_applied", "record_latest"],
-    mutants: [],
-    state: "model",
-    issue: { n: 1326, name: "journal roles" },
+    mutants: ["StaleBinding", "StaleBoundary", "BoundaryBeforeDurable (trace)"],
+    state: "checked",
   },
   {
     claim: "An acceptor sends a promise or a vote only once it is durable, and writes a raised promise before or with the vote.",
     models: [{ dir: "journal-state", inv: ["Agreement"] }, { dir: "flight-rule", inv: ["SentIsDurable"] }],
-    trace: [],
-    walk: "",
+    trace: ["journal-state/RolesTrace.tla"],
+    walk: "roles walk, driver walk, whole journal · AGREE, FLIGHT",
     controls: ["reply_mem1b", "reply_mem2b", "order_vote_first", "send_early"],
-    mutants: [],
-    state: "model",
-    issue: { n: 1326, name: "journal roles" },
+    mutants: ["WipeDisk", "driver: LyingDisk"],
+    state: "checked",
   },
   {
     claim: "A write reaches only the replica set of its segment, and a read returns the acked write.",
@@ -242,12 +237,11 @@ const JOURNAL: Claim[] = [
   {
     claim: "A deposed controller changes nothing, and every grid meets F + 1 ≤ acks ≤ rows − F.",
     models: [{ dir: "grid-controller", inv: ["OneFromEach", "AnswerTrue", "AllBounded"] }, { dir: "segment-records", inv: ["ReshapeFenced"] }],
-    trace: [],
-    walk: "",
+    trace: ["grid-controller/ControllerTrace.tla"],
+    walk: "controller walk · FENCED, BOUNDED_IN_FLIGHT",
     controls: ["noterm", "nobound", "noidem"],
-    mutants: [],
-    state: "model",
-    issue: { n: 1328, name: "paros-journal-control" },
+    mutants: ["WriteOnStale", "NoToken", "ElectNoCas (trace)"],
+    state: "checked",
   },
   {
     claim: "A heal of a sealed segment's replica set keeps every slot on a live replica.",
@@ -257,7 +251,7 @@ const JOURNAL: Claim[] = [
     controls: ["copy_any", "cas_blind"],
     mutants: [],
     state: "model",
-    issue: { n: 1326, name: "journal roles" },
+    issue: { n: 1314, name: "re-replication of a sealed segment's replica set" },
   },
   {
     claim: "A damaged copy of a sealed segment is repaired or reported, across retire and offload.",
@@ -314,16 +308,62 @@ const JOURNAL: Claim[] = [
   },
 ];
 
+// The layers of parosd above the journal (#1409 (build the layered parosd)).
+// Each model adds its row in the pull request that merges the model; the code
+// is not built, so each row is model only and names the issue of its code.
+const PAROSD: Claim[] = [
+  {
+    claim: "One term of an election over a journal has one holder: the holder writes only in its own term, and stops at its first refused write.",
+    models: [{ dir: "election", inv: ["TermTrue", "WriteInTerm", "NoRegress", "StopsAtRefusal", "IfaceOfTerm", "ModeKept"] }],
+    trace: [],
+    walk: "",
+    controls: ["no_fence", "late_challenge", "no_stop", "reinstate", "iface_kept", "multi", "any_answer"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1420, name: "paros-election" },
+  },
+  {
+    claim: "One id names at most one journal, forever: a fold gives an id once, deletes included, and a host keeps records under an id only after the fold gave it.",
+    models: [{ dir: "journal-ids", inv: ["JournalIdOnce", "TenantIdOnce", "DiskOneJournal", "BookedAfterRecord", "GoneStays"] }],
+    trace: [],
+    walk: "",
+    controls: ["book_first", "no_tombs", "no_tombs_disk", "journal_key", "counter"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1419, name: "the tenancy wrapper and paros-names" },
+  },
+  {
+    claim: "A placement is all or none and one for each request id, the moves in flight stay under the limit, and no booking leaks.",
+    models: [{ dir: "placement-port", inv: ["OneGrantPerRid", "GrantWhole", "MovesInFlight", "KeepsSize", "NoOrphan", "ReleasedFree"] }],
+    trace: [],
+    walk: "",
+    controls: ["book_first", "no_dedup", "partial", "no_limit", "no_free", "fixed", "no_abandon"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1421, name: "the placement port" },
+  },
+  {
+    claim: "An order of a deposed coordinator never takes effect, and a machine hosts each role once, only where its booking says.",
+    models: [{ dir: "takeover", inv: ["NoLateEffect", "OnceEach", "EffectBooked", "Complete"] }],
+    trace: [],
+    walk: "",
+    controls: ["two_writes", "two_writes_late", "no_idem", "keep_view", "fallback", "reg_nofence", "gone_ignored"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1422, name: "the takeover by a new controller" },
+  },
+];
+
 const LABEL: Record<State, { text: string; cls: string }> = {
   checked: { text: "checked", cls: "done" },
   model: { text: "model only", cls: "accent" },
   open: { text: "open", cls: "gap" },
 };
 const count = (rows: Claim[], s: State) => rows.filter((r) => r.state === s).length;
-const ALL = [...CONSENSUS, ...JOURNAL];
+const ALL = [...CONSENSUS, ...JOURNAL, ...PAROSD];
 ---
 <Doc title="Engineering" kicker="Engineering" section="engineering/" siblings={[]}
-  description="The safety case of paros-consensus and of the journal: each claim, the TLA+ model that states it, the trace check and the walk that hold the code to it, and the mutants that must die. The open rows stay on the page.">
+  description="The safety case of paros-consensus, of the journal and of the layered parosd: each claim, the TLA+ model that states it, the trace check and the walk that hold the code to it, and the mutants that must die. The open rows stay on the page.">
 
   <div class="strip" aria-label="The safety case in figures">
     <div><span class="k">Claims</span><span class="v">{ALL.length}</span></div>
@@ -341,7 +381,8 @@ const ALL = [...CONSENSUS, ...JOURNAL];
   and its code is not built yet. A claim is <b>open</b> when something is not proved; its issue
   says what.</p>
   <p>Each judge is tested too. A control is a TLC check that must fail without the rule. A <a href={url("engineering/mutants/")}>mutant</a> is a bug planted in the driver of a walk,
-  and its oracle or its trace check must fail.</p>
+  and its oracle or its trace check must fail. A mutant marked <i>(trace)</i> passes every oracle,
+  and only the trace check refuses it.</p>
   <div class="callout">
     <p><b>Mostly bounded.</b> TLC explores small instances of each model completely. Only the
     single decree has a proof that holds at every size (TLAPS); the other claims do not have
@@ -350,7 +391,8 @@ const ALL = [...CONSENSUS, ...JOURNAL];
 
   {[
     { id: "consensus", title: "paros-consensus", rows: CONSENSUS, intro: "The sans-IO Paxos roles. Every walk runs the real ColocatedNode, ProxyLeader, ReplicaNode and Matchmaker of the crate." },
-    { id: "journal", title: "The journal", rows: JOURNAL, intro: "The journal v1. Its pure core (paros-journal: the fold, Resolve and the matchmaker register) has walks; its roles, controller and driver are not built yet, so most rows are model only." },
+    { id: "journal", title: "The journal", rows: JOURNAL, intro: "The journal v1. Its pure core, its roles, its driver, its client and its grid controller run in the walks of journal-sim. The rules of the steps that are not built yet are model only." },
+    { id: "parosd", title: "The layered parosd", rows: PAROSD, intro: "The layers above the journal: the election, the ids, the placement and the takeover. Each model of #1409 adds its row here when it merges. The code of these layers is not built yet, so each row is model only." },
   ].map((g) => (
     <>
       <h2 id={g.id}>{g.title}</h2>
@@ -387,7 +429,8 @@ const ALL = [...CONSENSUS, ...JOURNAL];
       whose listed result is <code>violation</code>.</li>
     <li>The walks, oracles and mutants of the core: <a href={`${REPO}/tree/main/crates/sim/consensus-sim`}><code>consensus-sim</code></a> (<code>Flavor</code> and <code>Mutant</code> in <code>src/cluster/flavor.rs</code>, the oracles in <code>src/oracle/</code>).
       A walk name is a <code>Flavor</code>.</li>
-    <li>The walks of the journal: <a href={`${REPO}/tree/main/crates/sim/journal-sim`}><code>journal-sim</code></a> (<code>src/fold.rs</code>, <code>src/register.rs</code>).</li>
+    <li>The walks of the journal: <a href={`${REPO}/tree/main/crates/sim/journal-sim`}><code>journal-sim</code></a> (<code>src/fold.rs</code>, <code>src/register.rs</code>, <code>src/roles.rs</code>, <code>src/host.rs</code> for the driver walk, <code>src/client.rs</code>, <code>src/controller.rs</code> and <code>src/whole.rs</code>). A mutant with a prefix is a mutant of that walk.</li>
+    <li>The models of the layered parosd, with the code that each waits on: the table of <a href={`${BLOB}/README.md`}><code>specs/tla/README.md</code></a>, and <a href={ISSUE(1409)}>#1409</a> (build the layered parosd).</li>
     <li>The rule behind each journal row, with its decision: <a href={`${REPO}/blob/main/docs/journal/07-verification.md`}>§J7.1</a> of <code>docs/journal/</code>. The flavor view of the core: <a href={url("consensus/proof/")}>How it is checked</a>.</li>
   </ul>
 
