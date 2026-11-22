@@ -22,8 +22,9 @@ Each module keeps its unit tests in `<module>/tests.rs`. The driver walk of
 `crates/sim/journal-sim` (`src/host.rs`, `tests/host.rs`) judges the driver and the `Host`
 under faults.
 
-`examples/`: `in_memory` (a journal on three processes) and `custom_storage` (a backend written
-by hand, checked by the contract suite). Shared code is in `examples/common/mod.rs`. Each asserts
+`examples/`: `in_memory` (a journal on three processes), `custom_storage` (a backend written
+by hand, checked by the contract suite) and `multi_writer` (`SetLeader(None)`, open writes from
+two writers, and back to one writer). Shared code is in `examples/common/mod.rs`. Each asserts
 its result and runs in the `examples` job of CI.
 
 ## Rules
@@ -45,7 +46,7 @@ its result and runs in the `examples` job of CI.
 ## Gates
 
 `cargo nextest run -p paros-journal-io -p journal-sim`, `cargo run -p paros-journal-io --example
-in_memory` and `--example custom_storage`, `cargo test --doc -p paros-journal-io`,
+in_memory`, `--example custom_storage` and `--example multi_writer`, `cargo test --doc -p paros-journal-io`,
 `cargo clippy --all-targets -- -D warnings`,
 `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-journal-io --no-deps`,
 `cargo check --target wasm32-unknown-unknown -p paros-journal-io`,

@@ -15,6 +15,8 @@ safety_crash2     pass       ci
 # CI set has one; these two do not finish in 30 minutes.
 safety_np2_l1     pass       long   40
 safety_np2        pass       long   40
+# Two segments in CI, small: the trims keep the segments a prefix.
+trim_order        pass       ci
 # An offloader may take a sealed segment that did not retire yet.
 gate_sealed       pass       ci
 # A tombstone at trim also stops the late upload, while no controller stops.

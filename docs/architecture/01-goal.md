@@ -85,7 +85,27 @@ append to, unfenced), and that every consumer tails without a second protocol.
 The first deliverable is a toy: a local Docker Compose toy cell an operator can initialize, create
 a tenant on, write to, read from, break and watch heal (section 9). The homelab is not in scope.
 
-### 1.1 The eight root rules
+### 1.1 The goals and the root rules
+
+**The ten goals** (Pierre, 2026-11-22). The goals say what paros is for. Goals 1 to 6 are the
+decisions of section 1 above. Goals 7 to 10 say how paros is built (section 4.4, AGENTS.md).
+
+| # | Goal | In short |
+|---|---|---|
+| 1 | **A journal service for tenants** | Four calls: `Write`, `Read`, `Truncate`, `SetLeader`. A durable, ordered, fenced log. paros owns the log, never the state. |
+| 2 | **The cell heals with nobody watching** | After the faults stop, each journal and each set is whole again within one bound, or reports a true reason. |
+| 3 | **paros eats its own food** | State is in journals, who acts is an election on a journal, agreement is a Paxos flavor of the core. The control plane gets no call that a tenant does not have. |
+| 4 | **One shape at every level** | Universe, cell and tenant are each a control journal, a pure fold and one coordinator. Levels talk only through records. |
+| 5 | **The person says what, the system says where** | A person types names and what a journal must survive. The system chooses machines and ids, and refuses what it cannot place. |
+| 6 | **Everything can move** | A namespace moves to another cell with no change of protocol, and a cell is rolled out by evacuation. |
+| 7 | **Layers that stand alone** | Each layer is a crate that a program that is not paros can use alone. A layer depends only on the layers below it. The core has no tenant. |
+| 8 | **Every role is a pure actor** | A deterministic step, persist before send, a refusal is data. I/O is only in adapters. So each layer has its model, its walk and its trace check. |
+| 9 | **Proved before built** | No code before its TLA+ model, and no excuse in simulation. |
+| 10 | **Everything simulates, and it runs in the browser** | Every layer, and the whole service, runs in the deterministic simulation. The same code compiles to wasm and runs in a browser. |
+
+**The eight root rules** are the consequences of these goals in the service. Each one replaced a
+stack of fixes of the code at the tag `v0.2.0-alpha.1`: rule 3 serves goals 3 and 4; rules 2, 4,
+5, 6 and 8 serve goal 2; rule 7 serves goal 5; rule 1 serves goal 6.
 
 Every change obeys these rules (the rework plan of 2026-11-15, decisions 1 to 35). A fix that
 needs an exception to one of them is a sign that the rule is wrong, and the rule goes back to its

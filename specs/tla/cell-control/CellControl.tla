@@ -148,10 +148,11 @@ Admit(i, j) ==
   /\ UNCHANGED <<alive, addr, gone, lead, term, coord, members, seen, top, net,
                  sent, outcome, applies, survive, opSurvive, reported, restarts, regress>>
 
-\* `MachineGone`, once the routine replaced the id in each set.
+\* `MachineGone`. The routine writes it once it replaced the id in each set;
+\* the model lets it come earlier, as the operator's `OpGone` already takes
+\* a gone id out of the registry while a set still names it.
 MachineGone(i, d) ==
   /\ Writer(i) /\ d \in registry \cap gone
-  /\ \A s \in Sets : d \notin members[s]
   /\ registry' = registry \ {d}
   /\ Wrote(i)
   /\ UNCHANGED <<alive, addr, gone, lead, term, coord, members, seen, top, net,
@@ -190,7 +191,6 @@ OpGone(i, d) ==
 
 \* The receiver of a set takes an order, or refuses one below its fence.
 Deliver(o) ==
-  /\ o \in net
   /\ net' = net \ {o}
   /\ IF OrderFence /\ o[3] < seen[o[1]]
        THEN UNCHANGED <<members, seen, top>>
@@ -215,10 +215,12 @@ Wipe(i) ==
   /\ UNCHANGED <<registry, lead, term, members, seen, top, net, sent, outcome,
                  applies, survive, opSurvive, reported, restarts, stale, regress>>
 
-\* The disk of a wiped machine comes back as a new id (decision 4).
+\* A new id comes up (Ids \ Initial: NewId, if any): the disk of a wiped
+\* machine comes back as a new id (decision 4). The model lets it come up
+\* before a wipe too, as a machine that joins the cell, and again after a
+\* stop.
 Return ==
-  /\ NewId # None /\ gone # {} /\ NewId \notin alive
-  /\ alive' = alive \cup {NewId} /\ addr' = addr \cup {NewId}
+  /\ alive' = alive \cup (Ids \ Initial) /\ addr' = addr \cup (Ids \ Initial)
   /\ UNCHANGED <<gone, registry, lead, term, coord, members, seen, top, net,
                  sent, outcome, applies, survive, opSurvive, reported, restarts, stale, regress>>
 

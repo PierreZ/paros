@@ -103,9 +103,9 @@ EndP1(b) ==
   /\ phase' = [phase EXCEPT ![b] = "write"]
   /\ UNCHANGED <<rg, wg, rv, prom, votes, reads, lcfg, p1, wrote, crashed>>
 
+\* A second write of b at m is refused by its own CAS: wg[m] = b.
 Write(b, m) ==
   /\ phase[b] = "write"
-  /\ m \notin wrote[b]
   /\ wg[m] < b
   /\ Check = "nocheck" \/ rg[m] <= b
   /\ wg' = [wg EXCEPT ![m] = b]
@@ -113,17 +113,20 @@ Write(b, m) ==
   /\ wrote' = [wrote EXCEPT ![b] = @ \cup {m}]
   /\ UNCHANGED <<rg, prom, votes, phase, reads, lcfg, p1, ncfg, lval, crashed>>
 
+\* wrote[b] is not empty only from the write phase on, and in "p2" the step
+\* changes nothing, so the step needs no phase guard.
 EndWrite(b) ==
-  /\ phase[b] = "write"
   /\ \E Q \in MQ : Q \subseteq wrote[b]
   /\ phase' = [phase EXCEPT ![b] = "p2"]
   /\ UNCHANGED <<rg, wg, rv, prom, votes, reads, lcfg, p1, ncfg, lval, wrote, crashed>>
 
+\* Phase 2 addresses Mem[ncfg[b]], but the model lets any acceptor vote, a
+\* crashed one too: a vote is for lval[b], the value that Phase 1 made safe
+\* at b, and Chosen counts only a quorum of ncfg[b]. A second vote of a at b
+\* changes nothing.
 Accept(b, a) ==
   /\ phase[b] = "p2"
-  /\ a \in Mem[ncfg[b]] /\ a \notin crashed
   /\ prom[a] <= b
-  /\ <<a, b, lval[b]>> \notin votes
   /\ prom' = [prom EXCEPT ![a] = b]
   /\ votes' = votes \cup {<<a, b, lval[b]>>}
   /\ UNCHANGED <<rg, wg, rv, phase, reads, lcfg, p1, ncfg, lval, wrote, crashed>>
@@ -132,7 +135,6 @@ Accept(b, a) ==
 \* live Phase-1 quorum without it.
 Crash(n) ==
   /\ Cardinality(crashed) < Crashes
-  /\ n \notin crashed
   /\ \A c \in InForce : \E Q \in Q1s[c] : Q \cap (crashed \cup {n}) = {}
   /\ crashed' = crashed \cup {n}
   /\ UNCHANGED <<rg, wg, rv, prom, votes, phase, reads, lcfg, p1, ncfg, lval, wrote>>
@@ -149,6 +151,10 @@ Chosen(v) == \E b \in Ballots : \E Q \in Q2s[ncfg[b]] :
                phase[b] = "p2" /\ \A a \in Q : <<a, b, v>> \in votes
 
 Agreement == \A v, w \in Values : Chosen(v) /\ Chosen(w) => v = w
+
+\* The register's generations never go down at a matchmaker: a write
+\* below the write generation would bring back an older configuration.
+GenUp == [][\A m \in Matchmakers : rg'[m] >= rg[m] /\ wg'[m] >= wg[m]]_vars
 
 \* Liveness as an invariant: whatever a matchmaker majority answers, its
 \* configuration still has a live Phase-1 quorum.

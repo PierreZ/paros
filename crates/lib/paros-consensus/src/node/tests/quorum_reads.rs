@@ -906,6 +906,7 @@ fn a_member_above_the_leader_takes_no_basis() {
     let (mut n, _, lead) = stranded_learner(&[2, 3]);
     n.step(beat(lead, &[2, 3]));
     let _ = drain(&mut n);
+    assert!(n.read_basis.is_none(), "the beat is not stored as a basis");
     assert!(n.read_basis().is_none());
     n.quorum_read(1);
     assert!(n.quorum_reads().is_empty());
@@ -949,4 +950,207 @@ fn an_open_campaign_takes_no_basis() {
     n.step(beat(ballot(own.round, 2), &[0, 1, 2]));
     let _ = drain(&mut n);
     assert!(n.read_basis().is_none());
+}
+
+/// The exception needs the promise to be the node's own: a `Prepare` of
+/// another campaign whose configuration the node's pool makes it ignore
+/// raises the promise and leaves the belief ballot below it. The basis of
+/// the stranded learner stops counting, though the node is still outside
+/// the basis's configuration.
+#[test]
+fn a_foreign_promise_under_an_ignored_configuration_ends_the_exception() {
+    let (mut n, own, lead) = stranded_learner(&[0, 1, 2]);
+    n.step(beat(lead, &[0, 1, 2]));
+    let _ = drain(&mut n);
+    assert!(n.read_basis().is_some());
+    let foreign = ballot(own.round + 1, 1);
+    n.step(Message::Prepare {
+        reply_to: NodeId(1),
+        ballot: foreign,
+        from_slot: Slot(0),
+        config: Some(cfg(&[0, 1, 4])),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(n.hard_state().max_promised_ballot, foreign);
+    assert_eq!(
+        n.acceptors_since(),
+        lead,
+        "a configuration outside the pool is not adopted"
+    );
+    assert!(
+        n.read_basis().is_none(),
+        "a foreign promise gates the basis"
+    );
+}
+
+/// The exception needs the node outside the configuration of each open
+/// read too: a read that a member opened before its campaign ends once
+/// the matchmakers refuse that campaign, because the member answered that
+/// read itself with no fence.
+#[test]
+fn a_member_read_ends_under_its_own_unprepared_campaign() {
+    let mut n = deployed_node(3, &[1, 2, 3], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let first = n.ballot();
+    let _ = drain_match_requests(&mut n);
+    // A leader of `{1, 2, 3}` above this campaign: the node follows it
+    // and reads over it as a member.
+    let lead = ballot(first.round + 1, 2);
+    n.step(beat(lead, &[1, 2, 3]));
+    let _ = drain(&mut n);
+    n.quorum_read(1);
+    let _ = drain(&mut n);
+    assert_eq!(n.quorum_reads().pending().len(), 1);
+    // The node campaigns again with no tick (so no read is fenced while
+    // the campaign matches), and the matchmaker refuses the campaign.
+    n.campaign();
+    let own = n.ballot();
+    assert!(own > lead);
+    let _ = drain_match_requests(&mut n);
+    let _ = n.on_match_reply(super::matchmaking::refused(
+        0,
+        own,
+        MatchRefusal::Stale {
+            highest: ballot(own.round + 1, 1),
+        },
+    ));
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(n.hard_state().max_promised_ballot, own);
+    n.serve_quorum_reads();
+    assert!(
+        n.quorum_reads().is_empty(),
+        "a member's read ends under its own promise"
+    );
+}
+
+/// A node of the full `2 × 2` grid `G = {0, 1, 2, 3}` (rows `{0, 1}` and
+/// `{2, 3}`) with node 4 in its pool and one matchmaker.
+fn deployed_grid_node(id: u64) -> ColocatedNode {
+    let mut storage = MemStorage::for_node(id, &[0, 1, 2, 3]);
+    storage.config.nodes = (0..5).map(NodeId).collect();
+    storage.config.matchmakers = vec![MatchmakerId(0)];
+    storage.config.quorum_system = crate::membership::QuorumSystem::grid(2, 2);
+    ColocatedNode::new(&storage, Limits::DEFAULT)
+}
+
+/// Decision 31 (#1209): a Phase 1 seals each row of each full grid of
+/// `H_b` other than `C_b`. The trace of `specs/tla/reads/`, check
+/// `grid_full`, on real nodes:
+///
+/// - Node 2 leads `b1` under the full `2 × 2` grid `G = {0, 1, 2, 3}` (rows
+///   `{0, 1}` and `{2, 3}`), and one write is chosen everywhere: node 0 reads
+///   on `(G, b1)`.
+/// - Node 2 reconfigures to `H = {1, 2, 3, 4}` (rows `{1, 2}` and `{3, 4}`)
+///   at `b2`. Only nodes 3 and 4 get the `Prepare`. The row `{2, 3}` of `G`
+///   promised: a Phase-1 quorum of `G` and of `H`.
+/// - Expected: node 2 does not lead yet, because no acceptor of the row
+///   `{0, 1}` of `G` promised `b2`. Without the seal it leads, a column of
+///   `H` chooses `W`, and node 0 reads over the row `{0, 1}`, where no one
+///   heard of `b2`: the read misses `W`.
+/// - Once node 1 promises, node 2 leads, `W` is chosen without nodes 0 and
+///   1, and the answer of node 1 to the read of node 0 names `b2` and ends
+///   the read. No read is served below `W`.
+#[test]
+fn a_phase1_seals_each_row_of_an_old_full_grid() {
+    let mut nodes: Vec<ColocatedNode> = (0..5).map(deployed_grid_node).collect();
+    let mut mms = registries(1);
+    let g = AcceptorConfig::new(
+        (0..4).map(NodeId).collect(),
+        crate::membership::QuorumSystem::grid(2, 2),
+    );
+
+    // Node 2 wins `b1` under `G`, beats, and has one write chosen everywhere.
+    campaign(&mut nodes[2]);
+    let requests = drain_match_requests(&mut nodes[2]);
+    for reply in matchmake(&mut mms, requests) {
+        nodes[2].on_match_reply(reply);
+    }
+    let q = drain(&mut nodes[2]);
+    deliver_all(&mut nodes, q);
+    assert!(nodes[2].is_leader());
+    nodes[2].set_election_timeout(NO_CHECK_QUORUM);
+    nodes[2].tick();
+    let q = drain(&mut nodes[2]);
+    deliver_all(&mut nodes, q);
+    let b1 = nodes[2].ballot();
+    let _ = nodes[2].propose(entry(1, 1, 1));
+    let q = drain(&mut nodes[2]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(nodes[2].hard_state().chosen_index, Some(Slot(0)));
+    assert_eq!(
+        nodes[0].read_basis().map(|b| (b.config, b.since)),
+        Some((g, b1)),
+        "node 0 reads on (G, b1)"
+    );
+
+    // Node 2 reconfigures to `H`. Only nodes 3 and 4 get the `Prepare`.
+    let h = AcceptorConfig::new(
+        (1..5).map(NodeId).collect(),
+        crate::membership::QuorumSystem::grid(2, 2),
+    );
+    let ReconfigureResult::Started(b2) = nodes[2].reconfigure(&h) else {
+        panic!("the reconfiguration starts");
+    };
+    assert!(b2 > b1);
+    let requests = drain_match_requests(&mut nodes[2]);
+    for reply in matchmake(&mut mms, requests) {
+        let _ = nodes[2].on_match_reply(reply);
+    }
+    let prepares = drain(&mut nodes[2]);
+    let to_node_1: Vec<(NodeId, Message)> = prepares
+        .iter()
+        .filter(|(to, m)| *to == NodeId(1) && matches!(m, Message::Prepare { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(to_node_1.len(), 1, "the Prepare of b2 reaches for node 1");
+    deliver_filtered(&mut nodes, prepares, |to, _| {
+        to == NodeId(2) || to == NodeId(3) || to == NodeId(4)
+    });
+    assert_eq!(nodes[3].acceptor().promised(), b2);
+    assert!(
+        !nodes[2].is_leader(),
+        "the row {{0, 1}} of G heard nothing of b2: the Phase 1 of b2 is not sealed"
+    );
+
+    // Node 1 promises: every row of `G` holds a promise, and node 2 leads.
+    deliver_filtered(&mut nodes, to_node_1, |to, _| to != NodeId(0));
+    assert!(nodes[2].is_leader(), "a sealed Phase 1 wins");
+    assert_eq!(nodes[2].ballot(), b2);
+    assert_eq!(*nodes[2].acceptors(), h);
+
+    // `W` is chosen under `H` without nodes 0 and 1.
+    let _ = nodes[2].propose(entry(1, 2, 2));
+    let q = drain(&mut nodes[2]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0) && to != NodeId(1));
+    let w_slot = nodes[2]
+        .hard_state()
+        .chosen_index
+        .expect("W is chosen at the leader");
+    assert!(w_slot > Slot(0));
+    assert_eq!(chosen_at(&nodes[2], w_slot.0), Some(val(2)), "W is chosen");
+
+    // Node 0 still reads on `(G, b1)` and asks its row `{0, 1}` (ctx 0).
+    assert_eq!(nodes[0].read_basis().map(|b| b.since), Some(b1));
+    nodes[0].quorum_read(0);
+    let asks = drain(&mut nodes[0]);
+    assert_eq!(pre_read_targets(&asks), vec![NodeId(1)]);
+    for (to, m) in asks {
+        nodes[usize::try_from(to.0).expect("node index")].step(m);
+        for (to, ack) in drain(&mut nodes[1]) {
+            if to == NodeId(0) {
+                nodes[0].step(ack);
+            }
+        }
+    }
+    let ready = nodes[0].ready();
+    let served = ready.read_states().to_vec();
+    ready.advance();
+    assert!(
+        served.is_empty(),
+        "stale read: served {served:?} below W at {w_slot:?} over the row {{0, 1}} of G"
+    );
+    assert!(
+        nodes[0].quorum_reads().is_empty(),
+        "the answer of node 1 names b2 and ends the read"
+    );
 }

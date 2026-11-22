@@ -91,7 +91,10 @@ Test only: `publish = false`, never a dependency of another crate.
   - `ledger.rs` → `Ledger`: the durable votes and promises of every node, each ballot bound to
     the configuration the matchmakers registered for it. Oracles `ONE_VALUE`, `COMMIT_BACKED`,
     `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `JOURNAL_FOLD`, `PREFIX_SHRINKS` (the durable
-    chosen prefix never shrinks: a crash may take back only what no fsync covered).
+    chosen prefix never shrinks: a crash may take back only what no fsync covered),
+    `ONE_PROPOSAL` (every `Accept` that a node or a proxy sends at one `(slot, ballot)` carries
+    one command, across a handoff, a restart and a duplicated `Relinquish`; #1292 (duplicated
+    Relinquish)).
   - `journal.rs` → `JournalSpec`: the single-writer journal contract
     (`docs/journal/02-data-plane.md` §J2.1-§J2.3, §J2.6) written again, folded over the
     commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome

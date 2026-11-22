@@ -6,7 +6,7 @@ use consensus_sim::campaign::try_campaign;
 use consensus_sim::cluster::{Cluster, Flavor, Mutant};
 use consensus_sim::oracle::journal::JOURNAL_FOLD;
 use consensus_sim::oracle::ledger::{
-    COMMIT_BACKED, LEARNED_CHOSEN, ONE_VALUE, PERSIST_BEFORE_SEND, PREFIX_SHRINKS,
+    COMMIT_BACKED, LEARNED_CHOSEN, ONE_PROPOSAL, ONE_VALUE, PERSIST_BEFORE_SEND, PREFIX_SHRINKS,
 };
 use consensus_sim::oracle::reads::READ_SEES_WRITES;
 use moonpool_walk::Walk;
@@ -116,4 +116,9 @@ fn a_site_longer_than_the_table_keeps_is_refused() {
     let long = "batcher walk: a site name that runs on past the sixty-three bytes of a slot";
     let failure = try_campaign(&walk, &[long]).expect_err("a long site is refused");
     assert!(failure.contains("longer than"), "{failure}");
+}
+
+#[test]
+fn a_rewound_handoff_is_caught_by_one_proposal_per_ballot() {
+    caught(Flavor::handoff(), Mutant::RewindHandoff, 400, ONE_PROPOSAL);
 }

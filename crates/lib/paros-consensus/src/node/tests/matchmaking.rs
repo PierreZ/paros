@@ -1505,7 +1505,7 @@ fn only_a_leader_names_its_configurations_in_force() {
 // ---- refusals, foreign replies and the read-only role ------------------------
 
 /// A refusal of `ballot`'s registration from `mm` at generation 0.
-fn refused(mm: u64, ballot: Ballot, refusal: MatchRefusal) -> MatchReply {
+pub(super) fn refused(mm: u64, ballot: Ballot, refusal: MatchRefusal) -> MatchReply {
     registered_reply(mm, ballot, MatchOutcome::Refused(refusal))
 }
 
