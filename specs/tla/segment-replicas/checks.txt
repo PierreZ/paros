@@ -20,6 +20,9 @@ reach_retire      violation  ci
 deliver_all       violation  ci
 boundary_zero     violation  ci
 boundary_early    violation  ci
+# The record of S1 is written once (the compare-and-set of WriteRecord),
+# even with the early boundary state.
+record_once       pass       ci
 boundary_seq      violation  ci
 route_other       violation  ci
 retire_early      violation  ci
@@ -32,6 +35,9 @@ safety_k2         pass       long   40
 # matchmaker record, a Fence at the first slot of S2.
 meta_safety_ci    pass       ci
 meta_stale        violation  ci
+# The leader chooses the slots in order and never changes a chosen slot,
+# the fence too (the frontier guard of ChooseFence), even on a stale read.
+order_stale       pass       ci
 meta_safety       pass       long   40
 meta_live         pass       long
 meta_gone         pass       long   40

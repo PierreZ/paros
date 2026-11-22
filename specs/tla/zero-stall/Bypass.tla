@@ -287,11 +287,12 @@ Bypass(b, b2) ==
 \* on to node n, one hop. The successor gets the proposals at b and leads at
 \* b with no Phase 1. With HandoffCarry, it also gets the slots that wait
 \* for the fence Phase 1 of b; with the control, it takes them as free.
+\* A hand-on to the holder itself changes nothing with HandoffCarry, and
+\* only drops the pending slots with the control.
 HandOn(b, n) ==
     /\ Handoff
     /\ status[b] = "leading"
     /\ holder[b] = Owner[b]
-    /\ n \in Nodes \ {holder[b]}
     /\ holder' = [holder EXCEPT ![b] = n]
     /\ known' = [known EXCEPT ![n] = @ \cup {k \in known[holder[b]] : k[1] = b}]
     /\ IF HandoffCarry
@@ -483,6 +484,12 @@ WmRedundant ==
 
 \* Not a real invariant. TLC must find a trace with two bypasses in a row.
 NoChain == ~ \E b \in Ballots : via[b] # 0 /\ via[via[b]] # 0
+
+\* DPaxos hands a ballot on one hop: only its minter, while it leads at it.
+HandOnOneHop ==
+    [][\A b \in Ballots : holder'[b] # holder[b] =>
+          /\ holder[b] = Owner[b]
+          /\ status[b] = "leading"]_vars
 
 \* Not a real invariant. TLC must find a trace where a successor of a
 \* handoff leads at a ballot that its minter bypassed to.
