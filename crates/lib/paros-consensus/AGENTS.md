@@ -103,7 +103,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
 - Examples: `examples/{single_decree,multi_paxos,matchmaker,acceptor_grid,quorum_read,
   proxy_leader,replica_tier}.rs` are the lessons, and `examples/{quickstart,journal_calls,
   leader_handoff,reconfiguration}.rs` drive `ColocatedNode` as a driver does. Each one asserts
-  the property that it shows. A new example gets a step in the CI `examples` job, a row in
+  the property that it shows. A new example gets a step in the CI `checks` job, a row in
   `README.md` and in the table of `src/lib.rs`, and an item in the root `README.md`.
 - `examples/common/cluster.rs` → `Cluster`, the toy cluster of the four driver examples: the
   nodes, one `MemStorage` for each node, optional `Matchmaker`s with a `MemRegistry` each, and a
@@ -115,7 +115,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
   with no clock; `Config::with_peers` sorts and deduplicates a membership; `Message::kind`
   names a variant for a trace or a metric; `NodeId`, `Slot` and `Ballot` (`round.node`) have
   `Display`.
-- A doc example is a test: `cargo test --doc -p paros-consensus` (CI `examples` job). A new
+- A doc example is a test: `cargo test --doc -p paros-consensus` (CI `checks` job). A new
   public entry point of a driver gets one.
 - A boot assertion on `Config` names the field that is wrong (`node/boot.rs`,
   `assert_config_shape`).
@@ -145,7 +145,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` (`models/support.rs`, `env_or`).
 - `cargo run -p paros-consensus --example <name>` for each of the eleven examples, and
-  `cargo test --doc -p paros-consensus` for the doc examples (CI `examples` job).
+  `cargo test --doc -p paros-consensus` for the doc examples (CI `checks` job).
 - `cargo check --target wasm32-unknown-unknown -p paros-consensus` with and without
   `--no-default-features`; `cargo check -p paros-consensus --features serde` (CI `portability`).
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps` (CI `clippy` job).
