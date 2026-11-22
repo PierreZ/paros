@@ -486,6 +486,8 @@ WmRedundant ==
 NoChain == ~ \E b \in Ballots : via[b] # 0 /\ via[via[b]] # 0
 
 \* DPaxos hands a ballot on one hop: only its minter, while it leads at it.
+\* A ballot that moved never moves again. HandOn is the one step that moves
+\* a ballot, so this states the rule that its guards build.
 HandOnOneHop ==
     [][\A b \in Ballots : holder'[b] # holder[b] =>
           /\ holder[b] = Owner[b]
