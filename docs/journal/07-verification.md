@@ -213,6 +213,29 @@ the program or the journal, never in the client. A finding of the walk: with fre
 call in flight, a `Resolve` that answers not written means that the writer was deposed, so the
 client's resend at the tail is answered `Fenced` (site `RESOLVED_AGAIN`).
 
+**The whole-journal walk** (#1445 (simulate the whole journal in memory),
+`journal-sim/tests/whole.rs`). Before the moonpool-sim too, `journal-sim` runs the whole journal on
+the in-memory IO of `paros-journal-io`: nine machines in three zones, two journals that share the
+machines and one matchmaker register, a `Driver` and its `Host` on each machine (acceptors, leaders
+and segment replicas of both journals), two controllers for each journal
+(`paros_journal_control::role`) that are elected, heal a column, seal and get deposed, a reshape
+token shared by the journals, a client that claims the writer, writes, sends again, resends with a
+stale position and resolves each `Below`, crashes and restarts of a machine, the loss of a zone for
+a while, register operations whose request or reply is lost, and disk faults inside the contract.
+Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
+at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
+`ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with
+its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
+and `ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
+(`WholeMutant`). At the end of the walk each journal converges: a controller holds the term, the
+newest segment is in force, the older ones are retired, and every replica of the newest segment
+holds the whole log. One replica node serves one replica for each segment of its journal, so a
+heal keeps the live replicas of a column (Pierre, 2026-11-22, #1445); the address and the disk key
+of a replica name its segment (§J4.2). **Open**: the walk retires a sealed segment in place of the
+leader, whose retire is not built, and it loses a machine or a zone only for a while. A permanent
+loss needs re-replication (#1314, a rule group of #1326), which `decide` asks before the heal; it
+joins the walk with that rule group.
+
 ### J7.5 The controller's `decide`
 
 Property tests, a second `decide` with no shared code, and the controller walks in

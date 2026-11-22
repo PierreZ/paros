@@ -9,6 +9,8 @@ register across handovers of the set (#1325). A third walk drives the journal ro
 (`paros_journal::roles`, #1326): acceptors, leaders and segment replicas with disks, over a chain
 of segments. A fourth walk runs the generic driver of `paros-journal-io` (#1329) on three processes. A fifth walk
 drives the pure journal client (#1331) against a journal that loses and holds answers.
+A sixth walk runs the whole journal on the in-memory IO of `paros-journal-io` (#1445): two
+journals on nine machines in three zones, with their controllers and a client.
 Test only: `publish = false`.
 
 ## Map
@@ -51,6 +53,15 @@ Test only: `publish = false`.
   `paros_journal::client`, a lossy mailbox, held and lost answers, seals, `Resolve`, reads; its
   oracles (`WRITTEN`, `ONCE`, `REFUSED`, `LED`, `TAIL`, `PAGE`), judged on a log that the walk keeps, its
   reach sites and its planted mutants (`ClientMutant`). `tests/client.rs`.
+- `src/backend.rs`: the backends of the driver walk and the whole walk: `Disk`, a disk that
+  survives its process and fails commits inside the contract, and `Wire`, a transport that judges
+  the flight rule at each send.
+- `src/whole.rs`: the whole-journal walk (`WholeModel`, #1445): two journals on nine machines in
+  three zones, a `Driver` on each machine, the controllers of each journal over one register, a
+  shared reshape token, a client that writes, resends and resolves, crashes, the loss of a zone
+  for a while, lost register calls and disk faults; its oracles (`AGREE`, `SEALED`, `FLIGHT`,
+  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`), its reach sites and its planted mutants (`WholeMutant`).
+  `tests/whole.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/roles.rs`: the events of a roles walk as a trace of

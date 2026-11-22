@@ -76,7 +76,7 @@ pub struct Driver<S, T, C, R, E> {
     /// The batches of the next commit, in the order the roles emitted them.
     group: Vec<(Address, PersistId, Vec<Op>)>,
     /// The sends that wait on a batch of their sender.
-    held: Vec<(PersistId, Envelope)>,
+    held: Vec<(PersistId, Address, Envelope)>,
     /// The register changes that wait on a batch of their role.
     held_changes: Vec<(PersistId, Address, Change)>,
     /// The highest durable batch of each role that runs.
@@ -319,12 +319,16 @@ where
                 );
                 self.group.push((address, id, ops));
             }
-            Effect::Send { envelope, after } => {
-                if self.is_durable(envelope.sender(), after) {
+            Effect::Send {
+                sender,
+                envelope,
+                after,
+            } => {
+                if self.is_durable(sender, after) {
                     self.transport.send(envelope);
                 } else {
                     let id = after.expect("a held send names a batch");
-                    self.held.push((id, envelope));
+                    self.held.push((id, sender, envelope));
                 }
             }
             Effect::Register {
@@ -365,7 +369,7 @@ where
                     self.settled.insert(address, id);
                 }
                 self.group.retain(|(role, ..)| other(*role));
-                self.held.retain(|(_, envelope)| other(envelope.sender()));
+                self.held.retain(|(_, sender, _)| other(*sender));
                 self.held_changes.retain(|(_, role, _)| other(*role));
                 self.durable.remove(&address);
                 self.stopped.push((address, why));
@@ -422,11 +426,11 @@ where
     /// Send what waited on a batch that is durable now.
     fn release(&mut self) {
         let held = std::mem::take(&mut self.held);
-        for (id, envelope) in held {
-            if self.is_durable(envelope.sender(), Some(id)) {
+        for (id, sender, envelope) in held {
+            if self.is_durable(sender, Some(id)) {
                 self.transport.send(envelope);
             } else {
-                self.held.push((id, envelope));
+                self.held.push((id, sender, envelope));
             }
         }
         let changes = std::mem::take(&mut self.held_changes);
