@@ -239,7 +239,18 @@ blocker is deliberate (access that was withheld, a rule in this file). Then say 
 found.
 
 A pull request merges on green CI and after a review that is okay. Never merge on red; fix the
-red, in the PR or in its own PR. A flaky check is a finding, never a reason to run it again.
+red, in the PR or in its own PR.
+
+**The builder never grades its own code** (Pierre, 2026-11-22). Before the merge, run an
+independent reviewer: a fresh agent that reads only the diff, the PR description and the docs
+the diff touches, never the builder's reasoning or chat. It follows `REVIEW.md` and hunts races,
+edge cases and broken invariants. Fix each finding, or answer it in the PR description.
+
+**Two same failures stop the loop** (Pierre, 2026-11-22). When the same failure comes back a
+second time (the same CI error, the same test, the same approach that did not work), do not try a
+third time blindly. Stop, write down what you tried and what each try printed, and escalate: to
+the coordinator, or in the PR or the issue. A different approach with a new reason is not a
+retry. A flaky check is a finding, never a reason to run it again.
 These steps need Pierre's go-ahead: a change to the goal or to a recorded design decision, a
 merge on red, and a force-push or a delete on a branch you did not create.
 
@@ -378,6 +389,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
+- **A lesson becomes a rule** (Pierre, 2026-11-22). When a mistake is one that a machine could
+  have caught, add the check in the same PR as the fix: a lint, a `scripts/check-*.sh` in CI, a
+  test or an oracle, or else a rule in this file. A fix of only the one instance lets the
+  mistake come back.
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
