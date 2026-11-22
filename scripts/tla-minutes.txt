@@ -2,7 +2,8 @@
 # (`.github/workflows/tla.yml`): TLC on its `ci` checks plus the parse of its
 # guard mutants. Each line is the largest time the folder took on GitHub's
 # runners, rounded up to a half minute (measured on runs 44972036856,
-# 44972223841 and 44978685157). `scripts/ci-plan.py` packs the folders that a
+# 44972223841 and 44978685157; a folder that a timeout cut adds the time of
+# its checks that did not run, from a full run). `scripts/ci-plan.py` packs the folders that a
 # change needs into as few jobs as it can, each at most `GROUP_MINUTES` of
 # checks, so that each job stays inside its 30 minutes on a slow runner too.
 # Every folder is listed: the plan fails on a folder with no line, on a line

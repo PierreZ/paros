@@ -10,7 +10,10 @@
 # runner's address. The token is read-only (`contents: read`) and ends with
 # the job. The header goes only to the inputs of flake.lock.
 #
-# A job runs actions/checkout first, then this action.
+# Nix fetches the inputs with the git CLI of the runner, which reads this
+# header; its libgit2 fallback (used only when git is not on PATH) does not,
+# so the last step checks that git is there and sees the header for each
+# input. A job runs actions/checkout first, then this action.
 name: Nix
 description: Install Nix, cache the store, and sign git in to github.com
 runs:
@@ -32,4 +35,5 @@ runs:
         test -n "$urls"
         for url in $urls; do
           git config --global "http.$url.extraheader" "AUTHORIZATION: basic $auth"
+          test -n "$(git config --get-urlmatch http.extraheader "$url")"
         done

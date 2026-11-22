@@ -24,6 +24,7 @@ on:
       - "scripts/build-wasm.sh"
       - "flake.nix"
       - "flake.lock"
+      - ".github/actions/nix/action.yml"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
