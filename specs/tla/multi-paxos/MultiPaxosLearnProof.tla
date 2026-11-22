@@ -8,67 +8,17 @@ EXTENDS MultiPaxosFactsProof
 USE NBType, NSType, NoneNotValue, NoopNotCommand, OwnerType, LearnersType
     DEF Ballots, Slots, Values, NoVote
 
-\* A step that changes no variable keeps `Inv`.
-THEOREM UnchangedInv ==
-  ASSUME Inv, Hyp, UNCHANGED vars
-  PROVE  Inv'
-<1>0. TypeOK /\ UNCHANGED <<prom, vote, dprom, dvote, learned, phase, next, front, wiped, restarts, msgs>>
-  BY DEF Inv, vars
-<1>1. \A x, c, s, v : VotedFor(x, c, s, v)' = VotedFor(x, c, s, v)
-  BY <1>0 DEF VotedFor
-<1>2. \A x \in Acceptors : prom'[x] \in Nat /\ prom'[x] >= prom[x]
-  BY <1>0 DEF TypeOK
-<1>3. KeepsVW
-  <2>1. \A x \in Acceptors, c \in Ballots, s \in Slots :
-          WontVoteIn(x, c, s) => \A v \in Values : ~VotedFor(x, c, s, v)'
-    BY <1>1 DEF WontVoteIn
-  <2> QED
-    BY <1>0, <1>2, <2>1, KeepsVWFrom
-<1>4. TypeOK' /\ restarts' <= Restarts /\ Cardinality(wiped') <= Wipes
-      /\ dprom' = prom' /\ dvote' = vote'
-  BY <1>0 DEF Inv, TypeOK
-<1>5. NodeInv'
-  <2> SUFFICES ASSUME NEW x \in Acceptors PROVE NodeOK(x)'
-    BY DEF NodeInv
-  <2>1. IF x \in wiped THEN prom'[x] = prom[x] ELSE prom'[x] \in Nat /\ prom'[x] >= prom[x]
-    BY <1>0 DEF TypeOK
-  <2> QED
-    BY <1>0, <1>1, <2>1, NodeKeep
-<1>6. BallotInv'
-  <2> SUFFICES ASSUME NEW c \in Ballots PROVE BallotOK(c)'
-    BY DEF BallotInv
-  <2>1. phase[c] \in {"p1", "p2"} => Owner[c] \notin wiped'
-    BY <1>0 DEF Inv, BallotInv, BallotOK
-  <2> QED
-    BY <1>0, <1>2, <1>3, <2>1, BallotKeep
-<1>7. MsgInv'
-  <2> SUFFICES ASSUME NEW m \in msgs' PROVE MsgOK(m)'
-    BY DEF MsgInv
-  <2> QED
-    BY <1>0, <1>1, <1>2, <1>3, OldMsg
-<1> QED
-  BY <1>4, <1>5, <1>6, <1>7 DEF Inv
-
-\* With Durable = "before" the disk always holds the memory (`Inv`), so a
-\* `Persist` changes no variable.
 THEOREM PersistInv ==
   ASSUME Inv, Hyp, NEW a \in Acceptors, Persist(a)
   PROVE  Inv'
-<1>0. TypeOK /\ dprom = prom /\ dvote = vote
-  BY DEF Inv
-<1>1. dprom' = dprom /\ dvote' = dvote
-  BY <1>0 DEF Persist, TypeOK
-<1>2. UNCHANGED vars
-  BY <1>1 DEF Persist, vars
-<1> QED
-  BY <1>2, UnchangedInv
+BY DEF Persist, Hyp, InvApplies
 
 THEOREM RestartInv ==
   ASSUME Inv, Hyp, NEW a \in Acceptors, Restart(a)
   PROVE  Inv'
 <1>0. TypeOK /\ dprom = prom /\ dvote = vote
   BY DEF Inv
-<1>1. /\ restarts < Restarts /\ restarts' = restarts + 1
+<1>1. /\ a \notin wiped /\ restarts < Restarts /\ restarts' = restarts + 1
       /\ prom' = prom /\ vote' = vote
       /\ phase' = [c \in Ballots |-> IF Owner[c] = a /\ phase[c] \in {"p1", "p2"} THEN "dead" ELSE phase[c]]
       /\ UNCHANGED <<dprom, dvote, next, front, wiped, msgs>>

@@ -215,11 +215,12 @@ Choose(v) ==
 \* journal's metadata as the first slot of S2. With "meta_stale" it may read
 \* the metadata before the seal wrote it, and finds the first uuid.
 \* The metadata holds a uuid only once a replica of R1 applied all of S1
-\* (WriteRecord), so with Boundary = "meta" the slots below K are chosen;
-\* once K is chosen, the step writes the same fence again.
+\* (WriteRecord), so with Boundary = "meta" the slots below K are chosen.
+\* The leader proposes the fence once, at the frontier.
 ChooseFence ==
   /\ MetaMode
   /\ K < NS
+  /\ Frontier = K
   /\ Boundary = "meta" => meta # None
   /\ chosen' = [chosen EXCEPT ![K] = [op |-> "fence", u |-> IF meta = None THEN U0 ELSE meta]]
   /\ UNCHANGED <<held, applied, base, rec, meta, retired, down, acked, rd>>
@@ -246,11 +247,11 @@ Apply(r) ==
   /\ applied' = [applied EXCEPT ![r] = @ + 1]
   /\ UNCHANGED <<chosen, held, base, rec, meta, retired, down, acked, rd>>
 
-\* A replica of R1 writes the boundary state into the record of S1. The
-\* code writes it once (a compare-and-set); a second write writes the same
-\* state, since each replica of R1 folds the same slots up to K.
+\* A replica of R1 writes the boundary state into the record of S1, once:
+\* the code writes it with a compare-and-set on an empty record.
 WriteRecord(p) ==
   /\ RecordMode
+  /\ rec = None
   /\ p \in R1 \ down
   /\ Boundary # "early" => Front(p) = K
   /\ rec' = StateOf(p)

@@ -89,6 +89,10 @@ Nodes   == {Owner[b] : b \in Ballots}
 Free    == "free"
 Pending == "pending"
 
+\* A gone acceptor is in the configuration of ballot 1 only, so it votes at
+\* ballot 1 only. Accept needs no guard of its own on Gone.
+ASSUME \A f \in CfgChoices : \A b \in Ballots \ {1} : f[b] \cap Gone = {}
+
 VARIABLES status,    \* ballot -> "matching" | "matched" | "leading" | "switched" | "dead"
           cfgOf,     \* ballot -> its configuration
           reg,       \* matchmaker -> set of <<ballot, config>>
@@ -216,7 +220,7 @@ Propose(b, s, v) ==
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe, wm, maxwm, acked, seen,
                    holder, via, restarts>>
 
-\* A gone acceptor is only in the configuration of ballot 1 (Gone). A second
+\* A gone acceptor votes at ballot 1 only (the ASSUME on Gone). A second
 \* vote of the same round changes nothing.
 Accept(a, b, s, v) ==
     /\ <<b, s, v>> \in proposals
@@ -279,15 +283,15 @@ Bypass(b, b2) ==
     /\ UNCHANGED <<cfgOf, reg, replied, hist, promised, votes, promises, proposals, wm, maxwm, acked, seen,
                    holder, known, restarts>>
 
-\* The cooperative handoff (DPaxos, relinquish_to): the holder of b hands b
-\* on to node n. The successor gets the proposals at b and leads at b with
-\* no Phase 1. With HandoffCarry, it also gets the slots that wait for the
-\* fence Phase 1 of b; with the control, it takes them as free. The code
-\* hands a leading ballot on one hop, from its minter to another node. The
-\* model lets any holder hand b on, in any status of b, to any node: the one
-\* hop of the code is one of these runs, and no check needs the others away.
+\* The cooperative handoff (DPaxos, relinquish_to): the minter of b hands b
+\* on to node n, one hop. The successor gets the proposals at b and leads at
+\* b with no Phase 1. With HandoffCarry, it also gets the slots that wait
+\* for the fence Phase 1 of b; with the control, it takes them as free.
 HandOn(b, n) ==
     /\ Handoff
+    /\ status[b] = "leading"
+    /\ holder[b] = Owner[b]
+    /\ n \in Nodes \ {holder[b]}
     /\ holder' = [holder EXCEPT ![b] = n]
     /\ known' = [known EXCEPT ![n] = @ \cup {k \in known[holder[b]] : k[1] = b}]
     /\ IF HandoffCarry
@@ -350,6 +354,10 @@ Fence(b) == Max({0} \cup {s \in Slots : safe[b][s] # Free})
 \* The vote watermark of acceptor a: the highest slot that it voted in.
 Watermark(a) == Max({0} \cup {w[2] : w \in {x \in votes : x[1] = a}})
 
+\* The index of a leaderless read at b over the answers of Q: the highest
+\* watermark of the answers, and the fence or above.
+ReadIndex(b, Q) == Max({Fence(b)} \cup {Watermark(a) : a \in Q})
+
 \* A leaderless read on the basis of the leadership at b ends, and its client
 \* gets the slots at or below its index. The reader asks a quorum Q of the
 \* configuration of b, none of whose members promised above b (an answer
@@ -360,10 +368,9 @@ ReadReturn(b, Q) ==
     /\ status[b] \in {"leading", "switched"}
     /\ Q \in Quorums(cfgOf[b])
     /\ \A a \in Q : promised[a] <= b
-    /\ LET i == Max({Fence(b)} \cup {Watermark(a) : a \in Q})
-       IN  /\ \A s \in Slots : s <= i =>
-                  \E c \in Ballots : ChosenAt(c, s) /\ (ReadHold => Covered(c))
-           /\ seen' = seen \cup {s \in Slots : s <= i}
+    /\ \A s \in Slots : s <= ReadIndex(b, Q) =>
+          \E c \in Ballots : ChosenAt(c, s) /\ (ReadHold => Covered(c))
+    /\ seen' = seen \cup {s \in Slots : s <= ReadIndex(b, Q)}
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
                    proposals, wm, maxwm, acked, ext>>
 
@@ -406,7 +413,7 @@ LiveSpec ==
           /\ WF_vars(MatchDone(b)) /\ WF_vars(Phase1Done(b)) /\ WF_vars(Phase1Low(b))
           /\ \A a \in Acceptors : WF_vars(Promise(a, b))
           /\ \A s \in Slots : WF_vars(\E v \in Values : Propose(b, s, v))
-          /\ \A s \in Slots : WF_vars(Ack(b, s))
+          /\ \A s \in Slots : WF_vars(Reads /\ Ack(b, s))
           /\ \A b2 \in Ballots : WF_vars(Bypass(b, b2))
     /\ \A a \in Acceptors, p \in Ballots \X Slots \X Values :
           WF_vars(Accept(a, p[1], p[2], p[3]))
@@ -437,10 +444,13 @@ ReadSafe ==
                     /\ s > Fence(b)
                     /\ \A a \in Q : ~ \E w \in votes : w[1] = a /\ w[2] >= s
 
-\* Each read returns every slot that is acked or that an earlier read
-\* returned. ReadSafe says it of each read that could start; this says it of
-\* the reads that end, so it also judges the fence of ReadReturn.
-ReadsComplete == [][seen' # seen => acked \cup seen \subseteq seen']_vars
+\* The index of each read that ends covers every slot that is acked or that
+\* an earlier read returned. ReadSafe says it of each read that could start;
+\* this says it of the reads that end, so it also judges the guards of
+\* ReadReturn.
+ReadsComplete ==
+    [][\A b \in Ballots, Q \in SUBSET Acceptors :
+          ReadReturn(b, Q) => acked \cup seen \subseteq {s \in Slots : s <= ReadIndex(b, Q)}]_vars
 
 \* Matchmaking ends before Phase 1 (Matchmaker Paxos): no acceptor promises
 \* a ballot that still matches.
