@@ -62,13 +62,13 @@ candidacy only.
 | C11 | `universe.rs` | The cell's side of the universe: `JoinFleet`, a tenant's birth footprint, `HostTenant`, `DropTenant`; follow the directory; join another universe (`JoinUniverse`) | The universe directory, the registry | `paros-universe` (#1432) for the directory and its fold; `paros-cell` writes the cell's step after it reads the directory, and never calls it (§4.4) |
 | C12 | `tenant.rs` | The tenant coordinator's desk: claim each tenant control journal, describe a tenant, answer create, delete and configure by request id, draw journal and booking ids, place a create, release the bookings of an unanswered create, record `Placed` and `Scrubbed` | The tenant control journal, the registry, the busyness of the round | `paros-tenant` (#1430), the catalog. Ids for people and drawn ids: `paros-names` (#1419). The placement is a request to the port (#1421) |
 | C13 | `tenant/arrivals.rs` | The target's half of a move between cells: move each journal onto this cell's machines, then the tenant's matchmaker set, then `SettleTenant` | The registry, the tenant control journal, each journal's leader | #1433 (the move of a tenant between cells). Each journal's move is a reshape by its grid controller |
-| C14 | `tenant/balancing.rs` | Record the balancer's decision (`paros_model::balance`): `BalanceStarted`, `BalanceAbandoned`, and a leader `Handoff` | The registry, the busyness and the leaders of the round | `paros-cell` (#1423): the pure balance decision, given to the grid controller as a "must leave" answer of the port (#1421). The leader part has no home: question 2 below |
+| C14 | `tenant/balancing.rs` | Record the balancer's decision (`paros_model::balance`): `BalanceStarted`, `BalanceAbandoned`, and a leader `Handoff` | The registry, the busyness and the leaders of the round | `paros-cell` (#1423): the pure balance decision, given to the grid controller as a "must leave" answer of the port (#1421). The leader part: answer 2 below, the handoff at the end of the release of the leader |
 | C15 | `tenant/controls.rs` | Keep each control journal at its `2F+1` on storage machines; grow, shrink and move it off a machine that leaves; never shrink while a kept member is down (`holds_shrink`, `must_serve`) | The registry, the journal's leader (`Inspect`) | The grid controller of each control journal (`paros-journal-control`, #1421). Its size is the `Configure` of the level that owns it. **Open** in #1421 and #1423: how the cell places its own control journal |
 | C16 | `tenant/modes.rs` | Move a journal to its desired mode (`Configure`): book, reconfigure, record `Placed`, release; wait while a move holds the journal | The registry, the tenant control journal, the journal's leader | `paros-tenant` (#1430) records the desired mode; the grid controller reshapes to it through the port (#1421) |
-| C17 | `tenant/moves.rs` | The membership loop of one journal off a draining, slow or gone machine: book, warm the new member, hand the leadership off, reconfigure, wait for the GC watermark, record `Placed`, retire the old member, release. `stays`, `bookable` and `Leaving` decide who leaves | The registry (standing, slow, bookable machines), the watch (`gone`, `held`), the leader (`InspectReply`) | The grid controller of the journal (`paros-journal-control`, #1421); `stays` and `bookable` answer through the port from `paros-cell`. The warm step goes: a reshape opens a new segment on the new grid (§J3), so a new member catches up on nothing. The wait for the GC watermark and the retire become the retire of the old segment at `F + 1` replicas (§J3.1). The handoff has no home: question 2 below |
-| C18 | `tenant/roles.rs` | Book role counts: a tenant's frontends on `stateless` machines; a journal's proxy leaders and batchers on `stateless` machines and replicas on `storage` machines; release a slot on a machine that leaves | The registry, the tenant control journal | The frontends: `paros-tenant` (#1430), booked through the port. The journal's stateless roles have no home: question 3 below |
+| C17 | `tenant/moves.rs` | The membership loop of one journal off a draining, slow or gone machine: book, warm the new member, hand the leadership off, reconfigure, wait for the GC watermark, record `Placed`, retire the old member, release. `stays`, `bookable` and `Leaving` decide who leaves | The registry (standing, slow, bookable machines), the watch (`gone`, `held`), the leader (`InspectReply`) | The grid controller of the journal (`paros-journal-control`, #1421); `stays` and `bookable` answer through the port from `paros-cell`. The warm step goes: a reshape opens a new segment on the new grid (§J3), so a new member catches up on nothing. The wait for the GC watermark and the retire become the retire of the old segment at `F + 1` replicas (§J3.1). The handoff: answer 2 below, the leader role hands on at the end of its release |
+| C18 | `tenant/roles.rs` | Book role counts: a tenant's frontends on `stateless` machines; a journal's proxy leaders and batchers on `stateless` machines and replicas on `storage` machines; release a slot on a machine that leaves | The registry, the tenant control journal | The frontends: `paros-tenant` (#1430), booked through the port. The journal's stateless roles: answer 3 below, the grid controller books them through the port |
 | C19 | `tenant/scrub.rs` | The scrubber: read every record on each acceptor at a low rate, compare fingerprints (never a quorum read), report mismatches, record the progress | The tenant control journal, each acceptor's `Scrub` answer | The grid controller of each journal (`paros-journal-control`): scrub with repair through the protocol is a v1 duty (§J6, §J5.3). The rate is a knob of that layer (#1415) |
-| C20 | `tenant/sets.rs` | Keep each tenant's matchmaker set at `2F+1` from the tenant's largest `F`; book, hand over (`ReconfigureMatchmakers` fenced by generation), release; never onto a down target; keep it odd | The registry, the set in force (`Inspect`) | The grid controller of each journal, through the port: each journal has its own matchmaker set since 2026-11-19 (§3.4, §J3.4), so the set of a tenant is gone. Its handover is not an action of v1's `decide` (§J6.2): question 1 below |
+| C20 | `tenant/sets.rs` | Keep each tenant's matchmaker set at `2F+1` from the tenant's largest `F`; book, hand over (`ReconfigureMatchmakers` fenced by generation), release; never onto a down target; keep it odd | The registry, the set in force (`Inspect`) | The grid controller of each journal, through the port: each journal has its own matchmaker set since 2026-11-19 (§3.4, §J3.4), so the set of a tenant is gone. Its handover is not an action of v1's `decide` (§J6.2): answer 1 below |
 | C21 | `fixture.rs` | Test registry folded one command at a time | — | The walks of `control-sim` (#1423) |
 
 #### The machine (`crates/lib/paros-machine/src/`, 11.1k lines)
@@ -106,25 +106,36 @@ candidacy only.
 | N5 | `host.rs`, `MachineFacts`: `load`, `metrics`, `frontend` | Load, metrics and the frontend role setting | The load board, the metrics handle | `load` and `metrics`: `Events` and `paros-metrics` (#1428). `frontend`: the frontend role (#1431) |
 | N6 | `host.rs`, `CellHost`, `FormedCell` | The port through which the node loop starts the machine's services; an initial member's formed cell | The machine | The adapter hosts the services (#1427); `FormedCell` is `paros-machine` (#1426) |
 
-#### Duties with no home
+#### Duties that had no home, and their home
 
-These duties of the tag have no home in the layer table. Each one is a question for Pierre in
-#1412; the answer goes into this section and into the issue that takes the duty.
+Three duties of the tag had no home in the layer table. Pierre gave each one its home on
+2026-11-22 (#1412 (the duty table)). One rule covers the three: **the tenant coordinator gives
+birth to a journal and keeps its controller alive; the grid controller of the journal keeps
+every other role of its journal alive; the cell says where, through the placement port.**
 
-1. **The matchmaker set of each journal** (C20). Since 2026-11-19 every journal has its own set
-   (§3.4, §J3.4), so the old set of a tenant is gone. Who books a journal's set, and who hands it
-   over off a machine that leaves? §J6.2 says the handover is not an action of v1's `decide`.
-   Proposal: the grid controller of the journal, through the placement port, as a step after v1.
-   #1430 (paros-tenant), work item 2, still names a set of a tenant from the tenant's largest
-   `F`; it changes with the answer.
+1. **The matchmaker set of each journal** (C20). Every journal has its own set (§3.4, §J3.4);
+   there is no set of a tenant (#1430 (paros-tenant)). The tenant coordinator books the first
+   set when it creates the journal: the grid controller is elected by a term in the register
+   that this set holds, so the set exists before any controller. After that, the grid
+   controller of the journal hands the set over off a machine that leaves. It asks the port for
+   the target, and the handover names that target (§3.4). The handover is a step after v1
+   (§J6.2). When the set is below a majority, no controller can act: hold and page.
 2. **The leader of a journal on a machine that leaves, and the balance of leaders** (C14, C17).
-   The old move handed the leadership off the leaving machine before the reconfigure, and the
-   balancer moved leaders off a loaded machine. §J6 says the grid controller never calls
-   `SetLeader`, and no rule of `docs/journal/` places the leader role or hands it off.
-3. **The stateless roles of a journal and the grid controller itself** (C18). The old
-   coordinator booked a journal's proxy leaders and batchers on `stateless` machines and moved
-   them off a machine that leaves. The journal v1 has these roles (§J4.1), and the grid
-   controller runs on stateless machines (§J6), but no layer books or moves them.
+   The grid controller still never calls `SetLeader`, which is the fence of the writer and
+   belongs to the client (§J6). The Paxos leader moves by the cooperative handoff, as the end
+   of its release: the grid controller releases the leader on the machine that leaves and names
+   the successor, and the leader role hands its ballot on and then stops (a release is ended by
+   the role, §4.4). A handoff that fails costs availability, never safety
+   (`specs/tla/leader-handoff/`). The balance of leaders stays as a feature, after v1: the cell
+   decides it, as it decides the balance of acceptors, and gives it as a "must leave" answer of
+   the port; the same handoff runs it. v1 takes no action from load (§J6).
+3. **The stateless roles of a journal and the grid controller itself** (C18). The grid
+   controller books the proxy leaders, the batchers and the leader candidates of its journal
+   through the port, and replaces one on a machine that leaves. The counts come from the
+   `Configure` of the tenant. A controller cannot book itself, so the tenant coordinator books
+   the controller candidates of each journal and replaces one that is gone. **Open**: no rule
+   of `docs/journal/` says where the leader candidates of a journal run; this answer puts them
+   with the stateless roles, and the issue of the port (#1421) confirms it.
 
 The live moves that v1's `decide` does not make (a drain, a slow machine, a maintenance window,
 the balance of acceptors, a `Configure`) have a home: #1421 gives the grid controller's loop the

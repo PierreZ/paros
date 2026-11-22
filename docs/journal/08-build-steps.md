@@ -17,9 +17,9 @@ less than this table.
 | 4 | #1325 (the matchmaker register as an optional role) | The register, its handover and its walks | §J3.4 |
 | 5 | #1326 (the journal roles over the core) | Segments, seal, writes, leaderless reads, retire, truncate, re-replication; several pull requests, one rule group each (segments, seal and writes: `paros_journal::roles`, PR #1360; their trace check against `journal-state/RolesTrace.tla`) | §J3, §J5 |
 | 6 | #1327 (journal-sim) | The walks, the oracles, the trace check and the coverage gate. Built with steps 3 to 5, in the same pull requests | §J7.3 |
-| 7 | #1328 (paros-journal-control) | The pure `decide` and the v1 controller role; #1261 (grid controller decision tests) is part of it (`decide` and its sweep, the role, its walk and its trace check built; the moonpool-sim scenarios wait for the driver) | §J6 |
+| 7 | #1328 (paros-journal-control) | The pure `decide` and the v1 controller role; #1261 (grid controller decision tests) is part of it (`decide` and its sweep, the role, its walk and its trace check built; its scenarios in the whole journal are #1445; their moonpool-sim version is #1417, outside v1) | §J6 |
 | 8 | #1329 (paros-journal-io) | The traits, the driver under the flight rule and the contract suites (built: `crates/lib/paros-journal-io`, the driver walk of `journal-sim`) | §J4.2 |
-| 9 | #1330 (paros-journal-moonpool) | The moonpool adapter and the moonpool-sim of the whole journal | §J7.4 |
+| 9 | #1445 (the whole journal on the in-memory IO) | A `journal-sim` walk of the whole journal on the driver and the in-memory backends of `paros-journal-io`: every role, the controller, clients that retry, machine and zone loss, disk faults inside the contract, with the oracles of §J7.4. The moonpool adapter and the moonpool-sim version moved out of v1: #1330 (paros-journal-moonpool) is part of #1417 (the moonpool adapter on the generic host) under #1409 (build the layered parosd) (Pierre, 2026-11-22) | §J7.3, §J7.4 |
 | 10 | #1331 (the pure journal client) | The client state machine of the four calls. After step 3; it can run beside steps 7 to 9 | §J2 |
 
 **The examples** (#1370 (journal examples), Pierre 2026-11-21). The examples of the journal crates
@@ -33,7 +33,7 @@ result, and each lands with the step that it needs:
 | `in_memory` | A journal on three processes, on the traits and the driver of `paros-journal-io` with its backends in memory; a process crashes and starts again from its storage, and a second segment seals the first | Step 8: done (`paros-journal-io`) |
 | `custom_storage` | A storage backend of the user (an append-only log), checked by the contract suite of the storage trait, with a journal on it | Step 8: done (`paros-journal-io`) |
 | `single_writer`, `multi_writer` | The pure client: exactly-once with `expected_seq`; `SetLeader(None)` and back | Step 10 |
-| `moonpool`, `simulation` | The same journal on the moonpool host, then under moonpool-sim with faults | Step 9 |
+| `moonpool`, `simulation` | The same journal on the moonpool host, then under moonpool-sim with faults | #1417, after v1 (parosd) |
 
 **Rules for every step** (#1323):
 

@@ -93,8 +93,11 @@ decides them.
 
 ## In paros
 
-- Not built yet: `paros-journal-control`, the pure `decide` of the controller and its role
-  (#1328), and its walk in `journal-sim` with two controllers of different terms (#1261).
+- [`paros-journal-control`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-journal-control):
+  the pure `decide` of the controller and its role (#1328), walked in `journal-sim` with two
+  controllers and traced against `grid-controller/` (#1261).
+- In parosd, the controller asks the cell where a new member goes through the placement port:
+  [Machines](../../parosd/machines/).
 - [`paros-journal`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-journal):
   `OpeningCall`, the identity of the reshape call that the record keeps, so that a retry gets
   "ok" ([`segment.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-journal/src/segment.rs)).

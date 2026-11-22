@@ -24,7 +24,7 @@ Each module keeps its unit tests in `<module>/tests.rs`.
 
 `examples/` (#1370 (journal examples)): `fold` (the fold alone) and `register` (the
 compare-and-sets of the matchmaker register, with their guards). Shared code is in
-`examples/common/mod.rs`. Each example asserts its result and runs in the `examples` job of CI;
+`examples/common/mod.rs`. Each example asserts its result and runs in the `checks` job of CI;
 `README.md` lists them in reading order. An example uses no crate from outside the workspace
 (`scripts/check-core-deps.sh`). The examples that run the roles (`in_memory`, `custom_storage`)
 are in `paros-journal-io`, on its traits and its driver: a change to a role's effects or its disk

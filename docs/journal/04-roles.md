@@ -181,11 +181,11 @@ backends in memory (`mem`) and the contract suites (`contract`).
   `Driver::unassign`); a role is an acceptor, a replica of one segment, or a leader of one
   campaign.
 - *The register.* `Register` is a port of its own: run a change, and read the value of a done
-  write. In one process it is `mem::MemRegister`. **Open** (#1330 (paros-journal-moonpool)): the
+  write. In one process it is `mem::MemRegister`. **Open** (#1417 (the moonpool adapter on the generic host), with #1330): the
   register on the journal's matchmakers (`RegisterCall`, `RegisterMember`) as roles of the
   `Host`.
 - *Choices for Pierre's final review* (#1329). The traits are synchronous and never block: a
-  program calls `Driver::poll` in its own loop, and an async adapter (#1330) runs the driver's
+  program calls `Driver::poll` in its own loop, and an async adapter (#1417, outside v1) runs the driver's
   I/O through them or drives the `Host` itself. There is no `open()` call: the damage report
   comes with the scan of each role, at its start. The storage holds one format for every role;
   a backend stores keys and bytes and never reads them.
@@ -266,8 +266,8 @@ creates these crates, each in its own step. `paros-journal` and `journal-sim` ex
 |---|---|---|
 | `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the matchmaker register and its handover (`register`), the journal roles (`roles`, #1326), the codec with a release number in every header (`codec`), the record headers (`command`); later the pure client (no network) | #1324 (paros-journal), #1325 (the matchmaker register), #1331 (the pure journal client) |
 | `paros-journal-control` (`crates/lib/`) | The pure `decide` of the v1 controller and the controller role | #1328 (paros-journal-control) |
-| `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the register), the on-disk format, the pure `Host` (many journals in one process), the generic driver under the flight rule, the `Events` port, backends in memory and the contract suites. Its examples `in_memory` and `custom_storage` run the roles on it | #1329 (paros-journal-io) |
-| `paros-journal-moonpool` (`crates/lib/`) | The adapter of the `paros-journal-io` traits on moonpool providers: compio through moonpool's `CompioProviders`, no trait requires `Send` (Pierre, 2026-11-19) | #1330 (paros-journal-moonpool) |
+| `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the register), the on-disk format, the pure `Host` (many journals in one process), the generic driver under the flight rule, the `Events` port, backends in memory and the contract suites. Its examples `in_memory` and `custom_storage` run the roles on it. Its traits are not stable until the moonpool adapter of #1417 runs on them (2026-11-22) | #1329 (paros-journal-io) |
+| `paros-journal-moonpool` (`crates/lib/`) | Not in v1: the adapter of the `paros-journal-io` traits on moonpool providers (compio through moonpool's `CompioProviders`, no trait requires `Send`; Pierre, 2026-11-19), with moonpool RPC and protobuf as its transport ("The wire" below). It is built by the layered parosd (Pierre, 2026-11-22) | #1417 (the moonpool adapter on the generic host), with #1330 |
 | `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla`; the walk of the roles, its trace check against `journal-state/RolesTrace.tla` | #1327 (journal-sim) |
 
 The journal roles that compose the core (segments, seal, reads, retire, truncate,
@@ -295,7 +295,7 @@ engine and no network or file crate. Their traits do not require `Send`, an exec
 runtime type. With no feature on, a pure crate depends on workspace crates only. Its optional
 features only observe (`serde`, `tracing`, `assertions`): they decide nothing and do no I/O. The
 generic driver of `paros-journal-io` is written against the traits only. A crate that does I/O
-is an adapter in a crate of its own (`paros-journal-moonpool`, #1330), and the facade `paros`
+is an adapter in a crate of its own (`paros-journal-moonpool`, #1417, outside v1), and the facade `paros`
 re-exports it only behind an optional feature that is off by default. The facade is the place
 where paros bundles moonpool's storage and network for a program that wants them (Pierre,
 2026-11-21): the bundle is a feature of `paros`, never a dependency of a pure crate. CI runs
@@ -304,6 +304,20 @@ features, gains a dependency outside the workspace and the observation crates. A
 joins that script in the pull request that creates it. The examples of #1370 (journal examples)
 show the rule: a backend written by hand, in memory, with no runtime crate (`paros-journal-io`'s
 `custom_storage`).
+
+**The wire: moonpool RPC with protobuf** (Pierre, 2026-11-21). The end goal of the journal's
+network is moonpool RPC, with every role message and every client call as a protobuf message.
+The moonpool adapter builds its `Transport` on it, and the service above the journal uses the
+same messages. The adapter is not part of the journal v1: it moved to the layered parosd (Pierre, 2026-11-22), as #1417 (the moonpool adapter on the generic host) under #1409 (build the layered parosd), which takes #1330 in. The protobuf schema and its generated code
+live in the adapter (or in a wire crate of their own beside it), never in a pure crate: a pure
+crate gains no protobuf dependency (`scripts/check-core-deps.sh`). The pure crates keep their
+own byte codec for what they own: the records, the segment records and the on-disk format
+(`paros-journal`'s `codec`, `paros-journal-io`'s `layout`). A transport of the journal over plain
+`std::net`, with a hand-written codec of the role messages, is not built: it takes the work away
+from that goal (Pierre, 2026-11-21, #1391 (a multi-process example)). A program that brings its
+own transport still implements the `Transport` trait. **Open** (#1417): the `.proto` files
+(their place and their version rule against the release number of each header, §J2), and
+the mapping of a moonpool RPC endpoint to a role of the `Host`.
 
 *Moved here from `docs/architecture/04-roles.md` §4.3, where the journal applies the rule
 (#1332 (journal architecture docs)):*

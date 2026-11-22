@@ -9,7 +9,7 @@
 # The examples are how a reviewer judges the API.
 #
 # The check: such a crate has at least one example, `examples/<name>.rs`, and
-# the `examples` job of `.github/workflows/rust.yml` runs each example of it.
+# the `checks` job of `.github/workflows/rust.yml` runs each example of it.
 # A crate with no workspace library dependency (`paros-consensus`) is not
 # composing; its examples are welcome but not required here.
 set -euo pipefail
@@ -53,7 +53,7 @@ for crate in "${libs[@]}"; do
   for example in "${examples[@]}"; do
     name="$(basename "$example" .rs)"
     if ! grep -q -- "cargo run -p $crate --example $name\$" "$workflow"; then
-      echo "check-examples: the example $name of $crate is not run by the examples job of $workflow" >&2
+      echo "check-examples: the example $name of $crate is not run by the checks job of $workflow" >&2
       status=1
     fi
   done
