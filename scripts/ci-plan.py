@@ -28,6 +28,8 @@ The folders that run are packed into groups, each at most `GROUP_MINUTES` of
 checks (`scripts/tla-minutes.txt`), largest first, so that a job of the TLA
 workflow stays inside its 30 minutes and the number of jobs is small. A folder
 above `GROUP_MINUTES` (at most `FOLDER_MINUTES`) runs alone.
+Every plan also judges the two tables of the folders: a folder with no line
+in `scripts/tla-minutes.txt` or in `scripts/mutate-tla-shards.txt` fails it.
 
 The trace checks (`traces`) run the walks of consensus-sim and journal-sim
 against the `*Trace.tla` specs. They run in the TLA workflow when a folder of a
@@ -51,6 +53,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SPECS = ROOT / "specs" / "tla"
 MINUTES = ROOT / "scripts" / "tla-minutes.txt"
+SHARDS = ROOT / "scripts" / "mutate-tla-shards.txt"
 
 # A job of the TLA workflow has 30 minutes, about 27 of them for its checks
 # once Nix is set up. A line of `scripts/tla-minutes.txt` is the largest time
@@ -130,13 +133,23 @@ def inputs(folder: str) -> set[str]:
     return result
 
 
-def minutes(all_folders: list[str]) -> dict[str, float]:
-    table = {}
-    for line in MINUTES.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
+def pairs(path: Path) -> list[tuple[str, str]]:
+    """The `<folder> <number>` lines of a table, without comments and blank lines."""
+    result = []
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        name, value = line.split()
+        parts = line.split()
+        if len(parts) != 2:
+            sys.exit(f"{path.relative_to(ROOT)}: a line must be <folder> <number>, not {raw!r}")
+        result.append((parts[0], parts[1]))
+    return result
+
+
+def minutes(all_folders: list[str]) -> dict[str, float]:
+    table = {}
+    for name, value in pairs(MINUTES):
         if name in table:
             sys.exit(f"scripts/tla-minutes.txt: two lines for {name}")
         table[name] = float(value)
@@ -148,6 +161,24 @@ def minutes(all_folders: list[str]) -> dict[str, float]:
     if too_long:
         sys.exit(f"{too_long} take more than {FOLDER_MINUTES} minutes: split the folder's checks")
     return table
+
+
+def shards(all_folders: list[str]) -> None:
+    """Every folder has one line in `scripts/mutate-tla-shards.txt`: the
+    `TLA mutants` workflow refuses a run on a folder with no line, so a new
+    folder gets its line in the pull request that adds it."""
+    names = []
+    for name, value in pairs(SHARDS):
+        if not re.fullmatch(r"[0-9]+", value):
+            sys.exit(f"scripts/mutate-tla-shards.txt: {name} has no whole number of slices")
+        names.append(name)
+    twice = sorted({n for n in names if names.count(n) > 1})
+    if twice:
+        sys.exit(f"scripts/mutate-tla-shards.txt: two lines for {twice}")
+    missing = sorted(set(all_folders) - set(names))
+    extra = sorted(set(names) - set(all_folders))
+    if missing or extra:
+        sys.exit(f"scripts/mutate-tla-shards.txt: no line for {missing}, no folder for {extra}")
 
 
 def pack(selected: list[str], table: dict[str, float]) -> list[list[str]]:
@@ -170,6 +201,7 @@ def needs_rust(changed: list[str] | None) -> bool:
 def plan_tla(changed: list[str] | None) -> dict[str, str]:
     all_folders = folders()
     table = minutes(all_folders)
+    shards(all_folders)
     tools = changed is None or any(f in TLA_TOOLS for f in changed)
     selected = []
     for folder in all_folders:

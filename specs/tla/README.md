@@ -345,7 +345,7 @@ The rules of #1018 (zero-stall model, more rules), each with its check and its c
 | Bypass check, the registration half (rule 3) | `p212_check` | `p212_nocheck` |
 | Bypass check, the watermark half (rule 3) | see the finding below | none: the registration half implies it |
 | GC fence (I5): the leader at `b2` makes no floor effective before its fence Phase 1 ends | `gc_p212_paper`, `wm_nocheck_small` | `gc_nofence` (21 steps), `gc_early` |
-| Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff`, `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
+| Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff` (with `HandOnOneHop`: a ballot moves once, from its minter, while it leads), `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
 | Chained bypass (8.3): a second bypass waits for the fence Phase 1 of the first | `chain_small`, `chain` (7.1 million states, 5 minutes, `long`) | `chain_open_small`, `chain_open` |
 | A reader's chosen prefix waits for the fence Phase 1 of the ballot that chose the slot (#1270 (bypass read order)) | `read_carry_hold` (343 thousand states), `read_p212_hold`, and every check with `Reads` | `read_carry_no_read_hold`, `read_p212_no_read_hold`: `ReadSafe` breaks in 13 states (ballot 1 in `{a1, a2}` bypasses to ballot 3 in `{a3, a4}`, which chooses slot 1, and a read on ballot 3 returns it; a read on ballot 1 asks `{a1, a2}` and misses it) |
 | Only the incarnation that won `b` bypasses from `b` (#1230 (rules no check tests)) | `restart_bypass` (489 thousand states) | `restart_bypass_off`: Agreement breaks in 16 states (propose at `b`, restart, bypass, the proposed slot is free at `b2`, a second value is chosen) |
@@ -367,7 +367,8 @@ Findings of #1018 (2026-11-19). No design decision is refuted.
   the minter that still holds a ballot bypasses from it.
 - **The handoff carries the open slots.** `handoff_drop`: a successor that takes the slots that
   wait for the fence Phase 1 as free proposes a second value for a slot that the minter chose at
-  the old ballot.
+  the old ballot. A hand-on to the minter itself drops the open slots the same way, so the control
+  also fails with no successor.
 - **A minter that handed on drops its proactive matchmaking.** `relinquish_off`: the minter bypasses
   with what it knew at the handoff, and misses a value that the successor chose after it.
 - **GC waits for the fence Phase 1.** `gc_nofence`: the leader at `b2` collects the old ballots
@@ -2631,6 +2632,7 @@ and the checks without the `meta_` prefix run it.
 | `deliver_all` | ci | violation of `NoForeign`: every replica gets every slot (the paper's replica); the invariant sees a broadcast |
 | `boundary_zero` | ci | violation of `OneFold`: R2 starts from the empty state, so its fold is not the fold of the whole log (a `seq` that S1 used is given again, or the fence uses a leader uuid that a `SetLeader` of S1 replaced) |
 | `boundary_early` | ci | violation of `OneFold`: the record is written before its writer applied every slot of S1 (`K = 2`) |
+| `record_once` | ci | pass of `RecordOnce`: the early boundary with `K = 1`, `NS = 2`; the record is a compare-and-set on an empty record, so a second replica never writes it again |
 | `boundary_seq` | ci | violation of `AckTrue`: the record holds `next_seq` only, and R2 starts with the first leader uuid. S1 decides `SetLeader(u2, u1)`; R2 then accepts a `Write` of the deposed writer `u1` that the whole log refuses |
 | `route_other` | ci | violation of `ReadTrue`: a read goes to a replica of the other set, which does not hold the `seq`: it answers `Truncated` (below its boundary state) or `Tail` (above the seal) for an acked write that nobody trimmed |
 | `retire_early` | ci | violation of `Ends`: S1 retires at `F` holders; the holder crashes and the slot is lost for the other replicas of R1 |
@@ -2640,6 +2642,7 @@ and the checks without the `meta_` prefix run it.
 | `safety_k2` | long | pass, bounded at 40 minutes: `K = 2`, `NS = 3` |
 | `meta_safety_ci` | ci | pass: the safety invariants with the `meta` rule; two replicas in each set (safety needs no quorum of replicas), the `SetLeader` from `u1` to `u2` and a write of `u1` |
 | `meta_stale` | ci | violation of `AckTrue`: the same configuration as `meta_safety_ci`, but the first leader of S2 reads the metadata before the seal wrote the uuid and proposes `Fence(u1)`; S1 decided `SetLeader(u2, u1)`, and the deposed `u1` writes in S2 |
+| `order_stale` | ci | pass of `ChosenPrefix` and `ChosenStable`: the stale read of `meta_stale` with `K = 1`, `NS = 2`; the fence takes the wrong value but keeps the slot order, and no chosen slot changes. Without the frontier guard of `ChooseFence`, the fence is chosen before slot 0 |
 | `meta_safety` | long | pass, bounded at 40 minutes: the `meta` rule, `NS = 3` (the `Fence` takes slot 1) |
 | `meta_live` | long | pass: `Ends` with the `meta` rule (20.7 million distinct states, about 55 minutes locally with 4 workers) |
 | `meta_gone` | long | pass, bounded at 40 minutes: `EndsS2` with the `meta` rule |
