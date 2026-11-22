@@ -18,6 +18,7 @@ ctrl-grid 9.5
 ctrl-segments 1.5
 decree 8.5
 degraded-reshape 7.5
+election 8
 experiments/segments/a 3.5
 experiments/segments/b 3.5
 experiments/segments/reads 9.5

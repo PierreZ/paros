@@ -126,7 +126,10 @@ the same write; #1189 (the journal state model), #1309 (the state is the disk)),
 member of the set, the new set written by compare-and-set on the version of the register, a "done"
 report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
 removed replica that comes back during the heal; #1314 (re-replication of a sealed segment's
-replica set)).
+replica set)), and, above the journal, the election over a journal (`specs/tla/election/`: the term
+won by `SetLeader(new, old)`, the term number from the fold, the stop at the first refused write,
+the hand on, the fence of an order by its term, the interface of a term, the refusal of a
+multi-writer journal; #1420 (paros-election)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both

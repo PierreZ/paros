@@ -36,10 +36,15 @@ candidate) fail.
   it is registered, alive, and has followed the control journal to its tail. No list of
   candidates is kept, and no candidate comes from a booking or from the first configuration
   (step 3.6, #1023).
-- **One election mechanism for everyone** (decision 13). The term of the kit (win a journal with
+- **One election mechanism for everyone** (decision 13). The election over a journal is its own
+  crate of layer 3, `paros-election` (section 4.4, #1420 (paros-election)): win a journal with
   `SetLeader`, renew by writing, stop at the first refused write, hand on with `SetLeader(next,
-  me)`) is the public election API. The election journal library (`paros::client::election`) is
-  deleted. Multi-writer journals stay a data-plane feature.
+  me)`. It is the public election API, and each coordinator uses it over its control journal. The
+  election journal library (`paros::client::election`) is deleted. Multi-writer journals stay a
+  data-plane feature: the election refuses a journal whose leader is `None`. TLC checks the
+  election alone in `specs/tla/election/`: one holder for each term, a holder that stops at its
+  first refused write, a fenced order of an old term refused, an interface that ends with its
+  term, and a multi-writer journal that the election never takes back.
 - **Each control journal has one writer, its coordinator.** An operator or a client sends a
   request with an idempotency id, and the coordinator writes it under its own term. No admin
   session claims a control journal (section 3.1).
