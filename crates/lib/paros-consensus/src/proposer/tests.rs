@@ -101,6 +101,50 @@ fn phase1_needs_a_quorum_of_every_prior_configuration() {
     );
 }
 
+/// Decision 31 (#1209): a Phase 1 seals each row of a full grid of `H_b`
+/// other than `C_b`, and asks no seal of `C_b` itself. The old grid
+/// `{1, 2, 3, 4}` has the rows `{1, 2}` and `{3, 4}`; `C_b` is the grid
+/// `{3, 4, 5, 6}`, with the rows `{3, 4}` and `{5, 6}`.
+#[test]
+fn phase1_seals_each_row_of_an_old_full_grid_only() {
+    let grid = |members: &[u64]| {
+        AcceptorConfig::new(
+            members.iter().copied().map(NodeId).collect(),
+            crate::membership::QuorumSystem::grid(2, 2),
+        )
+    };
+    let old = grid(&[1, 2, 3, 4]);
+    let c_b = grid(&[3, 4, 5, 6]);
+    let mut p: Proposer<NodeId, Command> = Proposer::new();
+    let _ = p.open_phase1(
+        Campaign {
+            me: None,
+            ballot: ballot(1, 0),
+            config: c_b.clone(),
+            prior: vec![old.clone(), c_b.clone()],
+            from_slot: Slot(0),
+        },
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    // The row {3, 4}: a Phase-1 quorum of both grids. The row {5, 6} of
+    // `C_b` heard nothing and needs nothing; the row {1, 2} of the old grid
+    // heard nothing, so the Phase 1 is not sealed.
+    assert_eq!(fold_empty(&mut p, 3, Slot(0)), PromiseFold::Answered);
+    assert_eq!(fold_empty(&mut p, 4, Slot(0)), PromiseFold::Answered);
+    let row: BTreeSet<NodeId> = [NodeId(3), NodeId(4)].into();
+    assert!(old.has_phase1_quorum(&row) && c_b.has_phase1_quorum(&row));
+    assert!(!old.has_phase1_seal(&row) && !c_b.has_phase1_seal(&row));
+    assert!(
+        !p.phase1_won(ballot(1, 0)),
+        "a row of the old grid heard nothing of the ballot"
+    );
+    // One promise in the row {1, 2} seals the old grid, and the Phase 1 wins
+    // with the row {5, 6} of `C_b` still unheard.
+    assert_eq!(fold_empty(&mut p, 1, Slot(0)), PromiseFold::Answered);
+    assert!(p.phase1_won(ballot(1, 0)), "C_b needs no seal of its own");
+}
+
 /// The merge keeps the highest-ballot report per slot (P2c) and the
 /// closed outcome carries it.
 #[test]

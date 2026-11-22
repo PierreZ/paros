@@ -13,9 +13,9 @@ A coordinator is a client of the cell. It sits above `paros-client` and `paros-r
 3. publishes its `CoordinatorInterface` and renews the lease while each duty runs (`renewing`, #542 (coordinator starves its lease));
 4. runs one watch round per renewal period until its first write that does not land.
 
-A watch round (`cell/watch.rs`, `Watch`, #211 (failure detector)) `Identify`s every machine and writes changes only: `MachineUp`, `MachineDown` after `machine_down_after`, gone after `machine_replace_after` outside a maintenance window (#475 (re-place after the Down bound)), `MachineAdmitted`, `MachineSpace` (#360 (disk full)), `MachineSlow` (`cell/slow.rs`, #361 (slow machines)). Then, in this order (the chain in `cell/campaign.rs`), one step each, in turn over keys (`turn.rs`): balance, moves, modes, sets, footprints, roles, scrubs, controls. A step that returns `None` (its write did not land) ends the chain.
+A watch round (`cell/watch.rs`, `Watch`, #211 (failure detector)) `Identify`s every machine and writes changes only: `MachineUp`, `MachineDown` after `machine_down_after`, gone after `machine_replace_after` outside a maintenance window (#475 (re-place after the Down bound)), `MachineAdmitted`, `MachineSpace` (#360 (disk full)), `MachineSlow` (`cell/slow.rs`, #361 (slow machines)). A round also follows the universe directory (`universe.rs`) and the tenant moves between cells (`cell/moving.rs`), and releases the slots of a dropped or moved tenant. Then, in this order (the chain in `cell/campaign.rs`), one step each: balance, moves, modes, sets, footprints, roles, scrubs, controls, arrivals (`tenant/arrivals.rs`). The footprint, mode, move, role and scrub steps take their keys in turn (`turn.rs`). A step that returns `None` (its write did not land) ends the chain. Between rounds the term answers `Register`, `JournalRequest`, `CapacityRequest` and `JoinUniverse` (`cell/answers.rs`, `answer_until`). The new home of each module is in `docs/architecture/04-5-old-duties.md` (§4.5, #1412 (the duty table)).
 
-**Tenant coordinator** (`tenant.rs`, `TenantDesk`, #210 (tenant control journals)). The same term is the single writer of every hosted tenant's control journal. It claims each one under the term uuid, answers `JournalRequest` (create, delete, configure) from the recorded outcome or writes it, and places a create with `paros_model::placement` (#474 (journals on admitted machines)). Slots are booked through the term's own cell session (`cell/bookings.rs`, `grant`, #476 (tenant footprint)).
+**Tenant coordinator** (`tenant.rs`, `TenantDesk`, #210 (tenant control journals)). The same term is the single writer of every hosted tenant's control journal. It claims each one under the term uuid, answers `JournalRequest` (create, delete, configure) from the recorded outcome or writes it, and places a create with `paros_model::placement` (#474 (journals on admitted machines)). Slots are booked through the term's own cell session (`cell/capacity.rs`, `grant`, #476 (tenant footprint)).
 
 **Membership steps** (all in `tenant/`). Each step starts from what the registry and the journal's leader hold now, so a later term finishes what an earlier one started:
 
@@ -27,7 +27,7 @@ A watch round (`cell/watch.rs`, `Watch`, #211 (failure detector)) `Identify`s ev
 - `balancing.rs` (#687 (balance a cell)): runs the pure `paros_model::balance`, records `BalanceStarted`/`BalanceAbandoned`, asks a `Handoff`.
 - `scrub.rs` (`Scrubs`, #362 (background scrubbing)): page through every acceptor, compare fingerprints, record `TenantCommand::Scrubbed`.
 
-**Universe** (`universe.rs`, #513 (fleet Init duel), #225 (control hierarchy)): writes `JoinFleet`, a tenant's `GrantBookings`, `HostTenant`, `DropTenant` into the cell control journal.
+**Universe** (`universe.rs`, #513 (fleet Init duel), #225 (control hierarchy)): writes `JoinFleet`, a tenant's `GrantCapacity`, `HostTenant`, `DropTenant` into the cell control journal. **Tenant move between cells** (`cell/moving.rs` for the cell's records, `tenant/arrivals.rs` for the target's journals, #784 (coordinator handover)).
 
 ## Key files and types
 
@@ -37,7 +37,10 @@ A watch round (`cell/watch.rs`, `Watch`, #211 (failure detector)) `Identify`s ev
 | `crates/lib/paros-coordinator/src/cell/campaign.rs` | `Candidacy`, `spawn`, `successor`, `chaos`, `renewing`; the BUGGIFY decisions of a candidacy (`stall`, `hand_off`, `quit_mid_move`, `stray_replica`, ...) |
 | `crates/lib/paros-coordinator/src/cell/watch.rs` | `Watch` (`round`, `gone`, `held`), `Probe` |
 | `crates/lib/paros-coordinator/src/cell/slow.rs` | `SlowJudge`, `SlowBounds`, `Sample`, `Judged`: pure, with hysteresis and a minority cap |
-| `crates/lib/paros-coordinator/src/cell/bookings.rs` | `grant`, `decide`, `BookingRequest`, `BookingAnswer`: idempotent slot grants |
+| `crates/lib/paros-coordinator/src/cell/capacity.rs` | `grant`, `decide`, with `CapacityRequest` and `CapacityAnswer` of `paros_client::capacity`: idempotent slot grants |
+| `crates/lib/paros-coordinator/src/cell/moving.rs` | `follow`, `steps`, `reach`: the cell's side of a tenant move between cells |
+| `crates/lib/paros-coordinator/src/tenant/arrivals.rs` | `Arrivals`, `ArrivalStep`: the target's half of a tenant move between cells |
+| `crates/lib/paros-coordinator/src/tenant/balancing.rs` | `step`: records the balancer's decision |
 | `crates/lib/paros-coordinator/src/cell/footprints.rs` | `Footprints` |
 | `crates/lib/paros-coordinator/src/cell/answers.rs` | `Register` (#349 (address books from the registry)) and journal requests |
 | `crates/lib/paros-coordinator/src/tenant.rs` | `TenantDesk`, `Unread` |
@@ -55,11 +58,11 @@ A watch round (`cell/watch.rs`, `Watch`, #211 (failure detector)) `Identify`s ev
 
 - **Every step restarts from durable state** (all of `tenant/`). A step reads the registry, the tenant journal and the leader, then does one action. No step keeps a plan in memory across rounds. A new term finishes any half-done move. Keep this shape for any control loop.
 - **One rule of turns** (`turn.rs`). Each step takes the next key after the last one, wraps, and so one stuck journal cannot starve the others.
-- **Idempotent grants** (`cell/bookings.rs`). A request has an id; a decided id is answered from its record; a refusal at apply is recorded under the same id.
+- **Idempotent grants** (`cell/capacity.rs`). A request has an id; a decided id is answered from its record; a refusal at apply is recorded under the same id.
 - **Term fenced by uuid** (`cell.rs`, `tenant.rs`). Install with `SetLeader(uuid, current)`; stop at the first write that does not land; never fight an admin fence.
 - **Renew while a duty runs** (`renewing`, `cell/campaign.rs`). A long install or watch round must not starve the lease.
 - **Hand the term on at a clean stop** (`successor`, `cell/campaign.rs`): name the next candidate by id.
-- **Pure judges with unit tests** (`SlowJudge`, `Watch::gone`, `bookings::decide`, `count_steps`, `change_of`, scrub `judge`). The async glue is tested only by the simulation (see `AGENTS.md`, #827 (ub-mode: paros-coordinator)).
+- **Pure judges with unit tests** (`SlowJudge`, `Watch::gone`, `capacity::decide`, `count_steps`, `change_of`, scrub `judge`). The async glue is tested only by the simulation (see `AGENTS.md`, #827 (ub-mode: paros-coordinator)).
 - **Scrub never uses a quorum read** (`tenant/scrub.rs`): a quorum read hides rot on the other copies. Progress is a journal entry, so a new term resumes.
 - **Slow is not down** (`cell/slow.rs`): RTT against four times the round median, busy ratios, `slow_rounds` in a row, at most a minority held slow.
 
@@ -96,7 +99,7 @@ A new design should move these rules into a journal admin port ("move members fr
 - **Dropped tenant** must be refused by every term (#395 (dropped tenant refused)); a short catch-up answers `unavailable` (#445 (ignored load result)).
 - **Watch unit tests** (`src/cell/watch/tests.rs`): `a_down_machine_silent_past_the_bound_is_gone`, `a_maintenance_window_holds_a_down_machines_roles`, `a_reboot_widens_its_roles_never_narrows_them`, `a_machine_whose_fold_stopped_below_the_tail_is_stuck`, `a_retired_initial_member_is_never_marked_down`.
 - **Move unit tests** (`src/tenant/moves/tests.rs`): `a_handoff_goes_to_a_member_of_both_configurations`, `a_cold_member_holds_its_move_back_at_most_the_warm_rounds`, `a_waiting_move_gives_its_turn_to_one_that_steps`.
-- **Booking tests** (`src/cell/bookings/tests.rs`): `a_recorded_request_is_answered_from_its_record`, `a_slot_on_a_machine_that_does_not_serve_is_refused`.
+- **Booking tests** (`src/cell/capacity/tests.rs`): `a_recorded_request_is_answered_from_its_record`, `a_slot_on_a_machine_that_does_not_serve_is_refused`.
 
 ## How to read it at the tag
 

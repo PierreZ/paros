@@ -45,6 +45,26 @@ refused.
   clients to draw fresh uuids (decision C, section 2.3, #241).
 - **Failure domains** are not identifiers: `AcceptorConfig` carries the registry's
   `paros/zone` names unchanged (section 5).
+
+**Names for people, ids for machines, and an id is never an authority** (Pierre, 2026-11-22;
+goal 5 of section 1.1). This decision changes three rules of this section. The code and the
+bullets below still tell the rules of the tag where they differ; #1402 (remove the tenant from
+the core) tracks the change.
+
+- A person types and reads ASCII names. Machines and protocols carry `u64` ids.
+- An id is an address, never an authority. A client sends a token and names to the frontend
+  (section 3.5), and it has no field to put an id in. So a caller that crafts the right `u64`
+  gains nothing.
+- A client does not draw an id. A create call carries a name and a request id. The service draws
+  the id, and the fold checks it at apply and refuses an id that is in use: the fold of the
+  universe for a `TenantId`, the fold of a tenant for a `JournalId`, which is unique inside its
+  tenant (Pierre, 2026-11-22). A counter in the fold was refused: the tenant of a cell exists
+  before the cell joins a universe, so no counter of the universe can give its id. **Open**: the
+  role that draws, the genesis records of the first tenants, and a birth nonce in `Assign`.
+- `paros-consensus` and `paros-journal` know no tenant (section 4.4). So a peer message of the
+  core carries one journal id, and the pair `(TenantId, JournalId)` is made above the core: the
+  host is generic over its key, and the tenancy crate keys it by the pair.
+
 - **Tombstones** (removed tenant ids, dropped tenants, deleted journal ids) are kept forever, a
   `u64` each. They are the one part of control state bounded by history rather than by live
   entities (section 3.9), accepted as such (decided on 2026-10-04). Names are not tombstoned

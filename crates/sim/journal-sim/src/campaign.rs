@@ -35,6 +35,28 @@ impl Drop for Table {
 /// The walk's failure, a site name longer than the table keeps, or the
 /// sites that no seed passed.
 pub fn try_campaign<M: Model>(walk: &Walk<M>, expected: &[&str]) -> Result<(), String> {
+    try_sites(
+        AssertKind::Sometimes,
+        || walk.try_run().map_err(|error| error.to_string()),
+        expected,
+    )
+}
+
+/// Run `run` with the assertion table installed, then judge that every
+/// site of `expected`, of `kind`, passed: the campaign of a sweep that is
+/// not a walk (the `probe!` sites of the controller's decisions, which are
+/// `Reachable`, `crate::control`). A site declared with another kind than
+/// its code's is a conflict in the table and never counts.
+///
+/// # Errors
+///
+/// The error of `run`, a site name longer than the table keeps, or the
+/// sites that `run` never passed.
+pub fn try_sites<R: std::fmt::Display>(
+    kind: AssertKind,
+    run: impl FnOnce() -> Result<R, String>,
+    expected: &[&str],
+) -> Result<(), String> {
     if let Some(long) = expected.iter().find(|site| site.len() > SITE_LEN) {
         return Err(format!(
             "the site {long:?} is longer than the {SITE_LEN} bytes the table keeps"
@@ -42,9 +64,9 @@ pub fn try_campaign<M: Model>(walk: &Walk<M>, expected: &[&str]) -> Result<(), S
     }
     let _table = Table::install();
     for site in expected {
-        moonpool_assertions::declare_site(AssertKind::Sometimes, true, false, site);
+        moonpool_assertions::declare_site(kind, true, false, site);
     }
-    let report = walk.try_run().map_err(|error| error.to_string())?;
+    let report = run()?;
     let sites = moonpool_assertions::assertion_read_all();
     let missed: Vec<&&str> = expected
         .iter()
@@ -58,7 +80,7 @@ pub fn try_campaign<M: Model>(walk: &Walk<M>, expected: &[&str]) -> Result<(), S
         Ok(())
     } else {
         Err(format!(
-            "every seed passed, but no seed reached {missed:?}\n{report}"
+            "every run passed, but no run reached {missed:?}\n{report}"
         ))
     }
 }

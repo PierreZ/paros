@@ -3,11 +3,16 @@
 #
 #   scripts/mutants.sh [ARGS...]
 #   scripts/mutants.sh --journal [ARGS...]
+#   scripts/mutants.sh --control [ARGS...]
 #   scripts/mutants.sh --journal-io [ARGS...]
 #
 # `--journal` runs the same two passes on paros-journal, judged by its unit
 # tests and by journal-sim (`.cargo/mutants-journal.toml`, then
 # `.cargo/mutants-journal-tlc.toml`).
+#
+# `--control` runs one pass on paros-journal-control, judged by its unit tests,
+# by journal-sim's sweep of the controller's decisions and by its controller
+# walks (`.cargo/mutants-control.toml`).
 #
 # `--journal-io` runs one pass on paros-journal-io, judged by its unit tests
 # and by the driver walk of journal-sim (`.cargo/mutants-journal-io.toml`).
@@ -52,6 +57,10 @@ if [ "${1:-}" = "--journal" ]; then
   second=.cargo/mutants-journal-tlc.toml
   baseline_args=(-p paros-journal -p journal-sim
     -E '(binary(traces) | binary(register_traces)) and not test(edited)')
+elif [ "${1:-}" = "--control" ]; then
+  shift
+  crate=paros-journal-control
+  first=.cargo/mutants-control.toml
 elif [ "${1:-}" = "--journal-io" ]; then
   shift
   crate=paros-journal-io
@@ -95,6 +104,12 @@ fi
 if [ ! -s mutants.first/missed.txt ]; then
   echo "First pass: no mutant missed. The second pass has nothing to run."
   exit 0
+fi
+if [ -z "$second" ]; then
+  cp mutants.first/missed.txt survivors.txt
+  echo "Survivors: $(wc -l < survivors.txt)."
+  cat survivors.txt
+  exit 2
 fi
 
 # One anchored regex for each missed mutant, matched on its whole name

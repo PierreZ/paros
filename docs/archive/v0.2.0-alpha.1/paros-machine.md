@@ -40,7 +40,6 @@ The `CellPlan` names the cell id, the initial members (id and address), the cell
 | `crates/lib/paros-machine/src/resolve.rs`, `resolve/entry.rs` | `Resolver`, `booked_on`: `Resolve` and `ResolveEntry` (#233 (resolver)) |
 | `crates/lib/paros-machine/src/views.rs`, `load.rs` | `View` (#399 (views)), `Load` windows (#424 (busyness metrics)) |
 | `crates/lib/paros-machine/src/inspect.rs`, `inspect/` | Offline store inspection (#365 (offline store inspection)) |
-| `crates/lib/paros-machine/src/plan_shard.rs` | The plan declared as a moonpool `shard!` (#1179 (the kill policy as shards)) |
 | `crates/lib/paros-machine/src/pin.rs` | `AdminPin` |
 
 The record format is `MachineRecord` in `paros-model/src/machine/record.rs`: a text file with `created`, `deleted`, `admitted` and other lines.
