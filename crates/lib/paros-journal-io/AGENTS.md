@@ -25,7 +25,7 @@ under faults.
 `examples/`: `in_memory` (a journal on three processes), `custom_storage` (a backend written
 by hand, checked by the contract suite) and `multi_writer` (`SetLeader(None)`, open writes from
 two writers, and back to one writer). Shared code is in `examples/common/mod.rs`. Each asserts
-its result and runs in the `examples` job of CI.
+its result and runs in the `checks` job of CI.
 
 ## Rules
 

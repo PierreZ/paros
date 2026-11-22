@@ -278,15 +278,15 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `multi_writer`; #1370 (journal examples)), the grid controller's example:
   `cargo run -p paros-journal-control --example controller`, and the facade examples:
   `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
-- `scripts/check-examples.sh`: every composing crate has an example, and the `examples` job runs
+- `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
   each one (the workflow rule "Composing crates have examples" below)
 - the doc examples: `cargo test --doc -p paros-consensus -p paros-journal-io` (nextest runs no
   doc test)
 - the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
   instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
   `SANCOV_CRATES=paros_consensus`, `--target-dir target/sancov`). Each CI job has at most 30
-  minutes, so four `coverage-shard` jobs walk a quarter of the walks each
-  (`COVERAGE_SHARD=i/4`, `COVERAGE_SAVE`), and the `coverage` job judges their union
+  minutes, so two `coverage-shard` jobs walk half of the walks each
+  (`COVERAGE_SHARD=i/2`, `COVERAGE_SAVE`), and the `coverage` job judges their union
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
 - the edits of recorded traces (#1308 (mutate recorded traces)), in release in the
@@ -324,17 +324,20 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   of its live parts (`nix develop .#site --command npm test`, Playwright and Chromium;
   `website/site/AGENTS.md`, "Tests")
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
-  TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow, one job for each folder, and the trace checks of consensus-sim and journal-sim, the live check of `journal-sim/tests/live.rs` too, in four
-  `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); the job of each folder also checks that
-  each guard mutant parses (`scripts/mutate-tla.py --parse`)
+  TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow: the folders that the change can break, packed into `spec` jobs of at
+  most 22 minutes of checks by `scripts/ci-plan.py` and `scripts/tla-minutes.txt`, and the trace checks of consensus-sim and journal-sim, the live check of `journal-sim/tests/live.rs` too, in four
+  `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); each `spec` job also checks that
+  each guard mutant of its folders parses (`scripts/mutate-tla.py --parse`)
 - the `TLA mutants` workflow, each week and on demand: `scripts/mutate-tla.py` sets each guard
   of each action of `specs/tla/` to `TRUE` and runs the folder's `ci` checks; one check must
   fail. A survivor fails the run: remove the guard or add the check that needs it, never an
   allow list (#1311 (mutate spec guards), `specs/tla/README.md`)
 
 A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`,
-Markdown, `docs/`, `specs/`) runs only the `wasm` job of `rust.yml`; a push to `main` runs
-everything. Rust 2024 edition, toolchain pinned in `rust-toolchain.toml` (incl.
+Markdown, `docs/`, `specs/`, the TLA+ scripts) runs only the `wasm` job of `rust.yml`
+(`scripts/ci-plan.py rust`); a push to `main` runs everything. The `traces` jobs of the `TLA`
+workflow run only when the `test` job of `rust.yml` does not, since that job runs the same trace
+tests. Rust 2024 edition, toolchain pinned in `rust-toolchain.toml` (incl.
 `wasm32-unknown-unknown`), clippy pedantic on (`[workspace.lints]`). The whole workspace passes
 pedantic with no lint allowed (Pierre, 2026-11-19): fix the code, never add `#[allow(clippy::..)]`.
 When a lint is wrong for one item, write `#[expect(clippy::<lint>, reason = "..")]` on that item
@@ -350,7 +353,7 @@ merges a release pull request, and only Pierre starts the `release` job (workflo
 which publishes. An agent never merges a release pull request and never starts that job. A new
 public crate (for example `parosd`) gets the crates.io metadata, a `version` on
 its workspace dependency line, and a `[[package]]` entry in the `paros` group of
-`release-plz.toml`, in the PR that creates it. The `portability` job checks that the public
+`release-plz.toml`, in the PR that creates it. The portability steps of the `checks` job check that the public
 crates package and build as crates.io builds them (`cargo publish --dry-run --workspace`): each
 git dependency is replaced by its `version`, so a moonpool pin that needs an API not yet on
 crates.io turns that job red until moonpool publishes it.
@@ -399,11 +402,18 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   have caught, add the check in the same PR as the fix: a lint, a `scripts/check-*.sh` in CI, a
   test or an oracle, or else a rule in this file. A fix of only the one instance lets the
   mistake come back.
-- **A new crate adds only the CI it needs** (Pierre, 2026-11-22). The workspace jobs of
-  `.github/workflows/rust.yml` already build and test a new crate. Add a job or a step only for a
-  check that is new to the crate. Make that new job run only when it can find something: when the
-  crate, a crate it depends on, or the job changes. A path filter is allowed on the new job only.
-  A filter on an existing job is a loosened judge (`REVIEW.md`).
+- **A job runs only when it can find something** (Pierre, 2026-11-22: "trigger only the CI
+  that's necessary"). GitHub runs at most 40 jobs at a time for the whole account (GitHub Pro),
+  so each job that cannot find anything holds back the pull requests behind it. The workspace
+  jobs of `.github/workflows/rust.yml` already build and test a new crate: add a job or a step
+  only for a check that is new to the crate. A path filter or a plan (`scripts/ci-plan.py`) may
+  skip any job, a new one or an existing one, only when it provably runs the job for every
+  change of the job's inputs: name the inputs and why they are all of them in the comment of
+  the job (a TLA+ folder reads only its files and their symlink targets). A filter that skips a
+  job whose inputs changed is a loosened judge (`REVIEW.md`). Put small checks of one kind as
+  steps of one job (`checks`), not one job each, and keep each job inside its 30 minutes.
+  A new folder of `specs/tla/` gets its line in `scripts/tla-minutes.txt` (the plan fails
+  without it).
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
@@ -411,7 +421,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   journal client. A user programs against these crates, so each one has runnable examples in
   `examples/` that use its public API as a user would (the facade's examples import `paros::`
   paths only). An example asserts what it shows, so CI runs it as a test: add each new example
-  to the `examples` job of `.github/workflows/rust.yml`. A change that reshapes the public API of
+  to the examples steps of the `checks` job of `.github/workflows/rust.yml`. A change that reshapes the public API of
   a composing crate updates its examples, or adds one, in the same pull request: the examples are
   how a reviewer judges the abstraction. `scripts/check-examples.sh` fails when a composing crate
   has no example or when CI does not run one. The internal crates (`consensus-sim`,

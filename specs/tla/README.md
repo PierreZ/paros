@@ -8,7 +8,7 @@ completely, and the simulation tests the code that ships.
 
     nix develop .#tla --command scripts/check-tla.sh          # the checks that CI runs
     nix develop .#tla --command scripts/check-tla.sh --all    # the long checks too
-    nix develop .#tla --command scripts/check-tla.sh reads    # one folder; CI runs one job for each folder
+    nix develop .#tla --command scripts/check-tla.sh reads    # one folder
 
 `tlc` is also in the default dev shell. CI runs the first command in the `TLA` workflow, only
 when a spec, the script or the flake changes.
@@ -191,7 +191,7 @@ uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked in
 not models of the plan, and no rule of `paros-consensus` comes from them until Pierre decides.
 Each experiment has one folder for each design, with the same layout as a model, and a
 `README.md` with the report. `scripts/check-tla.sh` runs an experiment only when it is named
-(`scripts/check-tla.sh experiments/segments/a`); CI runs a job for each experiment folder too.
+(`scripts/check-tla.sh experiments/segments/a`); CI checks each experiment folder too.
 
 - `experiments/segments/`: #1213 (segments in the protocol or in storage). Design A, the segment
   table in the matchmakers (`a/`), against design B, plain Matchmaker Paxos with chunks local to

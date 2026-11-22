@@ -35,7 +35,7 @@ nix develop .#tla --command scripts/check-tla.sh          # the checks that CI r
 nix develop .#tla --command scripts/check-tla.sh reads    # one folder
 ```
 
-CI runs one job for each folder. A `long` line runs only with `--all`; a long line with a time
+CI runs the folders that a change can break, packed into a few jobs. A `long` line runs only with `--all`; a long line with a time
 bound stops at that bound and is a bounded run, never a proof. The README of
 [`specs/tla/`](https://github.com/PierreZ/paros/blob/main/specs/tla/README.md) lists every model
 with its checks and its controls. The [safety case](../) names, for each claim, the model, the
