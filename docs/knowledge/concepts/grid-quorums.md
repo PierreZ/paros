@@ -90,7 +90,9 @@ A `3 × 2` grid of partitions (`F = 1`): six acceptors, two columns of three.
   quorum of every column at every lower ballot. The P2c merge works unchanged.
 - **A reconfiguration between grids, or between a grid and a majority.** Phase 1 needs a
   Phase-1 quorum of every configuration in the history, so a row of the old grid too
-  ([matchmaking](matchmaking.md)).
+  ([matchmaking](matchmaking.md)). On an old full-column grid it also needs one promise in each
+  row: the **seal** (`AcceptorConfig::has_phase1_seal`, `Election::covered`; decision 31, #1209).
+  `C_b` itself needs no seal.
 
 ## 6. Why it is safe
 
@@ -112,6 +114,8 @@ because a short row or column would let a predicate answer for a cell that does 
   zero: one dead acceptor freezes its column until the leader moves the round.
 - An election needs `rows − acks + 1` live acceptors in every column. A partition that lost a
   majority stops elections, and so stops every later reconfiguration.
+- During a change of members, an election also needs one live acceptor in each row of every
+  old full-column grid in its history (the seal, #1209).
 - Which acceptors fail matters, not only how many ([WPaxos §3.1]: `Fmin` and `Fmax`).
 - `f` acceptors down in **every** column at once leave a Phase-1 and a Phase-2 quorum exactly
   when `f + 1 <= acks <= rows - f` (`specs/tla/grid/GridCheck.tla`, `PerColumnTolerance`). The
@@ -185,7 +189,9 @@ because a short row or column would let a predicate answer for a cell that does 
   majority and on the partitions two Phase-1 quorums meet, and the `PreReadAck` ballot catches
   the read. A static full grid and a Phase 1 that reaches every row of the old grid both pass;
   paros takes the second (decision 31, 2026-11-19, #1102 (rework 1.13)): a full grid keeps its
-  change of members.
+  change of members. The code seals each row of each configuration of `H_b` other than `C_b`
+  (#1209, check `grid_full_seal_others`; the unit test
+  `a_phase1_seals_each_row_of_an_old_full_grid`).
 - **Columns in one zone.** A column inside one failure domain commits alone, and after its loss
   it blocks every later reconfiguration. The zone rule refuses it per partition.
 

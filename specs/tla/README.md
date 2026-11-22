@@ -998,6 +998,8 @@ Results (`reads/checks.txt`):
 | `grid_full`: the full grid, a change of members, the row read (the code) | violation (300 thousand states, 15 seconds) |
 | `grid_full_static`: the full grid, no change of members | pass (588 thousand states, 35 seconds) |
 | `grid_full_seal`: the full grid, a change of members, `Seal = "reads"` | pass (1.6 million states, 1.5 minutes) |
+| `grid_full_seal_others`: `Seal = "others"`, the seal of each configuration of `H_b` other than `C_b` (the code, #1209) | pass (1.9 million states, 1.5 minutes) |
+| `grid_full_seal_others3`: `grid_full_seal_others` with three ballots of two proposers, `OwnerParos3` (`long`) | no violation in 16.1 million distinct states (bounded: 30 minutes, 2 workers) |
 | `grid_partitions`: the partitions, a change of members | no violation in 71.2 million distinct states, to depth 23 (a bounded run of 2 hours, 2 workers; `long`) |
 
 The trace of `grid_full` is the stale read that `quorum_read.rs` names (a row "wholly unaware of
@@ -1017,8 +1019,12 @@ meet, so the read finds that acceptor. On the full grid two rows do not meet
 (`grid/grid_full_rows`). Two rules close the gap, and each check passes: a full grid that
 refuses a change of members (`grid_full_static`), and a seal that reaches each row
 (`grid_full_seal`). Pierre chose the seal that reaches each row on 2026-11-19 (#1102, decision 31
-in `docs/journal/02-data-plane.md` §J2.5); the code is #1209 (seal each row of a full
-grid).
+in `docs/journal/02-data-plane.md` §J2.5). The code is #1209 (seal each row of a full grid):
+`Election::covered` asks the seal (`AcceptorConfig::has_phase1_seal`) of each configuration of
+`H_b` other than `C_b`, and the Phase-1 quorum alone of `C_b` (`Seal = "others"`, check
+`grid_full_seal_others`). A column of `C_b` chooses at the new ballot, and each row of `C_b`
+meets that column, so a row of `C_b` needs no seal. The plain deployment (`H_b = [C_b]`) and a
+new leader of the configuration in force pay nothing.
 
 The fence of the `PreReadAck` (#1099 (rework 1.10), findings 1 and 11 of the review of
 `paros-consensus` of 2026-11-16). The trace of `fence_belief_lag` is finding 1:
