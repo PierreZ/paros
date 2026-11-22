@@ -44,6 +44,7 @@ and the `paros-sim` simulation) is at the git tag
 | [`crates/lib/paros-consensus`](crates/lib/paros-consensus) | the sans-IO Paxos roles (proposer, acceptor, replica, matchmaker, proxy leader, quorum reads) and `ColocatedNode`; std-only, wasm-safe, zero deps with `default-features = false` |
 | [`crates/lib/paros`](crates/lib/paros) | the facade a program depends on |
 | [`crates/support/paros-wasm`](crates/support/paros-wasm) | the engine of the step-through diagrams of the site's Paxos pages |
+| [`crates/support/paros-authz-biscuit`](crates/support/paros-authz-biscuit) | Biscuit tokens: root keys, offline mint and derive, the verifier of a request |
 | [`specs/tla`](specs/tla) | TLA+ models of the protocol rules, checked with TLC |
 | [`website`](website) | the site |
 | [`docs`](docs) | the target design, the Paxos knowledge base, design notes and paper references |

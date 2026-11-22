@@ -1,0 +1,24 @@
+[package]
+name = "paros-authz-biscuit"
+description = "paros authorization with Biscuit tokens: root keys, offline minting and derivation, and the verifier of each request (#245, #400)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Not released while `biscuit-auth` is pinned to an alpha.
+publish = false
+
+[dependencies]
+# Default features off: no PEM loaders and no compile-time Datalog macro.
+# Every key and every block key comes from a caller's `Entropy`, never from
+# the crate's thread RNG (`clippy.toml` bans the defaults).
+# Pinned to the 7.0 alpha: 6.0.0 pins prost 0.10 and rand_core 0.6, the
+# 7.0 line uses prost 0.14 and rand 0.10 (#400).
+biscuit-auth = { version = "=7.0.0-alpha.3", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

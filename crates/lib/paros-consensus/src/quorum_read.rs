@@ -46,11 +46,18 @@
 //! carries the answering node's configuration ballot on a matchmaker
 //! deployment, so a read whose row already knows of a successor abandons on
 //! the first such answer rather than completing over a superseded belief.
-//! That catch needs the read's row to meet the successor's Phase-1 quorum
-//! in the old configuration: true under a majority, and not for a grid row *wholly* unaware of a completed
-//! successor — those reads are judged by the client-history linearizability
-//! oracle and the audit's read floor, the sweep's finding, not this
-//! module's claim. A rebooted acceptor answers no `PreRead` until it has
+//! That catch needs the read's row to hold an acceptor that promised the
+//! successor. Under a majority and on a partitioned grid the read asks the
+//! whole membership, which meets every Phase-1 quorum. On a full-column grid
+//! two rows never meet, so the election **seals** each row (decision 31,
+//! #1209): a Phase 1 of ballot `b` takes, in each configuration of `H_b`
+//! other than `C_b`, one promise in every row as well as its Phase-1 quorum
+//! ([`crate::membership::AcceptorConfig::has_phase1_seal`],
+//! [`crate::proposer::Election::covered`]). Each row of an old grid then
+//! holds an acceptor whose `PreReadAck` names `b` and ends the read; a row
+//! of `C_b` itself meets the column that chooses at `b`. The model is
+//! `specs/tla/reads/` (check `grid_full` finds the stale read without the
+//! seal, `grid_full_seal_others` passes with it). A rebooted acceptor answers no `PreRead` until it has
 //! heard what is in force, or its answer would name a ballot it forgot.
 //!
 //! *Which* configuration is the [`ReadBasis`]: never a node's belief as a

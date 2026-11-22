@@ -60,35 +60,36 @@ Handover == /\ active < N - 1
                           IF m \in Members(active + 1) THEN active + 1 ELSE know[m]]
             /\ UNCHANGED <<gone, belief, regs>>
 
-\* A frozen matchmaker learns its successor (`Stopped { successor }`).
+\* A frozen matchmaker learns its successor (`Stopped { successor }`). For a
+\* member of the set in force it changes nothing.
 LearnSuccessor(m) == /\ m \notin gone
-                     /\ know[m] < active
                      /\ know' = [know EXCEPT ![m] = active]
                      /\ UNCHANGED <<active, gone, belief, regs>>
 
 \* A matchmaker outside the set in force is gone for good.
-Leave(m) == /\ m \notin gone
-            /\ m \notin Members(active)
+Leave(m) == /\ m \notin Members(active)
             /\ gone' = gone \cup {m}
             /\ UNCHANGED <<active, know, belief, regs>>
 
 \* The matchmakers a re-ask of the campaign addresses.
 Asked == IF Discover THEN Pool ELSE Members(belief)
 
-\* A refusal that names a later generation: the candidate adopts it. An
-\* outsider's refusal counts only when the later set is wholly in the pool.
+\* A refusal that names a later generation: the candidate adopts it. A
+\* matchmaker that is gone now may have sent its refusal before it left, so
+\* the answer can still arrive. (An outsider's refusal counts only when the
+\* later set is wholly in the pool; in this model every set of the chain is
+\* in the pool.)
 Refuse(m) == /\ m \in Asked
-             /\ m \notin gone
              /\ know[m] > belief
-             /\ Members(know[m]) \subseteq Pool
              /\ belief' = know[m]
              /\ UNCHANGED <<active, know, gone, regs>>
 
-\* A matchmaker active in the generation in force registers the campaign.
-Register(m) == /\ m \in Asked
-               /\ m \notin gone
-               /\ m \in Members(active)
-               /\ know[m] = active
+\* A matchmaker active in the generation in force registers the campaign. A
+\* member of the set in force is not gone and knows that generation (the
+\* handover bootstraps it). The candidate asks it before it registers; the
+\* model lets an ask that the candidate did not send register too, as
+\* RegInForce judges each registration the same way.
+Register(m) == /\ m \in Members(active)
                /\ JudgeGeneration => belief = know[m]
                /\ regs' = regs \cup {<<m, belief, active>>}
                /\ UNCHANGED <<active, know, gone, belief>>
@@ -111,5 +112,15 @@ RegInForce == \A r \in regs : r[2] = r[3]
 Learnable == \E m \in Asked \ gone : know[m] > belief
 NotStuck == belief < active =>
                \/ Learnable
-               \/ \E m \in Asked \ gone : ENABLED LearnSuccessor(m)
+               \/ \E m \in Asked \ gone : know[m] < active
+
+\* A refusal moves the belief forward only.
+BeliefForward == [][belief' >= belief]_vars
+
+\* Liveness: the candidate's refusals and the frozen matchmakers' learning
+\* are fair; a handover and a leave are not. Once the handovers stop, the
+\* candidate believes the generation in force.
+Fair == \A m \in Pool : WF_vars(Refuse(m)) /\ WF_vars(LearnSuccessor(m))
+LiveSpec == Spec /\ Fair
+LearnsInForce == <>[](belief = active)
 =============================================================================

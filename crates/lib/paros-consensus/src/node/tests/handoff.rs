@@ -15,6 +15,7 @@ use super::{
 };
 use crate::contract::limits::Limits;
 use crate::proposer::RecoveryPolicy;
+use crate::types::Ballot;
 
 /// Pull the single `Relinquish` a leader queued, panicking if there is not
 /// exactly one.
@@ -1038,4 +1039,135 @@ fn a_handoff_leader_fills_its_orphan_when_it_answers_a_read() {
         Some(&Command::Control(Control::Noop)),
         "a Noop is chosen over the orphan"
     );
+}
+
+// ---- a duplicated payload that reaches the successor after its restart ------
+// (#1292 (duplicated Relinquish)): the successor installs, proposes, crashes
+// and restarts, and the network still holds a copy of the same payload.
+
+/// Install the authority of node 0 on node 1, and return the payload that
+/// did it: the copy a duplicating network can deliver again.
+fn installed_on_one(nodes: &mut [ColocatedNode]) -> Message {
+    nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
+    let q = drain(&mut nodes[0]);
+    let (_, relinquish) = take_relinquish(&q);
+    deliver_all(nodes, q);
+    assert!(nodes[1].is_leader(), "the successor holds the authority");
+    relinquish
+}
+
+/// The distinct `(ballot, command)` pairs that the `Accept`s of `queue`
+/// carry at `slot`.
+fn accepts_at(queue: &[(NodeId, Message)], slot: Slot) -> Vec<(Ballot, Command)> {
+    let mut found: Vec<(Ballot, Command)> = Vec::new();
+    for (_, m) in queue {
+        if let Message::Accept {
+            ballot,
+            slot: at,
+            command,
+            ..
+        } = m
+            && *at == slot
+            && !found.iter().any(|(b, c)| b == ballot && c == command)
+        {
+            found.push((*ballot, command.clone()));
+        }
+    }
+    found
+}
+
+#[test]
+fn a_duplicated_relinquish_after_the_successor_restarts_is_refused() {
+    let mut nodes = cluster_with_three_chosen();
+    let relinquish = installed_on_one(&mut nodes);
+    let Message::Relinquish { next_slot, .. } = relinquish else {
+        unreachable!("take_relinquish returns a Relinquish");
+    };
+    let ProposeResult::Accepted(slot) = nodes[1].propose(entry(9, 1, 77)) else {
+        panic!("the successor admits proposals");
+    };
+    assert_eq!(
+        slot, next_slot,
+        "the first proposal takes the inherited frontier"
+    );
+    let first = accepts_at(&drain(&mut nodes[1]), slot);
+    assert_eq!(first.len(), 1, "the proposal left as one command");
+
+    // The successor crashes with its `Accept`s on the wire. Its own record
+    // of the round is on its disk (`record_own_round`), so the rebooted
+    // frontier is past the slot it proposed.
+    nodes[1] = ColocatedNode::new(&MemStorage::from_node(&nodes[1]), Limits::DEFAULT);
+    assert!(
+        nodes[1].proposer().next_slot() > slot,
+        "the frontier survives the restart"
+    );
+    let stale = nodes[1].handoff_counters().rejected_stale;
+    nodes[1].step(relinquish);
+    assert!(
+        !nodes[1].is_leader(),
+        "the copy does not install the ballot again"
+    );
+    assert_eq!(nodes[1].handoff_counters().rejected_stale, stale + 1);
+    assert_eq!(nodes[1].handoff_counters().installed, 0);
+    // No second command at the proposed slot, under any ballot.
+    let _ = nodes[1].propose(entry(9, 2, 78));
+    assert_eq!(accepts_at(&drain(&mut nodes[1]), slot), Vec::new());
+}
+
+#[test]
+fn a_successor_that_restarts_before_it_proposes_installs_the_copy_unchanged() {
+    let mut nodes = cluster_with_three_chosen();
+    let authority = nodes[0].ballot();
+    // Node 1 promised the minter's own Phase 1: its durable promise is the
+    // handed ballot itself. A guard that refused a ballot at or below the
+    // promise would refuse every ordinary handoff, this one too.
+    assert_eq!(nodes[1].hard_state().max_promised_ballot, authority);
+    let relinquish = installed_on_one(&mut nodes);
+    let frontier = nodes[1].proposer().next_slot();
+    let _ = drain(&mut nodes[1]);
+
+    // A restart before any proposal: nothing was proposed at or past the
+    // frontier under this ballot, so the copy hands over the same tail.
+    nodes[1] = ColocatedNode::new(&MemStorage::from_node(&nodes[1]), Limits::DEFAULT);
+    assert_eq!(nodes[1].proposer().next_slot(), frontier);
+    nodes[1].step(relinquish);
+    assert!(nodes[1].is_leader());
+    assert_eq!(nodes[1].ballot(), authority);
+    assert_eq!(nodes[1].proposer().next_slot(), frontier);
+    let ProposeResult::Accepted(slot) = nodes[1].propose(entry(9, 1, 77)) else {
+        panic!("the successor admits proposals");
+    };
+    assert_eq!(
+        slot, frontier,
+        "the first proposal of the ballot at the frontier"
+    );
+    let q = drain(&mut nodes[1]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(chosen_at(&nodes[1], slot.0), Some(val(77)));
+}
+
+#[test]
+fn a_successor_passed_by_a_higher_promise_refuses_the_copy_after_a_restart() {
+    let mut nodes = cluster_with_three_chosen();
+    let relinquish = installed_on_one(&mut nodes);
+    let authority = nodes[1].ballot();
+    // Node 2 campaigns; only node 1 hears its `Prepare`. Node 1 still leads,
+    // but its promise is above its ballot now.
+    campaign(&mut nodes[2]);
+    let q = drain(&mut nodes[2]);
+    deliver_filtered(&mut nodes, q, |to, m| {
+        to == NodeId(1) && matches!(m, Message::Prepare { .. })
+    });
+    assert!(nodes[1].hard_state().max_promised_ballot > authority);
+    // A leadership that a higher promise passed opens no new round: the
+    // frontier on disk stays where the install left it.
+    assert!(!matches!(
+        nodes[1].propose(entry(9, 1, 77)),
+        ProposeResult::Accepted(_)
+    ));
+    nodes[1] = ColocatedNode::new(&MemStorage::from_node(&nodes[1]), Limits::DEFAULT);
+    // The promise guard refuses the copy: the durable promise passed it.
+    nodes[1].step(relinquish);
+    assert!(!nodes[1].is_leader());
+    assert_eq!(nodes[1].handoff_counters().rejected_stale, 1);
 }

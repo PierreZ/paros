@@ -216,7 +216,6 @@ Retire ==
 
 \* A replica drops its copy of the segment.
 Drop ==
-    /\ ~ dropped
     /\ \E i \in Idx :
          /\ Ops[i] \in {"offload", "drop"}
          /\ IF DropOn = "write" THEN ost[i] = "done"
@@ -247,9 +246,11 @@ Close(Q) ==
     /\ UNCHANGED <<gen, phase, up, rg, reg, ost, ogen, oseen, acked, boot,
                    chosen, retired, dropped>>
 
+\* A member m of T (Next takes m in T and s in props) records that it holds
+\* s. The model lets a down member and an active one record it too: no
+\* check here is a liveness check, a record only lets Decide run, and after
+\* the decree no step reads boot.
 Bootstrap(m, s) ==
-    /\ s \in props
-    /\ m \in T /\ up[m] /\ gen[m] = 0
     /\ <<m, s>> \notin boot
     /\ boot' = boot \cup {<<m, s>>}
     /\ UNCHANGED <<gen, phase, up, rg, reg, ost, ogen, oseen, acked, props,
@@ -258,7 +259,6 @@ Bootstrap(m, s) ==
 \* The decree over M0 chooses s; it needs a live majority of M0.
 Decide(s) ==
     /\ chosen = None
-    /\ s \in props
     /\ \A m \in T : <<m, s>> \in boot
     /\ \E Q \in Majorities(M0) : \A m \in Q : up[m]
     /\ chosen' = s

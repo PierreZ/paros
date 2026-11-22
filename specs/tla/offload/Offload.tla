@@ -157,8 +157,10 @@ Whole(p) == IsObj(p) /\ store[p].n = L
 (* Replicas and retire                                                      *)
 (***************************************************************************)
 
+\* A replica applies the next slot. The model lets a replica that dropped its
+\* copy, or a trimmed one, go on: Holders counts only a copy that is held,
+\* and no step reads a trimmed segment.
 Apply(r, p) ==
-  /\ held[r][p] /\ ~trim[p]
   /\ applied[r][p] < L
   /\ applied' = [applied EXCEPT ![r][p] = @ + 1]
   /\ UNCHANGED <<rec, held, store, offl, pend, crashes>>
@@ -191,11 +193,14 @@ Takes(p) ==
   /\ Gate = "retired" => ret[p]
 
 \* Steps 1 and 2: read the record, read the segment from replica r and
-\* build the object.
+\* build the object. The offloader reads the record first (Takes): with no
+\* such read, offloaders build and put objects of a trimmed segment for
+\* ever, and the liveness checks fail. The model lets it read a replica that dropped
+\* its copy: a replica drops only after the mark (Drop = "offloaded"), and
+\* after the mark no other mark of the segment succeeds.
 BuildObj(o, p, r) ==
   /\ ost[o] = "idle"
   /\ Takes(p)
-  /\ held[r][p]
   /\ Build = "full" => applied[r][p] = L
   /\ ost' = [ost EXCEPT ![o] = "built"]
   /\ oseg' = [oseg EXCEPT ![o] = p]
@@ -236,16 +241,18 @@ MarkOk(o) ==
      /\ Idle(o)
      /\ UNCHANGED <<ret, trim, rep, store, pend, crashes>>
 
+\* The mark is lost, whether or not the compare-and-set would succeed.
 MarkLost(o) ==
   /\ ost[o] = "mark"
-  /\ Takes(oseg[o])
   /\ Idle(o)
   /\ UNCHANGED <<rec, rep, store, pend, crashes>>
 
+\* The offloader sees its compare-and-set fail. The model lets it see a
+\* failure also when the record would take the mark: the record does not
+\* change, as for a lost mark, and the recheck reads the record as it is.
 MarkFail(o) ==
   LET p == oseg[o]
   IN /\ ost[o] = "mark"
-     /\ ~Takes(p)
      /\ store' = IF \/ Recheck = "trimmed" /\ trim[p] /\ IsObj(p)
                     \/ Recheck = "anyfail" /\ IsObj(p)
                    THEN [store EXCEPT ![p] = Absent]
@@ -253,9 +260,9 @@ MarkFail(o) ==
      /\ Idle(o)
      /\ UNCHANGED <<rec, rep, pend, crashes>>
 
-\* An offloader stops for good; one offloader stays up.
+\* An offloader stops for good; one offloader stays up. A stop of an
+\* offloader that is down only uses up the budget.
 Stop(o) ==
-  /\ ost[o] # "down"
   /\ crashes < NCrash
   /\ \E o2 \in Offloaders \ {o} : ost[o2] # "down"
   /\ ost' = [ost EXCEPT ![o] = "down"]
@@ -268,7 +275,6 @@ Stop(o) ==
 
 \* A user truncate trims the next segment. The record write comes first.
 Trim(p) ==
-  /\ ~trim[p]
   /\ \A q \in Segs : q < p => trim[q]
   /\ trim' = [trim EXCEPT ![p] = TRUE]
   /\ pend' = [pend EXCEPT ![p] = TRUE]
@@ -284,18 +290,19 @@ TrimDelete(p) ==
   /\ UNCHANGED <<rec, rep, offl, crashes>>
 
 \* The controller stops between the record write of a trim and the delete.
-\* The controller that takes over does not know that a delete is to do.
+\* The controller that takes over does not know that a delete is to do. A
+\* stop with no delete to do only uses up the budget.
 CtlStop(p) ==
-  /\ pend[p]
   /\ crashes < NCrash
   /\ pend' = [pend EXCEPT ![p] = FALSE]
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<rec, rep, store, offl>>
 
-\* The scrub lists the store and deletes an object by its key.
+\* The scrub lists the store and deletes an object by its key. With these
+\* cleanups the store holds no tombstone, so a delete of a key with no
+\* object changes nothing.
 ScrubDel(p) ==
   /\ Cleanup \in {"scrub", "unmarked"}
-  /\ IsObj(p)
   /\ trim[p] \/ (Cleanup = "unmarked" /\ ~off[p])
   /\ store' = [store EXCEPT ![p] = Absent]
   /\ UNCHANGED <<rec, rep, offl, pend, crashes>>
@@ -336,6 +343,17 @@ Findable ==
   \A p \in Segs : ~trim[p] =>
     /\ off[p] => Whole(p)
     /\ (ret[p] /\ ~off[p]) => Cardinality(Holders(p)) >= F + 1
+
+\* The guards of the records (docs/journal/03-segments-and-records.md,
+\* section J3.4): `retired` comes from a segment that is not trimmed, and
+\* `offloaded` from "not offloaded and not trimmed".
+RecordGuards ==
+  [][\A p \in Segs :
+       /\ (ret'[p] /\ ~ret[p]) => ~trim[p]
+       /\ (off'[p] /\ ~off[p]) => ~trim[p]]_vars
+
+\* A trim moves the floor of the journal: the trimmed segments are a prefix.
+TrimPrefix == \A p, q \in Segs : q < p /\ trim[p] => trim[q]
 
 \* Every segment ends offloaded or trimmed.
 AllOffloaded == <>(\A p \in Segs : off[p] \/ trim[p])

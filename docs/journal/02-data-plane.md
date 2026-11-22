@@ -364,7 +364,11 @@ promise in each row of each full grid of `H_b`, so each row of an old grid holds
 that promised the new ballot and the `PreReadAck` ballot ends a read over it (check
 `grid_full_seal` passes). A full grid keeps its change of members. This rule is not in the
 papers (Compartmentalized Paxos §3.4 reads one row of a static grid); its model is the check. The
-code follows in #1209 (seal each row of a full grid). The partitioned grid of architecture §3.4 (F+1
+code is #1209 (seal each row of a full grid): `Election::covered` asks the seal
+(`AcceptorConfig::has_phase1_seal`) of each configuration of `H_b` other than `C_b`. `C_b` needs
+no seal: a column of `C_b` chooses at the new ballot, and each row of `C_b` meets that column
+(check `grid_full_seal_others`). The cost: during a change of members, an election waits for one
+live acceptor in each row of the old full grid. The partitioned grid of architecture §3.4 (F+1
 of one column write, F+1 of each column elect) needs no seal: two of its Phase-1 quorums meet.
 
 ### J2.6 Truncation

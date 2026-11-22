@@ -1307,7 +1307,7 @@ impl Cluster {
     }
 
     /// The oracles on a message that leaves `who`.
-    fn judge_sent(&self, who: &str, envelope: &Envelope) {
+    fn judge_sent(&mut self, who: &str, envelope: &Envelope) {
         let Wire::Paxos(msg) = &envelope.msg else {
             return;
         };
@@ -1330,6 +1330,12 @@ impl Cluster {
                 command,
                 ..
             } => self.ledger.commit_sent(who, *slot, *ballot, command),
+            Message::Accept {
+                ballot,
+                slot,
+                command,
+                ..
+            } => self.ledger.proposed(who, *slot, *ballot, command),
             _ => {}
         }
     }

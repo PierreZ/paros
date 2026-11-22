@@ -1,0 +1,19 @@
+# cargo-mutants over paros-journal-control, the grid controller's decision
+# and its role (`scripts/mutants.sh --control`). It has one pass.
+#
+# The judge: the unit tests of paros-journal-control, the sweep of
+# journal-sim's `tests/control.rs` (every small view against the reference
+# `decide`, the oracles and their controls, and the probes of `decide`), and
+# the controller walks of `tests/controller.rs` (the role under races,
+# crashes and losses, the oracles and their controls, and the probes of the
+# role). Built in release (`profile = "mutants"`), they take seconds.
+
+# Equivalent mutants only, each with its reason (AGENTS.md, the absolute
+# rule: no allow list).
+exclude_re = []
+
+test_package = ["paros-journal-control", "journal-sim"]
+test_tool = "nextest"
+additional_cargo_test_args = ["-E", "package(paros-journal-control) | binary(control) | binary(controller)"]
+profile = "mutants"
+minimum_test_timeout = 120
