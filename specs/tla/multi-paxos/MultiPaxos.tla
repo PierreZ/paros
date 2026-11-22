@@ -168,9 +168,11 @@ PromiseMsg(a, b, from) ==
 \* The owner of ballot b opens a campaign from its first unlearned slot. It
 \* is its own first acceptor: it promises b, and its own records seed the
 \* tally (`open_phase1` takes `acceptor.records()`). The code draws the
-\* round of a campaign above its durable promise (`next_campaign_round`), as
+\* round of a campaign above its promise (`next_campaign_round`), as
 \* `prom[o] < b` does here; a ballot that left "idle" holds its owner's
 \* promise (`BallotOK` in `Inv`), so the step needs no guard on the phase.
+\* Where a control loses the promise (Durable = "after", Identity = FALSE),
+\* a dead ballot opens again, as the code opens the same round again.
 Prepare(b) ==
   LET o == Owner[b]
       from == FirstUnlearned(o)
@@ -264,10 +266,10 @@ Accept(a, b, s) ==
 \* The late write of an acceptor that answered first (Durable = "after"): the
 \* disk catches up with memory. With Durable = "before" the disk already
 \* holds memory (`Inv`: dprom = prom, dvote = vote), and so does a node that
-\* is not `Live` (down, it never moved; or wiped under `Identity`, both are
-\* empty). A write of what the
-\* disk holds changes no variable, so the step needs no guard on the mode,
-\* on the difference or on `Live`.
+\* is not `Live`: a down node never moved, and a node wiped under `Identity`
+\* is empty in memory and on disk. A write of what the disk holds changes no
+\* variable, so the step needs no guard on the mode, on the difference or on
+\* `Live`.
 Persist(a) ==
   /\ dprom' = [dprom EXCEPT ![a] = prom[a]]
   /\ dvote' = [dvote EXCEPT ![a] = vote[a]]
