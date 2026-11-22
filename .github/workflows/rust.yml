@@ -72,9 +72,9 @@ jobs:
       - name: Check the pure crates' dependencies
         run: nix develop --command scripts/check-core-deps.sh
       # docs/architecture/04-roles.md §4.4: the layer table (scripts/layers.sh), no dependency
-      # up or sideways, no name of a higher crate, no fault switch in a pure crate. Files only.
+      # up or sideways, no name of a higher crate, no fault switch in a pure crate. `cargo metadata --no-deps`, no build.
       - name: Check the layers of the crates
-        run: scripts/check-layers.sh
+        run: nix develop --command scripts/check-layers.sh
       # AGENTS.md, "Examples": every composing crate has examples, and the examples steps of the `checks` job run each one.
       - name: Check the examples of the composing crates
         run: scripts/check-examples.sh

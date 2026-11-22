@@ -291,7 +291,8 @@ These points are decided:
   and it is where the fold checks the `TenantId` (section 3.8).
 
 **How CI holds the layers** (#1411 (CI checks that hold the layering)). The layer of each crate
-is one table, `scripts/layers.sh`. `scripts/check-layers.sh` reads only files and fails when:
+is one table, `scripts/layers.sh`. `scripts/check-layers.sh` reads the manifests through `cargo metadata` (no build) and the
+sources, and fails when:
 
 1. a crate of the workspace has no row, or a row names a crate that is gone;
 2. a crate depends on a crate of the same layer or of a higher layer (normal, build and dev
