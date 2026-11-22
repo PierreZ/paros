@@ -21,7 +21,7 @@
 //! `tests/paxos_traces.rs` writes every trace to `website/site/src/traces/`
 //! (committed, diffed in CI).
 
-mod compart;
+pub(crate) mod compart;
 mod content;
 mod pages;
 mod story;
@@ -521,7 +521,7 @@ impl Recorder {
     fn broken(&self) -> Option<String> {
         match self.game.world() {
             WorldKind::Decree(world) => world.violation().map(str::to_string),
-            WorldKind::Log(_) => None,
+            WorldKind::Log(_) => two_values(&self.game.world().view()),
         }
     }
 
@@ -922,6 +922,30 @@ fn site_note(text: &str) -> Option<String> {
     let mut chars = kept.chars();
     let first = chars.next()?;
     Some(first.to_uppercase().chain(chars).collect())
+}
+
+/// Two nodes of a log world that hold two different values chosen for one
+/// slot, in words; `None` while every slot holds one value. Only a "Break
+/// the rule" run gets there: the fault comes from outside the core.
+fn two_values(world: &WorldView) -> Option<String> {
+    let mut chosen: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+    for node in &world.nodes {
+        for record in node.accepted.iter().filter(|record| record.chosen) {
+            let values = chosen.entry(record.slot).or_default();
+            if !values.contains(&record.value) {
+                values.push(record.value.clone());
+            }
+        }
+    }
+    chosen
+        .into_iter()
+        .find(|(_, values)| values.len() > 1)
+        .map(|(slot, values)| {
+            format!(
+                "Two values are chosen for slot {slot}: {}. Paxos says this never happens.",
+                values.join(" and ")
+            )
+        })
 }
 
 pub(crate) fn lane_of(message: &MessageView, sender: bool) -> String {

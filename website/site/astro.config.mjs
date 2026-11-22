@@ -25,8 +25,12 @@ const tricky = {
   "faulty-records": "multi-paxos",
 };
 // The pages of the old parosd docs: the service before the rewrite is at the tag
-// v0.2.0-alpha.1, and /parosd/ says how to run it.
-const parosd = ["admin-views", "bench", "cells", "journal-api", "metrics", "roles", "tls", "tokens"];
+// v0.2.0-alpha.1, and /parosd/ says how to run it. A page whose subject has a
+// page of its own in the new group goes there.
+const parosd = {
+  "admin-views": "", bench: "", "journal-api": "", metrics: "", tls: "",
+  cells: "universe/", roles: "machines/", tokens: "names-and-tokens/",
+};
 
 const redirects = {
   "/play": "/paxos/",
@@ -38,7 +42,6 @@ const redirects = {
   "/docs/quickstart": "/parosd/",
   "/docs/reference": "/parosd/",
   "/docs/playground": "/parosd/",
-  "/engineering/simulation": "/engineering/",
   "/engineering/same-code": "/engineering/",
   "/engineering/swarm": "/engineering/",
   "/engineering/durable-writes": "/engineering/",
@@ -59,7 +62,7 @@ for (const p of multi) {
   redirects[`/${p}.html`] = "/paxos/multi-paxos/";
 }
 for (const [p, to] of Object.entries(tricky)) redirects[`/paxos/tricky/${p}`] = `/paxos/${to}/`;
-for (const p of parosd) redirects[`/parosd/${p}`] = "/parosd/";
+for (const [p, to] of Object.entries(parosd)) redirects[`/parosd/${p}`] = `/parosd/${to}`;
 
 // Astro does not put the base in front of a redirect's target.
 const BASE = "/paros";

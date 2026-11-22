@@ -159,6 +159,9 @@ impl Game {
                 Some(world) => world.wipe(*node)?,
                 None => self.log_world()?.wipe(NodeId(*node))?,
             },
+            Action::SkipPhase1 { node, slot, value } => {
+                self.log_world()?.skip_phase1(NodeId(*node), *slot, value)?;
+            }
             Action::Compact { node, up_to } => {
                 self.log_world()?.compact(NodeId(*node), *up_to)?;
             }

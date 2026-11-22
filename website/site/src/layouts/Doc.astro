@@ -45,7 +45,19 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "Quorums and failures", path: "journal/quorums-and-failures/" },
     { title: "The controller", path: "journal/controller/" },
   ],
+  "parosd/": [
+    { title: "parosd", path: "parosd/" },
+    { title: "Layers that stand alone", path: "parosd/layers/" },
+    { title: "One shape at every level", path: "parosd/control/" },
+    { title: "Machines", path: "parosd/machines/" },
+    { title: "Names and tokens", path: "parosd/names-and-tokens/" },
+    { title: "The universe", path: "parosd/universe/" },
+  ],
   "engineering/": [
+    { title: "The safety case", path: "engineering/" },
+    { title: "TLA+ models", path: "engineering/tla/" },
+    { title: "Simulation", path: "engineering/simulation/" },
+    { title: "Mutants and assertions", path: "engineering/mutants/" },
     { title: "Grid quorums", path: "engineering/grid-quorums/" },
   ],
 };
@@ -74,10 +86,18 @@ const STATUS: Record<string, { tag: string; html: string }> = {
   journal: {
     tag: "design · checked in TLA+",
     html: `The journal v1 is designed, and each of its rules has a TLA+ model. Its code is being
-      built (<a href="${REPO}/issues/1323">#1323</a>): the pure journal core
-      (<code>paros-journal</code>) exists, and the roles, the register and the driver do not exist
-      yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
+      built (<a href="${REPO}/issues/1323">#1323</a>): the pure journal core and the
+      matchmaker register (<code>paros-journal</code>) exist, and the roles and the driver do not
+      exist yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
       this page explains them and links each section.`,
+  },
+  parosd: {
+    tag: "design · not built",
+    html: `The design of parosd is written in
+      <a href="${REPO}/tree/main/docs/architecture"><code>docs/architecture/</code></a>, and its
+      code is not built. The layers are built after the journal v1, in the order of
+      <a href="${REPO}/issues/1409">#1409</a>. This page explains the design and links each
+      section; the rules are in the docs.`,
   },
 };
 const statusName = Astro.props.status ?? fm.status;
@@ -107,7 +127,10 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
     {trace && <script is:inline src={url("story.js")} />}
     {trace && <script is:inline src={url("steps.js")} />}
     {widget && <script is:inline type="module" src={url("engineering.js")} />}
-    {fm.lab && <script is:inline type="module" src={url("lab.js")} />}
+    {fm.lab && fm.lab !== "journal" && fm.lab !== "register" && <script is:inline type="module" src={url("lab.js")} />}
+    {(fm.lab === "journal" || fm.lab === "register") && !trace && <script is:inline src={url("course.js")} />}
+    {fm.lab === "journal" && <script is:inline type="module" src={url("journal-lab.js")} />}
+    {fm.lab === "register" && <script is:inline type="module" src={url("register-lab.js")} />}
     {(prev || next) && (
       <nav class="pager label" aria-label="Next and previous pages">
         {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}

@@ -83,7 +83,6 @@ CONSTANTS
   NoLead,      \* a client that never led
   MaxOps,      \* writes of each client
   MaxSL,       \* SetLeader commands in a run
-  MaxTrunc,    \* Truncate commands in a run
   MaxSlots,    \* slots of the log
   SealAt,      \* the first slot of the next segment, 0 for no seal
   InitLeader,
@@ -115,13 +114,13 @@ VARIABLES
   lead,       \* client: the uuid that it last won, or NoLead
   basis,      \* client: its next expected_seq
   nops,       \* client: writes sent so far
-  slCount, truncCount,
+  slCount,
   meta,       \* the leader uuid in the journal's matchmaker record
   metaSet,    \* the seal wrote it
   starts      \* the next_seq at which each uuid started to lead
 
 vars == <<slots, applied, leader, first, log, truncs, answers, sent, lead,
-          basis, nops, slCount, truncCount, meta, metaSet, starts>>
+          basis, nops, slCount, meta, metaSet, starts>>
 
 NextSeq == Len(log) + 1
 
@@ -257,7 +256,7 @@ Apply ==
           [] c.kind = "t" -> ApplyTruncate(c, s)
           [] c.kind = "fence" -> ApplyFence(c, s)
   /\ applied' = applied + 1
-  /\ UNCHANGED <<slots, sent, nops, slCount, truncCount>>
+  /\ UNCHANGED <<slots, sent, nops, slCount>>
 
 ----------------------------------------------------------------------------
 (* The clients and the leader that proposes.                               *)
@@ -271,7 +270,7 @@ CallSetLeader(w, toNone) ==
      AppendCmd([kind |-> "sl", new |-> new, old |-> leader])
   /\ slCount' = slCount + 1
   /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
-                 basis, nops, truncCount, meta, metaSet, starts>>
+                 basis, nops, meta, metaSet, starts>>
 
 \* A client that won a uuid writes under it, pipelined: each write at the
 \* position after the last one. A deposed client keeps writing.
@@ -282,7 +281,7 @@ SendFenced(w) ==
   /\ basis' = [basis EXCEPT ![w] = @ + 1]
   /\ nops' = [nops EXCEPT ![w] = @ + 1]
   /\ UNCHANGED <<slots, applied, leader, first, log, truncs, answers, lead,
-                 slCount, truncCount, meta, metaSet, starts>>
+                 slCount, meta, metaSet, starts>>
 
 \* Any client may send an unfenced write, in any mode.
 SendUnfenced(w) ==
@@ -290,25 +289,24 @@ SendUnfenced(w) ==
   /\ sent' = sent \cup {Unfenced([w |-> w, n |-> nops[w] + 1])}
   /\ nops' = [nops EXCEPT ![w] = @ + 1]
   /\ UNCHANGED <<slots, applied, leader, first, log, truncs, answers, lead,
-                 basis, slCount, truncCount, meta, metaSet, starts>>
+                 basis, slCount, meta, metaSet, starts>>
 
 \* A client whose fenced write got a final refusal while the journal is
-\* multi-writer writes it again, unfenced.
+\* multi-writer writes it again, unfenced (Next takes a in answers). The
+\* model lets a client do so after any final refusal, in any mode: an
+\* unfenced write is allowed in any mode (SendUnfenced), and the resend of
+\* an unfenced write is the same message.
 MoveToMulti(a) ==
-  /\ a \in answers
-  /\ a.m.kind = "f"
   /\ a.kind \in {"fenced", "taken"}
-  /\ a.leader = None
   /\ sent' = sent \cup {Unfenced(a.m.op)}
   /\ UNCHANGED <<slots, applied, leader, first, log, truncs, answers, lead,
-                 basis, nops, slCount, truncCount, meta, metaSet, starts>>
+                 basis, nops, slCount, meta, metaSet, starts>>
 
 \* A client that got "below" reads that position from the replica set of
 \* the old segment (a sealed segment does not change) and learns the fate
 \* of its write: "dup" when the record there is its write, "truncated"
 \* when the position is below first_seq, else "taken".
 ResolveBelow(a) ==
-  /\ a \in answers
   /\ a.kind = "below"
   /\ LET k == IF a.m.e < first THEN "truncated"
               ELSE IF log[a.m.e].u = a.m.u /\ log[a.m.e].op = a.m.op THEN "dup"
@@ -317,37 +315,33 @@ ResolveBelow(a) ==
           {[m |-> a.m, kind |-> k, seq |-> IF k = "dup" THEN a.m.e ELSE 0,
             leader |-> leader, slot |-> 0]}
   /\ UNCHANGED <<slots, applied, leader, first, log, truncs, sent, lead,
-                 basis, nops, slCount, truncCount, meta, metaSet, starts>>
+                 basis, nops, slCount, meta, metaSet, starts>>
 
 \* A truncate up to the tail that the client read: fenced by the uuid that it
-\* won, or unfenced.
+\* won, or unfenced. A client that never won a uuid sends NoLead, which no
+\* apply takes. MaxSlots bounds the truncates.
 CallTruncate(w, fenced) ==
-  /\ truncCount < MaxTrunc
   /\ CanAppend
-  /\ fenced => lead[w] # NoLead
   /\ AppendCmd([kind |-> "t", u |-> IF fenced THEN lead[w] ELSE None, upto |-> NextSeq])
-  /\ truncCount' = truncCount + 1
   /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
                  basis, nops, slCount, meta, metaSet, starts>>
 
 \* The consensus leader proposes a request from the network: a first send,
 \* a resend or a copy.
 Propose(m) ==
-  /\ m \in sent
   /\ CanAppend
   /\ AppendCmd(m)
   /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
-                 basis, nops, slCount, truncCount, meta, metaSet, starts>>
+                 basis, nops, slCount, meta, metaSet, starts>>
 
 \* The first leader of the next segment proposes the Fence with the uuid in
 \* the matchmaker record.
 ProposeFence ==
-  /\ SealAt > 0
   /\ Len(slots) + 1 = SealAt
   /\ Boundary = "wait" => metaSet
   /\ slots' = Append(slots, [kind |-> "fence", leader |-> meta, ok |-> TRUE])
   /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
-                 basis, nops, slCount, truncCount, meta, metaSet, starts>>
+                 basis, nops, slCount, meta, metaSet, starts>>
 
 ----------------------------------------------------------------------------
 
@@ -364,7 +358,6 @@ Init ==
   /\ basis = [w \in Writers |-> 1]
   /\ nops = [w \in Writers |-> 0]
   /\ slCount = 0
-  /\ truncCount = 0
   /\ meta = InitLeader
   /\ metaSet = FALSE
   /\ starts = {}

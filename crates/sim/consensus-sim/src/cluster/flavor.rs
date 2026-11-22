@@ -458,12 +458,15 @@ pub enum Mutant {
     /// A proxy leader crashes and the driver keeps it running with its
     /// rounds. Its later `Commit`s are backed, so the oracles pass; the
     /// trace check refuses the `Commit` of a round the crash lost
-    /// (`ProxyLeaderTrace.tla`).
+    /// (`node/ProxyLeaderTrace.tla`).
     KeepProxyRounds,
     /// The driver empties the payload of each `Relinquish`: its frontier
     /// falls to its first slot, with no decided or pending slot. The
-    /// successor proposes again from there; the trace check refuses the
-    /// payload (`LeaderHandoffTrace.tla`).
+    /// successor proposes again from there, under the same ballot. Caught by
+    /// [`ONE_PROPOSAL`](crate::oracle::ledger::ONE_PROPOSAL) when the
+    /// successor proposes a slot the predecessor already proposed; the
+    /// trace check refuses the payload itself (`node/LeaderHandoffTrace.tla`),
+    /// on a seed where the oracles see no second command.
     RewindHandoff,
     /// The driver asks the matchmakers for GC as soon as a node leads,
     /// before a majority of its configuration learned the slots below its

@@ -8,6 +8,7 @@ bare                  violation  ci
 fence_only            violation  ci
 seal_only             violation  ci
 fence_rows            pass       ci
+chain                 pass       ci
 record                pass       ci
 column                pass       ci
 wipe_fence_rows       violation  ci

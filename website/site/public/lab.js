@@ -13,7 +13,9 @@
 // "paxos:solved" on the document.
 const PAXOS = new URL("paxos/wasm/paros_paxos.js", import.meta.url);
 const SVG = "http://www.w3.org/2000/svg";
-const ROWS = ["proposer", "node", "acceptor", "matchmaker"];
+// One row per role, top to bottom. The compartmentalized exercises add the
+// proxy leaders below the nodes and the replicas under them.
+const ROWS = ["proposer", "batcher", "node", "proxy", "acceptor", "replica", "matchmaker"];
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -155,7 +157,7 @@ function mountLab(mount, engine) {
     drawStage();
 
     chosen.replaceChildren();
-    if (view.chosen.length > 1) chosen.append(el("span", "chip-status gap", "two values chosen"));
+    if (view.two_values) chosen.append(el("span", "chip-status gap", "two values chosen"));
     else if (view.chosen.length) chosen.append(el("span", "chip-status done", "chosen"));
     else chosen.append(el("span", "chip-status", "not chosen"));
     if (view.chosen.length) chosen.append(document.createTextNode(" " + view.chosen.join(", ")));
@@ -175,6 +177,11 @@ function mountLab(mount, engine) {
     if (!view.wire.length) wire.append(el("li", "lab-empty", "Nothing is on the wire."));
     for (const m of view.wire) {
       const li = el("li", "lab-msg");
+      // What the message is, for a script that plays the network (the
+      // browser smoke test, website/site/tests/).
+      li.dataset.kind = m.kind;
+      li.dataset.from = m.from;
+      li.dataset.to = m.to;
       li.style.setProperty("--phase", `var(--phase-${m.phase || "other"})`);
       const what = el("span", "lab-msg-what");
       what.append(el("b", "lab-msg-label", m.label));

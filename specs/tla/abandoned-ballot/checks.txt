@@ -5,5 +5,7 @@
 #             long       only `scripts/check-tla.sh --all` runs it
 reach_skip     violation  ci
 reach_choice   violation  ci
-owner_noguard  violation  long
+# The owner rule with two ballots: every rule of the file (3 minutes).
+owner_two      pass       ci
+owner_noguard  violation  ci
 owner          pass       long  40

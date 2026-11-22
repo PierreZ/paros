@@ -143,3 +143,48 @@ fn a_reconfiguration_names_a_node_only_once_the_pool_admits_it() {
     );
     assert_eq!(nodes[1].acceptors(), &joined);
 }
+
+/// A belief that names a node outside the pool abandons a campaign whose
+/// histories hold it, even with no reconfiguration in effect: Phase 1 would
+/// need that node's promise.
+#[test]
+fn a_prior_belief_naming_an_unknown_node_abandons_the_campaign() {
+    let mut mms = registries(1);
+    let stranger = cfg(&[0, 1, 7]);
+    let _ = matchmake(
+        &mut mms,
+        vec![(
+            MatchmakerId(0),
+            MatchRequest::new(
+                J,
+                NodeId(0),
+                ballot(1, 0),
+                stranger,
+                MatchmakerGeneration(0),
+            ),
+        )],
+    );
+    let mut n = deployed_node(1, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    let mut steps = Vec::new();
+    for _ in 0..4 {
+        campaign(&mut n);
+        let requests = drain_match_requests(&mut n);
+        for reply in matchmake(&mut mms, requests) {
+            steps.push(n.on_match_reply(reply));
+        }
+        let _ = drain(&mut n);
+        if steps.contains(&MatchStep::UnknownMember) {
+            break;
+        }
+    }
+    assert!(
+        steps.contains(&MatchStep::UnknownMember),
+        "the unknown member abandons the campaign: {steps:?}"
+    );
+    assert!(
+        !steps
+            .iter()
+            .any(|s| matches!(s, MatchStep::Completed { .. })),
+        "{steps:?}"
+    );
+}

@@ -39,9 +39,3 @@ restart_twice      pass       long
 # lost `Accept`.
 live_quiet_no_resign pass      long
 live_quiet_2a        pass      long
-# The steps of the node's wiring that a traced walk takes too: a leader steps
-# down, a node learns a slot, and a node records a value chosen below its
-# promise (a recorded ballot never falls).
-wiring       pass  ci
-wiring_long  pass  long
-wiring_lower violation ci

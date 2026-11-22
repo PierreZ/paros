@@ -7,7 +7,7 @@
 
 use super::{
     ColocatedNode, Delegation, MemStorage, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party,
-    ProposeResult, Slot, campaign, cluster, deliver_all, deliver_filtered, drain, entry,
+    ProposeResult, Slot, ballot, campaign, cluster, deliver_all, deliver_filtered, drain, entry,
     make_leader, ucmd,
 };
 use crate::contract::limits::Limits;
@@ -428,4 +428,35 @@ fn an_open_repair_probe_runs_new_rounds_colocated() {
         panic!("the leader admits the proposal");
     };
     assert_eq!(nodes[0].delegated_rounds(), vec![(next, ProxyId(0))]);
+}
+
+/// A leader whose promise a higher-ballot `Commit` passed still takes a
+/// stalled delegation back, but cannot record it in its own log: its promise
+/// stays where the `Commit` raised it.
+#[test]
+fn a_passed_leader_takes_a_round_back_without_recording_it() {
+    let mut nodes = proxied_cluster(1);
+    let mine = nodes[0].ballot();
+    let _ = nodes[0].propose(entry(1, 1, 1));
+    let _ = raw(&mut nodes[0]);
+    let higher = ballot(mine.round + 5, 1);
+    nodes[0].step(Message::Commit {
+        from: Party::Node(NodeId(1)),
+        ballot: higher,
+        slot: Slot(40),
+        command: ucmd(1, 9, 9),
+    });
+    let _ = raw(&mut nodes[0]);
+    assert!(nodes[0].is_leader(), "a Commit does not depose the leader");
+    assert_eq!(nodes[0].delegated_rounds(), vec![(Slot(0), ProxyId(0))]);
+    let taken = nodes[0].take_back_delegated(0);
+    assert_eq!(taken, vec![(Slot(0), ProxyId(0))]);
+    assert!(nodes[0].delegated_rounds().is_empty(), "taken back");
+    assert_eq!(nodes[0].hard_state().max_promised_ballot, higher);
+    let ready = nodes[0].ready();
+    assert!(
+        ready.writes().is_empty(),
+        "a round taken back under a passed promise writes nothing"
+    );
+    ready.advance();
 }

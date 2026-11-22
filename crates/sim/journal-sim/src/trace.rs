@@ -11,6 +11,7 @@
 //! `"noop"`). The model has one refusal for a truncate, `"fenced"`: the
 //! code's `WrongMode` of a truncate is written so.
 
+pub mod controller;
 pub mod mutate;
 pub mod register;
 
@@ -102,69 +103,90 @@ fn write_fields(fields: &mut Vec<(&'static str, Value)>, write: &Write) {
 ///
 /// # Panics
 ///
-/// When an event holds what the model does not have: a write of more or
+/// When an event holds what the model does not have (see [`encode`]).
+#[must_use]
+pub fn trace<'a>(fresh: Leader, events: impl IntoIterator<Item = &'a FoldEvent>) -> Trace {
+    let mut trace = start(fresh);
+    for event in events {
+        let (name, fields) = encode(event);
+        trace.event(name, fields);
+    }
+    trace
+}
+
+/// The trace of no event of a fold walk whose fresh journal is `fresh`:
+/// the definitions of `FoldTrace.tla`, and the start of a live check.
+#[must_use]
+pub fn start(fresh: Leader) -> Trace {
+    let mut trace = Trace::new();
+    trace.define("TraceFresh", leader(fresh));
+    trace
+}
+
+/// One event of a fold walk as an event of `FoldTrace.tla`: its name and
+/// its fields.
+///
+/// # Panics
+///
+/// When the event holds what the model does not have: a write of more or
 /// fewer than one record, an `Upgrade`, an answer `Empty` or `Reserved`, a
 /// `Resolve` that was not covered.
 #[must_use]
-pub fn trace<'a>(fresh: Leader, events: impl IntoIterator<Item = &'a FoldEvent>) -> Trace {
-    let mut trace = Trace::new();
-    for event in events {
-        let mut fields: Vec<(&'static str, Value)> = Vec::new();
-        match event {
-            FoldEvent::Apply {
-                command,
-                answer,
-                state: after,
-            } => {
-                let mut res = *answer;
-                match command {
-                    Command::Noop => fields.push(("op", Value::from("noop"))),
-                    Command::Write(write) => write_fields(&mut fields, write),
-                    Command::Truncate { fence, up_to } => {
-                        fields.push(("op", Value::from("tr")));
-                        fields.push(("u", fence.map_or(Value::from("none"), uuid)));
-                        fields.push(("up", int(up_to.0)));
-                        if res == "wrong" {
-                            res = "fenced";
-                        }
+pub fn encode(event: &FoldEvent) -> (&'static str, Vec<(&'static str, Value)>) {
+    let mut fields: Vec<(&'static str, Value)> = Vec::new();
+    let name = match event {
+        FoldEvent::Apply {
+            command,
+            answer,
+            state: after,
+        } => {
+            let mut res = *answer;
+            match command {
+                Command::Noop => fields.push(("op", Value::from("noop"))),
+                Command::Write(write) => write_fields(&mut fields, write),
+                Command::Truncate { fence, up_to } => {
+                    fields.push(("op", Value::from("tr")));
+                    fields.push(("u", fence.map_or(Value::from("none"), uuid)));
+                    fields.push(("up", int(up_to.0)));
+                    if res == "wrong" {
+                        res = "fenced";
                     }
-                    Command::SetLeader { new, old } => {
-                        fields.push(("op", Value::from("sl")));
-                        fields.push(("new", new.map_or(Value::from("none"), uuid)));
-                        fields.push(("old", leader(*old)));
-                    }
-                    Command::Upgrade { .. } => panic!("the model has no Upgrade"),
                 }
-                assert!(
-                    !matches!(res, "empty" | "reserved"),
-                    "the model has no answer {res}"
-                );
-                fields.push(("res", Value::from(res)));
-                state(&mut fields, *after);
-                trace.event("apply", fields);
+                Command::SetLeader { new, old } => {
+                    fields.push(("op", Value::from("sl")));
+                    fields.push(("new", new.map_or(Value::from("none"), uuid)));
+                    fields.push(("old", leader(*old)));
+                }
+                Command::Upgrade { .. } => panic!("the model has no Upgrade"),
             }
-            FoldEvent::Seal { state: boundary } => {
-                state(&mut fields, *boundary);
-                trace.event("seal", fields);
-            }
-            FoldEvent::Resolve {
-                segment,
-                write,
-                answer,
-            } => {
-                write_fields(&mut fields, write);
-                fields.push(("seg", int(*segment)));
-                let res = match answer {
-                    ResolveAnswer::Written { .. } => "dup",
-                    ResolveAnswer::NotWritten => "taken",
-                    ResolveAnswer::Truncated => "trunc",
-                    ResolveAnswer::NotCovered => panic!("a Resolve that was not covered"),
-                };
-                fields.push(("res", Value::from(res)));
-                trace.event("resolve", fields);
-            }
+            assert!(
+                !matches!(res, "empty" | "reserved"),
+                "the model has no answer {res}"
+            );
+            fields.push(("res", Value::from(res)));
+            state(&mut fields, *after);
+            "apply"
         }
-    }
-    trace.define("TraceFresh", leader(fresh));
-    trace
+        FoldEvent::Seal { state: boundary } => {
+            state(&mut fields, *boundary);
+            "seal"
+        }
+        FoldEvent::Resolve {
+            segment,
+            write,
+            answer,
+        } => {
+            write_fields(&mut fields, write);
+            fields.push(("seg", int(*segment)));
+            let res = match answer {
+                ResolveAnswer::Written { .. } => "dup",
+                ResolveAnswer::NotWritten => "taken",
+                ResolveAnswer::Truncated => "trunc",
+                ResolveAnswer::NotCovered => panic!("a Resolve that was not covered"),
+            };
+            fields.push(("res", Value::from(res)));
+            "resolve"
+        }
+    };
+    (name, fields)
 }

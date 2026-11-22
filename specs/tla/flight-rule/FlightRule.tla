@@ -179,8 +179,9 @@ Prepare(b) ==
   /\ net' = net \cup {[type |-> "prepare", bal |-> b]}
   /\ UNCHANGED <<mem, pending, durable, durableId, nextId, outbox, proposed, crashes, grouped>>
 
+\* A promise at b answers the prepare of b, so a quorum of them exists only
+\* once Prepare(b) ran.
 Propose(b) ==
-  /\ b \in started
   /\ b \notin proposed
   /\ \E Q \in Quorums :
        LET ps == {m \in net : m.type = "promise" /\ m.bal = b /\ m.from \in Q}

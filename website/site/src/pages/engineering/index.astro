@@ -1,15 +1,402 @@
 ---
-// The Engineering section (#812 (website redo 3/4)): one short page per
-// technique, and each page shows the technique at work on paros-consensus,
-// compiled to wasm and run in the browser.
+// The safety case (#1361 (a safety case for consensus and journal)): one row
+// per safety claim of paros-consensus and of the journal, with the TLA+ model,
+// the trace spec, the walk and the mutants behind it. The open rows stay: the
+// page says what is not proved. Every name below exists in the repository.
 import Doc from "../../layouts/Doc.astro";
-import { url } from "../../nav";
+import { REPO, url } from "../../nav";
+const TLA = `${REPO}/tree/main/specs/tla`;
+const BLOB = `${REPO}/blob/main/specs/tla`;
+const ISSUE = (n: number) => `${REPO}/issues/${n}`;
+
+/** A link to a model folder, a trace spec, or a crate path. */
+interface Ref { text: string; href?: string }
+type State = "checked" | "model" | "open";
+interface Claim {
+  claim: string;
+  /** The model folders, each with the invariants that state the claim. */
+  models: { dir: string; inv: string[] }[];
+  trace: string[];
+  walk: string;
+  /** TLC controls (a check that must fail) and walk mutants (a planted bug). */
+  controls: string[];
+  mutants: string[];
+  state: State;
+  /** The issue that keeps the row open, or the step that builds its code. */
+  issue?: { n: number; name: string };
+  note?: string;
+}
+
+const CONSENSUS: Claim[] = [
+  {
+    claim: "One value is chosen per slot.",
+    models: [{ dir: "decree", inv: ["Agreement", "Inv"] }, { dir: "multi-paxos", inv: ["Agreement", "Inv"] }, { dir: "node", inv: ["Agreement"] }],
+    trace: ["decree/DecreeTrace.tla", "node/MultiPaxosTrace.tla"],
+    walk: "decree walk, multi_paxos, multi_paxos_five, grid, partitions · ONE_VALUE",
+    controls: ["inductive_ignore", "wipe_revote", "lost"],
+    mutants: ["ForgetVotes", "HideVotes", "decree: ForgetPromise, HideVote"],
+    state: "checked",
+  },
+  {
+    claim: "A promise or a vote leaves a node only once it is on the node's disk.",
+    models: [{ dir: "multi-paxos", inv: ["Agreement"] }],
+    trace: ["node/MultiPaxosTrace.tla"],
+    walk: "every flavor · PERSIST_BEFORE_SEND",
+    controls: ["durable_after"],
+    mutants: ["SkipPersist"],
+    state: "checked",
+  },
+  {
+    claim: "A Commit is sent only for a value that a Phase-2 quorum chose.",
+    models: [{ dir: "node", inv: ["CommitBacked", "CommitAgree"] }, { dir: "proxy-leader", inv: ["CommitBacked", "CommitAgree"] }],
+    trace: ["node/ProxyLeaderTrace.tla"],
+    walk: "proxies, proxies_on_grid, compartments · COMMIT_BACKED",
+    controls: ["short", "belief_any"],
+    mutants: ["EarlyCommit", "KeepProxyRounds"],
+    state: "checked",
+  },
+  {
+    claim: "What a party learns or applies is the value that was chosen.",
+    models: [{ dir: "multi-paxos", inv: ["LearnedChosen"] }, { dir: "node", inv: ["LearnedChosen", "ReplicaChosen"] }],
+    trace: ["node/MultiPaxosTrace.tla", "node/CompartmentsTrace.tla"],
+    walk: "replicas, compartments_compacting · LEARNED_CHOSEN",
+    controls: ["learn_record"],
+    mutants: ["CorruptCommit"],
+    state: "checked",
+  },
+  {
+    claim: "The chosen prefix on a disk never moves back while its node runs, and keeps what an fsync covered.",
+    models: [],
+    trace: [],
+    walk: "every flavor · PREFIX_SHRINKS",
+    controls: [],
+    mutants: ["LoseChosenIndex"],
+    state: "checked",
+    note: "Judged by the walk oracle only; no model states it.",
+  },
+  {
+    claim: "A leaderless read sees every write that was acknowledged before it started.",
+    models: [{ dir: "reads", inv: ["ReadSeesAcked"] }, { dir: "node", inv: ["ReadSeesAcked"] }],
+    trace: ["node/ReadsTrace.tla"],
+    walk: "reads, lagging_reads · READ_SEES_WRITES",
+    controls: ["fence_belief_lag", "ack_no_ballot"],
+    mutants: ["LocalRead", "BeliefFence", "HideWatermark"],
+    state: "checked",
+  },
+  {
+    claim: "A reconfiguration never lets two configurations choose two values.",
+    models: [{ dir: "matchmaker", inv: ["Agreement"] }, { dir: "node", inv: ["Agreement"] }],
+    trace: ["node/MatchmakerTrace.tla", "node/MatchmakerGridTrace.tla"],
+    walk: "matchmakers, reconfiguring · ONE_VALUE",
+    controls: ["phase1_own", "match_nocheck", "gc_early"],
+    mutants: ["EarlyGc"],
+    state: "checked",
+  },
+  {
+    claim: "A retirement never leaves a new ballot without a Phase-1 quorum.",
+    models: [{ dir: "matchmaker", inv: ["Electable"] }, { dir: "retire-fence", inv: [] }, { dir: "node", inv: ["Electable"] }],
+    trace: ["node/RetireTrace.tla"],
+    walk: "retiring",
+    controls: ["retire_one_ack", "fence_volatile"],
+    mutants: ["RetireUnchecked"],
+    state: "checked",
+  },
+  {
+    claim: "A matchmaker set handover carries every registration and the GC floor to the next generation.",
+    models: [{ dir: "handover", inv: ["RegisterCarried", "FloorCarried"] }, { dir: "generations", inv: ["RegsCarried", "OneSuccessor"] }, { dir: "handover-chain", inv: [] }],
+    trace: ["generations/HandoverTrace.tla"],
+    walk: "handover",
+    controls: ["first_write_majority", "frozen_serves"],
+    mutants: ["ShrinkBootstrap"],
+    state: "checked",
+  },
+  {
+    claim: "One node at a time leads at a ballot across a handoff, and the successor keeps every pending round.",
+    models: [{ dir: "node", inv: ["OneHolder", "LeaderFrontier"] }, { dir: "leader-handoff", inv: ["OneHolder", "LeaderFrontier"] }],
+    trace: ["node/LeaderHandoffTrace.tla"],
+    walk: "handoff",
+    controls: ["two_hops", "volatile_frontier"],
+    mutants: ["RewindHandoff"],
+    state: "checked",
+  },
+  {
+    claim: "Truncation and compaction never lose a value above the floor.",
+    models: [{ dir: "truncation", inv: ["ValueKept", "FloorChosen", "Recoverable"] }, { dir: "truncation-reconfig", inv: [] }, { dir: "node", inv: ["FloorChosen"] }],
+    trace: ["node/TruncationTrace.tla"],
+    walk: "compaction · JOURNAL_FOLD",
+    controls: ["floor_ignore", "compact_early"],
+    mutants: ["CompactPastFold", "CorruptTrimJump"],
+    state: "checked",
+  },
+  {
+    claim: "A damaged record never changes a chosen value (CTRL).",
+    models: [{ dir: "truncation", inv: ["Agreement"] }, { dir: "node", inv: ["NoFillChosen"] }],
+    trace: ["node/FaultsTrace.tla"],
+    walk: "disk_faults, disk_faults_three · ONE_VALUE",
+    controls: ["ctrl_none", "two_rots"],
+    mutants: ["HideFaulty"],
+    state: "checked",
+  },
+  {
+    claim: "Each write of a batch gets one range of the log, in order.",
+    models: [{ dir: "compartments", inv: ["OneRange", "AckedChosen"] }, { dir: "batcher", inv: ["LaneOrder", "AnswerHolds"] }],
+    trace: ["batcher/BatcherTrace.tla", "node/CompartmentsTrace.tla"],
+    walk: "batcher walk, compartments",
+    controls: ["copies_onerange", "order_any"],
+    mutants: ["batcher: ReverseLane"],
+    state: "checked",
+  },
+  {
+    claim: "Each claim above holds at every size, not only on the bounded instances that TLC explores.",
+    models: [{ dir: "decree", inv: ["Inv"] }, { dir: "multi-paxos", inv: ["Inv"] }],
+    trace: [],
+    walk: "",
+    controls: ["inductive_ignore", "inductive_prefix"],
+    mutants: [],
+    state: "open",
+    issue: { n: 1307, name: "inductive invariants, then proofs" },
+    note: "Decree: TLAPS proves that Inv holds at the start, that every step keeps it and that it implies Agreement (DecreeProof.tla); the temporal rule that joins them is not checked (no LS4 in the TLAPS of nixpkgs). Multi-Paxos: TLC checks drawn states only; no proof yet.",
+  },
+];
+
+const JOURNAL: Claim[] = [
+  {
+    claim: "Each answer to a write is the answer of the whole log, or Below for a resend across a seal.",
+    models: [{ dir: "journal-state", inv: ["AckTrue", "OneFold"] }, { dir: "seal-chain", inv: ["AckTrue", "OneFold"] }],
+    trace: ["journal-state/FoldTrace.tla"],
+    walk: "fold walk · FOLD, VIEW",
+    controls: ["gap_off", "lookup_local"],
+    mutants: ["LostLog", "StaleBoundary"],
+    state: "checked",
+    issue: { n: 1326, name: "journal roles" },
+    note: "Checked on the fold of paros-journal. The roles that carry a write are not built yet.",
+  },
+  {
+    claim: "A single writer gets exactly-once writes; a fenced write is judged under its uuid.",
+    models: [{ dir: "multi-writer", inv: ["ExactlyOnce", "FenceTrue", "RefusalFinal"] }],
+    trace: ["journal-state/FoldTrace.tla"],
+    walk: "fold walk · FOLD",
+    controls: ["dedup_after", "fence_propose", "basis_stale"],
+    mutants: ["LostLog"],
+    state: "checked",
+    issue: { n: 1326, name: "journal roles" },
+    note: "The fold walk switches to multi-writer and back; the roles are not built yet.",
+  },
+  {
+    claim: "A Resolve answers the fate that the whole log gives the write.",
+    models: [{ dir: "journal-state", inv: ["ResolveTrue"] }],
+    trace: ["journal-state/FoldTrace.tla"],
+    walk: "fold walk · RESOLVE",
+    controls: ["resolve_uuid", "resolve_early"],
+    mutants: ["ResolveInForce"],
+    state: "checked",
+  },
+  {
+    claim: "A replica that restarts folds its segment again to the same state.",
+    models: [{ dir: "journal-state", inv: ["OneFold"] }],
+    trace: ["journal-state/FoldTrace.tla"],
+    walk: "fold walk · REFOLD",
+    controls: [],
+    mutants: ["RefoldShort"],
+    state: "checked",
+  },
+  {
+    claim: "A done register write is never lost across a matchmaker set handover, and a step acts only on a value that every serving majority holds.",
+    models: [{ dir: "segment-records", inv: ["Carried", "SealOnce", "RetireKept", "DropKept"] }, { dir: "cas-register", inv: [] }],
+    trace: ["segment-records/RegisterTrace.tla"],
+    walk: "register walk · CARRIED, ACTED",
+    controls: ["close_one", "drop_read"],
+    mutants: ["SendBeforePersist", "ActOnRead"],
+    state: "checked",
+  },
+  {
+    claim: "A seal ends where the boundary state says: a sealed grid chooses nothing at or above its end, and next_seq never moves back.",
+    models: [{ dir: "journal-state", inv: ["SealedFrozen", "RecordTrue", "NoMoveBack"] }, { dir: "seal-chain", inv: ["RecordTrue"] }, { dir: "seal-ctrl", inv: [] }],
+    trace: [],
+    walk: "",
+    controls: ["end_read", "end_applied", "record_latest"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1326, name: "journal roles" },
+  },
+  {
+    claim: "An acceptor sends a promise or a vote only once it is durable, and writes a raised promise before or with the vote.",
+    models: [{ dir: "journal-state", inv: ["Agreement"] }, { dir: "flight-rule", inv: ["SentIsDurable"] }],
+    trace: [],
+    walk: "",
+    controls: ["reply_mem1b", "reply_mem2b", "order_vote_first", "send_early"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1326, name: "journal roles" },
+  },
+  {
+    claim: "A write reaches only the replica set of its segment, and a read returns the acked write.",
+    models: [{ dir: "segment-replicas", inv: ["NoForeign", "ReadTrue", "AckTrue"] }],
+    trace: [],
+    walk: "",
+    controls: ["deliver_all", "route_other", "retire_early"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1326, name: "journal roles" },
+  },
+  {
+    claim: "A deposed controller changes nothing, and every grid meets F + 1 ≤ acks ≤ rows − F.",
+    models: [{ dir: "grid-controller", inv: ["OneFromEach", "AnswerTrue", "AllBounded"] }, { dir: "segment-records", inv: ["ReshapeFenced"] }],
+    trace: [],
+    walk: "",
+    controls: ["noterm", "nobound", "noidem"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1328, name: "paros-journal-control" },
+  },
+  {
+    claim: "A heal of a sealed segment's replica set keeps every slot on a live replica.",
+    models: [{ dir: "re-replication", inv: ["Findable", "Margin", "ReadTrue"] }],
+    trace: [],
+    walk: "",
+    controls: ["copy_any", "cas_blind"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1326, name: "journal roles" },
+  },
+  {
+    claim: "A damaged copy of a sealed segment is repaired or reported, across retire and offload.",
+    models: [{ dir: "ctrl-grid", inv: ["RecordsTrue"] }, { dir: "ctrl-segments", inv: [] }],
+    trace: [],
+    walk: "",
+    controls: ["tally_none", "retire_f", "drop_retired"],
+    mutants: [],
+    state: "model",
+    issue: { n: 1326, name: "journal roles" },
+  },
+  {
+    claim: "Every step of the journal completes with F members down in every group, and waits for no more than a quorum.",
+    models: [{ dir: "quorum-everywhere", inv: ["Done"] }],
+    trace: [],
+    walk: "",
+    controls: ["write_every_column", "seal_mm", "write_all"],
+    mutants: [],
+    state: "open",
+    issue: { n: 1318, name: "quorum-everywhere rows for the boundary write and the acceptor compaction" },
+    note: "A liveness claim. The boundary write and the acceptor compaction have no row yet.",
+  },
+  {
+    claim: "A user truncate across segments never serves a record below the floor.",
+    models: [{ dir: "segment-truncate", inv: [] }],
+    trace: [],
+    walk: "",
+    controls: ["nofirst", "trim_open", "cache_unchecked"],
+    mutants: [],
+    state: "open",
+    issue: { n: 1321, name: "make crash_all and live_all finish" },
+    note: "Two checks of the model do not finish.",
+  },
+  {
+    claim: "The health measures give one journal state, and v1 acts on it.",
+    models: [{ dir: "health", inv: [] }],
+    trace: [],
+    walk: "",
+    controls: ["p2_only", "draft_states"],
+    mutants: [],
+    state: "open",
+    issue: { n: 1319, name: "a v1 switch in health/" },
+  },
+  {
+    claim: "A reshape with a column below quorum keeps writes going.",
+    models: [{ dir: "degraded-reshape", inv: [] }, { dir: "zero-stall", inv: [] }],
+    trace: [],
+    walk: "",
+    controls: ["hold_none", "block_short"],
+    mutants: [],
+    state: "open",
+    issue: { n: 1258, name: "reshape with a column below quorum" },
+    note: "Not a v1 rule: in v1 a reshape needs a quorum of the old grid.",
+  },
+];
+
+const LABEL: Record<State, { text: string; cls: string }> = {
+  checked: { text: "checked", cls: "done" },
+  model: { text: "model only", cls: "accent" },
+  open: { text: "open", cls: "gap" },
+};
+const count = (rows: Claim[], s: State) => rows.filter((r) => r.state === s).length;
+const ALL = [...CONSENSUS, ...JOURNAL];
 ---
 <Doc title="Engineering" kicker="Engineering" section="engineering/" siblings={[]}
-  description="How paros is built, one short page per technique. Each page runs the real paros-consensus in your browser.">
+  description="The safety case of paros-consensus and of the journal: each claim, the TLA+ model that states it, the trace check and the walk that hold the code to it, and the mutants that must die. The open rows stay on the page.">
+
+  <div class="strip" aria-label="The safety case in figures">
+    <div><span class="k">Claims</span><span class="v">{ALL.length}</span></div>
+    <div><span class="k">Checked on the code</span><span class="v">{count(ALL, "checked")}</span></div>
+    <div><span class="k">Model only</span><span class="v">{count(ALL, "model")}</span></div>
+    <div><span class="k">Open</span><span class="v">{count(ALL, "open")}</span></div>
+  </div>
+
+  <h2 id="read">How to read it</h2>
+  <p>Each row is one safety claim. A claim is <b>checked</b> when three judges hold the code that
+  ships to it: TLC checks a <a href={url("engineering/tla/")}>TLA+ model</a> that states the
+  claim as an invariant; a seeded <a href={url("engineering/simulation/")}>walk</a> runs the real
+  state machines with faults on, and an oracle with no code of its own judges it; TLC checks the
+  trace of each walk against the model. A claim is <b>model only</b> when its model is checked
+  and its code is not built yet. A claim is <b>open</b> when something is not proved; its issue
+  says what.</p>
+  <p>Each judge is tested too. A control is a TLC check that must fail without the rule. A <a href={url("engineering/mutants/")}>mutant</a> is a bug planted in the driver of a walk,
+  and its oracle or its trace check must fail.</p>
+  <div class="callout">
+    <p><b>Mostly bounded.</b> TLC explores small instances of each model completely. Only the
+    single decree has a proof that holds at every size (TLAPS); the other claims do not have
+    one yet: that is the last row of the first table (<a href={ISSUE(1307)}>#1307</a>).</p>
+  </div>
+
+  {[
+    { id: "consensus", title: "paros-consensus", rows: CONSENSUS, intro: "The sans-IO Paxos roles. Every walk runs the real ColocatedNode, ProxyLeader, ReplicaNode and Matchmaker of the crate." },
+    { id: "journal", title: "The journal", rows: JOURNAL, intro: "The journal v1. Its pure core (paros-journal: the fold, Resolve and the matchmaker register) has walks; its roles, controller and driver are not built yet, so most rows are model only." },
+  ].map((g) => (
+    <>
+      <h2 id={g.id}>{g.title}</h2>
+      <p>{g.intro}</p>
+      <table class="case">
+        <thead><tr><th>Claim</th><th>Model · invariant</th><th>Trace spec</th><th>Walk · oracle</th><th>Must die</th><th>State</th></tr></thead>
+        <tbody>
+          {g.rows.map((r) => (
+            <tr>
+              <td data-label="Claim">{r.claim}{r.note && <span class="case-note">{r.note}</span>}</td>
+              <td data-label="Model"><div>{r.models.length ? r.models.map((m) => (
+                <span class="case-item"><a href={`${TLA}/${m.dir}`}><code>{m.dir}/</code></a>{m.inv.length > 0 && <> {m.inv.map((i) => <code>{i}</code>).reduce((a: any, b: any) => [a, ", ", b])}</>}</span>
+              )) : <span class="case-none">none</span>}</div></td>
+              <td data-label="Trace"><div>{r.trace.length ? r.trace.map((t) => (
+                <span class="case-item"><a href={`${BLOB}/${t}`}><code>{t}</code></a></span>
+              )) : <span class="case-none">none yet</span>}</div></td>
+              <td data-label="Walk"><div>{r.walk ? r.walk : <span class="case-none">none yet</span>}</div></td>
+              <td data-label="Must die"><div>
+                {r.controls.length > 0 && <span class="case-item">TLC: {r.controls.map((c) => <code>{c}</code>).reduce((a: any, b: any) => [a, ", ", b])}</span>}
+                {r.mutants.length > 0 && <span class="case-item">walk: {r.mutants.map((m) => <code>{m}</code>).reduce((a: any, b: any) => [a, ", ", b])}</span>}
+                {r.controls.length + r.mutants.length === 0 && <span class="case-none">none</span>}
+              </div></td>
+              <td data-label="State"><div><span class={`chip-status ${LABEL[r.state].cls}`}>{LABEL[r.state].text}</span>{r.issue && <span class="case-item"><a href={ISSUE(r.issue.n)}>#{r.issue.n}</a> ({r.issue.name})</span>}</div></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  ))}
+
+  <h2 id="sources">Where each row comes from</h2>
+  <ul>
+    <li>The models and their checks: <a href={`${TLA}`}><code>specs/tla/</code></a>, with <code>checks.txt</code> in each folder. A name under <i>TLC</i> is a check of that file
+      whose listed result is <code>violation</code>.</li>
+    <li>The walks, oracles and mutants of the core: <a href={`${REPO}/tree/main/crates/sim/consensus-sim`}><code>consensus-sim</code></a> (<code>Flavor</code> and <code>Mutant</code> in <code>src/cluster/flavor.rs</code>, the oracles in <code>src/oracle/</code>).
+      A walk name is a <code>Flavor</code>.</li>
+    <li>The walks of the journal: <a href={`${REPO}/tree/main/crates/sim/journal-sim`}><code>journal-sim</code></a> (<code>src/fold.rs</code>, <code>src/register.rs</code>).</li>
+    <li>The rule behind each journal row, with its decision: <a href={`${REPO}/blob/main/docs/journal/07-verification.md`}>§J7.1</a> of <code>docs/journal/</code>. The flavor view of the core: <a href={url("consensus/proof/")}>How it is checked</a>.</li>
+  </ul>
+
+  <h2 id="pages">The techniques</h2>
   <ol class="index-list">
+    <li><a href={url("engineering/tla/")}>TLA+ models</a><span class="desc">No code before its model. TLC checks each rule, each rule has a control, and each guard of a model is mutated.</span></li>
+    <li><a href={url("engineering/simulation/")}>Simulation</a><span class="desc">Seeded walks with faults on the code that ships, each walk checked against its model, every probe reached. No exception.</span></li>
+    <li><a href={url("engineering/mutants/")}>Mutants and assertions</a><span class="desc">cargo-mutants on the core, the score of a dated run, and the hard assertions that stop a broken state.</span></li>
     <li><a href={url("engineering/grid-quorums/")}>Grid quorums</a><span class="desc">Partitions of acceptors: a write touches one, an election touches all. Stop acceptors and see what still works.</span></li>
   </ol>
-  <p>The sans-IO core and its driver loop are in <a href={url("consensus/driver/")}>Consensus</a>,
-  with the library that builds every flavor.</p>
+  <p>The sans-IO core and its driver loop are in <a href={url("consensus/driver/")}>Consensus</a>.</p>
 </Doc>

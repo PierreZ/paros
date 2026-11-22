@@ -21,24 +21,24 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | Multi-writer mode through `SetLeader(None)`, position before fence, the resend across a seal (`Below`) | §J2.2, §J2.4.1 | `multi-writer/` | #1274 (multi-writer mode), #1301 (a resent write across a seal) |
 | The `Resolve` call that settles `Below` | §J2.2 | `journal-state/` | #1320 (the wire shape that resolves a `Below` answer) |
 | Leaderless reads: the read fence on the promise and the belief ballot | §J2.5 | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), #1228 (stale read by a lagging reader) |
-| The row seal of a full grid (not a v1 grid) | §J2.5 | `reads/` (`grid_full_seal`) | #1102 (rework 1.13), #1209 (seal each row of a full grid) |
+| The row seal of a full grid (not a v1 grid) | §J2.5 | `reads/` (`grid_full_seal`, `grid_full_seal_others`) | #1102 (rework 1.13), #1209 (seal each row of a full grid) |
 | Truncation on plain Multi-Paxos: the floor, the trim-point jump | §J2.6 | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2) |
 | Segments in the matchmakers, the seal end, the gap fill | §J3.1 | `experiments/segments/a/` | #1213 (segments in the protocol or in storage), #1233 (segments gap fill) |
 | A write reaches only the replica set of its segment; retire at `F + 1` holders | §J3.1 | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment) |
 | The whole boundary state in the segment record; two seals in a row | §J3.1 | `seal-chain/` | #1303 (two seals in a row) |
-| A user truncate across segments | §J3.2 | `segment-truncate/` | #1276 (user truncate across segments); #1321 (make `crash_all` and `live_all` finish) |
+| A user truncate across segments; the acceptors' floor for each segment | §J3.2 | `segment-truncate/` | #1276 (user truncate across segments); #1318 (`acc_grid`); #1321 (make `crash_all` and `live_all` finish) |
 | A leaderless read of the tail across a reshape | §J3.3 | `experiments/segments/reads/` | #1254 (leaderless reads across a reshape) |
 | Segment records across a matchmaker set handover; act on a write seen done | §J3.4 | `segment-records/` | #1275 (segment records across a matchmaker handover) |
 | The register as a compare-and-set at a majority of one generation | §J3.4 | `cas-register/`, `handover/` | PR #1064 (gone-node gap), #1097 (rework 1.8) |
 | The offloader and the races of offload (after v1) | §J3.1 | `offload/` | #1256 (offload races and the offloader role) |
-| Quorum everywhere and the grid bound | §J5.1 | `quorum-everywhere/`, `grid/` | #1257 (quorum everywhere); #1318 (two rows **Not proved**) |
+| Quorum everywhere and the grid bound | §J5.1 | `quorum-everywhere/`, `grid/` | #1257 (quorum everywhere); #1318 (the rows of the boundary write and the acceptor compaction) |
 | CTRL on a grid and across segments | §J5.3 | `ctrl-grid/`, `ctrl-segments/` | #1263 (CTRL recovery in the journal) |
 | The seal end against a faulty record: a faulty vote counts | §J3.1, §J5.3 | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record) |
 | Re-replication of a sealed segment | §J3.1, §J5.2 | `re-replication/`, its row in `quorum-everywhere/` | #1314 (re-replication of a sealed segment's replica set) |
 | The rules composed across three segments, with the acceptors' disk and the write orders | §J7.2 | `journal-state/` | #1189 (the journal state model), #1309 (the state is the disk) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
 | The controller's election and fenced reshape | §J6.1 | `grid-controller/` | #1259 (the fenced reshape call of the grid controller) |
-| The health measures and the journal states | §J6.2 | `health/`; its v1 switch is #1319 (a v1 switch in health/) | #1260 (journal health measures) |
+| The health measures and the journal states | §J6.2 | `health/` (v1: its `v1` and `v1_draft` checks, #1319 (a v1 switch in health/)) | #1260 (journal health measures) |
 
 ### J7.2 The composed model
 
@@ -102,6 +102,26 @@ extends `Journal.tla` and binds each event to the model's fold operators; the ch
 16 named rules, a planted `Below` in the segment in force is the control, and TLC refuses 24
 named edits of the recorded walks. The probes and the coverage gate come with the roles (#1326).
 
+**The walk of the roles** (#1326 (the journal roles over the core), `src/roles.rs`): the
+acceptors, the leaders and the segment replicas of `paros_journal::roles`, with a disk each
+(batches durable in id order, a crash that loses the batches in flight and the held sends), the
+register as an atomic compare-and-set, three proposers that campaign, reshapes to new grids from
+a pool of six acceptors, seals, boundary writes, retires, and the clients of the fold walk (one
+call in flight each, a call answered `Unknown` sent again, `Below` settled with `Resolve`). Six
+oracles judge it: one command chosen at each slot (`AGREE`), nothing chosen in a sealed grid at
+or above its end (`SEALED`), each answer the whole log's (`FOLD`), each replica's fold the whole
+log's at its front (`VIEW`), each boundary state the fold at the end (`BOUNDARY`) and each
+`Resolve` the fate the whole log gives (`RESOLVE`). Each has its planted mutant in the driver:
+an acceptor that loses its disk, a leader bound to a stale grid, a `Duplicate` answered `Taken`,
+a replica that takes a stale base, a stale boundary write and a `Resolve` at the segment in
+force. The narrow shape is the default grid (one column of three); the wide shape adds grids of
+two columns and promises in pages of two. Each campaign reaches its named sites (a seal lost, a
+`Noop` below the start, an old vote chosen again in a new grid, a third segment, a retire, a
+pull from a peer, a leader stopped on a higher promise, `Unknown`, `Below`, `Resolve`, and
+more). **Open**: the trace check of this walk against `Journal.tla` and the coverage gate over
+its probes (the next rule group of #1326); CTRL faulty votes on the acceptors' disks (the
+leader's blocked slot has unit tests only).
+
 **The walk of the register** (#1325 (the matchmaker register as an optional role),
 `src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
 of §J3.4 and handovers of the matchmaker set, with crashes that lose what a member did not
@@ -117,13 +137,51 @@ an action of the model. The checked walks meet 9 named rules, a forged `Bootstra
 the control (the oracles pass it, TLC refuses the decree before every bootstrap), and TLC refuses
 23 named edits of the recorded walks.
 
+**The live trace check** (#1310 (check long runs live), `tests/live.rs`). A long run writes more
+events than one TLC run can follow (one behaviour holds at most 65,535 states), and a check after
+the run sees a divergence only when the run ends. moonpool-tla's `Live` checks the events while
+the run writes them, in chunks on a thread of its own: each chunk starts from every model state
+at which the chunk before it ended, so the chunks check what one TLC run over the whole trace
+would check, with no limit on the length. The first chunk that no behaviour matches stops the
+check, and the run stops with it. The fold walk has an events port for it
+(`FoldModel::build_reported`, the walk's form of `Events`, rule 5 of §J4.2): it reports its fresh
+journal, then each event as it records it. Its long shape (`Shape::LONG`) seals up to 200
+segments. In CI one long walk (about 7,000 events, 199 seals) is checked live, and the trace
+control (`BelowInSegment`) is stopped at its first wrong answer, before the walk ends. Each night
+the `Journal live` workflow checks one fold walk with no end live for four hours.
+
 ### J7.4 The whole journal under moonpool-sim
 
 A moonpool-sim of the whole journal runs the driver, the adapter, many journals in one process,
 disk faults inside the contract, machine and zone loss, the controller and clients that retry
-(#1330 (paros-journal-moonpool)). Every input is recorded (§J4.2, rule 2), so a red run replays.
+(#1330 (paros-journal-moonpool), now part of #1417 (the moonpool adapter on the generic host)).
+The moonpool-sim version is not part of the journal v1: the adapter moved to the layered parosd
+(#1409; Pierre, 2026-11-22). The v1 keeps the same scenarios with the same oracles as a
+`journal-sim` walk of the whole journal on the driver and the in-memory backends of
+`paros-journal-io` (#1445 (the whole journal on the in-memory IO)), so the move removes no check. Every input is recorded (§J4.2, rule 2), so a red run replays.
 A contract suite certifies a backend's API only; crash safety is claimed only on a disk that can
 inject faults (Pierre, 2026-11-19).
+
+Its `Events` port feeds the live trace check of §J7.3, so a run of many hours is judged against
+#1189 while it runs (#1310 (check long runs live)). The driver reports each write before it makes
+it (announce, make, confirm): after a kill, only the last announced write is uncertain, and the
+report at restart decides. A control tears a persist batch during a reconfiguration (as E3 of
+etcd-raft, a lost commit index across a membership change), and the live check must refuse it.
+**Open**: these three parts need the moonpool adapter, #1417 (after v1). The
+driver and its `Events` port are built (#1329 (paros-journal-io), §J4.2): the driver reports each
+step of the `Host` once its batches are settled. The announce, make and confirm of each write, the
+live check fed by the port, and the torn-batch control land with the adapter.
+
+**The driver walk** (#1329, `journal-sim/tests/host.rs`). Before the moonpool-sim, `journal-sim`
+walks the generic driver itself: three processes, each a `Driver` with a disk that fails commits
+inside the contract (before or after the write), a transport through the walk's mailbox (lost,
+repeated, reordered), crashes that keep the disk, restarts that read it back, campaigns that
+depose a leader, and a writer that sends a call again. Its oracles share no code with the
+driver: `AGREE` (no two `Commit`s on the wire name two commands at one slot), `FLIGHT` (an
+`Accepted` or a `Promise` leaves only once the state it reports is on the disk) and `ANSWER`
+(each answer is the whole log's at a slot of the command). Each has its planted mutant: a disk
+that lies about a commit (`LyingDisk`), a process that loses its disk (`WipeDisk`), and a client
+that takes a `Taken` as written (`TakenAsWritten`). The driver has no trace check yet.
 
 ### J7.5 The controller's `decide`
 

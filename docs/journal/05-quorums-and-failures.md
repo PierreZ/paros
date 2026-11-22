@@ -25,8 +25,8 @@ a segment's replica set, each step completes:
 | Election | a matchmaker majority, then `F + 1` acceptors of every column of each configuration of `H_b` |
 | Leaderless read | `F + 1` acceptors of every column of the configuration in force; no matchmaker read: the fence of the code closes a reshape (#1254, decided in §J3.1) |
 | Seal | a Phase-1 quorum of the old grid, then a matchmaker majority for the compare-and-set of the end slot |
-| Boundary write | one replica of the old set that applied the segment, then a matchmaker majority. **Not proved**: no row yet (#1318) |
-| Acceptor compaction | `F + 1` replicas of the segment's set report their compaction point. **Not proved**: no row yet (#1318) |
+| Boundary write | one replica of the old set that applied the segment, then a matchmaker majority (#1318); `boundary_replica` passes even with `F + 1` members of the set down while one lives |
+| Acceptor compaction | `F + 1` replicas of the segment's set report their compaction point to the leader side; the floor that it sends the acceptors waits for no answer (§J3.2, #1318) |
 | Retire | `F + 1` replicas of the segment, then a matchmaker majority |
 | Offload mark, record of a trim | a matchmaker majority. In v1 the offload mark is a rule of the record only: nothing writes it (§J3.1) |
 | Matchmaker set handover | a majority of the old set (the stop quorum), then a majority of the new set (the successor decree) |
@@ -58,7 +58,7 @@ is still live. Each rule is in the section that the table names.
 | Step | The count | Section | Model |
 |---|---|---|---|
 | Retire of a sealed segment | `F + 1` replicas of its set hold the whole segment, and the boundary state is written. A found damage that is not repaired also blocks it, as a margin (Pierre, 2026-11-20, #1263) | §J3.1, §J3.4 | `segment-replicas/` (#1271) |
-| Compaction of a segment's acceptors | to a slot that `F + 1` replicas of its set compacted to, counted on the leader side through `membership/` | §J3.2 | `segment-truncate/` (#1276); the quorum row is **Not proved** (#1318) |
+| Compaction of a segment's acceptors | to a slot that `F + 1` replicas of its set compacted to, counted on the leader side through `membership/` | §J3.2 | `segment-truncate/` (#1276), the floor kept for each segment (`acc_grid`); `quorum-everywhere/`, `compact` (#1318) |
 | Re-replication of a sealed segment | a member that holds the whole segment copies it to a new replica, which counts only on its own complete copy; with `D` members down, at least `F + 1 - D` live members hold the segment (v1, Pierre, 2026-11-20) | §J3.1, §J3.4 | `re-replication/` (#1314 (re-replication of a sealed segment's replica set)) |
 
 ### J5.3 Damage: CTRL in the journal

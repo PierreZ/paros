@@ -220,9 +220,21 @@ breaks:
   (`AGENTS.md`), so it does not count the replicas itself: the replicas report their compaction
   point to the leader side, which counts them with a predicate of `membership/` on the replica
   set (as `collector.rs` counts the GC acks today) and sends the acceptors a floor. This is the
-  layering rule applied to the new step; the message is new. **Not proved**: the step has no row
-  in `quorum-everywhere/` yet (#1318 (quorum-everywhere rows for the boundary write and the
-  acceptor compaction)). Without a `Truncate` the acceptors keep every vote of the open segment;
+  layering rule applied to the new step; the message is new. The step waits for the reports of
+  `F + 1` replicas only, and the floor that it sends waits for no answer, so it completes with `F`
+  replicas of the set down; one more down blocks it (`quorum-everywhere/`, `compact`,
+  `compact_replica`; #1318 (quorum-everywhere rows for the boundary write and the acceptor
+  compaction)).
+- **The acceptors keep their floor for each segment, keyed by the replica set of the slot, not
+  by the grid where the vote lives** (#1318, checked on 2026-11-21 by `segment-truncate/`,
+  `acc_grid`). The sealing leader proposes again, in its own grid, each vote below the end that
+  the replicas did not apply (§J3.1). Those slots live at the acceptors of the new grid but
+  belong to the old segment and its replica set. So the acceptors drop such a slot only at the
+  floor that `F + 1` replicas of the old set reported, or at the retire of the old segment. A
+  grid that keeps one floor, counted on the replica set of the segment in force, drops them as
+  soon as `F + 1` replicas of the new set start: one replica of the old set applied the segment
+  (it wrote the boundary state), the others did not, and when it stops no live member and no
+  acceptor holds the slot (`Findable` fails). Without a `Truncate` the acceptors keep every vote of the open segment;
   in v1 only a reshape and its retire free the votes of a segment. Acceptors that compact to the decided
   floor alone (`acc_floor`) can drop the slots of a segment that no replica applied yet: nobody
   can then fold the segment, its boundary state is never written, and the next segment never
@@ -413,9 +425,11 @@ steps depend on the rule:
 
 Each write of the register waits for a matchmaker majority only (§J5.1,
 `specs/tla/quorum-everywhere/`). The model has a row for the seal, the retire, the offload mark,
-the trim, the controller election and the reshape call. **Not proved**: the boundary write has
-no row yet; it is one wait for a matchmaker majority after a replica applied the segment
-(#1318 (quorum-everywhere rows for the boundary write and the acceptor compaction)).
+the trim, the controller election, the reshape call and the boundary write. The boundary write
+waits for one live replica of the old set that applied the segment, then for a matchmaker
+majority (`boundary`): `F + 1` matchmakers down block it (`boundary_mm`), and it still completes
+with `F + 1` replicas of the set down while one lives (`boundary_replica`; #1318
+(quorum-everywhere rows for the boundary write and the acceptor compaction)).
 
 #### Matchmakers below a majority
 

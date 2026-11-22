@@ -18,7 +18,12 @@ live_reads        pass       ci
 # The same with F = 1 and crashes (three replicas in R1, two in R2), no
 # reads; about 11 minutes with 4 workers, so it stays out of CI.
 live              pass       long
-# The crash and liveness checks with all three values.
+# The crash and liveness checks with all three values, cut to at most two
+# writes, one Truncate(1) and one Truncate(2) (CONSTRAINT Budget, #1321).
+# Each finishes; about 7 and 91 minutes with 4 workers.
+crash_cut         pass       long
+live_cut          pass       long
+# The same with no cut. Neither finishes, so TLC stops at the bound.
 crash_all         pass       long   40
 live_all          pass       long   40
 # Reach: a check that must break, so that the passing checks are not empty.
@@ -37,4 +42,5 @@ cache_unchecked   violation  ci
 trim_intent       violation  ci
 trim_open         violation  ci
 acc_floor         violation  ci
+acc_grid          violation  ci
 nojump            violation  ci

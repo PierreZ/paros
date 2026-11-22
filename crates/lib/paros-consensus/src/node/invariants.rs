@@ -243,10 +243,18 @@ impl ColocatedNode {
                 "a rejoin is never below the durable incarnation"
             );
         }
-        if self.retire_check.is_some() {
+        if let Some(check) = self.retire_check.as_ref() {
             assert!(
                 self.role == NodeRole::Follower,
                 "a retirement check runs on a follower"
+            );
+            assert!(
+                self.acceptors_since == check.watermark(),
+                "a retirement check runs under the belief bound to its floor"
+            );
+            assert!(
+                !self.acceptors.contains(self.config.id),
+                "a retirement check runs with the node outside"
             );
         }
     }
@@ -394,6 +402,18 @@ impl ColocatedNode {
             );
         }
         if self.closed_probe.is_some() {
+            // A probe closes with its node outside (`fold_probe_answer`),
+            // and every move of the belief, a campaign or a fresh probe
+            // drops the tag.
+            assert!(
+                self.role == NodeRole::Follower,
+                "a closed probe's tag lives on a follower"
+            );
+            assert!(
+                self.belief_source == BeliefSource::Heard
+                    && !self.acceptors.contains(self.config.id),
+                "a closed probe's tag lives on a node outside its heard belief"
+            );
             assert!(
                 self.probe.is_none(),
                 "a closed probe's tag never coexists with an open probe"

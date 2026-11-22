@@ -47,6 +47,8 @@ CONSTANTS Sets, Writes, Floor, Fence, FrozenServes
 
 NG   == Len(Sets)
 Gens == 0..(NG - 1)
+\* The generations that hand over to a next one.
+Handovers == 0..(NG - 2)
 \* Sets is a sequence; generation g has the set Sets[g + 1].
 Set(g) == Sets[g + 1]
 Pool == UNION {Set(g) : g \in Gens}
@@ -105,11 +107,12 @@ Init == /\ gen = [m \in Pool |-> IF m \in Set(0) THEN 0 ELSE -1]
 (* The clients. Each step reaches one member. *)
 
 \* The member m acks the op. A member that does not serve answers nothing.
+\* A second ack of the same op changes nothing: the maximum and the set
+\* union are the same, and a write takes only a member below it.
 Ack(op, m) ==
     LET g == gen[m] IN
     /\ g >= 0 /\ Serves(m, g)
     /\ ~ OpDone(op)
-    /\ <<op, m, g>> \notin acks
     /\ CASE op[1] = "read"  -> /\ rg' = [rg EXCEPT ![m] = Up(@, op[2])]
                                /\ UNCHANGED <<wm, reg>>
          [] op[1] = "write" -> /\ OpDone(<<"read", op[2]>>)
@@ -122,10 +125,11 @@ Ack(op, m) ==
     /\ UNCHANGED <<gen, phase, boot, chosen, done, skipped>>
 
 \* The client's tally of generation g is complete. The client asks no more,
-\* so its acks are forgotten: they change nothing after this step.
+\* so its acks are forgotten: they change nothing after this step. The model
+\* lets a client complete an op again at another generation: each property
+\* reads the earliest one. With the fence, only a member that served g, so a
+\* chosen g, gave an ack of g.
 Complete(op, g) ==
-    /\ ~ OpDone(op)
-    /\ chosen[g]
     /\ Counted(op, g) \in Majorities(Set(g))
     /\ done' = done \cup {<<op, g>>}
     /\ acks' = {x \in acks : x[1] # op}
@@ -135,12 +139,12 @@ Complete(op, g) ==
 (* The handovers. The handover of generation g to g + 1 starts once g is    *)
 (* chosen, and only one runs at a time.                                     *)
 
-\* m freezes at generation g.
+\* m freezes at generation g. A member is at g only once g is chosen and
+\* names it. The model lets it freeze after the decree chose g + 1 too, and
+\* a second stop changes nothing.
 Stop(m) ==
     LET g == gen[m] IN
     /\ g >= 0 /\ g + 1 \in Gens
-    /\ chosen[g] /\ ~ chosen[g + 1]
-    /\ m \in Set(g) /\ phase[m] = "active"
     /\ phase' = [phase EXCEPT ![m] = "frozen"]
     /\ UNCHANGED <<gen, wm, rg, reg, boot, chosen, acks, done, skipped>>
 
@@ -150,32 +154,30 @@ Reconstruct(Q) == <<Max({wm[m] : m \in Q}), Max({rg[m] : m \in Q}),
 
 \* A reconfigurer closes the stop of generation g on the frozen quorum Q,
 \* and sends the state to the member m of the target. The member keeps the
-\* first bootstrap of the generation that reaches it.
+\* first bootstrap of the generation that reaches it; the model also lets a
+\* later one replace it, and lets a bootstrap arrive after the decree chose
+\* the set. A frozen quorum at g exists only once g is chosen.
 Bootstrap(g, Q, m) ==
-    /\ g + 1 \in Gens
-    /\ chosen[g] /\ ~ chosen[g + 1]
     /\ Q \in Majorities(Set(g))
     /\ \A n \in Q : gen[n] = g /\ phase[n] = "frozen"
     /\ m \in Set(g + 1)
-    /\ boot[m][g + 1] = None
     /\ boot' = [boot EXCEPT ![m][g + 1] = Reconstruct(Q)]
     /\ UNCHANGED <<gen, phase, wm, rg, reg, chosen, acks, done, skipped>>
 
-\* The decree over generation g chooses the set of g + 1, once every member
-\* of it holds a bootstrap (the first write needs every new member).
+\* The decree over generation g chooses the set of g + 1. The first write
+\* needs every new member to hold a bootstrap; `handover/` checks that rule
+\* (its control `first_write_majority`). Here a member with no bootstrap
+\* never activates, which costs only liveness, and this model checks safety
+\* only, so the decree may choose at any time. Choosing again changes nothing.
 Decide(g) ==
-    /\ g + 1 \in Gens
-    /\ chosen[g] /\ ~ chosen[g + 1]
-    /\ \A m \in Set(g + 1) : boot[m][g + 1] # None
     /\ chosen' = [chosen EXCEPT ![g + 1] = TRUE]
     /\ UNCHANGED <<gen, phase, wm, rg, reg, boot, acks, done, skipped>>
 
 \* m activates the chosen generation h with its own bootstrap of h. It can
 \* skip a generation. It keeps its own floor, read generation and register
-\* if they are higher.
+\* if they are higher. Only a member of the set of h holds a bootstrap of h.
 Activate(m, h) ==
     /\ chosen[h] /\ gen[m] < h
-    /\ m \in Set(h)
     /\ boot[m][h] # None
     /\ LET s == boot[m][h] IN
        /\ gen' = [gen EXCEPT ![m] = h]
@@ -192,8 +194,8 @@ Next ==
     \/ \E op \in Ops, m \in Pool : Ack(op, m)
     \/ \E op \in Ops, g \in Gens : Complete(op, g)
     \/ \E m \in Pool : Stop(m)
-    \/ \E g \in Gens, Q \in SUBSET Pool, m \in Pool : Bootstrap(g, Q, m)
-    \/ \E g \in Gens : Decide(g)
+    \/ \E g \in Handovers, Q \in SUBSET Pool, m \in Pool : Bootstrap(g, Q, m)
+    \/ \E g \in Handovers : Decide(g)
     \/ \E m \in Pool, h \in Gens : Activate(m, h)
 
 Spec == Init /\ [][Next]_vars

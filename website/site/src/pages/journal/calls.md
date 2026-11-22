@@ -3,6 +3,7 @@ layout: ../../layouts/Doc.astro
 kicker: Journal
 section: journal/
 status: journal
+lab: journal
 title: The calls
 description: Four calls make the data plane. One writer gets exactly-once writes with no dedup table; with no leader, many writers append at-least-once.
 ---
@@ -134,6 +135,16 @@ Each record carries two lists of headers: the client's, which the journal never 
 paros's own. In v1 paros adds only the leader time, a hint with no order promise. It is not part
 of the identity of a write, so a resend with a new time is the same write (§J2.8).
 
+## Your turn
+
+Make the calls of three writers, A, B and C. `paros-journal` runs in this page, compiled to
+wasm, and answers each call: the fold `JournalState::apply`, and `resolve` for `Resolve`. It is
+the code a replica runs. Here each call is one decided slot, applied at once: no consensus runs,
+and there is no network, disk or clock. A seal starts the next segment from the state at the
+seal.
+
+<div data-journal-lab="journal-duplicate journal-fenced journal-multi journal-below journal-truncated"></div>
+
 ## In paros
 
 - [`paros-journal`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-journal):
@@ -145,4 +156,6 @@ of the identity of a write, so a resend with a new time is the same write (§J2.
 - [`journal-sim`](https://github.com/PierreZ/paros/tree/main/crates/sim/journal-sim): three
   writers resend across seals, switch modes and truncate; four oracles judge the fold against a
   fold of the whole log with no segment.
+- [`paros-wasm`](https://github.com/PierreZ/paros/tree/main/crates/support/paros-wasm), feature
+  `journal`: the exercises above, a driver of `paros-journal` with no journal rule of its own.
 - Not built yet: the client (#1331) and the roles that serve the calls (#1326).

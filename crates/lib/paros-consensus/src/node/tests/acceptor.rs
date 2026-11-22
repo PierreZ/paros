@@ -168,3 +168,90 @@ fn accept_below_floor_is_ignored() {
         "a below-floor accept records nothing"
     );
 }
+
+/// A `Prepare` whose ballot names a node outside the pool, or an `Accept`
+/// whose reply party is outside it, is ignored whole: no promise moves and
+/// nothing is answered.
+#[test]
+fn a_message_naming_a_stranger_is_ignored() {
+    let mut n = node(1, &[0, 1, 2]);
+    let promised = n.hard_state().max_promised_ballot;
+    n.step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: ballot(4, 9),
+        from_slot: Slot(0),
+        config: None,
+    });
+    assert!(
+        drain(&mut n).is_empty(),
+        "no promise to a stranger's ballot"
+    );
+    assert_eq!(n.hard_state().max_promised_ballot, promised);
+    n.step(Message::Accept {
+        reply_to: Party::Node(NodeId(9)),
+        leader: NodeId(0),
+        ballot: ballot(4, 0),
+        slot: Slot(0),
+        command: ucmd(1, 1, 9),
+        config: None,
+    });
+    assert!(drain(&mut n).is_empty(), "no answer to a stranger");
+    assert_eq!(n.hard_state().max_promised_ballot, promised);
+    n.step(Message::Accept {
+        reply_to: Party::Node(NodeId(0)),
+        leader: NodeId(0),
+        ballot: ballot(4, 9),
+        slot: Slot(0),
+        command: ucmd(1, 1, 9),
+        config: None,
+    });
+    assert!(drain(&mut n).is_empty(), "no accept of a stranger's ballot");
+    assert_eq!(n.hard_state().max_promised_ballot, promised);
+}
+
+/// With `CheckQuorum` off (an election timeout of zero), a leader that
+/// hears no ack keeps leading.
+#[test]
+fn a_leader_with_check_quorum_off_never_resigns() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    nodes[0].set_election_timeout(0);
+    for _ in 0..10 {
+        nodes[0].tick();
+        let _ = drain(&mut nodes[0]);
+    }
+    assert!(nodes[0].is_leader());
+}
+
+/// A beat ack at a ballot other than the leader's own is no contact: a
+/// leader that hears only stale acks resigns on `CheckQuorum`, and one that
+/// hears acks at its ballot keeps leading.
+#[test]
+fn a_stale_beat_ack_does_not_hold_the_leadership() {
+    for stale in [true, false] {
+        let mut nodes = cluster::<3>();
+        make_leader(&mut nodes, 0);
+        let mine = nodes[0].ballot();
+        let acked = if stale {
+            Ballot {
+                round: mine.round - 1,
+                node: NodeId(1),
+            }
+        } else {
+            mine
+        };
+        nodes[0].set_election_timeout(3);
+        for _ in 0..10 {
+            nodes[0].tick();
+            let _ = drain(&mut nodes[0]);
+            for from in [1, 2] {
+                nodes[0].step(Message::HeartbeatAck {
+                    from: NodeId(from),
+                    ballot: acked,
+                    chosen: None,
+                });
+            }
+        }
+        assert_eq!(nodes[0].is_leader(), !stale, "stale acks: {stale}");
+    }
+}

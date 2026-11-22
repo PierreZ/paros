@@ -36,8 +36,11 @@ pub type Abandonable<Id> = Vec<(AcceptorConfig<Id>, Vec<(Id, Ballot)>)>;
 /// tally ([`Election::covered`]). Value selection runs over *all* gathered
 /// promises regardless of configuration (`recovered`), exactly as before.
 ///
-/// On a plain deployment `prior` is the one static configuration, so the
-/// predicate is today's single quorum comparison.
+/// A prior configuration other than `C_b` is also **sealed**: on a
+/// full-column grid, one promise in each of its rows (decision 31, #1209;
+/// [`AcceptorConfig::has_phase1_seal`]), so its quorum reads hear of the
+/// ballot. On a plain deployment `prior` is the one static configuration,
+/// `C_b` itself, so the predicate is the single quorum comparison.
 #[derive(Clone, Debug)]
 pub struct Election<Id, V> {
     /// The paging half: the ballot, the first slot, who answered completely,
@@ -169,11 +172,38 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
 
     /// Whether every prior configuration holds a Phase-1 quorum of promises —
     /// the completion predicate, in one readable place (see the type doc).
+    /// A prior configuration other than `C_b` must also be **sealed**
+    /// ([`AcceptorConfig::has_phase1_seal`]): on a full-column grid, one
+    /// promise in each row, so a quorum read over any row of it hears of
+    /// this ballot (decision 31, #1209). `C_b` itself needs no seal: a
+    /// column of `C_b` chooses at this ballot, and each row of `C_b` meets
+    /// that column. On a plain deployment `prior` is `[C_b]`, so the plain
+    /// predicate is unchanged.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn covered(&self) -> bool {
-        self.prior
-            .iter()
-            .all(|config| config.has_phase1_quorum(&self.promises.answered))
+        let answered = &self.promises.answered;
+        let covered = self.prior.iter().all(|config| {
+            if *config == self.config {
+                config.has_phase1_quorum(answered)
+            } else {
+                config.has_phase1_seal(answered)
+            }
+        });
+        // The seal only adds to the quorum of each configuration.
+        if covered {
+            assert!(
+                self.prior
+                    .iter()
+                    .all(|config| config.has_phase1_quorum(answered)),
+                "a covered election holds a Phase-1 quorum of every prior configuration"
+            );
+        }
+        covered
     }
 
     /// The Phase-1 addressees: the union of every prior configuration — the
@@ -569,21 +599,22 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         let Some(e) = self.election.as_mut() else {
             return;
         };
-        if ballot != e.promises.ballot || prepared >= ballot {
-            // A testimony at another ballot, or one that claims this very
-            // ballot or above it (wire input), proves nothing here.
+        if ballot != e.promises.ballot {
+            // A testimony at another ballot proves nothing here. One that
+            // claims this very ballot or above it (wire input) is kept, and
+            // drops nothing: every abandonable registration lies below the
+            // ballot (`mark_abandonable`).
             return;
         }
         let slot = e.testimony.entry(from).or_insert(prepared);
         *slot = (*slot).min(prepared);
         assert!(*slot <= prepared, "the lowest testimony counts");
         let dropped = e.drop_abandoned();
-        if dropped > 0 {
-            probe!(
-                reachable,
-                "phase1: a candidate drops a configuration only abandoned ballots registered"
-            );
-        }
+        probe!(
+            sometimes,
+            dropped > 0,
+            "phase1: a candidate drops a configuration only abandoned ballots registered"
+        );
     }
 
     /// The win gate (#121): every prior configuration covered — one
@@ -606,12 +637,10 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         // A quorum of a non-empty H_b is somebody: a won campaign over prior
         // configurations rests on at least one promise.
         if let Some(e) = self.election.as_ref().filter(|_| won) {
-            if !e.prior.is_empty() {
-                assert!(
-                    !e.promises.answered.is_empty(),
-                    "a won campaign rests on a promise"
-                );
-            }
+            assert!(
+                e.prior.is_empty() || !e.promises.answered.is_empty(),
+                "a won campaign rests on a promise"
+            );
             assert!(
                 e.promises.ballot >= promise,
                 "a won campaign is not below the promise"

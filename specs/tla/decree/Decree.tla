@@ -42,16 +42,23 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Values, NB, Quorums, Phase1, Pick, Identity, Refuse, Wipes, Down
 
-ASSUME Phase1 \in {"quorum", "every"}
+ASSUME Phase1Type == Phase1 \in {"quorum", "every"}
 ASSUME Pick \in {"highest", "ignore"}
-ASSUME Identity \in BOOLEAN
-ASSUME Refuse \in BOOLEAN
+ASSUME IdentityType == Identity \in BOOLEAN
+ASSUME RefuseType == Refuse \in BOOLEAN
 ASSUME Down \subseteq Acceptors
+\* The facts below are what the proof of `Inv` (`DecreeProof.tla`) uses
+\* about the constants. TLC checks each one on each configuration.
+ASSUME AcceptorsFinite == IsFiniteSet(Acceptors)
+ASSUME NBType == NB \in Nat
+ASSUME WipesType == Wipes \in Nat
+ASSUME QuorumsType == Quorums \subseteq SUBSET Acceptors /\ Quorums # {}
 \* Every two quorums intersect: the majority rule of the decree.
-ASSUME \A Q, R \in Quorums : Q \cap R # {}
+ASSUME QuorumsIntersect == \A Q, R \in Quorums : Q \cap R # {}
 
 Ballots == 1..NB
 None == "none"
+ASSUME NoneNotValue == None \notin Values
 
 VARIABLES prom,   \* acceptor: the highest ballot it promised or voted at
           vbal,   \* acceptor: the ballot of its vote, 0 when it has none
@@ -202,8 +209,7 @@ SafeAt(b, v) ==
 
 \* The state of an acceptor: its vote is its highest vote, and its promise
 \* is at or above it. A wiped acceptor has an empty disk.
-AccInv ==
-  \A a \in Acceptors :
+AccOK(a) ==
     IF a \in wiped
     THEN prom[a] = 0 /\ vbal[a] = 0 /\ vval[a] = None
     ELSE /\ vbal[a] <= prom[a]
@@ -211,9 +217,10 @@ AccInv ==
          /\ vbal[a] > 0 => VotedFor(a, vbal[a], vval[a])
          /\ \A c \in (vbal[a] + 1)..NB, v \in Values : ~VotedFor(a, c, v)
 
+AccInv == \A a \in Acceptors : AccOK(a)
+
 \* What each message says is true.
-MsgInv ==
-  \A m \in msgs :
+MsgOK(m) ==
     /\ m.type = "1b" =>
          /\ [type |-> "1a", bal |-> m.bal] \in msgs
          /\ m.acc \notin wiped => m.bal <= prom[m.acc]
@@ -227,6 +234,8 @@ MsgInv ==
     /\ m.type = "2b" =>
          /\ [type |-> "2a", bal |-> m.bal, val |-> m.val] \in msgs
          /\ m.acc \notin wiped => m.bal <= prom[m.acc]
+
+MsgInv == \A m \in msgs : MsgOK(m)
 
 Inv ==
   /\ TypeOK

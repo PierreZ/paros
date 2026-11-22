@@ -1294,7 +1294,7 @@ impl Cluster {
     }
 
     /// The oracles on a message that leaves `who`.
-    fn judge_sent(&self, who: &str, envelope: &Envelope) {
+    fn judge_sent(&mut self, who: &str, envelope: &Envelope) {
         let Wire::Paxos(msg) = &envelope.msg else {
             return;
         };
@@ -1317,6 +1317,12 @@ impl Cluster {
                 command,
                 ..
             } => self.ledger.commit_sent(who, *slot, *ballot, command),
+            Message::Accept {
+                ballot,
+                slot,
+                command,
+                ..
+            } => self.ledger.proposed(who, *slot, *ballot, command),
             _ => {}
         }
     }
@@ -1496,8 +1502,13 @@ impl Cluster {
         for i in 0..self.proxies.len() {
             let id = ProxyId(i as u64);
             if let Some(proxy) = self.proxy_mut(id).live.as_mut() {
-                proxy.expire_stale(expire_after);
+                let evicted = proxy.expire_stale(expire_after);
                 proxy.resend_pending();
+                for slot in evicted {
+                    if let Some(event) = self.tracer.proxy_expired(id, slot) {
+                        cx.record(event);
+                    }
+                }
                 self.drain_proxy(id, cx);
             }
         }

@@ -2,8 +2,8 @@
 
 The paros website (#810 (website redo 1/4), plan approved by Pierre on 2026-10-31). One Astro
 app, one style for every page. Build: `npm ci && npm run build` (output in `dist/`), preview:
-`npm run dev`. The live parts need the wasm first: `scripts/build-wasm.sh` stages
-`paros-consensus` into `public/paxos/wasm/`.
+`npm run dev`, tests: `npm run check-links` and `npm test` (see "Tests"). The live parts need the wasm first: `scripts/build-wasm.sh` stages
+`paros-consensus` into `public/paxos/wasm/` and `paros-journal` into `public/journal/wasm/`.
 
 ## What the site is for
 
@@ -20,9 +20,9 @@ in the repository; the old service is named only as "at the tag". No long book p
 | `/paxos/` | `src/pages/paxos/*.md`, `index.astro` | the course map (`src/course.ts`), the map of the flavors and the words (#949); one page per flavor: the problem, a story and a step-through diagram, the rule, where in paros |
 | `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
 | `/consensus/` | `src/pages/consensus/*` | the `paros-consensus` library (#1349 (Consensus, Journal and parosd page groups)): what the crate is and each flavor with its type and example (`index.astro`), the driver loop with the `Ready` widget (`driver.md`, the former Engineering page "The sans-IO core"), the four deployments (`deployments.md`), how it is checked (`proof.md`). Each Paxos page's "In paros" section links its Consensus page, and back |
-| `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | one short page per technique, each with a live widget on `paros-consensus` |
-| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, and the controller. Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule |
-| `/parosd/` | `src/pages/parosd/index.astro` | the service around the journal: what it will be, that it is rebuilt, and how to run the version before the rewrite at the tag |
+| `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | how paros is made safe (#1361 (safety case)): the safety case (`index.astro`: one row per safety claim of `paros-consensus` and of the journal, with its model and invariant, trace spec, walk and oracle, the controls and mutants that must die, and its state: checked, model only or open, with the issue; the open rows stay), one page each for TLA+ models (`tla.md`), simulation (`simulation.md`) and mutants and assertions (`mutants.md`), and grid quorums with its live widget. A figure on these pages comes from a dated run, with its date |
+| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, and the controller. Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule. The calls page has the fold lab, the matchmakers page the register lab and the segments page the record lab ("Your turn", below) |
+| `/parosd/` | `src/pages/parosd/index.astro`, `*.md` | the service around the journal (#1439 (the parosd page group)): what it will be, the eleven goals of paros (`docs/architecture/01-goal.md` §1.1; keep the list in step with it), one screen of the stack of eight layers and its two joints, and how to run the version before the rewrite at the tag. Then one page each for the layers (`layers.md`, §4.4), the control levels (`control.md`, §3.1, §3.3, §4.4), machines (`machines.md`, §3.1, §3.2, §4.4, §J6), names and tokens (`names-and-tokens.md`, §3.5, §3.8) and the universe (`universe.md`, §3.7). Each page says at the top (`status: parosd`) that the design is written and the code is not built, and links #1409 (build the layered parosd); it explains and links its sections of `docs/architecture/` and never copies a rule. When a crate of #1409 lands, its pull request removes the callout of its page and adds its "In paros" links |
 
 The top bar (`src/nav.ts`) is `Paxos · Consensus · Journal · parosd · Engineering` (#1349).
 
@@ -102,8 +102,11 @@ the screen marks the right answer, the reader's answer and the reason (`why`). T
 in the page only (`window.paxosStory.answers()`), and each one fires `paxos:answer` on the
 document. A "Break the rule" run ends with a "find the bug" question (`after`): its beat plays
 first, then the screen asks what went wrong in it, and an answer marks the right one with no
-second play. A page with no beats keeps the step-through alone. The story draws the recorded
-trace only; the step-through switches to the live wasm run.
+second play. Every page has one: single decree (an acceptor loses its disk), quorums (two
+quorums that do not meet), Multi-Paxos (a node skips Phase 1), compartmentalized (a proxy
+leader commits after one vote) and matchmaker (skip the matchmakers). A page with no beats
+keeps the step-through alone. The story draws the recorded trace only; the step-through
+switches to the live wasm run.
 
 ## The course (`src/course.ts`)
 
@@ -139,14 +142,35 @@ extra moves of the exercise, what the core said about the last move, Deliver all
 message until the wire is empty, one move), Undo and Start again. When the engine says
 the goal holds, the page shows why it matters and the next exercise. A solved exercise is
 kept in the browser (`public/course.js`) and the map counts it. `#lab=<id>` opens a tab, at
-load or later: the end of a lesson's story links to its first exercise. Lessons 1 to 5 and 7
-have exercises; the compartmentalized page runs its own driver, not a level, so lesson 6 has
-none yet.
+load or later: the end of a lesson's story links to its first exercise. Every lesson has
+exercises. The exercises of lesson 6 run the compartmentalized deployment of the page's own
+driver (`Desk` in `src/paxos/trace/compart/desk.rs`), not a level: node 0, two proxy leaders
+(lanes `p0`, `p1`) and two replicas (`r0`, `r1`).
 Without the wasm, the section says so.
+
+The Journal pages have their own "Your turn" (#1363 (journal fold lab)): `lab: journal` in the
+front matter loads `public/journal-lab.js` (and `course.js`, for the solved marks), and
+`<div data-journal-lab="id id id">` mounts it. It loads the `journal` wasm bundle
+(`public/journal/wasm/`, staged by `scripts/build-wasm.sh`, gitignored) and runs `JournalLab`
+(`paros-wasm`, `src/journal/lab.rs`): three writers, the view of the segment in force, each
+segment with its records, each writer's belief, the calls of the exercise as buttons (each
+with `data-call`, `A:write`, `seal`), and what `paros-journal` answered with its row of the
+answers table of §J2. Every answer comes from `JournalState::apply` or `resolve`; the page holds
+no journal rule. Each call is one decided slot, applied at once: the page says that no
+consensus, network, disk or clock runs there. `/journal/calls/` has five exercises.
+
+The Matchmakers and Segments pages share a third "Your turn" (#1364 (register and segment
+record lab)): `lab: register` loads `public/register-lab.js` (and `course.js`) on the same
+`journal` bundle. `<div data-register-lab="id id">` mounts `RegisterLab` (two controllers and
+three matchmakers of the register; each read and write is delivered, its reply lost, or
+dropped, and a matchmaker can stop), and `<div data-record-lab="id id">` mounts `RecordLab`
+(the strip of the segment records, each move a button). Each move is a button with `data-key`
+(`P>m1:deliver`, `seal:1`), from the engine's list of the moves open now; a refused move shows
+the refusal of the guard.
 
 ## Live widgets (#812 (website redo 3/4), #951 (live Engineering pages))
 
-Every Engineering page, and the driver page of Consensus, shows something live. A page sets `widget: true` in its front matter
+The grid quorums page of Engineering and the driver page of Consensus show something live; the safety case and the technique pages hold no widget. A page sets `widget: true` in its front matter
 (or `widget` on `<Doc>`) and puts `<div data-widget="NAME">` where the widget goes.
 `public/engineering.js` draws them, on the `paros-consensus` bundle at `/paxos/wasm/`:
 
@@ -159,3 +183,32 @@ A widget holds no protocol logic: every fact comes from the core. No bench figur
 performance numbers on the site (Pierre, 2026-10-31). The widgets that ran the playground engine
 (simulation, same-code, swarm, durable-writes, fsync, dogfooding) are at the tag
 `v0.2.0-alpha.1` (`docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md`).
+
+## Tests (#1362 (browser smoke test and link check))
+
+`.github/workflows/pages.yml` runs both on each pull request that touches the site,
+`paros-wasm`, `paros-consensus`, `paros-journal` or the Cargo files, and before each deploy.
+Both run on the built site, so build the wasm and the site first.
+
+- **Link check**, `npm run check-links` (`scripts/check-links.mjs`, in `nix develop`): every
+  `href` and `src` of `dist/`. A link inside the site names a file of `dist/`, and its
+  `#anchor` names an `id` of that page (`#run=…` and `#lab=…` are addresses that a script
+  reads). A link to this repository on GitHub (`blob/<ref>/…`, `tree/<ref>/…`) names a file
+  or folder that exists at that ref (the working tree for `main`, `git ls-tree` for a tag),
+  and its anchor on a Markdown file names a heading there, as GitHub writes the anchor
+  (`§J4.2 The journal's sans-IO contract` is `#j42-the-journals-sans-io-contract`). Links to
+  other sites are not fetched. A broken link is fixed; there is no list of links to skip.
+- **Browser smoke test**, `npm test` (`tests/smoke.spec.mjs`, Playwright, Chromium only, in
+  `nix develop .#site`: the flake gives the browser of nixpkgs's `playwright-driver`, and
+  `@playwright/test` in `package.json` has its exact version; bump both together).
+  `scripts/serve.mjs` serves `dist/` at `/paros/`. The test fails on a console error or
+  warning, an uncaught exception, a failed request or an answer of 400 or more on any page,
+  and on a page wider than 390 px at 390 px. On each page with a trace, the step-through
+  must switch to the live wasm run (the chip says "live"), every story must reach its last
+  screen, and every "What if" run its last step. One exercise of each lesson is solved by
+  clicks on Deliver and Drop (the rows carry `data-kind`, `data-from` and `data-to`, from
+  `WireMessage` in `paros-wasm`), and the page must say the goal holds. Every exercise of the
+  journal fold lab is solved by clicks on its calls (`data-call`), and every exercise of the
+  register and record labs by clicks on its moves (`data-key`); Undo takes the goal back. The quorum picker,
+  the `quorums` widget and the `Ready` widget must answer. A new live part gets its test in
+  the same pull request. No test is skipped, and a red run is not run again (`AGENTS.md`).

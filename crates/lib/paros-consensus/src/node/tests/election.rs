@@ -431,6 +431,56 @@ fn recovering_leader(page: usize) -> ColocatedNode {
 }
 
 #[test]
+fn a_recovery_page_counts_its_gap_fills() {
+    // Node 1 reports slots 0 and 2: the page re-proposes both and fills the
+    // hole at slot 1 with a no-op, so it started three rounds and one fill.
+    let mut n = node(0, &[0, 1, 2]);
+    campaign(&mut n);
+    let _ = drain(&mut n);
+    let accepted = [0_u64, 2]
+        .into_iter()
+        .map(|slot| {
+            (
+                Slot(slot),
+                (
+                    ballot(0, 1),
+                    ucmd(9, slot, u8::try_from(slot).expect("test slot fits u8")),
+                ),
+            )
+        })
+        .collect();
+    n.step(Message::Promise {
+        faulty: BTreeMap::new(),
+        from: NodeId(1),
+        ballot: n.ballot(),
+        from_slot: Slot(0),
+        accepted,
+        next_from_slot: None,
+        prepared: None,
+    });
+    assert_eq!(n.role(), NodeRole::Leader);
+    let ready = n.ready();
+    assert_eq!(ready.recovery_batch(), Some((3, 1, 0)));
+    ready.advance();
+    assert_eq!(n.election_gap_fills(), 1);
+}
+
+#[test]
+fn a_pending_recovery_page_holds_the_next_one() {
+    // The driver has not advanced the first page: a call to release the next
+    // one starts nothing, and the first page is reported unchanged.
+    let mut n = recovering_leader(7);
+    n.advance_recovery();
+    let ready = n.ready();
+    let (started, gap_fills, remaining) = ready
+        .recovery_batch()
+        .expect("a recovering leader reports a page");
+    ready.advance();
+    assert_eq!((started, gap_fills), (7, 0));
+    assert_eq!(remaining, 2 * PROMISE_BATCH + 2 - 7);
+}
+
+#[test]
 fn a_recovering_leader_is_not_settled() {
     let mut n = recovering_leader(RECOVERY_BATCH);
     assert!(!n.leadership_settled(), "its recovery is open");
@@ -819,6 +869,26 @@ fn campaign_above_is_a_no_op_on_the_leader() {
         nodes[0].acceptor().promised(),
         promised,
         "the leader's promise does not move"
+    );
+}
+
+/// A candidate still matchmaking keeps its campaign: `campaign_above`
+/// neither re-asks the matchmakers nor opens a second ballot.
+#[test]
+fn campaign_above_is_a_no_op_while_matchmaking() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    campaign(&mut n);
+    let mine = n.ballot();
+    assert!(
+        !drain_match_requests(&mut n).is_empty(),
+        "matchmaking is open"
+    );
+    n.campaign_above(ballot(mine.round + 3, 2));
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert_eq!(n.ballot(), mine, "the campaign keeps its ballot");
+    assert!(
+        drain_match_requests(&mut n).is_empty(),
+        "nothing is asked again"
     );
 }
 

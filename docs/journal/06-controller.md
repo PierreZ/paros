@@ -79,8 +79,9 @@ with the v1 scope)) cuts this section for v1: v1 grids are the partitioned grid 
 (`rows = 2F + 1`, `acks = F + 1`, the majority being one column), so the two spares of a column
 are one number and WritesBlocked is not a v1 state; the bypass of §J5.5 is out of v1, so
 WritesDegraded holds and alerts; the Offload rows of the catalogue are for after v1. The model
-`specs/tla/health/` still checks the wider grids and the bypass hold, a superset of v1; its
-`V1` switch is #1319 (a v1 switch in health/). The other decisions of that
+`specs/tla/health/` checks v1 with its `V1` switch (the `v1` check, #1319 (a v1 switch in
+health/); "Which checks cover v1" below), and keeps its other checks, on the wider grids and the
+bypass hold, as the design for after v1. The other decisions of that
 day bind this section: the grid controller (§J6.1) is the journal's own elected role on
 stateless machines and also owns scrubbing; after a zone loss it holds and alerts; v1 has no
 unsafe recover; the autoscaling decisions get heavy tests. **The v1 controller has no service
@@ -176,6 +177,27 @@ no writable column. TLC breaks both: with no column that can write, a live leade
 in WritesDegraded, whose bypass hold cannot complete (`draft_states`), and an electable grid with
 no writable column had no state (`draft_one_state`). The table above adds WritesBlocked and
 Stopped.
+
+**Which checks cover v1** (#1319 (a v1 switch in health/)). The constant `V1` of
+`specs/tla/health/` keeps only the v1 grids (the partitioned grid, `rows = 2F + 1` and
+`acks = F + 1`, the majority being one column) and the v1 actions (no bypass). The `v1` check
+runs it on every v1 grid up to 9 acceptors and every set of live members (5 thousand states):
+
+- the counts say what the quorums say (`ElectableMeaning`, `WritableMeaning`, `SpareMeaning`);
+- the states are a partition (`OneState`);
+- the action of each state can run (`ActionCanRun`): WritesDegraded needs only a column that can
+  write, because v1 holds and alerts and runs no bypass;
+- the two spares of a column are one number (`PartitionedOneSpare`), so the status shows one
+  spare per column;
+- WritesBlocked is empty (`NoWritesBlocked`): on a v1 grid a Phase-1 quorum holds `acks` members
+  of every column, so an electable grid can write in every column. Without `V1` the same
+  invariant fails (`reach_writes_blocked`), so the state stays in the table for after v1.
+
+The control `v1_draft` runs the states of the first draft on the v1 grids: a live leader with no
+column that can write falls in WritesDegraded and cannot write, and `ActionCanRun` fails. The
+zone checks (`zones2`, `zones3`) hold on every grid, the v1 grids among them. Every other check
+of the folder (`health`, the controls of a wrong threshold, `hold_short`, `draft_states`,
+`draft_one_state`) is the design for after v1.
 
 Beside the grid state, three flags change what the controller may start. Each one comes from a
 rule that a TLA+ model checked:
@@ -286,3 +308,78 @@ Its tests come with its crate, after #1189, and follow the plan of the design do
    each P measure from the walk's own state, with no shared code, and compares.
 6. A `probe!` on every branch and every refusal reason of `decide`; the coverage gate requires
    all of them, with no excused probe (the absolute rule of `AGENTS.md`).
+
+#### The decision as built
+
+`crates/lib/paros-journal-control` (#1328 (paros-journal-control), #1261 (grid controller
+decision tests)) builds `decide` from this chapter. Its view is a done read of the register, the
+liveness of each member (`up`, `suspect`, `down`), the zones, the candidates that the host's
+placement offers, the leader, the matchmakers, the scrub's pending repairs, `data_lost`, the ages
+of the signals and of the oldest seal, the time since the last reshape, and whether the rate
+limiter has a token. The numbers that are **Open** above stay the host's: `Tunables` (the stale
+age, the minimum interval, the stall window) has no default. The view has no load, latency or
+error signal, so `NO_LOAD_PLAN` holds by the type. `decide` gives at most one action and every
+alert, in this order:
+
+1. A controller whose term is not the register's stops and reports nothing (§J6.1).
+2. The alerts: `data_lost`; the matchmakers below a majority (`ControlFrozen`, a page) or at a
+   majority with no spare; the journal states of the table above that hold (Unplaceable,
+   WritesDegraded, ElectionBlocked and Stopped; the last two page); a seal older than the stall
+   window (`ReshapeStalled`).
+3. No action while the matchmakers are frozen or a signal is stale.
+4. The cheap action first: the repair of a found damage, with no token.
+5. The re-replication of the first sealed or retired segment that has a replica down, under a
+   token.
+6. The heal reshape of the segment in force, when the state is AtRisk and a member is down, or a
+   replica of its set is down: it waits for the retire of every older segment, the minimum
+   interval and a token. The new grid keeps every member that is not down in its place and puts
+   a candidate in the place of each member that is down, the first placement in the host's
+   order that meets the zone rule; the replica set the same, with no zone rule.
+
+The tests as built: the unit tests of the crate; tests 1, 2, 5 (the oracles that one decision can
+judge: `NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`, `FENCED`, `NO_STALE_PLAN`, `NO_SUSPECT_REPLACED`,
+`IDEMPOTENT`, `MONOTONE` and `SAME_AS_REFERENCE`, each with a planted mutant) and 6 run in
+`journal-sim`'s `tests/control.rs` over every small view (`P <= 3`, `F <= 2`, no zones or three or
+four zones: about 390 thousand views); `scripts/mutants.sh --control` leaves no survivor.
+
+The controller role as built (`role.rs`): a `Controller` holds its standing (idle, campaigning,
+or holding a term) and the reshape call in flight, and nothing else, so a restart is a new
+`Controller` (`grid-controller/`: a crash forgets the term and the plan). It runs no register
+operation. It gives the driver the change to run (`Elect`, or the `Reshape` of its call) and
+takes back the outcome (done, refused, or no answer). It gives the call in flight again until the
+call is answered, and plans nothing else meanwhile; a refusal for the term, or a view of another
+term, makes it idle. The driver decides when to send a call again: after a timeout, it reports
+"no answer" and sends the same call, which the register answers "ok" if it already took it.
+
+Test 3 runs in `journal-sim`'s controller walk (`src/controller.rs`, `tests/controller.rs`):
+controllers that race, crash between plan and call, and get deposed; lost requests and replies;
+acceptors that fail (and recover, in the wide shape); views that read the register late; the
+journal's seal and retire. Its oracles share no code with the controller: `FENCED`,
+`BOUNDED_RESHAPE_RATE`, `COST_BOUND` (a reshape replaces only members that failed),
+`NO_OSCILLATION` (a removed member comes back only after it recovered), `BOUNDED_IN_FLIGHT` and
+`CONVERGES` (once the faults stop, each journal has one live controller and its newest segment in
+force on live members only, every older one retired). Each oracle catches its planted mutant of
+the driver. The many-journals shape of #1261 has four journals whose grids share one machine,
+which dies, and a token with a cap of one for all of them. The walks reach every `probe!` of the
+role. TLC checks the traced walks against `ControllerTrace.tla`, which extends
+`GridController.tla` (`tests/controller_traces.rs`), refuses the control `ElectNoCas` (a campaign
+with no compare, which the oracles pass) and refuses every edit of the recorded traces at or
+after the edited event. The model has the step `Stand` for this: a holder with no plan that reads
+another term stops, as `decide` does first. Test 4 (the moonpool-sim scenario library) waits for
+the driver (#1329, #1330).
+
+**Proposals of the build, for Pierre's review** (each is a reading of this chapter, not a
+decision of Pierre):
+
+- **A suspect member is not replaced.** It counts as lost for the spares (the catalogue), and a
+  heal replaces only members that are `down`. A column at risk only through suspects waits.
+- **The minimum interval holds every reshape, a heal at spare 0 too** (item 1 of the tests above
+  says "no reshape inside the minimum interval"; the first text of #1261 said "unless the spare
+  is 0", which in v1 would leave the interval no effect, since a heal runs only at spare 0).
+- **A replica down in the segment in force heals by a reshape**; the re-replication of §J3.1 is
+  for sealed and retired segments (v1 has no offload, so a retired segment's replicas hold its
+  only copy).
+- **A heal does not move survivors**: a member that is down is replaced in its own place. The
+  zone rule of a v1 grid is the rule of each column.
+- **The matchmakers at a majority with no spare alert**; the handover of the catalogue is not an
+  action of v1's `decide` yet.
