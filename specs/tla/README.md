@@ -88,7 +88,9 @@ control). There is no allow list.
 
 The `spec` job of the `TLA` workflow runs `--parse` on each folder. The `TLA mutants` workflow
 runs every mutant each week and on demand, in slices of 30 minutes
-(`scripts/mutate-tla-shards.txt`), and its `report` job lists the survivors. The `--help` of the
+(`scripts/mutate-tla-shards.txt`, where every folder has a line), and its `report` job lists
+the survivors. A run on demand can name its folders (`folders`) and hold each of its two
+matrices to a number of jobs at a time (`max_parallel`). The `--help` of the
 script names the other options (`--shard`, `--budget`, `--baseline-out`, `--baseline-from`,
 `--out`, `--skip`). The trace specs (`*Trace.tla`) are not mutated: `checks.txt` does not run
 them.
