@@ -18,6 +18,11 @@
 //!   repair, re-replicate, or hold and alert.
 //! - [`role`]: the controller role, its election by a term and its fenced
 //!   reshape call, as asks to a driver that runs each register operation.
+//! - [`signals`]: what the processes of a journal publish to its controller
+//!   ([`Report`]), and the liveness the controller reads from them.
+//! - [`driver`]: [`ControlDriver`], the driver of one journal's controller:
+//!   the signals, the register and the host's placement and token, through
+//!   two ports ([`ControlRegister`], [`Cell`]).
 //!
 //! The numbers of §J6 (the stale age, the minimum interval between two
 //! reshapes, the stall window, the suspicion window and the cap of the rate
@@ -29,12 +34,16 @@
 mod probe;
 
 pub mod decide;
+pub mod driver;
 pub mod measure;
 pub mod placement;
 pub mod role;
+pub mod signals;
 
 pub use decide::{Action, Alert, Decision, PROBES, Tunables, View, Wait, decide};
+pub use driver::{Cell, ControlConfig, ControlDriver, ControlRegister, Polled};
 pub use measure::{GridState, Liveness, Spares};
 pub use role::{Ask, Controller, Outcome, Standing};
+pub use signals::{ProcessId, Report, Signals, Windows};
 // The membership types of a view, so a host needs no second import path.
 pub use paros_consensus::membership::{FailureDomain, MatchmakerId, MatchmakerSet};
