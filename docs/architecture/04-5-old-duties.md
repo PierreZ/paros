@@ -1,4 +1,4 @@
-[← 04-roles.md](04-roles.md) · [Index](README.md) · [05-failure-model-and-zones.md →](05-failure-model-and-zones.md)
+[← 04-roles.md](04-roles.md) · [Index](README.md) · [04-6-parity.md →](04-6-parity.md)
 
 ### 4.5 The duty table of the old coordinator and machine
 
