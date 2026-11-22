@@ -247,7 +247,7 @@ at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end),
 its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
 and `ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
 (`WholeMutant`). At the end of the walk each journal converges: a controller holds the term, the
-newest segment is in force, the older ones are retired, and every replica of the newest segment
+newest segment is in force, the older ones are retired (by the leader, §J3.1), and every replica of the newest segment
 holds the whole log. One replica node serves one replica for each segment of its journal, so a
 heal keeps the live replicas of a column (Pierre, 2026-11-22, #1445); the address and the disk key
 of a replica name its segment (§J4.2). A member of a retired segment that stays down long enough

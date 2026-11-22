@@ -13,7 +13,7 @@ Read them before you change the code, and change them in the same PR when a rule
 | `layout.rs` | the on-disk format: `Key` and its bytes, `Kind`, `Op`, `Entry`, the ops of each role's batch, the decode of a role's records with its `Damage` | rule 4 |
 | `storage.rs`, `transport.rs`, `clock.rs`, `register.rs` | the four traits a backend implements | rules 2, 4 |
 | `events.rs` | the `Events` port and `Event` | rule 5 |
-| `host.rs` | the pure `Host`: `Assignment`, `Input`, `Effect`, `Stop`, `CallOutcome` | rules 1 to 3, 5 |
+| `host.rs` | the pure `Host`: `Assignment`, `Input` (with `Join` and `Abandon`, the new replica of a heal, #1314), `Effect`, `Stop`, `CallOutcome` | rules 1 to 3, 5 |
 | `driver.rs` | the generic `Driver`: group commit, held sends and register changes, recovery reads, the timer, the events port | rule 1 |
 | `mem.rs` | backends in memory: `MemStorage`, `MemNetwork` and its `Endpoint`, `ManualClock`, `MemRegister` | |
 | `contract.rs` | the suites that check a backend: `storage`, `storage_reopen`, `transport`, `clock` | rule 4 |

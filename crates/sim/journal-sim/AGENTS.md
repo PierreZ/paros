@@ -67,7 +67,8 @@ Test only: `publish = false`.
 - `src/whole.rs`: the whole-journal walk (`WholeModel`, #1445): two journals on nine machines in
   three zones, a `Driver` on each machine, the controllers of each journal over one register, a
   shared reshape token, a client that writes, resends and resolves, crashes, the loss of a zone
-  for a while, lost register calls and disk faults; its oracles (`AGREE`, `SEALED`, `FLIGHT`,
+  for a while, lost register calls and disk faults, the leader's retire and the heal of a retired
+  segment's replica set on the `Host` (#1314); its oracles (`AGREE`, `SEALED`, `FLIGHT`,
   `ANSWER`, `ONCE`, `ACKED`, `ALERTS`), its reach sites and its planted mutants (`WholeMutant`).
   `tests/whole.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.

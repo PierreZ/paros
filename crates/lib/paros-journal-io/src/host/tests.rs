@@ -727,3 +727,42 @@ fn an_abandon_of_a_member_that_reads_its_disk_keeps_it() {
     );
     assert!(host.serves(NEW));
 }
+
+#[test]
+fn a_holding_goes_to_the_replica_and_a_holds_to_its_asker() {
+    let holding = Envelope {
+        journal: J,
+        from: NodeId(100),
+        to: NodeId(11),
+        message: Message::Holding {
+            segment: SegmentId(1),
+        },
+    };
+    assert_eq!(
+        holding.receiver(),
+        Address::replica(J, NodeId(11), SegmentId(1))
+    );
+    let holds = |to: u64| Envelope {
+        journal: J,
+        from: NodeId(11),
+        to: NodeId(to),
+        message: Message::Holds {
+            segment: SegmentId(1),
+            full: true,
+        },
+    };
+    assert_eq!(holds(100).receiver(), at(J, 100), "a leader asked");
+
+    // A new replica asked: the answer reaches it, and it pulls from the
+    // member that holds the segment.
+    let mut host = joined(retired());
+    let effects = host.step(Time(1), Input::Message(holds(20)));
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Send { envelope, .. }
+                if envelope.to == NodeId(11) && matches!(envelope.message, Message::Pull { .. })
+        )),
+        "the new replica pulls from its source: {effects:?}"
+    );
+}

@@ -27,10 +27,9 @@
 //! journals share. The controller's reshape call runs on the register; a
 //! request or its reply may be lost. The walk is the host's placement: it
 //! serves each acceptor and replica that the register names on its machine,
-//! campaigns a leader of the newest segment when none writes, and retires a
-//! sealed segment whose boundary state is written once `F + 1` replicas of
-//! its set hold it (the leader's retire is a later rule group of #1326, as
-//! in [`crate::roles`]).
+//! and campaigns a leader of the newest segment when none writes. The
+//! leader retires a sealed segment once `F + 1` replicas of its set hold it
+//! on their disk (§J3.1), as in [`crate::roles`].
 //!
 //! **The faults.** The walk crashes and restarts machines; a zone goes out
 //! (every machine of it crashes at once); a disk fails a commit inside the
@@ -383,8 +382,6 @@ pub enum WholeAction {
     Write,
     /// A controller takes one step.
     Control,
-    /// Placement retires the sealed segments that it may.
-    Retire,
     /// A writer resolves a `Below`.
     Resolve,
     /// The next commit of a machine fails.
@@ -410,7 +407,6 @@ impl Model for WholeModel {
             WholeAction::Campaign,
             WholeAction::Write,
             WholeAction::Control,
-            WholeAction::Retire,
             WholeAction::Resolve,
             WholeAction::Fault,
             WholeAction::ZoneOut,
@@ -426,7 +422,7 @@ impl Model for WholeModel {
             (WholeAction::Tick | WholeAction::Campaign, _) => 8,
             (WholeAction::Write, _) => 10,
             (WholeAction::Control, _) => 4,
-            (WholeAction::Retire | WholeAction::Resolve, _) => 2,
+            (WholeAction::Resolve, _) => 2,
         }
     }
 
@@ -437,7 +433,6 @@ impl Model for WholeModel {
             WholeAction::Campaign => self.each(cx, Self::campaign),
             WholeAction::Write => self.each(cx, Self::write),
             WholeAction::Control => self.each(cx, Self::control),
-            WholeAction::Retire => self.each(cx, Self::retire),
             WholeAction::Resolve => self.each(cx, Self::resolve),
             WholeAction::Fault => self.fault(cx),
             WholeAction::ZoneOut => self.zone_out(cx),
@@ -975,6 +970,9 @@ impl WholeModel {
             copy,
         } = notice
         else {
+            // A leader's done retire: the acceptors of the retired segment
+            // stop when placement no longer names them.
+            sometimes!(true, reach::RETIRED);
             return;
         };
         let Some(j) = self
@@ -1618,38 +1616,6 @@ impl WholeModel {
                     .filter(|m| !self.up(*m))
                     .collect::<Vec<_>>()
             );
-        }
-    }
-
-    /// Placement retires each sealed segment of journal `j` whose boundary
-    /// state is written, once `F + 1` replicas of its set hold it.
-    fn retire(&mut self, j: usize, _cx: &mut Cx<'_, Self>) {
-        let value = self.value(j);
-        let id = self.journals[j].id;
-        for record in value.segments().values() {
-            if record.state() != SegmentState::Sealed || record.boundary().is_none() {
-                continue;
-            }
-            let holders = record
-                .replicas()
-                .iter()
-                .filter(|node| {
-                    self.machines[&machine_of(**node)]
-                        .driver
-                        .as_ref()
-                        .and_then(|d| d.host().replica(Address::replica(id, **node, record.id())))
-                        .is_some_and(paros_journal::roles::SegmentReplica::full)
-                })
-                .count();
-            let retired = self.register.change(
-                id,
-                &Change::Retire {
-                    segment: record.id(),
-                    holders,
-                    unrepaired_damage: false,
-                },
-            );
-            sometimes!(retired.is_ok(), reach::RETIRED);
         }
     }
 

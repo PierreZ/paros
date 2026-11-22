@@ -709,7 +709,13 @@ impl Host {
     }
 
     fn deliver(&mut self, envelope: Envelope, effects: &mut Vec<Effect>) {
-        let address = envelope.receiver();
+        let mut address = envelope.receiver();
+        if let paros_journal::roles::Message::Holds { segment, .. } = &envelope.message
+            && !self.roles.contains_key(&address)
+        {
+            // The answer to a new replica's `Holding`.
+            address = Address::replica(address.journal, address.node, *segment);
+        }
         let Envelope { from, message, .. } = envelope;
         match self.roles.get_mut(&address) {
             Some(Role::Acceptor(acceptor)) => {
