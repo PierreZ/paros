@@ -13,21 +13,10 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use serde::{Deserialize, Serialize};
-
 use crate::paxos::view::{
     AttemptView, MessageView, NodeFlavour, NodeView, PartyView, QuorumKindView, RoleView, WorldView,
 };
-
-/// The group of steps a step belongs to: "Phase 1 · ballot 1.5".
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Stage {
-    /// A short name, e.g. `Phase 1 · ballot 1.5`. Two steps with the same
-    /// title next to each other are one group.
-    pub title: String,
-    /// One sentence on what the group does.
-    pub about: String,
-}
+use crate::steps::Stage;
 
 /// The ballot the empty world starts from: no promise yet.
 pub(super) const NO_BALLOT: &str = "0.0";
@@ -96,28 +85,6 @@ pub fn stage_of(message: &MessageView, log: bool) -> Option<Stage> {
         title,
         about: about.to_string(),
     })
-}
-
-/// Give every step a stage: a message without its own continues the stage
-/// before it, and an event opens the stage after it.
-pub fn fill_stages(stages: &mut [Option<Stage>]) {
-    let mut last: Option<Stage> = None;
-    let mut pending = Vec::new();
-    for i in 0..stages.len() {
-        match stages[i].clone() {
-            Some(stage) => {
-                for j in pending.drain(..) {
-                    stages[j] = Some(stage.clone());
-                }
-                last = Some(stage);
-            }
-            None => pending.push(i),
-        }
-    }
-    // Steps at the end with no stage after them keep the one before.
-    for j in pending {
-        stages[j].clone_from(&last);
-    }
 }
 
 /// The name of a party in a sentence: `Acceptor 3`, `Proposer 5`, `Node 1`,

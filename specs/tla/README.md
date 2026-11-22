@@ -53,15 +53,29 @@ module). A long proof is split into several `*Proof.tla` modules so that each mo
 minutes of a job; the module that extends them all is the map of the proof. This is step 2 of
 #1307.
 
+`specs/tla/PROVED.sha256` pins the files that the proofs cover: each `*Proof.tla` module and each
+module of its folder that a proof extends (step 4 of #1307, #1459 (pin the proved specs)). A full
+pass of `scripts/check-proofs.sh` (no argument) writes it with `scripts/proof-hashes.sh write`.
+The `plan` job of the `TLA` workflow runs `scripts/proof-hashes.sh check`, which fails when a
+pinned file changed and the pin was not written again, or when a covered file is not pinned. The
+pin shows a reader which files the proofs cover. It does not prove that a proof ran: the
+`proofs` jobs do, since the plan runs them on each change of a proof folder. The pin follows only
+the modules of the folder that a `*Proof.tla` names after `EXTENDS`, not the modules that those
+modules extend in turn: today `Decree.tla` and `MultiPaxos.tla` extend standard modules only.
+
 | Model | Proof | What it proves |
 |---|---|---|
-| `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 679 obligations, Z3 and Zenon, about 2 minutes |
-| `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Persist`, `Restart`, `Wipe`) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,283 obligations, Z3 and Zenon, at most 6 minutes for each module |
+| `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 692 obligations, Z3, Zenon and LS4, about 2 minutes |
+| `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Persist`, `Restart`, `Wipe`) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,289 obligations, Z3, Zenon and LS4, at most 6 minutes for each module |
 
-The TLAPS of nixpkgs (1.4.5) has no Isabelle and no LS4. So a proof uses no induction lemma (they
+The TLAPS of nixpkgs (1.4.5) has no Isabelle. So a proof uses no induction lemma (they
 need Isabelle; a least or highest member of a set of naturals comes from `WFMin`, which is first
-order, as `MinExists` and `MaxExists` of `DecreeProof.tla` and `MultiPaxosFactsProof.tla` do), and the last step of `Safety` (`Spec => []Agreement`), the TLA rule INV1 applied
-to the three theorems, is `PROOF OMITTED`: LS4, the PTL backend, is the one tool that checks it.
+order, as `MinExists` and `MaxExists` of `DecreeProof.tla` and `MultiPaxosFactsProof.tla` do).
+The last step of `Safety` (`Spec => []Agreement`) is the TLA rule INV1 applied to the three
+theorems. LS4, the PTL backend, checks it (`BY PTL DEF Spec`). The flake builds LS4 and
+`ptl_to_trp`, the translator that tlapm pipes into it, from source in the `proofs` shell,
+because the TLAPS of nixpkgs has neither. No proof has a `PROOF OMITTED` step, and
+`scripts/check-proofs.sh` fails on one.
 The constant facts that a proof uses are named `ASSUME`s of the model (`AcceptorsFinite`,
 `QuorumsType`, `NoneNotValue` and others), so TLC checks them on each configuration. A proof has a
 control too: remove a guard that the proof needs (for example `prom[a] <= b` in `Accept`) and
@@ -88,7 +102,9 @@ control). There is no allow list.
 
 The `spec` job of the `TLA` workflow runs `--parse` on each folder. The `TLA mutants` workflow
 runs every mutant each week and on demand, in slices of 30 minutes
-(`scripts/mutate-tla-shards.txt`), and its `report` job lists the survivors. The `--help` of the
+(`scripts/mutate-tla-shards.txt`, where every folder has a line), and its `report` job lists
+the survivors. A run on demand can name its folders (`folders`) and hold each of its two
+matrices to a number of jobs at a time (`max_parallel`). The `--help` of the
 script names the other options (`--shard`, `--budget`, `--baseline-out`, `--baseline-from`,
 `--out`, `--skip`). The trace specs (`*Trace.tla`) are not mutated: `checks.txt` does not run
 them.
@@ -155,6 +171,16 @@ no checked model takes. The trace specs today are:
   `Below` answers not yet resolved) and applies those operators: an `apply` event is `Step` with
   the answer `Res`, a `seal` event is `Bound`, and a `resolve` event is `ResolveOn` on the
   boundary of its sealed segment. It defines no rule of its own.
+- `journal-state/RolesTrace`: the journal roles of `paros-journal` (the acceptor, the leader and
+  the segment replica), on the roles walk of `journal-sim` (#1326 (the journal roles over the
+  core)). Each event is one action of `Journal.tla` with the parameters the code chose: a
+  campaign is `Register`, an acceptor's queued batch is `Promise` or `Accept` and its durable
+  batch `Flush`, a Phase 1 that closed is `Phase1On` with the reports the leader read, then
+  `SealWrite`, `Open`, `Propose`, and a replica's durable base, applied slot and boundary write
+  are `TakeBase`, `Apply` and `BoundWrite`. The model's leader takes what its Phase 1 reads and
+  the first slot it writes at `Register`, as the code takes them from the register value of its
+  campaign. The walk is the narrow shape (one column of three): a grid of two columns chooses a
+  slot in one column, which `Journal.tla` does not have.
 
 `proxy-leader/` and `leader-handoff/` stay as the design models of their rules, with their
 liveness checks; `node/` has the same safety rules as constants, each with its control in
@@ -220,6 +246,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | Quorum everywhere: every journal step (write, election, leaderless read, seal, boundary write, retire, offload mark, trim, acceptor compaction, matchmaker handover, grid controller election, reshape call, heal of a sealed segment) waits for a quorum only | `membership/quorum_system.rs`, `quorum_read.rs`; the journal steps are designed, not built | `quorum-everywhere/` | #1257 (quorum everywhere), done |
 | The grid controller's election by a term in the matchmaker record, and its fenced `reshape(expected configuration, new grid, term)` call | built (`paros_journal_control::role`; its walk is traced against `ControllerTrace.tla`) | `grid-controller/` | #1259 (the fenced reshape call of the grid controller), done |
+| The placement port between the grid controller and the cell: `standing`, `place` (all or none, keyed by a request id the caller draws, one write), `release`; the limit of moves in flight; the cell's own control journal through the same port | not built (the trait in `paros-journal-control` and its answer in `paros-cell` wait for #1323) | `placement-port/` | #1421 (the placement port) |
 | A reshape when a column of the grid is below quorum: the Phase-1 bypass, the hold, the seal end of a bypass, the read fence across it | not built (#579 (zero-stall reconfiguration) is at the tag) | `degraded-reshape/` | #1258 (reshape with a column below quorum), done |
 | The health measures of the grid (the spares of a column, electable, writable, the hold of a bypass, the zone margin) against the quorums, and the journal states with their fixed actions | not built (`paros-journal-control`, after #1189) | `health/` | #1260 (journal health measures), done |
 | Segment replica sets: a write reaches only the replica set of its segment; the boundary state of the seal (now the whole state in the segment record, `seal-chain/`; first checked as `next_seq` in the segment record, the uuid in the journal's matchmaker record and a `Fence` at the next segment's first slot); reads routed to the set of the segment; retire at `F + 1` holders | the journal steps are designed, not built | `segment-replicas/` | #1271 (a write reaches only the replica set of its segment), done |
@@ -231,8 +258,9 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | CTRL in the journal: the tri-state tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen value in one write | `proposer.rs` (`slot_decidable`), `acceptor.rs`; the scrub and the repair are designed, not built | `ctrl-grid/` | #1263 (CTRL recovery in the journal), done |
 | CTRL across segments: the copies of a sealed segment across retire and offload, the repair of a replica log and of an object, the data-loss report | the journal steps are designed, not built | `ctrl-segments/` | #1263 (CTRL recovery in the journal), done |
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
-| The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the roles are not built (#1325, #1326) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
+| The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the acceptor, the leader and the segment replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
+| One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
@@ -317,7 +345,7 @@ The rules of #1018 (zero-stall model, more rules), each with its check and its c
 | Bypass check, the registration half (rule 3) | `p212_check` | `p212_nocheck` |
 | Bypass check, the watermark half (rule 3) | see the finding below | none: the registration half implies it |
 | GC fence (I5): the leader at `b2` makes no floor effective before its fence Phase 1 ends | `gc_p212_paper`, `wm_nocheck_small` | `gc_nofence` (21 steps), `gc_early` |
-| Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff`, `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
+| Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff` (with `HandOnOneHop`: a ballot moves once, from its minter, while it leads), `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
 | Chained bypass (8.3): a second bypass waits for the fence Phase 1 of the first | `chain_small`, `chain` (7.1 million states, 5 minutes, `long`) | `chain_open_small`, `chain_open` |
 | A reader's chosen prefix waits for the fence Phase 1 of the ballot that chose the slot (#1270 (bypass read order)) | `read_carry_hold` (343 thousand states), `read_p212_hold`, and every check with `Reads` | `read_carry_no_read_hold`, `read_p212_no_read_hold`: `ReadSafe` breaks in 13 states (ballot 1 in `{a1, a2}` bypasses to ballot 3 in `{a3, a4}`, which chooses slot 1, and a read on ballot 3 returns it; a read on ballot 1 asks `{a1, a2}` and misses it) |
 | Only the incarnation that won `b` bypasses from `b` (#1230 (rules no check tests)) | `restart_bypass` (489 thousand states) | `restart_bypass_off`: Agreement breaks in 16 states (propose at `b`, restart, bypass, the proposed slot is free at `b2`, a second value is chosen) |
@@ -339,7 +367,8 @@ Findings of #1018 (2026-11-19). No design decision is refuted.
   the minter that still holds a ballot bypasses from it.
 - **The handoff carries the open slots.** `handoff_drop`: a successor that takes the slots that
   wait for the fence Phase 1 as free proposes a second value for a slot that the minter chose at
-  the old ballot.
+  the old ballot. A hand-on to the minter itself drops the open slots the same way, so the control
+  also fails with no successor.
 - **A minter that handed on drops its proactive matchmaking.** `relinquish_off`: the minter bypasses
   with what it knew at the handoff, and misses a value that the successor chose after it.
 - **GC waits for the fence Phase 1.** `gc_nofence`: the leader at `b2` collects the old ballots
@@ -946,7 +975,7 @@ Constants select the rule:
 | `Restarters` | The acceptors that can restart. The promise and the votes are durable. The belief goes back to the bootstrap, bound to no ballot, and the node did not hear what is in force until its membership probe answers. A reader also forgets its read basis and its open read. |
 | `Refuse` | `TRUE`: an acceptor that did not hear answers no `PreRead` (`on_pre_read`, the code). |
 | `Hold` | `TRUE`: the decision hold of #579 (zero-stall reconfiguration). `zero-stall/` holds the full checks of the hold. |
-| `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis, and opens or serves no read on it (`main` today). `own`: option (b), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
+| `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis, and opens or serves no read on it (the code before option (b)). `own`: option (b), the code (`ColocatedNode::reader_fence`), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
 | `Q1s`, `Q2s`, `Targets` | The quorum system, for each configuration (#1102 (rework 1.13)): the Phase-1 quorums, the Phase-2 quorums, and the sets of acceptors that a reader asks. A majority asks the whole membership. A grid takes them from `grid/Grid.tla`: the partitions ask the whole membership, the full grid asks one row (`row_of`). |
 | `Seal` | `quorum`: Phase 1 takes a Phase-1 quorum of each prior configuration (the code). `reads`: a candidate rule, not in the code: Phase 1 also takes one promise in each read target of each prior configuration, so each row of an old full grid hears of the campaign. |
 | `ReadAgain` | `TRUE`: a client gets the answer of a served read (`ReadClose`), and a second read can start. `ReadSeesAcked` then also orders reads: a served read covers each slot that an earlier read returned. |
@@ -996,8 +1025,8 @@ Results (`reads/checks.txt`):
 | `reads_bypass_hold_again_prefix_chain`: the rule, three ballots of one proposer, so two bypasses in a row (`long`) | no violation in 50.2 million distinct states (bounded: 30 minutes, 2 workers) |
 | `reads_two_slots`: `reads_plain` with two slots (`long`) | no violation in 30.7 million distinct states, to depth 24 (bounded: 50 minutes, 1 worker) |
 | `reads_three`: `reads_plain` with three ballots, `OwnerParos3`, so a reader can hold the basis of the middle leadership (`long`) | no violation in 33.4 million distinct states, to depth 25 (bounded: 50 minutes, 1 worker) |
-| #890, `strict` (`main` today) | pass |
-| #890, option (b) | pass |
+| #890, `strict` (the code before option (b)) | pass |
+| #890, option (b) (the code) | pass |
 | #890, the node ignores its promise | pass |
 | `grid_full`: the full grid, a change of members, the row read (the code) | violation (300 thousand states, 15 seconds) |
 | `grid_full_static`: the full grid, no change of members | pass (588 thousand states, 35 seconds) |
@@ -1080,7 +1109,15 @@ must gate the chosen prefix, which every read uses. `zero-stall/` checks the sam
 
 Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
 leader and a reader outside its configuration whose own abandoned campaign is above it.
-`learner_own_serves` finds a read that option (b) serves and that `strict` refuses.
+`learner_own_serves` finds a read that option (b) serves and that `strict` refuses. The code
+builds option (b) (`ColocatedNode::reader_fence`) for every quorum system, so option (b) is
+checked on majorities (`learner_own`), on the full `2 × 2` grid with the seal of the code
+(`learner_own_grid`, 2.0 million states, 1.7 min) and with a lagging pool (`learner_own_lag`,
+0.6 million states, 21 s). The two last are `long` checks: `reads` already fills the time of one
+CI job. In the implementation model `node/`, a
+campaign promises its own ballot at its `Prepare`, so the promise of a campaign that the
+matchmakers refused before its `Prepare` is not in a trace, and the basis of option (b) is an
+ordinary `Basis` step there.
 
 Option (a) of #890, where the leader campaigns above the promise, adds no rule to the model: it
 is one more ordinary campaign, and `reads_plain` covers it. Its cost is a leader change for each
@@ -2341,6 +2378,61 @@ The answer to #1259:
   follow once the `journal-sim` walk of the controller loop exists (#1261 (grid controller
   decision tests), after #1189).
 
+### `placement-port/`: the placement port between the grid controller and the cell, for #1421 (the placement port)
+
+Pierre's decisions (2026-11-22): the grid controller of a journal owns the loop that changes its
+membership (ask, reshape, release); the cell answers where, through a port with three calls,
+`standing`, `place` and `release`; a grant in flight is the token of the rate limit of the cell;
+"gone" is a durable record of the cell; and the cell's own control journal uses the same port, so
+the cell answers itself (`docs/journal/06-controller.md` §J6.3). A coarse model: a journal is a
+set of members, a reshape swaps them in one step when a majority of the members is up (the
+journal's own models judge that step), and every step of the cell is a write of its control
+journal, which needs a majority of that journal's members up.
+
+The cell writes a grant and its bookings in one write, keyed by the request id that the
+controller drew; the cell sends the answer of a grant again at any time, so a repeated request gets
+the same answer (`PlaceAgain`, a read of the fold); a cell at the limit answers
+"busy" and writes nothing (no step in the model: the request waits, and the controller sends it
+again); a cell with no machine that fits records a refusal under the id, and the controller asks
+again with a new id only after the records that decide a placement (gone, draining, bookings)
+change. `release(request id, members)` ends the grant and frees its bookings on the machines that
+are not members now. A journal below a majority cannot reshape: its controller abandons the grant
+with a release that names the members it has, so the grant stops holding the limit.
+The faults: machines that fail for good (the cell records them gone), one drain by an operator,
+lost and repeated messages, a restart of the cell coordinator (its memory is lost). A crash or a
+takeover of a grid controller is #1422 (takeover by a new controller), not this model.
+
+Two journals, the cell's control journal on `m1..m3` and one journal on `m3..m5`, five machines,
+two roles at most on a machine, one move in flight in the cell.
+
+Properties: `OneGrantPerRid`, `GrantWhole` (all or none), `InFlight` (the limit), `Capacity`,
+`KeepsSize` (a member leaves only in the reshape that puts its replacement in), `MembersBooked`,
+`NoOrphan` (each booking belongs to a member, to a move in flight or to a write the coordinator
+still holds), `ReleasedFree`, `Writes` (an action property: every write of the cell and every
+reshape waits for a majority), `MovesInFlight` (at most `Limit` controllers are between a grant
+and a reshape), and under weak fairness once the faults stop, `Healed`: no grant is in flight,
+and each journal is settled. A journal is settled when it is off the machines that failed or
+drain, or it is below a majority (nothing can heal it: hold and page), or its last ask was refused
+and the records did not change since.
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: every safety property, one failure, one drain, one lost message (61 thousand distinct states) |
+| `live` | ci | pass: `Healed`, with the faults of `safety` |
+| `live_two` | ci | pass: `Healed` with two failures, so the cell or a journal can be below a majority (320 thousand distinct states) |
+| `live_tight` | ci | pass: `Healed` with two drains, so the cell refuses and the controller waits for a change of the records |
+| `safety_two` | ci | pass: two failures, so the cell and a journal can be below a majority |
+| `safety_tight` | ci | pass: two failures and two drains, so the cell also refuses (1.8 million distinct states) |
+| `book_first_nocrash` | ci | pass: the bookings first and the grant in a later write is safe while the coordinator keeps its memory |
+| `book_first` | ci | violation of `NoOrphan`: a restart between the two writes leaves bookings that nobody frees (the control of "the id is in the fold before any machine is booked") |
+| `no_dedup` | ci | violation of `OneGrantPerRid`: a repeated request gets a second grant |
+| `partial` | ci | violation of `KeepsSize`: a partial grant shrinks the journal |
+| `no_limit` | ci | violation of `MovesInFlight`: with no limit, two controllers reshape at the same time |
+| `no_free` | ci | violation of `ReleasedFree` |
+| `fixed` | ci | violation of `Healed`: a cell control journal that does not use the port never leaves a failed machine |
+| `no_abandon` | ci | violation of `Healed`: a journal below a majority keeps its grant, and the limit blocks every other journal |
+| `reach_cell_heal`, `reach_busy`, `reach_refusal`, `reach_two_moves`, `reach_abandon` | ci | violation: the model reaches a heal of the cell's own journal, a busy cell, a refusal, two moves one after the other, and an abandoned grant |
+
 ### `degraded-reshape/`: a reshape when a column is below quorum, for #1258 (reshape with a column below quorum)
 
 The journal grid is `Grid { rows: 2F + 1, cols: P, acks: F + 1 }` (§J5.1 of
@@ -2540,6 +2632,7 @@ and the checks without the `meta_` prefix run it.
 | `deliver_all` | ci | violation of `NoForeign`: every replica gets every slot (the paper's replica); the invariant sees a broadcast |
 | `boundary_zero` | ci | violation of `OneFold`: R2 starts from the empty state, so its fold is not the fold of the whole log (a `seq` that S1 used is given again, or the fence uses a leader uuid that a `SetLeader` of S1 replaced) |
 | `boundary_early` | ci | violation of `OneFold`: the record is written before its writer applied every slot of S1 (`K = 2`) |
+| `record_once` | ci | pass of `RecordOnce`: the early boundary with `K = 1`, `NS = 2`; the record is a compare-and-set on an empty record, so a second replica never writes it again |
 | `boundary_seq` | ci | violation of `AckTrue`: the record holds `next_seq` only, and R2 starts with the first leader uuid. S1 decides `SetLeader(u2, u1)`; R2 then accepts a `Write` of the deposed writer `u1` that the whole log refuses |
 | `route_other` | ci | violation of `ReadTrue`: a read goes to a replica of the other set, which does not hold the `seq`: it answers `Truncated` (below its boundary state) or `Tail` (above the seal) for an acked write that nobody trimmed |
 | `retire_early` | ci | violation of `Ends`: S1 retires at `F` holders; the holder crashes and the slot is lost for the other replicas of R1 |
@@ -2549,6 +2642,7 @@ and the checks without the `meta_` prefix run it.
 | `safety_k2` | long | pass, bounded at 40 minutes: `K = 2`, `NS = 3` |
 | `meta_safety_ci` | ci | pass: the safety invariants with the `meta` rule; two replicas in each set (safety needs no quorum of replicas), the `SetLeader` from `u1` to `u2` and a write of `u1` |
 | `meta_stale` | ci | violation of `AckTrue`: the same configuration as `meta_safety_ci`, but the first leader of S2 reads the metadata before the seal wrote the uuid and proposes `Fence(u1)`; S1 decided `SetLeader(u2, u1)`, and the deposed `u1` writes in S2 |
+| `order_stale` | ci | pass of `ChosenPrefix` and `ChosenStable`: the stale read of `meta_stale` with `K = 1`, `NS = 2`; the fence takes the wrong value but keeps the slot order, and no chosen slot changes. Without the frontier guard of `ChooseFence`, the fence is chosen before slot 0 |
 | `meta_safety` | long | pass, bounded at 40 minutes: the `meta` rule, `NS = 3` (the `Fence` takes slot 1) |
 | `meta_live` | long | pass: `Ends` with the `meta` rule (20.7 million distinct states, about 55 minutes locally with 4 workers) |
 | `meta_gone` | long | pass, bounded at 40 minutes: `EndsS2` with the `meta` rule |
@@ -3286,3 +3380,61 @@ majority. It passes with `F + 1` members of the set down (`heal_replica`).
 What is not in the model: the register across a matchmaker handover (`segment-records/`), a
 replica that comes back with an empty disk (a new replica stands for it), a source that the
 controller changes during a copy (the plan aborts and a new plan starts), and offload.
+
+### `journal-ids/`: one id names at most one journal, forever, for #1419
+
+An id is an address, never an authority (§3.8 of `docs/architecture/`). A create call carries a
+name and a request id. The coordinator of the level draws the id, and the fold of the level
+checks it at apply and refuses an id in use: the fold of the universe for a `TenantId`, the fold
+of a tenant for a `JournalId`, unique inside its tenant. The model has two cells, whose cell
+tenants draw their ids at `cell init` before any universe and are recorded by `AddCell` (the
+directory half of `universe add-cell`), one user tenant created through the universe and placed
+in cell `cA`, and three journals on one host
+of `cA` (two of the cell tenant, one of the user tenant). Ids come from a small space, so draws
+collide. A coordinator restart loses the draws not yet recorded; a create resumes by its request
+id and reads back the id that the fold gave. A delete is final, and the host drops the records of
+a deleted journal later.
+
+| Constant | Values (first: the design that passes) |
+|---|---|
+| `Order` | `fold_first`: the host books slots only under an id that the fold gave. `book_first`: slots are booked under the id that the coordinator drew, before the fold checks it (the bug of the old resumed create). |
+| `Tombs` | `TRUE`: a deleted id stays used in the fold. `FALSE`: a delete frees the id. |
+| `Key` | `pair`: the host keys records by `(TenantId, JournalId)`. `journal`: by the `JournalId` alone. |
+| `CellMint` | `draw`: the cell tenant draws its id at `cell init`. `counter`: a counter of the cell gives it (the first id). |
+| `Fresh` | `TRUE` (liveness checks only): a `TenantId` draw never collides with another one, as a 64-bit random draw. `FALSE`: draws collide; safety never uses it. |
+| `Restarts` | the restarts of the coordinators, 1. |
+
+The rule, in four invariants: `JournalIdOnce` (a tenant fold gives a `JournalId` to at most one
+journal over the whole history, deletes included), `TenantIdOnce` (the universe fold gives a
+`TenantId` to at most one tenant), `DiskOneJournal` (on a host, one key holds the records of at most
+one journal) and `BookedAfterRecord` (a host holds records under a key only after the fold gave
+that key to the journal). Action properties: `GoneStays` (a delete is final) and `KeepLive` (the
+host drops only the records of a deleted journal). Liveness: `AllCreated` (each cell joins, each
+tenant and each journal gets its id) and `Dropped` (the host drops the records of a deleted
+journal and books none again).
+
+A draw never repeats an id that the fold refused for the same create: it stands for a 64-bit
+random draw, which finds a free id in a few draws. A refused `AddCell` is final, because the
+cell tenant's id is already on the cell's disks. So the liveness of the genesis rests on `Fresh`:
+without it, the universe can draw for a user tenant the id of a cell that has not joined yet, and
+that cell never joins (found while the model was written; the chance is about `2^-64` for each
+pair of draws).
+
+| Check | CI | Result |
+|---|---|---|
+| `ids` | ci | pass (9.0 million distinct states, about 2.5 minutes with 4 workers) |
+| `live` | ci | pass: `AllCreated` and `Dropped` with `Fresh` (1.7 million) |
+| `book_first` | ci | violation of `DiskOneJournal`: two journals of the tenant draw the same id and both book under it before the fold checks either (a create resumed after a lost draw is one more way to the same state) |
+| `no_tombs` | ci | violation of `JournalIdOnce`: a journal is deleted, and a second journal of the tenant gets its id |
+| `no_tombs_disk` | ci | violation of `DiskOneJournal`: the same, before the host drops the records of the deleted journal |
+| `journal_key` | ci | violation of `DiskOneJournal`: a journal of the cell tenant and a journal of the user tenant get the same `JournalId` on one host |
+| `counter` | ci | violation of `AllCreated`: both cell tenants get id 1, and the second `JoinFleet` is refused for good |
+| `reach_journal_refused`, `reach_tomb_refused`, `reach_tenant_refused`, `reach_join_refused`, `reach_draw_lost` | ci | violation: a tenant fold refuses a used `JournalId`, then a tombstone; the universe refuses a used `TenantId` for a user tenant, then for a `JoinFleet`; a restart loses the draw of a create (`lost`), and that create still gets its id |
+
+What is not in the model: the universe tenant's own id, drawn at `universe init`, and the id of a
+tenant's control journal, drawn with the tenant and recorded beside it, not in the tenant's fold
+(both are random draws, like the others, with the same `2^-64` chance of a collision); the names of `paros-names` (a name to an id, a pure fold), the delete
+of a tenant (the same tombstone rule in the fold of the universe), the move of a tenant between
+cells (its id does not change), a control journal rebuilt by recovery (§3.10, deferred; it forgets
+its tombstones, the case for a birth nonce in `Assign`), and a peer that forges ids (out of scope).
+

@@ -549,7 +549,7 @@ THEOREM AcceptInv ==
         /\ msgs' = msgs \cup {[type |-> "2b", acc |-> a, bal |-> b, val |-> m2.val]}
   BY DEF Accept, Send
 <1> DEFINE m2b == [type |-> "2b", acc |-> a, bal |-> b, val |-> m2.val]
-<1>1. UNCHANGED wiped /\ prom[a] <= b /\ vbal[a] # b
+<1>1. UNCHANGED wiped /\ prom[a] <= b
   BY DEF Accept
 <1>2. a \notin wiped
   BY WipedRule DEF Accept, Hyp
@@ -639,8 +639,7 @@ THEOREM WipeInv ==
   ASSUME Inv, Hyp, NEW a \in Acceptors, Wipe(a)
   PROVE  Inv'
 <1> USE DEF Inv, TypeOK
-<1>0. /\ a \notin wiped
-      /\ Cardinality(wiped) < Wipes
+<1>0. /\ Cardinality(wiped) < Wipes
       /\ wiped' = wiped \cup {a}
       /\ prom' = [prom EXCEPT ![a] = 0]
       /\ vbal' = [vbal EXCEPT ![a] = 0]
@@ -652,10 +651,16 @@ THEOREM WipeInv ==
 <1>2. Cardinality(wiped') <= Wipes
   <2>1. IsFiniteSet(wiped) /\ Cardinality(wiped) \in Nat
     BY WipedFinite
-  <2>2. Cardinality(wiped \cup {a}) = Cardinality(wiped) + 1
-    BY <2>1, <1>0, FS_AddElement
+  \* A wipe of an acceptor that is already wiped leaves the set as it is.
+  <2>2. CASE a \in wiped
+    BY <2>2, <1>0
+  <2>3. CASE a \notin wiped
+    <3>1. Cardinality(wiped \cup {a}) = Cardinality(wiped) + 1
+      BY <2>1, <2>3, FS_AddElement
+    <3> QED
+      BY <2>1, <3>1, <1>0
   <2> QED
-    BY <2>1, <2>2, <1>0
+    BY <2>2, <2>3
 <1>3. AccInv'
   BY <1>0 DEF AccInv, AccOK, VotedFor
 <1>4. MsgInv'
@@ -746,18 +751,19 @@ THEOREM InvAgreement == Inv => Agreement
 (* The theorem. `InitInv` and `StepInv` are the two premises of the TLA   *)
 (* proof rule INV1 (Lamport, "The Temporal Logic of Actions", 1994):      *)
 (*   Init => Inv,  Inv /\ [Next]_vars => Inv'  |-  Init /\ [][Next]_vars => []Inv. *)
-(* TLAPS checks a use of that rule with its PTL backend, LS4, which the   *)
-(* TLAPS of nixpkgs does not ship. So the last step is the one step that  *)
-(* TLAPS does not check here: it is the rule itself, applied as written.  *)
+(* TLAPS checks the use of that rule with its PTL backend, LS4, which the *)
+(* proofs shell of the flake builds from source.                          *)
 (***************************************************************************)
 
 THEOREM Safety == Hyp => (Spec => []Agreement)
-<1>1. Hyp /\ Init => Inv
+<1> SUFFICES ASSUME Hyp PROVE Spec => []Agreement
+  OBVIOUS
+<1>1. Init => Inv
   BY InitInv
-<1>2. Hyp /\ Inv /\ [Next]_vars => Inv'
+<1>2. Inv /\ [Next]_vars => Inv'
   BY StepInv
 <1>3. Inv => Agreement
   BY InvAgreement
 <1> QED
-  PROOF OMITTED
+  BY <1>1, <1>2, <1>3, PTL DEF Spec
 =============================================================================

@@ -104,6 +104,48 @@ impl ColocatedNode {
         fence
     }
 
+    /// Whether this node's promise is its own campaign that sent no
+    /// `Prepare` and is no longer open (#890 (learner above the leader)):
+    /// the matchmakers refused it, so no acceptor ever heard of its ballot.
+    pub(super) fn promise_is_own_unprepared(&self) -> bool {
+        let own = self.matchmaking.is_none()
+            && self.unprepared_campaign == Some(self.acceptor.promised());
+        if own {
+            assert!(
+                self.acceptor.promised().node == self.config.id,
+                "an unprepared campaign is this node's own ballot"
+            );
+            assert!(
+                self.proposer.election().is_none(),
+                "an unprepared campaign opened no Phase 1"
+            );
+        }
+        own
+    }
+
+    /// The fence that gates this node's **own** reads over `config`: to
+    /// take a basis, to open a read on it and to keep it open. It is
+    /// [`ColocatedNode::wire_read_fence`], with one exception, option (b) of
+    /// #890 (learner above the leader): a node outside `config` whose only
+    /// promise above the belief ballot is its own campaign that sent no
+    /// `Prepare` is gated on the belief ballot alone. That campaign chose
+    /// nothing, and the node does not answer its own read, so the quorum of
+    /// `config` that answers carries every fence. Rule `Below` with
+    /// `Learner = "own"` in `specs/tla/reads/` (checks `learner_own`, and
+    /// the control `learner_own_serves` of `learner_strict`). The fence that
+    /// a `PreReadAck` carries to other readers never takes the exception.
+    pub(super) fn reader_fence(&self, config: &AcceptorConfig) -> Option<Ballot> {
+        let fence = self.wire_read_fence()?;
+        if self.promise_is_own_unprepared() && !config.contains(self.config.id) {
+            assert!(
+                self.acceptors_since <= fence,
+                "the exception only lowers the fence"
+            );
+            return Some(self.acceptors_since);
+        }
+        Some(fence)
+    }
+
     /// The configuration a `Prepare` at this node's ballot carries: the
     /// registered `C_b` on a matchmaker deployment (so every acceptor it
     /// reaches learns it), nothing on plain Multi-Paxos (whose `Prepare` is

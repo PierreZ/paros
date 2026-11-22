@@ -37,7 +37,7 @@ trusts that no other leader exists, and only CheckQuorum makes a cut-off leader 
 
 **(c) maps to paros.** paros has no option: `ColocatedNode::tick_check_quorum` always runs on a
 leader whose election timeout is set. paros has no lease-based read either; every read is a
-leaderless quorum read (`paros-core/src/quorum_read.rs`), so CheckQuorum in paros guards writes,
+leaderless quorum read (`paros-consensus/src/quorum_read.rs`), so CheckQuorum in paros guards writes,
 not reads.
 
 ## 2. The leader's clock fires the check once per election timeout
@@ -132,7 +132,7 @@ case pb.MsgCheckQuorum:
 follower **at the same term**. It does not increment the term and it does not start an
 election. Then every peer is marked inactive, so the next window must earn its quorum again.
 
-**(c) maps to paros.** `ColocatedNode::tick_check_quorum` (`paros-core/src/node/authority.rs`)
+**(c) maps to paros.** `ColocatedNode::tick_check_quorum` (`paros-consensus/src/node/authority.rs`)
 has the same shape: the window age is `Authority::tick`, the credit is `Authority::credit`, the
 reset is `Authority::renew`, and a failed check is `become_follower(None)`. Two differences:
 
@@ -165,7 +165,7 @@ partitioned node that comes back with a high term therefore cannot depose a heal
 A leader transfer sets `force` and passes the lease.
 
 **(c) maps to paros.** paros has **no** vote lease. An acceptor promises any `Prepare` above its
-promise (`on_prepare` in `paros-core/src/node/acceptor.rs`), whatever its election clock says.
+promise (`on_prepare` in `paros-consensus/src/node/acceptor.rs`), whatever its election clock says.
 A disruptive candidate costs one election, never safety. This is a deliberate gap, not an
 oversight: see the CheckQuorum card in `docs/knowledge/concepts/check-quorum.md`.
 
@@ -218,7 +218,7 @@ does not block it. If the target does not win within one election timeout, the o
 aborts the transfer and keeps leading (§2).
 
 **(c) maps to paros.** paros's handoff (`ColocatedNode::relinquish_to`,
-`paros-core/src/node/handoff.rs`) is the opposite design: the successor continues **the same
+`paros-consensus/src/node/handoff.rs`) is the opposite design: the successor continues **the same
 ballot** with no Phase 1, and the old leader abdicates in the same call, so there is no abort
 path. See `docs/knowledge/concepts/leader-handoff.md` for the comparison.
 

@@ -178,6 +178,8 @@ impl ColocatedNode {
             self.ballot.round > self.round_floor,
             "a campaign opens above the round floor a stale refusal set"
         );
+        // No `Prepare` of this ballot has left yet; `start_phase1` clears it.
+        self.unprepared_campaign = Some(self.ballot);
         if self.matchmakers.is_some() {
             // The registration this campaign sends stays in the matchmakers'
             // histories whether or not the campaign goes on: every later
@@ -245,6 +247,9 @@ impl ColocatedNode {
             "Phase 1 opens once matchmaking has closed"
         );
         assert!(self.proposer.election().is_none(), "one Phase 1 per ballot");
+        // The campaign sends its `Prepare` now: its promise may reach every
+        // acceptor, so it is no longer an abandoned campaign nobody heard of.
+        self.unprepared_campaign = None;
 
         // The campaign's recovery range starts at this node's first *faulty*
         // slot when that sits below the contiguous prefix (Stage 8): a rotted

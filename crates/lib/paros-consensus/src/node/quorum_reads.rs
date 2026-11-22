@@ -321,11 +321,13 @@ impl ColocatedNode {
     }
 
     /// Abandon every open read whose basis sits below this node's read
-    /// fence (the higher of its promise and its belief ballot, rule `Below`
-    /// of `specs/tla/reads/`). A promise that rose above the basis may have
-    /// helped a newer leadership choose a write that the basis's row need
-    /// not meet, and the reader's own watermark entered the tally with no
-    /// fence. A plain deployment has no fence and abandons nothing.
+    /// fence for its configuration (the higher of its promise and its
+    /// belief ballot, rule `Below` of `specs/tla/reads/`, with the exception
+    /// of [`ColocatedNode::reader_fence`]). A promise that rose above the
+    /// basis may have helped a newer leadership choose a write that the
+    /// basis's row need not meet, and the reader's own watermark entered
+    /// the tally with no fence. A plain deployment has no fence and
+    /// abandons nothing.
     ///
     /// # Panics
     ///
@@ -335,8 +337,16 @@ impl ColocatedNode {
         let Some(fence) = self.wire_read_fence() else {
             return;
         };
+        // The exception of `reader_fence`, read before the tally borrows.
+        let me = self.config.id;
+        let unprepared = self
+            .promise_is_own_unprepared()
+            .then_some(self.acceptors_since);
         let open = self.quorum_reads.pending().len();
-        self.quorum_reads.abandon_superseded(fence);
+        self.quorum_reads.abandon_below(|config| match unprepared {
+            Some(since) if !config.contains(me) => since,
+            _ => fence,
+        });
         let left = self.quorum_reads.pending().len();
         assert!(left <= open, "fencing opens no read");
         probe!(

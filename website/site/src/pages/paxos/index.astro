@@ -4,18 +4,19 @@
 // each flavor solves, and the words that every flavor page links to.
 import Doc from "../../layouts/Doc.astro";
 import { REPO, url } from "../../nav";
-import { LESSONS, TLC_RUN } from "../../course";
+import { LESSONS, TLC_RUN, pathOf } from "../../course";
 
 const traces = import.meta.glob("../../traces/*.json", { eager: true, import: "default" }) as Record<string, { scenarios: { id: string; beats?: unknown[] }[] }>;
 const traceOf = (page: string) => Object.entries(traces).find(([p]) => p.endsWith(`/${page}.json`))![1];
 const PAGE_NAMES: Record<string, string> = {
   "single-decree": "Single-decree Paxos", "quorums": "Quorums", "multi-paxos": "Multi-Paxos",
   "compartmentalized": "Compartmentalized Paxos", "matchmaker": "Matchmaker Paxos",
+  "journal-seal": "Journal segments",
 };
 const lessons = LESSONS.map((l, i) => {
   const story = traceOf(l.page).scenarios.some((s) => s.beats?.length);
   return { ...l, n: i + 1, story, pageName: PAGE_NAMES[l.page] ?? l.page,
-    href: url(`paxos/${l.page}/`) + `#run=${l.runs[0]}&${story ? "beat" : "step"}=0` };
+    href: url(pathOf(l)) + `#run=${l.runs[0]}&${story ? "beat" : "step"}=0` };
 });
 
 const FLAVORS = [
@@ -57,7 +58,7 @@ const WORDS = [
 const f = (n: number) => FLAVORS[n - 1];
 ---
 <Doc title="The Paxos course" kicker="Paxos" section="paxos/" siblings={[]}
-  description="A course in seven lessons, from one value to a journal that changes its acceptors. Every run on these pages is recorded from the real paros-consensus.">
+  description="A course in eight lessons, from one value to a journal that changes its acceptors. Every run on these pages is recorded from the real paros-consensus and paros-journal.">
 
   <h2 id="map">The map</h2>
   <p>One journal of a cell, from a write to the log. Each tag names the flavor that does the
@@ -102,7 +103,7 @@ const f = (n: number) => FLAVORS[n - 1];
   </div>
 
   <h2 id="course">The course</h2>
-  <p>Seven lessons, in order. Each lesson is a group of recorded runs on one page. A run tells
+  <p>Eight lessons, in order: seven on the Paxos flavors, then one on the journal that paros builds from them. Each lesson is a group of recorded runs on one page. A run tells
   one idea per screen, and before some screens it asks what will happen. At the end of a run,
   the page offers the next run of the lesson.</p>
   <p class="course-resume" data-course-resume hidden></p>
@@ -115,7 +116,7 @@ const f = (n: number) => FLAVORS[n - 1];
           <span class="lesson-goal">After it, you can {l.goal}</span>
           <span class="lesson-tlc">
             <span class="tnum">{l.tlc.states.toLocaleString("en-US")}</span> states: TLC checked that {l.tlc.checks}{" "}
-            (<a href={`${REPO}/blob/main/specs/tla/${l.tlc.model}/${l.tlc.config}.cfg`}><code>{l.tlc.model}/{l.tlc.config}</code></a>).
+            (<a href={`${REPO}/blob/main/specs/tla/${l.tlc.model}/${l.tlc.config}.cfg`}><code>{l.tlc.model}/{l.tlc.config}</code></a>{l.tlc.date ? `, run on ${l.tlc.date}` : ""}).
           </span>
           <span class="lesson-meta label">
             <span>{l.pageName}</span>
@@ -131,7 +132,7 @@ const f = (n: number) => FLAVORS[n - 1];
   </ol>
   <p class="aside">Each lesson has a model in <a href={`${REPO}/tree/main/specs/tla`}><code>specs/tla/</code></a>,
   and the figure is the count of distinct states that {TLC_RUN.tool} found in one run of it on
-  {TLC_RUN.date}, with no error.</p>
+  {TLC_RUN.date} (or on the day that the lesson names), with no error.</p>
   <p class="aside">Your progress stays in this browser only.
   <button type="button" class="linkish" data-course-forget hidden>Forget my progress</button></p>
   <p>Then the <a href={url("paxos/concepts/")}>concepts</a>: one short entry for each idea that

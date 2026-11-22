@@ -15,7 +15,7 @@ use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, ChangeRefusal, RegisterValue};
 
 use crate::clock::Clock;
-use crate::layout::{Entry, KEY_LEN, Key, Op};
+use crate::layout::{Entry, KEY_LEN, Key, Op, PREFIX_LEN};
 use crate::register::Register;
 use crate::storage::{Storage, StorageError};
 use crate::transport::Transport;
@@ -92,16 +92,16 @@ impl Storage for MemStorage {
     }
 }
 
-fn prefix_start(prefix: [u8; 16]) -> [u8; KEY_LEN] {
+fn prefix_start(prefix: [u8; PREFIX_LEN]) -> [u8; KEY_LEN] {
     let mut start = [0; KEY_LEN];
-    start[..16].copy_from_slice(&prefix);
+    start[..PREFIX_LEN].copy_from_slice(&prefix);
     start
 }
 
 /// The messages of a network in memory, by endpoint.
 #[derive(Debug, Default)]
 struct Network {
-    /// The endpoint that serves each role.
+    /// The endpoint that serves each node.
     routes: BTreeMap<Address, usize>,
     inboxes: Vec<VecDeque<Envelope>>,
 }
@@ -152,17 +152,24 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// From now on, the messages to the role at `address` come to this
-    /// endpoint.
+    /// From now on, the messages to the node of `address` come to this
+    /// endpoint (every role of the node: each segment of a replica node).
     pub fn route(&self, address: Address) {
-        self.network.borrow_mut().routes.insert(address, self.id);
+        self.network
+            .borrow_mut()
+            .routes
+            .insert(address.node_address(), self.id);
     }
 }
 
 impl Transport for Endpoint {
     fn send(&mut self, envelope: Envelope) {
         let mut network = self.network.borrow_mut();
-        if let Some(to) = network.routes.get(&envelope.receiver()).copied() {
+        if let Some(to) = network
+            .routes
+            .get(&envelope.receiver().node_address())
+            .copied()
+        {
             network.inboxes[to].push_back(envelope);
         }
     }

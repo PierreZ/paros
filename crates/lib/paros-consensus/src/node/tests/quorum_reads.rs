@@ -811,6 +811,284 @@ fn a_far_watermark_is_filled_one_page_a_tick() {
     assert_eq!(nodes[0].watermark_fills(), 6, "nothing is left to fill");
 }
 
+// ---- #890 (learner above the leader), option (b) ----------------------------
+
+/// Node 3 of `{1, 2, 3}` (pool `0..4`) campaigns on its belief, and the one
+/// matchmaker answers that node 2 reconfigured to `members` at a ballot
+/// below the campaign. The campaign is abandoned before any `Prepare`: the
+/// node keeps its promise of its own ballot, above the leader. Returns the
+/// node, its campaign ballot and the leader's ballot.
+fn stranded_learner(members: &[u64]) -> (ColocatedNode, Ballot, Ballot) {
+    let mut n = deployed_node(3, &[1, 2, 3], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let own = n.ballot();
+    let lead = ballot(own.round, 2);
+    assert!(lead < own, "the leader sits below the campaign");
+    let _ = drain_match_requests(&mut n);
+    let history = BTreeMap::from([super::matchmaking::reconfigured(lead, members)]);
+    assert_eq!(
+        n.on_match_reply(super::matchmaking::registered_with(
+            0,
+            own,
+            history,
+            Ballot::zero()
+        )),
+        MatchStep::StaleConfiguration { newest: lead }
+    );
+    let sent = drain(&mut n);
+    assert!(
+        !sent
+            .iter()
+            .any(|(_, m)| matches!(m, Message::Prepare { .. })),
+        "the abandoned campaign sent no Prepare"
+    );
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(n.hard_state().max_promised_ballot, own);
+    (n, own, lead)
+}
+
+/// The leader's beat: ballot `lead`, configuration `members`, no fence.
+fn beat(lead: Ballot, members: &[u64]) -> Message {
+    Message::Heartbeat {
+        from: NodeId(2),
+        ballot: lead,
+        commit: None,
+        config: Some(cfg(members)),
+        fence: None,
+        gc_floor: None,
+    }
+}
+
+/// The case of #890: a node whose only promise above the leader is its own
+/// campaign that the matchmakers refused takes the leader's beat as its
+/// read basis when the leader's configuration leaves it out, and serves a
+/// read on it. The beat is still not followed and not acked. Before option
+/// (b), the node had no basis until a later leader change.
+#[test]
+fn a_learner_above_the_leader_by_its_own_unprepared_campaign_reads() {
+    let (mut n, own, lead) = stranded_learner(&[0, 1, 2]);
+    n.step(beat(lead, &[0, 1, 2]));
+    let sent = drain(&mut n);
+    assert!(
+        !sent
+            .iter()
+            .any(|(_, m)| matches!(m, Message::HeartbeatAck { .. })),
+        "a beat below the promise is not acked"
+    );
+    assert_eq!(n.leader(), None, "a beat below the promise is not followed");
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        own,
+        "the promise stands"
+    );
+    assert_eq!(
+        n.read_basis().map(|b| (b.config, b.since)),
+        Some((cfg(&[0, 1, 2]), lead))
+    );
+
+    n.quorum_read(1);
+    let targets = pre_read_targets(&drain(&mut n));
+    assert!(
+        !targets.contains(&NodeId(3)),
+        "the learner does not answer its own read"
+    );
+    for to in targets {
+        n.step(Message::PreReadAck {
+            from: to,
+            ctx: 1,
+            watermark: None,
+            config_since: Some(lead),
+        });
+    }
+    assert_eq!(
+        n.pending_read_states
+            .iter()
+            .map(|r| r.ctx)
+            .collect::<Vec<_>>(),
+        vec![1],
+        "the read is served"
+    );
+}
+
+/// The exception is volatile: a node that reboots with its own ballot as
+/// its durable promise cannot tell whether that campaign sent a `Prepare`
+/// before the crash, so it keeps the strict rule and a beat below the
+/// promise gives it no basis.
+#[test]
+fn a_rebooted_learner_keeps_the_strict_rule() {
+    let (n, own, lead) = stranded_learner(&[0, 1, 2]);
+    let mut storage = MemStorage::for_node(3, &[1, 2, 3]);
+    storage.config.nodes = (0..4).map(NodeId).collect();
+    storage.config.matchmakers = vec![MatchmakerId(0)];
+    storage.hard_state.max_promised_ballot = own;
+    drop(n);
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    assert_eq!(n.hard_state().max_promised_ballot, own);
+    assert!(
+        !n.promise_is_own_unprepared(),
+        "a reboot forgets that the campaign sent no Prepare"
+    );
+    n.step(beat(lead, &[0, 1, 2]));
+    let _ = drain(&mut n);
+    assert!(n.read_basis.is_none(), "the rebooted node takes no basis");
+    assert!(n.read_basis().is_none());
+}
+
+/// The read stays judged: a `Prepare` of another campaign above the leader
+/// raises the promise, which is no longer the node's own, so the open read
+/// is abandoned and the basis no longer counts.
+#[test]
+fn a_foreign_promise_ends_the_learner_exception() {
+    let (mut n, own, lead) = stranded_learner(&[0, 1, 2]);
+    n.step(beat(lead, &[0, 1, 2]));
+    let _ = drain(&mut n);
+    n.quorum_read(1);
+    let _ = drain(&mut n);
+    assert_eq!(n.quorum_reads().pending().len(), 1);
+    n.step(Message::Prepare {
+        reply_to: NodeId(1),
+        ballot: ballot(own.round + 1, 1),
+        from_slot: Slot(0),
+        config: Some(cfg(&[0, 1, 2])),
+    });
+    let _ = drain(&mut n);
+    assert!(
+        n.quorum_reads().is_empty(),
+        "a foreign promise above the basis ends the read"
+    );
+    assert!(n.read_basis().is_none());
+    n.step(beat(lead, &[0, 1, 2]));
+    let _ = drain(&mut n);
+    assert!(
+        n.read_basis().is_none(),
+        "a beat below a foreign promise is no basis"
+    );
+}
+
+/// The exception needs the node outside the leader's configuration: a
+/// member answers its own read with no fence, so its promise gates it.
+#[test]
+fn a_member_above_the_leader_takes_no_basis() {
+    let (mut n, _, lead) = stranded_learner(&[2, 3]);
+    n.step(beat(lead, &[2, 3]));
+    let _ = drain(&mut n);
+    assert!(n.read_basis.is_none(), "the beat is not stored as a basis");
+    assert!(n.read_basis().is_none());
+    n.quorum_read(1);
+    assert!(n.quorum_reads().is_empty());
+}
+
+/// The exception needs a campaign that sent no `Prepare`: once its Phase 1
+/// opened, an acceptor may hold its promise, so a beat below it is no basis.
+#[test]
+fn a_prepared_campaign_keeps_the_strict_rule() {
+    let mut n = deployed_node(3, &[1, 2, 3], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let own = n.ballot();
+    let _ = drain_match_requests(&mut n);
+    let _ = n.on_match_reply(super::matchmaking::registered(
+        0,
+        own,
+        &[(own, cfg(&[1, 2, 3]))],
+        Ballot::zero(),
+    ));
+    let sent = drain(&mut n);
+    assert!(
+        sent.iter()
+            .any(|(_, m)| matches!(m, Message::Prepare { .. })),
+        "the campaign opened its Phase 1"
+    );
+    let lead = ballot(own.round, 2);
+    n.step(beat(lead, &[0, 1, 2]));
+    let _ = drain(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate, "Phase 1 is open");
+    assert!(n.read_basis().is_none());
+}
+
+/// The exception needs a campaign that is over: while its matchmaking is
+/// open, it may still send a `Prepare`.
+#[test]
+fn an_open_campaign_takes_no_basis() {
+    let mut n = deployed_node(3, &[1, 2, 3], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let own = n.ballot();
+    assert!(n.matchmaking_role().is_some(), "the campaign is matching");
+    n.step(beat(ballot(own.round, 2), &[0, 1, 2]));
+    let _ = drain(&mut n);
+    assert!(n.read_basis().is_none());
+}
+
+/// The exception needs the promise to be the node's own: a `Prepare` of
+/// another campaign whose configuration the node's pool makes it ignore
+/// raises the promise and leaves the belief ballot below it. The basis of
+/// the stranded learner stops counting, though the node is still outside
+/// the basis's configuration.
+#[test]
+fn a_foreign_promise_under_an_ignored_configuration_ends_the_exception() {
+    let (mut n, own, lead) = stranded_learner(&[0, 1, 2]);
+    n.step(beat(lead, &[0, 1, 2]));
+    let _ = drain(&mut n);
+    assert!(n.read_basis().is_some());
+    let foreign = ballot(own.round + 1, 1);
+    n.step(Message::Prepare {
+        reply_to: NodeId(1),
+        ballot: foreign,
+        from_slot: Slot(0),
+        config: Some(cfg(&[0, 1, 4])),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(n.hard_state().max_promised_ballot, foreign);
+    assert_eq!(
+        n.acceptors_since(),
+        lead,
+        "a configuration outside the pool is not adopted"
+    );
+    assert!(
+        n.read_basis().is_none(),
+        "a foreign promise gates the basis"
+    );
+}
+
+/// The exception needs the node outside the configuration of each open
+/// read too: a read that a member opened before its campaign ends once
+/// the matchmakers refuse that campaign, because the member answered that
+/// read itself with no fence.
+#[test]
+fn a_member_read_ends_under_its_own_unprepared_campaign() {
+    let mut n = deployed_node(3, &[1, 2, 3], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let first = n.ballot();
+    let _ = drain_match_requests(&mut n);
+    // A leader of `{1, 2, 3}` above this campaign: the node follows it
+    // and reads over it as a member.
+    let lead = ballot(first.round + 1, 2);
+    n.step(beat(lead, &[1, 2, 3]));
+    let _ = drain(&mut n);
+    n.quorum_read(1);
+    let _ = drain(&mut n);
+    assert_eq!(n.quorum_reads().pending().len(), 1);
+    // The node campaigns again with no tick (so no read is fenced while
+    // the campaign matches), and the matchmaker refuses the campaign.
+    n.campaign();
+    let own = n.ballot();
+    assert!(own > lead);
+    let _ = drain_match_requests(&mut n);
+    let _ = n.on_match_reply(super::matchmaking::refused(
+        0,
+        own,
+        MatchRefusal::Stale {
+            highest: ballot(own.round + 1, 1),
+        },
+    ));
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(n.hard_state().max_promised_ballot, own);
+    n.serve_quorum_reads();
+    assert!(
+        n.quorum_reads().is_empty(),
+        "a member's read ends under its own promise"
+    );
+}
+
 /// A node of the full `2 × 2` grid `G = {0, 1, 2, 3}` (rows `{0, 1}` and
 /// `{2, 3}`) with node 4 in its pool and one matchmaker.
 fn deployed_grid_node(id: u64) -> ColocatedNode {

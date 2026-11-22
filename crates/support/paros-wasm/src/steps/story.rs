@@ -13,7 +13,7 @@
 //! - a [`Question`]: what the page asks the reader before a beat plays. The
 //!   reader answers, the beat plays, and the page says why. The right answer
 //!   is a fact of the run: the script pins it to the world with
-//!   [`super::Recorder::holds`].
+//!   `Recorder::holds` of the Paxos pages.
 //! - a [`Choice`]: at the end of a beat, a label that opens another recorded
 //!   run at one of its beats. The reader decides; nothing runs again.
 //! - a [`Flight`]: one message on the wire after a step. Every message of one
@@ -23,10 +23,10 @@
 //!   alive, ballot, promise, vote, holes in the log), and the disk writes the
 //!   step made on it.
 //!
-//! Both drivers fill these: the game's [`super::Recorder`] and the
-//! compartmentalized page's own driver.
+//! Every driver fills these: the game's `Recorder`, the compartmentalized
+//! page's own driver, and the journal's seal driver.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -149,26 +149,28 @@ pub struct Vote {
 
 /// The durable facts of one lane, compared step to step to find what a step
 /// wrote on the disk.
+#[cfg(feature = "paxos")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Durable {
+pub(crate) struct Durable {
     /// Whether the lane can write: a lane that is down writes nothing.
     pub alive: bool,
     /// The promise, as `round.node`.
     pub promise: Option<String>,
     /// The votes by slot: (ballot, value). One decree uses slot 0.
-    pub votes: BTreeMap<u64, (String, String)>,
+    pub votes: std::collections::BTreeMap<u64, (String, String)>,
     /// The slots of `votes` known chosen. A record that changes and is
     /// chosen at once was learned (a `Commit`, a catch-up), not voted.
     pub chosen: BTreeSet<u64>,
     /// The records of a matchmaker: ballot → members.
-    pub registrations: BTreeMap<String, String>,
+    pub registrations: std::collections::BTreeMap<String, String>,
 }
 
+#[cfg(feature = "paxos")]
 impl Durable {
     /// What a step wrote: every fact of `after` that is new or changed since
     /// `self`. A lane that was down, or is down now, wrote nothing a reader
     /// can see. `log` names the slot of each vote.
-    pub(super) fn writes(&self, after: &Durable, log: bool) -> Vec<String> {
+    pub(crate) fn writes(&self, after: &Durable, log: bool) -> Vec<String> {
         if !self.alive || !after.alive {
             return Vec::new();
         }
@@ -202,7 +204,7 @@ impl Durable {
 
 /// The beats of one run, as its script opens them.
 #[derive(Clone, Debug, Default)]
-pub(super) struct Beats {
+pub(crate) struct Beats {
     beats: Vec<Beat>,
 }
 
@@ -212,7 +214,7 @@ impl Beats {
     /// # Panics
     ///
     /// When `says` is not one plain sentence that ends with a full stop.
-    pub(super) fn open(&mut self, at: usize, says: &str) {
+    pub(crate) fn open(&mut self, at: usize, says: &str) {
         assert!(
             says.ends_with('.') && !says.trim().is_empty(),
             "a beat says one plain sentence: {says:?}"
@@ -234,7 +236,7 @@ impl Beats {
     /// `asks` does not end with a question mark, when `why` does not end
     /// with a full stop, when the answers are fewer than two or more than
     /// four, when two answers are the same, or when `right` names no answer.
-    pub(super) fn ask(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) {
+    pub(crate) fn ask(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) {
         self.put(asks, answers, right, why, false);
     }
 
@@ -243,7 +245,7 @@ impl Beats {
     /// # Panics
     ///
     /// As [`Beats::ask`].
-    pub(super) fn find(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) {
+    pub(crate) fn find(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) {
         self.put(asks, answers, right, why, true);
     }
 
@@ -296,7 +298,7 @@ impl Beats {
     /// # Panics
     ///
     /// When no beat is open.
-    pub(super) fn choice(&mut self, label: &str, run: &str, beat: usize) {
+    pub(crate) fn choice(&mut self, label: &str, run: &str, beat: usize) {
         let open = self
             .beats
             .last_mut()
@@ -315,7 +317,7 @@ impl Beats {
     ///
     /// When the run has beats and steps before its first beat: a story tells
     /// every step.
-    pub(super) fn finish(self, steps: usize) -> Vec<Beat> {
+    pub(crate) fn finish(self, steps: usize) -> Vec<Beat> {
         let mut beats = self.beats;
         if let Some(first) = beats.first() {
             assert_eq!(first.from, 0, "a story opens a beat before its first step");
@@ -348,7 +350,7 @@ impl Beats {
 ///
 /// When a choice names a run the page does not have, or a beat that run does
 /// not have.
-pub(super) fn check_choices(page: &str, runs: &[super::Scenario]) {
+pub(crate) fn check_choices(page: &str, runs: &[super::Scenario]) {
     for run in runs {
         for choice in run.beats.iter().flat_map(|beat| &beat.choices) {
             let target = runs
@@ -375,7 +377,8 @@ pub(super) fn check_choices(page: &str, runs: &[super::Scenario]) {
 
 /// The holes of a log: every slot from `floor` up to the highest slot of
 /// `slots` that `slots` does not hold.
-pub(super) fn holes(floor: u64, slots: impl IntoIterator<Item = u64>) -> Vec<u64> {
+#[cfg(feature = "paxos")]
+pub(crate) fn holes(floor: u64, slots: impl IntoIterator<Item = u64>) -> Vec<u64> {
     let held: std::collections::BTreeSet<u64> = slots.into_iter().collect();
     let Some(top) = held.last().copied() else {
         return Vec::new();
@@ -489,6 +492,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "paxos")]
     fn a_record_learned_chosen_is_not_a_vote() {
         let before = Durable {
             alive: true,
@@ -517,6 +521,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "paxos")]
     fn a_step_writes_what_changed_on_a_live_disk() {
         let before = Durable {
             alive: true,
@@ -545,9 +550,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "paxos")]
     fn a_recorded_run_tells_its_story_in_beats() {
         use crate::paxos::level::common::open;
-        use crate::paxos::trace::{Recorder, assemble};
+        use crate::paxos::trace::Recorder;
+        use crate::steps::assemble;
 
         let mut run = Recorder::new("act1/the-duel");
         run.beat("Three acceptors wait for a proposer.")
@@ -567,10 +574,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "paxos")]
     #[should_panic(expected = "opens no run")]
     fn a_choice_opens_a_run_of_the_page() {
         use crate::paxos::level::common::open;
-        use crate::paxos::trace::{Recorder, assemble};
+        use crate::paxos::trace::Recorder;
+        use crate::steps::assemble;
 
         let mut run = Recorder::new("act1/the-duel");
         run.beat("Proposer 5 opens a ballot.")
@@ -581,6 +590,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "paxos")]
     fn holes_are_the_missing_slots_below_the_top() {
         assert_eq!(holes(0, [0, 2, 5]), [1, 3, 4]);
         assert_eq!(holes(3, [4]), [3]);

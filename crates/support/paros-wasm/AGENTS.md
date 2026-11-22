@@ -17,7 +17,8 @@ clippy and nextest cover both); each wasm bundle is built alone with `--no-defau
   `docs/analysis/play/game-plan.md`, a record.
 - `journal` → `src/journal.rs` + `src/journal/` → the fold lab of the site's `/journal/calls/`
   page (#1363 (journal fold lab)), and the register and record labs of `/journal/matchmakers/`
-  and `/journal/segments/` (#1364 (register and segment record lab)). Depends on `paros-journal` only (which takes
+  and `/journal/segments/` (#1364 (register and segment record lab)), and the step-through of
+  `/journal/segments/`, recorded from the journal roles (#1365 (reshape and seal step-through)). Depends on `paros-journal` only (which takes
   `paros-consensus` with its features off). Bundle `paros_journal_lab`, staged into
   `website/site/public/journal/wasm/`.
 - `playground` was removed on 2026-11-19 with the journal layers. It is at the tag
@@ -115,6 +116,9 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   `QuorumSystem::partitions` and `AcceptorConfig::has_phase1_quorum` / `has_phase2_quorum_in` over
   the acceptors that are up.
 - `tests/paxos_traces.rs` → writes `website/site/src/traces/*.json` (committed, diffed in CI).
+- `src/steps.rs` + `src/steps/story.rs` → the JSON shape of every step-through (`Trace`,
+  `Scenario`, `Step`, `Beat`, …) and `assemble`, shared by the `paxos` and `journal` tools
+  (#1365 (reshape and seal step-through)). `Durable` and the `Recorder` helpers stay `paxos` only.
 - `tests/paxos_world.rs` → the log world driven directly: election, apply, heal, restart, seams, reads, recovery, the matchmaker plane.
 
 The `applied` log in `world/disk.rs` is the **game's own** application stand-in, kept to teach
@@ -173,6 +177,16 @@ decided slot, applied at once.
   slot, controller term 1; `truncate` raises the fold floor to the highest boundary
   `next_seq`. Three exercises. The browser smoke test plays the solutions of both labs by
   `data-key`: change both together.
+- `src/journal/seal.rs` (+ `seal/words.rs`) → `trace`, `trace_of` (wasm `journal_trace`) → the
+  step-through of `/journal/segments/` (#1365 (reshape and seal step-through)): a small driver of
+  the journal roles of `paros-journal` (`JournalLeader`, `JournalAcceptor`, `SegmentReplica`)
+  and one `RegisterValue`, like the compartmentalized driver of the `paxos` tool. Three runs on
+  one setup (segment 1 on acceptors 1 to 3, replica 7, leader A): the reshape and the seal, a
+  slow acceptor (a Phase 1 that sees no vote ends the segment at its start), and "Break the
+  rule", a `Seal` that the driver writes below a chosen vote. The driver only moves messages;
+  each state line, seal end, boundary state and answer is read off the roles. Each register
+  write is done at once (the register lab shows the reads and writes behind it), and each disk
+  write is durable at once. `tests/journal_traces.rs` writes `website/site/src/traces/journal-seal.json`.
 
 ## Tests & gates
 
@@ -180,7 +194,7 @@ Prefix each with `nix develop --command`. CI's `wasm` job runs the traces diff a
 build; clippy and nextest cover the crate through the workspace.
 
 - `cargo nextest run -p paros-wasm`
-- `cargo test -p paros-wasm --test paxos_traces` then `git diff --exit-code -- website/site/src/traces`
+- `cargo test -p paros-wasm --test paxos_traces --test journal_traces` then `git diff --exit-code -- website/site/src/traces`
 - `cargo check --target wasm32-unknown-unknown -p paros-wasm --no-default-features --features paxos`,
   and the same with `--features journal`
 - `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `target/wasm-tools/paxos/` and

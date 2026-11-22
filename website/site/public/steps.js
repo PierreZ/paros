@@ -5,7 +5,10 @@
 // then loads paros-consensus compiled to wasm and draws the same runs computed
 // live in the browser. The page holds the trace in
 // <script type="application/json" id="trace"> and a <div data-steps> where
-// the diagram goes; the script's data-wasm names the wasm bundle.
+// the diagram goes; the script's data-wasm names the wasm bundle, data-call
+// the function that records a page (`paxos_trace` on the Paxos pages,
+// `journal_trace` on the Journal pages, #1365), and data-source the crate
+// that the runs come from.
 //
 // What a reader sees, top to bottom:
 //   1. the stage: which phase this step is in, and what that phase does;
@@ -30,6 +33,8 @@
   var first = document.querySelector("[data-steps]");
   if (!data || !first) return;
   var wasm = data.dataset.wasm;
+  var call = data.dataset.call || "paxos_trace";
+  var origin = data.dataset.source || "paros-consensus";
   var current = draw(JSON.parse(data.textContent), first, false, fromAddress());
   // The story mode (public/story.js, #1147) opens the step-through here at
   // a run and a step.
@@ -53,10 +58,10 @@
     : Promise.reject(new Error("no wasm bundle named"));
   engineReady
     .then(function (engine) {
-      current = draw(JSON.parse(engine.paxos_trace(current.page)), current.panel, true, current.position());
+      current = draw(JSON.parse(engine[call](current.page)), current.panel, true, current.position());
     })
     .catch(function (err) {
-      console.warn("paros-consensus in wasm did not load; the diagram shows the recorded run", err);
+      console.warn(origin + " in wasm did not load; the diagram shows the recorded run", err);
     });
 
   // The quorum picker (#948): stop acceptors, and paros-consensus says which
@@ -181,7 +186,7 @@
     var head = el("div", "panel-head label");
     head.appendChild(el("span", "title", "Step through"));
     var source = el("span", "chip-status" + (live ? " done" : ""), live ? "live" : "recorded");
-    source.title = live ? "paros-consensus, compiled to wasm, runs this page's scripts now" : "recorded from paros-consensus at build time";
+    source.title = live ? origin + ", compiled to wasm, runs this page's scripts now" : "recorded from " + origin + " at build time";
     head.appendChild(source);
     var count = el("span", "meta tnum");
     head.appendChild(count);
@@ -297,7 +302,7 @@
     if (trace.scenarios.length > 1) panel.appendChild(whatif);
 
     var details = el("details", "steps-details");
-    details.appendChild(el("summary", "label", "What paros-consensus says about this step"));
+    details.appendChild(el("summary", "label", "What " + origin + " says about this step"));
     var notes = el("div", "steps-notes");
     details.appendChild(notes);
     panel.appendChild(details);

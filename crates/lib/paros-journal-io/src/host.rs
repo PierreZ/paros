@@ -81,13 +81,16 @@ pub enum Assignment {
 }
 
 impl Assignment {
-    /// The role that the assignment names.
+    /// The role that the assignment names. The address of a replica names
+    /// its segment: one node holds a replica of each segment whose set names
+    /// it ([`crate::wire`]).
     #[must_use]
     pub fn address(&self) -> Address {
         match self {
-            Self::Acceptor { address, .. }
-            | Self::Replica { address, .. }
-            | Self::Leader { address, .. } => *address,
+            Self::Acceptor { address, .. } | Self::Leader { address, .. } => *address,
+            Self::Replica {
+                address, segment, ..
+            } => Address::replica(address.journal, address.node, *segment),
         }
     }
 }
@@ -97,7 +100,8 @@ impl Assignment {
 pub enum Input {
     /// Serve a role.
     Assign(Assignment),
-    /// Stop serving a role.
+    /// Stop serving a role. An address with no segment names every role of
+    /// the node: each replica of a replica node too.
     Unassign(Address),
     /// The records of a role that starts, as [`Effect::Read`] asked.
     Recovered {
@@ -191,6 +195,8 @@ pub enum Effect {
     },
     /// Send `envelope` once batch `after` of its sender is durable.
     Send {
+        /// The role that sends: the envelope names its node only.
+        sender: Address,
         /// The message.
         envelope: Envelope,
         /// The batch of the sender it waits on; `None` waits on nothing.
@@ -304,10 +310,20 @@ impl Host {
         }
     }
 
-    /// The replica at `address`, once it recovered.
+    /// The replica at `address`, once it recovered. An address with no
+    /// segment names the replica of the newest segment that the node holds.
     #[must_use]
     pub fn replica(&self, address: Address) -> Option<&SegmentReplica> {
-        match self.roles.get(&address) {
+        let role = if address.segment.is_some() {
+            self.roles.get(&address)
+        } else {
+            self.roles
+                .range(address..)
+                .take_while(|(a, _)| a.node_address() == address)
+                .last()
+                .map(|(_, role)| role)
+        };
+        match role {
             Some(Role::Replica(role)) => Some(role),
             _ => None,
         }
@@ -340,7 +356,7 @@ impl Host {
         let mut effects = Vec::new();
         match input {
             Input::Assign(assignment) => self.assign(now, assignment, &mut effects),
-            Input::Unassign(address) => self.stop(address, Stop::Unassigned, &mut effects),
+            Input::Unassign(address) => self.unassign(address, &mut effects),
             Input::Recovered { address, entries } => {
                 self.recovered(address, &entries, &mut effects);
             }
@@ -367,7 +383,9 @@ impl Host {
         }
         assert!(
             effects.iter().all(|effect| match effect {
-                Effect::Send { envelope, .. } => self.roles.contains_key(&envelope.sender()),
+                Effect::Send {
+                    sender, envelope, ..
+                } => self.roles.contains_key(sender) && sender.node == envelope.from,
                 _ => true,
             }),
             "only a role that the Host serves sends"
@@ -447,6 +465,20 @@ impl Host {
                 }
             }
             Err(damage) => self.stop(address, Stop::Damaged(damage), effects),
+        }
+    }
+
+    /// Stop the role at `address`; an address with no segment stops every
+    /// replica of the node too.
+    fn unassign(&mut self, address: Address, effects: &mut Vec<Effect>) {
+        let named: Vec<Address> = self
+            .roles
+            .keys()
+            .copied()
+            .filter(|a| *a == address || (address.segment.is_none() && a.node_address() == address))
+            .collect();
+        for role in named {
+            self.stop(role, Stop::Unassigned, effects);
         }
     }
 
@@ -562,6 +594,7 @@ fn acceptor_effects(address: Address, out: Vec<AcceptorEffect>, effects: &mut Ve
                 ops: layout::acceptor_ops(address, id, &ops),
             },
             AcceptorEffect::Send { to, message, after } => Effect::Send {
+                sender: address,
                 envelope: envelope(address, to, message),
                 after,
             },
@@ -578,13 +611,14 @@ fn replica_effects(address: Address, out: Vec<ReplicaEffect>, effects: &mut Vec<
                 ops: layout::replica_ops(address, id, &ops),
             },
             ReplicaEffect::Send { to, message, after } => Effect::Send {
+                sender: address,
                 envelope: envelope(address, to, message),
                 after,
             },
-            ReplicaEffect::Register(change) => Effect::Register {
+            ReplicaEffect::Register { change, after } => Effect::Register {
                 address,
                 change,
-                after: None,
+                after,
             },
         });
     }
@@ -594,6 +628,7 @@ fn leader_effects(address: Address, out: Vec<LeaderEffect<CallId>>, effects: &mu
     for effect in out {
         effects.push(match effect {
             LeaderEffect::Send { to, message } => Effect::Send {
+                sender: address,
                 envelope: envelope(address, to, message),
                 after: None,
             },

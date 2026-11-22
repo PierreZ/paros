@@ -215,10 +215,12 @@ pairs and mints tokens for any role.
 - **Names, not ids** (decided on 2026-10-10, #400): a token and the verifier's facts name a
   tenant and a journal by their full string names, never by hex ids. The entry roles already
   resolve names. An `internal` tenant has no resolvable name, so only `admin` reaches it. A name
-  is free again after its delete, so a token for `acme` also works on a later tenant named
-  `acme`; short lifetimes limit this.
+  is free again after its delete. A tenant token also carries the tenant's `u64` id (amended by
+  Pierre on 2026-11-22, #1419 (the tenancy wrapper and paros-names), section 3.8): the verifier
+  checks it against the id that the name resolves to, so a token for `acme` fails on a later
+  tenant named `acme`. **Open** (#1431): how the offline mint learns that id.
 - **Token content** (#400, `paros-authz-biscuit`). The authority block holds `role(..)`,
-  `tenant(<name>)` for the tenant role, a `subject(..)` label and an expiry check. For each
+  `tenant(<name>)` and `tenant_id(<u64>)` for the tenant role, a `subject(..)` label and an expiry check. For each
   request the verifier adds `time`, `operation`, `op_class`, `access` (`read` or `write`),
   `target_tenant`, `target_kind` (`users` or `internal`) and `target_journal`, then runs one
   Datalog policy in the server: the meaning of a role changes without new tokens. A view of #399
