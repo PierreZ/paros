@@ -1,0 +1,29 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that a property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# Every rule: safety, then the heal once the faults stop.
+safety               pass       ci
+live                 pass       ci
+# Two failures: the cell and the journals stop writing below a majority.
+safety_two           pass       ci
+# Bookings first and the grant later is safe while the coordinator keeps its
+# memory; book_first breaks it with one restart between the two writes.
+book_first_nocrash   pass       ci
+# Controls: each rule off breaks its property.
+book_first           violation  ci
+no_dedup             violation  ci
+partial              violation  ci
+no_limit             violation  ci
+no_free              violation  ci
+fixed                violation  ci
+# The limit of "the cell answers itself": two failures in the cell's control
+# journal leave no majority to write the grant of its own heal.
+cell_below_majority  violation  ci
+# Reachability: the model reaches each case.
+reach_cell_heal      violation  ci
+reach_busy           violation  ci
+reach_refusal        violation  ci
+reach_two_moves      violation  ci

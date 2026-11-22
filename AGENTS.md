@@ -126,7 +126,10 @@ the same write; #1189 (the journal state model), #1309 (the state is the disk)),
 member of the set, the new set written by compare-and-set on the version of the register, a "done"
 report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
 removed replica that comes back during the heal; #1314 (re-replication of a sealed segment's
-replica set)).
+replica set)), the placement port between the grid controller and the cell
+(`specs/tla/placement-port/`: `standing`, `place` all or none in one write keyed by the caller's
+request id, `release`, the limit of moves in flight, and the cell's own control journal placed
+through the same port; #1421 (the placement port)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). The decree's

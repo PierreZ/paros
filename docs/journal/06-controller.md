@@ -383,3 +383,50 @@ decision of Pierre):
   zone rule of a v1 grid is the rule of each column.
 - **The matchmakers at a majority with no spare alert**; the handover of the catalogue is not an
   action of v1's `decide` yet.
+
+### J6.3 The placement port
+
+**The grid controller asks the cell where; the cell answers through a placement port**
+(Pierre, 2026-11-22, #1421 (the placement port); `docs/architecture/04-roles.md` §4.4, "The cut
+of the old tenant coordinator"). The loop that changes the membership of one journal (ask, reshape,
+release) is the grid controller's. Which member must leave, where a new member goes and how many
+moves run at one time are questions of the whole cell. `paros-journal-control` defines the port
+as a trait with plain data; `paros-cell` answers it. The journal layer names no cell type. A
+program with no cell answers it from a fixed list of machines.
+
+**The calls** (Pierre, 2026-11-22, decision card of #1421: "place, release, standing"):
+
+- `standing(machine)`: whether the machine must lose its members (it is gone, it drains, it is
+  slow, it is held for maintenance). "Gone" and "drains" are durable records of the cell, not the
+  memory of one coordinator.
+- `place(request id, journal, role, keep, leave, count, needs disk)`: one grant, all or none.
+  The caller draws the request id. The cell writes the grant and its bookings in **one** write of
+  its control journal, so the id is in the fold before any machine is booked. The same request id
+  gets the same answer. `busy` (the limit of moves in flight is reached) writes nothing, and the
+  caller asks again with the same id. `refused` (no machine fits) is recorded under the id, and
+  the caller asks later with a new id.
+- `release(request id)`: the reshape is done; the cell frees the bookings of the members that
+  left and ends the grant. A grant in flight is the token of the rate limit of the cell (the old
+  chain of steps of `turn.rs`). The same release again changes nothing.
+
+**The cell places its own control journal through the same port** (Pierre, 2026-11-22, decision
+card of #1421: "The cell answers itself"). The grid controller of the cell's control journal asks
+the port of its own cell, and the grant is a write to that same journal. The journal stays
+writable while at most `F` of its members are down, so the heal goes on. Below a majority, no
+grant and no reshape can be written: hold and page (§J6.2, `ControlFrozen`).
+
+`specs/tla/placement-port/` checks the port: a grant is all or none (`GrantWhole`), one request id
+is one grant (`OneGrantPerRid`), the moves in flight never pass the limit (`InFlight`), a released
+booking is free again (`ReleasedFree`), no booking leaks (`NoOrphan`), a journal keeps its size
+(`KeepsSize`: a member leaves only in the reshape that puts its replacement in), every write of
+the cell and every reshape waits for a majority (`Writes`), and once the faults stop every journal
+is off the machines that failed or drain (`Healed`), the cell's control journal too. Each rule has
+a control: the bookings in one write and the grant in a later write, with a restart of the
+coordinator between (`book_first`); no look-up of the request id (`no_dedup`); a partial grant
+(`partial`); no limit (`no_limit`); a release that keeps the bookings (`no_free`); a cell control
+journal that does not use the port (`fixed`).
+
+The model has the reasons gone and drain of `standing`; slow, maintenance and the balance of
+`paros-cell` (#1423) give the same "must leave" answer. **Open** (#1421): the order of the grants (the rule of turns of `turn.rs`, so that one stuck journal starves no
+other), and whether the cell's own control journal skips the limit. The model has a limit of one
+move for the whole cell and never starves the cell's journal, because every grant ends.
