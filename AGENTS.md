@@ -132,7 +132,11 @@ request id, `release`, the limit of moves in flight, and the cell's own control 
 through the same port; #1421 (the placement port)), and, above the journal, the election over a
 journal (`specs/tla/election/`: the term won by `SetLeader(new, old)`, the term number from the
 fold, the stop at the first refused write, the hand on, the fence of an order by its term, the
-interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)).
+interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)), and the
+takeover by a new coordinator (`specs/tla/takeover/`: the view of a term from its own
+registrations, the registration that raises the fence, the order checked and done in one write, a
+reference per term, the stop of a deposed coordinator, the directory asked after a gone order;
+#1422 (the takeover by a new controller)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both

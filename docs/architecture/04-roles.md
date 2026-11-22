@@ -265,6 +265,38 @@ These points are decided:
   service for clients, and the health and inspect calls. Every journal role, coordinator and
   controller is dynamic. A reference is not a credential: the right stays with the token at the
   frontend (section 3.5), and the fences stay with the terms and the ballots.
+- **The takeover by a new coordinator** (#1422 (the takeover by a new controller); TLC checks it in
+  `specs/tla/takeover/`). A coordinator that wins a term knows only its control journal and what
+  the machines tell it in that term, and it acts on that view (it frees, moves or heals a role).
+  The pattern is FoundationDB's `moveKeysLock`. These rules hold together, and each has a control
+  in the model:
+  1. **A machine reports the roles that it hosts when it registers** with the coordinator of a
+     term. A new term builds its view from the journal and from the registrations and acks of its
+     own term, never from the memory of an earlier term. A coordinator that crashed acts again
+     only after it wins a new term.
+  2. **A registration with term t raises the machine's highest term to t in the same write.** So
+     an order of an earlier term that arrives after the registration is refused, and the
+     registration names every role that the machine hosts without an order of the new term.
+  3. **An order is checked and done in one atomic write**: the machine writes the term of the
+     order and the effect in one batch, and refuses an order below its highest term.
+  4. **A booking names a machine by its durable id, never by a reference.** The reference of an
+     order comes from the registration of the current term.
+  5. **A coordinator gets a new reference at each term.** No message falls back to a fixed
+     endpoint of a coordinator. A machine gets a new reference at each incarnation (a dynamic
+     reference of moonpool RPC), so an order to an incarnation that is gone comes back to its
+     sender as an error.
+  6. **`Assign` is idempotent by its request id.** **Open** (#1419 (the tenancy wrapper and
+     paros-names)): the exact form of the birth nonce of the key that `Assign` carries.
+  7. **A deposed coordinator stops** on a refused order (a newer term began) and on a refused write
+     to its control journal.
+  8. **The error of an order to a gone incarnation marks the machine as unknown** in the view of
+     its coordinator, which asks the machine's fixed directory ("which reference serves this id
+     now") for its current registration. Without it, a coordinator whose view names a dead
+     incarnation orders it for ever. With it, a late registration of an older incarnation does no
+     harm, so a view needs no rule on the order of incarnations.
+  A machine sends its registration again until the coordinator acks it, and a coordinator sends
+  an order again until an ack or a registration shows the role. `paros-cell` and `paros-machine`
+  build these rules (#1422).
 
 - **Everything simulates and compiles to wasm** (goal 10). Each pure layer builds for
   `wasm32-unknown-unknown`, as `paros-consensus` and `paros-journal` do today, and the whole

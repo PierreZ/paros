@@ -263,6 +263,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | The election over a journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after #1323 (build the paros journal v1)) | `election/` | #1420 (paros-election) |
+| The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -3468,8 +3469,8 @@ That costs one term: in a first liveness check with a tight uuid budget, it used
 
 What is not in the model: Paxos inside the journal (one atomic object), the lease as a clock (a
 challenge waits until there is no live holder, or comes at any time with `Eager`), more than one
-receiver, the recovery pass of a coordinator after it wins (#1422 (the takeover by a new
-controller)), and the `expected_seq` of the writes of a holder (`multi-writer/`).
+receiver, the recovery pass of a coordinator after it wins (`takeover/`), and the `expected_seq`
+of the writes of a holder (`multi-writer/`).
 
 ### `journal-ids/`: one id names at most one journal, forever, for #1419
 
@@ -3528,3 +3529,98 @@ of a tenant (the same tombstone rule in the fold of the universe), the move of a
 cells (its id does not change), a control journal rebuilt by recovery (§3.10, deferred; it forgets
 its tombstones, the case for a birth nonce in `Assign`), and a peer that forges ids (out of scope).
 
+### `takeover/`: the takeover by a new coordinator, for #1422 (the takeover by a new controller)
+
+This model checks what a coordinator knows and does when it wins a term after another
+coordinator (`docs/architecture/04-roles.md` §4.4, "The takeover by a new coordinator"). The term
+is the election of `election/`, taken here as one atomic step. The pattern is FoundationDB's
+`moveKeysLock`: a new holder fences the old one out of every machine, then builds its view again.
+
+The steps:
+
+- **Book.** A coordinator books a role for a request on a machine that its view shows. The booking
+  is a record of its control journal, written under its term, and names the machine by its
+  durable id. The journal refuses the write of a deposed coordinator, which then stops.
+- **Order.** A coordinator orders the machine of each booked request with `Assign(request, term)`
+  until an ack or a registration shows the role. A deposed coordinator does this too, with its old
+  term.
+- **Free.** A coordinator frees a booked request that it believes no machine hosts: the
+  registration in its view does not name the role, no ack of its term names it, and it sent no
+  order for it in its term. This is the step that trusts the view. It stands for every decision
+  that a coordinator takes from its view (a free, a move, a heal).
+- **Register.** A machine learns each new term from the journal and registers with its holder: its
+  incarnation and the roles that it hosts. A machine sends its registration again until the holder
+  acks it, so the model never loses a registration.
+- **Fence.** A machine refuses an order below the highest term on its disk, with a nack.
+- **Gone.** A message to an activation that is gone (an old term of a coordinator, an old
+  incarnation of a machine) does not reach the new activation. An order to a gone incarnation
+  comes back to its coordinator as `gone`. The coordinator then marks the machine as unknown and
+  asks the fixed directory of the machine ("which reference serves this id now", §4.4) for its
+  current registration. The reference of a machine changes at each incarnation because a dynamic
+  reference of moonpool RPC names one incarnation. The model takes this as given, not as a rule.
+
+The faults: a coordinator is deposed and keeps sending orders of its old term. A coordinator
+crashes, loses its memory and acts again only after it wins a new term. A message is late,
+reordered, sent two times or lost. A machine restarts as a new incarnation, and its disk stays.
+
+The properties:
+
+- `EffectBooked`: a role is hosted only on the machine that its booking names. So no role is
+  hosted that the journal freed: a role that a coordinator freed from a wrong view is a ghost that
+  no booking names.
+- `OnceEach`: no role is hosted two times for one request.
+- `NoLateEffect`: an order of an old term never takes effect after the machine wrote a newer term.
+- `Complete`: for each registration of the current incarnation in the holder's view, every role
+  that the machine hosts is in the registration, in an ack of the term or in an order of the term.
+  It is the invariant that makes `Free` safe.
+- `Settles`: once the faults stop, every request that is not freed is booked and hosted, and the
+  holder knows it.
+- `Quiet`: once the faults stop, the network is empty. So a deposed coordinator stops ordering.
+
+The rules are constants, and `TRUE` is the rule: `OneWrite` (the machine checks the term of an
+order and does its effect in one atomic write), `Idem` (`Assign` is idempotent by its request id),
+`ClearView` (a new term starts with an empty view), `CoordRef` (a coordinator has a new reference
+at each term), `IdInBooking` (a booking names the durable id; the reference of an order comes from
+the view of the term), `RegFence` (a registration with term `t` raises the machine's highest term
+to `t` in the same write), `NackStops` (a refused order stops its coordinator) and `GoneAsks` (a
+`gone` marks the machine as unknown and asks its directory for its current registration).
+
+| Check | Where | Result |
+|---|---|---|
+| `safety` | ci | pass: `EffectBooked`, `OnceEach`, `NoLateEffect` and `Complete`, two coordinators, one machine, one request, three terms, one crash, one restart and one loss |
+| `safety_dup` | ci | pass: the same, with one copy of a message and two terms |
+| `live` | ci | pass: `Settles` and `Quiet` under weak fairness, with the faults of `safety` and two terms |
+| `live_dup` | ci | pass: the same, with one copy, two terms, and no crash or loss |
+| `two_writes` | ci | violation of `EffectBooked`: the machine checks an order of the old term, registers with the new term, then does the effect. The registration does not name the role, and the new holder frees it |
+| `two_writes_late` | ci | violation of `NoLateEffect`: the same trace, judged at the effect |
+| `no_idem` | ci | violation of `OnceEach`: a copy of an order hosts the role two times |
+| `keep_view` | ci | violation of `EffectBooked`: a coordinator wins a term again and keeps its view of its first term. It frees the role from the kept view while an order of the term between is in flight, and the order then takes effect |
+| `fallback` | ci | violation of `EffectBooked`: a registration of an earlier term reaches the new term of the same coordinator through a fixed endpoint, does not name a role, and the coordinator frees it |
+| `ref_in_booking` | ci | violation of `Settles`: after a restart, the order goes to the reference in the booking, which is gone, again and again |
+| `reg_nofence` | ci | violation of `EffectBooked`: an order of the old term takes effect after the registration with the new term. The registration does not name the role, and the new holder frees it |
+| `nack_ignored` | ci | violation of `Quiet`: a deposed coordinator sends its refused order again for ever |
+| `gone_ignored` | ci | violation of `Quiet`: a coordinator whose view names a dead incarnation orders it for ever |
+| `safety_full` | long, 30 minutes | pass: the faults of `safety` and one copy, with three terms |
+| `live_full` | long, 30 minutes | pass: `live` with three terms |
+| `safety_two` | long, 30 minutes | pass: two machines and two requests |
+
+What the model found:
+
+- **A registration raises the fence in the same write** (`reg_nofence`). Without it, an order of
+  the old term that comes after the registration takes effect, and the new holder frees a role
+  that is hosted.
+- **A deposed coordinator must stop on a nack** (`nack_ignored`), **and a `gone` must ask the
+  directory of the machine** (`gone_ignored`). An order to a dead incarnation never meets the
+  fence of the machine, so the nack alone does not stop it.
+- **"The newest incarnation wins in a view" is not a rule.** A registration of an older
+  incarnation can replace a newer one with no harm, once a `gone` asks the directory: the order to
+  the dead incarnation comes back, and the answer of the directory names the live one. With that
+  rule off, `safety_dup` and `live` pass.
+
+What is not in the model: the election itself (`election/`), Paxos inside the control journal,
+the placement of a role on another machine (`placement-port/`), a machine that loses its disk (a
+new machine), a machine that reads the term of the journal late (it learns each term at once
+here), the ack of a registration (a registration is never lost), and the birth nonce of the key
+that `Assign` carries (#1419 (the tenancy wrapper and paros-names), `journal-ids/`). The model
+does not check a machine reference that survives a restart: the reference of moonpool RPC changes
+at each incarnation.
