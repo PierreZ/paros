@@ -31,13 +31,13 @@ techniques, and each one covers a gap of another. Their rules are in §J7 of
 | [The composed model](#composed) | two safe rules that are not safe together | `spec` jobs |
 | [Guard mutants of the models](#guard-mutants) | a guard that no check needs | `TLA mutants`, each week |
 | [Proofs of the core below](#proofs) | a gap of the small instance that TLC checks | `proofs` jobs |
-| [Pure roles](#pure-roles) | a run that cannot replay, a role that does I/O | the layer checks of `checks` |
+| [Pure roles](#pure-roles) | a pure crate that does I/O | the layer checks of `checks` |
 | [Seeded walks with faults](#walks) | an order of events that breaks the code | `test` job |
 | [Oracles with no shared code](#oracles) | a wrong answer, judged from the contract | each step of each walk |
 | [A planted mutant per oracle](#planted) | an oracle that cannot fail | `test` job |
 | [Reach sites and probes](#reach) | a walk that never meets a rare case | `test` job |
 | [Trace checks against the model](#traces) | a step of the code that the model does not have | `traces` jobs or `test` job |
-| [Edits of recorded traces](#edits) | a trace check that accepts a wrong trace | `trace-edits` job |
+| [Edits of recorded traces](#edits) | a trace check that accepts a wrong trace | `traces` jobs or `test` job |
 | [The live trace check](#live) | a divergence deep in a long run | `test` job, and `Journal live` each night |
 | [A second `decide`](#decide) | a wrong decision of the controller | `test` job |
 | [cargo-mutants on the code](#mutants) | a line that no test checks | `mutants` job, on each pull request |
@@ -144,7 +144,7 @@ takes a `Taken` answer as written. A new oracle gets its mutant in the same pull
 A walk that never meets a rare case judges nothing about it. Each walk names its reach sites: a
 seal lost, a `Noop` below the start, an old vote chosen again in a new grid, a third segment,
 `Below`, `Resolve`, and more. The campaign of each walk must reach every site, or the test fails.
-The controller crates put a `probe!` on each branch of `decide` and of the role, and a test
+`paros-journal-control` puts a `probe!` on each branch of `decide` and of the role, and a test
 requires every probe. A site that no walk reaches gets a walk move, never only a larger budget.
 
 <h2 id="traces">Trace checks against the model</h2>
@@ -188,7 +188,7 @@ The controller's decision is a pure function, so it is checked on every small vi
 thousand views (up to 3 columns, up to `F = 2`, zero, three or four zones, every count of up,
 suspect and down members, mixed signals). Each decision must match a reference `decide` written
 again from §J6.2 with no code of `paros-journal-control` (`SAME_AS_REFERENCE`), and must pass the
-oracles `NO_UNSAFE_PLAN`, `FENCED`, `NO_STALE_PLAN`, `NO_SUSPECT_REPLACED`, `IDEMPOTENT` and
+oracles `NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`, `FENCED`, `NO_STALE_PLAN`, `NO_SUSPECT_REPLACED`, `IDEMPOTENT` and
 `MONOTONE`, each with its mutant.
 
 <h2 id="mutants">cargo-mutants on the code</h2>
@@ -211,7 +211,7 @@ that is a result, never a panic.
 
 A program uses the journal through four traits of `paros-journal-io`: `Storage`, `Transport`,
 `Clock` and `Register`. Contract suites (`storage`, `storage_reopen`, `transport`, `clock`)
-check that a backend keeps the contract. A suite certifies the API only: crash safety is claimed
+check that a backend keeps the contract. `Register` has no suite yet. A suite certifies the API only: crash safety is claimed
 only on a disk that can inject faults, as in the walks.
 
 <h2 id="static">Layers, wasm and examples</h2>
@@ -241,12 +241,16 @@ The techniques work only if nobody bends them to make a red check green.
 
 ## What is not there yet
 
-- The coverage gate over the journal's probes, as the core has (the next rule group of #1326
-  (the journal roles over the core)).
+- The coverage gate over the journal's probes, as the core has. It comes with the next rule
+  group of #1326 (the journal roles over the core).
 - CTRL faulty votes on the acceptors' disks in the roles walk: the leader's blocked slot has unit
   tests only.
 - A trace check for the driver walk, and for the roles walk on grids of two columns.
 - The permanent loss of a machine in the whole-journal walk: it needs re-replication (#1314).
+- A contract suite for the `Register` trait.
+- The live trace check covers the fold walk only. The driver's reports of each write (announce,
+  make, confirm), the live check fed by the driver's `Events` port, and the control that tears a
+  persist batch come with the adapter.
 - A moonpool-sim run of the whole journal, with the adapter: after v1, in #1417 (the moonpool
   adapter on the generic host).
 - Proofs of the journal models: they are checked by TLC only.
