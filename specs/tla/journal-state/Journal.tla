@@ -404,9 +404,9 @@ Phase1(b) == \E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : Phase1On(b, Qs)
 \* write is still the end that its Phase 1 read.
 SealWrite(b) ==
   LET g == bgen[b] IN
-  \* The start of g - 1 is known: `Reshape` opens g only once the end of
-  \* g - 2 is done (retired, or in force), and a done end stays.
   /\ bend[b] # None
+  \* No guard on the start of g - 1: `Reshape` opens g only once the end of
+  \* g - 2 is done (retired, or in force), and a done end stays.
   \* No end, or a partial end that its read missed.
   /\ IF rend[g - 1] = None THEN TRUE
      ELSE ~rend[g - 1].done /\ rend[g - 1].v # bend[b]

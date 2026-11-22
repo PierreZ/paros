@@ -235,8 +235,8 @@ Selectable(S) ==
 Propose(b) ==
   /\ matched[b]
   /\ p1[b] = "wait"
-  \* S can hold two promises of one acceptor at b: each is a promise at b,
-  \* so P2c holds for the highest vote among all of them.
+  \* An acceptor promises b at most once (`prom[a] < b`, and `prom` only
+  \* grows), so S holds one promise of each acceptor.
   /\ \E S \in SUBSET {m \in msgs : m.type = "1b" /\ m.bal = b} :
        /\ Phase1Done(b, {m.acc : m \in S})
        /\ p1' = [p1 EXCEPT ![b] = IF \E m \in S : m.vbal > 0 THEN "found" ELSE "empty"]
