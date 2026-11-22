@@ -59,7 +59,7 @@ fn drain(proxy: &mut ProxyLeader) -> Vec<(Audience, Message)> {
 /// re-delegation of the closed round is ignored.
 #[test]
 fn a_delegated_round_is_fanned_out_folded_and_committed() {
-    let mut proxy = ProxyLeader::new(ProxyId(1), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(1), majority(&[0, 1, 2]), Limits::DEFAULT);
     proxy.step(delegation(1, 0, ballot(3, 0), 7, cmd(7)));
     let out = drain(&mut proxy);
     assert_eq!(out.len(), 1);
@@ -117,7 +117,7 @@ fn a_delegated_round_is_fanned_out_folded_and_committed() {
 /// round, and a delegation for another proxy is not this proxy's.
 #[test]
 fn re_delegations_refresh_the_leader_and_ballots_order_the_rounds() {
-    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), Limits::DEFAULT);
     proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
     drain(&mut proxy);
     proxy.step(delegation(0, 1, ballot(3, 0), 4, cmd(4)));
@@ -168,16 +168,17 @@ fn re_delegations_refresh_the_leader_and_ballots_order_the_rounds() {
 /// ballot, used to be re-fanned-out forever.
 #[test]
 fn an_unanswered_round_is_evicted_after_its_budget() {
-    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    let limits = Limits {
+        proxy_retention: 3,
+        ..Limits::DEFAULT
+    };
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), limits);
+    assert_eq!(proxy.limits(), limits);
     // The late delegation of a slot the acceptors will never answer.
     proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
     assert_eq!(drain(&mut proxy).len(), 1);
     for beat in 1..=3 {
-        assert!(
-            proxy.expire_stale(3).is_empty(),
-            "under budget at beat {beat}"
-        );
-        proxy.resend_pending();
+        assert!(proxy.tick().is_empty(), "under budget at beat {beat}");
         let out = drain(&mut proxy);
         assert_eq!(out.len(), 1, "the round is re-fanned-out on beat {beat}");
         assert!(matches!(out[0].1, Message::Accept { .. }));
@@ -185,9 +186,9 @@ fn an_unanswered_round_is_evicted_after_its_budget() {
     assert_eq!(proxy.rounds().by_slot()[&Slot(4)].resends(), 3);
     assert!(
         proxy.expire_stale(4).is_empty(),
-        "the budget is the caller's"
+        "a budget above the re-fan-outs evicts nothing"
     );
-    assert_eq!(proxy.expire_stale(3), vec![Slot(4)]);
+    assert_eq!(proxy.tick(), vec![Slot(4)]);
     assert!(!proxy.has_pending_accepts());
     assert_eq!(proxy.delegator(Slot(4)), None);
     assert!(drain(&mut proxy).is_empty(), "an eviction emits nothing");
@@ -214,7 +215,7 @@ fn an_unanswered_round_is_evicted_after_its_budget() {
 /// A refusal closes the round and reaches the leader that delegated it.
 #[test]
 fn a_nack_is_relayed_to_the_delegating_leader() {
-    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), Limits::DEFAULT);
     proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
     drain(&mut proxy);
     proxy.step(Message::Nack {
@@ -242,7 +243,7 @@ fn a_nack_is_relayed_to_the_delegating_leader() {
 /// it superseded.
 #[test]
 fn a_delegation_teaches_the_proxy_its_configuration() {
-    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), Limits::DEFAULT);
     proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
     drain(&mut proxy);
     let grid = AcceptorConfig::new((0..4).map(NodeId).collect(), QuorumSystem::grid(2, 2));
@@ -277,7 +278,7 @@ fn a_delegation_teaches_the_proxy_its_configuration() {
 /// again after `advance`.
 #[test]
 fn a_proxy_batch_is_empty_until_a_delegation() {
-    let mut proxy = ProxyLeader::new(ProxyId(1), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(1), majority(&[0, 1, 2]), Limits::DEFAULT);
     let ready = proxy.ready();
     assert!(ready.is_empty(), "a fresh proxy owes nothing");
     ready.advance();
@@ -296,7 +297,7 @@ fn a_proxy_batch_is_empty_until_a_delegation() {
 #[test]
 #[should_panic(expected = "a proxy remembers a delegator only for an open round")]
 fn a_delegator_without_an_open_round_breaks_the_proxy_invariants() {
-    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), Limits::DEFAULT);
     proxy.delegators.insert(Slot(3), NodeId(0));
     proxy.assert_invariants();
 }
@@ -305,7 +306,7 @@ fn a_delegator_without_an_open_round_breaks_the_proxy_invariants() {
 /// one below the ballot the proxy works for.
 #[test]
 fn every_ignored_delegation_is_counted() {
-    let mut proxy = ProxyLeader::new(ProxyId(1), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(1), majority(&[0, 1, 2]), Limits::DEFAULT);
     assert_eq!(proxy.id(), ProxyId(1));
     proxy.step(delegation(2, 0, ballot(3, 0), 7, cmd(7)));
     assert_eq!(proxy.counters().ignored, 1);
@@ -321,7 +322,7 @@ fn every_ignored_delegation_is_counted() {
 /// open at that ballot, is not relayed.
 #[test]
 fn only_a_member_s_refusal_of_an_open_round_is_relayed() {
-    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), Limits::DEFAULT);
     proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
     drain(&mut proxy);
     proxy.step(Message::Nack {
@@ -343,7 +344,7 @@ fn only_a_member_s_refusal_of_an_open_round_is_relayed() {
 /// more: the oldest of them is still ignored on a re-delegation.
 #[test]
 fn the_closed_round_memory_holds_exactly_its_bound() {
-    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), Limits::DEFAULT);
     let b = ballot(3, 0);
     let rounds = u64::try_from(DONE_MEMORY).expect("small bound") + 1;
     for slot in 0..rounds {
@@ -359,4 +360,58 @@ fn the_closed_round_memory_holds_exactly_its_bound() {
     assert_eq!(proxy.counters().ignored, 1);
     proxy.step(delegation(0, 0, b, 0, cmd(0)));
     assert_eq!(drain(&mut proxy).len(), 1, "slot 0 is forgotten");
+}
+
+/// The beat re-fans-out one page of the open rounds, the page the proxy's
+/// `Limits` name, and a round past no budget stays open: the default keeps
+/// every round until it closes.
+#[test]
+fn the_beat_re_fans_out_one_page() {
+    let limits = Limits {
+        resend_page: 1,
+        ..Limits::DEFAULT
+    };
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), limits);
+    proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
+    proxy.step(delegation(0, 0, ballot(3, 0), 5, cmd(5)));
+    let _ = drain(&mut proxy);
+    for _ in 0..10 {
+        assert!(
+            proxy.tick().is_empty(),
+            "the default retention evicts nothing"
+        );
+        let out = drain(&mut proxy);
+        assert_eq!(out.len(), 1, "one round per page");
+        assert!(matches!(out[0].1, Message::Accept { .. }));
+    }
+    assert!(proxy.has_pending_accepts());
+    assert_eq!(proxy.counters().expired, 0);
+}
+
+/// A proxy takes its limits as every deployment does: checked at
+/// construction.
+#[test]
+#[should_panic(expected = "a proxy keeps a round for at least one re-fan-out")]
+fn a_proxy_refuses_invalid_limits() {
+    let _ = ProxyLeader::new(
+        ProxyId(0),
+        majority(&[0, 1, 2]),
+        Limits {
+            proxy_retention: 0,
+            ..Limits::DEFAULT
+        },
+    );
+}
+
+/// Two delegations at one `(slot, ballot)` with two commands break P2b
+/// (one ballot, one proposer): a detected safety violation, so the proxy
+/// stops on it (decision 30 keeps such an assertion). A handoff successor
+/// re-delegates the inherited command at the same ballot, which the proxy
+/// folds: `re_delegations_refresh_the_leader_and_ballots_order_the_rounds`.
+#[test]
+#[should_panic(expected = "a re-delegation at the open round's ballot carries the round's command")]
+fn two_commands_at_one_ballot_and_slot_stop_the_proxy() {
+    let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]), Limits::DEFAULT);
+    proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
+    proxy.step(delegation(0, 1, ballot(3, 0), 4, cmd(5)));
 }

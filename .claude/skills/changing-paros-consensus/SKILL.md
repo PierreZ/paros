@@ -23,7 +23,7 @@ because the perturbation is a caller that stops calling.
 | durable promise, accepted log, compaction floor, CTRL faulty set | `acceptor.rs` (`Acceptor`); the two ops that move the floor (truncation decided by consensus, the jump below a peer's trim point) are `Acceptor` methods in `acceptor/retention.rs` |
 | the retained window (a map with a floor under it, shared by the acceptor's log and the matchmaker's registry) | `retained.rs` (`RetainedWindow`) |
 | Phase-1 election and P2c merge, CTRL probe, Phase-2 rounds (the standalone `Rounds` tally the proposer embeds; a round's `Custody` is colocated or delegated to a `ProxyId`; a proxy leader embeds the same tally, never a second kernel), the standing authority (`Authority`: the leadership fence and the `CheckQuorum` window — embedded the same way), bounded recovery; policies are explicit types (`RecoveryPolicy::{Phase1Backed, Inherited}`), never flags | `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs` |
-| the proxy leader (#142): a `Rounds` plus routing on its own process — fans a delegated `Accept` out to the column, folds, emits `Commit { from: Party::Proxy }`, relays a `Nack`, re-fans-out on its beat (`resend_pending`), works for the highest ballot it was handed; ephemeral, no `WriteOp`; proven by `models/proxy.rs` | `proxy_leader.rs` (`ProxyLeader`), `proxy_leader/ready.rs` (`ProxyReady`) |
+| the proxy leader (#142): a `Rounds` plus routing on its own process — fans a delegated `Accept` out to the column, folds, emits `Commit { from: Party::Proxy }`, relays a `Nack`, re-fans-out on its beat (`tick`, which also evicts a round past `Limits::proxy_retention`), works for the highest ballot it was handed; ephemeral, no `WriteOp`; proven by `models/proxy.rs` | `proxy_leader.rs` (`ProxyLeader`), `proxy_leader/ready.rs` (`ProxyReady`) |
 | chosen prefix, contiguous walk, the journal fold (every walked slot judged by `JournalState::apply`, the state sealed at the floor), the journal read (`Replica::read`, `LogRead`), the trim-point jump (`Replica::trim_to`); `chosen_gap()` lives here (`node.replica().chosen_gap()`). No application: paros runs none (#186) | `replica.rs` (`Replica`) |
 | the per-journal state machine (#204): `JournalState { owner, generation, next_seq, first_seq }` and its pure `apply`, judged at apply in slot order on every node alike — the safety rule; a propose-time refusal is only ever an optimisation (§2.2) — a write accepted only from the current owner at `next_seq`, a `Duplicate` exactly when the log holds the same write there (the log is the at-most-once table; there is no session ledger), refused otherwise, `truncated` below `first_seq`; `SetLeader` a compare-and-swap on the generation; `Truncate` raises `first_seq` | `journal/state.rs` (`JournalState`, `Outcome`); what the log carries is `journal/command.rs`, its ids `journal/ids.rs` |
 | the replica tier (#144): a `Replica` over a durable chosen log on a process with no `Acceptor` — steps `Commit` / `CatchUpResponse` / `TrimmedTo` / `Heartbeat` / `PreReadAck`, sends `CatchUpRequest` and `PreRead` (its quorum reads, §3.4), serves journal reads (`read_log`), writes `WriteOp::Learned` / `SetChosenIndex` / `Truncate` / `TrimmedTo` (never an acceptor op), never in the pool; the coupling analysis (why every acceptor stays a learner) is its module doc; `Config::reply_owner` names a slot's reply owner | `replica_node.rs` (`ReplicaNode`), `replica_node/ready.rs` (`ReplicaReady`) |
@@ -79,8 +79,10 @@ enforces it).
 
 ## Constructors and wire types
 
-`AcceptorConfig::new` and `MatchmakerSet::new` are the only constructors
-(deserialisation included) because the membership is binary-searched and
+`AcceptorConfig::new` and `MatchmakerSet::new` and their fallible `try_*`
+forms are the only constructors (deserialisation included, through `TryFrom`;
+wire and operator input goes through a `try_*` form and gets a `ShapeError`)
+because the membership is binary-searched and
 normalized; do not add a second path that skips the check. `HardState` is
 `#[non_exhaustive]` with two scalars; adding one is a storage-surface change
 for every driver, so justify it in the design note first.

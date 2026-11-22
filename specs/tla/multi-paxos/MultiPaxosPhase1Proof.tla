@@ -16,13 +16,31 @@ THEOREM PrepareInv ==
            m1b == PromiseMsg(o, b, fr)
 <1>0. TypeOK /\ o \in Acceptors
   BY DEF Inv
-<1>1. /\ phase[b] = "idle" /\ o \notin wiped /\ prom[o] < b
+<1>a. /\ o \notin wiped /\ prom[o] < b
       /\ phase' = [phase EXCEPT ![b] = "p1"]
       /\ prom' = [prom EXCEPT ![o] = b]
       /\ dprom' = [dprom EXCEPT ![o] = b]
       /\ msgs' = msgs \cup {m1a, m1b}
       /\ UNCHANGED <<vote, dvote, learned, next, front, wiped, restarts>>
   BY PersistedNew DEF Prepare, Live, SendAll, Hyp, InvApplies
+\* A ballot that left "idle" holds its owner's promise (`BallotOK`), so a
+\* promise below b says that b is still "idle".
+<1>b. phase[b] = "idle"
+  <2>1. BallotOK(b)
+    BY DEF Inv, BallotInv
+  <2>2. phase[b] # "idle" => prom[o] >= b \/ o \in wiped
+    BY <2>1 DEF BallotOK
+  <2>3. prom[o] \in Nat
+    BY <1>0 DEF TypeOK
+  <2> QED
+    BY <1>a, <2>2, <2>3
+<1>1. /\ phase[b] = "idle" /\ o \notin wiped /\ prom[o] < b
+      /\ phase' = [phase EXCEPT ![b] = "p1"]
+      /\ prom' = [prom EXCEPT ![o] = b]
+      /\ dprom' = [dprom EXCEPT ![o] = b]
+      /\ msgs' = msgs \cup {m1a, m1b}
+      /\ UNCHANGED <<vote, dvote, learned, next, front, wiped, restarts>>
+  BY <1>a, <1>b
 <1>2. fr \in 0..NS
   BY <1>0, FirstUnlearnedType
 <1>3. m1b = [type |-> "1b", acc |-> o, bal |-> b, from |-> fr,

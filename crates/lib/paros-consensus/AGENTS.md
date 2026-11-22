@@ -30,7 +30,7 @@ Foundations:
 - `probe.rs` → `probe!(reachable, "..")` / `probe!(sometimes, cond, "..")` → coverage probes
   (#317) behind `assertions` (first in `lib.rs`: a textual-scope macro).
 - `types.rs` → the Paxos scalars: `NodeId`, `Slot`, `Ballot`, `Value`, `Fingerprint`, and `fnv1a` with `FNV_OFFSET`, the one FNV-1a step every fingerprint and trace digest folds with.
-- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`) → `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, #215 (zones); it names no cell: cells are the upper stack's, #1264 (remove the cell)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`).
+- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`, `shape_error.rs`) → `ShapeError` (why a membership from the wire or an operator is refused), `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, #215 (zones); it names no cell: cells are the upper stack's, #1264 (remove the cell)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`).
 - `journal.rs` + `journal/` → what the log carries, judged at apply (not Paxos):
   - `ids.rs` → `TenantId`, `JournalId`, `JournalIdentifier` (the identifier, #235), `LeaderUuid`, `Seq`.
   - `command.rs` → `Command`, `Control`, `Entry`, `command_fingerprint`.
@@ -41,7 +41,7 @@ Foundations:
   - `storage.rs` → `Storage`, the read-only recovery port.
   - `mem_storage.rs` → `MemStorage`: the in-memory `Storage` a driver writes with `apply` (tests, examples); `rot` damages a record into a faulty entry, and a later write at its slot heals it.
   - `hard_state.rs` → `HardState` (two scalars, `#[non_exhaustive]`); `config.rs` → `Config` (`proxy_count`, `replica_count`, `reply_owner`).
-  - `limits.rs` → `Limits` (the page sizes and the read window a deployment takes at construction), the ceilings (`RECOVERY_BATCH`, `PROMISE_BATCH`, `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE`) and the read-window floor `READ_TTL_TICKS` (crate-private: `Limits::kept_read_window` raises the driver's window to it).
+  - `limits.rs` → `Limits` (the page sizes, the read window and the proxy leader's retention a deployment takes at construction), the ceilings (`RECOVERY_BATCH`, `PROMISE_BATCH`, `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE`) and the read-window floor `READ_TTL_TICKS` (crate-private: `Limits::kept_read_window` raises the driver's window to it).
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
 
 Roles (pure tallies, no deployment knowledge):
@@ -76,7 +76,7 @@ Deployments (each wires roles and owns one `Ready`):
 - `node/{handoff,gc,matchmaking,reconfigure}.rs` → `DPaxos` handoff, GC wiring, matchmaking wiring, online reconfiguration (`relinquish_to`, `reconfigure`, `quorum_read`).
 - `node/{boot,acceptor,helpers,invariants}.rs` → boot path, acceptor wiring, `adopt_configuration`, `assert_invariants`.
 - `node/tests.rs` + `node/tests/*.rs` → unit tests, one file per concern.
-- `proxy_leader.rs` → `ProxyLeader` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, `expire_stale`; `proxy_leader/ready.rs` → `ProxyReady`. Its TLA+ model is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration.
+- `proxy_leader.rs` → `ProxyLeader` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, and the beat `tick` (re-send page and bounded retention, both from its `Limits`); `proxy_leader/ready.rs` → `ProxyReady`. Its TLA+ model is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration.
 - `replica_node.rs` → `ReplicaNode`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis; `replica_node/ready.rs` → `ReplicaReady`; `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network.
 
 Test-only:
@@ -117,8 +117,9 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
   `Display`.
 - A doc example is a test: `cargo test --doc -p paros-consensus` (CI `checks` job). A new
   public entry point of a driver gets one.
-- A boot assertion on `Config` names the field that is wrong (`node/boot.rs`,
-  `assert_config_shape`).
+- A boot assertion on `Config` names the field that is wrong (`Config::assert_valid`, which
+  `ColocatedNode::new` and `ReplicaNode::new` run; a driver can run it on a configuration it
+  built).
 
 ## Local rules
 
@@ -126,7 +127,10 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
   the exit of every public mutating entry point; a new entry point calls it.
 - Hard `assert!` only, never `debug_assert!`; every public fn that can panic has `# Panics`
   (clippy pedantic enforces it).
-- `AcceptorConfig::new` / `MatchmakerSet::new` are the only constructors (deserialisation included).
+- `AcceptorConfig::try_new` / `try_zoned` / `try_with_counts` and `MatchmakerSet::try_new` are the
+  only constructors (deserialisation included, through `TryFrom`); they answer a malformed
+  membership with a `ShapeError`. `new`, `zoned` and `with_counts` panic on it, for values the
+  program builds itself. A configuration from the wire or an operator goes through `try_*`.
 - No tally compares a count against a threshold: every quorum question goes through `membership/`.
 - `ColocatedNode::adopt_configuration` (`node/helpers.rs`) is the one way the configuration in force moves.
 - A new observability counter is a field of `Counters` (`node/counters.rs`) and of the

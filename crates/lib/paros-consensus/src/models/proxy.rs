@@ -15,7 +15,7 @@
 //! durable — and reboot from exactly what their disk holds; a leader
 //! resigns, or hands its authority off mid-round to a peer that re-delegates
 //! what it inherited; every proxy evicts its unanswered rounds on a
-//! per-seed retention budget ([`ProxyLeader::expire_stale`]), interleaved
+//! per-seed retention budget ([`ProxyLeader::tick`] with `Limits::proxy_retention`), interleaved
 //! with the leader's take-back so the two policies meet in every order.
 //! After every step the model asserts:
 //!
@@ -331,7 +331,11 @@ impl World {
 
     fn boot_proxy(&mut self, id: ProxyId) {
         let config = self.config.clone();
-        self.proxy(id).live = Some(ProxyLeader::new(id, config));
+        let limits = Limits {
+            proxy_retention: self.expire_after,
+            ..Limits::DEFAULT
+        };
+        self.proxy(id).live = Some(ProxyLeader::new(id, config, limits));
     }
 
     fn send(&mut self, envelope: Envelope) {
@@ -561,15 +565,10 @@ impl World {
     /// the driver's order).
     fn tick_all(&mut self) {
         let after = self.take_back_after;
-        let expire_after = self.expire_after;
         for p in 0..PROXIES {
             let id = ProxyId(p as u64);
             let expired = match self.proxy(id).live.as_mut() {
-                Some(proxy) => {
-                    let expired = proxy.expire_stale(expire_after).len() as u64;
-                    proxy.resend_pending();
-                    expired
-                }
+                Some(proxy) => proxy.tick().len() as u64,
                 None => continue,
             };
             self.reach.round_expired += expired;

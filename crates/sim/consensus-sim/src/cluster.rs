@@ -32,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use moonpool_walk::{Cx, Model, Phase, sometimes};
+use paros_consensus::Limits;
 use paros_consensus::contract::message::Audience;
 use paros_consensus::contract::write::{AcceptorWrite, MustSync};
 use paros_consensus::journal::{
@@ -42,6 +43,7 @@ use paros_consensus::matchmaker::{
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::node::{BeliefSource, Delegation, ProposeResult, ReconfigureResult};
+use paros_consensus::quorum_read::ReadOpen;
 use paros_consensus::{
     Ballot, ColocatedNode, Config, MatchmakerReconfigurer, Message, NodeId, ProxyLeader,
     ReplicaNode, Slot, Value, WriteOp,
@@ -509,9 +511,10 @@ impl Model for Cluster {
             }
             Party::Proxy(id) => {
                 let config = self.config.clone();
+                let limits = self.proxy_limits();
                 let site = self.proxy_mut(id);
                 if site.live.is_none() && !site.dead_for_good {
-                    site.live = Some(ProxyLeader::new(id, config));
+                    site.live = Some(ProxyLeader::new(id, config, limits));
                 }
             }
             Party::Replica(id) => {
@@ -733,7 +736,7 @@ impl Cluster {
             cluster.register_sibling();
         }
         cluster.proxies = (0..cluster.flavor.proxies)
-            .map(|i| ProxySite::new(ProxyId(i), cluster.config.clone()))
+            .map(|i| ProxySite::new(ProxyId(i), cluster.config.clone(), cluster.proxy_limits()))
             .collect();
         for id in cluster.pool.clone() {
             cluster.boot_node(id, false, cx);
@@ -1506,17 +1509,24 @@ impl Cluster {
 
     // ---- the clock and the clients ------------------------------------
 
+    /// The limits of a proxy leader: the flavor's, with this seed's
+    /// retention budget.
+    fn proxy_limits(&self) -> Limits {
+        Limits {
+            proxy_retention: self.expire_after,
+            ..self.flavor.limits
+        }
+    }
+
     fn tick_all(&mut self, cx: &mut Cx<'_, Self>) {
         if self.flavor.steer == Steer::LaggingReader && cx.phase() == Phase::Settle {
             self.admit_all();
         }
         self.step_down_after_compaction(cx);
-        let expire_after = self.expire_after;
         for i in 0..self.proxies.len() {
             let id = ProxyId(i as u64);
             if let Some(proxy) = self.proxy_mut(id).live.as_mut() {
-                let evicted = proxy.expire_stale(expire_after);
-                proxy.resend_pending();
+                let evicted = proxy.tick();
                 for slot in evicted {
                     if let Some(event) = self.tracer.proxy_expired(id, slot) {
                         cx.record(event);
@@ -1779,7 +1789,12 @@ impl Cluster {
                     return;
                 }
                 let basis = node.read_basis().map(|basis| (basis.since, basis.fence));
-                node.quorum_read(ctx);
+                let opened = node.quorum_read(ctx);
+                assert_ne!(
+                    opened,
+                    ReadOpen::TokenInUse,
+                    "the walk draws a fresh token for each read"
+                );
                 if let Some(basis) = basis
                     && let Some(read) = node
                         .quorum_reads()
@@ -1815,7 +1830,12 @@ impl Cluster {
                         .answered(&format!("replica {}", id.0), ctx, index);
                     return;
                 }
-                replica.quorum_read_in(ctx, None);
+                let opened = replica.quorum_read_in(ctx, None);
+                assert_ne!(
+                    opened,
+                    ReadOpen::TokenInUse,
+                    "the walk draws a fresh token for each read"
+                );
                 self.drain_replica(id, cx);
             }
             Party::Proxy(_) | Party::Matchmaker(_) => {}

@@ -295,15 +295,10 @@ impl Storage for Disk {
         self.first_slot
     }
 
-    fn last_slot(&self) -> Slot {
+    fn last_slot(&self) -> Option<Slot> {
         // A faulty entry is a record this node accepted: it bounds the scan
         // exactly like a readable one, it is simply unreadable.
-        self.records
-            .keys()
-            .chain(self.faulty.keys())
-            .max()
-            .copied()
-            .unwrap_or(Slot(0))
+        self.records.keys().chain(self.faulty.keys()).max().copied()
     }
 
     fn sealed_state(&self) -> JournalState {

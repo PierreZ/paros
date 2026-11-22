@@ -11,13 +11,18 @@
 //! the jump below a peer's trim point — from the voting state machine
 //! beside it. The two callers differ only in the durable op they emit
 //! beside the same private `drop_prefix`.
+//!
+//! Both ops emit a [`WriteOp`] of the journal's log, so they exist only on
+//! the log's acceptor, `Acceptor<Command>`: the acceptor of another value,
+//! such as the handover decree's, cannot push a log write.
 
 use super::Acceptor;
 use crate::contract::write::WriteOp;
+use crate::journal::Command;
 use crate::journal::state::JournalState;
 use crate::types::Slot;
 
-impl<V: Clone + PartialEq> Acceptor<V> {
+impl Acceptor<Command> {
     /// Drop every record and faulty entry below `first`, raise the floor to
     /// it, and emit the durable [`WriteOp::Truncate`] carrying `sealed` (the
     /// journal state the dropped slots folded to, #204). A decided

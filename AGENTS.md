@@ -129,7 +129,10 @@ removed replica that comes back during the heal; #1314 (re-replication of a seal
 replica set)), the placement port between the grid controller and the cell
 (`specs/tla/placement-port/`: `standing`, `place` all or none in one write keyed by the caller's
 request id, `release`, the limit of moves in flight, and the cell's own control journal placed
-through the same port; #1421 (the placement port)).
+through the same port; #1421 (the placement port)), and, above the journal, the election over a
+journal (`specs/tla/election/`: the term won by `SetLeader(new, old)`, the term number from the
+fold, the stop at the first refused write, the hand on, the fence of an order by its term, the
+interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both
@@ -677,7 +680,8 @@ sideways, on the identifier of a higher crate in `src/`, and on a fault switch i
   decree ballot): a `Stopped` sent to an earlier incarnation can reach a later one, so the stop
   quorum's maximum decree promise alone does not keep two incarnations apart), and above that
   maximum promise, which only skips rounds the matchmakers refuse; any node that meets `Stopped { successor: None }` finishes
-  the handover. `MatchmakerSet::new` / `AcceptorConfig::new` are the only constructors.
+  the handover. `MatchmakerSet::new` / `AcceptorConfig::new` and their fallible `try_*` forms (for wire
+  and operator input) are the only constructors.
 
 Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,
 `node/gc.rs` (`may_retire`), `matchmaker.rs`, `matchmaker/reconfigurer.rs`,

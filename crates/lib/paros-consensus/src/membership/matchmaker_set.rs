@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 #[cfg(doc)]
 use super::AcceptorConfig;
 use super::quorum_system::{counted, majority_of};
-use super::{MatchmakerId, QuorumSystem};
+use super::{MatchmakerId, QuorumSystem, ShapeError};
 
 /// A matchmaker-set **generation** (#125): which matchmaker set is
 /// authoritative. Distinct from a Paxos ballot (consensus leadership, and the
@@ -45,7 +45,7 @@ impl MatchmakerGeneration {
 /// rather than an empty one.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(from = "SerdeMatchmakerSet"))]
+#[cfg_attr(feature = "serde", serde(try_from = "SerdeMatchmakerSet"))]
 pub struct MatchmakerSet {
     /// The generation this set is authoritative for.
     pub generation: MatchmakerGeneration,
@@ -64,30 +64,52 @@ struct SerdeMatchmakerSet {
 }
 
 #[cfg(feature = "serde")]
-impl From<SerdeMatchmakerSet> for MatchmakerSet {
-    fn from(wire: SerdeMatchmakerSet) -> Self {
-        Self::new(wire.generation, wire.members)
+impl TryFrom<SerdeMatchmakerSet> for MatchmakerSet {
+    type Error = ShapeError;
+
+    /// A set off the wire is an input: an empty one is refused with a
+    /// decode error, never a panic.
+    fn try_from(wire: SerdeMatchmakerSet) -> Result<Self, ShapeError> {
+        Self::try_new(wire.generation, wire.members)
     }
 }
 
 impl MatchmakerSet {
-    /// A set of `members` (sorted and deduplicated here) for `generation`.
+    /// A set of `members` (sorted and deduplicated here) for `generation`:
+    /// [`MatchmakerSet::try_new`] for a value the program builds itself.
     ///
     /// # Panics
     ///
-    /// If `members` is empty: a set with no matchmaker can never form a
-    /// quorum, so a generation naming one is a programmer error. Also if the
-    /// normalized set is not well formed ([`MatchmakerSet::is_well_formed`])
-    /// — asserted here, once, at the only construction site, never per
-    /// tally.
+    /// If [`MatchmakerSet::try_new`] refuses it: a set with no matchmaker.
+    /// The panic text is the [`ShapeError`]'s rule.
     #[must_use]
-    pub fn new(generation: MatchmakerGeneration, mut members: Vec<MatchmakerId>) -> Self {
+    pub fn new(generation: MatchmakerGeneration, members: Vec<MatchmakerId>) -> Self {
+        Self::try_new(generation, members).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// A set of `members` (sorted and deduplicated here) for `generation`,
+    /// or the rule it breaks. The form for an input: a set from the wire or
+    /// from an operator.
+    ///
+    /// # Errors
+    ///
+    /// [`ShapeError::NoMember`] if `members` is empty: a set with no
+    /// matchmaker can never form a quorum.
+    ///
+    /// # Panics
+    ///
+    /// If the normalized set is not well formed
+    /// ([`MatchmakerSet::is_well_formed`]): asserted here, once, at the only
+    /// construction site, never per tally.
+    pub fn try_new(
+        generation: MatchmakerGeneration,
+        mut members: Vec<MatchmakerId>,
+    ) -> Result<Self, ShapeError> {
         members.sort_unstable();
         members.dedup();
-        assert!(
-            !members.is_empty(),
-            "a matchmaker set names at least one matchmaker"
-        );
+        if members.is_empty() {
+            return Err(ShapeError::NoMember);
+        }
         let set = Self {
             generation,
             members,
@@ -100,7 +122,7 @@ impl MatchmakerSet {
             set.quorum_size() <= set.members.len(),
             "a matchmaker quorum fits the set"
         );
-        set
+        Ok(set)
     }
 
     /// The members, sorted and deduplicated.
@@ -289,7 +311,7 @@ mod tests {
             generation: MatchmakerGeneration(4),
             members: [3, 1, 3, 2].into_iter().map(MatchmakerId).collect(),
         };
-        let set = MatchmakerSet::from(wire);
+        let set = MatchmakerSet::try_from(wire).expect("a non-empty wire set decodes");
         assert_eq!(set.generation, MatchmakerGeneration(4));
         assert_eq!(set.members(), [1, 2, 3].map(MatchmakerId).as_slice());
     }
@@ -321,14 +343,36 @@ mod tests {
     }
 
     /// A set with no matchmaker can never form a quorum. The wire path
-    /// refuses it, as the constructor does.
+    /// refuses it with a decode error, never a panic.
     #[cfg(feature = "serde")]
     #[test]
-    #[should_panic(expected = "a matchmaker set names at least one matchmaker")]
     fn an_empty_wire_set_is_refused() {
-        let _ = MatchmakerSet::from(super::SerdeMatchmakerSet {
+        let refused = MatchmakerSet::try_from(super::SerdeMatchmakerSet {
             generation: MatchmakerGeneration(0),
             members: Vec::new(),
         });
+        assert_eq!(refused, Err(super::ShapeError::NoMember));
+        let kept = MatchmakerSet::try_from(super::SerdeMatchmakerSet {
+            generation: MatchmakerGeneration(2),
+            members: vec![MatchmakerId(3), MatchmakerId(1), MatchmakerId(3)],
+        })
+        .expect("a non-empty set is kept");
+        assert_eq!(kept.members(), [MatchmakerId(1), MatchmakerId(3)]);
+        assert_eq!(kept.generation, MatchmakerGeneration(2));
+    }
+
+    /// The fallible constructor refuses an empty set and builds the same set
+    /// as `new` otherwise.
+    #[test]
+    fn try_new_refuses_only_an_empty_set() {
+        assert_eq!(
+            MatchmakerSet::try_new(MatchmakerGeneration(0), Vec::new()),
+            Err(super::ShapeError::NoMember)
+        );
+        let members = vec![MatchmakerId(2), MatchmakerId(1)];
+        assert_eq!(
+            MatchmakerSet::try_new(MatchmakerGeneration(1), members.clone()),
+            Ok(MatchmakerSet::new(MatchmakerGeneration(1), members))
+        );
     }
 }

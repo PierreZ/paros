@@ -23,9 +23,11 @@ USE NBType, NSType, NoneNotValue, NoopNotCommand, OwnerType, LearnersType
 THEOREM StepInv ==
   ASSUME Inv, Hyp, [Next]_vars
   PROVE  Inv'
-<1>1. CASE UNCHANGED vars
+<1>1. CASE UNCHANGED vars \/ \E a \in Acceptors : Persist(a)
+  <2>a. UNCHANGED vars
+    BY <1>1, PersistStutter
   <2>0. TypeOK /\ UNCHANGED <<prom, vote, dprom, dvote, learned, phase, next, front, wiped, restarts, msgs>>
-    BY <1>1 DEF Inv, vars
+    BY <2>a DEF Inv, vars
   <2>1. \A x, c, s, v : VotedFor(x, c, s, v)' = VotedFor(x, c, s, v)
     BY <2>0 DEF VotedFor
   <2>2. \A x \in Acceptors : prom'[x] \in Nat /\ prom'[x] >= prom[x]
@@ -62,7 +64,7 @@ THEOREM StepInv ==
     BY <2>4, <2>5, <2>6, <2>7 DEF Inv
 <1> QED
   BY <1>1, PrepareInv, WinInv, AllocateInv, PromiseInv, AcceptInv, DecideInv, CatchUpInv,
-     PersistInv, RestartInv, WipeInv DEF Next
+     RestartInv, WipeInv DEF Next
 
 -----------------------------------------------------------------------------
 (* The theorem. `InitInv` and `StepInv` are the two premises of the TLA   *)

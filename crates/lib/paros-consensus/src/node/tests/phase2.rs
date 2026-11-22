@@ -294,7 +294,7 @@ fn a_fresh_leaderships_recovery_is_never_delegated() {
     let ballot = nodes[0].ballot();
     let _ = nodes[0].propose(entry(1, 1, 1));
     let delegation = raw(&mut nodes[0]);
-    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone());
+    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone(), Limits::DEFAULT);
     for (_, m) in delegation {
         proxy.step(m);
     }
@@ -346,7 +346,7 @@ fn a_relayed_nack_deposes_the_delegating_leader() {
     let ballot = nodes[0].ballot();
     let _ = nodes[0].propose(entry(1, 1, 1));
     let _ = raw(&mut nodes[0]);
-    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone());
+    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone(), Limits::DEFAULT);
     proxy.step(Message::Accept {
         reply_to: Party::Proxy(ProxyId(0)),
         leader: NodeId(0),

@@ -1,7 +1,7 @@
 use super::Config;
 use crate::journal::state::WriterMode;
 use crate::journal::{JournalId, JournalIdentifier, TenantId};
-use crate::membership::{FailureDomain, QuorumSystem};
+use crate::membership::{FailureDomain, MatchmakerId, QuorumSystem};
 use crate::types::NodeId;
 
 fn nodes(ids: impl IntoIterator<Item = u64>) -> Vec<NodeId> {
@@ -125,4 +125,89 @@ fn proxies_and_replicas_run_from_a_count_of_one() {
     config.replica_count = 1;
     assert!(config.has_proxies());
     assert!(config.has_replicas());
+}
+
+/// A configuration that `Config::with_peers` built is valid; each broken
+/// shape is refused by the assertion that names its field.
+#[test]
+fn assert_valid_accepts_a_built_configuration() {
+    Config::new(NodeId(1), JournalIdentifier::UNSET)
+        .with_peers([3, 1, 2].map(NodeId))
+        .assert_valid();
+    let mut grid = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers((1..=6).map(NodeId));
+    grid.quorum_system = QuorumSystem::grid(2, 3);
+    grid.assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "Config::peers is empty")]
+fn assert_valid_refuses_a_configuration_with_no_peer() {
+    Config::new(NodeId(1), JournalIdentifier::UNSET).assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "Config::peers is not sorted and deduplicated")]
+fn assert_valid_refuses_unsorted_peers() {
+    three_peers().assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "Config::nodes is not sorted and deduplicated")]
+fn assert_valid_refuses_an_unsorted_pool() {
+    let mut config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([1].map(NodeId));
+    config.nodes = nodes([2, 1]);
+    config.assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "the bootstrap membership is drawn from the node pool")]
+fn assert_valid_refuses_peers_outside_the_pool() {
+    let mut config =
+        Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([1, 9].map(NodeId));
+    config.nodes = nodes([1, 2]);
+    config.assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "a configuration labels every bootstrap member or none")]
+fn assert_valid_refuses_a_missing_label() {
+    let mut config =
+        Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([1, 2].map(NodeId));
+    config.peer_domains = vec![FailureDomain::new("", "a")];
+    config.assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "Config::quorum_system does not admit Config::peers")]
+fn assert_valid_refuses_a_grid_that_does_not_tile() {
+    let mut config =
+        Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers((1..=5).map(NodeId));
+    config.quorum_system = QuorumSystem::grid(2, 3);
+    config.assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "Config::matchmakers is not sorted and deduplicated")]
+fn assert_valid_refuses_unsorted_matchmakers() {
+    let mut config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([1].map(NodeId));
+    config.matchmakers = vec![MatchmakerId(2), MatchmakerId(1)];
+    config.assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "Config::matchmaker_pool is not sorted and deduplicated")]
+fn assert_valid_refuses_an_unsorted_matchmaker_pool() {
+    let mut config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([1].map(NodeId));
+    config.matchmakers = vec![MatchmakerId(1)];
+    config.matchmaker_pool = vec![MatchmakerId(2), MatchmakerId(1)];
+    config.assert_valid();
+}
+
+#[test]
+#[should_panic(expected = "the bootstrap matchmaker set is drawn from the matchmaker pool")]
+fn assert_valid_refuses_matchmakers_outside_their_pool() {
+    let mut config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([1].map(NodeId));
+    config.matchmakers = vec![MatchmakerId(3)];
+    config.matchmaker_pool = vec![MatchmakerId(1), MatchmakerId(2)];
+    config.assert_valid();
 }

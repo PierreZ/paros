@@ -167,12 +167,16 @@ PromiseMsg(a, b, from) ==
 
 \* The owner of ballot b opens a campaign from its first unlearned slot. It
 \* is its own first acceptor: it promises b, and its own records seed the
-\* tally (`open_phase1` takes `acceptor.records()`).
+\* tally (`open_phase1` takes `acceptor.records()`). The code draws the
+\* round of a campaign above its promise (`next_campaign_round`), as
+\* `prom[o] < b` does here; a ballot that left "idle" holds its owner's
+\* promise (`BallotOK` in `Inv`), so the step needs no guard on the phase.
+\* Where a control loses the promise (Durable = "after", Identity = FALSE),
+\* a dead ballot opens again, as the code opens the same round again.
 Prepare(b) ==
   LET o == Owner[b]
       from == FirstUnlearned(o)
-  IN /\ phase[b] = "idle"
-     /\ Live(o)
+  IN /\ Live(o)
      /\ prom[o] < b
      /\ phase' = [phase EXCEPT ![b] = "p1"]
      /\ prom' = [prom EXCEPT ![o] = b]
@@ -215,12 +219,15 @@ Recovery(S, b, from, f) ==
                  s \in {t \in from..(f - 1) : Top(S, t).bal = 0}}
         ELSE {})
 
-\* The owner of ballot b wins Phase 1 on the promises S, one for each
-\* acceptor, its own among them, and a Phase-1 quorum. It opens the recovery.
+\* The owner of ballot b wins Phase 1 on the promises S, its own among them
+\* (`OwnRecords`), and a Phase-1 quorum. It opens the recovery. An acceptor
+\* promises a ballot once (`prom[a] < b`; `MsgOK` in `Inv`), so S holds one
+\* promise for each acceptor with no guard; where a control forgets a
+\* promise (Durable = "after", Identity = FALSE), a second promise of the
+\* same acceptor only adds reports.
 Win(b) ==
   /\ phase[b] = "p1"
   /\ \E S \in SUBSET {m \in msgs : m.type = "1b" /\ m.bal = b} :
-       /\ \A m, n \in S : m.acc = n.acc => m = n
        /\ Owner[b] \in {m.acc : m \in S}
        /\ \E Q \in Q1 : Q \subseteq {m.acc : m \in S}
        /\ LET from == (CHOOSE m \in msgs : m.type = "1a" /\ m.bal = b).from
@@ -256,11 +263,14 @@ Accept(a, b, s) ==
        /\ Send([type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> m.val])
   /\ UNCHANGED <<learned, phase, next, front, wiped, restarts>>
 
-\* The late write of an acceptor that answered first (Durable = "after").
+\* The late write of an acceptor that answered first (Durable = "after"): the
+\* disk catches up with memory. With Durable = "before" the disk already
+\* holds memory (`Inv`: dprom = prom, dvote = vote), and so does a node that
+\* is not `Live`: a down node never moved, and a node wiped under `Identity`
+\* is empty in memory and on disk. A write of what the disk holds changes no
+\* variable, so the step needs no guard on the mode, on the difference or on
+\* `Live`.
 Persist(a) ==
-  /\ Durable = "after"
-  /\ Live(a)
-  /\ <<dprom[a], dvote[a]>> # <<prom[a], vote[a]>>
   /\ dprom' = [dprom EXCEPT ![a] = prom[a]]
   /\ dvote' = [dvote EXCEPT ![a] = vote[a]]
   /\ UNCHANGED <<prom, vote, learned, phase, next, front, wiped, restarts, msgs>>
@@ -291,6 +301,8 @@ LearnAll(n, rec) ==
                                     THEN "dead" ELSE phase[c]]
 
 \* The leader of ballot b learns slot s at a Phase-2 quorum and commits it.
+\* The leader decides a slot once: `mark_chosen` of a chosen slot changes
+\* nothing (`RecordMoves`).
 Decide(b, s) ==
   /\ phase[b] = "p2"
   /\ learned[Owner[b]][s] = None
@@ -315,9 +327,11 @@ CatchUp(n, p) ==
 (* Faults *)
 
 \* Node a restarts: memory goes back to the disk, its ballots die, and it
-\* keeps a prefix of what it learned (up to its durable chosen index).
+\* keeps a prefix of what it learned (up to its durable chosen index). A node
+\* that is not `Live` (down, or wiped under `Identity`) holds on disk what it
+\* holds in memory, learned nothing it can keep and owns no live ballot, so
+\* its restart only spends the budget, and the step needs no `Live` guard.
 Restart(a) ==
-  /\ Live(a)
   /\ a \in Restartable
   /\ restarts < Restarts
   /\ restarts' = restarts + 1
@@ -409,6 +423,28 @@ LearnRecordsHeld ==
 \* slot that its recovery proposes.
 OneProposal ==
   \A m, n \in msgs : m.type = "2a" /\ n.type = "2a" /\ m.bal = n.bal /\ m.slot = n.slot => m = n
+
+\* A record moves only by a vote of the node (its `2b`), a learn of a slot it
+\* had not learned, or a fault: `mark_chosen` records a chosen slot once and
+\* returns early on a slot that is chosen already (`node/learn.rs`).
+RecordMoves ==
+  [][\A n \in Acceptors, s \in Slots :
+       vote'[n][s] # vote[n][s] =>
+         \/ [type |-> "2b", acc |-> n, bal |-> vote'[n][s].bal, slot |-> s,
+             val |-> vote'[n][s].val] \in msgs'
+         \/ learned[n][s] = None /\ learned'[n][s] # None
+         \/ restarts' # restarts
+         \/ wiped' # wiped]_vars
+
+\* A won campaign's frontier is past every vote that its owner's own promise
+\* reported: the candidate's own records seed its tally (`open_phase1` takes
+\* `acceptor.records()`), so a leader never allocates a fresh command at a
+\* slot it holds a vote at.
+OwnRecords ==
+  [][\A b \in Ballots :
+       phase[b] = "p1" /\ phase'[b] = "p2" =>
+         \A m \in msgs : m.type = "1b" /\ m.bal = b /\ m.acc = Owner[b] =>
+           \A s \in Slots : m.rep[s].bal > 0 => s < front'[b]]_vars
 
 -----------------------------------------------------------------------------
 (* The inductive invariant (#1307 (inductive invariants, then proofs)).    *)

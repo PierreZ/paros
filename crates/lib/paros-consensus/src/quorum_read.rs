@@ -126,6 +126,25 @@ pub enum PreReadFold {
     Superseded,
 }
 
+/// What asking for a quorum read did
+/// ([`crate::ColocatedNode::quorum_read_in`],
+/// [`crate::ReplicaNode::quorum_read_in`]). The token `ctx` is the driver's,
+/// and the core expires a read on its own clock, so a driver cannot always
+/// know that a token is still open: a token in use is a result, never a
+/// panic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadOpen {
+    /// The read is open: its `PreRead`s are in the batch, and its
+    /// [`ReadState`] comes once the row answered and the prefix covers it.
+    Opened,
+    /// No won leadership is known yet (#260): nothing opened. The driver
+    /// answers the read unserved, and the client asks again.
+    NoBasis,
+    /// A read is already open at this token: nothing changed. The driver
+    /// waits for that read's answer or uses another token.
+    TokenInUse,
+}
+
 /// Where one quorum read stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Stage {
@@ -318,11 +337,12 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// that row (`own: Some((me, watermark))`). Returns the addressees the
     /// caller sends `PreRead` to — the row minus the reader itself.
     ///
+    /// `None`, with nothing changed, when a read is already open at `ctx`
+    /// ([`QuorumReads::is_open`]).
+    ///
     /// # Panics
     ///
-    /// If a read is already open at `ctx` (the driver's token is unique per
-    /// read, so a second open at one token is a programmer error), or if
-    /// `row` is not a row of `config`'s quorum system (a row under a
+    /// If `row` is not a row of `config`'s quorum system (a row under a
     /// majority, or one past a grid's last).
     pub fn open(
         &mut self,
@@ -331,16 +351,15 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         basis: ReadBasis<Id>,
         created_tick: u64,
         own: Option<(Id, Option<Slot>)>,
-    ) -> Vec<Id> {
+    ) -> Option<Vec<Id>> {
+        if self.is_open(ctx) {
+            return None;
+        }
         let ReadBasis {
             config,
             since: config_since,
             fence,
         } = basis;
-        assert!(
-            self.reads.iter().all(|r| r.ctx != ctx),
-            "a quorum read token is opened at most once"
-        );
         assert!(
             config.admits_read_row(row),
             "a quorum read is opened against a row of its configuration"
@@ -374,7 +393,14 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             self.reads.len() == open + 1,
             "opening adds exactly one read"
         );
-        addressees
+        assert!(self.is_open(ctx), "an opened read is open");
+        Some(addressees)
+    }
+
+    /// Whether a read is open at the token `ctx`.
+    #[must_use]
+    pub fn is_open(&self, ctx: u64) -> bool {
+        self.reads.iter().any(|r| r.ctx == ctx)
     }
 
     /// Fold `from`'s watermark into the read at `ctx`. The row guard is the

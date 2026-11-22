@@ -394,7 +394,7 @@ fn a_campaign_configuration_is_no_read_basis() {
     let mut n = deployed_node(3, &[0, 1, 2, 3], &[0, 1, 2, 3], 1);
 
     // No won leadership heard this incarnation: no basis, no read.
-    n.quorum_read(1);
+    assert_eq!(n.quorum_read(1), crate::quorum_read::ReadOpen::NoBasis);
     assert!(n.quorum_reads().is_empty());
     assert_eq!(n.membership_counters().reads_without_basis, 1);
 
@@ -809,6 +809,37 @@ fn a_far_watermark_is_filled_one_page_a_tick() {
     assert_eq!(nodes[0].proposer().next_slot(), Slot(frontier.0 + 6));
     nodes[0].tick();
     assert_eq!(nodes[0].watermark_fills(), 6, "nothing is left to fill");
+}
+
+/// A token still open is a result, never a panic: the core expires reads
+/// on its own clock, so a driver cannot know a token is free. The second
+/// ask changes nothing and sends nothing; a fresh token opens.
+#[test]
+fn a_token_in_use_is_a_result() {
+    let mut nodes = grid_with_three_chosen();
+    assert_eq!(
+        nodes[4].quorum_read(1),
+        crate::quorum_read::ReadOpen::Opened
+    );
+    let asks = drain(&mut nodes[4]);
+    assert_eq!(pre_read_targets(&asks), vec![NodeId(3), NodeId(5)]);
+    assert_eq!(
+        nodes[4].quorum_read_in(1, Some(0)),
+        crate::quorum_read::ReadOpen::TokenInUse
+    );
+    assert!(
+        drain(&mut nodes[4]).is_empty(),
+        "a token in use sends nothing"
+    );
+    assert_eq!(
+        nodes[4].quorum_reads().pending().len(),
+        1,
+        "the first read is kept"
+    );
+    assert_eq!(
+        nodes[4].quorum_read(3),
+        crate::quorum_read::ReadOpen::Opened
+    );
 }
 
 // ---- #890 (learner above the leader), option (b) ----------------------------

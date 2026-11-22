@@ -37,7 +37,7 @@ fn a_read_completes_on_its_row_at_the_maximum_watermark() {
         0,
         Some((NodeId(5), Some(Slot(2)))),
     );
-    assert_eq!(addressees, vec![NodeId(4), NodeId(6)]);
+    assert_eq!(addressees, Some(vec![NodeId(4), NodeId(6)]));
     assert_eq!(reads.pending()[0].row(), Some(1));
     assert!(!reads.is_empty(), "the read is open");
     assert!(reads.serve(|_| true).is_empty(), "one answer is no row");
@@ -123,7 +123,7 @@ fn an_unvoted_row_confirms_at_the_empty_index() {
         0,
         Some((NodeId(0), None)),
     );
-    assert_eq!(addressees, vec![NodeId(1), NodeId(2)]);
+    assert_eq!(addressees, Some(vec![NodeId(1), NodeId(2)]));
     assert_eq!(reads.fold(4, NodeId(1), None, None), PreReadFold::Counted);
     assert_eq!(reads.serve(|index| index.is_none()), vec![(4, None)]);
 }
@@ -166,14 +166,6 @@ fn a_read_expires_by_ttl() {
     assert!(reads.is_empty());
 }
 
-#[test]
-#[should_panic(expected = "a quorum read token is opened at most once")]
-fn a_token_is_opened_at_most_once() {
-    let mut reads: QuorumReads<NodeId> = QuorumReads::new();
-    let _ = reads.open(0, Some(0), basis(grid(), ballot(0)), 0, None);
-    let _ = reads.open(0, Some(0), basis(grid(), ballot(0)), 0, None);
-}
-
 /// A named row: any row of the grid is honoured, a row past the last
 /// or one under a majority falls back to `ctx % rows` / the whole
 /// membership (`read_row`), and the tally refuses a row its
@@ -205,7 +197,7 @@ fn a_named_read_row_is_honoured_or_falls_back() {
     let mut reads: QuorumReads<NodeId> = QuorumReads::new();
     // Row 1 of the 2x3 grid is {4, 5, 6}, although ctx 4 defaults to row 0.
     let addressees = reads.open(4, Some(1), basis(grid, ballot(0)), 0, None);
-    assert_eq!(addressees, vec![NodeId(4), NodeId(5), NodeId(6)]);
+    assert_eq!(addressees, Some(vec![NodeId(4), NodeId(5), NodeId(6)]));
 }
 
 #[test]
@@ -228,7 +220,7 @@ fn a_read_waits_on_its_basis_fence() {
         fence: Some(Slot(3)),
     };
     let addressees = reads.open(0, None, fenced, 0, Some((NodeId(0), Some(Slot(2)))));
-    assert_eq!(addressees, vec![NodeId(1), NodeId(2)]);
+    assert_eq!(addressees, Some(vec![NodeId(1), NodeId(2)]));
     assert_eq!(
         reads.fold(0, NodeId(1), Some(Slot(1)), Some(ballot(7))),
         PreReadFold::Counted
@@ -241,5 +233,36 @@ fn a_read_waits_on_its_basis_fence() {
         reads.serve(|index| index <= Some(Slot(3))),
         vec![(0, Some(Slot(3)))],
         "served at the fence once the replica covers it"
+    );
+}
+
+/// A token already open is a result, never a panic: the core expires reads
+/// on its own clock, so a driver cannot always know a token is still open.
+/// The second open changes nothing; once the first read is gone, the token
+/// opens again.
+#[test]
+fn a_token_in_use_opens_nothing() {
+    let mut reads: QuorumReads<NodeId> = QuorumReads::new();
+    assert!(!reads.is_open(7));
+    assert!(
+        reads
+            .open(7, Some(0), basis(grid(), ballot(1)), 0, None)
+            .is_some()
+    );
+    assert!(reads.is_open(7));
+    assert!(!reads.is_open(8));
+    assert_eq!(
+        reads.open(7, Some(1), basis(grid(), ballot(2)), 3, None),
+        None,
+        "a second open at one token is refused"
+    );
+    assert_eq!(reads.pending().len(), 1);
+    assert_eq!(reads.pending()[0].row(), Some(0), "the first read is kept");
+    reads.expire(100, 8);
+    assert!(!reads.is_open(7));
+    assert!(
+        reads
+            .open(7, Some(1), basis(grid(), ballot(2)), 100, None)
+            .is_some()
     );
 }

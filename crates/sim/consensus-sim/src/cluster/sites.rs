@@ -164,10 +164,10 @@ pub(super) struct ProxySite {
 }
 
 impl ProxySite {
-    pub(super) fn new(id: ProxyId, config: AcceptorConfig) -> Self {
+    pub(super) fn new(id: ProxyId, config: AcceptorConfig, limits: Limits) -> Self {
         Self {
             id,
-            live: Some(ProxyLeader::new(id, config)),
+            live: Some(ProxyLeader::new(id, config, limits)),
             dead_for_good: false,
         }
     }

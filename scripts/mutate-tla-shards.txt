@@ -18,6 +18,7 @@ ctrl-grid 14
 ctrl-segments 1
 decree 2
 degraded-reshape 7
+election 3
 flight-rule 1
 generations 3
 grid 0
