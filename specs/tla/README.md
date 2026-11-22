@@ -1250,6 +1250,29 @@ the basis, and that answer ends the read. On the grid, two Phase-1 quorums need 
 seal rule of the code (`Seal = "others"`, decision 31) puts a promise of the newer ballot in each
 read target, and `replica_grid` checks it.
 
+**A grid whose Phase-1 quorums do not meet** (#1483): `QuorumSystem::admits` lets in every grid
+with `1 <= acks <= rows`. A grid that is not full (`acks < rows`) gets no row seal, and a reader
+asks every member and closes on a Phase-1 quorum of the answers. When `2 * (rows - acks + 1)
+<= rows`, two Phase-1 quorums of one column can be disjoint. The checks run in their own folder,
+`reads-rows4/`, which links `Reads.tla` and `MC.tla`: four rows, one column, the members
+`a1..a4` and then `a2..a5`, reader `a1`.
+
+| Check | Shape | Result |
+|---|---|---|
+| `grid_rows4` | `acks = 3`: Phase 1 takes two of four, Phase 2 three | `ReadSeesAcked` violation (990 thousand states, 1 minute with 2 workers) |
+| `grid_rows4_meet` | `acks = 2`: Phase 1 takes three, so two Phase-1 quorums meet | pass (3.5 million states, 6 minutes with 2 workers) |
+
+The trace of `grid_rows4`: ballot 1 leads on `a1..a4`. Ballot 2 (the members `a2..a5`) wins
+with the Phase-1 quorum `{a2, a3}` of the old members, and `{a2, a3, a5}` choose slot 1; the
+leader acks it. `a1` hears the beat of ballot 1 and takes it as its basis, asks every member of
+`a1..a4`, and closes on the answers of `a1` and `a4`, a Phase-1 quorum of the old members that
+misses `{a2, a3}`. No answer holds a fence above 1 or a vote, so the read serves index 0 after
+the ack. A write at the new members meets every Phase-1 quorum of the new members, but not of the
+old ones. So the rule is: a grid that is not full must have Phase-1 quorums that meet
+(`2 * (rows - acks + 1) > rows`, `phase1_quorums_meet`), and `admits` refuses the others; this
+is candidate rule 1 of #1483. Rule 2 (seal each row) would make a one-column grid wait for every
+member at an election, against quorum everywhere (#1257).
+
 `live_no_leader` shows what a leaderless read rests on: a read whose index is a slot that only a
 minority voted waits until a leader finishes that slot.
 

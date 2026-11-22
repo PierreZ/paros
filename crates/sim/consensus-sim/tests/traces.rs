@@ -621,6 +621,98 @@ fn tlc_refuses_a_bootstrap_that_lost_a_registration() {
     );
 }
 
+/// The driver mutants of one flavor that its trace spec refuses (#1198
+/// (trace checking)): the mutants planted for another flavor also break the
+/// rules that this flavor's spec shares. Each runs the walks of 60 chaos
+/// steps from seed 1 up to the last seed of its row, and TLC must refuse
+/// one of them before any oracle sees the bug.
+fn refuses_the_driver_mutants(spec: Spec, flavor: &Flavor, mutants: &[(Mutant, u64)]) {
+    require_tlc(&spec.check());
+    for &(mutant, last) in mutants {
+        let (seed, event, _) = first_refused_cluster(spec, flavor, mutant, 1..=last, 60)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{spec:?} {}: TLC refuses no seed of {mutant:?}",
+                    flavor.name
+                )
+            });
+        eprintln!(
+            "{spec:?} {} {mutant:?}: seed {seed}, TLC refused {event:?}",
+            flavor.name
+        );
+    }
+}
+
+#[test]
+fn tlc_refuses_the_driver_mutants_on_the_handoff() {
+    refuses_the_driver_mutants(
+        Spec::LeaderHandoff,
+        &Flavor::handoff(),
+        &[(Mutant::HideVotes, 3), (Mutant::ForgetVotes, 6)],
+    );
+}
+
+#[test]
+fn tlc_refuses_the_driver_mutants_on_the_proxies() {
+    refuses_the_driver_mutants(
+        Spec::ProxyLeader,
+        &Flavor::proxies(),
+        &[(Mutant::HideVotes, 1), (Mutant::RewindHandoff, 8)],
+    );
+}
+
+#[test]
+fn tlc_refuses_the_driver_mutants_on_the_matchmakers() {
+    refuses_the_driver_mutants(
+        Spec::Matchmaker,
+        &Flavor::matchmakers(),
+        &[(Mutant::HideVotes, 1)],
+    );
+    refuses_the_driver_mutants(
+        Spec::MatchmakerGrid,
+        &Flavor::reconfiguring(),
+        &[
+            (Mutant::HideVotes, 4),
+            (Mutant::ForgetVotes, 1),
+            (Mutant::EarlyGc, 5),
+        ],
+    );
+}
+
+#[test]
+fn tlc_refuses_the_driver_mutants_on_the_compartments() {
+    refuses_the_driver_mutants(
+        Spec::Compartments,
+        &Flavor::compartments_compacting(),
+        &[
+            (Mutant::HideVotes, 6),
+            (Mutant::ForgetVotes, 9),
+            (Mutant::HideWatermark, 6),
+            (Mutant::LocalRead, 2),
+            (Mutant::RewindHandoff, 1),
+        ],
+    );
+}
+
+#[test]
+fn tlc_refuses_the_driver_mutants_on_truncation_faults_and_retirement() {
+    refuses_the_driver_mutants(
+        Spec::Truncation,
+        &Flavor::compaction(),
+        &[(Mutant::HideVotes, 2)],
+    );
+    refuses_the_driver_mutants(
+        Spec::Faults,
+        &Flavor::disk_faults(),
+        &[(Mutant::HideVotes, 3)],
+    );
+    refuses_the_driver_mutants(
+        Spec::Retire,
+        &Flavor::retiring(),
+        &[(Mutant::HideVotes, 4), (Mutant::EarlyGc, 1)],
+    );
+}
+
 /// The batcher walks TLC always checks: a trace of a batcher walk costs
 /// about a second.
 const BATCHER_SEEDS: u64 = 20;
