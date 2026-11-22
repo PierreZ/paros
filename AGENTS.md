@@ -150,7 +150,13 @@ the other rule groups of #1326 (proxy leader, leaderless reads, retire, truncate
 re-replication) are not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
 (storage, transport, clock, register), the pure `Host` that serves many journals in one process,
 and the generic driver under the flight rule (#1329 (paros-journal-io)), judged by
-`journal-sim`'s driver walk.
+`journal-sim`'s driver walk. The grid controller's pure decision is
+`crates/lib/paros-journal-control` (`decide`: heal, repair, re-replicate, or hold and alert, with
+a probe on every branch; #1328 (paros-journal-control), #1261 (grid controller decision tests)),
+judged by `journal-sim`'s sweep of every small view against a reference `decide` that shares no
+code with it. The controller role (`paros_journal_control::role`) is walked by `journal-sim`'s
+controller walk with two controllers and traced against `specs/tla/grid-controller/ControllerTrace.tla`;
+the moonpool-sim scenarios of the controller wait for its driver.
 **`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
 2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
 the build steps of #1323 (build the paros journal v1). Start there for any journal work.
@@ -244,13 +250,14 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
-  `-p paros-journal` and with `-p paros-journal-io`
+  `-p paros-journal`, `-p paros-journal-control` and `-p paros-journal-io`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
   the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
   `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
-  `multi_writer`; #1370 (journal examples)), and the facade examples:
+  `multi_writer`; #1370 (journal examples)), the grid controller's example:
+  `cargo run -p paros-journal-control --example controller`, and the facade examples:
   `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
 - `scripts/check-examples.sh`: every composing crate has an example, and the `examples` job runs
   each one (the workflow rule "Composing crates have examples" below)
@@ -275,6 +282,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`scripts/mutants.sh --journal`: the tests of `paros-journal` and the walks of `journal-sim`,
   then the trace checks of `journal-sim`; `.cargo/mutants-journal.toml`,
   `.cargo/mutants-journal-tlc.toml`), and one pass on the changed lines of
+  `crates/lib/paros-journal-control/src` (`scripts/mutants.sh --control`: its unit tests,
+  `journal-sim`'s sweep of the controller's decisions and its controller walks;
+  `.cargo/mutants-control.toml`), and one pass on the changed lines of
   `crates/lib/paros-journal-io/src` (`scripts/mutants.sh --journal-io`: its tests and the driver
   walk of `journal-sim`; `.cargo/mutants-journal-io.toml`). A
   surviving mutant fails the job: add the test that sees it in the same pull request. The
@@ -285,7 +295,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
   `--no-default-features`, `cargo check -p paros-consensus --features serde`,
   `cargo check --target wasm32-unknown-unknown -p paros-journal`, the same with
-  `-p paros-journal-io`, and
+  `-p paros-journal-control` and with `-p paros-journal-io`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
@@ -369,7 +379,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
-  (the facade), `paros-journal` and `paros-journal-io`; later the moonpool adapter and the
+  (the facade), `paros-journal`, `paros-journal-control` and `paros-journal-io`; later the moonpool adapter and the
   journal client. A user programs against these crates, so each one has runnable examples in
   `examples/` that use its public API as a user would (the facade's examples import `paros::`
   paths only). An example asserts what it shows, so CI runs it as a test: add each new example
@@ -692,6 +702,14 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   journal roles (`roles`: acceptor, leader, segment replica) and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
   Its examples (`examples/`): `fold` drives the fold alone, `register` the compare-and-sets of the
   matchmaker register.
+- `crates/lib/paros-journal-control` — the grid controller of the journal v1
+  (`docs/journal/06-controller.md` §J6, #1328): the P measures of a v1 grid, the placement of a
+  heal under the zone rule, the pure `decide` of the v1 controller (heal, repair,
+  re-replicate, hold and alert), and the controller role (`role`: its election by a term and
+  its fenced reshape call, as asks to a driver), with a `probe!` on every branch. Sans-IO,
+  wasm-safe, on `paros-consensus` and `paros-journal`; every **Open** number of §J6 comes from
+  the host. Not published yet, and not in the facade. Its example `controller` drives the role
+  over a register written by hand: an election, a heal, a lost reply and a takeover.
 - `crates/lib/paros-journal-io` — the journal's IO side, pure (#1329): the four traits a backend
   implements (`Storage`, `Transport`, `Clock`, `Register`), the on-disk format (`layout`), the
   pure `Host` that serves many roles of many journals in one process, the generic `Driver` under
@@ -706,9 +724,11 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   over channels (tokio is a dev-dependency only).
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
   segments, the walk of the matchmaker register across handovers, the walk of the journal
-  roles and the walk of the generic driver of `paros-journal-io` on three processes, with oracles that share no
+  roles, the walk of the generic driver of `paros-journal-io` on three processes, the sweep of
+  the grid controller's decisions over every small view against a reference `decide`
+  (`control`, #1261) and the walk of the controller role (`controller`), with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
-  `specs/tla/journal-state/FoldTrace.tla` and `specs/tla/segment-records/RegisterTrace.tla`, and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
+  `specs/tla/journal-state/FoldTrace.tla` and `specs/tla/segment-records/RegisterTrace.tla` (and of the controller walk against `specs/tla/grid-controller/ControllerTrace.tla`), and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
   (check long runs live); four hours each night in the `Journal live` workflow).
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with

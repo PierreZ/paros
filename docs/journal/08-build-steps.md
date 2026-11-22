@@ -17,7 +17,7 @@ less than this table.
 | 4 | #1325 (the matchmaker register as an optional role) | The register, its handover and its walks | §J3.4 |
 | 5 | #1326 (the journal roles over the core) | Segments, seal, writes, leaderless reads, retire, truncate, re-replication; several pull requests, one rule group each (segments, seal and writes: `paros_journal::roles`) | §J3, §J5 |
 | 6 | #1327 (journal-sim) | The walks, the oracles, the trace check and the coverage gate. Built with steps 3 to 5, in the same pull requests | §J7.3 |
-| 7 | #1328 (paros-journal-control) | The pure `decide` and the v1 controller role; #1261 (grid controller decision tests) is part of it | §J6 |
+| 7 | #1328 (paros-journal-control) | The pure `decide` and the v1 controller role; #1261 (grid controller decision tests) is part of it (`decide` and its sweep, the role, its walk and its trace check built; the moonpool-sim scenarios wait for the driver) | §J6 |
 | 8 | #1329 (paros-journal-io) | The traits, the driver under the flight rule and the contract suites (built: `crates/lib/paros-journal-io`, the driver walk of `journal-sim`) | §J4.2 |
 | 9 | #1330 (paros-journal-moonpool) | The moonpool adapter and the moonpool-sim of the whole journal | §J7.4 |
 | 10 | #1331 (the pure journal client) | The client state machine of the four calls. After step 3; it can run beside steps 7 to 9 | §J2 |
