@@ -243,6 +243,20 @@ red, in the PR or in its own PR. A flaky check is a finding, never a reason to r
 These steps need Pierre's go-ahead: a change to the goal or to a recorded design decision, a
 merge on red, and a force-push or a delete on a branch you did not create.
 
+**The builder never grades its own code** (Pierre, 2026-11-22). The review before the merge comes
+from an independent reviewer: a fresh agent or a person who did not write the change. It gets the
+diff, the PR description, the code around the diff and `main`, never the builder's chat or
+reasoning. It follows `REVIEW.md` and hunts races, edge cases and broken invariants. An
+automatic reviewer uses the builder's model or a cheaper one, never Fable unless Pierre asks.
+Fix each finding, or answer it in the PR description.
+
+**The same failure twice stops the loop** (Pierre, 2026-11-22). This rule counts fixes, never
+reruns: a red check or a red seed is never run again (the absolute rule, and "A flaky check is a
+finding"). When a second fix fails in the same way (the same CI error, the same test, the same
+approach), do not try a third time. Stop. Write down what you tried and what each try printed.
+Then escalate to Pierre in the PR or the issue. A different approach with a new reason is not a
+second try.
+
 ## Build, test, gates
 
 These are the commands CI runs (`.github/workflows/rust.yml`), always through Nix (next section):
@@ -378,6 +392,15 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
+- **A lesson becomes a rule** (Pierre, 2026-11-22). When a mistake is one that a machine could
+  have caught, add the check in the same PR as the fix: a lint, a `scripts/check-*.sh` in CI, a
+  test or an oracle, or else a rule in this file. A fix of only the one instance lets the
+  mistake come back.
+- **A new crate adds only the CI it needs** (Pierre, 2026-11-22). The workspace jobs of
+  `.github/workflows/rust.yml` already build and test a new crate. Add a job or a step only for a
+  check that is new to the crate. Make that new job run only when it can find something: when the
+  crate, a crate it depends on, or the job changes. A path filter is allowed on the new job only.
+  A filter on an existing job is a loosened judge (`REVIEW.md`).
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
