@@ -52,15 +52,17 @@ ROOT = Path(__file__).resolve().parent.parent
 SPECS = ROOT / "specs" / "tla"
 MINUTES = ROOT / "scripts" / "tla-minutes.txt"
 
-# A job of the TLA workflow has 30 minutes, and the same group of folders
-# takes from half to more than 1.36 times its measured minutes from one
-# runner to the next. A group holds at most `GROUP_MINUTES` of measured
-# checks, so a runner twice as slow still finishes. A folder above it runs
-# alone in its job, with less margin (a folder at `FOLDER_MINUTES` fits a
-# runner 1.5 times as slow), and no folder may be above `FOLDER_MINUTES`:
-# such a folder splits its checks.
+# A job of the TLA workflow has 30 minutes, about 27 of them for its checks
+# once Nix is set up. A line of `scripts/tla-minutes.txt` is the largest time
+# the folder took on GitHub's runners, and the time of one folder still moves
+# by a third from one runner to the next. A group holds at most
+# `GROUP_MINUTES` of measured checks, so a runner 1.8 times as slow as the
+# slowest one measured still finishes. A folder above it runs alone in its
+# job, with less margin: a folder at `FOLDER_MINUTES` fits a runner 1.2 times
+# as slow. No folder may be above `FOLDER_MINUTES`: such a folder splits its
+# checks.
 GROUP_MINUTES = 15.0
-FOLDER_MINUTES = 20.0
+FOLDER_MINUTES = 22.0
 
 # The files that no Rust build reads. Keep in step with `paths-ignore` of
 # `.github/workflows/rust.yml`, which is a subset of this list.
