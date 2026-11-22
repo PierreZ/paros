@@ -424,6 +424,31 @@ impl ColocatedNode {
         }
     }
 
+    /// Whether `msg` is in this node's own name: a transport echo. The core
+    /// never addresses itself ([`Audience::resolve`] leaves the sender
+    /// out), so following one would let a node depose its own leadership
+    /// with its own beat; `step` drops it, for every driver.
+    ///
+    /// [`Audience::resolve`]: crate::contract::message::Audience::resolve
+    pub(super) fn is_own_echo(&self, msg: &Message) -> bool {
+        msg.sender() == Party::Node(self.config.id)
+    }
+
+    /// Whether this node answers a request whose reply goes to `node`: a
+    /// node of the pool, or, on a deployment with a replica tier, a replica
+    /// (its id is outside the pool by construction; the driver routes it
+    /// through the deployment map and drops an address it does not know).
+    pub(super) fn is_reply_addressable(&self, node: NodeId) -> bool {
+        let addressable = self.in_pool(node) || self.acceptors.has_replicas();
+        if !self.acceptors.has_replicas() {
+            assert!(
+                addressable == self.in_pool(node),
+                "without a replica tier only the pool is answered"
+            );
+        }
+        addressable
+    }
+
     /// Whether `party` is one this deployment can answer: a node of the
     /// pool ([`ColocatedNode::in_pool`]) or a proxy rank under the cap
     /// (`ProxyId(0..MAX_ROLE_COUNT)`) — the wire-hygiene boundary an

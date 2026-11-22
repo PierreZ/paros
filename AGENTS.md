@@ -49,7 +49,7 @@ flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain
 (`specs/tla/multi-paxos/`: Phase 1 recovery, the allocator frontier, the `Noop` gap fill,
 commit and catch-up, restarts; #1185 (rework 1.14)), the cooperative leader handoff
 (`specs/tla/leader-handoff/`: one hop, the frontier guard, the durable frontier, the pending
-rounds proposed again, and the beat guard that rework 2.7 adds; #1187 (rework 2.8)), grid quorums
+rounds proposed again, and the beat guard of `on_heartbeat` (#902 (node handler gaps)); #1187 (rework 2.8)), grid quorums
 (`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
@@ -308,7 +308,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   'test(edited) | test(no_record)'`. The `test` job leaves them out.
 - the `mutants` job (pull requests only): cargo-mutants on the lines of
   `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
-  pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
+  pr.diff`), shared round-robin by two shards of the job (its time grows with the diff). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). The
   same job runs the two passes on the changed lines of `crates/lib/paros-journal/src`

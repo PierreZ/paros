@@ -8,7 +8,7 @@
 //! Phase-2 half — opening a round, fanning it out, folding the votes and
 //! deciding — is `node/phase2.rs`.
 
-use super::{Ballot, ColocatedNode, Command, NodeRole, Slot};
+use super::{Ballot, ColocatedNode, Command, NodeRole, Party, Slot};
 
 impl ColocatedNode {
     /// Learner: a command was chosen elsewhere — by another leader's tally,
@@ -19,7 +19,15 @@ impl ColocatedNode {
     /// a round taken back from a proxy that decided it after all is retired
     /// without a second decision.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, round = ballot.round, slot = slot.0)))]
-    pub(super) fn on_commit(&mut self, ballot: Ballot, slot: Slot, command: &Command) {
+    pub(super) fn on_commit(&mut self, from: Party, ballot: Ballot, slot: Slot, command: &Command) {
+        // Wire hygiene: a learn raises the durable promise to the choosing
+        // ballot (`mark_chosen`), so a `Commit` from outside the pool and the
+        // proxy namespace could pin the promise at any ballot and end every
+        // later campaign. Only a pooled node or a proxy of the deployment
+        // teaches a decision, as only a pooled node's `Nack` moves a ballot.
+        if !self.is_party_addressable(from) {
+            return;
+        }
         if ballot >= self.ballot {
             self.election_elapsed = 0;
         }
@@ -88,25 +96,18 @@ impl ColocatedNode {
                 "a decision at the open round's ballot carries the round's command"
             );
         }
-        // Adopt the choosing ballot *before* the record lands, so the batch
-        // carries the promise ahead of the accept exactly as `on_accept` does:
-        // the write-side ordering the boot scan re-asserts ("the durable
-        // promise dominates every accepted record"). Recording first left a
-        // crash between the two durable ops with a record above the promise;
-        // a spare that only ever learns (never prepared, promise still zero)
-        // hit it on 1 seed in 2,000 (17196295897912962235) and refused to
-        // boot again.
-        let promise = self.acceptor.promised().max(ballot);
-        self.acceptor.set_promise(promise, &mut self.pending_writes);
+        // The acceptor owns the record rule (`Acceptor::learn_chosen`): the
+        // promise rises first, a held record of the chosen command at or
+        // above the choosing ballot stays, and a faulty entry is repaired at
+        // its own ballot when that is higher. A crash between the promise and
+        // the record must never leave a record above the promise: the boot
+        // re-asserts "the durable promise dominates every accepted record".
+        self.acceptor
+            .learn_chosen(slot, ballot, command, &mut self.pending_writes);
         // A live campaign's promise sits at its ballot
         // (`assert_invariants`): a candidate that learns a slot chosen
         // above its ballot can no longer accept its own rounds, so its
-        // campaign is over, as a higher `Prepare` ends it in
-        // `on_prepare`. Left open, a matchmaking phase reached Phase 1
-        // with the promise past the ballot (witness
-        // 13099780746496209636 on PR #556 (tenant footprint): a
-        // candidate at (2,1) learned slot 0 chosen at (3,2) through a
-        // `Commit`, then its matchmaker quorum answered).
+        // campaign is over, as a higher `Prepare` ends it in `on_prepare`.
         if self.role == NodeRole::Candidate && self.acceptor.promised() != self.ballot {
             probe!(
                 reachable,
@@ -118,27 +119,6 @@ impl ColocatedNode {
             self.role != NodeRole::Candidate || self.acceptor.promised() == self.ballot,
             "a learned slot leaves a live campaign's promise at its ballot"
         );
-        // Record the *chosen* value as the authoritative accepted command. An
-        // upsert is load-bearing: a node may hold a stale lower-ballot accept
-        // it picked up from a failed earlier ballot, and `chosen` is rebuilt
-        // from the accepted log on restart. Keeping the stale entry would
-        // resurrect a value the cluster never chose for this slot.
-        //
-        // But a held record of the chosen command at a ballot at or above
-        // the choosing one stays: an acceptor's recorded ballot for a slot
-        // never falls. Phase 1 and the CTRL thresholds read each report as
-        // the highest ballot its acceptor accepted, so a learn that lowered
-        // it hid the only clean copy's real ballot after a loss, and the
-        // slot stayed blocked forever (#529 (sets oracles after PR #515):
-        // witness 12991929581014999161, a leader's (4,0) re-proposal erased
-        // by a learn at the choosing (2,2)).
-        let keeps = self
-            .acceptor
-            .record(slot)
-            .is_some_and(|(held, recorded)| recorded == command && *held >= ballot);
-        if !keeps {
-            self.record_accepted(slot, ballot, command.clone());
-        }
         self.replica.learn(slot, command);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).

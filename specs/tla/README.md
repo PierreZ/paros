@@ -1539,7 +1539,7 @@ Each rule has a constant whose first value is the code, and a control:
 | `FrontierGuard` | a successor refuses a payload below its frontier | `replay`: `OneProposal` breaks |
 | `DurableFrontier` | a leader records its own rounds | `volatile_frontier`: `OneProposal` breaks |
 | `Pending` | `"keep"`: the successor proposes the pending slots again | `live_drop_pending`: `Ends` breaks |
-| `BeatGuard` | `TRUE`: a beat at the leader's own ballot keeps it leader (rework 2.7; the code of today has `FALSE`) | `live_late_beat`: `Ends` breaks |
+| `BeatGuard` | `TRUE`: a beat at the leader's own ballot keeps it leader (`on_heartbeat` has it since #902 (node handler gaps)) | `live_late_beat`: `Ends` breaks |
 | `PromiseGuard` | a successor refuses a payload below its promise | `promise_guard_off`: `OneProposal` breaks in 11 states (ballot 1 hands on to a node that promised ballot 2; the successor opens slot 0 with no record, restarts, installs the replayed payload and opens slot 0 again with another command) |
 | `RecordAll` | a leader records every round, in a column it is not in too | `grid_in_column_only`: `OneProposal` breaks in 10 states on the grid (the successor opens a slot of the other column with no record, restarts, installs the replay and opens it again) |
 | `Abdicate` | the leader steps down in the step that sends the payload | `keep_leading`: `OneHolder` breaks in 6 states |
@@ -1559,7 +1559,7 @@ Results (`leader-handoff/checks.txt`):
 | `reach` | `NoHandoffLearns`, a reachability control: a successor learns a slot | violation (8 states) |
 | `safety` | NB 1, NS 2, two commands, one restart | pass (875 thousand states) |
 | `safety_elect` | NB 2, NS 1, one restart, a later election | pass (2.5 million states) |
-| `late_beat_safe` | `safety` with the beat of today's code (`BeatGuard = FALSE`) | pass (950 thousand states) |
+| `late_beat_safe` | `safety` with the beat of the code before #902 (`BeatGuard = FALSE`) | pass (950 thousand states) |
 | `live`, `live_gone` | `Ends` with a lost `Accept`, and with a lost payload or a restarted successor | pass (115 thousand, 441 thousand states) |
 | `grid` (`long`) | the 2 x 2 full grid, NB 1, NS 2, no restart | pass (2.5 million states, 7 minutes) |
 | `owner_twice` (`long`) | `safety_elect` where one node owns every ballot: the predecessor campaigns again after it hands on | pass (2.7 million states, 6 minutes) |

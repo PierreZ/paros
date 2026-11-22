@@ -201,6 +201,11 @@ pub struct World {
     /// The per-node election timeout the level (or the player) asked for — what
     /// [`NO_CHECK_QUORUM`] is restored to.
     election_timeouts: Vec<u64>,
+    /// The ballot each node last forged Accepts at with no Phase 1
+    /// ([`World::skip_phase1`]). The core never addresses a message to its
+    /// own node, so the forger casts no vote of its own; its next election
+    /// opens above this ballot, as a leader that minted it would.
+    forged: Vec<Option<Ballot>>,
     armed_seams: Vec<Option<Seam>>,
     clients: Vec<Client>,
     next_read_ctx: u64,
@@ -320,6 +325,7 @@ impl World {
             clock: 0,
             pool,
             election_timeouts: vec![election_timeout; count],
+            forged: vec![None; count],
             armed_seams: vec![None; count],
             clients: clients
                 .iter()

@@ -998,3 +998,48 @@ fn a_second_proposer_that_misses_the_only_vote_chooses_its_own_value() {
         "one value is chosen"
     );
 }
+
+/// A ballot `round.node` as the narration writes it, ordered as the core
+/// orders a ballot: by round, then by node.
+fn ballot_of(text: &str) -> (u64, u64) {
+    let (round, node) = text
+        .split_once('.')
+        .unwrap_or_else(|| panic!("{text} is a ballot round.node"));
+    (
+        round.parse().expect("a round is a number"),
+        node.parse().expect("a node is a number"),
+    )
+}
+
+/// A refusal by the promise names a promise above the refused ballot. A
+/// sentence that names an equal or lower promise describes a step that the
+/// promise did not refuse.
+#[test]
+fn a_refusal_names_a_higher_promise() {
+    const PROMISED: &str = ": it promised ballot ";
+    let mut seen = 0;
+    for trace in traces() {
+        for run in &trace.scenarios {
+            for (n, step) in run.steps.iter().enumerate() {
+                let Some((head, rest)) = step.says.split_once(PROMISED) else {
+                    continue;
+                };
+                let where_ = || format!("{}/{} step {n}: {}", trace.page, run.id, step.says);
+                let refused = head
+                    .rsplit(' ')
+                    .next()
+                    .unwrap_or_else(|| panic!("{}", where_()));
+                let promised = rest
+                    .split(',')
+                    .next()
+                    .unwrap_or_else(|| panic!("{}", where_()));
+                seen += 1;
+                assert!(ballot_of(promised) > ballot_of(refused), "{}", where_());
+            }
+        }
+    }
+    assert!(
+        seen > 0,
+        "some step of the traces is a refusal by the promise"
+    );
+}

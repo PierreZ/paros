@@ -13,6 +13,12 @@ impl ColocatedNode {
     /// Serve a lagging peer's catch-up request by replaying the decided range.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, from_slot = from_slot.0)))]
     pub(super) fn on_catchup_request(&mut self, from: NodeId, from_slot: Slot) {
+        // Wire hygiene: history is served to a node of the pool, or, on a
+        // deployment with a replica tier, to a replica (its id is outside the
+        // pool by construction), never to an arbitrary id.
+        if !self.is_reply_addressable(from) {
+            return;
+        }
         let writes = self.pending_writes.len();
         let promised = self.acceptor.promised();
         self.serve_catchup(from, from_slot);
@@ -94,8 +100,19 @@ impl ColocatedNode {
             }
             expected = Slot(slot.0 + 1);
             // The choosing ballot is the ballot recorded for this slot in the
-            // accepted log (a chosen value is recorded authoritatively there).
-            let ballot = self.acceptor.record(*slot).map_or(self.ballot, |(b, _)| *b);
+            // accepted log: a chosen slot always holds its authoritative
+            // record (`mark_chosen` asserts the coupling), and the receiver
+            // raises its durable promise to this ballot, so it is never
+            // invented.
+            let (ballot, recorded) = self
+                .acceptor
+                .record(*slot)
+                .expect("a chosen slot holds its authoritative accepted record");
+            assert!(
+                recorded == command,
+                "a chosen slot's record carries the chosen command"
+            );
+            let ballot = *ballot;
             entries.insert(*slot, (ballot, command.clone()));
         }
         if entries.is_empty() {
@@ -136,7 +153,16 @@ impl ColocatedNode {
     /// quorum-decided), so `mark_chosen` records it authoritatively and advances
     /// the contiguous prefix — filling the hole a missed `Accept`+`Commit` left.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, entries = entries.len())))]
-    pub(super) fn on_catchup_response(&mut self, entries: BTreeMap<Slot, (Ballot, Command)>) {
+    pub(super) fn on_catchup_response(
+        &mut self,
+        from: NodeId,
+        entries: BTreeMap<Slot, (Ballot, Command)>,
+    ) {
+        // Wire hygiene: each learned entry raises the durable promise to
+        // its ballot, so only a pooled peer teaches history.
+        if !self.in_pool(from) {
+            return;
+        }
         let chosen = self.replica.chosen_index();
         let floor = self.acceptor.first_slot();
         for (slot, (ballot, command)) in entries {
@@ -167,8 +193,10 @@ impl ColocatedNode {
     /// `specs/tla/truncation/`). A node that jumps keeps the promise it made, and a
     /// candidate campaigning here still collects promises by Phase 1.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, point = point.0)))]
-    pub(super) fn on_trimmed_to(&mut self, point: Slot, state: JournalState) {
-        if point <= self.acceptor.first_slot() {
+    pub(super) fn on_trimmed_to(&mut self, from: NodeId, point: Slot, state: JournalState) {
+        // Wire hygiene: a jump drops every record below `point`, so only a
+        // pooled peer's trim point moves the floor.
+        if !self.in_pool(from) || point <= self.acceptor.first_slot() {
             return;
         }
         let promised = self.acceptor.promised();

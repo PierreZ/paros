@@ -13,6 +13,7 @@ use paros_consensus::journal::Outcome;
 use paros_consensus::{Slot, WriteOp};
 
 use super::{Batch, ClusterEvent, Tracer};
+use crate::oracle::journal::JOURNAL_FOLD;
 
 /// The floor steps of `TruncationTrace`.
 pub(super) fn keeps(event: &ClusterEvent) -> bool {
@@ -70,9 +71,12 @@ impl Tracer {
             _ => (0, before),
         };
         if let Some(folded) = self.folds.get(index) {
+            // Two parties that fold one slot two ways break the journal
+            // rules: the tracer sees it before the ledger when the second
+            // fold rides a batch, so it names the same oracle.
             assert_eq!(
                 folded.0, high,
-                "every party folds the records of slot {slot:?} the same"
+                "{JOURNAL_FOLD}: every party folds the records of slot {slot:?} the same"
             );
             return None;
         }
