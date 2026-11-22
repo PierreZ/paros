@@ -223,6 +223,7 @@ const JOURNAL: Claim[] = [
     controls: ["reply_mem1b", "reply_mem2b", "order_vote_first", "send_early"],
     mutants: ["WipeDisk", "driver: LyingDisk"],
     state: "checked",
+    note: "The trace checks each promise, vote and flush against Journal.tla. The FLIGHT oracle of the driver walk judges SentIsDurable of flight-rule/, with no trace check.",
   },
   {
     claim: "A write reaches only the replica set of its segment, and a read returns the acked write.",
@@ -238,10 +239,11 @@ const JOURNAL: Claim[] = [
     claim: "A deposed controller changes nothing, and every grid meets F + 1 ≤ acks ≤ rows − F.",
     models: [{ dir: "grid-controller", inv: ["OneFromEach", "AnswerTrue", "AllBounded"] }, { dir: "segment-records", inv: ["ReshapeFenced"] }],
     trace: ["grid-controller/ControllerTrace.tla"],
-    walk: "controller walk · FENCED, BOUNDED_IN_FLIGHT",
+    walk: "controller walk · FENCED",
     controls: ["noterm", "nobound", "noidem"],
-    mutants: ["WriteOnStale", "NoToken", "ElectNoCas (trace)"],
+    mutants: ["WriteOnStale", "ElectNoCas (trace)"],
     state: "checked",
+    note: "The walk plans only grids of three rows and two acks, so only the model tests the bound F + 1 ≤ acks ≤ rows − F.",
   },
   {
     claim: "A heal of a sealed segment's replica set keeps every slot on a live replica.",
@@ -313,8 +315,8 @@ const JOURNAL: Claim[] = [
 // is not built, so each row is model only and names the issue of its code.
 const PAROSD: Claim[] = [
   {
-    claim: "One term of an election over a journal has one holder: the holder writes only in its own term, and stops at its first refused write.",
-    models: [{ dir: "election", inv: ["TermTrue", "WriteInTerm", "NoRegress", "StopsAtRefusal", "IfaceOfTerm", "ModeKept"] }],
+    claim: "One term of an election over a journal has one holder: the holder writes only in its own term, and stops at its first refused write. The interface that the journal publishes is the one of the term's holder.",
+    models: [{ dir: "election", inv: ["TermTrue", "WriteInTerm", "NoRegress", "StopsAtRefusal", "IfaceOfTerm", "PubTrue", "ModeKept"] }],
     trace: [],
     walk: "",
     controls: ["no_fence", "late_challenge", "no_stop", "reinstate", "iface_kept", "multi", "any_answer"],
@@ -323,8 +325,8 @@ const PAROSD: Claim[] = [
     issue: { n: 1420, name: "paros-election" },
   },
   {
-    claim: "One id names at most one journal, forever: a fold gives an id once, deletes included, and a host keeps records under an id only after the fold gave it.",
-    models: [{ dir: "journal-ids", inv: ["JournalIdOnce", "TenantIdOnce", "DiskOneJournal", "BookedAfterRecord", "GoneStays"] }],
+    claim: "One id names at most one journal, forever: a fold gives an id once, deletes included, and a host keeps records under an id only after the fold gave it. Every create ends.",
+    models: [{ dir: "journal-ids", inv: ["JournalIdOnce", "TenantIdOnce", "DiskOneJournal", "BookedAfterRecord", "GoneStays", "AllCreated"] }],
     trace: [],
     walk: "",
     controls: ["book_first", "no_tombs", "no_tombs_disk", "journal_key", "counter"],
@@ -333,8 +335,8 @@ const PAROSD: Claim[] = [
     issue: { n: 1419, name: "the tenancy wrapper and paros-names" },
   },
   {
-    claim: "A placement is all or none and one for each request id, the moves in flight stay under the limit, and no booking leaks.",
-    models: [{ dir: "placement-port", inv: ["OneGrantPerRid", "GrantWhole", "MovesInFlight", "KeepsSize", "NoOrphan", "ReleasedFree"] }],
+    claim: "A placement is all or none and one for each request id, the moves in flight never pass the limit, and no booking leaks. Once the faults stop, every journal heals.",
+    models: [{ dir: "placement-port", inv: ["OneGrantPerRid", "GrantWhole", "MovesInFlight", "KeepsSize", "NoOrphan", "ReleasedFree", "Healed"] }],
     trace: [],
     walk: "",
     controls: ["book_first", "no_dedup", "partial", "no_limit", "no_free", "fixed", "no_abandon"],
@@ -343,11 +345,11 @@ const PAROSD: Claim[] = [
     issue: { n: 1421, name: "the placement port" },
   },
   {
-    claim: "An order of a deposed coordinator never takes effect, and a machine hosts each role once, only where its booking says.",
-    models: [{ dir: "takeover", inv: ["NoLateEffect", "OnceEach", "EffectBooked", "Complete"] }],
+    claim: "An order of a deposed coordinator never takes effect, and a machine hosts each role once, only where its booking says. Once the faults stop, every coordinator stops sending and every role settles.",
+    models: [{ dir: "takeover", inv: ["NoLateEffect", "OnceEach", "EffectBooked", "Complete", "Settles", "Quiet"] }],
     trace: [],
     walk: "",
-    controls: ["two_writes", "two_writes_late", "no_idem", "keep_view", "fallback", "reg_nofence", "gone_ignored"],
+    controls: ["two_writes", "two_writes_late", "no_idem", "keep_view", "fallback", "reg_nofence", "ref_in_booking", "nack_ignored", "gone_ignored"],
     mutants: [],
     state: "model",
     issue: { n: 1422, name: "the takeover by a new controller" },
