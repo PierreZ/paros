@@ -129,10 +129,11 @@ removed replica that comes back during the heal; #1314 (re-replication of a seal
 replica set)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
-the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). The decree's
-`Inv` is also proved with TLAPS at every size (`specs/tla/decree/DecreeProof.tla`,
-`scripts/check-proofs.sh` in `nix develop .#proofs`, the `proofs` job of the `TLA` workflow;
-`specs/tla/README.md`, "Proofs"). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
+the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both
+`Inv` are also proved with TLAPS at every size (`specs/tla/decree/DecreeProof.tla`,
+`specs/tla/multi-paxos/MultiPaxosProof.tla` and the `*Proof.tla` modules it extends,
+`scripts/check-proofs.sh` in `nix develop .#proofs`, one `proofs` job for each module in the `TLA`
+workflow; `specs/tla/README.md`, "Proofs"). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
 journal's matchmaker register with its writer, its guard and the models that check it (#1315). Then the journal is
 designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
 `step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and

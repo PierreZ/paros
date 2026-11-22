@@ -23,8 +23,9 @@
 # and `trace-edits` jobs, which run the same tests on the same specs. Each CI
 # job has at most 30 minutes, so `traces` runs in four shards (nextest
 # `--partition count:i/4`; #1340 (the traces job reaches its timeout)). The
-# job `proofs` checks the TLAPS proofs of specs/tla/ (`scripts/check-proofs.sh`)
-# when a folder of a proof runs or the proof script changes.
+# job `proofs` checks the TLAPS proofs of specs/tla/ (`scripts/check-proofs.sh`),
+# one job for each `*Proof.tla` module of a folder that runs, or of every
+# folder when the proof script changes.
 name: TLA
 
 on:
@@ -71,6 +72,7 @@ jobs:
       any: ${{ steps.plan.outputs.any }}
       traces: ${{ steps.plan.outputs.traces }}
       proofs: ${{ steps.plan.outputs.proofs }}
+      any_proofs: ${{ steps.plan.outputs.any_proofs }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -134,17 +136,23 @@ jobs:
 
   # The TLAPS proofs (`*Proof.tla`, #1307 (inductive invariants, then
   # proofs)): every obligation is proved again, with no cache.
+  # One job for each proof module of the plan, so that a long proof is split
+  # into modules that each fit the 30 minutes of a job.
   proofs:
     needs: plan
-    if: ${{ needs.plan.outputs.proofs == 'true' }}
+    if: ${{ needs.plan.outputs.any_proofs == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.plan.outputs.proofs) }}
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Check the TLAPS proofs of specs/tla
-        run: nix develop .#proofs --command scripts/check-proofs.sh
+      - name: Check the TLAPS proof ${{ matrix.module }}
+        run: nix develop .#proofs --command scripts/check-proofs.sh ${{ matrix.module }}
 
   # Green when every job of the plan is green; a job that the plan leaves out
   # is `skipped`.
@@ -159,4 +167,4 @@ jobs:
           test "${{ needs.plan.result }}" = success
           ok "${{ needs.spec.result }}" "${{ needs.plan.outputs.any }}"
           ok "${{ needs.traces.result }}" "${{ needs.plan.outputs.traces }}"
-          ok "${{ needs.proofs.result }}" "${{ needs.plan.outputs.proofs }}"
+          ok "${{ needs.proofs.result }}" "${{ needs.plan.outputs.any_proofs }}"

@@ -32,8 +32,9 @@ The trace checks (`traces`) run the walks of consensus-sim and journal-sim
 against the `*Trace.tla` specs. They run in the TLA workflow when a folder of a
 trace spec runs and the Rust jobs do not: when the Rust jobs run, the `test`
 and `trace-edits` jobs of the Rust workflow run the same trace tests on the same
-specs. The proofs (`proofs`) run when a folder of a `*Proof.tla` runs, or when
-the proof script changes.
+specs. The proofs (`proofs`, one job for each `*Proof.tla` module, so that each fits
+the 30 minutes of a job) run for the folders that run, or all of them when the
+proof script changes.
 """
 
 from __future__ import annotations
@@ -168,14 +169,16 @@ def plan_tla(changed: list[str] | None) -> dict[str, str]:
     # With no diff (a full plan), the Rust workflow may not run (a manual run,
     # or a push to main that touched specs only), so the traces run here.
     traces = bool(trace_folders & set(selected)) and (changed is None or not needs_rust(changed))
-    proofs = bool(proof_folders & set(selected)) or changed is None \
-        or any(f in PROOF_TOOLS for f in changed)
+    proof_tools = changed is None or any(f in PROOF_TOOLS for f in changed)
+    proofs = sorted(str(m.relative_to(SPECS)) for f in all_folders
+                    if proof_tools or f in selected for m in (SPECS / f).glob("*Proof.tla"))
     groups = [" ".join(g) for g in pack(selected, table)]
     return {
         "groups": json.dumps(groups),
         "any": str(bool(groups)).lower(),
         "traces": str(traces).lower(),
-        "proofs": str(proofs).lower(),
+        "proofs": json.dumps(proofs),
+        "any_proofs": str(bool(proofs)).lower(),
     }
 
 
