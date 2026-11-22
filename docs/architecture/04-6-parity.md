@@ -22,6 +22,7 @@ The marks in the "Home" column:
   back;
 - **Dropped**: a recorded decision removes it, named in the row;
 - **After v1**: out of the journal v1, §J1.2;
+- **Later**: kept, but not needed for parity (Pierre's answer on #1437);
 - **Finding**: no home yet, asked on #1437.
 
 #### Bootstrap, machines and the cell
@@ -60,13 +61,13 @@ The marks in the "Home" column:
 | F25 | `configure` of a journal or of a tenant's default: `--survive machines=M` (`F`), `--partitions P` | `cmd/journal.rs`, `tenant/modes.rs` | #1430, #1434 |
 | F26 | `--writers single\|multi`, fixed for the journal's life | `cmd/journal.rs` | #1430; the two modes are journal v1 (§J2.4) |
 | F27 | A layout: `colocated` or `compartmentalized`, with counts of proxy leaders, replicas and batchers | `cmd/journal.rs`, `tenant/roles.rs` | Question 3 of §4.5 (who books the stateless roles). Counts by load: **after v1** (§J1.2) |
-| F28 | The commit mode of the stores: `ordered` (two syncs) or `batched` (one sync) (#599) | `cmd/journal.rs` | **Finding** |
+| F28 | The commit mode of the stores: `ordered` (two syncs) or `batched` (one sync) (#599) | `cmd/journal.rs` | **Dropped** (Pierre, 2026-11-22: "Ordered vs batch is no more because we can set leader to none") |
 | F29 | Quorum systems: majority and grid (partitions); flexible quorums | `cmd/journal.rs` | Majority and the partitioned grid: journal v1 (§J1.1). Flexible quorums: **Dropped** (decision 27, §3.4). Other grids: **after v1** |
 | F30 | A tenant's frontends: `configure --frontend-count N` books them on `stateless` machines | `cmd/journal.rs`, `tenant/roles.rs` | #1430, #1431 (the frontend role) |
 | F31 | The matchmaker set of each tenant, moved off a machine that leaves | `tenant/sets.rs` | The set is now one for each journal (§3.4, 2026-11-19). Who moves it: question 1 of §4.5 |
 | F32 | The control journals of the cell and of each tenant grow with the cell and move off a machine that leaves | `tenant/controls.rs` | #1421, #1423, #1430 |
 | F33 | Background scrub of every record on every acceptor, at a low rate, with repair and a mismatch report | `tenant/scrub.rs` | The grid controller (#1328 (paros-journal-control), §J6); the scrub of objects is **after v1** |
-| F34 | User tags (`key:value`) on cells, machines, tenants and journals (`cell tag`, `cell tag-machine`, `tenant tag`, `journal tag`), and selectors in `list` and in `tenant create --cell-selector` (#575) | `cmd/*.rs` | **Finding** |
+| F34 | User tags (`key:value`) on cells, machines, tenants and journals (`cell tag`, `cell tag-machine`, `tenant tag`, `journal tag`), and selectors in `list` and in `tenant create --cell-selector` (#575) | `cmd/*.rs` | #1449 (user tags and tag selectors; Pierre, 2026-11-22: "Keep those") |
 
 #### The data plane and the client
 
@@ -127,5 +128,5 @@ The marks in the "Home" column:
 | F67 | The bench (`paros-bench`): writers, tailers and readers, phases `init`, `run`, `clean`, `report`; `--backlog`; `--topology` | `crates/bin/paros-bench` | #1371 (journal bench); on the service: #1434 (`paros-cli`) |
 | F68 | The live playground in the browser: the whole service, driven by operator buttons and faults | `paros-wasm` (`playground`) | #1435 (the wasm parosd engine), #1441 (the page) |
 | F69 | The Engineering pages that run the engine live | `website/site/public/engineering.js` | #1444 (Engineering pages with live runs) |
-| F70 | A two-cell demo with Docker Compose under mutual TLS, and `DEMO.md` | `docker-compose.yml`, `DEMO.md` | `DEMO.md` for one cell: #1429. The image and the two-cell Compose demo: **Finding** |
-| F71 | Release archives of the binaries for `cargo binstall` | `release-plz.toml` | **Finding** (releases are Pierre's call, AGENTS.md) |
+| F70 | A two-cell demo with Docker Compose under mutual TLS, and `DEMO.md` | `docker-compose.yml`, `DEMO.md` | `DEMO.md` for one cell: #1429. The image and the two-cell Compose demo: #1450 (Pierre, 2026-11-22: "Keep those") |
+| F71 | Release archives of the binaries for `cargo binstall` | `release-plz.toml` | **Later**, after the parity check (Pierre, 2026-11-22: "We can do this later") |
