@@ -39,4 +39,11 @@ block_propose_maj        pass       ci
 safe_record_maj          pass       ci
 # T2, the seal end of a bypass: the allocator frontier.
 seal_frontier            pass       ci
+# The same on two majorities with a common member: an acceptor never lowers
+# its promise (the guard of Promise), or a ballot below a promise chooses
+# another value.
+seal_frontier_maj        pass       ci
 seal_chosen              violation  ci
+# A ballot below the GC floor of a later leader never ends its matching
+# (the watermark check of Register; HeardNoFloorAbove).
+gc_floor                 pass       ci
