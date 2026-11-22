@@ -1575,7 +1575,9 @@ impl WholeModel {
                     .driver
                     .as_ref()
                     .and_then(|d| d.host().replica(Address::replica(id, *node, record.id())))
-                    .map(|r| r.resolve(uuid, expected_seq, &write.records));
+                    // The walk reads the replica's answer to judge its fate; the
+                    // persist id it waits on matters only to a driver that sends it.
+                    .map(|r| r.resolve(uuid, expected_seq, &write.records).0);
                 if let Some(found) = found
                     && found != ResolveAnswer::NotCovered
                 {

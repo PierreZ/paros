@@ -108,8 +108,7 @@ jobs:
         folder: ${{ fromJSON(needs.slices.outputs.folders) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - name: Time the checks of specs/tla/${{ matrix.folder }}
         id: name
         run: |

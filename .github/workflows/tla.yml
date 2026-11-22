@@ -10,13 +10,14 @@
 # this file). A push to main is planned the same way from the commit before
 # the push, and a manual run (workflow_dispatch) runs every folder.
 #
-# The folders that run are packed into a few `spec` jobs, each at most 22
-# minutes of checks (`scripts/tla-minutes.txt`), inside the 30 minutes of a
-# job. The job `tlc` is green only when every job of the plan is green.
+# The folders that run are packed into a few `spec` jobs, each at most 15
+# measured minutes of checks (`scripts/tla-minutes.txt`; a larger folder runs
+# alone), inside the 30 minutes of a job. The job `tlc` is green only when every job of the plan is green.
 #
 # The job `traces` runs the trace checks of consensus-sim and journal-sim
 # (`tests/traces.rs` of each, and `tests/register_traces.rs`,
-# `tests/controller_traces.rs` and `tests/live.rs` of journal-sim): a trace
+# `tests/roles_traces.rs`, `tests/controller_traces.rs` and `tests/live.rs` of
+# journal-sim): a trace
 # spec EXTENDS its model, so a change of a model or of a `*Trace.tla` alone
 # must meet the walks too (#1231 (traced walks reach the rules)). It runs when
 # a folder of a trace spec runs and the Rust workflow does not run its `test`
@@ -40,6 +41,7 @@ on:
       - "scripts/tla-minutes.txt"
       - "flake.nix"
       - "flake.lock"
+      - ".github/actions/nix/action.yml"
       - ".github/workflows/tla.yml"
   workflow_dispatch:
   pull_request:
@@ -53,6 +55,7 @@ on:
       - "scripts/tla-minutes.txt"
       - "flake.nix"
       - "flake.lock"
+      - ".github/actions/nix/action.yml"
       - ".github/workflows/tla.yml"
 
 # A new push cancels a pull request's older run, never a run on main: each
@@ -102,8 +105,7 @@ jobs:
         folders: ${{ fromJSON(needs.plan.outputs.groups) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - name: Run TLC on specs/tla/ ${{ matrix.folders }}
         run: nix develop .#tla --command scripts/check-tla.sh ${{ matrix.folders }}
       # Each guard set to TRUE still parses, so that the weekly `TLA mutants`
@@ -122,8 +124,7 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - uses: Swatinem/rust-cache@v2
         with:
           key: traces
@@ -131,7 +132,7 @@ jobs:
       - name: Check the consensus-sim and journal-sim walks against the trace specs (shard ${{ matrix.shard }} of 4)
         run: >-
           nix develop --command cargo nextest run --profile ci --release
-          -p consensus-sim -p journal-sim --test traces --test register_traces --test controller_traces --test live
+          -p consensus-sim -p journal-sim --test traces --test register_traces --test roles_traces --test controller_traces --test live
           --partition count:${{ matrix.shard }}/4
 
   # The TLAPS proofs (`*Proof.tla`, #1307 (inductive invariants, then
@@ -149,13 +150,14 @@ jobs:
         module: ${{ fromJSON(needs.plan.outputs.proofs) }}
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - name: Check the TLAPS proof ${{ matrix.module }}
         run: nix develop .#proofs --command scripts/check-proofs.sh ${{ matrix.module }}
 
   # Green when every job of the plan is green; a job that the plan leaves out
-  # is `skipped`.
+  # is `skipped`. It runs even in a cancelled run (`always()`), so a run that
+  # is cancelled before its spec jobs end reports a red `tlc`, never a skipped
+  # one that a merge would read as green.
   tlc:
     needs: [plan, spec, traces, proofs]
     if: always()

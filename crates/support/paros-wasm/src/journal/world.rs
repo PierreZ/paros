@@ -2,7 +2,7 @@
 //! segments, each folded by `paros-journal`'s [`JournalState`].
 //!
 //! The world is a driver. It builds the commands a client sends, hands each
-//! one to [`JournalState::apply`] (or to [`resolve`]) and keeps what the
+//! one to [`JournalState::apply`] (or to [`resolve()`]) and keeps what the
 //! core answers. It judges nothing itself: every answer, and every move of
 //! `next_seq`, `first_seq` and the leader, is the core's.
 //!

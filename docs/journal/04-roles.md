@@ -135,8 +135,14 @@ ballot belongs to one leader in memory, as in `journal-state/`), so its sends wa
 The inputs are `step(from, message)`, `observe(register value)` (a value that a done write
 gave, §J3.4), and `tick(page)`: the driver paces the re-sends with `page`, because a re-send of
 every round floods a bounded network and loses the messages that would close the rounds (a
-finding of the roles walk). A compare-and-set of the register is an effect
-(`Register(Change)`).
+finding of the roles walk). A compare-and-set of the register is an effect: the leader's
+(`Register(Change)`) waits on nothing, and the replica's boundary write (`Register { change,
+after }`) waits on the batch of the last slot it folds, so the register takes only a fold that is
+on the replica's disk. The answer to a `Resolve` reads the fold too, and goes once the batch it
+names is durable. A leader takes what its Phase 1 reads (the segments that are not retired, the
+end of each sealed one) and the first slot it writes from the register value of its campaign, and
+keeps them; the driver computes that first slot from the replicas' disks. `RolesTrace.tla`
+checks each of these against `Journal.tla` (§J7.3).
 
 *What the driver builds* (#1329 (paros-journal-io), `crates/lib/paros-journal-io`). The crate is
 pure (§J4.3): the four traits that a backend implements, the `Host`, the generic `Driver`, the
@@ -261,11 +267,11 @@ creates these crates, each in its own step. `paros-journal` and `journal-sim` ex
 
 | Crate | What it holds | Step |
 |---|---|---|
-| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the matchmaker register and its handover (`register`), the journal roles (`roles`, #1326), the codec with a release number in every header (`codec`), the record headers (`command`); later the pure client (no network) | #1324 (paros-journal), #1325 (the matchmaker register), #1331 (the pure journal client) |
+| `paros-journal` (`crates/lib/`) | The pure journal core: the journal fold (`fold`), the `Resolve` call (`resolve`), the held answers (`held`), the segment record types (`segment`), the matchmaker register and its handover (`register`), the journal roles (`roles`, #1326), the codec with a release number in every header (`codec`), the record headers (`command`), the pure client with no network (`client`, #1331) | #1324 (paros-journal), #1325 (the matchmaker register), #1331 (the pure journal client) |
 | `paros-journal-control` (`crates/lib/`) | The pure `decide` of the v1 controller and the controller role | #1328 (paros-journal-control) |
 | `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the register), the on-disk format, the pure `Host` (many journals in one process), the generic driver under the flight rule, the `Events` port, backends in memory and the contract suites. Its examples `in_memory` and `custom_storage` run the roles on it. Its traits are not stable until the moonpool adapter of #1417 runs on them (2026-11-22) | #1329 (paros-journal-io) |
 | `paros-journal-moonpool` (`crates/lib/`) | Not in v1: the adapter of the `paros-journal-io` traits on moonpool providers (compio through moonpool's `CompioProviders`, no trait requires `Send`; Pierre, 2026-11-19), with moonpool RPC and protobuf as its transport ("The wire" below). It is built by the layered parosd (Pierre, 2026-11-22) | #1417 (the moonpool adapter on the generic host), with #1330 |
-| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla` | #1327 (journal-sim) |
+| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla`; the walk of the roles, its trace check against `journal-state/RolesTrace.tla` | #1327 (journal-sim) |
 
 The journal roles that compose the core (segments, seal, reads, retire, truncate,
 re-replication) are #1326 (the journal roles). They live in `paros-journal`, module `roles`

@@ -36,8 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       - run: nix develop --command cargo --version
 
   # A shard has about 60 mutants for the first pass, then runs the trace
@@ -61,8 +60,7 @@ jobs:
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache
           df -h /
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: ./.github/actions/nix
       # The script exits with 2 when a mutant survives: the shard still
       # uploads its outcomes, and the `score` job judges them.
       # `shard.done` marks a shard whose two passes ran to the end: the
