@@ -262,7 +262,8 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
-| CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
+| The election over a journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after #1323 (build the paros journal v1)) | `election/` | #1420 (paros-election) |
+| CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
 model.
@@ -3385,6 +3386,90 @@ majority. It passes with `F + 1` members of the set down (`heal_replica`).
 What is not in the model: the register across a matchmaker handover (`segment-records/`), a
 replica that comes back with an empty disk (a new replica stands for it), a source that the
 controller changes during a copy (the plan aborts and a new plan starts), and offload.
+
+### `election/`: the election over a journal, for #1420 (paros-election)
+
+This model checks the term of `docs/architecture/03-3-coordinators-and-placement.md` §3.3 (rule 3,
+decision 13) alone. The crate `paros-election` (a working name) will build it. A user elects any
+actor with it, and each coordinator uses it over its control journal. `cell-control/` has the same
+term together with the duties of a cell. This model has no cell duties. It models the steps of the
+term that `cell-control/` leaves abstract.
+
+The journal is one atomic object. The other models check how Paxos keeps it. It holds the leader
+value: unset, a uuid, or `None` in multi-writer mode (`docs/journal/02-data-plane.md` §J2.4.1). It
+also holds a log of the records that the election folds: each applied `SetLeader` and each term
+record.
+
+The steps:
+
+- **Win.** An actor sends `SetLeader(new, old)` with a fresh uuid. It takes `old` from its fold of
+  a prefix of the log, so its view can lag. The loser learns the winner from the refusal. A
+  candidate with no answer sends the same call again, so a refusal that names its own uuid is a
+  win.
+- **Number.** The term number is the count of the `SetLeader` records that name a uuid. The winner
+  computes it as the number of the term of `old`, plus one.
+- **Hold.** The first write of a term is the term record. It names the holder's interface: the
+  actor and its incarnation. Each later write is a renewal.
+- **Lose.** A holder stops at its first refused write.
+- **Hand on.** A holder sends `SetLeader(next, me)` with a fresh uuid. Then it sends the uuid and
+  the term number to the next actor, which takes the term if it is idle.
+- **Fence.** A holder sends orders out of the journal with its term number. The receiver keeps the
+  highest term on disk and refuses a lower one.
+- **Challenge.** An actor challenges only when no write under the current uuid comes for a lease
+  (`LiveHolder`: an actor or a hand-on message holds the current uuid). With `Eager`, it
+  challenges at any time.
+
+The faults: an actor stops and comes back as a new incarnation, and the answers to the old
+incarnation are lost. One message is lost. A call is applied late. The user switches the journal to
+multi-writer mode.
+
+The properties:
+
+- `TermTrue`: the term of a holder is the term of its uuid in the journal. So one term has one
+  holder.
+- `WriteInTerm`: the journal takes a write only in the term that it was sent in.
+- `NoRegress`: the receiver never applies an order below one that it applied. The fence is a
+  property of the receiver only.
+- `StopsAtRefusal`, an action property: the step that reads a refusal of a write under the
+  holder's uuid leaves it with no term. It checks the rule itself, not a result of the rule.
+- `IfaceOfTerm`: the interface that any fold publishes is the interface of the holder of that
+  fold's term, in the incarnation that took the term.
+- `PubTrue`: a holder that believes its interface is published finds its term record, with its own
+  incarnation, in the journal.
+- `ModeKept`: the election never takes a journal out of multi-writer mode.
+- `Leads`: once the faults stop, an actor leads the term in force, and its interface is published.
+  It is checked under weak fairness, with no `Eager` challenge and with every fold at the tail.
+
+The rules are constants, and `TRUE` is the rule: `Fence`, `Cas`, `ClearIface` (the fold clears the
+interface at each `SetLeader`), `Fresh` (each campaign draws a new uuid), `Stop`, `RefuseMulti` and
+`OwnAnswer` (an answer counts only for the uuid that its write was sent under).
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: every safety property. Three actors (symmetric), three uuids, one crash, one lost message, eager challenges from views that lag (1.5 million distinct states) |
+| `safety_hand` | ci | pass: every safety property, with one hand on, one crash and no lost message (1.3 million distinct states) |
+| `safety_multi` | ci | pass: every safety property, with the user's switch to multi-writer mode, two uuids, one crash and no lost message |
+| `live` | ci | pass: `Leads`. Two actors, four uuids, one crash, one lost message |
+| `live_hand` | ci | pass: `Leads` with one hand on and one lost message. A lost hand-on message leaves a term with no holder, and a challenge takes the next term |
+| `no_fence` | ci | violation of `NoRegress`: the order of a deposed holder lands after an order of the next term |
+| `late_challenge` | ci | violation of `TermTrue`: with no compare-and-set, two challenges from one view both win. The second one believes a term number that the first one holds |
+| `iface_kept` | ci | violation of `IfaceOfTerm`: after a `SetLeader`, the fold publishes the interface of the earlier term until the term record of the new holder lands |
+| `reinstate` | ci | violation of `WriteInTerm`: an actor names its old uuid again and wins a later term. Its write of the earlier term was in flight across a restart, and it lands in the new term |
+| `no_stop` | ci | violation of `StopsAtRefusal`: a holder keeps its term after a refused write |
+| `multi` | ci | violation of `ModeKept`: a challenge with `old = None` takes a multi-writer journal back to single-writer mode |
+| `any_answer` | ci | violation of `PubTrue`: an actor hands on and then wins again. The ok of the term record of its earlier term marks its new interface as published |
+| `reach_<event>` | ci | violation of `NotReached`, one for each case. `won_by_refusal`: the answer of a won call is lost, and the call sent again is refused with the candidate's own uuid. `lost_cas`: two candidates race, and one loses. `deposed_stop`: a deposed holder stops at its refused write. `late_cas_refused`: a call applied after another term began is refused. `stale_refused`: the receiver refuses an order of an old term. `adopted`: the next actor takes a handed term. `multi_stop`: a holder stops when the user switches the journal to multi-writer mode |
+
+What the model found: **an answer counts only for the uuid that its write was sent under.** A holder
+can have a write of its earlier term in flight when it takes a new term, for example after a hand
+on that it then wins back. Without this rule, the ok of that old term record marks the new
+interface as published (`any_answer`). The refusal of an old renewal also deposes the new term.
+That costs one term: in a first liveness check with a tight uuid budget, it used the last uuid.
+
+What is not in the model: Paxos inside the journal (one atomic object), the lease as a clock (a
+challenge waits until there is no live holder, or comes at any time with `Eager`), more than one
+receiver, the recovery pass of a coordinator after it wins (#1422 (the takeover by a new
+controller)), and the `expected_seq` of the writes of a holder (`multi-writer/`).
 
 ### `journal-ids/`: one id names at most one journal, forever, for #1419
 
