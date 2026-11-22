@@ -87,8 +87,11 @@ a tenant on, write to, read from, break and watch heal (section 9). The homelab 
 
 ### 1.1 The goals and the root rules
 
-**The ten goals** (Pierre, 2026-11-22). The goals say what paros is for. Goals 1 to 6 are the
+**The eleven goals** (Pierre, 2026-11-22). The goals say what paros is for. Goals 1 to 6 are the
 decisions of section 1 above. Goals 7 to 10 say how paros is built (section 4.4, AGENTS.md).
+Goal 11 says what an operator gets: Pierre, 2026-11-22, "parosd should be easy to operate,
+because of self healing and autoscaling". The scaling is for after the journal v1, whose
+controller takes no action from load (journal §J6).
 
 | # | Goal | In short |
 |---|---|---|
@@ -102,6 +105,13 @@ decisions of section 1 above. Goals 7 to 10 say how paros is built (section 4.4,
 | 8 | **Every role is a pure actor** | A deterministic step, persist before send, a refusal is data. I/O is only in adapters. So each layer has its model, its walk and its trace check. |
 | 9 | **Proved before built** | No code before its TLA+ model, and no excuse in simulation. |
 | 10 | **Everything simulates, and it runs in the browser** | Every layer, and the whole service, runs in the deterministic simulation. The same code compiles to wasm and runs in a browser. |
+| 11 | **Easy to operate** | The service operates itself: it heals and it scales with no person in the loop. What a person would do by hand, a component does. Each component has one duty, and offers it as a call. |
+
+**How goal 11 reads in a design** (Pierre, 2026-11-22). When a design leaves a task to a
+person, ask which component can do it. A component that does such a task observes the system
+and acts on it; it has one duty; and it offers that duty as a call, so that another component
+or a tool can use it. The grid controller of a journal is one example (journal §J6): it reads
+the measures of its roles and reshapes the journal. The examples are not the goal.
 
 **The eight root rules** are the consequences of these goals in the service. Each one replaced a
 stack of fixes of the code at the tag `v0.2.0-alpha.1`: rule 3 serves goals 3 and 4; rules 2, 4,

@@ -212,6 +212,7 @@ or of `docs/` is a consequence of one of them (`docs/architecture/01-goal.md` §
 | 8 | **Every role is a pure actor** | A deterministic step, persist before send, a refusal is data. I/O is only in adapters. So each layer has its model, its walk and its trace check. |
 | 9 | **Proved before built** | No code before its TLA+ model, and no excuse in simulation. |
 | 10 | **Everything simulates, and it runs in the browser** | Every layer, and the whole service, runs in the deterministic simulation. The same code compiles to wasm and runs in a browser. |
+| 11 | **Easy to operate** | The service operates itself: it heals and it scales with no person in the loop. What a person would do by hand, a component does. Each component has one duty, and offers it as a call. |
 
 The features of the service at the tag stay; its structure changes (goals 7 and 8,
 `docs/architecture/04-roles.md` §4.4). When you add a crate, ask: can a program that is not
