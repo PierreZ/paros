@@ -67,7 +67,8 @@ Test only: `publish = false`.
 - `src/whole.rs`: the whole-journal walk (`WholeModel`, #1445): two journals on nine machines in
   three zones, a `Driver` on each machine, the controllers of each journal run by
   `paros_journal_control::ControlDriver` on the reports of the machines (the walk is its register
-  and cell ports), a shared reshape token, a client that writes, resends and resolves, crashes, the loss of a zone
+  and cell ports; each controller is a process of its own, and the move `Mute` loses its reports
+  so the other takes the term from a holder that runs), a shared reshape token, a client that writes, resends and resolves, crashes, the loss of a zone
   for a while, lost register calls and disk faults, the leader's retire and the heal of a retired
   segment's replica set on the `Host` (#1314); its oracles (`AGREE`, `SEALED`, `FLIGHT`,
   `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`, `BOUNDED_IN_FLIGHT`), its reach sites and its planted mutants (`WholeMutant`).

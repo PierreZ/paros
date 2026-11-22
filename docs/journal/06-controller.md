@@ -391,8 +391,9 @@ controller:
   serves no role yet. The controller stamps each report with its own clock when it takes it, so
   the clocks of two processes never meet. `Signals` gives the liveness of a process from the age
   of its last report (`up` below the suspicion window, `suspect` below the down window, `down`
-  after; both windows are the host's, **Open**), `leader_known` (a `Writes` of the newest segment
-  inside the suspicion window) and `signal_age` (the time since the newest report of any
+  after; both windows are the host's, **Open**), `leader_known` (a `Writes` of a segment
+  inside the suspicion window; the view's `leader_live` asks it of the segment
+  in force) and `signal_age` (the time since the newest report of any
   process: a controller that hears nobody is cut off and plans nothing expensive; a process that
   is down does not make the signals stale). A process never heard ages from the start of the
   signals, so a controller that just started replaces no member before it could hear it. The
@@ -404,7 +405,8 @@ controller:
   implements: `ControlRegister` (a done read of the register, and one register operation for a
   change: done, refused or no answer) and `Cell` (the process of a node, its zone, the
   candidates, the matchmakers, and the cell's token for the journal). One `poll`: read the
-  register; note each segment and each seal the driver sees for the first time, at that time;
+  register; note each segment and each seal the driver sees for the first time, at that time,
+  and forget each segment that left the register;
   an idle controller campaigns when the register names no holder, names this controller (it
   restarted and forgot its term) or names a holder whose process is down or unknown; a holder
   builds its view (the liveness of every node of the register and of every candidate, the zones,
@@ -414,18 +416,27 @@ controller:
   complete copy goes to `ControlDriver::copied`. The driver takes the cell's token before an
   expensive action (a reshape call, a heal's copy or its compare-and-set) and gives it back once
   the journal has no call, no heal and no pending or sealed segment; both are idempotent at the
-  cell, so a new holder gives back the token of a holder that crashed. The scrub is not built
+  cell, so a new holder gives back the token of a holder that crashed. Only the holder that the
+  register names, at its own term, takes or gives back the token: a deposed holder touches it
+  no more. The driver drops the reports of its own process (its controller knows it is alive,
+  and its own beat must not hide that it hears no other process), so the cell must place the
+  controller on the driver's own process; `poll` asserts it. The scrub is not built
   (the CTRL repair group of #1326), so the driver gives no pending repair and no data loss.
 
 The whole-journal walk of `journal-sim` (#1445, `src/whole.rs`) runs the controllers through
 `ControlDriver`: each machine that is up publishes a beat and the segment of each leader on it
-that writes, the walk is the register port (a request or a reply lost in the chaos phase) and the
+that writes, each controller publishes its own beat (a controller is a process of its own, on
+a stateless machine), the walk is the register port (a request or a reply lost in the chaos phase) and the
 cell port (its placement, and one token for the two journals), and it delivers the driver's sends
 to the new replicas. Journal 1 starts with a holder that runs on no machine, journal 2 with no
-holder. The oracle `ALERTS` judges each alert against the machines as they are (a machine is
-gone once it is down and was not up at a report for the down window); the mutant
+holder. The move `Mute` loses the reports of one controller for longer than the down window,
+so the other controller takes the term from a holder that runs, and the reach site `DEPOSED`
+requires that a running holder reads it and stops. The oracle `ALERTS` judges each alert against
+the machines as they are (a machine is gone once it is down and was not up at a report for the
+down window: the truth counts the window from the last report, as the driver does); the mutant
 `StaleLiveness` drops the reports of a machine that was ever down. The new oracle
-`BOUNDED_IN_FLIGHT` judges that at most one journal has a pending or sealed segment at a time
+`BOUNDED_IN_FLIGHT` judges that at most one journal has an expensive action in flight at a time
+(a pending or sealed segment, or a heal of the holder that the register names)
 (mutant `NoToken`: the cell gives a token to every journal). `tests/whole.rs` also requires every
 `probe!` of the driver and of the signals (`driver::PROBES`, `signals::PROBES`). The example
 `driver` of the crate shows a campaign, a heal after a process goes silent and a takeover.

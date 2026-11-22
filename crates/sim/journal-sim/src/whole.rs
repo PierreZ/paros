@@ -138,7 +138,7 @@ pub const ACKED: &str = "whole journal: each acked write holds its position in t
 pub const ALERTS: &str = "whole journal: each controller alert is true of the machines";
 /// Oracle: the journals share one token, so at most one reshapes at a time.
 pub const BOUNDED_IN_FLIGHT: &str =
-    "whole journal: at most one journal reshapes at a time under the shared token";
+    "whole journal: at most one journal reshapes or heals at a time under the shared token";
 /// Oracle: a node that a heal added to a retired set holds the whole
 /// segment on its disk while the set names it.
 pub const HEAL_HELD: &str =
@@ -174,6 +174,8 @@ pub mod reach {
     pub const HEALED_WRITE: &str = "whole journal: a write chosen in a segment a heal opened";
     /// The controller held a heal and alerted that no placement exists.
     pub const UNPLACEABLE: &str = "whole journal: the controller alerted no placement";
+    /// A controller that runs read that another took its term, and stopped.
+    pub const DEPOSED: &str = "whole journal: a running controller saw it was deposed";
     /// A heal waited for the token that the journals share.
     pub const NO_TOKEN: &str = "whole journal: a heal waited for the shared token";
     /// The controller asked to re-replicate a sealed segment.
@@ -194,6 +196,7 @@ pub mod reach {
         RESTARTED,
         ZONE_OUT,
         TAKEOVER,
+        DEPOSED,
         HEALED,
         HEAL_LOST,
         SEALED,
@@ -395,6 +398,9 @@ pub struct WholeModel {
     late: Vec<(usize, Ask)>,
     /// The journal that holds the one token of the cell's rate limiter.
     token: Option<usize>,
+    /// The controllers whose reports are lost until a time, by journal and
+    /// controller.
+    muted: BTreeMap<(usize, usize), u64>,
 }
 
 /// The walk with `mutant` planted.
@@ -431,6 +437,9 @@ pub enum WholeAction {
     ZoneOut,
     /// A copy or abandon ask that the network held arrives again, late.
     Late,
+    /// The reports of one controller are lost for a while: the other
+    /// controller of its journal takes the term from a holder that runs.
+    Mute,
 }
 
 impl Model for WholeModel {
@@ -454,13 +463,20 @@ impl Model for WholeModel {
             WholeAction::Fault,
             WholeAction::ZoneOut,
             WholeAction::Late,
+            WholeAction::Mute,
         ]
     }
 
     fn weight(action: WholeAction, phase: Phase) -> u32 {
         match (action, phase) {
-            (WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late, Phase::Chaos) => 1,
-            (WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late, _) => 0,
+            (
+                WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late | WholeAction::Mute,
+                Phase::Chaos,
+            ) => 1,
+            (
+                WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late | WholeAction::Mute,
+                _,
+            ) => 0,
             (_, Phase::Settle) => 1,
             (WholeAction::Poll, _) => 120,
             (WholeAction::Tick | WholeAction::Campaign, _) => 8,
@@ -481,6 +497,7 @@ impl Model for WholeModel {
             WholeAction::Fault => self.fault(cx),
             WholeAction::ZoneOut => self.zone_out(cx),
             WholeAction::Late => self.late(cx),
+            WholeAction::Mute => self.mute(cx),
         }
         self.place();
         self.judge_heals();
@@ -526,7 +543,7 @@ impl Model for WholeModel {
                 if ctl.machine == *node {
                     ctl.driver = Some(ControlDriver::new(
                         ctl.node(),
-                        ProcessId(ctl.machine),
+                        ProcessId(ctl.node().0),
                         CONTROL,
                         now,
                     ));
@@ -661,7 +678,7 @@ impl WholeModel {
                     machine,
                     driver: Some(ControlDriver::new(
                         NodeId(CONTROLLERS + machine),
-                        ProcessId(machine),
+                        ProcessId(CONTROLLERS + machine),
                         CONTROL,
                         0,
                     )),
@@ -699,6 +716,7 @@ impl WholeModel {
             journals,
             late: Vec::new(),
             token: None,
+            muted: BTreeMap::new(),
         };
         for m in MACHINES {
             model.machines.insert(
@@ -1321,7 +1339,7 @@ impl WholeModel {
     /// publishes its report to every controller of the journal that is up:
     /// a beat, and the segment of each leader on it that writes.
     fn control(&mut self, j: usize, cx: &mut Cx<'_, Self>) {
-        self.publish(j);
+        self.publish(j, cx.phase() == Phase::Chaos);
         let alive: Vec<usize> = (0..self.journals[j].ctls.len())
             .filter(|c| self.journals[j].ctls[*c].driver.is_some())
             .collect();
@@ -1335,13 +1353,24 @@ impl WholeModel {
         }
     }
 
-    /// The reports of every machine that is up, to every controller of
-    /// journal `j` that is up. The planted bug [`WholeMutant::StaleLiveness`]
-    /// drops the reports of a machine that was ever down.
-    fn publish(&mut self, j: usize) {
+    /// The reports of every machine that is up, and of every controller of
+    /// journal `j` that is up, to every controller of the journal that is
+    /// up. In the chaos phase a muted controller's report is lost
+    /// ([`WholeAction::Mute`]). The planted bug
+    /// [`WholeMutant::StaleLiveness`] drops the reports of a machine that
+    /// was ever down.
+    fn publish(&mut self, j: usize, chaos: bool) {
         let now = self.now();
         let id = self.journals[j].id;
         let mut reports = Vec::new();
+        for (c, ctl) in self.journals[j].ctls.iter().enumerate() {
+            let muted = chaos && self.muted.get(&(j, c)).is_some_and(|until| now < *until);
+            if let Some(driver) = ctl.driver.as_ref()
+                && !muted
+            {
+                reports.push(driver.report());
+            }
+        }
         for (m, machine) in &self.machines {
             let Some(driver) = machine.driver.as_ref() else {
                 continue;
@@ -1466,6 +1495,7 @@ impl WholeModel {
     fn polled(&mut self, j: usize, c: usize, polled: Polled, cx: &mut Cx<'_, Self>) {
         if let Some(decision) = &polled.decision {
             let value = self.value(j);
+            sometimes!(decision.action == Action::Stop, reach::DEPOSED);
             self.judge_alerts(j, &value, &decision.alerts);
             sometimes!(
                 decision.action == Action::Wait(paros_journal_control::Wait::NoToken),
@@ -1618,21 +1648,31 @@ impl WholeModel {
         }
     }
 
-    /// [`BOUNDED_IN_FLIGHT`]: at most one journal has a reshape that its
-    /// retire has not ended (a pending or a sealed segment): the two
-    /// journals share one token.
+    /// [`BOUNDED_IN_FLIGHT`]: at most one journal has an expensive action
+    /// in flight: a reshape that its retire has not ended (a pending or a
+    /// sealed segment), or a heal of the controller that holds the
+    /// register's term. The two journals share one token.
     fn judge_in_flight(&self) {
-        let busy: Vec<u64> = self
-            .journals
-            .iter()
-            .filter(|journal| {
-                self.value_of(journal.id)
-                    .segments()
-                    .values()
-                    .any(|r| matches!(r.state(), SegmentState::Pending | SegmentState::Sealed))
-            })
-            .map(|journal| journal.id.0)
-            .collect();
+        let busy: Vec<u64> =
+            self.journals
+                .iter()
+                .filter(|journal| {
+                    let value = self.value_of(journal.id);
+                    let term = value.term();
+                    let healing = journal.ctls.iter().any(|ctl| {
+                        ctl.driver.as_ref().is_some_and(|d| {
+                            term.holder == Some(d.controller().me())
+                                && d.controller().term() == Some(term.number)
+                                && d.controller().heal().is_some()
+                        })
+                    });
+                    healing
+                        || value.segments().values().any(|r| {
+                            matches!(r.state(), SegmentState::Pending | SegmentState::Sealed)
+                        })
+                })
+                .map(|journal| journal.id.0)
+                .collect();
         assert!(
             busy.len() <= 1,
             "{BOUNDED_IN_FLIGHT}: the journals {busy:?} reshape at once"
@@ -1953,6 +1993,18 @@ impl WholeModel {
         }
     }
 
+    /// The reports of one controller are lost for longer than the down
+    /// window.
+    fn mute(&mut self, cx: &mut Cx<'_, Self>) {
+        let j = cx.rng().index(self.journals.len()).expect("journals");
+        let c = cx
+            .rng()
+            .index(self.journals[j].ctls.len())
+            .expect("controllers");
+        let until = self.now() + (DOWN_AFTER + 2) * TICK;
+        self.muted.insert((j, c), until);
+    }
+
     /// Every machine of one zone crashes.
     fn zone_out(&mut self, cx: &mut Cx<'_, Self>) {
         let zone = cx.rng().below(3);
@@ -2014,6 +2066,11 @@ struct WalkCell {
 
 impl Cell for WalkCell {
     fn process_of(&self, node: NodeId) -> Option<ProcessId> {
+        // A controller is a process of its own, on a stateless machine
+        // (§J6.1); a role runs in the process of its machine.
+        if node.0 >= CONTROLLERS {
+            return Some(ProcessId(node.0));
+        }
         let machine = machine_of(node);
         MACHINES.contains(&machine).then_some(ProcessId(machine))
     }

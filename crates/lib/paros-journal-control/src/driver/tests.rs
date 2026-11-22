@@ -6,7 +6,7 @@ use paros_journal::segment::OpeningCall;
 use paros_journal::{BoundaryState, Grid, Leader, RELEASE, Slot};
 
 use super::*;
-use crate::decide::{Action, Wait};
+use crate::decide::{Action, Alert, Wait};
 
 const ME: NodeId = NodeId(100);
 const OTHER: NodeId = NodeId(200);
@@ -632,4 +632,141 @@ fn a_seal_seen_later_stalls_from_its_own_sight() {
     }
     beat_all(&mut d, 501 + stall, &[]);
     assert!(stalled(&d.poll(501 + stall, &mut register, &mut cell)));
+}
+
+#[test]
+fn the_drivers_own_report_hides_no_silence() {
+    let mut d = driver(0);
+    d.publish(
+        25,
+        Report::Beat {
+            process: ProcessId(ME.0),
+        },
+    );
+    // The own beat is dropped: the driver heard nothing since its start.
+    assert_eq!(d.signals().signal_age(25), 25);
+    assert_eq!(
+        d.signals().liveness(ProcessId(ME.0), 25, CONFIG.windows),
+        Liveness::Suspect
+    );
+}
+
+#[test]
+#[should_panic(expected = "the cell places this controller on the driver's own process")]
+fn a_cell_that_places_the_controller_elsewhere_panics() {
+    let mut register = Register::new(RegisterValue::new());
+    let mut cell = TestCell::new();
+    let mut d = ControlDriver::new(ME, ProcessId(7), CONFIG, 0);
+    d.poll(0, &mut register, &mut cell);
+}
+
+/// Segment 1 on the two columns 1, 2, 3 and 4, 5, 6, in force, and
+/// segment 2 pending: the newest segment is not the one in force.
+fn two_columns_and_a_pending_segment() -> RegisterValue {
+    let value = apply(&RegisterValue::new(), &Change::Elect { holder: ME });
+    let value = apply(
+        &value,
+        &Change::Reshape {
+            opening: OpeningCall {
+                term: 1,
+                expected: None,
+                grid: Grid::new(1, vec![nodes(&[1, 2, 3]), nodes(&[4, 5, 6])]).expect("a v1 grid"),
+                replicas: nodes(&[11, 12, 13]),
+            },
+            release: RELEASE,
+        },
+    );
+    apply(
+        &value,
+        &Change::Reshape {
+            opening: OpeningCall {
+                term: 1,
+                expected: Some(SegmentId(1)),
+                grid: Grid::new(1, vec![nodes(&[7, 8, 9])]).expect("a v1 grid"),
+                replicas: nodes(&[17, 18, 19]),
+            },
+            release: RELEASE,
+        },
+    )
+}
+
+/// A column below quorum: the grid writes with a live leader of the
+/// segment in force, and blocks an election without one. The leader of
+/// another segment does not count.
+#[test]
+fn the_leader_that_counts_writes_the_segment_in_force() {
+    let alerts_with = |segment: Option<SegmentId>| {
+        let mut register = Register::new(two_columns_and_a_pending_segment());
+        let mut cell = TestCell::new();
+        let mut d = driver(0);
+        // 2 and 3 are never heard: down at 40.
+        beat_all(&mut d, 40, &[2, 3]);
+        if let Some(segment) = segment {
+            d.publish(
+                40,
+                Report::Writes {
+                    process: ProcessId(1),
+                    segment,
+                },
+            );
+        }
+        d.poll(40, &mut register, &mut cell)
+            .decision
+            .expect("a decision")
+            .alerts
+    };
+    let with = alerts_with(Some(SegmentId(1)));
+    assert!(with.contains(&Alert::WritesDegraded), "{with:?}");
+    for other in [Some(SegmentId(2)), None] {
+        let alerts = alerts_with(other);
+        assert!(alerts.contains(&Alert::ElectionBlocked), "{other:?}");
+        assert!(!alerts.contains(&Alert::WritesDegraded), "{other:?}");
+    }
+}
+
+#[test]
+fn a_deposed_holder_neither_takes_nor_gives_the_token() {
+    let mut register = Register::new(one_segment(ME));
+    let mut cell = TestCell::new();
+    let mut d = driver(0);
+    beat_all(&mut d, 0, &[2]);
+    d.poll(0, &mut register, &mut cell);
+    assert_eq!(d.controller().term(), Some(2));
+    let (takes, gives) = (cell.takes, cell.gives);
+    // Another controller takes the term while this one still holds 2.
+    register.value = Some(apply(
+        &register.read().expect("a register"),
+        &Change::Elect { holder: OTHER },
+    ));
+    cell.held = true;
+    beat_all(&mut d, 60, &[2]);
+    let polled = d.poll(60, &mut register, &mut cell);
+    assert_eq!(polled.decision.map(|d| d.action), Some(Action::Stop));
+    assert_eq!((cell.takes, cell.gives), (takes, gives));
+    assert!(cell.held, "the token of the new holder stays");
+    assert!(
+        register
+            .ran
+            .iter()
+            .all(|c| !matches!(c, Change::Reshape { .. })),
+        "{:?}",
+        register.ran
+    );
+}
+
+#[test]
+fn a_segment_that_leaves_the_register_is_forgotten() {
+    let mut register = Register::new(sealed(ME));
+    let mut cell = TestCell::new();
+    let mut d = driver(0);
+    beat_all(&mut d, 0, &[]);
+    d.poll(0, &mut register, &mut cell);
+    assert!(d.seen.contains_key(&SegmentId(2)));
+    register.value = Some(one_segment(ME));
+    beat_all(&mut d, 10, &[]);
+    d.poll(10, &mut register, &mut cell);
+    assert_eq!(
+        d.seen.keys().copied().collect::<Vec<_>>(),
+        vec![SegmentId(1)]
+    );
 }

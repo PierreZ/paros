@@ -27,8 +27,9 @@
 //!    role, and runs what the role asks: a register change at once, with its
 //!    outcome given back; a copy, an abandon or a repair as a send that the
 //!    program delivers ([`Polled::sends`]).
-//! 4. The token: the driver takes it before an expensive action (a reshape
-//!    call, a heal's copy or its compare-and-set) and gives it back once the
+//! 4. The token: a holder of the register's term takes it before an
+//!    expensive action (a reshape call, a heal's copy or its
+//!    compare-and-set) and gives it back once the
 //!    journal has no call, no heal, and no pending or sealed segment (a
 //!    reshape ends when its old segment is retired). Both are
 //!    idempotent at the cell, so a new holder gives back the token of a
@@ -163,13 +164,19 @@ impl ControlDriver {
         }
     }
 
-    /// Take `report` at `now`.
+    /// Take `report` at `now`. A report of the driver's own process is
+    /// dropped: the controller knows it is alive, and its own beat must not
+    /// hide that it hears no other process (`signal_age`).
     ///
     /// # Panics
     ///
     /// When `now` is before the last time the driver was given.
     pub fn publish(&mut self, now: u64, report: Report) {
         self.tick(now);
+        if report.process() == self.process {
+            probe!(reachable, "driver: its own report is dropped");
+            return;
+        }
         self.signals.publish(now, report);
     }
 
@@ -177,7 +184,10 @@ impl ControlDriver {
     ///
     /// # Panics
     ///
-    /// When `now` is before the last time the driver was given.
+    /// When `now` is before the last time the driver was given, or when
+    /// the cell places this controller on a process that is not the
+    /// driver's own: the driver drops the reports of its own process, so it
+    /// would read the other process as silent.
     pub fn poll(
         &mut self,
         now: u64,
@@ -185,6 +195,11 @@ impl ControlDriver {
         cell: &mut impl Cell,
     ) -> Polled {
         self.tick(now);
+        assert!(
+            cell.process_of(self.controller.me())
+                .is_none_or(|process| process == self.process),
+            "the cell places this controller on the driver's own process"
+        );
         let Some(value) = register.read() else {
             return Polled::default();
         };
@@ -206,7 +221,8 @@ impl ControlDriver {
         self.see(&value);
         let (ask, decision) = self.step(term, &value, cell);
         polled.decision = decision;
-        self.run(ask, register, cell, &mut polled);
+        let owns = self.owns(&value);
+        self.run(ask, owns, register, cell, &mut polled);
         self.settle_token(register, cell);
         polled
     }
@@ -227,10 +243,26 @@ impl ControlDriver {
     ) -> Polled {
         self.tick(now);
         let ask = self.controller.copied(segment, copy);
+        let owns = register.read().is_some_and(|value| self.owns(&value));
         let mut polled = Polled::default();
-        self.run(ask, register, cell, &mut polled);
+        self.run(ask, owns, register, cell, &mut polled);
         self.settle_token(register, cell);
         polled
+    }
+
+    /// Whether this controller holds the term that `value` names: only
+    /// such a holder takes the token. A deposed holder that does not know
+    /// it yet still sends its heal in flight (the register refuses it for
+    /// the term), but it never takes the token from the journal that the
+    /// new holder may have given it back to.
+    fn owns(&self, value: &RegisterValue) -> bool {
+        let term = value.term();
+        let owns = term.holder == Some(self.controller.me())
+            && self.controller.term() == Some(term.number);
+        if !owns && self.controller.term().is_some() {
+            probe!(reachable, "driver: a deposed holder takes no token");
+        }
+        owns
     }
 
     /// Move the driver's time to `now`.
@@ -331,7 +363,9 @@ impl ControlDriver {
         let (matchmakers, matchmakers_live) = cell.matchmakers();
         let repairs = BTreeSet::new();
         let newest = value.newest().map(SegmentRecord::id);
-        let leader_live = newest.is_some_and(|s| self.signals.writes(s, now, self.config.windows));
+        let leader_live = value
+            .in_force()
+            .is_some_and(|r| self.signals.writes(r.id(), now, self.config.windows));
         let since_last_reshape = newest.map(|s| now - self.seen[&s].opened);
         let seal_age = value
             .segments()
@@ -365,6 +399,7 @@ impl ControlDriver {
     fn run(
         &mut self,
         mut ask: Ask,
+        owns: bool,
         register: &mut impl ControlRegister,
         cell: &mut impl Cell,
         polled: &mut Polled,
@@ -373,8 +408,10 @@ impl ControlDriver {
             match ask {
                 Ask::Nothing => return,
                 Ask::Call(change) => {
-                    probe!(reachable, "driver: an expensive action takes the token");
-                    cell.take_token();
+                    if owns {
+                        probe!(reachable, "driver: an expensive action takes the token");
+                        cell.take_token();
+                    }
                     let outcome = register.run(&change);
                     match &change {
                         Change::Reshape { opening, .. } => {
@@ -394,7 +431,9 @@ impl ControlDriver {
                     }
                 }
                 Ask::Copy { .. } => {
-                    cell.take_token();
+                    if owns {
+                        cell.take_token();
+                    }
                     polled.sends.push(ask);
                     return;
                 }
@@ -438,6 +477,8 @@ pub const PROBES: &[&str] = &[
     "driver: an expensive action takes the token",
     "driver: a heal's write waits for the next step",
     "driver: an idle journal gives back the token",
+    "driver: its own report is dropped",
+    "driver: a deposed holder takes no token",
 ];
 
 #[cfg(test)]
