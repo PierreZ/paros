@@ -65,7 +65,7 @@ modules extend in turn: today `Decree.tla` and `MultiPaxos.tla` extend standard 
 
 | Model | Proof | What it proves |
 |---|---|---|
-| `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 686 obligations, Z3, Zenon and LS4, about 2 minutes |
+| `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 692 obligations, Z3, Zenon and LS4, about 2 minutes |
 | `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Persist`, `Restart`, `Wipe`) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,289 obligations, Z3, Zenon and LS4, at most 6 minutes for each module |
 
 The TLAPS of nixpkgs (1.4.5) has no Isabelle. So a proof uses no induction lemma (they
@@ -102,7 +102,9 @@ control). There is no allow list.
 
 The `spec` job of the `TLA` workflow runs `--parse` on each folder. The `TLA mutants` workflow
 runs every mutant each week and on demand, in slices of 30 minutes
-(`scripts/mutate-tla-shards.txt`), and its `report` job lists the survivors. The `--help` of the
+(`scripts/mutate-tla-shards.txt`, where every folder has a line), and its `report` job lists
+the survivors. A run on demand can name its folders (`folders`) and hold each of its two
+matrices to a number of jobs at a time (`max_parallel`). The `--help` of the
 script names the other options (`--shard`, `--budget`, `--baseline-out`, `--baseline-from`,
 `--out`, `--skip`). The trace specs (`*Trace.tla`) are not mutated: `checks.txt` does not run
 them.

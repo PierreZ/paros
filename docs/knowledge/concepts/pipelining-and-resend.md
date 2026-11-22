@@ -118,10 +118,22 @@ which is a state the protocol is built to survive" (the `resend_pending` doc).
 | The page ceiling | `paros-consensus/src/contract/limits.rs`: `RESEND_BATCH`, `Limits::resend_page` |
 | The driver's call | `paros-roles/src/node/shared.rs` (the beat) |
 
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
 The rule is stated in the `resend_pending` doc: a driver-policy method with an honest contract,
 not something `tick` does, because skipping it is what makes the #54 hole reachable.
 
-**Sim gates and oracles:**
+**Judges today:**
+
+- `consensus-sim`'s liveness judge (`Cluster::converged`): once the faults stop, one leader
+  stands with no open round. Its control is `Mutant::NoResend` (the driver never calls
+  `resend_pending`).
+- `Flavor::paged` puts the re-send page at one round, so the core probe "phase2: a re-send page
+  wraps around past the highest open round" is reached; the coverage gate judges every core
+  probe.
+- The Phase-2 oracles `ONE_VALUE` and `ONE_PROPOSAL` (`oracle/ledger.rs`).
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - The driver skips a re-send on an inline `buggify_fault_with_prob!(0.95)` site, silent in the
   recovery tail, with the gate `"the driver skips a pending accept re-send"`

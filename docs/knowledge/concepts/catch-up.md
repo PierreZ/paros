@@ -131,7 +131,17 @@ and in the comments of `on_heartbeat`.
 - `"catch-up: a replay stops at the server's own faulty chosen record"`.
 - `"catch-up: a trim-point jump resolves a repair probe's blocked slot"`.
 
-**Sim gates and oracles:**
+**Judges today:**
+
+- Core probes, all reached by `consensus-sim`'s coverage gate: "catch-up: a stalled pull asks the
+  whole pool", "catch-up: a follower replays the decided prefix to a leader that advertises a
+  lower commit", "catch-up: a replay stops at the server's own faulty chosen record".
+- `LEARNED_CHOSEN` ("a learned value is the chosen value") and the liveness judge
+  (`Cluster::converged`: every node that is not retired learned its log once the faults stop).
+- The model `specs/tla/multi-paxos/` (commit and catch-up) and the trim-point jump of
+  `specs/tla/truncation/`.
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - `"a lagging node converges via catch-up"` (`paros-sim/src/audit/world.rs`).
 - `"the driver drops a catch-up request at the send seam"` (`paros-sim/src/audit/net.rs`).

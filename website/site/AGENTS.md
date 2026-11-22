@@ -187,7 +187,8 @@ performance numbers on the site (Pierre, 2026-10-31). The widgets that ran the p
 ## Tests (#1362 (browser smoke test and link check))
 
 `.github/workflows/pages.yml` runs both on each pull request that touches the site,
-`paros-wasm`, `paros-consensus`, `paros-journal` or the Cargo files, and before each deploy.
+`paros-wasm`, `paros-consensus`, `paros-journal`, the knowledge base cards (the Concepts
+page is built from them) or the Cargo files, and before each deploy.
 Both run on the built site, so build the wasm and the site first.
 
 - **Link check**, `npm run check-links` (`scripts/check-links.mjs`, in `nix develop`): every

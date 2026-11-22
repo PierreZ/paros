@@ -138,7 +138,19 @@ configuration-based. It may be shut down only after GC ([configuration GC](confi
 | The client | `paros-client/src/lib.rs`: `reconfigure`, `reconfigure_to` |
 | Who asks in a cell | `paros-coordinator/src/tenant/moves.rs`: a move off a draining machine reconfigures onto the machines that stay |
 
-**Sim gates and oracles** (`paros-sim/src/audit/matchmaking.rs` unless named):
+The rows that name `paros-client`, `paros-coordinator` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- The models `specs/tla/matchmaker/` (a reconfiguration as a round change) and
+  `specs/tla/zero-stall/` (the Phase-1 bypass), and the trace rules "a leader selects a second configuration" and "a candidate prepares over two configurations" (`cluster/trace/rules.rs`).
+- `consensus-sim`'s flavors `Flavor::reconfiguring` and `Flavor::reconfigured_compartments`, with
+  the walk sites "cluster: a leader started a reconfiguration" and "cluster: a slot was chosen
+  after a reconfiguration".
+- Core probes of `node/matchmaking.rs` ("matchmaking: a campaign adopts a reconfiguration its won
+  leadership ran", "node: a probe learns a later set from outside its set", and more).
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/matchmaking.rs` unless named):
 
 - `"reconfiguration: a leader is elected under a reconfigured acceptor set"` and
   `"reconfiguration: a node outside the ballot's configuration answers its Phase 1"`
