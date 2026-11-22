@@ -448,6 +448,7 @@ impl ReplicaNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, ctx)))]
     pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) -> ReadOpen {
         if self.quorum_reads.is_open(ctx) {
+            self.assert_invariants();
             return ReadOpen::TokenInUse;
         }
         // On a matchmaker deployment a read waits for a won leadership's

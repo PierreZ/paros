@@ -43,6 +43,7 @@ use paros_consensus::matchmaker::{
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::node::{BeliefSource, Delegation, ProposeResult, ReconfigureResult};
+use paros_consensus::quorum_read::ReadOpen;
 use paros_consensus::{
     Ballot, ColocatedNode, Config, MatchmakerReconfigurer, Message, NodeId, ProxyLeader,
     ReplicaNode, Slot, Value, WriteOp,
@@ -1775,7 +1776,12 @@ impl Cluster {
                     return;
                 }
                 let basis = node.read_basis().map(|basis| (basis.since, basis.fence));
-                node.quorum_read(ctx);
+                let opened = node.quorum_read(ctx);
+                assert_ne!(
+                    opened,
+                    ReadOpen::TokenInUse,
+                    "the walk draws a fresh token for each read"
+                );
                 if let Some(basis) = basis
                     && let Some(read) = node
                         .quorum_reads()
@@ -1811,7 +1817,12 @@ impl Cluster {
                         .answered(&format!("replica {}", id.0), ctx, index);
                     return;
                 }
-                replica.quorum_read_in(ctx, None);
+                let opened = replica.quorum_read_in(ctx, None);
+                assert_ne!(
+                    opened,
+                    ReadOpen::TokenInUse,
+                    "the walk draws a fresh token for each read"
+                );
                 self.drain_replica(id, cx);
             }
             Party::Proxy(_) | Party::Matchmaker(_) => {}

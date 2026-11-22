@@ -81,6 +81,7 @@ impl ColocatedNode {
         // A token still open is the driver's to wait on: nothing moves, not
         // even the gap fill below.
         if self.quorum_reads.is_open(ctx) {
+            self.assert_invariants();
             return ReadOpen::TokenInUse;
         }
         let marks = self.durable_marks();

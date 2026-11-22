@@ -79,8 +79,10 @@ enforces it).
 
 ## Constructors and wire types
 
-`AcceptorConfig::new` and `MatchmakerSet::new` are the only constructors
-(deserialisation included) because the membership is binary-searched and
+`AcceptorConfig::new` and `MatchmakerSet::new` and their fallible `try_*`
+forms are the only constructors (deserialisation included, through `TryFrom`;
+wire and operator input goes through a `try_*` form and gets a `ShapeError`)
+because the membership is binary-searched and
 normalized; do not add a second path that skips the check. `HardState` is
 `#[non_exhaustive]` with two scalars; adding one is a storage-surface change
 for every driver, so justify it in the design note first.

@@ -15,7 +15,7 @@
 //! durable — and reboot from exactly what their disk holds; a leader
 //! resigns, or hands its authority off mid-round to a peer that re-delegates
 //! what it inherited; every proxy evicts its unanswered rounds on a
-//! per-seed retention budget ([`ProxyLeader::expire_stale`]), interleaved
+//! per-seed retention budget ([`ProxyLeader::tick`] with `Limits::proxy_retention`), interleaved
 //! with the leader's take-back so the two policies meet in every order.
 //! After every step the model asserts:
 //!
