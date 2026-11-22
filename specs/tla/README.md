@@ -246,6 +246,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None`, `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the acceptor, the leader and the segment replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The heal when a later plan asks a node again, the network delivers a request twice and late, and a node acts on its own view of the register: the highest copy per node, the term check of the heal's compare-and-set, the heal count of the record, a sent heal that ends only on an answer, and a fresh register value before an abandon or a copy wipes a node | `paros_journal::register` (`Rereplicate`, `SegmentRecord::heals`), `SegmentReplica::join`, the controller's heal in `paros_journal_control::role`; walked by `journal-sim`'s heal walk | `heal-reuse/` | #1314 (re-replication of a sealed segment's replica set) |
+| One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
 
@@ -3356,3 +3357,61 @@ rules, and each rule is needed. They are proposals for Pierre (PR #1470, rules t
 What is not in the model: reads, the trim and the floor (`re-replication/`), the register across a
 matchmaker handover (`segment-records/`), and a controller's own stale view of the register (the
 controller reads the current record).
+
+### `journal-ids/`: one id names at most one journal, forever, for #1419
+
+An id is an address, never an authority (§3.8 of `docs/architecture/`). A create call carries a
+name and a request id. The coordinator of the level draws the id, and the fold of the level
+checks it at apply and refuses an id in use: the fold of the universe for a `TenantId`, the fold
+of a tenant for a `JournalId`, unique inside its tenant. The model has two cells, whose cell
+tenants draw their ids at `cell init` before any universe and are recorded by `AddCell` (the
+directory half of `universe add-cell`), one user tenant created through the universe and placed
+in cell `cA`, and three journals on one host
+of `cA` (two of the cell tenant, one of the user tenant). Ids come from a small space, so draws
+collide. A coordinator restart loses the draws not yet recorded; a create resumes by its request
+id and reads back the id that the fold gave. A delete is final, and the host drops the records of
+a deleted journal later.
+
+| Constant | Values (first: the design that passes) |
+|---|---|
+| `Order` | `fold_first`: the host books slots only under an id that the fold gave. `book_first`: slots are booked under the id that the coordinator drew, before the fold checks it (the bug of the old resumed create). |
+| `Tombs` | `TRUE`: a deleted id stays used in the fold. `FALSE`: a delete frees the id. |
+| `Key` | `pair`: the host keys records by `(TenantId, JournalId)`. `journal`: by the `JournalId` alone. |
+| `CellMint` | `draw`: the cell tenant draws its id at `cell init`. `counter`: a counter of the cell gives it (the first id). |
+| `Fresh` | `TRUE` (liveness checks only): a `TenantId` draw never collides with another one, as a 64-bit random draw. `FALSE`: draws collide; safety never uses it. |
+| `Restarts` | the restarts of the coordinators, 1. |
+
+The rule, in four invariants: `JournalIdOnce` (a tenant fold gives a `JournalId` to at most one
+journal over the whole history, deletes included), `TenantIdOnce` (the universe fold gives a
+`TenantId` to at most one tenant), `DiskOneJournal` (on a host, one key holds the records of at most
+one journal) and `BookedAfterRecord` (a host holds records under a key only after the fold gave
+that key to the journal). Action properties: `GoneStays` (a delete is final) and `KeepLive` (the
+host drops only the records of a deleted journal). Liveness: `AllCreated` (each cell joins, each
+tenant and each journal gets its id) and `Dropped` (the host drops the records of a deleted
+journal and books none again).
+
+A draw never repeats an id that the fold refused for the same create: it stands for a 64-bit
+random draw, which finds a free id in a few draws. A refused `AddCell` is final, because the
+cell tenant's id is already on the cell's disks. So the liveness of the genesis rests on `Fresh`:
+without it, the universe can draw for a user tenant the id of a cell that has not joined yet, and
+that cell never joins (found while the model was written; the chance is about `2^-64` for each
+pair of draws).
+
+| Check | CI | Result |
+|---|---|---|
+| `ids` | ci | pass (9.0 million distinct states, about 2.5 minutes with 4 workers) |
+| `live` | ci | pass: `AllCreated` and `Dropped` with `Fresh` (1.7 million) |
+| `book_first` | ci | violation of `DiskOneJournal`: two journals of the tenant draw the same id and both book under it before the fold checks either (a create resumed after a lost draw is one more way to the same state) |
+| `no_tombs` | ci | violation of `JournalIdOnce`: a journal is deleted, and a second journal of the tenant gets its id |
+| `no_tombs_disk` | ci | violation of `DiskOneJournal`: the same, before the host drops the records of the deleted journal |
+| `journal_key` | ci | violation of `DiskOneJournal`: a journal of the cell tenant and a journal of the user tenant get the same `JournalId` on one host |
+| `counter` | ci | violation of `AllCreated`: both cell tenants get id 1, and the second `JoinFleet` is refused for good |
+| `reach_journal_refused`, `reach_tomb_refused`, `reach_tenant_refused`, `reach_join_refused`, `reach_draw_lost` | ci | violation: a tenant fold refuses a used `JournalId`, then a tombstone; the universe refuses a used `TenantId` for a user tenant, then for a `JoinFleet`; a restart loses the draw of a create (`lost`), and that create still gets its id |
+
+What is not in the model: the universe tenant's own id, drawn at `universe init`, and the id of a
+tenant's control journal, drawn with the tenant and recorded beside it, not in the tenant's fold
+(both are random draws, like the others, with the same `2^-64` chance of a collision); the names of `paros-names` (a name to an id, a pure fold), the delete
+of a tenant (the same tombstone rule in the fold of the universe), the move of a tenant between
+cells (its id does not change), a control journal rebuilt by recovery (§3.10, deferred; it forgets
+its tombstones, the case for a birth nonce in `Assign`), and a peer that forges ids (out of scope).
+
