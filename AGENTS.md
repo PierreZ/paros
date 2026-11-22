@@ -125,8 +125,10 @@ the same write; #1189 (the journal state model), #1309 (the state is the disk)),
 (`specs/tla/re-replication/`: a new replica counts only on its own complete copy from a full
 member of the set, the new set written by compare-and-set on the version of the register, a "done"
 report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
-removed replica that comes back during the heal; #1314 (re-replication of a sealed segment's
-replica set)).
+removed replica that comes back during the heal; `specs/tla/heal-reuse/`: a node that a later
+plan asks again and requests delivered twice and late, with the highest copy per node, the term
+check, the heal count of the record and a sent heal that ends only on an answer; #1314
+(re-replication of a sealed segment's replica set)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both

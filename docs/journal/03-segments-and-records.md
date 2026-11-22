@@ -141,12 +141,15 @@ checked, each with a control that TLC breaks:
     deposed controller to stop (§J6.1). The model never asks a node twice for a copy. In the
     code a later plan can pick the same node, and there the term check is needed: a deposed
     controller's compare-and-set, on a record that did not change, could count a copy that the
-    new holder's copy wiped (`journal-sim`'s heal walk, mutant `NoTermCheck`; #1314).
+    new holder's copy wiped (`specs/tla/heal-reuse/`, control `version_only`; `journal-sim`'s
+    heal walk, mutant `NoTermCheck`; #1314).
   - **A node runs one copy of a segment, the highest `CopyId` it was asked** (the term of the
     plan, then its number in that term; #1314, found by the heal walk). A higher copy replaces
-    the one it runs, and a lower one, from a deposed controller, is refused (mutant `AnyCopy`).
-    **Open**: a model of a node that a later plan asks again, and of a compare-and-set that the
-    network delivers twice and late (`re-replication/` with reuse and delayed requests).
+    the one it runs, and a lower one, from a deposed controller, is refused (`heal-reuse/`,
+    control `copy_any`; mutant `AnyCopy`). `specs/tla/heal-reuse/` models a node that a later
+    plan asks again, and requests and answers that the network delivers twice and late; it
+    checks the four rules of this list and of "As built" below that `re-replication/` cannot
+    see, each with a control.
   - **A "done" report belongs to one copy.** A new plan starts a new copy. A report kept from an
     aborted copy (`report_sticky`) counts a replica that dropped its copy since.
   - **A replica that does not hold a slot refuses the read**, and the reader reads the record and
@@ -170,13 +173,13 @@ checked, each with a control that TLC breaks:
   `heals`, the count of the heals that changed the set. The set is the one field that can return
   to an earlier value (a removed member that came back is a candidate again), so without the
   count a heal delayed in the network could apply a second time on a set that only looks like
-  the one it read (`journal-sim`'s heal walk, mutant `NoHealCount`, oracle `COMPARED`; found by
-  the review of PR #1470).
+  the one it read (`heal-reuse/`, control `no_heals`; `journal-sim`'s heal walk, mutant
+  `NoHealCount`, oracle `COMPARED`; found by the review of PR #1470).
   - **A heal whose compare-and-set was sent ends only on an answer** (found by the heal walk
     with delayed copies of requests). A copy of the change can still be in the network; if the
     heal ended when its new replica went down, the replica would drop its copy when it came back
-    and the late copy would write an empty member. A down new replica that holds its copy is a
-    member that a later heal replaces.
+    and the late copy would write an empty member (`heal-reuse/`, control `sent_abort`). A down
+    new replica that holds its copy is a member that a later heal replaces.
   The controller role plans one heal at a time, the first member that is down, asks the new
   replica to copy (`Ask::Copy` with its `CopyId`), counts it on its own report of that copy, and
   gives the compare-and-set until it is answered; a read that changed, a new replica that is down

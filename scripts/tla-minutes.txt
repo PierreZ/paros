@@ -29,6 +29,7 @@ grid-controller 2.5
 handover 12.5
 handover-chain 5
 handover-gc 1
+heal-reuse 3
 health 4
 journal-state 16
 leader-handoff 18.5

@@ -34,7 +34,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | Quorum everywhere and the grid bound | §J5.1 | `quorum-everywhere/`, `grid/` | #1257 (quorum everywhere); #1318 (the rows of the boundary write and the acceptor compaction) |
 | CTRL on a grid and across segments | §J5.3 | `ctrl-grid/`, `ctrl-segments/` | #1263 (CTRL recovery in the journal) |
 | The seal end against a faulty record: a faulty vote counts | §J3.1, §J5.3 | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record) |
-| Re-replication of a sealed segment | §J3.1, §J5.2 | `re-replication/`, its row in `quorum-everywhere/` | #1314 (re-replication of a sealed segment's replica set) |
+| Re-replication of a sealed segment | §J3.1, §J5.2 | `re-replication/`, `heal-reuse/` (a node asked again, late requests), its row in `quorum-everywhere/` | #1314 (re-replication of a sealed segment's replica set) |
 | The rules composed across three segments, with the acceptors' disk and the write orders | §J7.2 | `journal-state/` | #1189 (the journal state model), #1309 (the state is the disk) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
 | The controller's election and fenced reshape | §J6.1 | `grid-controller/` | #1259 (the fenced reshape call of the grid controller) |
@@ -148,8 +148,9 @@ it). Their mutants: a copy reported when it starts (`EarlyReport`), a lower copy
 (`AnyCopy`), a heal written with no compare (`NoCompare`), with no term check (`NoTermCheck`) or
 with no count of heals (`NoHealCount`), and a compare-and-set never sent again (`NoResend`). The
 roles walk's retire is the leader's now, judged by `RETIRE` (a retire counts `F + 1` replicas
-that hold the whole segment on their disk; mutant `HoldsLie`). **Open**: a trace check of the
-heal walk against `re-replication/`.
+that hold the whole segment on their disk; mutant `HoldsLie`). `specs/tla/heal-reuse/` checks the four rules of the code that these mutants
+remove (highest copy, term check, heal count, a sent heal that ends only on an answer), each with
+a control. **Open**: a trace check of the heal walk against `heal-reuse/`.
 
 **The walk of the register** (#1325 (the matchmaker register as an optional role),
 `src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
