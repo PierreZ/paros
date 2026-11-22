@@ -60,15 +60,18 @@ GROUP_MINUTES = 22.0
 NOT_RUST = re.compile(
     r"^(website/|docs/|specs/|scripts/build-wasm\.sh$|scripts/check-tla\.sh$"
     r"|scripts/check-proofs\.sh$|scripts/mutate-tla\.py$|scripts/tla-minutes\.txt$"
+    r"|scripts/mutate-tla-shards\.txt$|\.github/workflows/tla-mutants\.yml$"
     r"|\.github/workflows/tla\.yml$)|\.md$"
 )
 
 # The files that every folder's check reads: a change runs every folder.
+# `scripts/tla-minutes.txt` is not one: no check reads it, it only packs the
+# folders into jobs, and every plan judges it (a line for each folder), so a
+# change that adds the line of a new folder runs that folder alone.
 TLA_TOOLS = {
     "scripts/check-tla.sh",
     "scripts/mutate-tla.py",
     "scripts/ci-plan.py",
-    "scripts/tla-minutes.txt",
     "flake.nix",
     "flake.lock",
     ".github/workflows/tla.yml",
