@@ -67,7 +67,12 @@ use crate::command::{Command, Leader, Record, Write};
 use crate::fold::{Answer, BoundaryState, JournalState};
 use crate::register::{Change, RegisterValue};
 use crate::resolve::{ResolveAnswer, resolve};
-use crate::segment::{SegmentId, SegmentState};
+use crate::segment::{Grid, SegmentId, SegmentState};
+
+mod read;
+
+use read::PendingRead;
+pub use read::{MAX_READS, READ_PAGE, READ_TICKS, ReadAnswer};
 
 /// The most chosen slots one `Pull` answer carries.
 pub const PULL_PAGE: usize = 64;
@@ -146,6 +151,16 @@ pub enum ReplicaEffect {
         /// The copy.
         copy: CopyId,
         /// The batch the report waits on: the last slot of the copy.
+        after: Option<PersistId>,
+    },
+    /// Answer the read `read` once the batch `after` is durable: the fold
+    /// it reads may hold slots of batches still in flight.
+    Read {
+        /// The reader's id of the read.
+        read: u64,
+        /// The answer.
+        answer: ReadAnswer,
+        /// The batch the answer waits on.
         after: Option<PersistId>,
     },
     /// Drop the replica's copy of the segment and stop the replica: it is
@@ -232,6 +247,11 @@ pub struct SegmentReplica {
     sources: std::collections::BTreeSet<NodeId>,
     /// Whether the replica dropped its copy.
     dropped: bool,
+    /// The grid of the segment, from a done value: the acceptors a read
+    /// asks.
+    grid: Option<Grid>,
+    /// The open reads, by the reader's id.
+    reads: BTreeMap<u64, PendingRead>,
     flight: Flight,
 }
 
@@ -271,6 +291,8 @@ impl SegmentReplica {
             joining: disk.joining,
             sources: std::collections::BTreeSet::new(),
             dropped: false,
+            grid: None,
+            reads: BTreeMap::new(),
             flight: Flight::after(disk.durable),
         };
         if let Some((boundary, start)) = disk.base {
@@ -480,6 +502,12 @@ impl SegmentReplica {
                 }]
             }
             Message::Holds { segment, full } if segment == self.segment => self.holds(from, full),
+            Message::PreReadAck {
+                segment,
+                read,
+                watermark,
+                bound,
+            } if segment == self.segment => self.pre_read_ack(from, read, watermark, bound),
             _ => Vec::new(),
         };
         self.assert_invariants();
@@ -515,6 +543,7 @@ impl SegmentReplica {
                 effects.extend(self.set_joining(None));
             }
             self.set = record.replicas().to_vec();
+            self.grid = Some(record.grid().clone());
             if let Some(end) = record.end() {
                 assert!(
                     self.end.is_none_or(|known| known == end),
@@ -532,6 +561,7 @@ impl SegmentReplica {
         }
         effects.extend(self.boundary());
         effects.extend(self.copied());
+        effects.extend(self.serve_reads());
         self.assert_invariants();
         effects
     }
@@ -539,9 +569,10 @@ impl SegmentReplica {
     /// The periodic step: ask the peers for the slots the replica misses,
     /// and ask again for the write of the boundary state. A new replica asks
     /// the members whether they hold the whole segment, pulls only from
-    /// those that do, and reports its complete copy again.
-    #[must_use]
-    pub fn tick(&self) -> Vec<ReplicaEffect> {
+    /// those that do, and reports its complete copy again. An open read
+    /// asks again the acceptors that did not answer, and a read open too
+    /// long is unserved.
+    pub fn tick(&mut self) -> Vec<ReplicaEffect> {
         if self.dropped {
             return Vec::new();
         }
@@ -574,6 +605,7 @@ impl SegmentReplica {
         }
         effects.extend(self.boundary());
         effects.extend(self.copied());
+        effects.extend(self.tick_reads());
         effects
     }
 
@@ -689,6 +721,7 @@ impl SegmentReplica {
         }
         effects.extend(self.boundary());
         effects.extend(self.copied());
+        effects.extend(self.serve_reads());
         effects
     }
 
@@ -736,8 +769,10 @@ impl SegmentReplica {
         self.dropped = true;
         self.joining = None;
         self.sources.clear();
-        assert!(self.dropped, "a dropped replica takes no step");
-        vec![ReplicaEffect::Drop]
+        let mut effects = self.unserve_reads();
+        assert!(self.reads.is_empty(), "a dropped replica holds no read");
+        effects.push(ReplicaEffect::Drop);
+        effects
     }
 
     fn pull(&self, from: NodeId, at: Slot) -> Vec<ReplicaEffect> {
@@ -822,6 +857,14 @@ impl SegmentReplica {
         assert!(
             self.sources.iter().all(|source| *source != self.id),
             "a new replica copies from another replica"
+        );
+        assert!(
+            self.reads.len() <= MAX_READS,
+            "a replica holds at most MAX_READS reads"
+        );
+        assert!(
+            self.reads.is_empty() || self.folded.is_some(),
+            "a replica with no base holds no read"
         );
         if let Some(folded) = &self.folded {
             folded.state.assert_invariants();

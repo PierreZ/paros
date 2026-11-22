@@ -75,6 +75,7 @@ use paros_consensus::journal::{LeaderUuid, Seq};
 use crate::command::{Command, Fence, Leader, Record, Write};
 use crate::fold::{Answer, JournalView};
 use crate::held::Reply;
+pub use crate::read::ReadAnswer;
 use crate::resolve::ResolveAnswer;
 
 /// The id of one call that the program asked for.
@@ -129,23 +130,6 @@ impl Request {
     }
 }
 
-/// The answer of a `Read` (§J2.5).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReadAnswer {
-    /// The committed records from the position asked, in order, and the
-    /// journal's view.
-    Page {
-        /// The records.
-        records: Vec<Record>,
-        /// The view of the journal.
-        view: JournalView,
-    },
-    /// The position asked is below `first_seq`.
-    Truncated(JournalView),
-    /// This server cannot give the page; ask another server.
-    Unserved,
-}
-
 /// What came back for a request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Response {
@@ -197,6 +181,9 @@ pub enum Outcome {
         records: Vec<Record>,
         /// The view of the journal.
         view: JournalView,
+        /// Whether the page reaches the end of a sealed segment: the next
+        /// records are in a later segment.
+        sealed: bool,
     },
 }
 
@@ -682,18 +669,30 @@ impl Client {
 
     fn answer_read(&mut self, reading: Reading, response: Response) {
         match response {
-            Response::Read(ReadAnswer::Page { records, view }) => self.end(
+            Response::Read(ReadAnswer::Page {
+                records,
+                view,
+                sealed,
+            }) => self.end(
                 reading.call,
                 Outcome::Page {
                     from: reading.from,
-                    records,
+                    records: records.into_iter().map(|(_, record)| record).collect(),
                     view,
+                    sealed,
                 },
             ),
             Response::Read(ReadAnswer::Truncated(view)) => {
                 self.end(reading.call, Outcome::Truncated(view));
             }
-            Response::Read(ReadAnswer::Unserved) | Response::NotLeader | Response::Lost => {
+            // The program routes each copy of a read: after `Below` or
+            // `Superseded` it sends the next copy to a replica of the
+            // segment that the register names.
+            Response::Read(
+                ReadAnswer::Unserved | ReadAnswer::Below(_) | ReadAnswer::Superseded(_),
+            )
+            | Response::NotLeader
+            | Response::Lost => {
                 self.send_read(reading);
             }
             Response::Reply(_) | Response::Resolved(_) => {

@@ -313,7 +313,7 @@ fn a_later_segment_folds_from_the_boundary_of_the_one_before() {
 
 #[test]
 fn a_replica_behind_pulls_from_its_peers_and_a_peer_answers_a_page() {
-    let behind = based();
+    let mut behind = based();
     let tick = behind.tick();
     let pulls: Vec<NodeId> = tick
         .iter()

@@ -157,6 +157,7 @@ fn a_campaign_asks_every_acceptor_from_its_first_slot() {
                 Message::Prepare {
                     ballot: ballot(2),
                     from: Slot(3),
+                    segment: SegmentId(1),
                 }
             ))
             .collect::<Vec<_>>()
@@ -229,6 +230,7 @@ fn a_promise_in_pages_asks_for_the_next_page() {
             Message::Prepare {
                 ballot: ballot(2),
                 from: Slot(5),
+                segment: SegmentId(1),
             }
         )]
     );
@@ -946,7 +948,7 @@ fn a_delegating_leader_gives_each_round_to_a_proxy() {
                 slot: Slot(0),
             },
         );
-        assert!(effects.is_empty());
+        assert_eq!(effects, Vec::new());
     }
 }
 
@@ -955,16 +957,15 @@ fn a_chosen_from_a_proxy_commits_the_slot_and_holds_the_answer() {
     let mut leader = delegating_leader();
     leader.propose(1, write(1));
     // A `Chosen` of another ballot changes nothing.
-    assert!(
-        leader
-            .step(
-                NodeId(201),
-                Message::Chosen {
-                    ballot: ballot(1),
-                    slot: Slot(0),
-                },
-            )
-            .is_empty()
+    assert_eq!(
+        leader.step(
+            NodeId(201),
+            Message::Chosen {
+                ballot: ballot(1),
+                slot: Slot(0),
+            },
+        ),
+        Vec::new()
     );
     let effects = leader.step(
         NodeId(201),
@@ -984,16 +985,15 @@ fn a_chosen_from_a_proxy_commits_the_slot_and_holds_the_answer() {
         "the answer waits for a replica"
     );
     // A second `Chosen` finds no open round.
-    assert!(
-        leader
-            .step(
-                NodeId(202),
-                Message::Chosen {
-                    ballot: ballot(2),
-                    slot: Slot(0),
-                },
-            )
-            .is_empty()
+    assert_eq!(
+        leader.step(
+            NodeId(202),
+            Message::Chosen {
+                ballot: ballot(2),
+                slot: Slot(0),
+            },
+        ),
+        Vec::new()
     );
 }
 
@@ -1067,7 +1067,7 @@ fn a_retire_seen_in_phase_one_is_kept_once_the_leader_opens() {
             })
         })
         .expect("another leader retired segment 1");
-    assert!(leader.observe(&retired).is_empty());
+    assert_eq!(leader.observe(&retired), Vec::new());
     for node in [1, 2, 4, 5] {
         leader.step(NodeId(node), promise(3, 3, page(&[], &[])));
     }

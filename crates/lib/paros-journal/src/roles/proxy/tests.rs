@@ -62,9 +62,9 @@ fn a_delegation_sends_the_accept_to_its_column() {
 fn a_majority_of_the_column_commits_to_the_replicas_and_tells_the_leader() {
     let mut proxy = JournalProxy::new(PROXY);
     proxy.step(LEADER, delegate(1, 4));
-    assert!(proxy.step(NodeId(1), accepted(1, 4)).is_empty());
+    assert_eq!(proxy.step(NodeId(1), accepted(1, 4)), Vec::new());
     // A second vote of the same acceptor counts once.
-    assert!(proxy.step(NodeId(1), accepted(1, 4)).is_empty());
+    assert_eq!(proxy.step(NodeId(1), accepted(1, 4)), Vec::new());
     let effects = proxy.step(NodeId(3), accepted(1, 4));
     let mut expected = replicas();
     expected.push(LEADER);
@@ -80,9 +80,9 @@ fn a_majority_of_the_column_commits_to_the_replicas_and_tells_the_leader() {
 fn a_vote_from_outside_the_column_or_at_another_ballot_is_not_counted() {
     let mut proxy = JournalProxy::new(PROXY);
     proxy.step(LEADER, delegate(2, 4));
-    assert!(proxy.step(NodeId(7), accepted(2, 4)).is_empty());
-    assert!(proxy.step(NodeId(1), accepted(1, 4)).is_empty());
-    assert!(proxy.step(NodeId(2), accepted(2, 4)).is_empty());
+    assert_eq!(proxy.step(NodeId(7), accepted(2, 4)), Vec::new());
+    assert_eq!(proxy.step(NodeId(1), accepted(1, 4)), Vec::new());
+    assert_eq!(proxy.step(NodeId(2), accepted(2, 4)), Vec::new());
     assert!(
         proxy.step(NodeId(9), accepted(2, 4)).is_empty(),
         "one vote of the column and two outside it are no majority"
@@ -105,16 +105,15 @@ fn a_nack_drops_the_ballot_and_goes_to_the_leader() {
     assert_eq!(to(&effects), vec![LEADER], "one Nack for each leader");
     assert_eq!(proxy.open(), 0);
     // A Nack that refuses nothing tells nobody.
-    assert!(
-        proxy
-            .step(
-                NodeId(2),
-                Message::Nack {
-                    ballot: ballot(1),
-                    promised: ballot(1),
-                },
-            )
-            .is_empty()
+    assert_eq!(
+        proxy.step(
+            NodeId(2),
+            Message::Nack {
+                ballot: ballot(1),
+                promised: ballot(1),
+            },
+        ),
+        Vec::new()
     );
 }
 
@@ -125,7 +124,7 @@ fn a_higher_ballot_drops_the_rounds_below_and_a_lower_one_is_not_taken() {
     proxy.step(LEADER, delegate(2, 5));
     assert_eq!(proxy.open(), 1);
     assert_eq!(proxy.round(Slot(5)).map(|r| r.0), Some(ballot(2)));
-    assert!(proxy.step(LEADER, delegate(1, 6)).is_empty());
+    assert_eq!(proxy.step(LEADER, delegate(1, 6)), Vec::new());
     assert_eq!(proxy.open(), 1);
 }
 
@@ -143,7 +142,7 @@ fn a_column_that_is_not_two_f_plus_one_is_not_taken() {
             replicas: replicas(),
         },
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects, Vec::new());
     assert_eq!(proxy.open(), 0);
 }
 
@@ -152,7 +151,7 @@ fn a_decided_round_delegated_again_is_decided_again() {
     let mut proxy = JournalProxy::new(PROXY);
     proxy.step(LEADER, delegate(1, 4));
     proxy.step(NodeId(1), accepted(1, 4));
-    assert!(!proxy.step(NodeId(2), accepted(1, 4)).is_empty());
+    assert_ne!(proxy.step(NodeId(2), accepted(1, 4)), Vec::new());
     // The leader lost the `Chosen` and delegates the round again.
     assert_eq!(proxy.step(LEADER, delegate(1, 4)).len(), 3);
     proxy.step(NodeId(2), accepted(1, 4));

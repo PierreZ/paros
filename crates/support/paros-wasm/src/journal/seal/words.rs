@@ -231,6 +231,8 @@ pub(super) fn kind_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::Holds { .. }) => "Holds",
         Payload::Role(Message::Delegate { .. }) => "Delegate",
         Payload::Role(Message::Chosen { .. }) => "Chosen",
+        Payload::Role(Message::PreRead { .. }) => "PreRead",
+        Payload::Role(Message::PreReadAck { .. }) => "PreReadAck",
         Payload::Write { .. } => "Write",
         Payload::Reply { .. } => "Reply",
         Payload::Change(Change::Reshape { .. }) => "Reshape",
@@ -257,7 +259,9 @@ pub(super) fn phase_of(payload: &Payload) -> &'static str {
         }
         Payload::Write { .. } | Payload::Reply { .. } => "other",
         Payload::Change(_) | Payload::Done { .. } => "reconfigure",
-        Payload::Resolve { .. } | Payload::Resolved { .. } => "read",
+        Payload::Role(Message::PreRead { .. } | Message::PreReadAck { .. })
+        | Payload::Resolve { .. }
+        | Payload::Resolved { .. } => "read",
     }
 }
 
@@ -271,6 +275,7 @@ pub(super) fn is_reply(payload: &Payload) -> bool {
                 | Message::Applied { .. }
                 | Message::Holds { .. }
                 | Message::Chosen { .. }
+                | Message::PreReadAck { .. }
         ) | Payload::Reply { .. }
             | Payload::Done { .. }
             | Payload::Resolved { .. }
@@ -279,7 +284,7 @@ pub(super) fn is_reply(payload: &Payload) -> bool {
 
 pub(super) fn label_of(payload: &Payload) -> String {
     match payload {
-        Payload::Role(Message::Prepare { ballot, from }) => {
+        Payload::Role(Message::Prepare { ballot, from, .. }) => {
             format!("Prepare {} · from slot {}", ballot_text(*ballot), from.0)
         }
         Payload::Role(Message::Promise { ballot, page, .. }) => {
@@ -327,20 +332,12 @@ pub(super) fn label_of(payload: &Payload) -> String {
             format!("Pull · segment {} · from slot {}", segment.0, from.0)
         }
         Payload::Role(Message::Holding { segment }) => format!("Holding · segment {}", segment.0),
-        Payload::Role(Message::Delegate {
-            ballot,
-            slot,
-            command,
-            ..
-        }) => format!(
-            "Delegate {} · slot {} · {}",
-            ballot_text(*ballot),
-            slot.0,
-            value_name(command)
-        ),
-        Payload::Role(Message::Chosen { ballot, slot }) => {
-            format!("Chosen {} · slot {}", ballot_text(*ballot), slot.0)
-        }
+        Payload::Role(
+            message @ (Message::Delegate { .. }
+            | Message::Chosen { .. }
+            | Message::PreRead { .. }
+            | Message::PreReadAck { .. }),
+        ) => proxy_read_label(message),
         Payload::Role(Message::Holds { segment, full }) => {
             format!(
                 "Holds · segment {} · {}",
@@ -437,7 +434,7 @@ fn field(name: &str, value: String) -> Field {
 /// What a message of Phase 1 carries.
 fn phase1_content(message: &Message) -> (Vec<Field>, String) {
     match message {
-        Message::Prepare { ballot, from } => (
+        Message::Prepare { ballot, from, .. } => (
             vec![
                 field("ballot", ballot_text(*ballot)),
                 field("from slot", from.0.to_string()),
@@ -563,35 +560,10 @@ fn role_content(message: &Message) -> (Vec<Field>, String) {
                 segment.0, from.0
             ),
         ),
-        Message::Delegate {
-            ballot,
-            slot,
-            command,
-            ..
-        } => (
-            vec![
-                field("ballot", ballot_text(*ballot)),
-                field("slot", slot.0.to_string()),
-                field("value", value_name(command)),
-            ],
-            format!(
-                "Run Phase 2 of slot {} for {}, ballot {}.",
-                slot.0,
-                value_name(command),
-                ballot_text(*ballot)
-            ),
-        ),
-        Message::Chosen { ballot, slot } => (
-            vec![
-                field("ballot", ballot_text(*ballot)),
-                field("slot", slot.0.to_string()),
-            ],
-            format!(
-                "Slot {} is chosen at ballot {}.",
-                slot.0,
-                ballot_text(*ballot)
-            ),
-        ),
+        Message::Delegate { .. }
+        | Message::Chosen { .. }
+        | Message::PreRead { .. }
+        | Message::PreReadAck { .. } => proxy_read_content(message),
         Message::Holding { segment } => (
             vec![field("segment", segment.0.to_string())],
             format!("Do you hold the whole of segment {}?", segment.0),
@@ -676,4 +648,112 @@ fn call_content(payload: &Payload) -> (Vec<Field>, String) {
             },
         ),
     }
+}
+
+/// What a message of a proxy leader or of a leaderless read does at `to`.
+pub(super) fn proxy_read_says(message: &Message, to: &str) -> String {
+    match message {
+        Message::Delegate { slot, .. } => {
+            format!("{to} sends the Accept of slot {} to its column.", slot.0)
+        }
+        Message::Chosen { slot, .. } => format!("{to} learns that slot {} is chosen.", slot.0),
+        Message::PreRead { .. } => {
+            format!("{to} answers with its highest vote and its segment.")
+        }
+        Message::PreReadAck { .. } => format!("{to} counts the answer to its read."),
+        _ => unreachable!("a message of a proxy leader or of a read"),
+    }
+}
+
+/// The label of a message of a proxy leader or of a leaderless read.
+fn proxy_read_label(message: &Message) -> String {
+    match message {
+        Message::Delegate {
+            ballot,
+            slot,
+            command,
+            ..
+        } => format!(
+            "Delegate {} · slot {} · {}",
+            ballot_text(*ballot),
+            slot.0,
+            value_name(command)
+        ),
+        Message::Chosen { ballot, slot } => {
+            format!("Chosen {} · slot {}", ballot_text(*ballot), slot.0)
+        }
+        Message::PreRead { segment, read } => {
+            format!("PreRead {read} · segment {}", segment.0)
+        }
+        Message::PreReadAck {
+            read, watermark, ..
+        } => format!("PreReadAck {read} · watermark {}", slot_text(*watermark)),
+        _ => unreachable!("a message of a proxy leader or of a read"),
+    }
+}
+
+/// What a message of a proxy leader or of a leaderless read carries.
+fn proxy_read_content(message: &Message) -> (Vec<Field>, String) {
+    match message {
+        Message::Delegate {
+            ballot,
+            slot,
+            command,
+            ..
+        } => (
+            vec![
+                field("ballot", ballot_text(*ballot)),
+                field("slot", slot.0.to_string()),
+                field("value", value_name(command)),
+            ],
+            format!(
+                "Run Phase 2 of slot {} for {}, ballot {}.",
+                slot.0,
+                value_name(command),
+                ballot_text(*ballot)
+            ),
+        ),
+        Message::Chosen { ballot, slot } => (
+            vec![
+                field("ballot", ballot_text(*ballot)),
+                field("slot", slot.0.to_string()),
+            ],
+            format!(
+                "Slot {} is chosen at ballot {}.",
+                slot.0,
+                ballot_text(*ballot)
+            ),
+        ),
+        Message::PreRead { segment, read } => (
+            vec![
+                field("segment", segment.0.to_string()),
+                field("read", read.to_string()),
+            ],
+            format!("Read {read}: what is your highest vote, and which segment do you know?"),
+        ),
+        Message::PreReadAck {
+            segment,
+            read,
+            watermark,
+            bound,
+        } => (
+            vec![
+                field("segment", segment.0.to_string()),
+                field("read", read.to_string()),
+                field("watermark", slot_text(*watermark)),
+                field("bound", bound.0.to_string()),
+            ],
+            format!(
+                "Read {read}: my highest vote is at {}, and I know segment {}.",
+                slot_text(*watermark),
+                bound.0
+            ),
+        ),
+        _ => unreachable!("a message of a proxy leader or of a read"),
+    }
+}
+
+/// A vote watermark as text: a slot, or none.
+fn slot_text(watermark: Option<paros_journal::Slot>) -> String {
+    watermark.map_or_else(|| "none".to_string(), |slot| slot.0.to_string())
 }

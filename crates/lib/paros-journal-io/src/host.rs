@@ -30,10 +30,10 @@ use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, RegisterValue};
 use paros_journal::roles::{
     AcceptorEffect, Campaign, CopyId, JournalAcceptor, JournalLeader, JournalProxy, LeaderEffect,
-    PersistId, Proposed, ProxyEffect, RESEND_BATCH, ReplicaEffect, SegmentReplica,
+    PersistId, Proposed, ProxyEffect, RESEND_BATCH, ReadAnswer, ReplicaEffect, SegmentReplica,
 };
 use paros_journal::segment::SegmentState;
-use paros_journal::{Command, Leader, NodeId, Reply, SegmentId};
+use paros_journal::{Command, Leader, NodeId, Reply, SegmentId, Seq};
 
 use crate::layout::{self, Damage, Entry, Key, Op};
 use crate::wire::{Address, Envelope, Time};
@@ -192,6 +192,20 @@ pub enum Input {
         /// The copy.
         copy: CopyId,
     },
+    /// A client reads the records from `from`, at most `limit` of them, at
+    /// the replica at `address` (its segment named): the leaderless read of
+    /// §J2.5 ([`SegmentReplica::read`]). A role that is not a replica that
+    /// serves answers [`ReadAnswer::Unserved`].
+    Read {
+        /// The replica, with its segment.
+        address: Address,
+        /// The read's id, in its answer.
+        read: CallId,
+        /// The first position to read.
+        from: Seq,
+        /// The most records to read.
+        limit: usize,
+    },
 }
 
 /// The answer to a client call.
@@ -296,6 +310,18 @@ pub enum Effect {
         address: Address,
         /// The retired segment.
         segment: SegmentId,
+    },
+    /// Answer the read `read` at the replica at `address` once batch
+    /// `after` of the replica is durable.
+    ReadReply {
+        /// The replica.
+        address: Address,
+        /// The read.
+        read: CallId,
+        /// The answer.
+        answer: ReadAnswer,
+        /// The batch of the replica it waits on; `None` waits on nothing.
+        after: Option<PersistId>,
     },
     /// Fire [`Input::TimerFired`] at `at`.
     SetTimer {
@@ -476,6 +502,24 @@ impl Host {
                 copy,
             } => self.join(now, address, JoinAsk { set, initial, copy }, &mut effects),
             Input::Abandon { address, copy } => self.abandon(address, copy, &mut effects),
+            Input::Read {
+                address,
+                read,
+                from,
+                limit,
+            } => {
+                if let Some(Role::Replica(replica)) = self.roles.get_mut(&address) {
+                    let out = replica.read(read, from, limit);
+                    replica_effects(address, out, &mut effects);
+                } else {
+                    effects.push(Effect::ReadReply {
+                        address,
+                        read,
+                        answer: ReadAnswer::Unserved,
+                        after: None,
+                    });
+                }
+            }
         }
         let dropped: Vec<Address> = self
             .roles
@@ -723,9 +767,18 @@ impl Host {
         let Some(role) = self.roles.remove(&address) else {
             return;
         };
-        if let Role::Leader(mut leader) = role {
-            let out = leader.stop();
-            leader_effects(address, out, effects);
+        match role {
+            Role::Leader(mut leader) => {
+                let out = leader.stop();
+                leader_effects(address, out, effects);
+            }
+            // The open reads of a replica that stops are unserved: their
+            // readers ask again.
+            Role::Replica(mut replica) => {
+                let out = replica.unserve_reads();
+                replica_effects(address, out, effects);
+            }
+            Role::Acceptor(_) | Role::Proxy(_) | Role::Recovering(_) | Role::Joining(_) => {}
         }
         effects.push(Effect::Stopped { address, why });
         assert!(!self.roles.contains_key(&address), "a stopped role is gone");
@@ -901,6 +954,16 @@ fn replica_effects(address: Address, out: Vec<ReplicaEffect>, effects: &mut Vec<
                 address,
                 segment,
                 copy,
+                after,
+            },
+            ReplicaEffect::Read {
+                read,
+                answer,
+                after,
+            } => Effect::ReadReply {
+                address,
+                read,
+                answer,
                 after,
             },
             // The `Host` stops a replica that dropped its copy after the

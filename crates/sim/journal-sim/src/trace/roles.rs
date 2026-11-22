@@ -169,6 +169,46 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
     }
 }
 
+/// The first flush that makes a promise durable and is the last flush of
+/// its acceptor before a Phase 1 that counts that promise: without it, the
+/// promise of that Phase 1 is still queued. The queue of each acceptor is
+/// played from the events (`Flush` takes its head, `Crash` empties it).
+fn promise_flush(events: &[Value]) -> Option<usize> {
+    let mut queues: BTreeMap<i64, Vec<(bool, i64)>> = BTreeMap::new();
+    for (i, event) in events.iter().enumerate() {
+        let a = num(event, "a");
+        if is(event, "promise") || is(event, "accept") {
+            let a = a.expect("an acceptor");
+            let b = num(event, "b").expect("a ballot");
+            queues.entry(a).or_default().push((is(event, "promise"), b));
+        } else if is(event, "crash") {
+            queues.remove(&a.expect("an acceptor"));
+        } else if is(event, "flush") {
+            let a = a.expect("an acceptor");
+            let queue = queues.entry(a).or_default();
+            if queue.is_empty() {
+                continue;
+            }
+            let (promise, b) = queue.remove(0);
+            if !promise {
+                continue;
+            }
+            let counted = events[i + 1..]
+                .iter()
+                .take_while(|e| !(is(e, "flush") && num(e, "a") == Some(a)))
+                .any(|e| {
+                    is(e, "phase1")
+                        && num(e, "b") == Some(b)
+                        && matches!(fields(e).get("q"), Some(Value::Set(q)) if q.contains(&Value::Int(a)))
+                });
+            if counted {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
 fn remove(events: &[Value], at: usize) -> Vec<Value> {
     let mut edited = events.to_vec();
     edited.remove(at);
@@ -343,7 +383,7 @@ pub const EDITS: &[Edit] = &[
         Some((at, edited))
     }),
     Edit::new("a flush dropped", |events| {
-        let at = events.iter().position(|e| is(e, "flush"))?;
+        let at = promise_flush(events)?;
         Some((at, remove(events, at)))
     }),
     Edit::new("a base dropped", |events| {

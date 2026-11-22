@@ -33,8 +33,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, RegisterValue};
-use paros_journal::roles::{CopyId, PersistId};
-use paros_journal::{Command, Leader, NodeId, SegmentId};
+use paros_journal::roles::{CopyId, PersistId, ReadAnswer};
+use paros_journal::{Command, Leader, NodeId, SegmentId, Seq};
 
 use crate::clock::Clock;
 use crate::events::{Event, Events};
@@ -54,6 +54,17 @@ pub struct CallReply {
     pub call: CallId,
     /// The answer.
     pub outcome: CallOutcome,
+}
+
+/// The answer to a client read at a replica.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadReply {
+    /// The replica.
+    pub address: Address,
+    /// The read.
+    pub read: CallId,
+    /// The answer.
+    pub answer: ReadAnswer,
 }
 
 /// What a role tells the outside of its journal through the driver.
@@ -103,6 +114,8 @@ pub struct Driver<S, T, C, R, E> {
     held: Vec<(PersistId, Address, Envelope)>,
     /// The register changes that wait on a batch of their role.
     held_changes: Vec<(PersistId, Address, Change)>,
+    /// The read answers that wait on a batch of their replica.
+    held_reads: Vec<(PersistId, Address, CallId, ReadAnswer)>,
     /// The highest durable batch of each role that runs.
     durable: BTreeMap<Address, PersistId>,
     /// The highest settled batch of each role: durable, or failed.
@@ -114,6 +127,7 @@ pub struct Driver<S, T, C, R, E> {
     timer: Option<Time>,
     calls: CallId,
     replies: Vec<CallReply>,
+    reads: Vec<ReadReply>,
     notices: Vec<Notice>,
     stopped: Vec<(Address, Stop)>,
 }
@@ -147,6 +161,7 @@ where
             group: Vec::new(),
             held: Vec::new(),
             held_changes: Vec::new(),
+            held_reads: Vec::new(),
             durable: BTreeMap::new(),
             settled: BTreeMap::new(),
             pending: VecDeque::new(),
@@ -154,6 +169,7 @@ where
             timer: None,
             calls: 0,
             replies: Vec::new(),
+            reads: Vec::new(),
             notices: Vec::new(),
             stopped: Vec::new(),
         }
@@ -224,6 +240,27 @@ where
             command,
         });
         call
+    }
+
+    /// Read the records from `from`, at most `limit` of them, at the replica
+    /// at `address` (its segment named): the leaderless read of §J2.5. The
+    /// answer comes in [`take_reads`](Self::take_reads), with the id this
+    /// returns. Reads and calls share one counter of ids.
+    pub fn read(&mut self, address: Address, from: Seq, limit: usize) -> CallId {
+        self.calls += 1;
+        let read = self.calls;
+        self.input(Input::Read {
+            address,
+            read,
+            from,
+            limit,
+        });
+        read
+    }
+
+    /// The answers of client reads since the last take.
+    pub fn take_reads(&mut self) -> Vec<ReadReply> {
+        std::mem::take(&mut self.reads)
     }
 
     /// Start the new replica at `address` (its segment named) for the copy
@@ -305,6 +342,7 @@ where
             self.held_changes.is_empty(),
             "a round ends with no held register change"
         );
+        assert!(self.held_reads.is_empty(), "a round ends with no held read");
         self.report();
         busy
     }
@@ -409,6 +447,12 @@ where
                 call,
                 outcome,
             }),
+            Effect::ReadReply {
+                address,
+                read,
+                answer,
+                after,
+            } => self.read_reply(address, read, answer, after),
             Effect::SetTimer { at } => {
                 self.timer = Some(self.timer.map_or(at, |armed| armed.min(at)));
             }
@@ -431,29 +475,7 @@ where
             Effect::Retired { address, segment } => {
                 self.notices.push(Notice::Retired { address, segment });
             }
-            Effect::Stopped { address, why } => {
-                // A stopped role writes and sends nothing more: what waited
-                // on its batches is dropped. A replica that dropped its copy
-                // stopped by its own step, so its last batches (a copy that
-                // ends) stay in the group and reach the disk; any other stop
-                // takes them out of the group, settled.
-                let other = |role: Address| role != address;
-                if why != Stop::Dropped {
-                    if let Some(id) = self
-                        .group
-                        .iter()
-                        .rev()
-                        .find_map(|(role, id, _)| (!other(*role)).then_some(*id))
-                    {
-                        self.settled.insert(address, id);
-                    }
-                    self.group.retain(|(role, ..)| other(*role));
-                }
-                self.held.retain(|(_, sender, _)| other(*sender));
-                self.held_changes.retain(|(_, role, _)| other(*role));
-                self.durable.remove(&address);
-                self.stopped.push((address, why));
-            }
+            Effect::Stopped { address, why } => self.on_stopped(address, why),
         }
     }
 
@@ -521,6 +543,66 @@ where
         true
     }
 
+    /// The role at `address` stopped: what waited on its batches is
+    /// dropped.
+    fn on_stopped(&mut self, address: Address, why: Stop) {
+        // A stopped role writes and sends nothing more: what waited
+        // on its batches is dropped. A replica that dropped its copy
+        // stopped by its own step, so its last batches (a copy that
+        // ends) stay in the group and reach the disk; any other stop
+        // takes them out of the group, settled.
+        let other = |role: Address| role != address;
+        if why != Stop::Dropped {
+            if let Some(id) = self
+                .group
+                .iter()
+                .rev()
+                .find_map(|(role, id, _)| (!other(*role)).then_some(*id))
+            {
+                self.settled.insert(address, id);
+            }
+            self.group.retain(|(role, ..)| other(*role));
+        }
+        self.held.retain(|(_, sender, _)| other(*sender));
+        self.held_changes.retain(|(_, role, _)| other(*role));
+        // A read that waited on a batch of a stopped role is
+        // unserved: the fold it read may hold a batch that is lost.
+        let (stopped, kept) = std::mem::take(&mut self.held_reads)
+            .into_iter()
+            .partition(|(_, role, ..)| !other(*role));
+        self.held_reads = kept;
+        for (_, address, read, _) in stopped {
+            self.reads.push(ReadReply {
+                address,
+                read,
+                answer: ReadAnswer::Unserved,
+            });
+        }
+        self.durable.remove(&address);
+        self.stopped.push((address, why));
+    }
+
+    /// Give the answer of a read once batch `after` of its replica is
+    /// durable: now, or held until then.
+    fn read_reply(
+        &mut self,
+        address: Address,
+        read: CallId,
+        answer: ReadAnswer,
+        after: Option<PersistId>,
+    ) {
+        if self.is_durable(address, after) {
+            self.reads.push(ReadReply {
+                address,
+                read,
+                answer,
+            });
+        } else {
+            let id = after.expect("a held read names a batch");
+            self.held_reads.push((id, address, read, answer));
+        }
+    }
+
     /// Send what waited on a batch that is durable now.
     fn release(&mut self) {
         let held = std::mem::take(&mut self.held);
@@ -538,6 +620,9 @@ where
             } else {
                 self.held_changes.push((id, address, change));
             }
+        }
+        for (id, address, read, answer) in std::mem::take(&mut self.held_reads) {
+            self.read_reply(address, read, answer, Some(id));
         }
         self.drain();
     }

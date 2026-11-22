@@ -47,6 +47,7 @@ pub mod codec;
 pub mod command;
 pub mod fold;
 pub mod held;
+pub mod read;
 pub mod register;
 pub mod resolve;
 pub mod roles;
@@ -56,6 +57,7 @@ pub use codec::{DecodeError, RELEASE, Release};
 pub use command::{Command, Fence, Header, Headers, Leader, Record, Write};
 pub use fold::{Answer, BoundaryState, JournalState, JournalView};
 pub use held::{Held, Reply};
+pub use read::ReadAnswer;
 pub use resolve::{ResolveAnswer, resolve};
 pub use segment::{
     Grid, GridError, OpeningCall, RecordRefusal, SegmentId, SegmentRecord, SegmentState,

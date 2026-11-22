@@ -433,6 +433,7 @@ impl<T> JournalLeader<T> {
                             message: Message::Prepare {
                                 ballot: self.campaign.ballot,
                                 from: next,
+                                segment: self.campaign.segment,
                             },
                         }]
                     }
@@ -681,6 +682,7 @@ impl<T> JournalLeader<T> {
                 message: Message::Prepare {
                     ballot: self.campaign.ballot,
                     from,
+                    segment: self.campaign.segment,
                 },
             })
             .collect()
@@ -883,14 +885,9 @@ impl<T> JournalLeader<T> {
             .segment_of(slot)
             .expect("a slot the leader writes is in a segment it reads")
             .id;
-        self.unapplied.insert(
-            slot,
-            Unapplied {
-                segment,
-                command: command.clone(),
-            },
-        );
-        self.commits(segment, slot, &command)
+        let commits = self.commits(segment, slot, &command);
+        self.unapplied.insert(slot, Unapplied { segment, command });
+        commits
     }
 
     /// The `Commit`s of `slot`: to every replica of its segment.

@@ -59,6 +59,7 @@ fn prepare(journal: JournalId, to: u64) -> Input {
                 node: NodeId(100),
             },
             from: Slot(0),
+            segment: SegmentId(1),
         },
     })
 }
@@ -152,6 +153,7 @@ fn an_acceptor_recovers_its_promise_from_its_records() {
             message: Message::Prepare {
                 ballot: promised,
                 from: Slot(0),
+                segment: SegmentId(1),
             },
         }),
     );
@@ -838,4 +840,82 @@ fn a_join_whose_set_names_the_node_is_refused() {
     };
     assert_eq!(host.step(Time(0), ask), Vec::new());
     assert!(!host.serves(NEW));
+}
+
+#[test]
+fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
+    let mut host = Host::new(CONFIG);
+    let replica = Address::replica(J, NodeId(11), SegmentId(1));
+    let read = |from| Input::Read {
+        address: replica,
+        read: 7,
+        from: Seq(from),
+        limit: 4,
+    };
+    // A role that is not a replica that serves answers unserved.
+    assert_eq!(
+        host.step(Time(0), read(0)),
+        vec![Effect::ReadReply {
+            address: replica,
+            read: 7,
+            answer: ReadAnswer::Unserved,
+            after: None,
+        }]
+    );
+    host.step(
+        Time(0),
+        Input::Assign(Assignment::Replica {
+            address: at(J, 11),
+            segment: SegmentId(1),
+            set: vec![NodeId(11), NodeId(12), NodeId(13)],
+            initial: Leader::Unset,
+        }),
+    );
+    host.step(Time(0), recovered(replica));
+    host.step(
+        Time(0),
+        Input::Observe {
+            journal: J,
+            value: value(),
+        },
+    );
+    let asked: Vec<NodeId> = host
+        .step(Time(1), read(0))
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Send { envelope, .. } => {
+                assert!(matches!(envelope.message, Message::PreRead { read: 7, .. }));
+                assert_eq!(envelope.receiver(), at(J, envelope.to.0));
+                Some(envelope.to)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, vec![NodeId(1), NodeId(2), NodeId(3)]);
+    let ack = |from| Envelope {
+        journal: J,
+        from: NodeId(from),
+        to: NodeId(11),
+        message: Message::PreReadAck {
+            segment: SegmentId(1),
+            read: 7,
+            watermark: None,
+            bound: SegmentId(1),
+        },
+    };
+    assert_eq!(ack(1).receiver(), replica, "an ack names its replica");
+    assert_eq!(host.step(Time(2), Input::Message(ack(1))), Vec::new());
+    let effects = host.step(Time(2), Input::Message(ack(2)));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::ReadReply {
+                address,
+                read: 7,
+                answer: ReadAnswer::Page { sealed: false, .. },
+                ..
+            }] if *address == replica
+        ),
+        "{effects:?}"
+    );
 }

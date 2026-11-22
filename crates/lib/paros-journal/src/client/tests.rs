@@ -661,8 +661,13 @@ fn reads_leave_at_once_and_ask_again_when_unserved() {
         current = *id;
     }
     let page = ReadAnswer::Page {
-        records: records("r"),
+        records: records("r")
+            .into_iter()
+            .zip(1..)
+            .map(|(record, at)| (Seq(at), record))
+            .collect(),
         view: view(Leader::Uuid(A), 2, 0),
+        sealed: false,
     };
     client.answer(current, Response::Read(page));
     assert_eq!(
@@ -672,7 +677,8 @@ fn reads_leave_at_once_and_ask_again_when_unserved() {
             Outcome::Page {
                 from: Seq(1),
                 records: records("r"),
-                view: view(Leader::Uuid(A), 2, 0)
+                view: view(Leader::Uuid(A), 2, 0),
+                sealed: false,
             }
         )
     );

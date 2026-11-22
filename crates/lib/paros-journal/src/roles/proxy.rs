@@ -210,7 +210,7 @@ impl JournalProxy {
                 );
             }
             Some(_) => unreachable!("the rounds below the ballot are dropped"),
-            None => self.rounds.open(slot, ballot, command.clone(), None, None),
+            None => self.rounds.open(slot, ballot, command, None, None),
         }
         self.delegations.insert(
             slot,

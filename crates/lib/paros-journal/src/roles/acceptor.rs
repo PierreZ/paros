@@ -30,6 +30,7 @@ use paros_consensus::{Ballot, NodeId, Slot};
 use super::message::{Message, PromisePage};
 use super::{Flight, PersistId};
 use crate::command::Command;
+use crate::segment::SegmentId;
 
 /// One write of an acceptor's persist batch.
 pub type AcceptorOp = AcceptorWrite<Command>;
@@ -113,6 +114,13 @@ pub struct JournalAcceptor {
     flight: Flight,
     /// The votes and faulty entries one promise page carries at most.
     page: usize,
+    /// The newest segment that a `Prepare` at or above the promise named
+    /// since the acceptor started: its belief, the fence of a leaderless
+    /// read (§J3.3). In memory only: an acceptor that starts again answers
+    /// no read until a `Prepare` tells it, so it never names a segment
+    /// older than one it forgot. An `Accept` that raises the promise names
+    /// no segment, so it clears the belief.
+    bound: Option<SegmentId>,
 }
 
 impl JournalAcceptor {
@@ -137,6 +145,7 @@ impl JournalAcceptor {
             acceptor,
             flight: Flight::after(disk.durable),
             page,
+            bound: None,
         };
         assert!(
             role.acceptor.promised() == disk.promised,
@@ -161,6 +170,13 @@ impl JournalAcceptor {
         self.acceptor.promised()
     }
 
+    /// The acceptor's belief: the newest segment that a `Prepare` at or
+    /// above its promise named since it started.
+    #[must_use]
+    pub fn bound(&self) -> Option<SegmentId> {
+        self.bound
+    }
+
     /// The vote in memory at `slot`.
     #[must_use]
     pub fn vote(&self, slot: Slot) -> Option<&(Ballot, Command)> {
@@ -178,7 +194,12 @@ impl JournalAcceptor {
     pub fn step(&mut self, from: NodeId, message: Message) -> Vec<AcceptorEffect> {
         let promised = self.acceptor.promised();
         let effects = match message {
-            Message::Prepare { ballot, from: slot } => self.prepare(from, ballot, slot),
+            Message::Prepare {
+                ballot,
+                from: slot,
+                segment,
+            } => self.prepare(from, ballot, slot, segment),
+            Message::PreRead { segment, read } => self.pre_read(from, segment, read),
             Message::Accept {
                 ballot,
                 slot,
@@ -201,10 +222,17 @@ impl JournalAcceptor {
         effects
     }
 
-    fn prepare(&mut self, from: NodeId, ballot: Ballot, slot: Slot) -> Vec<AcceptorEffect> {
+    fn prepare(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        slot: Slot,
+        segment: SegmentId,
+    ) -> Vec<AcceptorEffect> {
         let mut ops = Vec::new();
         match self.acceptor.prepare(ballot, slot, &mut ops) {
             PrepareOutcome::Promised { raised } => {
+                self.bound = self.bound.max(Some(segment));
                 assert!(raised != ops.is_empty(), "a raised promise writes");
                 probe!(sometimes, raised, "acceptor: a Prepare raises the promise");
                 probe!(
@@ -271,6 +299,10 @@ impl JournalAcceptor {
             ballot > self.acceptor.promised(),
             "acceptor: an Accept raises the promise"
         );
+        if ballot > self.acceptor.promised() {
+            // A promise that a `Prepare` did not raise names no segment.
+            self.bound = None;
+        }
         if !held {
             // The promise first, then the vote, in one atomic batch.
             let mut ops = Vec::new();
@@ -289,6 +321,33 @@ impl JournalAcceptor {
             after: self.flight.last(),
         });
         effects
+    }
+
+    /// The answer to a leaderless read: the vote watermark and the belief,
+    /// once the last batch is durable. No answer with no belief.
+    fn pre_read(&self, from: NodeId, segment: SegmentId, read: u64) -> Vec<AcceptorEffect> {
+        let Some(bound) = self.bound else {
+            probe!(
+                reachable,
+                "acceptor: a read finds no belief and is not answered"
+            );
+            return Vec::new();
+        };
+        probe!(
+            sometimes,
+            bound > segment,
+            "acceptor: a read meets a newer segment"
+        );
+        vec![AcceptorEffect::Send {
+            to: from,
+            message: Message::PreReadAck {
+                segment,
+                read,
+                watermark: self.acceptor.vote_watermark(),
+                bound,
+            },
+            after: self.flight.last(),
+        }]
     }
 
     fn nack(&self, to: NodeId, ballot: Ballot) -> AcceptorEffect {
