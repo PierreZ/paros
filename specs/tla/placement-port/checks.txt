@@ -7,6 +7,12 @@
 # Every rule: safety, then the heal once the faults stop.
 safety               pass       ci
 live                 pass       ci
+# Two failures: a journal below a majority abandons its grant, and the others
+# still heal.
+live_two             pass       ci
+# Two drains: the cell refuses, and the controller asks again once the
+# records change.
+live_tight           pass       ci
 # Two failures: the cell and the journals stop writing below a majority.
 safety_two           pass       ci
 # Two failures and two drains: the cell refuses, and records each refusal only
@@ -22,11 +28,10 @@ partial              violation  ci
 no_limit             violation  ci
 no_free              violation  ci
 fixed                violation  ci
-# The limit of "the cell answers itself": two failures in the cell's control
-# journal leave no majority to write the grant of its own heal.
-cell_below_majority  violation  ci
+no_abandon           violation  ci
 # Reachability: the model reaches each case.
 reach_cell_heal      violation  ci
 reach_busy           violation  ci
 reach_refusal        violation  ci
 reach_two_moves      violation  ci
+reach_abandon        violation  ci

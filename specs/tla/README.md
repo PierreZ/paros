@@ -2360,7 +2360,10 @@ controller drew; the cell sends the answer of a grant again at any time, so a re
 the same answer (`PlaceAgain`, a read of the fold); a cell at the limit answers
 "busy" and writes nothing (no step in the model: the request waits, and the controller sends it
 again); a cell with no machine that fits records a refusal under the id, and the controller asks
-again with a new id. A release ends the grant and frees the bookings of the members that left.
+again with a new id only after the records that decide a placement (gone, draining, bookings)
+change. `release(request id, members)` ends the grant and frees its bookings on the machines that
+are not members now. A journal below a majority cannot reshape: its controller abandons the grant
+with a release that names the members it has, so the grant stops holding the limit.
 The faults: machines that fail for good (the cell records them gone), one drain by an operator,
 lost and repeated messages, a restart of the cell coordinator (its memory is lost). A crash or a
 takeover of a grid controller is #1422 (takeover by a new controller), not this model.
@@ -2372,24 +2375,29 @@ Properties: `OneGrantPerRid`, `GrantWhole` (all or none), `InFlight` (the limit)
 `KeepsSize` (a member leaves only in the reshape that puts its replacement in), `MembersBooked`,
 `NoOrphan` (each booking belongs to a member, to a move in flight or to a write the coordinator
 still holds), `ReleasedFree`, `Writes` (an action property: every write of the cell and every
-reshape waits for a majority), and under weak fairness once the faults stop, `Healed` (every
-journal is off the machines that failed or drain, and no move is in flight).
+reshape waits for a majority), `MovesInFlight` (at most `Limit` controllers are between a grant
+and a reshape), and under weak fairness once the faults stop, `Healed`: no grant is in flight,
+and each journal is settled. A journal is settled when it is off the machines that failed or
+drain, or it is below a majority (nothing can heal it: hold and page), or its last ask was refused
+and the records did not change since.
 
 | Check | CI | Result |
 |---|---|---|
 | `safety` | ci | pass: every safety property, one failure, one drain, one lost message (61 thousand distinct states) |
 | `live` | ci | pass: `Healed`, with the faults of `safety` |
+| `live_two` | ci | pass: `Healed` with two failures, so the cell or a journal can be below a majority (320 thousand distinct states) |
+| `live_tight` | ci | pass: `Healed` with two drains, so the cell refuses and the controller waits for a change of the records |
 | `safety_two` | ci | pass: two failures, so the cell and a journal can be below a majority |
-| `safety_tight` | ci | pass: two failures and two drains, so the cell also refuses (1.1 million distinct states) |
+| `safety_tight` | ci | pass: two failures and two drains, so the cell also refuses (1.8 million distinct states) |
 | `book_first_nocrash` | ci | pass: the bookings first and the grant in a later write is safe while the coordinator keeps its memory |
 | `book_first` | ci | violation of `NoOrphan`: a restart between the two writes leaves bookings that nobody frees (the control of "the id is in the fold before any machine is booked") |
 | `no_dedup` | ci | violation of `OneGrantPerRid`: a repeated request gets a second grant |
 | `partial` | ci | violation of `KeepsSize`: a partial grant shrinks the journal |
-| `no_limit` | ci | violation of `InFlight` |
+| `no_limit` | ci | violation of `MovesInFlight`: with no limit, two controllers reshape at the same time |
 | `no_free` | ci | violation of `ReleasedFree` |
 | `fixed` | ci | violation of `Healed`: a cell control journal that does not use the port never leaves a failed machine |
-| `cell_below_majority` | ci | violation of `Healed`: two failures in the cell's control journal leave no majority to write its own grant (the limit of "the cell answers itself": hold and page) |
-| `reach_cell_heal`, `reach_busy`, `reach_refusal`, `reach_two_moves` | ci | violation: the model reaches a heal of the cell's own journal, a busy cell, a refusal, and two moves one after the other |
+| `no_abandon` | ci | violation of `Healed`: a journal below a majority keeps its grant, and the limit blocks every other journal |
+| `reach_cell_heal`, `reach_busy`, `reach_refusal`, `reach_two_moves`, `reach_abandon` | ci | violation: the model reaches a heal of the cell's own journal, a busy cell, a refusal, two moves one after the other, and an abandoned grant |
 
 ### `degraded-reshape/`: a reshape when a column is below quorum, for #1258 (reshape with a column below quorum)
 

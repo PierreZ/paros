@@ -405,28 +405,48 @@ program with no cell answers it from a fixed list of machines.
   gets the same answer. `busy` (the limit of moves in flight is reached) writes nothing, and the
   caller asks again with the same id. `refused` (no machine fits) is recorded under the id, and
   the caller asks later with a new id.
-- `release(request id)`: the reshape is done; the cell frees the bookings of the members that
-  left and ends the grant. A grant in flight is the token of the rate limit of the cell (the old
-  chain of steps of `turn.rs`). The same release again changes nothing.
+- `release(request id, members)`: the move is over. The cell ends the grant and frees its
+  bookings of the machines that are not members of the journal now. After a reshape, these are
+  the members that left. After an **abandon**, they are the new machines: a controller whose
+  journal is below a majority cannot write a reshape, so it holds and pages, and it releases the
+  grant at once. A grant in flight is the token of the rate limit of the cell (the old chain of
+  steps of `turn.rs`), so every grant must end: a journal below a majority that kept its grant
+  would stop every move of the cell, the heal of the cell's own control journal too. The same
+  release again changes nothing.
+
+**A refusal is a true reason.** The controller asks again, with a new request id, only once the
+records of the cell (gone, draining, the bookings) have changed. Until then the journal reports
+the refusal.
 
 **The cell places its own control journal through the same port** (Pierre, 2026-11-22, decision
 card of #1421: "The cell answers itself"). The grid controller of the cell's control journal asks
 the port of its own cell, and the grant is a write to that same journal. The journal stays
-writable while at most `F` of its members are down, so the heal goes on. Below a majority, no
-grant and no reshape can be written: hold and page (§J6.2, `ControlFrozen`).
+writable while at most `F` of its members are down, so the heal goes on. Below a majority, the
+cell writes no grant, so no journal of the cell heals: hold and page (§J6.2, `ControlFrozen`).
 
-`specs/tla/placement-port/` checks the port: a grant is all or none (`GrantWhole`), one request id
-is one grant (`OneGrantPerRid`), the moves in flight never pass the limit (`InFlight`), a released
-booking is free again (`ReleasedFree`), no booking leaks (`NoOrphan`), a journal keeps its size
-(`KeepsSize`: a member leaves only in the reshape that puts its replacement in), every write of
-the cell and every reshape waits for a majority (`Writes`), and once the faults stop every journal
-is off the machines that failed or drain (`Healed`), the cell's control journal too. Each rule has
-a control: the bookings in one write and the grant in a later write, with a restart of the
-coordinator between (`book_first`); no look-up of the request id (`no_dedup`); a partial grant
-(`partial`); no limit (`no_limit`); a release that keeps the bookings (`no_free`); a cell control
-journal that does not use the port (`fixed`).
+`specs/tla/placement-port/` checks the port. Safety: one request id is one grant
+(`OneGrantPerRid`); a journal keeps its size (`KeepsSize`: a member leaves only in the reshape
+that puts its replacement in, which is the real all-or-none check; `GrantWhole` states it of the
+grant); the grants in flight and the journals that reshape on a grant never pass the limit
+(`InFlight`, `MovesInFlight`); a machine holds at most its roles (`Capacity`); each member has its
+booking (`MembersBooked`); no booking leaks, after an abandon too (`NoOrphan`); a released booking
+is free again (`ReleasedFree`); every write of the cell and every reshape waits for a majority
+(`Writes`). Liveness (`Healed`): once the faults stop, while the cell has a majority, every grant
+ends and every journal is off the machines that failed or drain, or reports a true reason (it is
+below a majority, or the cell refused it and nothing changed since). Seven rules have a control: the
+bookings in one write and the grant in a later write, with a restart of the coordinator between
+(`book_first`); no look-up of the request id (`no_dedup`); a partial grant (`partial`); no limit
+(`no_limit`); a release that keeps the bookings (`no_free`); a cell control journal that does not
+use the port (`fixed`); a controller that keeps the grant of a journal below a majority
+(`no_abandon`). The restart of the coordinator matters only in `book_first`: the rule keeps no
+grant in the coordinator's memory.
 
-The model has the reasons gone and drain of `standing`; slow, maintenance and the balance of
-`paros-cell` (#1423) give the same "must leave" answer. **Open** (#1421): the order of the grants (the rule of turns of `turn.rs`, so that one stuck journal starves no
-other), and whether the cell's own control journal skips the limit. The model has a limit of one
-move for the whole cell and never starves the cell's journal, because every grant ends.
+**What the model leaves out.** It replaces members at the same size: `count` is the number of
+members that leave. **Open** (#1421): a grow or a shrink of a control journal (row C15 of §4.5)
+through `place` with another `count`. The model has the reasons gone and drain of `standing`;
+slow, maintenance and the balance of `paros-cell` (#1423) give the same "must leave" answer.
+`place` answers a repeated request from the fold with no majority: a grant in the fold is durable
+and never changes its answer. **Open** (#1421): the order of the grants (the rule of turns of
+`turn.rs`), so that one journal never starves another (the model has a limit of one move for the
+whole cell, and its fairness covers the requests together, not each one), and whether the cell's
+own control journal skips the limit.

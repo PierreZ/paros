@@ -24,9 +24,15 @@
 (*                flight is reached) writes nothing; the caller asks again *)
 (*                with the same rid. "refused" (no machine fits) is       *)
 (*                recorded; the caller asks later with a new rid.          *)
-(*   release(rid) the reshape is done: the cell frees the bookings of the *)
-(*                members that left and ends the grant. A grant in flight *)
-(*                is the token of the rate limit of the cell.              *)
+(*   release(rid, members)  the move is over: the cell ends the grant and *)
+(*                frees its bookings of the machines that are not members *)
+(*                of the journal now. After a reshape these are the       *)
+(*                members that left; after an abandon (the journal is     *)
+(*                below a majority and cannot reshape) the new machines.  *)
+(*                A grant in flight is the token of the rate limit of the *)
+(*                cell, so every grant must end.                          *)
+(*   A refusal: the controller asks again, with a new rid, only once the  *)
+(*   cell's records (gone, draining, bookings) have changed.              *)
 (*                                                                         *)
 (* The cell's own control journal (Pierre, 2026-11-22, question 2 of     *)
 (* #1421): it is one of `Journals` (`Cell`) and asks the same port.       *)
@@ -48,7 +54,9 @@
 (*   AllOrNone = FALSE  the cell grants fewer machines than asked.        *)
 (*   CheckLimit = FALSE the cell grants past the limit of moves in flight.*)
 (*   FreeOnRelease = FALSE  a release ends the grant but keeps the        *)
-(*                      bookings of the members that left.                *)
+(*                      bookings of the machines that are not members.    *)
+(*   CanAbandon = FALSE a controller whose journal is below a majority    *)
+(*                      keeps its grant: the token of the cell is lost.   *)
 (*   CellPlace = "fixed"    the cell's control journal does not use the   *)
 (*                      port: it stays on its first machines.             *)
 (***************************************************************************)
@@ -63,7 +71,7 @@ CONSTANTS Machines,     \* the machines of the cell
           MaxRid,       \* the request ids that one controller draws
           MaxFail, MaxDrain, MaxLoss, MaxCrash,
           IdFirst, Dedup, AllOrNone, CheckLimit, FreeOnRelease,
-          CellPlace
+          CanAbandon, CellPlace
 
 ASSUME Cell \in Journals
 ASSUME \A j \in Journals : Mem0[j] \subseteq Machines
@@ -118,7 +126,8 @@ Init ==
     /\ grants = {}
     /\ bookings = UNION {{[j |-> j, m |-> m, rid |-> <<j, 0>>] : m \in Mem0[j]} : j \in Journals}
     /\ staged = {}
-    /\ ctl = [j \in Journals |-> [ph |-> "idle", n |-> 0, leave |-> {}, add |-> {}]]
+    /\ ctl = [j \in Journals |-> [ph |-> "idle", n |-> 0, leave |-> {}, add |-> {}, seen |-> <<>>,
+                                     rin |-> {}]]
     /\ net = {}
     /\ faults = [fail |-> 0, drain |-> 0, loss |-> 0, crash |-> 0]
 
@@ -175,7 +184,9 @@ Book(r, S) == {[j |-> r.j, m |-> m, rid |-> r.rid] : m \in S}
 Busy == CheckLimit /\ Cardinality(Active) + Cardinality(staged) >= Limit
 
 \* The answer of a grant again, at any time: a repeated request gets the same
-\* answer. It reads the fold and writes nothing.
+\* answer. It writes nothing and needs no majority: a grant in the fold is
+\* durable and never changes its answer, so an answer from an old read of the
+\* fold is still true.
 PlaceAgain(g) ==
     /\ Send({IF g.state = "refused"
              THEN [t |-> "refused", rid |-> g.rid]
@@ -225,7 +236,8 @@ PlaceRefuse(r) ==
     /\ Send({[t |-> "refused", rid |-> r.rid]})
     /\ UNCHANGED <<members, down, gone, draining, bookings, staged, ctl, faults>>
 
-\* release(rid): end the grant and free the bookings of the members that left.
+\* release(rid, members): end the grant and free its bookings of the machines
+\* that are not members now.
 Release(msg) ==
     /\ CellUp
     /\ \E g \in grants :
@@ -233,7 +245,7 @@ Release(msg) ==
          /\ grants' = (grants \ {g}) \cup {[g EXCEPT !.state = "done"]}
          /\ bookings' =
               IF FreeOnRelease /\ g.state = "active"
-              THEN {b \in bookings : ~(b.j = g.j /\ b.m \in g.leave /\ b.m \notin members[g.j])}
+              THEN {b \in bookings : ~(b.j = g.j /\ b.m \in (g.add \cup g.leave) \ msg.in)}
               ELSE bookings
     /\ Send({[t |-> "released", rid |-> msg.rid]})
     /\ UNCHANGED <<members, down, gone, draining, staged, ctl, faults>>
@@ -245,13 +257,18 @@ Uses(j) == j # Cell \/ CellPlace = "self"
 
 RidOf(j) == <<j, ctl[j].n>>
 
+\* The records of the cell that a refusal reads.
+Seen == <<gone, draining, bookings>>
+
 Ask(j) ==
     LET L == members[j] \cap Leaving
     IN /\ Uses(j)
-       /\ ctl[j].ph = "idle"
+       /\ \/ ctl[j].ph = "idle"
+          \/ ctl[j].ph = "refused" /\ ctl[j].seen # Seen
        /\ L # {}
        /\ ctl[j].n < MaxRid
-       /\ ctl' = [ctl EXCEPT ![j] = [ph |-> "asked", n |-> @.n + 1, leave |-> L, add |-> {}]]
+       /\ ctl' = [ctl EXCEPT ![j] = [ph |-> "asked", n |-> @.n + 1, leave |-> L, add |-> {},
+                                     seen |-> <<>>, rin |-> {}]]
        /\ Send({Req(<<j, ctl[j].n + 1>>, j, members[j] \ L, L)})
        /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, faults>>
 
@@ -264,10 +281,10 @@ AskAgain(j) ==
        /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, ctl, faults>>
 
 \* A rid that got a refusal never gets a grant (OneGrantPerRid), so the
-\* refusal finds the controller asking.
+\* refusal finds the controller asking. It waits for a change of the records.
 GotRefused(j) ==
     /\ [t |-> "refused", rid |-> RidOf(j)] \in net
-    /\ ctl' = [ctl EXCEPT ![j].ph = "idle"]
+    /\ ctl' = [ctl EXCEPT ![j].ph = "refused", ![j].seen = Seen]
     /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, net, faults>>
 
 GotGrant(j) ==
@@ -282,20 +299,32 @@ Reshape(j) ==
     /\ ctl[j].ph = "reshape"
     /\ Majority(members[j])
     /\ members' = [members EXCEPT ![j] = (@ \ ctl[j].leave) \cup ctl[j].add]
-    /\ ctl' = [ctl EXCEPT ![j].ph = "release"]
-    /\ Send({[t |-> "release", rid |-> RidOf(j)]})
+    /\ ctl' = [ctl EXCEPT ![j].ph = "release", ![j].rin = members'[j]]
+    /\ Send({[t |-> "release", rid |-> RidOf(j), in |-> members'[j]]})
     /\ UNCHANGED <<down, gone, draining, grants, bookings, staged, faults>>
+
+\* The journal is below a majority, so no reshape can be written: the
+\* controller holds and pages, and ends its grant so that the token of the
+\* cell is free for the other journals.
+Abandon(j) ==
+    /\ CanAbandon
+    /\ ctl[j].ph = "reshape"
+    /\ ~Majority(members[j])
+    /\ ctl' = [ctl EXCEPT ![j].ph = "release", ![j].rin = members[j]]
+    /\ Send({[t |-> "release", rid |-> RidOf(j), in |-> members[j]]})
+    /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, faults>>
 
 ReleaseAgain(j) ==
     /\ ctl[j].ph = "release"
-    /\ Send({[t |-> "release", rid |-> RidOf(j)]})
+    /\ Send({[t |-> "release", rid |-> RidOf(j), in |-> ctl[j].rin]})
     /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, ctl, faults>>
 
 \* Only a release sends "released", so it finds the controller releasing, or
 \* idle already.
 GotReleased(j) ==
     /\ [t |-> "released", rid |-> RidOf(j)] \in net
-    /\ ctl' = [ctl EXCEPT ![j] = [ph |-> "idle", n |-> @.n, leave |-> {}, add |-> {}]]
+    /\ ctl' = [ctl EXCEPT ![j] = [ph |-> "idle", n |-> @.n, leave |-> {}, add |-> {}, seen |-> <<>>,
+                                 rin |-> {}]]
     /\ UNCHANGED <<members, down, gone, draining, grants, bookings, staged, net, faults>>
 
 -----------------------------------------------------------------------------
@@ -308,7 +337,7 @@ CellStep ==
 
 CtlStep(j) ==
     \/ Ask(j) \/ AskAgain(j) \/ GotRefused(j) \/ GotGrant(j)
-    \/ Reshape(j) \/ ReleaseAgain(j) \/ GotReleased(j)
+    \/ Reshape(j) \/ Abandon(j) \/ ReleaseAgain(j) \/ GotReleased(j)
 
 Fault ==
     \/ \E m \in Machines : Fail(m) \/ Drain(m)
@@ -346,8 +375,11 @@ OneGrantPerRid == \A g, h \in grants : g.rid = h.rid => g = h
 \* A grant is all or none.
 GrantWhole == \A g \in grants : g.state # "refused" => Cardinality(g.add) = Cardinality(g.leave)
 
-\* The moves in flight never exceed the limit.
+\* The grants in flight never exceed the limit, and neither do the journals
+\* that reshape on a grant.
 InFlight == Cardinality(Active) <= Limit
+
+MovesInFlight == Cardinality({j \in Journals : ctl[j].ph = "reshape"}) <= Limit
 
 \* A machine holds at most Cap roles.
 Capacity == \A m \in Machines : Cardinality(BookedOn(m)) <= Cap
@@ -360,18 +392,24 @@ MembersBooked == \A j \in Journals : \A m \in members[j] :
                    \E b \in bookings : b.j = j /\ b.m = m
 
 \* Each booking belongs to a member, to a move in flight, or to a write that
-\* the cell coordinator still holds in memory: nothing leaks.
+\* the cell coordinator still holds in memory: nothing leaks, after an
+\* abandon too.
 NoOrphan ==
     \A b \in bookings :
       \/ b.m \in members[b.j]
       \/ \E g \in Active : g.j = b.j /\ b.m \in g.add \cup g.leave
       \/ \E p \in staged : p.rid = b.rid
 
-\* A released booking is free again.
+\* A released booking is free again: once a grant ends, no booking holds a
+\* machine of the grant for its journal unless the machine is a member or a
+\* later move holds it.
 ReleasedFree ==
     \A g \in grants : g.state = "done" =>
-      \A m \in g.leave : m \notin members[g.j] =>
-        ~\E b \in bookings : b.j = g.j /\ b.m = m
+      \A m \in g.add \cup g.leave :
+        (/\ m \notin members[g.j]
+         /\ ~\E h \in Active : h.j = g.j /\ m \in h.add \cup h.leave
+         /\ ~\E p \in staged : p.j = g.j /\ m \in p.add)
+          => ~\E b \in bookings : b.j = g.j /\ b.m = m
 
 \* Every write of the cell is a write of its control journal, and every change
 \* of a journal's members is a reshape of that journal: each needs a majority
@@ -380,15 +418,23 @@ Writes ==
     [][/\ (<<gone, draining, grants, bookings>>' # <<gone, draining, grants, bookings>>) => CellUp
        /\ \A j \in Journals : members'[j] # members[j] => Majority(members[j])]_vars
 
-Safety == TypeOK /\ OneGrantPerRid /\ GrantWhole /\ InFlight /\ Capacity /\ KeepsSize
+Safety == TypeOK /\ OneGrantPerRid /\ GrantWhole /\ InFlight /\ MovesInFlight /\ Capacity /\ KeepsSize
           /\ MembersBooked /\ NoOrphan /\ ReleasedFree
 
-\* Once the faults stop, every journal is off the machines that failed or
-\* drain, and every move is done: the cell heals with nobody watching.
+\* A journal is settled when it is off the machines that failed or drain, or
+\* when it reports a true reason: it is below a majority (hold and page), or
+\* the cell refused its move and nothing changed since.
+Settled(j) ==
+    \/ members[j] \cap (down \cup draining) = {}
+    \/ ~Majority(members[j])
+    \/ ctl[j].ph = "refused" /\ ctl[j].seen = Seen
+
+\* Once the faults stop, every move is done and every journal is settled: the
+\* cell heals with nobody watching. A cell below a majority writes nothing,
+\* so nothing heals: it holds and pages.
 Healed ==
-    <>[](/\ \A j \in Journals : members[j] \cap (down \cup draining) = {}
-                                /\ ctl[j].ph = "idle"
-         /\ Active = {})
+    <>[](CellUp => /\ Active = {}
+                   /\ \A j \in Journals : Settled(j) /\ ctl[j].ph \in {"idle", "refused"})
 
 -----------------------------------------------------------------------------
 (* Reachability: each must be violated, so the model reaches the case. *)
@@ -398,5 +444,6 @@ NoBusy == ~\E j \in Journals : /\ ctl[j].ph = "asked"
                                /\ Cardinality(Active) >= Limit
                                /\ ~\E g \in grants : g.rid = RidOf(j)
 NoRefusal == ~\E g \in grants : g.state = "refused"
+NoAbandon == ~\E j \in Journals : ctl[j].ph = "release" /\ ~Majority(members[j])
 NoTwoMoves == ~\E g, h \in grants : g.j # h.j /\ g.state = "done" /\ h.state = "done"
 =============================================================================
