@@ -132,7 +132,10 @@ only on an answer, and a fresh register value before an abandon or a copy wipes 
 (re-replication of a sealed segment's replica set)), the placement port between the grid controller and the cell
 (`specs/tla/placement-port/`: `standing`, `place` all or none in one write keyed by the caller's
 request id, `release`, the limit of moves in flight, and the cell's own control journal placed
-through the same port; #1421 (the placement port)).
+through the same port; #1421 (the placement port)), and, above the journal, the election over a
+journal (`specs/tla/election/`: the term won by `SetLeader(new, old)`, the term number from the
+fold, the stop at the first refused write, the hand on, the fence of an order by its term, the
+interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)).
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both
@@ -430,8 +433,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   the job (a TLA+ folder reads only its files and their symlink targets). A filter that skips a
   job whose inputs changed is a loosened judge (`REVIEW.md`). Put small checks of one kind as
   steps of one job (`checks`), not one job each, and keep each job inside its 30 minutes.
-  A new folder of `specs/tla/` gets its line in `scripts/tla-minutes.txt` (the plan fails
-  without it). A `spec` job prints the minutes of each folder and warns when a folder is far
+  A new folder of `specs/tla/` gets its line in `scripts/tla-minutes.txt` and in
+  `scripts/mutate-tla-shards.txt` (the plan fails without them). A `spec` job prints the minutes of each folder and warns when a folder is far
   from its line: measure it again and update the line in the same PR as the change that slowed it.
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library

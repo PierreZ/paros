@@ -1,7 +1,8 @@
 # The number of slices (CI jobs of 30 minutes) for the guard mutation of each
 # folder of specs/tla/ (`.github/workflows/tla-mutants.yml`): <folder> <slices>.
-# Every folder is listed (0 for a folder with no guard): the `slices` job
-# fails on a folder with no line. The numbers are about
+# Every folder is listed (0 for a folder with no guard): the plan of the
+# `TLA` workflow (`scripts/ci-plan.py`) and the `slices` job fail on a
+# folder with no line. The numbers are about
 # (guards x minutes of the folder's checks) / 40: a mutant that survives runs
 # every check of its folder. A slice that its budget cuts reports `unfinished`
 # mutants: give its folder more slices. A GitHub matrix holds at most 256
@@ -17,6 +18,7 @@ ctrl-grid 14
 ctrl-segments 1
 decree 2
 degraded-reshape 7
+election 3
 flight-rule 1
 generations 3
 grid 0
@@ -26,6 +28,7 @@ handover-chain 1
 handover-gc 1
 heal-reuse 2
 health 0
+journal-ids 3
 journal-state 19
 leader-handoff 12
 matchmaker 3

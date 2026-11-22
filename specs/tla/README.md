@@ -66,7 +66,7 @@ modules extend in turn: today `Decree.tla` and `MultiPaxos.tla` extend standard 
 | Model | Proof | What it proves |
 |---|---|---|
 | `decree/` | `DecreeProof.tla` | `InitInv` (`Init => Inv`), `StepInv` (`Inv /\ [Next]_vars => Inv'`) and `InvAgreement` (`Inv => Agreement`), for the configurations of `InvApplies` with `Pick = "highest"` and both `Phase1` rules: 692 obligations, Z3, Zenon and LS4, about 2 minutes |
-| `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Persist`, `Restart`, `Wipe`) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,289 obligations, Z3, Zenon and LS4, at most 6 minutes for each module |
+| `multi-paxos/` | `MultiPaxosProof.tla` (the map), with `MultiPaxosFactsProof.tla` (the shared lemmas, `InitInv`, `InvAgreement`), `MultiPaxosPhase1Proof.tla` (`Prepare`, `Promise`), `MultiPaxosWinProof.tla` (the recovery of `Win`), `MultiPaxosPhase2Proof.tla` (`Allocate`, `Accept`) and `MultiPaxosLearnProof.tla` (`Decide`, `CatchUp`, `Restart`, `Wipe`, and `Persist` as a stutter step) | The same three theorems for every number of slots, with every quorum system where each Phase-1 quorum meets each Phase-2 quorum of each slot (`QuorumFacts`, a hypothesis and not an `ASSUME`, because the control `full_grid_one_column` breaks it), for the configurations of `InvApplies` with `Pick = "highest"`, `Alloc = "frontier"` and both `Gap` rules: 2,307 obligations, Z3, Zenon and LS4, at most 6 minutes for each module |
 
 The TLAPS of nixpkgs (1.4.5) has no Isabelle. So a proof uses no induction lemma (they
 need Isabelle; a least or highest member of a set of naturals comes from `WFMin`, which is first
@@ -263,7 +263,8 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The heal when a later plan asks a node again, the network delivers a request twice and late, and a node acts on its own view of the register: the highest copy per node, the term check of the heal's compare-and-set, the heal count of the record, a sent heal that ends only on an answer, and a fresh register value before an abandon or a copy wipes a node | `paros_journal::register` (`Rereplicate`, `SegmentRecord::heals`), `SegmentReplica::join`, the controller's heal in `paros_journal_control::role`; walked by `journal-sim`'s heal walk | `heal-reuse/` | #1314 (re-replication of a sealed segment's replica set) |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
-| CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
+| The election over a journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after #1323 (build the paros journal v1)) | `election/` | #1420 (paros-election) |
+| CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
 model.
@@ -346,7 +347,7 @@ The rules of #1018 (zero-stall model, more rules), each with its check and its c
 | Bypass check, the registration half (rule 3) | `p212_check` | `p212_nocheck` |
 | Bypass check, the watermark half (rule 3) | see the finding below | none: the registration half implies it |
 | GC fence (I5): the leader at `b2` makes no floor effective before its fence Phase 1 ends | `gc_p212_paper`, `wm_nocheck_small` | `gc_nofence` (21 steps), `gc_early` |
-| Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff`, `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
+| Handoff (8.2): one hop, the open slots carried, the minter that handed on never bypasses, the successor never bypasses | `handoff` (with `HandOnOneHop`: a ballot moves once, from its minter, while it leads), `handoff_paros` | `handoff_drop`, `relinquish_off`, `successor_bypass`; two hops: `leader-handoff/two_hops` |
 | Chained bypass (8.3): a second bypass waits for the fence Phase 1 of the first | `chain_small`, `chain` (7.1 million states, 5 minutes, `long`) | `chain_open_small`, `chain_open` |
 | A reader's chosen prefix waits for the fence Phase 1 of the ballot that chose the slot (#1270 (bypass read order)) | `read_carry_hold` (343 thousand states), `read_p212_hold`, and every check with `Reads` | `read_carry_no_read_hold`, `read_p212_no_read_hold`: `ReadSafe` breaks in 13 states (ballot 1 in `{a1, a2}` bypasses to ballot 3 in `{a3, a4}`, which chooses slot 1, and a read on ballot 3 returns it; a read on ballot 1 asks `{a1, a2}` and misses it) |
 | Only the incarnation that won `b` bypasses from `b` (#1230 (rules no check tests)) | `restart_bypass` (489 thousand states) | `restart_bypass_off`: Agreement breaks in 16 states (propose at `b`, restart, bypass, the proposed slot is free at `b2`, a second value is chosen) |
@@ -368,7 +369,8 @@ Findings of #1018 (2026-11-19). No design decision is refuted.
   the minter that still holds a ballot bypasses from it.
 - **The handoff carries the open slots.** `handoff_drop`: a successor that takes the slots that
   wait for the fence Phase 1 as free proposes a second value for a slot that the minter chose at
-  the old ballot.
+  the old ballot. A hand-on to the minter itself drops the open slots the same way, so the control
+  also fails with no successor.
 - **A minter that handed on drops its proactive matchmaking.** `relinquish_off`: the minter bypasses
   with what it knew at the handoff, and misses a value that the successor chose after it.
 - **GC waits for the fence Phase 1.** `gc_nofence`: the leader at `b2` collects the old ballots
@@ -1306,7 +1308,12 @@ The safety invariants are `Agreement` (one command for each slot), `LearnedChose
 learned was chosen), `OneProposal` (one proposal for each slot and ballot: a new leader
 allocates above each slot that its Phase 1 reported, so a fresh command never lands on a slot
 that its recovery proposes) and `LearnRecordsHeld` (a learned slot holds its record: the
-code's assertion "a chosen slot holds its authoritative accepted record"). A value is chosen when a Phase-2 quorum of the slot sent its `2b`
+code's assertion "a chosen slot holds its authoritative accepted record"). The action property
+`OwnRecords` says that a won campaign's frontier is past every vote that the owner's own promise
+reported: the candidate's records seed its tally (`open_phase1`), so a leader never allocates a
+fresh command at a slot where it holds a vote. The action property `RecordMoves` says that a
+record moves only by a vote of the node, a learn of a slot that it had not learned, or a fault:
+`mark_chosen` returns early on a slot that is chosen already. A value is chosen when a Phase-2 quorum of the slot sent its `2b`
 at one ballot, so a restart cannot unchoose it. The liveness property is `Ends` under
 `LiveSpec`: the last ballot is the leader that no higher ballot preempts, and it learns every
 slot below its frontier and every slot that it proposed. `Spreads` adds that each live node
@@ -1319,7 +1326,7 @@ two slots, one command and `Noop`; the CI set runs in about nine minutes):
 |---|---|---|---|
 | `reach` | ci | `NoChoice`, a reachability control | violation |
 | `reach_gap` | ci | `NoNoopChosen`, a reachability control: a gap fill is chosen below a chosen command | violation |
-| `majority` | ci | the rules of the code | pass (470 thousand states) |
+| `majority` | ci | the rules of the code, `OwnRecords` and `RecordMoves` | pass (470 thousand states) |
 | `three_ballots` | ci | three ballots, one slot, two commands: two reports of different ballots meet at one slot | pass (108 thousand states) |
 | `three_ballots_lowest` | ci | the same, Phase 1 takes the lowest reported ballot | `Agreement` violation |
 | `three_ballots_restart` | ci | the same, `a1` owns ballots 1 and 3, one restart: the old leader campaigns again over its own durable log | pass (558 thousand states) |
@@ -2632,6 +2639,7 @@ and the checks without the `meta_` prefix run it.
 | `deliver_all` | ci | violation of `NoForeign`: every replica gets every slot (the paper's replica); the invariant sees a broadcast |
 | `boundary_zero` | ci | violation of `OneFold`: R2 starts from the empty state, so its fold is not the fold of the whole log (a `seq` that S1 used is given again, or the fence uses a leader uuid that a `SetLeader` of S1 replaced) |
 | `boundary_early` | ci | violation of `OneFold`: the record is written before its writer applied every slot of S1 (`K = 2`) |
+| `record_once` | ci | pass of `RecordOnce`: the early boundary with `K = 1`, `NS = 2`; the record is a compare-and-set on an empty record, so a second replica never writes it again |
 | `boundary_seq` | ci | violation of `AckTrue`: the record holds `next_seq` only, and R2 starts with the first leader uuid. S1 decides `SetLeader(u2, u1)`; R2 then accepts a `Write` of the deposed writer `u1` that the whole log refuses |
 | `route_other` | ci | violation of `ReadTrue`: a read goes to a replica of the other set, which does not hold the `seq`: it answers `Truncated` (below its boundary state) or `Tail` (above the seal) for an acked write that nobody trimmed |
 | `retire_early` | ci | violation of `Ends`: S1 retires at `F` holders; the holder crashes and the slot is lost for the other replicas of R1 |
@@ -2641,6 +2649,7 @@ and the checks without the `meta_` prefix run it.
 | `safety_k2` | long | pass, bounded at 40 minutes: `K = 2`, `NS = 3` |
 | `meta_safety_ci` | ci | pass: the safety invariants with the `meta` rule; two replicas in each set (safety needs no quorum of replicas), the `SetLeader` from `u1` to `u2` and a write of `u1` |
 | `meta_stale` | ci | violation of `AckTrue`: the same configuration as `meta_safety_ci`, but the first leader of S2 reads the metadata before the seal wrote the uuid and proposes `Fence(u1)`; S1 decided `SetLeader(u2, u1)`, and the deposed `u1` writes in S2 |
+| `order_stale` | ci | pass of `ChosenPrefix` and `ChosenStable`: the stale read of `meta_stale` with `K = 1`, `NS = 2`; the fence takes the wrong value but keeps the slot order, and no chosen slot changes. Without the frontier guard of `ChooseFence`, the fence is chosen before slot 0 |
 | `meta_safety` | long | pass, bounded at 40 minutes: the `meta` rule, `NS = 3` (the `Fence` takes slot 1) |
 | `meta_live` | long | pass: `Ends` with the `meta` rule (20.7 million distinct states, about 55 minutes locally with 4 workers) |
 | `meta_gone` | long | pass, bounded at 40 minutes: `EndsS2` with the `meta` rule |
@@ -3435,6 +3444,90 @@ rules, and each rule is needed. They are proposals for Pierre (PR #1470, rules t
 What is not in the model: reads, the trim and the floor (`re-replication/`), the register across a
 matchmaker handover (`segment-records/`), and a controller's own stale view of the register (the
 controller reads the current record).
+
+### `election/`: the election over a journal, for #1420 (paros-election)
+
+This model checks the term of `docs/architecture/03-3-coordinators-and-placement.md` §3.3 (rule 3,
+decision 13) alone. The crate `paros-election` (a working name) will build it. A user elects any
+actor with it, and each coordinator uses it over its control journal. `cell-control/` has the same
+term together with the duties of a cell. This model has no cell duties. It models the steps of the
+term that `cell-control/` leaves abstract.
+
+The journal is one atomic object. The other models check how Paxos keeps it. It holds the leader
+value: unset, a uuid, or `None` in multi-writer mode (`docs/journal/02-data-plane.md` §J2.4.1). It
+also holds a log of the records that the election folds: each applied `SetLeader` and each term
+record.
+
+The steps:
+
+- **Win.** An actor sends `SetLeader(new, old)` with a fresh uuid. It takes `old` from its fold of
+  a prefix of the log, so its view can lag. The loser learns the winner from the refusal. A
+  candidate with no answer sends the same call again, so a refusal that names its own uuid is a
+  win.
+- **Number.** The term number is the count of the `SetLeader` records that name a uuid. The winner
+  computes it as the number of the term of `old`, plus one.
+- **Hold.** The first write of a term is the term record. It names the holder's interface: the
+  actor and its incarnation. Each later write is a renewal.
+- **Lose.** A holder stops at its first refused write.
+- **Hand on.** A holder sends `SetLeader(next, me)` with a fresh uuid. Then it sends the uuid and
+  the term number to the next actor, which takes the term if it is idle.
+- **Fence.** A holder sends orders out of the journal with its term number. The receiver keeps the
+  highest term on disk and refuses a lower one.
+- **Challenge.** An actor challenges only when no write under the current uuid comes for a lease
+  (`LiveHolder`: an actor or a hand-on message holds the current uuid). With `Eager`, it
+  challenges at any time.
+
+The faults: an actor stops and comes back as a new incarnation, and the answers to the old
+incarnation are lost. One message is lost. A call is applied late. The user switches the journal to
+multi-writer mode.
+
+The properties:
+
+- `TermTrue`: the term of a holder is the term of its uuid in the journal. So one term has one
+  holder.
+- `WriteInTerm`: the journal takes a write only in the term that it was sent in.
+- `NoRegress`: the receiver never applies an order below one that it applied. The fence is a
+  property of the receiver only.
+- `StopsAtRefusal`, an action property: the step that reads a refusal of a write under the
+  holder's uuid leaves it with no term. It checks the rule itself, not a result of the rule.
+- `IfaceOfTerm`: the interface that any fold publishes is the interface of the holder of that
+  fold's term, in the incarnation that took the term.
+- `PubTrue`: a holder that believes its interface is published finds its term record, with its own
+  incarnation, in the journal.
+- `ModeKept`: the election never takes a journal out of multi-writer mode.
+- `Leads`: once the faults stop, an actor leads the term in force, and its interface is published.
+  It is checked under weak fairness, with no `Eager` challenge and with every fold at the tail.
+
+The rules are constants, and `TRUE` is the rule: `Fence`, `Cas`, `ClearIface` (the fold clears the
+interface at each `SetLeader`), `Fresh` (each campaign draws a new uuid), `Stop`, `RefuseMulti` and
+`OwnAnswer` (an answer counts only for the uuid that its write was sent under).
+
+| Check | CI | Result |
+|---|---|---|
+| `safety` | ci | pass: every safety property. Three actors (symmetric), three uuids, one crash, one lost message, eager challenges from views that lag (1.5 million distinct states) |
+| `safety_hand` | ci | pass: every safety property, with one hand on, one crash and no lost message (1.3 million distinct states) |
+| `safety_multi` | ci | pass: every safety property, with the user's switch to multi-writer mode, two uuids, one crash and no lost message |
+| `live` | ci | pass: `Leads`. Two actors, four uuids, one crash, one lost message |
+| `live_hand` | ci | pass: `Leads` with one hand on and one lost message. A lost hand-on message leaves a term with no holder, and a challenge takes the next term |
+| `no_fence` | ci | violation of `NoRegress`: the order of a deposed holder lands after an order of the next term |
+| `late_challenge` | ci | violation of `TermTrue`: with no compare-and-set, two challenges from one view both win. The second one believes a term number that the first one holds |
+| `iface_kept` | ci | violation of `IfaceOfTerm`: after a `SetLeader`, the fold publishes the interface of the earlier term until the term record of the new holder lands |
+| `reinstate` | ci | violation of `WriteInTerm`: an actor names its old uuid again and wins a later term. Its write of the earlier term was in flight across a restart, and it lands in the new term |
+| `no_stop` | ci | violation of `StopsAtRefusal`: a holder keeps its term after a refused write |
+| `multi` | ci | violation of `ModeKept`: a challenge with `old = None` takes a multi-writer journal back to single-writer mode |
+| `any_answer` | ci | violation of `PubTrue`: an actor hands on and then wins again. The ok of the term record of its earlier term marks its new interface as published |
+| `reach_<event>` | ci | violation of `NotReached`, one for each case. `won_by_refusal`: the answer of a won call is lost, and the call sent again is refused with the candidate's own uuid. `lost_cas`: two candidates race, and one loses. `deposed_stop`: a deposed holder stops at its refused write. `late_cas_refused`: a call applied after another term began is refused. `stale_refused`: the receiver refuses an order of an old term. `adopted`: the next actor takes a handed term. `multi_stop`: a holder stops when the user switches the journal to multi-writer mode |
+
+What the model found: **an answer counts only for the uuid that its write was sent under.** A holder
+can have a write of its earlier term in flight when it takes a new term, for example after a hand
+on that it then wins back. Without this rule, the ok of that old term record marks the new
+interface as published (`any_answer`). The refusal of an old renewal also deposes the new term.
+That costs one term: in a first liveness check with a tight uuid budget, it used the last uuid.
+
+What is not in the model: Paxos inside the journal (one atomic object), the lease as a clock (a
+challenge waits until there is no live holder, or comes at any time with `Eager`), more than one
+receiver, the recovery pass of a coordinator after it wins (#1422 (the takeover by a new
+controller)), and the `expected_seq` of the writes of a holder (`multi-writer/`).
 
 ### `journal-ids/`: one id names at most one journal, forever, for #1419
 

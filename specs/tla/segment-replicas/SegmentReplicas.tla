@@ -368,6 +368,16 @@ OneFold == \A r \in Replicas : Ready(r) /\ Frontier >= Front(r) =>
   THEN StateOf(r).next = Truth(Front(r)).next
   ELSE StateOf(r) = Truth(Front(r))
 
+\* The leader chooses the slots in order (the allocator frontier), and a
+\* chosen slot never changes. The stale read of "meta_stale" breaks the
+\* fence's value, never its order.
+ChosenPrefix == \A s \in Slots : chosen[s] # None => \A t \in 0..(s - 1) : chosen[t] # None
+ChosenStable == [][\A s \in Slots : chosen[s] # None => chosen'[s] = chosen[s]]_vars
+
+\* The record of S1 is written once: a compare-and-set on an empty record.
+\* An early boundary state is a wrong state, but it is written once too.
+RecordOnce == [][rec # None => rec' = rec]_vars
+
 \* The record holds the journal state at the seal.
 RecordTrue == rec # None => S1Full /\ rec = Truth(K)
 
