@@ -51,6 +51,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SPECS = ROOT / "specs" / "tla"
 MINUTES = ROOT / "scripts" / "tla-minutes.txt"
+SHARDS = ROOT / "scripts" / "mutate-tla-shards.txt"
 
 # A job of the TLA workflow has 30 minutes, about 27 of them for its checks
 # once Nix is set up. A line of `scripts/tla-minutes.txt` is the largest time
@@ -150,6 +151,28 @@ def minutes(all_folders: list[str]) -> dict[str, float]:
     return table
 
 
+def shards(all_folders: list[str]) -> None:
+    """Every folder has one line in `scripts/mutate-tla-shards.txt`: the
+    `TLA mutants` workflow refuses a run on a folder with no line, so a new
+    folder gets its line in the pull request that adds it."""
+    names = []
+    for line in SHARDS.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, value = line.split()
+        if not value.isdigit():
+            sys.exit(f"scripts/mutate-tla-shards.txt: {name} has no whole number of slices")
+        names.append(name)
+    twice = sorted({n for n in names if names.count(n) > 1})
+    if twice:
+        sys.exit(f"scripts/mutate-tla-shards.txt: two lines for {twice}")
+    missing = sorted(set(all_folders) - set(names))
+    extra = sorted(set(names) - set(all_folders))
+    if missing or extra:
+        sys.exit(f"scripts/mutate-tla-shards.txt: no line for {missing}, no folder for {extra}")
+
+
 def pack(selected: list[str], table: dict[str, float]) -> list[list[str]]:
     """First-fit decreasing: the largest folder first, into the first group that holds it."""
     groups: list[tuple[float, list[str]]] = []
@@ -170,6 +193,7 @@ def needs_rust(changed: list[str] | None) -> bool:
 def plan_tla(changed: list[str] | None) -> dict[str, str]:
     all_folders = folders()
     table = minutes(all_folders)
+    shards(all_folders)
     tools = changed is None or any(f in TLA_TOOLS for f in changed)
     selected = []
     for folder in all_folders:
