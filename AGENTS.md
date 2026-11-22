@@ -246,8 +246,9 @@ merge on red, and a force-push or a delete on a branch you did not create.
 **The builder never grades its own code** (Pierre, 2026-11-22). The review before the merge comes
 from an independent reviewer: a fresh agent or a person who did not write the change. It gets the
 diff, the PR description, the code around the diff and `main`, never the builder's chat or
-reasoning. It follows `REVIEW.md` and hunts races, edge cases and broken invariants. Fix each
-finding, or answer it in the PR description.
+reasoning. It follows `REVIEW.md` and hunts races, edge cases and broken invariants. An
+automatic reviewer never uses the Fable model: it uses the builder's model or a cheaper one.
+Fix each finding, or answer it in the PR description.
 
 **The same failure twice stops the loop** (Pierre, 2026-11-22). This rule counts fixes, never
 reruns: a red check or a red seed is never run again (the absolute rule, and "A flaky check is a
