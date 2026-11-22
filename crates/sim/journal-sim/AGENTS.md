@@ -119,3 +119,5 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
   `Below`, a `Resolve` answered both ways, two seals, and more). A rule no walk meets fails the
   test.
 - TLC must run: `require_tlc` fails the test when `tlc` is missing (the default nix shell has it).
+- **A test that runs TLC is named `tlc_*`**, and only such a test runs TLC: the mutants job runs
+  them in its second pass only (`.cargo/mutants-journal.toml`, `not test(/^tlc_/)`).
