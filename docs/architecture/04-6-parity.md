@@ -80,8 +80,8 @@ The marks in the "Home" column:
 | F39 | A reader cursor with gap reports; tail by long poll | `paros-client/src/reader.rs` | Journal v1 (§J2.5), #1331 |
 | F40 | Leaderless reads | `paros-roles` | Journal v1 (§J2.5, #1326) |
 | F41 | Write admission: a busy leader answers `busy`; a full backlog answers `Overloaded` | `node/calls.rs` | #1416 (host features), #1431 |
-| F42 | `inspect`: the operator's view of a journal (term, configuration, watermark) | `cmd/data.rs` | **Finding** |
-| F43 | `reconfigure` and `retire`: the operator changes a journal's members by hand | `cmd/data.rs` | **Finding** (the grid controller reshapes now, §J6) |
+| F42 | `inspect`: the operator's view of a journal (term, configuration, watermark) | `cmd/data.rs` | #1434, as a read-only `journal inspect`: the segment table, the grid, the leader and the health measures of §J6.2; it changes nothing (Pierre, 2026-11-22) |
+| F43 | `reconfigure` and `retire`: the operator changes a journal's members by hand | `cmd/data.rs` | **Dropped** (Pierre, 2026-11-22): the grid controller's fenced reshape is the only membership change (§J6.1), and the retire of a segment is a protocol step (§J3.1) |
 | F44 | The checkpoint of a journal's state, then a truncate below it | `paros-client/src/checkpoint.rs` | #1418 (paros-rsm) |
 | F45 | The election library for a user's own program | `paros-client/src/election.rs` | #1420 |
 
