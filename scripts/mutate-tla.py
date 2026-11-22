@@ -35,8 +35,8 @@ bounds the state space of the check, as for the `Mutants` workflow of the core
 
 `--budget` bounds a run in seconds, for a CI job: a mutant whose checks the
 budget cuts is `unfinished`, never caught, and the run fails. The fix is more
-slices. `--baseline-out` times every check once (one job for each folder in
-CI), and `--baseline-from` gives those times to the slices, so that a slice
+slices. `--baseline-out` times every check once (the folders of a job of the
+`TLA` workflow), and `--baseline-from` gives those times to the slices, so that a slice
 spends its budget on mutants. `--workers` is the number of mutants judged at
 once; each TLC gets an equal share of the CPUs, so a baseline and the slices
 that use it must run with the same `--workers`.
