@@ -48,8 +48,8 @@ the state it promises is durable. etcd-raft makes this structural: such a messag
 second queue, `msgsAfterAppend`, that is released only after the write. A leader's `MsgApp`
 does not promise anything, so it may leave while the leader's own copy is still being written.
 
-**(c) maps to paros.** `Ready` (`paros-core/src/node/ready.rs`) orders the buckets: persist
-`writes`, then send `messages`. `MustSync::for_batch` (`paros-core/src/contract/write.rs`) says
+**(c) maps to paros.** `Ready` (`paros-consensus/src/node/ready.rs`) orders the buckets: persist
+`writes`, then send `messages`. `MustSync::for_batch` (`paros-consensus/src/contract/write.rs`) says
 when the batch needs an fsync. The leader exception is #578 (leader sends Accept before its own
 fsync): the driver sends a batch's `Accept`s before its flush, unless the batch raises the
 promise (`split_early`, `paros-roles/src/node/ready.rs`).
@@ -110,11 +110,11 @@ gets a **snapshot**. A rejection (`MaybeDecrTo`, `tracker/progress.go:226`) move
 
 **(c) maps to paros.** paros keeps no per-follower replication progress. (A matchmaker
 deployment's leader notes each member's chosen index from beat acks, for GC only.) A Paxos log is per slot, so the
-leader tracks each **slot** (`Rounds`, `paros-core/src/proposer/rounds.rs`), not each
+leader tracks each **slot** (`Rounds`, `paros-consensus/src/proposer/rounds.rs`), not each
 follower. A follower learns a decided slot it missed by **pulling** it: a beat carries the
 leader's chosen index, and a follower that is behind sends a `CatchUpRequest`
-(`on_heartbeat`, `pull_gap`, `paros-core/src/node/replication.rs`). The leader's role is
-passive: it serves what is asked (`serve_catchup`, `paros-core/src/node/catch_up.rs`). The
+(`on_heartbeat`, `pull_gap`, `paros-consensus/src/node/replication.rs`). The leader's role is
+passive: it serves what is asked (`serve_catchup`, `paros-consensus/src/node/catch_up.rs`). The
 snapshot state maps onto the trim-point jump (`Message::TrimmedTo`): paros sends no bytes and
 no state machine, only the floor and the journal state.
 
@@ -151,8 +151,8 @@ gets acked or rejected and frees itself.
 
 **(c) maps to paros.** paros bounds pages, not a per-follower window. A re-send page carries at
 most `Limits::resend_page` rounds (`RESEND_BATCH` = 64), a recovery page at most
-`Limits::recovery_page` (both in `paros-core/src/contract/limits.rs`), and a catch-up answer at
-most `CATCHUP_BATCH` = 64 slots (`paros-core/src/node/catch_up.rs`). How many rounds are open at once is the driver's matter
+`Limits::recovery_page` (both in `paros-consensus/src/contract/limits.rs`), and a catch-up answer at
+most `CATCHUP_BATCH` = 64 slots (`paros-consensus/src/node/catch_up.rs`). How many rounds are open at once is the driver's matter
 (the client's pipeline and the batcher), not the core's.
 
 ## 4. Sending an append, and the fallback to a snapshot

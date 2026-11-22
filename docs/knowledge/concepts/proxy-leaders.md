@@ -133,7 +133,20 @@ open, commits a value that no quorum chose (`belief_any`).
 | The TLA+ model | `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration |
 | The driver | `paros-roles/src/proxy_leader.rs`: `run_proxy`; a machine runs the proxy of each `Role::ProxyLeader` booking the registry holds for it (PR #775 (machine proxy leaders), #765) |
 
-**Sim gates and oracles** (`paros-sim/src/audit/state.rs`):
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- The model `specs/tla/proxy-leader/` and the trace spec `specs/tla/node/ProxyLeaderTrace.tla`.
+- `consensus-sim`'s flavors `Flavor::proxies` and `Flavor::proxies_on_grid`, with the walk sites
+  "cluster: a proxy leader committed a slot", "cluster: a leader took back a delegated round" and
+  "cluster: a proxy crashed with rounds open".
+- `COMMIT_BACKED` and `ONE_PROPOSAL` (`oracle/ledger.rs`). `Mutant::KeepProxyRounds` (a crashed
+  proxy kept running with its rounds) passes the oracles and is refused by the trace check.
+- Core probes of `proxy_leader.rs` and `node/phase2.rs` ("proxy: a leader takes a delegated round
+  back on a grid column").
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/state.rs`):
 
 - `"proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot"`.
 - `"proxy: a proxy decides the command it was delegated"`.

@@ -136,7 +136,18 @@ fence; a handoff leader that cannot cover its inherited fence resigns (see the h
 The rule is stated in the doc comments of `tick_check_quorum` (why it exists, why the window
 length) and of `Authority::holds` (why Phase 2).
 
-**Sim gates and oracles** (`paros-sim/src/audit/state.rs`):
+**Judges today:**
+
+- `consensus-sim`'s liveness judge (`Cluster::converged`: once the faults stop, one leader stands)
+  and the walk moves that make a deposed leader: "cluster: a node campaigned while a leader
+  stood" (`Action::Usurp`), "cluster: a leader missed a message that would depose it" and "cluster:
+  a move met a leader that a higher ballot passed".
+- The core probe "propose: a leadership a higher ballot passed refuses a proposal".
+- Unit tests: `a_leader_without_an_ack_quorum_steps_down_after_its_window` and
+  `a_leader_hearing_acks_keeps_leadership_across_windows`
+  (`paros-consensus/src/node/tests/replication.rs`).
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/state.rs`):
 
 - `"a leader deposed by a promise-majority stops beating within an election timeout
   (CheckQuorum)"` (`assert_always!`): the budget is `2 × timeout + DEPOSED_TICK_SLACK` ticks

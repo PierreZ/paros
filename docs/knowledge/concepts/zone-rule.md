@@ -119,7 +119,17 @@ is "every `q2` spans at least two zones", WPaxos's `fz = 1`.
 | Where it binds, and the redraws | `paros-model/src/placement.rs`: `zone_rule_binds`, `ZONE_DRAWS` |
 | The decision | `docs/architecture/05-failure-model-and-zones.md` §5 (#215, #748 (survive)) |
 
-**Sim gates and oracles:**
+The rows that name `paros-model` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- Unit tests of `membership/zone_rule.rs` in `paros-consensus`.
+- The grid controller places a heal under the zone rule (`paros-journal-control/src/placement.rs`,
+  `GridZones`), judged by `journal-sim`'s sweep of every small view against a reference
+  `decide`.
+- The model `specs/tla/health/`: no placement over two zones after a zone loss.
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - `"zones: a configuration's labels are bound to its ballot"` (`paros-sim/src/audit/state.rs`).
 - `"zones: a placed journal that spans three zones survives any one"` and the gate `"zones: a

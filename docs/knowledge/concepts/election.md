@@ -30,7 +30,7 @@ out-of-order decisions + a gap-filling protocol").
   delay is needed for safety.
 - Liveness needs a period where timeouts are long enough for one Phase 1 round trip (§7).
 - Clocks: none in `paros-consensus`. Time is the driver's `tick()`. The driver draws the election
-  timeout in `[T, 2T)` ticks (`draw_election_timeout`, `paros-roles/src/node/report.rs`).
+  timeout in `[T, 2T)` ticks (`draw_election_timeout`, `paros-roles/src/node/report.rs`, at the tag `v0.2.0-alpha.1`).
 
 ## 3. Roles and state
 
@@ -169,7 +169,21 @@ The rule is stated in the doc comments of `Election` (cross-configuration comple
 `RecoveryPolicy`, `try_become_leader` (the gap-fill block) and `record_own_round`. AGENTS.md
 lists two of them under "Protocol invariants to remember".
 
-**Sim gates and oracles** (`paros-sim/src/audit/`):
+**Judges today:**
+
+- The model `specs/tla/multi-paxos/` (Phase 1 recovery, the `Noop` gap fill,
+  `record_own_round`), and the trace specs of `specs/tla/node/`: each names "a leader fills a gap with a Noop", "a leader wins with a frontier above slot 0" and "three ballots win in one walk" as rules its walks must meet
+  (`cluster/trace/rules.rs`).
+- `ONE_VALUE` and `ONE_PROPOSAL` (`consensus-sim/src/oracle/ledger.rs`); `Mutant::HideVotes`
+  (a `Promise` that hides its votes) is refused by the trace check at the first such promise.
+- The walk site "cluster: a node won an election above an earlier leader", and the core probes
+  of `node/election.rs` (for example "phase1: a fresh leader heals a faulty chosen slot from its
+  promise quorum").
+- Unit tests: `election_fills_a_hole_the_promise_quorum_never_reported`,
+  `recovery_picks_highest_ballot_value_per_slot`, `truncated_quorum_refuses_a_blind_candidate`
+  (`paros-consensus/src/node/tests/election.rs`).
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/`):
 
 - `"one ballot proposes at most one command for a slot"` and
   `"a durable accept quorum never decides two values for a slot"` (`state.rs`): the safety
