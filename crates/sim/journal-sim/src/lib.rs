@@ -8,6 +8,7 @@
 //! (moonpool-tla). Test only: `publish = false`, never a dependency of
 //! another crate.
 
+pub mod backend;
 pub mod campaign;
 pub mod control;
 pub mod controller;
@@ -17,3 +18,4 @@ pub mod oracle;
 pub mod register;
 pub mod roles;
 pub mod trace;
+pub mod whole;

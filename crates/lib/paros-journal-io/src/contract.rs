@@ -227,7 +227,7 @@ pub fn transport<T: Transport>(
             from: NodeId(i),
             to: to.node,
             message: Message::Pull {
-                segment: SegmentId(i),
+                segment: SegmentId(i + 1),
                 from: Slot(i),
             },
         })
@@ -242,9 +242,9 @@ pub fn transport<T: Transport>(
             "transport: a message arrives as it was sent: {envelope:?}"
         );
         assert_eq!(
-            envelope.receiver(),
-            to,
-            "transport: a message arrives at the role it names"
+            envelope.receiver().node_address(),
+            to.node_address(),
+            "transport: a message arrives at the node it names"
         );
     }
 }

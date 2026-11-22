@@ -13,6 +13,7 @@ use crate::storage::Storage;
 const A: Address = Address {
     journal: JournalId(3),
     node: NodeId(9),
+    segment: None,
 };
 
 fn ballot(round: u64) -> Ballot {
@@ -48,7 +49,7 @@ fn key_bytes_sort_as_keys_and_read_back() {
     }
     assert_eq!(Key::from_bytes(&[0; KEY_LEN - 1]), None, "a short key");
     let mut bad = Key::new(A, Kind::Vote, 1).to_bytes();
-    bad[16] = 99;
+    bad[PREFIX_LEN] = 99;
     assert_eq!(Key::from_bytes(&bad), None, "an unknown kind");
 }
 
@@ -181,4 +182,34 @@ fn every_damaged_record_is_reported() {
         Err(entries.len()),
         "every record of another role is damage"
     );
+}
+
+#[test]
+fn the_replicas_of_one_node_are_two_ranges() {
+    let mut storage = MemStorage::new();
+    let first = Address::replica(JournalId(3), NodeId(9), SegmentId(1));
+    let second = Address::replica(JournalId(3), NodeId(9), SegmentId(2));
+    commit(
+        &mut storage,
+        &[
+            Op {
+                key: Key::new(first, Kind::Base, 0),
+                value: vec![1],
+            },
+            Op {
+                key: Key::new(second, Kind::Base, 0),
+                value: vec![2],
+            },
+        ],
+    );
+    let mut scan = |address| storage.scan(address).expect("a scan");
+    assert_eq!(
+        scan(first),
+        vec![(Key::new(first, Kind::Base, 0), Entry::Value(vec![1]))]
+    );
+    assert_eq!(
+        scan(second),
+        vec![(Key::new(second, Kind::Base, 0), Entry::Value(vec![2]))]
+    );
+    assert_eq!(scan(A), Vec::new(), "the node's own range holds no replica");
 }
