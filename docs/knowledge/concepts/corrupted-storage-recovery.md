@@ -31,7 +31,7 @@ overwrite a committed entry. CTRL is "safe + highly available in all cases".
 
 | Role | State | Durable? |
 |---|---|---|
-| Store (`paros-storage` on `moonpool-journal`) | each entry's identity apart from its value; two checksummed copies of the metainfo | yes |
+| Store (`paros-storage` on `moonpool-journal`, at the tag `v0.2.0-alpha.1`) | each entry's identity apart from its value; two checksummed copies of the metainfo | yes |
 | Acceptor | its readable records, and the `faulty` set: slot → ballot of a record it can no longer read | the records yes; the faulty set is rebuilt by the boot scan |
 | Leader (`Election`, then `RepairProbe`) | per faulty slot: the `have` reports, the qualifying answers, the blocked slots | no |
 
@@ -160,7 +160,22 @@ for every other slot.
 | The record scrub | `paros-storage/src/journal/node.rs`: `JournalStorage::scrub`, `judge` |
 | The design | `docs/analysis/storage/ctrl-multipaxos-restatement.md`, `docs/analysis/storage/clstore-record-contract.md` |
 
-**Sim gates and oracles:**
+The rows that name `paros-roles`, `paros-storage` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- `consensus-sim`'s `Action::Rot` (`cluster/faults.rs`): a disk loses the value of one record and
+  keeps its identity; the split floor makes half the rots strike where a trim point must resolve
+  them. Flavors `Flavor::disk_faults` and `Flavor::disk_faults_three`; sites "cluster: a disk
+  rotted a chosen record", "cluster: a disk rotted a record below a peer's floor" and "cluster: a
+  scrub wrote a rotted record again".
+- `ONE_VALUE` judges each step; `Mutant::HideFaulty` (a `Promise` that drops its faulty records)
+  is refused by the trace check (`specs/tla/node/FaultsTrace.tla`).
+- The models: the faulty entries of CTRL and the repair probe in `specs/tla/truncation/`, CTRL on
+  a grid in `specs/tla/ctrl-grid/`, and the copies of a sealed segment in
+  `specs/tla/ctrl-segments/`.
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - The ledgered injector rots entries, persist records, headers and metainfo
   (`paros-sim/src/world/injector.rs`): `"journal store: an injected entry rot is reported faulty"`.

@@ -17,6 +17,7 @@ const SHOWN: Record<string, [string, string]> = {
   "pipelining-and-resend": ["Multi-Paxos", "paxos/multi-paxos/"],
   "catch-up": ["Multi-Paxos", "paxos/multi-paxos/"],
   "election": ["Multi-Paxos", "paxos/multi-paxos/"],
+  "paging-a-campaign": ["Multi-Paxos", "paxos/multi-paxos/"],
   "check-quorum": ["Multi-Paxos", "paxos/multi-paxos/"],
   "leader-handoff": ["Multi-Paxos", "paxos/multi-paxos/"],
   "grid-quorums": ["Quorums", "paxos/quorums/"],
@@ -33,6 +34,7 @@ const SHOWN: Record<string, [string, string]> = {
   "truncation": ["Multi-Paxos", "paxos/multi-paxos/"],
   "boot-safety": ["When fsync fails", "engineering/fsync/"],
   "writer-fence": ["Multi-Paxos", "paxos/multi-paxos/"],
+  "segments-and-seal": ["Segments", "journal/segments/"],
 };
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
