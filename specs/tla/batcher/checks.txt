@@ -7,6 +7,9 @@
 # keeps the push order of its lane.
 batch         pass       ci
 two_journals  pass       ci
+# A lane batch fits the limits and holds no write that goes alone, and a
+# write that goes alone flushes its lane first.
+limits        pass       ci
 # Controls: a flush in any order, and an unbatcher that reads the lane now.
 order_any     violation  ci
 scatter_lane  violation  ci

@@ -98,9 +98,9 @@ Init ==
 
 -----------------------------------------------------------------------------
 
-\* A writer makes write t of n records and b bytes for journal j.
+\* A writer makes write t of n records and b bytes for journal j (`Next`
+\* takes j from `Journals`).
 Write(t, j, n, b) ==
-  /\ j \in Journals
   /\ ~Made(t)
   /\ writes' = [x \in DOMAIN writes \cup {t} |->
                   IF x = t THEN [jr |-> j, n |-> n, bytes |-> b] ELSE writes[x]]
@@ -118,21 +118,23 @@ Push(t) ==
   /\ pushed' = Append(pushed, t)
   /\ UNCHANGED <<writes, batches, logs, landed, answers>>
 
-\* Batch ws of journal j leaves the batcher: the lane of j, or one write
-\* alone after its lane flushed.
+\* Batch ws of journal j leaves the batcher (`Next` takes j from `Journals`):
+\* the lane of j, never empty (`BatchFits`), or one write alone after its
+\* lane flushed. The batcher gets the write that goes alone as it gets every
+\* write, so it is pushed too (`SendOrder`).
 Flush(j, ws) ==
-  /\ j \in Journals
-  /\ ws # <<>>
   /\ Len(batches) < MaxBatches
   /\ \/ /\ lanes[j] # <<>>
         /\ ws \in Orders(lanes[j])
         /\ lanes' = [lanes EXCEPT ![j] = <<>>]
+        /\ UNCHANGED pushed
      \/ /\ Len(ws) = 1
         /\ Made(ws[1]) /\ writes[ws[1]].jr = j /\ Alone(ws[1])
         /\ lanes[j] = <<>>
+        /\ pushed' = Append(pushed, ws[1])
         /\ UNCHANGED lanes
   /\ batches' = Append(batches, [jr |-> j, ws |-> ws])
-  /\ UNCHANGED <<writes, pushed, logs, landed, answers>>
+  /\ UNCHANGED <<writes, logs, landed, answers>>
 
 \* The batcher stops and loses its lanes.
 Crash ==
@@ -157,7 +159,8 @@ Before(x, i, t) ==
        IN Records(SelectSeq(lane, LAMBDA u : u # t))
 
 \* A writer hears the range of write t: at position seq, n records. A copy
-\* of an answer heard before changes nothing: it is no step.
+\* of an answer heard before changes nothing: it is no step, so that
+\* `BatcherTrace` refuses a repeated answer (`AnswerOnce`).
 Answer(t, seq, n) ==
   /\ Made(t)
   /\ n = writes[t].n
@@ -168,13 +171,16 @@ Answer(t, seq, n) ==
   /\ answers' = answers \cup {[tok |-> t, seq |-> seq, n |-> n]}
   /\ UNCHANGED <<writes, pushed, lanes, batches, logs, landed>>
 
+\* The batches of one or two writes that a flush may name, as a recorded
+\* event may.
+Shorts == {<<t>> : t \in Tokens} \cup {<<t, u>> : t, u \in Tokens}
+
 Next ==
   \/ \E t \in Tokens, j \in Journals, n \in 0..MaxN, b \in 0..MaxB : Write(t, j, n, b)
   \/ \E t \in Tokens : Push(t)
-  \/ \E j \in Journals : \E ws \in {lanes[j]} \cup Orders(lanes[j]) \cup {<<t>> : t \in Tokens} :
-       Flush(j, ws)
+  \/ \E j \in Journals : \E ws \in {lanes[j]} \cup Orders(lanes[j]) \cup Shorts : Flush(j, ws)
   \/ Crash
-  \/ \E id \in 1..Len(batches) : \E seq \in {Len(logs[batches[id].jr])} : Land(id, seq)
+  \/ \E id \in 1..MaxBatches, seq \in 0..MaxLog : Land(id, seq)
   \/ \E t \in Tokens, seq \in 0..MaxLog, n \in 0..MaxN : Answer(t, seq, n)
 
 Spec == Init /\ [][Next]_vars
@@ -199,6 +205,30 @@ Sub(s, p) ==
 
 \* A batch of a lane keeps the push order of its writes.
 LaneOrder == \A x \in 1..Len(batches) : Len(batches[x].ws) = 1 \/ Sub(batches[x].ws, pushed)
+
+\* A batch holds a write at least. A batch of more than one write is a lane:
+\* no write in it goes alone, and it fits the limits (`Batcher::push`
+\* flushes a lane that the next write would overfill).
+BatchFits ==
+  \A x \in 1..Len(batches) :
+    LET ws == batches[x].ws
+    IN /\ ws # <<>>
+       /\ Len(ws) > 1 => /\ \A i \in 1..Len(ws) : ~Alone(ws[i])
+                         /\ Records(ws) <= MaxRecords
+                         /\ Bytes(ws) <= MaxBytes
+
+\* The batches of a journal leave in the order that the batcher got their
+\* writes: a write that goes alone flushes its lane first.
+SendOrder ==
+  \A j \in Journals :
+    LET of == SelectSeq([x \in 1..Len(batches) |-> batches[x]], LAMBDA b : b.jr = j)
+        Flat[k \in 0..Len(of)] == IF k = 0 THEN <<>> ELSE Flat[k - 1] \o of[k].ws
+    IN Sub(Flat[Len(of)], pushed)
+
+\* An answer heard before enables no `Answer`: a trace that hears one
+\* answer two times is refused at the copy.
+AnswerOnce ==
+  \A a \in answers : ~ENABLED Answer(a.tok, a.seq, a.n)
 
 \* Reachability controls: each must be violated.
 NoAnswer == answers = {}

@@ -309,8 +309,9 @@ Init ==
 (***************************************************************************)
 Reshape ==
   /\ top < G
-  /\ top = InForce
-  /\ IF ReshapeGuard THEN \A h \in 1..(top - 1) : rret[h] ELSE TRUE
+  \* With the guard the newest configuration is in force: `Retire` needs
+  \* the end of its configuration done. The control keeps that check alone.
+  /\ IF ReshapeGuard THEN \A h \in 1..(top - 1) : rret[h] ELSE top = InForce
   /\ top' = top + 1
   /\ UNCHANGED <<rend, rbound, rret, rtrim, bgen, ldr, acc, rep>>
 
@@ -398,9 +399,11 @@ Phase1(b) == \E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : Phase1On(b, Qs)
 (* by compare-and-set from "no end". Its read may miss a partial write of  *)
 (* another sealer, and then it writes over it.                             *)
 (***************************************************************************)
+\* The code writes the seal in Phase 1; in the model, a leader that already
+\* writes may also write the seal again. Only its Phase 1 sets `bend[b]`, so each
+\* write is still the end that its Phase 1 read.
 SealWrite(b) ==
   LET g == bgen[b] IN
-  /\ bst[b] = "p1"
   /\ bend[b] # None
   /\ StartKnown(g - 1)
   \* No end, or a partial end that its read missed.
@@ -556,9 +559,9 @@ Apply(r) ==
   /\ s < NS
   /\ IF EndKnown(g) THEN s < rend[g].v ELSE TRUE
   /\ ~rtrim[g]
-  /\ IsChosen(s)
   \* It learns the slot from a live source: a quorum of a grid that still
   \* runs holds the vote on its disk, or a peer of its set applied it.
+  \* Both sources hold a chosen slot only (`OnDisk` and a peer's `Apply`).
   /\ OnDisk(s) \/ \E q \in RepOf[g] \ {r} : rbase[q] # None /\ Front(q) > s
   /\ rapp' = [rapp EXCEPT ![r] = @ + 1]
   /\ acked' = [acked EXCEPT ![s] = Res(rbase[r], StateOf(r), ChosenVal(s))]
@@ -585,7 +588,8 @@ BoundLost(p) ==
   /\ rbound' = [rbound EXCEPT ![p] = None]
   /\ UNCHANGED <<top, rend, rret, rtrim, bgen, ldr, acc, rep>>
 
-\* A replica of g starts from the boundary state of g - 1.
+\* A replica of g starts from the boundary state of g - 1, one time: so
+\* `RolesTrace` refuses a base taken twice (`BaseOnce`).
 TakeBase(r) ==
   LET g == GenOf(r) IN
   /\ g >= 2 /\ g <= top
@@ -741,6 +745,12 @@ Readable == \A s \in Slots :
 
 \* A written seal end never changes.
 EndOnce == [][\A p \in Gens : Done(rend[p]) => rend'[p] = rend[p]]_vars
+\* A replica that holds its base takes no other: a trace that takes one base
+\* two times is refused at the copy.
+BaseOnce == \A r \in Replicas : rbase[r] # None => ~ENABLED TakeBase(r)
+
+\* A boundary state written at a majority never changes.
+BoundOnce == [][\A p \in Gens : Done(rbound[p]) => rbound'[p] = rbound[p]]_vars
 
 \* A `Resolve` only reads: a step that answers one changes nothing else, not
 \* the register (the seal end, the boundary state), not a vote, and not the

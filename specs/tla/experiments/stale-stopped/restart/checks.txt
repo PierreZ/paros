@@ -11,6 +11,7 @@ nonce                  pass       ci
 nonce_nofloor          violation  ci
 durable_reach          violation  ci
 durable                pass       ci
+retry_one              pass       ci
 durable_nofloor        pass       long
 durable2a              pass       long
 durable2a_nofloor      pass       long

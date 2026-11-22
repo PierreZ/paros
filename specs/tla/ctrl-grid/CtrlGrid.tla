@@ -56,9 +56,10 @@
 (*               later `Accept` heals the record (`record_accepted`).      *)
 (*   RepairWrite "atomic": the new record replaces the damaged one in one  *)
 (*               write. "drop_first": the store first deletes the damaged  *)
-(*               record, then writes the new one; the acceptor answers     *)
-(*               nothing between the two, but a restart between the two    *)
-(*               forgets that a repair was running.                        *)
+(*               record, then writes the new one; the acceptor promises    *)
+(*               nothing and campaigns not between the two (it may vote),  *)
+(*               but a restart between the two forgets that a repair was   *)
+(*               running.                                                  *)
 (*   Faults      how many damaged records may be found (in the whole run), *)
 (*               on the nodes `RotNodes` only.                             *)
 (*   Restarts    how many restarts may happen (in the whole run).          *)
@@ -146,7 +147,8 @@ Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 Readable(v) == v.bal > 0 /\ v.val \notin {Lost, None}
 Faulty(v) == v.bal > 0 /\ v.val = Lost
 
-\* An acceptor in the middle of a "drop_first" repair answers nothing.
+\* An acceptor in the middle of a "drop_first" repair promises nothing and
+\* campaigns not: its empty slot would read as a slot with no vote.
 Busy(a) == \E s \in Slots : repairing[a][s] # 0
 
 \* The history of ballot b: the configurations of every ballot up to b (no
@@ -174,10 +176,11 @@ IsChosen(s) == \E v \in Values : Chosen(s, v)
 PromiseMsg(a, b) == [type |-> "1b", acc |-> a, bal |-> b, rep |-> vote[a]]
 
 \* The owner of ballot b opens its campaign. It is its own first acceptor.
+\* A ballot that left "idle" raised its owner's promise to b, and a promise
+\* never falls (it is on disk), so the step needs no guard on the phase.
 Prepare(b) ==
   LET o == Owner[b]
-  IN /\ phase[b] = "idle"
-     /\ prom[o] < b
+  IN /\ prom[o] < b
      /\ ~Busy(o)
      /\ phase' = [phase EXCEPT ![b] = "p1"]
      /\ prom' = [prom EXCEPT ![o] = b]
@@ -186,14 +189,14 @@ Prepare(b) ==
 
 \* Acceptor a promises ballot b. A promise at its own ballot answers again
 \* for the repair probe of a leader with a blocked slot (`Acceptor::prepare`
-\* re-affirms it), when the acceptor took an `Accept` of the ballot first.
+\* re-affirms it), when the acceptor took an `Accept` of the ballot first. A
+\* promise that repeats one sent before adds nothing to `msgs`.
 Promise(a, b) ==
   /\ ~Busy(a)
   /\ [type |-> "1a", bal |-> b] \in msgs
   /\ \/ prom[a] < b
      \/ /\ prom[a] = b
         /\ blocked[b] # {}
-        /\ ~\E n \in msgs : n.type = "1b" /\ n.acc = a /\ n.bal = b /\ n.rep = vote[a]
   /\ prom' = [prom EXCEPT ![a] = b]
   /\ Send(PromiseMsg(a, b))
   /\ UNCHANGED <<vote, repairing, learned, phase, next, blocked, faults, restarts, fixed>>
@@ -290,34 +293,38 @@ Allocate(b, c) ==
   /\ UNCHANGED <<prom, vote, repairing, learned, phase, blocked, faults, restarts, fixed>>
 
 \* Acceptor a, a member of the configuration of ballot b, votes. A vote over
-\* a faulty record heals it.
+\* a faulty record heals it. A vote that the record holds already changes
+\* nothing. A vote during a "drop_first" repair writes a whole record over
+\* the deleted one, and `RepairEnd` then writes the repaired record over it,
+\* under the ballot of the faulty record: the record's ballot can fall below
+\* a vote that the acceptor sent. Every value stays safe with no guard on
+\* `Busy` here (`drop_first_two`, `drop_first_lead`, and `drop_first_up` with
+\* three ballots); the code answers nothing during the repair, which is
+\* stricter.
 Accept(a, b, s) ==
   /\ a \in Members[Cfg[b]]
-  /\ ~Busy(a)
   /\ prom[a] <= b
   /\ \E m \in msgs :
        /\ m.type = "2a" /\ m.bal = b /\ m.slot = s
-       /\ vote[a][s] # [bal |-> b, val |-> m.val]
        /\ prom' = [prom EXCEPT ![a] = b]
        /\ vote' = [vote EXCEPT ![a][s] = [bal |-> b, val |-> m.val]]
        /\ Send([type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> m.val])
   /\ UNCHANGED <<repairing, learned, phase, next, blocked, faults, restarts, fixed>>
 
 \* The leader of ballot b learns slot s at a Phase-2 quorum of its
-\* configuration.
+\* configuration. A slot has one chosen value (`Agreement`), so a second
+\* learn writes what the leader learned already.
 Decide(b, s) ==
   LET o == Owner[b]
   IN /\ phase[b] = "p2"
-     /\ learned[o][s] = None
      /\ \E v \in Values, Q \in Q2[Cfg[b]] :
           /\ \A a \in Q : [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
           /\ learned' = [learned EXCEPT ![o][s] = v]
      /\ UNCHANGED <<prom, vote, repairing, phase, next, blocked, faults, restarts, fixed, msgs>>
 
 \* Node n learns slot s from a node that learned it (the catch-up, or the
-\* `Commit` of the leader).
+\* `Commit` of the leader). A second learn writes the same chosen value.
 Learn(n, p, s) ==
-  /\ learned[n][s] = None
   /\ learned[p][s] # None
   /\ learned' = [learned EXCEPT ![n][s] = learned[p][s]]
   /\ UNCHANGED <<prom, vote, repairing, phase, next, blocked, faults, restarts, fixed, msgs>>
@@ -361,9 +368,10 @@ RepairValues(a, s) ==
 \* Acceptor a repairs its faulty record of slot s with a value from
 \* `RepairValues`, under the ballot that the faulty record keeps. With
 \* "atomic" it is one write. With "drop_first" the store deletes the record
-\* first, and `RepairEnd` writes the new one.
+\* first, and `RepairEnd` writes the new one. A second repair that starts
+\* while one runs deletes another record of an acceptor that answers nothing
+\* already, and `RepairEnd` writes each record back.
 RepairStart(a, s) ==
-  /\ ~Busy(a)
   /\ Faulty(vote[a][s])
   /\ \E v \in RepairValues(a, s) :
        IF RepairWrite = "atomic"
@@ -458,6 +466,30 @@ NoFillChosen ==
 RecordsTrue ==
   \A a \in Acceptors, s \in Slots, b \in Ballots, v \in Values :
     ChosenAt(b, s, v) /\ Readable(vote[a][s]) /\ vote[a][s].bal >= b => vote[a][s].val = v
+
+\* The run stays inside the bounds that the check names: at most `Faults`
+\* damaged records, found on `RotNodes` only, and at most `Restarts`
+\* restarts.
+InBounds ==
+  /\ faults <= Faults
+  /\ restarts <= Restarts
+  /\ \A a \in Acceptors \ RotNodes, s \in Slots : ~Faulty(vote[a][s])
+
+\* A won campaign's allocator is past every record that the owner's own
+\* promise reported, a faulty one too: the candidate's own records seed its
+\* tally (`open_phase1`).
+OwnRecords ==
+  [][\A b \in Ballots :
+       phase[b] = "p1" /\ phase'[b] = "p2" =>
+         \A m \in msgs : m.type = "1b" /\ m.bal = b /\ m.acc = Owner[b] =>
+           \A s \in Slots : m.rep[s].bal > 0 => s < next'[b]]_vars
+
+\* A dead ballot proposes nothing: its owner booted again and holds no
+\* proposer state for it (no refill of the repair probe either).
+DeadSilent ==
+  [][\A b \in Ballots :
+       phase[b] = "dead" =>
+         {m \in msgs' : m.type = "2a" /\ m.bal = b} = {m \in msgs : m.type = "2a" /\ m.bal = b}]_vars
 
 \* Reachability controls: each must be violated.
 \* A record of a chosen slot is faulty.

@@ -40,4 +40,5 @@ TwoCfg == [b \in Ballots |-> IF b = 1 THEN c1 ELSE c2]
 \* The owners of the ballots.
 Own123 == [b \in Ballots |-> IF b % 3 = 1 THEN a1 ELSE IF b % 3 = 2 THEN a2 ELSE a3]
 OwnTwo == [b \in Ballots |-> IF b = 1 THEN a1 ELSE IF b = 2 THEN a3 ELSE a4]
+Own21 == [b \in Ballots |-> IF b = 1 THEN a2 ELSE a1]
 =============================================================================

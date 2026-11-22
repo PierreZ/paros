@@ -355,9 +355,9 @@ ReadPasses(b, Q) == BasisOK(b) /\ RecordOK(b) /\ \A a \in Q : promised[a] <= b
 
 ReadIdx(b, Q) == Max({Fence(b)} \cup {w[2] : w \in {x \in votes : x[1] \in Q}})
 
-\* A read is served once each slot up to its index is chosen.
+\* A read is served once each slot up to its index is chosen. `Next` takes
+\* the read quorum Q from the Phase-1 quorums of the basis.
 Serve(b, Q) ==
-    /\ Q \in Q1(CfgOf[b])
     /\ Q \cap down = {}
     /\ ReadPasses(b, Q)
     /\ \A s \in 1..ReadIdx(b, Q) : IsChosen(s)

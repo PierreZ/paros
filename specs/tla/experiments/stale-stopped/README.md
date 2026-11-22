@@ -59,6 +59,10 @@ Invariants:
 - `OneValuePerRound`: no two votes at one round differ. A break is the panic of
   `proposer.rs:374` (two Phase-1 reports of one ballot) or of `acceptor.rs:612-615` (an `Accept`
   of a second value at a voted ballot) in the code.
+- `Asked`: a matchmaker answers only a request that the node sent (a `Stopped` answers a `Stop`
+  of its incarnation, a promise a `Prepare` of its round).
+- `FoldOnce`, an action property: the stop quorum counts one reply of each member, in phase
+  "stop", and clears them as it starts a stop again.
 - `NoLearnAfterRestart`: a reachability control, a node learns after a restart.
 
 ## Results
@@ -77,6 +81,7 @@ cores; the ones that ran were stopped with no error found, and the others were n
 | `nonce_nofloor` | nonce, no floor | NR 2, 1 restart | `OneValuePerRound` violation |
 | `durable_reach` | durable | NR 2, 1 restart | `NoLearnAfterRestart` violation (reachable) |
 | `durable` | durable + floor | NR 2, 1 restart | pass (7,446,297 states, 6.5 min) |
+| `retry_one` | nonce + floor | NR 2, no restart, retries | pass (223,992 states, 28 s) |
 | `durable_nofloor` | durable, no floor | NR 2, 1 restart | pass (7,446,297 states) |
 | `durable2a` | durable before `Accept` + floor | NR 2, 1 restart | pass (7,256,239 states, 6.5 min) |
 | `durable2a_nofloor` | durable before `Accept`, no floor | NR 2, 1 restart | pass (7,143,753 states, 6.5 min) |
