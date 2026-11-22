@@ -990,7 +990,9 @@ impl Run {
                 let Fence::Leader { uuid, expected_seq } = write.fence else {
                     unreachable!("the client's writes are fenced");
                 };
-                let answer = self.replicas[&node].resolve(uuid, expected_seq, &write.records);
+                // Each disk write of the story is durable at once, so the
+                // batch that the answer waits on is on the disk.
+                let (answer, _) = self.replicas[&node].resolve(uuid, expected_seq, &write.records);
                 self.send(
                     &to,
                     &flight.from,
@@ -1186,6 +1188,8 @@ impl Run {
                 LeaderEffect::Reply { token, reply } => {
                     out.push(("c".to_string(), Payload::Reply { token, reply }));
                 }
+                // The story ends before a retire: no step shows it.
+                LeaderEffect::Retired { .. } => {}
             }
         }
         self.send_all(&lane, out);
@@ -1229,9 +1233,12 @@ impl Run {
                 ReplicaEffect::Send { to, message, .. } => {
                     out.push((lane_of(to), Payload::Role(message)));
                 }
-                ReplicaEffect::Register(change) => {
+                ReplicaEffect::Register { change, .. } => {
                     out.push(("m".to_string(), Payload::Change(change)));
                 }
+                // The story heals and trims nothing: no step shows a copy or
+                // a drop.
+                ReplicaEffect::Copied { .. } | ReplicaEffect::Drop => {}
             }
         }
         self.send_all(&lane, out);
@@ -1377,6 +1384,9 @@ impl Run {
                 answer_text(answer)
             ),
             Payload::Role(Message::Pull { .. }) => format!("{to} sends the slots it holds."),
+            Payload::Role(message @ (Message::Holding { .. } | Message::Holds { .. })) => {
+                holding_says(message, &to, &from)
+            }
             Payload::Write { .. } => format!("{to} takes the write."),
             Payload::Reply { reply, .. } => format!("The client hears: {}.", reply_text(reply)),
             Payload::Change(change) => match self.notes.iter().find(|n| n.contains("refuse")) {
@@ -1556,9 +1566,9 @@ impl Run {
 mod words;
 
 use words::{
-    acceptor_write, answer_text, ballot_text, cell, change_text, content, is_reply, kind_of,
-    label_of, lane_of, lower, node_of, party, phase_of, phase_text, replica_write, reply_text,
-    resolved_text, stage_of, state_text, value_name,
+    acceptor_write, answer_text, ballot_text, cell, change_text, content, holding_says, is_reply,
+    kind_of, label_of, lane_of, lower, node_of, party, phase_of, phase_text, replica_write,
+    reply_text, resolved_text, stage_of, state_text, value_name,
 };
 
 #[cfg(test)]

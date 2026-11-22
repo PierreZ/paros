@@ -288,7 +288,10 @@ impl Program {
                             let node = replicas(segment)[0].0;
                             journal.process.host().replica(at(node))
                         })
-                        .map(|r| r.resolve(uuid, expected_seq, &records))
+                        // A program sends after `settle`, when the process
+                        // has no work left: the batch an answer waits on is
+                        // durable.
+                        .map(|r| r.resolve(uuid, expected_seq, &records).0)
                         .find(|a| *a != ResolveAnswer::NotCovered)
                         .unwrap_or(ResolveAnswer::NotCovered);
                     self.client.answer(id, Response::Resolved(answer));
