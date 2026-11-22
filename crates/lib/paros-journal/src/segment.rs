@@ -208,6 +208,14 @@ pub struct SegmentRecord {
     release: Release,
     opening: OpeningCall,
     replicas: Vec<NodeId>,
+    /// The number of heals that changed `replicas`. The set is the one field
+    /// of the record that can return to an earlier value (a removed member
+    /// can come back as a new replica), so without this count two records
+    /// that differ in history could compare equal, and a heal's
+    /// compare-and-set, delayed in the network, could apply a second time
+    /// on a record that only looks like the one it read (§J3.1, the version
+    /// of `re-replication/`).
+    heals: u64,
     state: SegmentState,
     start: Option<Slot>,
     end: Option<Slot>,
@@ -243,6 +251,7 @@ impl SegmentRecord {
             id,
             release,
             replicas: opening.replicas.clone(),
+            heals: 0,
             opening,
             state: SegmentState::Pending,
             start: None,
@@ -271,6 +280,7 @@ impl SegmentRecord {
         release: Release,
         opening: OpeningCall,
         replicas: Vec<NodeId>,
+        heals: u64,
         state: SegmentState,
         start: Option<Slot>,
         end: Option<Slot>,
@@ -281,6 +291,7 @@ impl SegmentRecord {
             release,
             opening,
             replicas,
+            heals,
             state,
             start,
             end,
@@ -317,6 +328,12 @@ impl SegmentRecord {
     #[must_use]
     pub fn grid(&self) -> &Grid {
         &self.opening.grid
+    }
+
+    /// The number of heals that changed the replica set.
+    #[must_use]
+    pub fn heals(&self) -> u64 {
+        self.heals
     }
 
     /// The replica set of the segment.
@@ -454,6 +471,7 @@ impl SegmentRecord {
     /// an operating condition.
     pub fn replace_replica(&mut self, remove: NodeId, add: NodeId) -> Result<(), RecordRefusal> {
         let size = self.replicas.len();
+        let heals = self.heals;
         self.step(&[SegmentState::Retired], |record| {
             let Some(at) = record.replicas.iter().position(|node| *node == remove) else {
                 return Err(RecordRefusal::NotMember(remove));
@@ -462,8 +480,10 @@ impl SegmentRecord {
                 return Err(RecordRefusal::AlreadyMember(add));
             }
             record.replicas[at] = add;
+            record.heals += 1;
             Ok(())
         })?;
+        assert!(self.heals == heals + 1, "each heal counts once");
         assert!(
             self.replicas.len() == size,
             "a heal keeps the size of the set"

@@ -137,13 +137,16 @@ faulty votes on the acceptors' disks (the leader's blocked slot has unit tests o
 **The heal walk** (#1314 (re-replication of a sealed segment's replica set), `src/heal.rs`):
 the controller role heals a retired segment while replica machines are lost for good or come
 back with their disk, two controllers depose each other, requests and replies are lost and the
-segment is trimmed. The walk plays the replicas: a copy moves only while a member of the set it
-read is up and full, a node runs the highest copy it was asked, and a replica in no set with no
-copy drops it. Two oracles judge it: `HELD` (every member of the set of a segment that is not
-trimmed holds a complete copy) and `CONVERGES` (once the faults stop, the set is all up, or the
-segment is trimmed and no live machine keeps it). Their mutants: a copy reported when it starts
-(`EarlyReport`), a lower copy taken (`AnyCopy`), a heal written with no compare (`NoCompare`)
-or with no term check (`NoTermCheck`), and a compare-and-set never sent again (`NoResend`). The
+segment is trimmed, and requests are duplicated and arrive late. The walk plays the replicas
+itself (the `SegmentReplica` of a heal has unit tests; the whole-journal walk, #1445, will run
+it): a copy moves only while a member of the set it read is up and full, a node runs the
+highest copy it was asked, and a replica in no set with no copy drops it. Three oracles judge
+it: `HELD` (every member of the set of a segment that is not trimmed holds a complete copy),
+`COMPARED` (a heal writes its set only if no set change came since its plan) and `CONVERGES`
+(once the faults stop, the set is all up, or the segment is trimmed and no live machine keeps
+it). Their mutants: a copy reported when it starts (`EarlyReport`), a lower copy taken
+(`AnyCopy`), a heal written with no compare (`NoCompare`), with no term check (`NoTermCheck`) or
+with no count of heals (`NoHealCount`), and a compare-and-set never sent again (`NoResend`). The
 roles walk's retire is the leader's now, judged by `RETIRE` (a retire counts `F + 1` replicas
 that hold the whole segment on their disk; mutant `HoldsLie`). **Open**: a trace check of the
 heal walk against `re-replication/`.

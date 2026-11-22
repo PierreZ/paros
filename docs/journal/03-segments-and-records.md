@@ -145,7 +145,8 @@ checked, each with a control that TLC breaks:
   - **A node runs one copy of a segment, the highest `CopyId` it was asked** (the term of the
     plan, then its number in that term; #1314, found by the heal walk). A higher copy replaces
     the one it runs, and a lower one, from a deposed controller, is refused (mutant `AnyCopy`).
-    **Open**: a model of a node that a later plan asks again (`re-replication/` with reuse).
+    **Open**: a model of a node that a later plan asks again, and of a compare-and-set that the
+    network delivers twice and late (`re-replication/` with reuse and delayed requests).
   - **A "done" report belongs to one copy.** A new plan starts a new copy. A report kept from an
     aborted copy (`report_sticky`) counts a replica that dropped its copy since.
   - **A replica that does not hold a slot refuses the read**, and the reader reads the record and
@@ -165,7 +166,17 @@ checked, each with a control that TLC breaks:
   **As built** (#1314): the register's `Change::Rereplicate { segment, read, term, remove, add }`
   writes the new set only if the record equals `read` and the term is the register's, and only
   from `retired` (`SegmentRecord::replace_replica`); the same change again answers "ok". The
-  record equality stands for the version: the record holds the state, the set and the boundary.
+  record equality stands for the version: the record holds the state, the set, the boundary and
+  `heals`, the count of the heals that changed the set. The set is the one field that can return
+  to an earlier value (a removed member that came back is a candidate again), so without the
+  count a heal delayed in the network could apply a second time on a set that only looks like
+  the one it read (`journal-sim`'s heal walk, mutant `NoHealCount`, oracle `COMPARED`; found by
+  the review of PR #1470).
+  - **A heal whose compare-and-set was sent ends only on an answer** (found by the heal walk
+    with delayed copies of requests). A copy of the change can still be in the network; if the
+    heal ended when its new replica went down, the replica would drop its copy when it came back
+    and the late copy would write an empty member. A down new replica that holds its copy is a
+    member that a later heal replaces.
   The controller role plans one heal at a time, the first member that is down, asks the new
   replica to copy (`Ask::Copy` with its `CopyId`), counts it on its own report of that copy, and
   gives the compare-and-set until it is answered; a read that changed, a new replica that is down
@@ -173,8 +184,12 @@ checked, each with a control that TLC breaks:
   its copy id (`ReplicaOp::Joining`, so a restart keeps the copy while the plan runs), pulls only
   from members of the set that say they hold the whole segment (`Holding`, `Holds`), and reports
   `Copied` when it is full. A replica in no set that runs no copy, or of a trimmed segment, drops
-  its copy and stops (`Stop::Dropped` in the `Host`). `decide` heals only a retired segment: a
-  sealed one retires first.
+  its copy and stops (`Stop::Dropped` in the `Host`). A node that serves the segment as a member
+  refuses every copy. `decide` heals only a retired segment: a sealed one retires first.
+  **Open**: the `Host` does not run `Ask::Copy` and `Ask::Abandon` yet (the whole-journal walk,
+  #1445); a new replica whose controller crashed keeps its copy until a trim or a higher copy
+  (the model drops it, as no open plan names it); a heal in flight holds back the controller's
+  other decisions until it ends.
 - **Each segment has its own replica set, and a write reaches only that set** (#1271 (a write
   reaches only the replica set of its segment), checked by `specs/tla/segment-replicas/`). Over
   the whole journal the replicas therefore do not bound write throughput, as they do in

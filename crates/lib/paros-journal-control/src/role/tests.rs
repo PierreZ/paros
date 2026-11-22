@@ -532,6 +532,26 @@ fn a_heal_whose_new_replica_is_down_ends() {
 }
 
 #[test]
+fn a_sent_heal_outlives_a_new_replica_that_goes_down() {
+    let register = retired();
+    let mut controller = healing(&register, &Signals::with_down(&[12]));
+    let change = heal_change(&register);
+    assert_eq!(
+        controller.copied(SegmentId(1), FIRST),
+        Ask::Call(change.clone())
+    );
+    // A copy of the compare-and-set can still be in the network: ending the
+    // heal here would let the new replica drop its copy, and the late copy
+    // would then write an empty member.
+    let signals = Signals::with_down(&[12, 20]);
+    assert_eq!(
+        controller.step(&signals.view(ME, 1, &register), &TUNABLES),
+        (Ask::Call(change), None)
+    );
+    assert!(controller.heal().is_some());
+}
+
+#[test]
 fn a_heal_on_an_old_read_ends() {
     let register = retired();
     let signals = Signals::with_down(&[12]);

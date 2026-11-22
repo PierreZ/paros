@@ -27,6 +27,10 @@
 //!
 //! - [`HELD`]: while the segment is not trimmed, every member of its replica
 //!   set holds a complete copy (up or down).
+//! - [`COMPARED`]: a heal writes its new set only if no other heal changed
+//!   the set since its controller planned it (the walk counts the set
+//!   changes it sees; a set that comes back to an earlier value is a new
+//!   change).
 //! - [`CONVERGES`]: once the faults stop, one live controller holds the term
 //!   with no heal and no call in flight, and the set is all up; or the
 //!   segment is trimmed and no live machine keeps a copy.
@@ -46,6 +50,9 @@ use paros_journal_control::{Liveness, Tunables, View};
 /// Oracle: every member of the set of a segment not trimmed holds a
 /// complete copy.
 pub const HELD: &str = "every member of a retired segment's replica set holds a complete copy";
+/// Oracle: a heal writes its set only on the set its controller read: no
+/// set change came between the plan and the write.
+pub const COMPARED: &str = "a heal writes its set only on the set its controller read";
 /// Oracle (liveness): once the faults stop, the heal is done.
 pub const CONVERGES: &str = "once the faults stop, the replica set is whole or the segment trimmed";
 
@@ -67,6 +74,8 @@ pub mod reach {
     pub const TERM_REFUSED: &str = "heal walk: a heal of an old term refused";
     /// The register refused a heal on an old read.
     pub const STALE_REFUSED: &str = "heal walk: a heal on an old read refused";
+    /// The register refused a heal whose set came back to the one it read.
+    pub const SET_CAME_BACK: &str = "heal walk: a heal refused on a set that came back";
     /// The segment was trimmed during a heal.
     pub const TRIMMED: &str = "heal walk: the segment trimmed during a heal";
 
@@ -80,6 +89,7 @@ pub mod reach {
         NO_SOURCE,
         TERM_REFUSED,
         STALE_REFUSED,
+        SET_CAME_BACK,
         TRIMMED,
     ];
 }
@@ -104,6 +114,10 @@ pub enum HealMutant {
     /// compare-and-set can count a copy that the new holder's copy wiped.
     /// [`HELD`] catches it.
     NoTermCheck,
+    /// The register compares the record read with no count of its heals:
+    /// a set that came back to an earlier value looks unchanged, and a
+    /// delayed copy of an old heal applies again. [`HELD`] catches it.
+    NoHealCount,
     /// The driver never sends a heal's compare-and-set again.
     /// [`CONVERGES`] catches it.
     NoResend,
@@ -118,8 +132,8 @@ const F: usize = 1;
 const SEGMENT: SegmentId = SegmentId(1);
 /// Its first replica set.
 const SET: [u64; 3] = [11, 12, 13];
-/// The candidates for a new replica.
-const CANDIDATES: std::ops::RangeInclusive<u64> = 20..=25;
+/// The machines outside the first set that can host a new replica.
+const SPARES: std::ops::RangeInclusive<u64> = 20..=25;
 /// The steps a copy takes from a live source.
 const COPY_STEPS: u8 = 2;
 /// The first controller id.
@@ -144,6 +158,10 @@ pub enum HealAction {
     LoseReq,
     /// A reply is lost.
     LoseRep,
+    /// The network delivers a request twice: a copy waits in the network.
+    Duplicate,
+    /// A copy that waited in the network arrives, late.
+    Late,
     /// A copy moves one step.
     Copy,
     /// A new replica reports its complete copy again.
@@ -191,6 +209,13 @@ pub struct HealModel {
     ctls: Vec<Ctl>,
     requests: Vec<Flight>,
     replies: Vec<Flight>,
+    /// The copies of requests that wait in the network.
+    delayed: Vec<Flight>,
+    /// The set changes the walk saw.
+    changes: u64,
+    /// For each plan (term, new replica, set read), the set changes the walk
+    /// had seen when the controller asked its copy.
+    planned: BTreeMap<(u64, NodeId, Vec<NodeId>), u64>,
     /// The machines that hold a complete copy of the segment.
     holds: BTreeSet<NodeId>,
     /// The copy each new replica runs.
@@ -270,6 +295,9 @@ impl HealModel {
                 .collect(),
             requests: Vec::new(),
             replies: Vec::new(),
+            delayed: Vec::new(),
+            changes: 0,
+            planned: BTreeMap::new(),
             holds: nodes(SET).into_iter().collect(),
             copies: BTreeMap::new(),
             down: BTreeSet::new(),
@@ -346,7 +374,7 @@ impl HealModel {
             .into_iter()
             .chain(nodes(SET))
             .chain(nodes(14..=16))
-            .chain(nodes(CANDIDATES));
+            .chain(nodes(SPARES));
         all.map(|n| {
             let live = if self.down.contains(&n) {
                 Liveness::Down
@@ -367,7 +395,10 @@ impl HealModel {
 
     fn step_one(&mut self, c: usize) {
         let liveness = self.liveness();
-        let candidates = nodes(CANDIDATES);
+        // The members of the first set come first: a removed member that
+        // came back is the first candidate, so a set can return to an
+        // earlier value.
+        let candidates: Vec<NodeId> = nodes(SET).into_iter().chain(nodes(SPARES)).collect();
         let matchmakers =
             MatchmakerSet::new(MatchmakerGeneration(0), (1..=3).map(MatchmakerId).collect());
         let matchmakers_live: BTreeSet<MatchmakerId> = (1..=3).map(MatchmakerId).collect();
@@ -411,6 +442,10 @@ impl HealModel {
                 copy,
             } => {
                 assert_eq!(segment, SEGMENT);
+                // The view is the register as it is, so the plan read the
+                // set after the changes seen so far.
+                self.planned
+                    .insert((copy.term, node, set.clone()), self.changes);
                 self.join(node, set, copy);
             }
             Ask::Abandon {
@@ -419,7 +454,8 @@ impl HealModel {
                 copy,
             } => {
                 assert_eq!(segment, SEGMENT);
-                // The ask waits on the node's disk until it is back.
+                // A node that is down does nothing with its copy, so the
+                // walk applies the ask at once.
                 if self.copies.get(&node).is_some_and(|run| run.copy == copy) {
                     self.copies.remove(&node);
                 }
@@ -523,6 +559,19 @@ impl HealModel {
                     RegisterValue::from_parts(self.register.term(), segments)
                 })
                 .map_err(|refusal| ChangeRefusal::Record(SEGMENT, refusal))
+        } else if let (HealMutant::NoHealCount, Change::Rereplicate { read, .. }) =
+            (self.mutant, change)
+        {
+            let held = self.record();
+            let same = read.replicas() == held.replicas()
+                && read.state() == held.state()
+                && read.end() == held.end()
+                && read.boundary() == held.boundary();
+            let mut change = change.clone();
+            if same && let Change::Rereplicate { read, .. } = &mut change {
+                *read = held.clone();
+            }
+            self.register.apply(&change)
         } else if self.mutant == HealMutant::NoTermCheck {
             let Change::Rereplicate {
                 segment,
@@ -550,6 +599,16 @@ impl HealModel {
                 self.register = value.clone();
                 let after = self.set();
                 if before != after {
+                    let Change::Rereplicate { read, term, .. } = change else {
+                        unreachable!("a heal");
+                    };
+                    let plan = (*term, *add, read.replicas().to_vec());
+                    assert_eq!(
+                        self.planned.get(&plan),
+                        Some(&self.changes),
+                        "{COMPARED}: the heal {plan:?} was planned at another set"
+                    );
+                    self.changes += 1;
                     sometimes!(true, reach::HEALED);
                     assert!(
                         after.contains(add) && !after.contains(remove),
@@ -567,6 +626,13 @@ impl HealModel {
                     matches!(refusal, ChangeRefusal::Stale(_)),
                     reach::STALE_REFUSED
                 );
+                if let Change::Rereplicate { read, .. } = change {
+                    sometimes!(
+                        matches!(refusal, ChangeRefusal::Stale(_))
+                            && read.replicas() == self.record().replicas(),
+                        reach::SET_CAME_BACK
+                    );
+                }
                 Outcome::Refused(refusal)
             }
         }
@@ -608,6 +674,29 @@ impl HealModel {
                     .rereplicated(&lost.change, &Outcome::NoAnswer);
                 self.run(lost.c, ask);
             }
+        }
+    }
+
+    fn duplicate(&mut self, cx: &mut Cx<'_, Self>) {
+        let eligible: Vec<usize> = (0..self.requests.len()).collect();
+        for i in Self::pick(cx, &eligible) {
+            let copy = self.requests[i].clone();
+            self.delayed.push(copy);
+        }
+    }
+
+    fn late(&mut self, cx: &mut Cx<'_, Self>) {
+        // In the chaos a copy waits through several heals: a long delay is
+        // what lets a heal arrive on a set that came back to its read.
+        if cx.phase() == Phase::Chaos && !cx.rng().chance(1, 4) {
+            return;
+        }
+        let eligible: Vec<usize> = (0..self.delayed.len()).collect();
+        let mut picked = Self::pick(cx, &eligible);
+        picked.sort_unstable_by(|a, b| b.cmp(a));
+        for i in picked {
+            let copy = self.delayed.remove(i);
+            self.requests.push(copy);
         }
     }
 
@@ -694,7 +783,7 @@ impl HealModel {
         let set_down = set.iter().filter(|n| self.down.contains(n)).count();
         let eligible: Vec<NodeId> = nodes(SET)
             .into_iter()
-            .chain(nodes(CANDIDATES))
+            .chain(nodes(SPARES))
             .filter(|n| !self.down.contains(n))
             // At most F members of the set down at once.
             .filter(|n| !set.contains(n) || set_down < F)
@@ -737,7 +826,7 @@ impl HealModel {
 
     /// What the walk still misses to have settled.
     fn unsettled(&self) -> Option<String> {
-        if !self.requests.is_empty() || !self.replies.is_empty() {
+        if !self.requests.is_empty() || !self.replies.is_empty() || !self.delayed.is_empty() {
             return Some("a message in flight".into());
         }
         let Some(holder) = self.live_holder() else {
@@ -781,6 +870,8 @@ impl Model for HealModel {
             HealAction::Receive,
             HealAction::LoseReq,
             HealAction::LoseRep,
+            HealAction::Duplicate,
+            HealAction::Late,
             HealAction::Copy,
             HealAction::Report,
             HealAction::Drop,
@@ -794,11 +885,13 @@ impl Model for HealModel {
         use HealAction as A;
         match (action, phase) {
             (A::Step | A::Process | A::Receive | A::Copy, Phase::Chaos | Phase::Quiet) => 8,
-            (A::Report | A::Drop, Phase::Chaos | Phase::Quiet) => 4,
+            // The quiet flushes the late copies of requests.
+            (A::Report | A::Drop, Phase::Chaos | Phase::Quiet) | (A::Late, Phase::Quiet) => 4,
             (A::Campaign, Phase::Chaos | Phase::Quiet) => 3,
-            (A::LoseReq | A::LoseRep | A::Fail | A::Recover, Phase::Chaos) => 2,
-            (A::Trim, Phase::Chaos) => 1,
-            (A::LoseReq | A::LoseRep | A::Fail | A::Recover | A::Trim, _) => 0,
+            (A::LoseReq | A::LoseRep | A::Duplicate | A::Fail | A::Recover, Phase::Chaos) => 2,
+            // A late copy waits long in the chaos.
+            (A::Trim | A::Late, Phase::Chaos) => 1,
+            (A::LoseReq | A::LoseRep | A::Duplicate | A::Fail | A::Recover | A::Trim, _) => 0,
             // Settle: each round makes every other move once.
             (_, _) => 1,
         }
@@ -812,6 +905,8 @@ impl Model for HealModel {
             HealAction::Receive => self.receive(cx),
             HealAction::LoseReq => self.lose(cx, true),
             HealAction::LoseRep => self.lose(cx, false),
+            HealAction::Duplicate => self.duplicate(cx),
+            HealAction::Late => self.late(cx),
             HealAction::Copy => self.copy(cx),
             HealAction::Report => self.report_again(cx),
             HealAction::Drop => self.drop_copies(cx),

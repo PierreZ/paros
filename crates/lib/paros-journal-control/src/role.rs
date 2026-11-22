@@ -90,7 +90,8 @@ pub enum Ask {
     /// register refuses it for the term, so a lower copy that replaced a
     /// complete higher one could leave the new holder's compare-and-set
     /// counting a node with nothing on it (`journal-sim`'s heal walk, the
-    /// mutant `AnyCopy`).
+    /// mutant `AnyCopy`). A node that serves the segment as a member refuses
+    /// every copy: the ask may come from an old view.
     Copy {
         /// The segment.
         segment: SegmentId,
@@ -404,13 +405,21 @@ impl Controller {
             probe!(reachable, "role: a heal on an old read ends");
             return self.abandon();
         }
+        if heal.complete {
+            // Once the compare-and-set is sent, a copy of it can still be in
+            // the network: the heal ends only on an answer, so the new
+            // replica keeps its copy until the register took or refused the
+            // change (a down new replica that holds the copy is a member
+            // that a later heal replaces).
+            if view.liveness.get(&heal.add) == Some(&Liveness::Down) {
+                probe!(reachable, "role: a sent heal outlives a down new replica");
+            }
+            probe!(reachable, "role: a heal's compare-and-set is sent again");
+            return Ask::Call(heal.change());
+        }
         if view.liveness.get(&heal.add) == Some(&Liveness::Down) {
             probe!(reachable, "role: a heal whose new replica is down ends");
-            return self.abandon();
-        }
-        if heal.complete {
-            probe!(reachable, "role: a heal's compare-and-set is sent again");
-            Ask::Call(heal.change())
+            self.abandon()
         } else {
             Ask::Copy {
                 segment: heal.segment,
@@ -498,6 +507,7 @@ pub const PROBES: &[&str] = &[
     "role: a view shows the heal done",
     "role: a heal on an old read ends",
     "role: a heal whose new replica is down ends",
+    "role: a sent heal outlives a down new replica",
     "role: a heal's compare-and-set is sent again",
     "role: a report of another copy is dropped",
     "role: a complete copy is counted",

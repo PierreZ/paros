@@ -312,6 +312,27 @@ fn a_heal_swaps_a_member_of_the_record_it_read() {
 }
 
 #[test]
+fn a_delayed_heal_never_applies_on_a_set_that_came_back() {
+    let value = retired_one();
+    let first = heal(&value, 1, 11, 20);
+    let healed = value.apply(&first).expect("11 out, 20 in");
+    let back = healed
+        .apply(&heal(&healed, 1, 20, 11))
+        .expect("20 out, 11 in again");
+    assert_eq!(replicas(&back), replicas(&value), "the same set again");
+    assert_eq!(
+        back.segment(SegmentId(1)).expect("segment 1").heals(),
+        2,
+        "the record counts both heals"
+    );
+    assert_eq!(
+        back.apply(&first),
+        Err(ChangeRefusal::Stale(SegmentId(1))),
+        "a copy of the first heal, delayed in the network, finds a record it never read"
+    );
+}
+
+#[test]
 fn a_heal_is_fenced_by_the_term() {
     let value = retired_one();
     let elected = elect(&value);

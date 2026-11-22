@@ -3,7 +3,7 @@
 //! every site, and each oracle catches its mutant.
 
 use journal_sim::campaign::try_campaign;
-use journal_sim::heal::{CONVERGES, HELD, HealMutant, reach, walk};
+use journal_sim::heal::{COMPARED, CONVERGES, HELD, HealMutant, reach, walk};
 
 /// The seeds of the walk in CI.
 const SEEDS: u64 = 3000;
@@ -43,6 +43,11 @@ fn held_catches_a_heal_written_with_no_compare() {
 #[test]
 fn held_catches_a_heal_written_with_no_term_check() {
     caught(HealMutant::NoTermCheck, HELD);
+}
+
+#[test]
+fn compared_catches_a_heal_compared_with_no_count_of_heals() {
+    caught(HealMutant::NoHealCount, COMPARED);
 }
 
 #[test]

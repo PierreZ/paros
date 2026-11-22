@@ -290,7 +290,9 @@ impl SegmentReplica {
     /// earlier copy on this node first: a new plan starts a new copy. The
     /// driver starts a copy only above the copy the node runs: a lower one
     /// comes from a deposed controller and is refused, so the copy that a
-    /// later term counts stays on the disk.
+    /// later term counts stays on the disk. It never starts a copy of a
+    /// segment that the node serves as a member: an ask built on an old
+    /// view would wipe a member's disk.
     ///
     /// # Panics
     ///

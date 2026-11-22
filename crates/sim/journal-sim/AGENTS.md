@@ -45,8 +45,9 @@ Test only: `publish = false`.
 - `src/heal.rs`: the heal walk (`HealModel`, #1314 (re-replication of a sealed segment's replica
   set)): the controller role heals a retired segment while replica machines are lost for good or
   come back, two controllers depose each other, requests and replies are lost and the segment is
-  trimmed; the walk plays the replicas (copy from a full member, the highest copy per node, drop
-  outside the set). Its oracles (`HELD`, `CONVERGES`), its reach sites and its planted mutants
+  trimmed, and requests arrive twice and late; the walk plays the replicas itself (copy from a
+  full member, the highest copy per node, drop outside the set). Its oracles (`HELD`,
+  `COMPARED`, `CONVERGES`), its reach sites and its planted mutants
   (`HealMutant`). `tests/heal.rs`; `tests/controller.rs` runs it in the gate of the role's probes.
 - `src/host.rs`: the driver walk (`HostModel`, #1329): three processes, each a `Driver` of
   `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
