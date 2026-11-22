@@ -48,7 +48,7 @@ Test only: `publish = false`.
   `FLIGHT`, `ANSWER`), its reach sites and its planted mutants (`HostMutant`). `tests/host.rs`.
 - `src/client.rs`: the client walk (`ClientModel`, #1331): two programs with a `Client` of
   `paros_journal::client`, a lossy mailbox, held and lost answers, seals, `Resolve`, reads; its
-  oracles (`WRITTEN`, `ONCE`, `REFUSED`, `LED`, `PAGE`), judged on a log that the walk keeps, its
+  oracles (`WRITTEN`, `ONCE`, `REFUSED`, `LED`, `TAIL`, `PAGE`), judged on a log that the walk keeps, its
   reach sites and its planted mutants (`ClientMutant`). `tests/client.rs`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.

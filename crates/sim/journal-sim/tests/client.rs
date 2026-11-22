@@ -2,7 +2,7 @@
 //! every site, and each oracle catches its mutant.
 
 use journal_sim::campaign::{campaign, try_campaign};
-use journal_sim::client::{ClientMutant, LED, ONCE, PAGE, REFUSED, WRITTEN, reach, walk};
+use journal_sim::client::{ClientMutant, LED, ONCE, PAGE, REFUSED, TAIL, WRITTEN, reach, walk};
 
 /// Two clients, a lossy network, seals, held and lost answers.
 #[test]
@@ -41,4 +41,9 @@ fn led_catches_a_forged_refusal() {
 #[test]
 fn page_catches_a_late_read() {
     caught(ClientMutant::PageLate, PAGE);
+}
+
+#[test]
+fn tail_catches_a_short_view() {
+    caught(ClientMutant::ShortView, TAIL);
 }

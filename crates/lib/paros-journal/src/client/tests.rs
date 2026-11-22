@@ -374,10 +374,17 @@ fn a_resolve_below_the_floor_is_truncated() {
     client.answer(resolve, Response::Resolved(ResolveAnswer::Truncated));
     assert_eq!(one_outcome(&mut client), (call, Outcome::Truncated(below)));
     assert!(client.idle());
+    assert_eq!(
+        client.mode(),
+        Mode::Fenced {
+            uuid: A,
+            next: Seq(9)
+        }
+    );
 }
 
 #[test]
-fn truncated_resolves_nothing() {
+fn truncated_resolves_nothing_and_follows_the_tail() {
     let mut client = leader(A, 2);
     let call = client.write(records("a"));
     let (id, _) = one_command(&mut client);
@@ -385,11 +392,12 @@ fn truncated_resolves_nothing() {
     client.answer(id, reply(Answer::Truncated(at)));
     assert_eq!(one_outcome(&mut client), (call, Outcome::Truncated(at)));
     assert_eq!(client.take_requests(), []);
+    // The next write is at the tail, not below the floor again.
     assert_eq!(
         client.mode(),
         Mode::Fenced {
             uuid: A,
-            next: Seq(2)
+            next: Seq(5)
         }
     );
 }
@@ -532,19 +540,46 @@ fn set_leader_none_makes_the_client_write_open() {
 
 #[test]
 fn a_lost_set_leader_that_won_settles_itself() {
-    for new in [Some(A), None] {
-        let mut client = Client::new();
-        let call = client.set_leader(new, Leader::Unset);
-        let (id, command) = one_command(&mut client);
-        client.answer(id, Response::Lost);
-        let (id, again) = one_command(&mut client);
-        assert_eq!(again, command);
-        let won = view(Leader::from_new(new), 4, 0);
-        client.answer(id, reply(Answer::LeaderRefused(won)));
-        assert_eq!(one_outcome(&mut client), (call, Outcome::LeaderSet(won)));
-        let mode = new.map_or(Mode::Open, |uuid| Mode::Fenced { uuid, next: Seq(4) });
-        assert_eq!(client.mode(), mode);
-    }
+    let mut client = Client::new();
+    let call = client.set_leader(Some(A), Leader::Unset);
+    let (id, command) = one_command(&mut client);
+    client.answer(id, Response::Lost);
+    let (id, again) = one_command(&mut client);
+    assert_eq!(again, command);
+    let won = view(Leader::Uuid(A), 4, 0);
+    client.answer(id, reply(Answer::LeaderRefused(won)));
+    assert_eq!(one_outcome(&mut client), (call, Outcome::LeaderSet(won)));
+    assert_eq!(
+        client.mode(),
+        Mode::Fenced {
+            uuid: A,
+            next: Seq(4)
+        }
+    );
+}
+
+#[test]
+fn a_lost_set_leader_none_refused_stays_refused() {
+    // Another caller can make the journal multi-writer: a refused resend of
+    // `SetLeader(None, _)` proves nothing.
+    let mut client = leader(A, 2);
+    let call = client.set_leader(None, Leader::Uuid(A));
+    let (id, _) = one_command(&mut client);
+    client.answer(id, Response::Lost);
+    let (id, _) = one_command(&mut client);
+    let multi = view(Leader::Multi, 4, 0);
+    client.answer(id, reply(Answer::LeaderRefused(multi)));
+    assert_eq!(
+        one_outcome(&mut client),
+        (call, Outcome::LeaderRefused(multi))
+    );
+    assert_eq!(
+        client.mode(),
+        Mode::Fenced {
+            uuid: A,
+            next: Seq(2)
+        }
+    );
 }
 
 #[test]

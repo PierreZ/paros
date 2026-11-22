@@ -26,7 +26,12 @@
 //! - [`REFUSED`]: a fenced write reported refused is never in the log. (An
 //!   unfenced write is at-least-once: a copy refused `WrongMode` says
 //!   nothing of an older copy still in flight, §J2.4.)
-//! - [`LED`]: a `SetLeader` reported set installed its leader.
+//! - [`LED`]: a `SetLeader` reported set applied: a copy of that call won
+//!   (a uuid is drawn once, so one `SetLeader` names it; a client reports
+//!   no more `SetLeader(None)` wins than its copies won).
+//! - [`TAIL`]: the first copy of a fenced write of the uuid that leads
+//!   names the journal's tail: a sole writer's client follows the tail, so
+//!   it never writes below it or above it.
 //! - [`PAGE`]: a page holds the log's records at its positions.
 //!
 //! The liveness claim: once the faults stop, every call of every client
@@ -48,8 +53,10 @@ pub const WRITTEN: &str = "client walk: a write reported written holds its posit
 pub const ONCE: &str = "client walk: a fenced write lands at most once";
 /// Oracle: a fenced write reported refused is never in the log.
 pub const REFUSED: &str = "client walk: a fenced write reported refused is never in the log";
-/// Oracle: a `SetLeader` reported set installed its leader.
-pub const LED: &str = "client walk: a SetLeader reported set installed its leader";
+/// Oracle: a `SetLeader` reported set applied.
+pub const LED: &str = "client walk: a SetLeader reported set applied";
+/// Oracle: a sole writer's new write names the tail.
+pub const TAIL: &str = "client walk: a leading writer's new write names the tail";
 /// Oracle: a page holds the log's records.
 pub const PAGE: &str = "client walk: a page holds the log's records at its positions";
 
@@ -79,6 +86,9 @@ pub mod reach {
     pub const READ_TRUNCATED: &str = "client walk: a read below the floor";
     /// A truncate applied.
     pub const TRIMMED: &str = "client walk: a truncate applied";
+    /// A leading writer's new write after the journal answered one of its
+    /// writes `Truncated`.
+    pub const AFTER_TRUNCATED: &str = "client walk: a leader's new write after a Truncated";
     /// A write written in the third segment.
     pub const THIRD: &str = "client walk: a write written in the third segment";
 
@@ -96,6 +106,7 @@ pub mod reach {
         READ_TRUNCATED,
         TRIMMED,
         THIRD,
+        AFTER_TRUNCATED,
     ];
 }
 
@@ -118,6 +129,9 @@ pub enum ClientMutant {
     ForgedRefusal,
     /// The server reads one position late. [`PAGE`] catches it.
     PageLate,
+    /// The journal answers a `SetLeader` that applied with a view one
+    /// position short. [`TAIL`] catches it.
+    ShortView,
 }
 
 /// A message in the walk's mailbox.
@@ -146,6 +160,9 @@ pub enum ClientAction {
     Seal,
     /// A program stops waiting for one request: `Lost`.
     Timeout,
+    /// A very late copy of an old command reaches the journal; nobody
+    /// waits for its answer.
+    Replay,
 }
 
 /// The clients of the walk.
@@ -202,18 +219,28 @@ pub struct ClientModel {
     fenced: BTreeSet<u64>,
     /// The record ids of the fenced writes reported refused.
     refused: BTreeSet<u64>,
-    /// The leader values that a `SetLeader` installed.
-    installed: Vec<Leader>,
+    /// The uuids that a `SetLeader` installed.
+    installed: BTreeSet<u128>,
+    /// For each client, how many of its `SetLeader(None)` copies applied,
+    /// and how many such calls it reported set.
+    to_multi: Vec<(u32, u32)>,
     /// The requests whose answer a program still waits for, and whether
     /// each is a command.
     waiting: BTreeMap<(usize, RequestId), bool>,
-    /// The fenced writes the journal already placed, for
-    /// [`ClientMutant::ResendAtTail`].
+    /// The fenced writes the journal already saw, by record ids.
     placed: BTreeSet<Vec<u64>>,
     /// The writes answered `Below` and not resolved yet, by record ids.
     belows: BTreeSet<Vec<u64>>,
     /// The writes resolved not written.
     again: BTreeSet<Vec<u64>>,
+    /// The last commands sent, for late copies.
+    sent: Vec<(usize, Command)>,
+    /// Whether the command applied now is a late copy that nobody waits
+    /// for.
+    replaying: bool,
+    /// For each client, whether the journal answered a write of the uuid
+    /// that leads `Truncated` since its last new write.
+    truncated: Vec<bool>,
     /// The last uuid drawn.
     uuids: u128,
     /// The last record id drawn.
@@ -239,12 +266,14 @@ impl Model for ClientModel {
             ClientAction::Read,
             ClientAction::Seal,
             ClientAction::Timeout,
+            ClientAction::Replay,
         ]
     }
 
     fn weight(action: ClientAction, phase: Phase) -> u32 {
         match (phase, action) {
-            (_, ClientAction::Timeout) | (Phase::Chaos, ClientAction::Seal) => 2,
+            (_, ClientAction::Timeout)
+            | (Phase::Chaos, ClientAction::Seal | ClientAction::Replay) => 2,
             (Phase::Chaos, ClientAction::Write) => 12,
             (Phase::Chaos, ClientAction::Claim | ClientAction::Read) => 3,
             (Phase::Chaos, _) => 1,
@@ -255,6 +284,26 @@ impl Model for ClientModel {
     fn act(&mut self, action: ClientAction, cx: &mut Cx<'_, Self>) {
         if action == ClientAction::Timeout {
             self.timeout(cx);
+            return;
+        }
+        if action == ClientAction::Replay {
+            // On one move in two, the last truncate sent.
+            let last_truncate = self
+                .sent
+                .iter()
+                .rev()
+                .find(|(_, c)| matches!(c, Command::Truncate { .. }))
+                .cloned();
+            let late = if cx.rng().chance(1, 2) && last_truncate.is_some() {
+                last_truncate
+            } else {
+                cx.rng().pick(&self.sent).cloned()
+            };
+            if let Some((index, command)) = late {
+                self.replaying = true;
+                let _ = self.apply(index, &command);
+                self.replaying = false;
+            }
             return;
         }
         if action == ClientAction::Seal {
@@ -292,7 +341,13 @@ impl Model for ClientModel {
                 (client.write(records), Asked::Write(ids))
             }
             ClientAction::Truncate => {
-                let up_to = Seq(cx.rng().below(next + 2));
+                // On one call in two, one past the tail: a late copy of it
+                // then truncates a write sent after it.
+                let up_to = if cx.rng().chance(1, 2) {
+                    Seq(next + 1)
+                } else {
+                    Seq(cx.rng().below(next + 2))
+                };
                 let client = &mut self.programs[index].client;
                 (client.truncate(up_to), Asked::Truncate)
             }
@@ -302,7 +357,9 @@ impl Model for ClientModel {
                 let client = &mut self.programs[index].client;
                 (client.read(from, limit), Asked::Read { limit })
             }
-            ClientAction::Seal | ClientAction::Timeout => unreachable!("handled above"),
+            ClientAction::Seal | ClientAction::Timeout | ClientAction::Replay => {
+                unreachable!("handled above")
+            }
         };
         self.programs[index].calls.insert(call, asked);
         self.flush(index, cx);
@@ -375,7 +432,11 @@ impl ClientModel {
             landed: BTreeMap::new(),
             fenced: BTreeSet::new(),
             refused: BTreeSet::new(),
-            installed: vec![fresh],
+            installed: BTreeSet::new(),
+            to_multi: vec![(0, 0); CLIENTS],
+            sent: Vec::new(),
+            replaying: false,
+            truncated: vec![false; CLIENTS],
             waiting: BTreeMap::new(),
             placed: BTreeSet::new(),
             belows: BTreeSet::new(),
@@ -457,7 +518,7 @@ impl ClientModel {
                 .calls
                 .remove(&call)
                 .expect("an outcome for a call the program asked");
-            self.judge(&asked, &outcome);
+            self.judge(index, &asked, &outcome);
         }
     }
 
@@ -485,13 +546,17 @@ impl ClientModel {
         let chaos = cx.phase() == Phase::Chaos;
         match request {
             Request::Command { id, command } => {
+                self.sent.push((index, command.clone()));
+                if self.sent.len() > 8 {
+                    self.sent.remove(0);
+                }
                 let fate = if chaos { cx.rng().below(10) } else { 0 };
                 let response = match fate {
                     // The slot chose a `Noop`: the command holds no slot.
                     6 => Response::Reply(Reply::Unknown),
                     7 => Response::NotLeader,
                     _ => {
-                        let answer = self.apply(&command);
+                        let answer = self.apply(index, &command);
                         match fate {
                             8 => Response::Reply(Reply::Unknown),
                             // The answer is lost; the program times out.
@@ -536,7 +601,8 @@ impl ClientModel {
     }
 
     /// [`ClientMutant::ForgedRefusal`]: a refused `SetLeader` names the
-    /// uuid it asked for.
+    /// last uuid drawn. [`ClientMutant::ShortView`]: a won `SetLeader` names
+    /// a tail one short.
     fn forge(&self, answer: Answer) -> Answer {
         match answer {
             Answer::LeaderRefused(view)
@@ -547,21 +613,40 @@ impl ClientModel {
                     ..view
                 })
             }
+            Answer::LeaderSet(view)
+                if self.mutant == ClientMutant::ShortView && view.next_seq.0 > 0 =>
+            {
+                Answer::LeaderSet(JournalView {
+                    next_seq: Seq(view.next_seq.0 - 1),
+                    ..view
+                })
+            }
             other => other,
         }
     }
 
     /// The command is chosen at the next slot of the segment in force, and
     /// folded.
-    fn apply(&mut self, command: &Command) -> Answer {
+    fn apply(&mut self, index: usize, command: &Command) -> Answer {
         let mut command = command.clone();
         if let Command::Write(write) = &mut command
-            && let Fence::Leader { expected_seq, .. } = &mut write.fence
+            && let Fence::Leader { uuid, expected_seq } = &mut write.fence
         {
             let ids = Self::ids_of(&write.records);
             self.fenced.extend(ids.iter().copied());
-            if self.mutant == ClientMutant::ResendAtTail && !self.placed.insert(ids) {
-                *expected_seq = self.current().fold.next_seq();
+            let fold = self.current().fold;
+            let first = self.placed.insert(ids);
+            if first && fold.leader() == Leader::Uuid(*uuid) {
+                assert!(
+                    *expected_seq == fold.next_seq(),
+                    "{TAIL}: a new write of {uuid:?} at {expected_seq:?}, the tail is {:?}",
+                    fold.next_seq()
+                );
+                sometimes!(self.truncated[index], reach::AFTER_TRUNCATED);
+                self.truncated[index] = false;
+            }
+            if self.mutant == ClientMutant::ResendAtTail && !first {
+                *expected_seq = fold.next_seq();
             }
         }
         let segments = self.segments.len();
@@ -589,9 +674,12 @@ impl ClientModel {
                 }
                 sometimes!(segments >= 3, reach::THIRD);
             }
-            (Answer::LeaderSet(view), _) => {
-                self.installed.push(view.leader);
-            }
+            (Answer::LeaderSet(_), Command::SetLeader { new, .. }) => match new {
+                Some(uuid) => {
+                    self.installed.insert(uuid.0);
+                }
+                None => self.to_multi[index].0 += 1,
+            },
             (
                 Answer::Fenced(_) | Answer::Taken(_) | Answer::WrongMode(_),
                 Command::Write(write),
@@ -600,6 +688,14 @@ impl ClientModel {
                     self.again.contains(&Self::ids_of(&write.records)),
                     reach::RESOLVED_AGAIN
                 );
+            }
+            (Answer::Truncated(view), Command::Write(write)) => {
+                if let Fence::Leader { uuid, .. } = write.fence
+                    && view.leader == Leader::Uuid(uuid)
+                    && !self.replaying
+                {
+                    self.truncated[index] = true;
+                }
             }
             (Answer::Duplicate { .. }, _) => sometimes!(true, reach::DUPLICATE),
             (Answer::LeaderRefused(view), Command::SetLeader { new, .. }) => {
@@ -655,7 +751,7 @@ impl ClientModel {
     }
 
     /// The oracles on one reported outcome.
-    fn judge(&mut self, asked: &Asked, outcome: &Outcome) {
+    fn judge(&mut self, index: usize, asked: &Asked, outcome: &Outcome) {
         match (asked, outcome) {
             (Asked::Write(ids), Outcome::Written { seq, count }) => {
                 assert!(
@@ -687,8 +783,19 @@ impl ClientModel {
             (Asked::Write(_), Outcome::Truncated(_)) => sometimes!(true, reach::TRUNCATED),
             (Asked::SetLeader(new), Outcome::LeaderSet(view)) => {
                 assert!(
-                    view.leader == Leader::from_new(*new) && self.installed.contains(&view.leader),
+                    view.leader == Leader::from_new(*new),
                     "{LED}: SetLeader({new:?}) reported set with {view:?}"
+                );
+                let applied = if let Some(uuid) = new {
+                    self.installed.contains(&uuid.0)
+                } else {
+                    let counts = &mut self.to_multi[index];
+                    counts.1 += 1;
+                    counts.1 <= counts.0
+                };
+                assert!(
+                    applied,
+                    "{LED}: SetLeader({new:?}) of client {index} reported set, no copy applied"
                 );
             }
             (Asked::Truncate, Outcome::Trimmed(_)) => sometimes!(true, reach::TRIMMED),

@@ -1,7 +1,7 @@
 //! The **journal client** (#1331 (the pure journal client),
 //! `docs/journal/02-data-plane.md` §J2): the state machine that a writer or
 //! a reader of one journal runs, with no network, no clock and no
-//! randomness (Pierre, 2026-11-19: parosd handles the network).
+//! randomness: the program that drives it handles the network.
 //!
 //! The program asks the client for one of the four calls ([`Client::write`],
 //! [`Client::read`], [`Client::truncate`], [`Client::set_leader`]). The
@@ -45,11 +45,19 @@
 //! the client. A client that never won a `SetLeader` writes unfenced: the
 //! journal accepts that only while it is multi-writer.
 //!
-//! **A lost `SetLeader` settles itself.** A resend of a `SetLeader(new, old)`
-//! whose first copy applied is refused, because `new` already leads. Uuids
-//! are fresh, so a refusal whose view names `new` as the leader after a
-//! resend means that the first copy won: the client answers
-//! [`Outcome::LeaderSet`] with that view.
+//! **A lost `SetLeader` of a uuid settles itself.** A resend of a
+//! `SetLeader(Some(uuid), old)` whose first copy applied is refused, because
+//! `uuid` already leads. Uuids are fresh, so a refusal whose view names
+//! `uuid` as the leader after a resend means that the first copy won: the
+//! client answers [`Outcome::LeaderSet`] with that view. `SetLeader(None, _)`
+//! has no such proof: another caller can make the journal multi-writer, so
+//! its refused resend is [`Outcome::LeaderRefused`].
+//!
+//! **The client follows the tail.** Each view that names the client's own
+//! uuid as the leader moves its next position to the view's `next_seq`:
+//! with one call in flight, only the client writes under its uuid, so that
+//! tail is its own. A write answered `Truncated` moves it too, so the next
+//! write is not below the floor again.
 //!
 //! **Record headers are opaque** (#1299 (record headers)). The client sends
 //! the records as the program gave them, with their headers, and never reads
@@ -167,7 +175,9 @@ pub enum Outcome {
     },
     /// The call is refused for ever: the answer of the journal (`Fenced`,
     /// `Taken`, `WrongMode`, `Empty`, `Reserved`, or an answer that does not
-    /// fit the call). A refused write is not in the journal.
+    /// fit the call). A refused fenced write is not in the journal. For an
+    /// unfenced write the refusal is final only for the copy it answers: an
+    /// older copy still in flight can land (§J2.4).
     Refused(Answer),
     /// The position is below the trim floor. For a write the fate is
     /// unknown; a read has no record there.
@@ -573,7 +583,10 @@ impl Client {
             }
             Answer::Early(_) => self.resend(call, Command::Write(write), copies),
             Answer::Below(view) => self.send_resolve(call, write, view),
-            Answer::Truncated(view) => self.end(call, Outcome::Truncated(view)),
+            Answer::Truncated(view) => {
+                self.follow(view);
+                self.end(call, Outcome::Truncated(view));
+            }
             refused @ (Answer::Taken(view)
             | Answer::Fenced(view)
             | Answer::WrongMode(view)
@@ -598,7 +611,7 @@ impl Client {
             // fresh, so no other call installed it.
             Answer::LeaderRefused(view)
                 if copies > 1
-                    && new.is_none_or(LeaderUuid::is_set)
+                    && new.is_some_and(LeaderUuid::is_set)
                     && view.leader == Leader::from_new(new) =>
             {
                 Some(*view)
@@ -653,6 +666,7 @@ impl Client {
                 self.send(call, Command::Write(again), 1);
             }
             Response::Resolved(ResolveAnswer::Truncated) => {
+                self.follow(view);
                 self.end(call, Outcome::Truncated(view));
             }
             Response::Resolved(ResolveAnswer::NotCovered)
