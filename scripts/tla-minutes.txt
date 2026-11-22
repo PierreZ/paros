@@ -6,11 +6,12 @@
 # stays inside its 30 minutes. Every folder is listed: the plan fails on a
 # folder with no line, and on a line with no folder. When a folder's checks
 # grow, measure them again (the step time of its job) and update its line.
-# Measured on run 44961887578 (2026-11-22).
+# Measured on run 44961887578 (2026-11-22); cas-register and generations
+# on run 44979057024 (2026-11-22).
 abandoned-ballot 4
 batcher 1
 campaign-discovery 1
-cas-register 3.5
+cas-register 20.5
 cell-control 3
 compartments 3
 config-register 10
@@ -23,7 +24,7 @@ experiments/segments/b 3.5
 experiments/segments/reads 9.5
 experiments/stale-stopped/restart 16
 flight-rule 3
-generations 10
+generations 20
 grid 1
 grid-controller 2.5
 handover 12.5
