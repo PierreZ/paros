@@ -1198,9 +1198,7 @@ impl ColocatedNode {
     /// let flight = ready.release();
     /// assert!(node.in_flight());
     /// // An async driver awaits its flush here; nothing steps the node.
-    /// for op in &writes {
-    ///     disk.apply(op);
-    /// }
+    /// disk.apply(&writes);
     /// node.durable(flight);
     /// assert!(!node.in_flight());
     /// ```

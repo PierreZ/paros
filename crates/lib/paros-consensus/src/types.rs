@@ -58,14 +58,23 @@ const _: () = assert!(FNV_OFFSET != 0);
 /// [`crate::journal::command_fingerprint`] and the decree identity of a
 /// matchmaker set.
 #[must_use]
-pub fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+pub const fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
         hash = hash.wrapping_mul(PRIME);
+        i += 1;
     }
     hash
 }
+
+// The fold is the published FNV-1a: no byte keeps the basis, and the test
+// vector of "a" matches the reference implementation.
+const _: () = assert!(fnv1a(FNV_OFFSET, b"") == FNV_OFFSET);
+const _: () = assert!(fnv1a(FNV_OFFSET, b"a") == 0xaf63_dc4c_8601_ec8c);
+// Each byte moves the hash: two prefixes of one input never collide here.
+const _: () = assert!(fnv1a(FNV_OFFSET, b"ab") != fnv1a(FNV_OFFSET, b"a"));
 
 /// A Paxos ballot (a.k.a. proposal / round number), forming a **total order**.
 ///
