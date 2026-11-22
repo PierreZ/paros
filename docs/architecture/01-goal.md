@@ -90,16 +90,8 @@ a tenant on, write to, read from, break and watch heal (section 9). The homelab 
 **The eleven goals** (Pierre, 2026-11-22). The goals say what paros is for. Goals 1 to 6 are the
 decisions of section 1 above. Goals 7 to 10 say how paros is built (section 4.4, AGENTS.md).
 Goal 11 says what an operator gets: Pierre, 2026-11-22, "parosd should be easy to operate,
-because of self healing and autoscaling". Its design rule (Pierre, 2026-11-22): "always try to
-decide some sort of control plane component interacting with data plane", for example the
-controller of a journal that takes the telemetry of its roles and grows the journal with calls.
-So a task of an operator is first a question: which control component does it? The grid
-controller of a journal (journal §J6) is the first one: it decides when and where, and the
-protocol decides whether it is safe. Two habits follow (Pierre, 2026-11-22): split the
-responsibilities, so that one component holds one duty, and expose each capability over the
-network, as a call that another component or a tool can use. The scaling is for after the
-journal v1, whose controller
-takes no action from load (journal §J6).
+because of self healing and autoscaling". The scaling is for after the journal v1, whose
+controller takes no action from load (journal §J6).
 
 | # | Goal | In short |
 |---|---|---|
@@ -113,7 +105,17 @@ takes no action from load (journal §J6).
 | 8 | **Every role is a pure actor** | A deterministic step, persist before send, a refusal is data. I/O is only in adapters. So each layer has its model, its walk and its trace check. |
 | 9 | **Proved before built** | No code before its TLA+ model, and no excuse in simulation. |
 | 10 | **Everything simulates, and it runs in the browser** | Every layer, and the whole service, runs in the deterministic simulation. The same code compiles to wasm and runs in a browser. |
-| 11 | **Easy to operate** | The service heals itself (goal 2) and scales itself, so a person runs it with few actions. For each need of operation, a control component reads the telemetry of the data plane and changes the system through its calls. An operator says what must be true and gets a true reason when the service cannot do it. |
+| 11 | **Easy to operate** | The service heals itself and scales itself, so a person runs it with few actions. An operator says what must be true and gets a true reason when the service cannot do it. |
+
+**Three habits of design serve goal 11** (Pierre, 2026-11-22). They are ways to reach the goal,
+not goals. A design that does not follow one says why.
+
+- A task of an operator is first a question: which component of the control plane does it? Such
+  a component reads the telemetry of the data plane and changes the system through calls. The
+  grid controller of a journal is the first one (journal §J6): it decides when and where, and
+  the protocol decides whether it is safe.
+- One component holds one duty.
+- A capability is a call over the network, which another component or a tool can use.
 
 **The eight root rules** are the consequences of these goals in the service. Each one replaced a
 stack of fixes of the code at the tag `v0.2.0-alpha.1`: rule 3 serves goals 3 and 4; rules 2, 4,
