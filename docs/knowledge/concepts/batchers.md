@@ -116,7 +116,19 @@ journal refuse a write it already holds. A single-writer journal merges in its c
 | The decision | `docs/journal/02-data-plane.md` §J2.4 |
 | The TLA+ model | `specs/tla/compartments/` (#1190 (rework 6.10)): one range for each write, also across a `TooLarge` split and a leader change, with the control `resend_ambiguous` (a batcher that sends an ambiguous batch again applies a write two times) |
 
-**Sim gates and oracles:**
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- `consensus-sim`'s batcher walk (`src/batcher.rs`) with its oracles: "a batch holds the writes
+  of one journal", "a merged batch stays within the limits", "a batch holds each write's records
+  in push order" and "the unbatcher answers each write with its own records"; it must reach "batcher
+  walk: a batch merged several writes", "batcher walk: a merged answer was scattered", "batcher
+  walk: a write over the limits went alone" and "batcher walk: a write landed twice".
+- The models `specs/tla/batcher/` (traced by `BatcherTrace.tla`) and `specs/tla/compartments/`.
+- Core probes "batcher: a write goes alone" and "unbatcher: a merged write is scattered".
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - `"batcher: a write's range holds exactly its records"`, `"batcher: two writes never share a
   position"` (`paros-sim/src/workload/fleet/created.rs`).
