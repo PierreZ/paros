@@ -1424,7 +1424,7 @@ model has:
   `Accept` of a slot goes to its column, and the column decides.
 
 Not in the model: the `Nack` (it only closes a round, and a round that stays open decides
-nothing more), the re-send beat and `expire_stale` (with no lost message they change nothing),
+nothing more), the re-send beat and the retention of `ProxyLeader::tick` (with no lost message they change nothing),
 and the GC of `H_b`. One command for each ballot and slot is assumed here (`prop[b][s]` is
 fixed); `leader-handoff/` checks it (`DurableFrontier`).
 

@@ -680,7 +680,8 @@ sideways, on the identifier of a higher crate in `src/`, and on a fault switch i
   decree ballot): a `Stopped` sent to an earlier incarnation can reach a later one, so the stop
   quorum's maximum decree promise alone does not keep two incarnations apart), and above that
   maximum promise, which only skips rounds the matchmakers refuse; any node that meets `Stopped { successor: None }` finishes
-  the handover. `MatchmakerSet::new` / `AcceptorConfig::new` are the only constructors.
+  the handover. `MatchmakerSet::new` / `AcceptorConfig::new` and their fallible `try_*` forms (for wire
+  and operator input) are the only constructors.
 
 Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,
 `node/gc.rs` (`may_retire`), `matchmaker.rs`, `matchmaker/reconfigurer.rs`,

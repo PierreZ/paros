@@ -271,9 +271,18 @@ fn a_replica_serves_a_quorum_read_once_it_applied_the_row_watermark() {
         tier.propose(seq, commit_to(10, 2));
     }
     assert_eq!(tier.applied_slots(0), vec![0, 1]);
-    tier.replicas[0].quorum_read_in(7, None);
+    assert_eq!(
+        tier.replicas[0].quorum_read_in(7, None),
+        crate::quorum_read::ReadOpen::Opened
+    );
     let q = tier.drain_replica(0);
     assert_eq!(q.len(), 3, "a majority's row is the whole membership");
+    // The token is still open: a second ask is a result, and sends nothing.
+    assert_eq!(
+        tier.replicas[0].quorum_read_in(7, None),
+        crate::quorum_read::ReadOpen::TokenInUse
+    );
+    assert_eq!(tier.drain_replica(0), Vec::new());
     assert!(q.iter().all(
         |(_, m)| matches!(m, Message::PreRead { reply_to, ctx: 7 } if *reply_to == NodeId(10))
     ));

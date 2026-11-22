@@ -150,7 +150,7 @@ Test only: `publish = false`, never a dependency of another crate.
   `truncation.rs`, `compartments.rs`, `faults.rs` and `handover.rs` each say which events their
   spec keeps (`Spec::keeps`, a list of the model's own steps). `node.rs` defines the constants of
   the ten trace specs of `specs/tla/node/`; `handover.rs` defines those of its own model. A
-  proxy round that ends with no decision (a relayed `Nack`, or `expire_stale`) is a `Close`. In a batch, the tracer writes the votes that
+  proxy round that ends with no decision (a relayed `Nack`, or an eviction of `ProxyLeader::tick`) is a `Close`. In a batch, the tracer writes the votes that
   are not the leader's own round and each trim jump before the learns, and each compaction
   after them: a node learns a value it holds, from its trim point on. `reads.rs` records the
   read basis, the answers and the served reads; `truncation.rs` the journal fold of each slot (`Fold`, from the first party that

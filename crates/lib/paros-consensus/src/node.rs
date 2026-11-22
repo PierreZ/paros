@@ -1229,6 +1229,8 @@ impl ColocatedNode {
         &self.pending_read_states
     }
 
+    /// The matchmaking requests of the batch. The one place their shape is
+    /// asserted: the plain path never speaks to a matchmaker.
     pub(crate) fn pending_match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
         if !self.pending_match_requests.is_empty() {
             assert!(

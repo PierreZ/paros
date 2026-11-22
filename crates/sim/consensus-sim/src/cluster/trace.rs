@@ -34,7 +34,7 @@
 //!
 //! For a batch of a proxy: `fanout`, the proxy opened a round, `commit`,
 //! the proxy decided it, and `close`, the proxy closed it on a `Nack` that
-//! it relays. A round the proxy evicts (`expire_stale`) is a `close` too. For a matchmaker: `register`, a
+//! it relays. A round the proxy evicts (`ProxyLeader::tick`) is a `close` too. For a matchmaker: `register`, a
 //! registration it did not hold before, and `gcack`, a GC request it
 //! applied. `restart` is a node that boots again from its disk, with a
 //! `rot` for each record its boot read faulty, and
@@ -213,7 +213,7 @@ pub enum ClusterEvent {
     Crash { proxy: ProxyId },
     /// `proxy` closed its open round of `slot` with no decision: an
     /// acceptor refused it (the proxy relays the `Nack`), or the round
-    /// reached its retention budget (`expire_stale`) (`Close`).
+    /// reached its retention budget (`ProxyLeader::tick`) (`Close`).
     Close { proxy: ProxyId, slot: Slot },
     /// `acceptor` durably voted for `cmd` at `ballot` and `slot`
     /// (`Accept`). `own`: the acceptor leads at `ballot` and records the
@@ -869,7 +869,7 @@ impl Tracer {
         events
     }
 
-    /// Proxy `id` evicted its round of `slot` (`expire_stale`): a step when
+    /// Proxy `id` evicted its round of `slot` (`ProxyLeader::tick`): a step when
     /// the tracer holds that round open.
     pub(super) fn proxy_expired(&mut self, id: ProxyId, slot: Slot) -> Option<ClusterEvent> {
         let mirror = self.proxies.entry(id).or_default();

@@ -277,6 +277,65 @@ impl Config {
         }
         pool
     }
+
+    /// Checks the shape that every deployment of this configuration relies
+    /// on, as [`crate::Limits::assert_valid`] checks the pages. Quorum
+    /// arithmetic, `contains` and broadcast all binary-search strictly sorted,
+    /// deduplicated memberships: a duplicated peer silently inflates a quorum.
+    /// [`Config::new`] builds a configuration with no peers on purpose (the
+    /// builder fills it in), so a driver calls this once the configuration is
+    /// complete; [`crate::ColocatedNode::new`] and [`crate::ReplicaNode::new`]
+    /// call it at boot. What a deployment adds on its own id (a node is in
+    /// the pool, a replica is not) stays with that deployment.
+    ///
+    /// # Panics
+    ///
+    /// Each assertion names the field that is wrong: an empty, unsorted or
+    /// duplicated membership, a bootstrap membership or matchmaker set that
+    /// leaves its pool, labels that do not match the membership, or a
+    /// bootstrap configuration that its quorum system does not admit.
+    pub fn assert_valid(&self) {
+        assert!(
+            !self.peers.is_empty(),
+            "Config::peers is empty: the bootstrap membership names at least one acceptor (Config::with_peers)"
+        );
+        assert!(
+            self.peers.windows(2).all(|w| w[0] < w[1]),
+            "Config::peers is not sorted and deduplicated (Config::with_peers sorts it)"
+        );
+        assert!(
+            self.nodes.windows(2).all(|w| w[0] < w[1]),
+            "Config::nodes is not sorted and deduplicated"
+        );
+        assert!(
+            self.matchmakers.windows(2).all(|w| w[0] < w[1]),
+            "Config::matchmakers is not sorted and deduplicated"
+        );
+        assert!(
+            self.matchmaker_pool.windows(2).all(|w| w[0] < w[1]),
+            "Config::matchmaker_pool is not sorted and deduplicated"
+        );
+        assert!(
+            self.peers
+                .iter()
+                .all(|p| self.pool().binary_search(p).is_ok()),
+            "Config::peers names a node outside Config::nodes: the bootstrap membership is drawn from the node pool"
+        );
+        assert!(
+            self.matchmakers
+                .iter()
+                .all(|m| self.matchmaker_pool().binary_search(m).is_ok()),
+            "the bootstrap matchmaker set is drawn from the matchmaker pool"
+        );
+        assert!(
+            self.peer_domains.is_empty() || self.peer_domains.len() == self.peers.len(),
+            "a configuration labels every bootstrap member or none"
+        );
+        assert!(
+            AcceptorConfig::try_new(self.peers.clone(), self.quorum_system).is_ok(),
+            "Config::quorum_system does not admit Config::peers"
+        );
+    }
 }
 
 #[cfg(test)]

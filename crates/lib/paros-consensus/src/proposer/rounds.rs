@@ -280,10 +280,10 @@ impl<Id, V> Rounds<Id, V> {
 
     /// Every round re-sent at least `after` times without closing, whatever
     /// its custody: what a tally that holds nothing durable **evicts** (a
-    /// proxy leader's bounded retention, [`ProxyLeader::expire_stale`]).
+    /// proxy leader's bounded retention in [`ProxyLeader::tick`]).
     /// The threshold is the caller's policy.
     ///
-    /// [`ProxyLeader::expire_stale`]: crate::proxy_leader::ProxyLeader::expire_stale
+    /// [`ProxyLeader::tick`]: crate::proxy_leader::ProxyLeader::tick
     ///
     /// # Panics
     ///

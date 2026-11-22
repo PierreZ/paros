@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::{AcceptorConfig, FailureDomain, MAX_ROLE_COUNT, QuorumSystem, ReplicaId};
+use super::{AcceptorConfig, FailureDomain, MAX_ROLE_COUNT, QuorumSystem, ReplicaId, ShapeError};
 use crate::types::{NodeId, Slot};
 
 fn nodes(ids: impl IntoIterator<Item = u64>) -> Vec<NodeId> {
@@ -169,6 +169,15 @@ fn domain(az: &str) -> FailureDomain {
     FailureDomain::new("", az)
 }
 
+/// A domain whose zone name is one byte past the cap: what a wire decode or
+/// a caller that fills the public fields can hand the core.
+fn long_domain() -> FailureDomain {
+    FailureDomain {
+        region: String::new(),
+        az: "x".repeat(super::super::MAX_FAILURE_DOMAIN_BYTES + 1),
+    }
+}
+
 /// A labeled configuration gives each member the label it was named with.
 /// A stranger has no label, and an unlabeled configuration has no labels.
 #[test]
@@ -253,13 +262,14 @@ fn a_role_count_above_the_cap_is_refused() {
 fn a_wire_configuration_is_normalized_like_a_built_one() {
     use super::SerdeAcceptorConfig;
 
-    let zoned = AcceptorConfig::from(SerdeAcceptorConfig {
+    let zoned = AcceptorConfig::try_from(SerdeAcceptorConfig {
         members: nodes([3, 1, 2]),
         quorum_system: QuorumSystem::Majority,
         domains: vec![domain("c"), domain("a"), domain("b")],
         proxies: 1,
         replicas: 2,
-    });
+    })
+    .expect("a well-formed wire configuration decodes");
     assert_eq!(
         zoned,
         AcceptorConfig::zoned(
@@ -273,13 +283,14 @@ fn a_wire_configuration_is_normalized_like_a_built_one() {
         .with_counts(1, 2)
     );
 
-    let plain = AcceptorConfig::from(SerdeAcceptorConfig {
+    let plain = AcceptorConfig::try_from(SerdeAcceptorConfig {
         members: nodes([2, 1, 2]),
         quorum_system: QuorumSystem::Majority,
         domains: Vec::new(),
         proxies: 0,
         replicas: 0,
-    });
+    })
+    .expect("a well-formed wire configuration decodes");
     assert_eq!(
         plain,
         AcceptorConfig::new(nodes([1, 2]), QuorumSystem::Majority)
@@ -304,4 +315,103 @@ fn only_a_normalized_configuration_is_well_formed() {
     assert!(!raw(&[2, 1, 3], 0).is_well_formed(), "unsorted");
     assert!(!raw(&[1, 2, 3], 2).is_well_formed(), "a domain short");
     assert!(!raw(&[], 0).is_well_formed(), "empty");
+}
+
+/// A malformed configuration from the wire is refused with the rule it
+/// breaks, never a panic (decision 30: a peer's input is a result).
+#[cfg(feature = "serde")]
+#[test]
+fn a_malformed_wire_configuration_is_refused() {
+    use super::SerdeAcceptorConfig;
+
+    let wire = |members: Vec<NodeId>, quorum_system, domains: Vec<FailureDomain>, proxies| {
+        AcceptorConfig::try_from(SerdeAcceptorConfig {
+            members,
+            quorum_system,
+            domains,
+            proxies,
+            replicas: 0,
+        })
+    };
+    assert_eq!(
+        wire(Vec::new(), QuorumSystem::Majority, Vec::new(), 0),
+        Err(ShapeError::NoMember)
+    );
+    assert_eq!(
+        wire(nodes(1..=5), QuorumSystem::grid(2, 3), Vec::new(), 0),
+        Err(ShapeError::QuorumNotAdmitted)
+    );
+    assert_eq!(
+        wire(
+            nodes([1, 1]),
+            QuorumSystem::Majority,
+            vec![domain("a"), domain("b")],
+            0
+        ),
+        Err(ShapeError::TwoDomains)
+    );
+    assert_eq!(
+        wire(nodes([1, 2]), QuorumSystem::Majority, vec![domain("a")], 0),
+        Err(ShapeError::UnlabeledMember)
+    );
+    assert_eq!(
+        wire(nodes([1]), QuorumSystem::Majority, vec![long_domain()], 0),
+        Err(ShapeError::DomainTooLong)
+    );
+    assert_eq!(
+        wire(
+            nodes(1..=3),
+            QuorumSystem::Majority,
+            Vec::new(),
+            MAX_ROLE_COUNT + 1
+        ),
+        Err(ShapeError::RoleCountOverCap)
+    );
+}
+
+/// The fallible constructors refuse what the panicking ones panic on, and
+/// build the same value otherwise.
+#[test]
+fn the_fallible_constructors_match_the_panicking_ones() {
+    assert_eq!(
+        AcceptorConfig::<NodeId>::try_new(Vec::new(), QuorumSystem::Majority),
+        Err(ShapeError::NoMember)
+    );
+    assert_eq!(
+        AcceptorConfig::try_new(nodes(1..=3), QuorumSystem::grid(2, 2)),
+        Err(ShapeError::QuorumNotAdmitted)
+    );
+    assert_eq!(
+        AcceptorConfig::try_new(nodes([3, 1, 2, 1]), QuorumSystem::Majority),
+        Ok(AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority))
+    );
+    assert_eq!(
+        AcceptorConfig::try_zoned(
+            vec![(NodeId(1), domain("a")), (NodeId(1), domain("b"))],
+            QuorumSystem::Majority,
+        ),
+        Err(ShapeError::TwoDomains)
+    );
+    assert_eq!(
+        AcceptorConfig::try_zoned(vec![(NodeId(1), long_domain())], QuorumSystem::Majority,),
+        Err(ShapeError::DomainTooLong)
+    );
+    let labeled = vec![(NodeId(2), domain("b")), (NodeId(1), domain("a"))];
+    assert_eq!(
+        AcceptorConfig::try_zoned(labeled.clone(), QuorumSystem::Majority),
+        Ok(AcceptorConfig::zoned(labeled, QuorumSystem::Majority))
+    );
+    let base = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority);
+    assert_eq!(
+        base.clone().try_with_counts(MAX_ROLE_COUNT + 1, 0),
+        Err(ShapeError::RoleCountOverCap)
+    );
+    assert_eq!(
+        base.clone().try_with_counts(0, MAX_ROLE_COUNT + 1),
+        Err(ShapeError::RoleCountOverCap)
+    );
+    assert_eq!(
+        base.clone().try_with_counts(MAX_ROLE_COUNT, MAX_ROLE_COUNT),
+        Ok(base.with_counts(MAX_ROLE_COUNT, MAX_ROLE_COUNT))
+    );
 }

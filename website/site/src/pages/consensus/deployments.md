@@ -81,7 +81,7 @@ learners.
 
 A proxy votes on nothing and orders nothing, so moving it cannot break agreement. It keeps
 nothing durable: after a crash it boots empty, and the leader sends the rounds again. Its driver
-calls `resend_pending` each beat. Example:
+calls `tick` each beat. Example:
 [`proxy_leader`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/proxy_leader.rs).
 Flavor: [Compartmentalized Paxos](../../paxos/compartmentalized/).
 

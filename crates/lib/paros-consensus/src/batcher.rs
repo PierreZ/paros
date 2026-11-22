@@ -286,14 +286,28 @@ impl Unbatcher {
     /// Each write's `(token, seq, count)` of `writes`, a batch accepted at
     /// `seq` with `count` records: in the batch's order, dense from `seq`.
     ///
+    /// `seq` and `count` come from the leader's answer, an input: `None` when
+    /// `count` is not the sum of the writes' counts (the leader accepted
+    /// another write than this batch), or when the range `seq + count` does
+    /// not fit a `u64`. The caller answers each write of that batch as not
+    /// landed, as it answers a lost reply.
+    ///
     /// # Panics
     ///
-    /// If `count` is not the sum of the writes' counts: the leader accepted
-    /// another write than the batch (a programmer error).
+    /// If an assertion on its own postconditions fails (a programmer error).
     #[must_use]
-    pub fn scatter<T: Copy>(writes: &[(T, usize)], seq: u64, count: u64) -> Vec<(T, u64, u64)> {
-        let total: u64 = writes.iter().map(|(_, n)| *n as u64).sum();
-        assert_eq!(total, count, "a merged write is accepted whole");
+    pub fn scatter<T: Copy>(
+        writes: &[(T, usize)],
+        seq: u64,
+        count: u64,
+    ) -> Option<Vec<(T, u64, u64)>> {
+        let total = writes
+            .iter()
+            .try_fold(0u64, |sum, (_, n)| sum.checked_add(u64::try_from(*n).ok()?))?;
+        if total != count {
+            return None;
+        }
+        let end = seq.checked_add(count)?;
         let mut at = seq;
         let out: Vec<(T, u64, u64)> = writes
             .iter()
@@ -304,14 +318,14 @@ impl Unbatcher {
                 range
             })
             .collect();
-        assert_eq!(at, seq + count, "the ranges cover the merged write");
+        assert_eq!(at, end, "the ranges cover the merged write");
         assert_eq!(out.len(), writes.len(), "one answer per write");
         probe!(
             sometimes,
             out.len() > 1,
             "unbatcher: a merged write is scattered"
         );
-        out
+        Some(out)
     }
 }
 

@@ -35,8 +35,9 @@ pub trait Storage {
     /// The first slot still available (slots below it have been compacted away).
     fn first_slot(&self) -> Slot;
 
-    /// The last slot present in storage.
-    fn last_slot(&self) -> Slot;
+    /// The last slot present in storage, or `None` when the log holds no
+    /// record. No slot is a sentinel: `Slot(0)` is a real slot (#56).
+    fn last_slot(&self) -> Option<Slot>;
 
     /// The **sealed** journal state (#204): what the slots below
     /// [`Storage::first_slot`] folded to, persisted when truncation (or a

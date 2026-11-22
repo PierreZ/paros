@@ -58,3 +58,12 @@ fn a_trim_point_jump_raises_the_chosen_index_only() {
     }]);
     assert_eq!(disk.hard_state().chosen_index, Some(Slot(9)));
 }
+
+/// An empty log has no last slot, and slot 0 is a real slot: no sentinel
+/// stands for "empty" (#56).
+#[test]
+fn an_empty_log_has_no_last_slot() {
+    assert_eq!(store(0).last_slot(), None);
+    assert_eq!(store(1).last_slot(), Some(Slot(0)));
+    assert_eq!(store(3).last_slot(), Some(Slot(2)));
+}
