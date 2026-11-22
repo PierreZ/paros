@@ -128,7 +128,19 @@ The rule is stated in the module docs of `proposer.rs` (volatile tallies, judged
 system), `replica.rs` (the fold is contiguous or it stops) and `node/phase2.rs` (delegation
 never covers Phase-1-shaped work).
 
-**Sim gates and oracles** (`paros-sim/src/audit/state.rs`):
+**Judges today:**
+
+- The model `specs/tla/multi-paxos/` (Phase 1 recovery, the allocator frontier, the `Noop` gap
+  fill, commit and catch-up, restarts), with an inductive invariant `Inv` that TLC checks on drawn
+  states and TLAPS proves at every size (`MultiPaxosProof.tla`).
+- `consensus-sim`'s walks of a `Cluster` (`Flavor::multi_paxos`, `Flavor::multi_paxos_five`) and the
+  oracles of `oracle/ledger.rs`: `ONE_VALUE`, `COMMIT_BACKED`, `LEARNED_CHOSEN`, `PREFIX_SHRINKS`
+  and `ONE_PROPOSAL`; `JOURNAL_FOLD` (`oracle/journal.rs`) folds the chosen commands with the
+  journal rules written again. Controls: `Mutant::ForgetVotes`, `Mutant::EarlyCommit`,
+  `Mutant::CorruptCommit`, `Mutant::LoseChosenIndex`.
+- Each walk is traced against `specs/tla/node/MultiPaxosTrace.tla`.
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/state.rs`):
 
 - `"one ballot proposes at most one command for a slot"`,
   `"a durable accept quorum never decides two values for a slot"`,

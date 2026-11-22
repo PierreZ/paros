@@ -107,7 +107,19 @@ replica waits until its prefix covers the maximum vote watermark of a row, and s
 | The reply owner | `paros-consensus/src/membership/ids.rs`: `ReplicaId::of` (`slot % replica_count`); `paros-consensus/src/membership/acceptor_config.rs`: `AcceptorConfig::reply_owner` |
 | The driver | `paros-roles/src/replica.rs`: `run_replica`; a machine runs the replica of each `Role::Replica` booking the registry holds for it (PR #780 (machine replicas), #765) |
 
-**Sim gates and oracles** (`paros-sim/src/audit/state.rs` unless named):
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- The model `specs/tla/compartments/` and the trace spec `specs/tla/node/CompartmentsTrace.tla`.
+- `consensus-sim`'s flavors `Flavor::replicas`, `Flavor::compartments` and
+  `Flavor::compartments_compacting`, with the walk sites "cluster: a replica applied a slot" and
+  "cluster: a replica answered a leaderless read"; `LEARNED_CHOSEN` judges what a replica learns
+  (control: `Mutant::CorruptCommit`).
+- Core probes of `replica.rs`: "compaction: a retained retry holds the floor down", "apply: a walk
+  yields with the next slot already chosen".
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/state.rs` unless named):
 
 - `"replica: a slot is applied on a replica that never voted"`.
 - `"replica: a replica's id is outside the node pool"` (`audit/replica.rs`).

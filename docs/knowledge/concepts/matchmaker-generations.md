@@ -127,7 +127,20 @@ generations in one quorum.
 | The driver | `paros-roles/src/node/operator.rs`: `reconfigure_matchmakers`; `paros-roles/src/node/shared.rs` (the stall budget) |
 | Who asks in a cell | `paros-coordinator/src/tenant/sets.rs`: places each tenant's set and moves it off a draining machine (#501) |
 
-**Sim gates and oracles:**
+The rows that name `paros-coordinator`, `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- The models `specs/tla/handover/`, `specs/tla/handover-chain/`, `specs/tla/handover-gc/` and
+  `specs/tla/generations/`, which traces the walks (`HandoverTrace.tla`).
+- `consensus-sim`'s flavor `Flavor::handover` and `Action::Handover` (`cluster/handover.rs`),
+  with the site "cluster: a handover chose a new matchmaker set". `Mutant::ShrinkBootstrap` is
+  refused by the trace check.
+- Core probes of `matchmaker/generation.rs` and `matchmaker/reconfigurer.rs` ("handover: a frozen
+  registry spans several pages", "handover: a finish thins an even count of answerers to an odd
+  successor").
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
 - `"generation: at most one matchmaker set is authoritative per generation"`, `"generation: a
   reconstruction is the union of the frozen quorum above its maximum watermark"`, `"generation: a
