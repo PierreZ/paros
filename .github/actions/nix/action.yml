@@ -1,0 +1,35 @@
+# Nix for a CI job: the installer, the GitHub Actions cache of the Nix store,
+# and git that is signed in to github.com.
+#
+# Every flake input is a `git+https://github.com/...` URL (AGENTS.md,
+# "Environment & Nix"), so `nix develop` runs `git fetch` on github.com for
+# each input that is not in the store. GitHub refuses anonymous git fetches
+# with 403 when many jobs fetch at once (a `checks` job of #1405 failed so on
+# 2026-11-22, `numtide/flake-utils`). Here git sends the job's GITHUB_TOKEN
+# to github.com, so the fetches count against the token's limit, not the
+# runner's address. The token is read-only (`contents: read`) and ends with
+# the job. The header goes only to the inputs of flake.lock.
+#
+# A job runs actions/checkout first, then this action.
+name: Nix
+description: Install Nix, cache the store, and sign git in to github.com
+runs:
+  using: composite
+  steps:
+    - uses: DeterminateSystems/nix-installer-action@main
+    - uses: DeterminateSystems/magic-nix-cache-action@main
+    - name: Sign git in to github.com for the flake inputs
+      shell: bash
+      env:
+        TOKEN: ${{ github.token }}
+      # One header for each git input of flake.lock, keyed by its URL, so a
+      # fetch of this repository (the header of actions/checkout) never gets
+      # a second Authorization header.
+      run: |
+        auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+        echo "::add-mask::$auth"
+        urls=$(python3 -c 'import json; print("\n".join(sorted({n["locked"]["url"] for n in json.load(open("flake.lock"))["nodes"].values() if n.get("locked", {}).get("type") == "git" and n["locked"]["url"].startswith("https://github.com/")})))')
+        test -n "$urls"
+        for url in $urls; do
+          git config --global "http.$url.extraheader" "AUTHORIZATION: basic $auth"
+        done
