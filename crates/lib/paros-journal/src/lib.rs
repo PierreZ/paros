@@ -20,6 +20,9 @@
 //! - [`register`]: the journal's matchmaker register, an optional role
 //!   beside the core's registration matchmaker: its value, its members,
 //!   its operations and its handover (§J3.4, #1325).
+//! - [`client`]: the pure journal client: the four calls, exactly-once for a
+//!   single writer through `expected_seq`, `Unknown` settled by a resend and
+//!   `Below` by `Resolve`, at-least-once for many writers (§J2, #1331).
 //! - [`command`]: the commands of the journal and its records with their
 //!   headers (§J2.8).
 //! - [`codec`]: the bytes of each of these, with a release number in every
@@ -35,6 +38,7 @@
 //! release. What a client or a peer can send is never asserted on: it is an
 //! answer or a refusal.
 
+pub mod client;
 pub mod codec;
 pub mod command;
 pub mod fold;

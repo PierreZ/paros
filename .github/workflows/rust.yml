@@ -130,6 +130,8 @@ jobs:
         run: nix develop --command cargo run -p paros-journal-io --example custom_storage
       - name: Run the journal example multi_writer
         run: nix develop --command cargo run -p paros-journal-io --example multi_writer
+      - name: Run the journal example single_writer
+        run: nix develop --command cargo run -p paros-journal-io --example single_writer
       - name: Run the grid controller example controller
         run: nix develop --command cargo run -p paros-journal-control --example controller
       - name: Run the facade example journal
