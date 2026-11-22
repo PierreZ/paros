@@ -4,10 +4,10 @@ name: Tests
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', 'scripts/check-proofs.sh', 'scripts/proof-hashes.sh', 'scripts/mutate-tla.py', 'scripts/tla-minutes.txt', '.github/workflows/tla.yml']
+    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', 'scripts/check-proofs.sh', 'scripts/proof-hashes.sh', 'scripts/mutate-tla.py', 'scripts/tla-minutes.txt', 'scripts/mutate-tla-shards.txt', '.github/workflows/tla.yml', '.github/workflows/tla-mutants.yml']
   pull_request:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', 'scripts/check-proofs.sh', 'scripts/proof-hashes.sh', 'scripts/mutate-tla.py', 'scripts/tla-minutes.txt', '.github/workflows/tla.yml']
+    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', 'scripts/check-proofs.sh', 'scripts/proof-hashes.sh', 'scripts/mutate-tla.py', 'scripts/tla-minutes.txt', 'scripts/mutate-tla-shards.txt', '.github/workflows/tla.yml', '.github/workflows/tla-mutants.yml']
 
 # A new push cancels a pull request's older run, never a run on main
 # (#920 (sweep budget)): each merged commit gets its whole sweep, so a red on
@@ -369,9 +369,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Re-record the Paxos pages' step-through traces and check they are committed (#811 (Paxos flavor pages))
+      - name: Re-record the step-through traces of the Paxos and Segments pages and check they are committed (#811 (Paxos flavor pages), #1365 (reshape and seal step-through))
         run: |
-          nix develop --command cargo test -p paros-wasm --test paxos_traces
+          nix develop --command cargo test -p paros-wasm --test paxos_traces --test journal_traces
           git diff --exit-code -- website/site/src/traces
       - name: Build the wasm tool
         run: nix develop --command scripts/build-wasm.sh --wasm-only

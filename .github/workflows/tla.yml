@@ -10,9 +10,9 @@
 # this file). A push to main is planned the same way from the commit before
 # the push, and a manual run (workflow_dispatch) runs every folder.
 #
-# The folders that run are packed into a few `spec` jobs, each at most 22
-# minutes of checks (`scripts/tla-minutes.txt`), inside the 30 minutes of a
-# job. The job `tlc` is green only when every job of the plan is green.
+# The folders that run are packed into a few `spec` jobs, each at most 15
+# measured minutes of checks (`scripts/tla-minutes.txt`; a larger folder runs
+# alone), inside the 30 minutes of a job. The job `tlc` is green only when every job of the plan is green.
 #
 # The job `traces` runs the trace checks of consensus-sim and journal-sim
 # (`tests/traces.rs` of each, and `tests/register_traces.rs`,
@@ -161,7 +161,9 @@ jobs:
         run: nix develop .#proofs --command scripts/check-proofs.sh ${{ matrix.module }}
 
   # Green when every job of the plan is green; a job that the plan leaves out
-  # is `skipped`.
+  # is `skipped`. It runs even in a cancelled run (`always()`), so a run that
+  # is cancelled before its spec jobs end reports a red `tlc`, never a skipped
+  # one that a merge would read as green.
   tlc:
     needs: [plan, spec, traces, proofs]
     if: always()

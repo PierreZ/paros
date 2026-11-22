@@ -26,7 +26,8 @@ or deleted). A change of a tool runs every folder.
 
 The folders that run are packed into groups, each at most `GROUP_MINUTES` of
 checks (`scripts/tla-minutes.txt`), largest first, so that a job of the TLA
-workflow stays inside its 30 minutes and the number of jobs is small.
+workflow stays inside its 30 minutes and the number of jobs is small. A folder
+above `GROUP_MINUTES` (at most `FOLDER_MINUTES`) runs alone.
 
 The trace checks (`traces`) run the walks of consensus-sim and journal-sim
 against the `*Trace.tla` specs. They run in the TLA workflow when a folder of a
@@ -51,24 +52,35 @@ ROOT = Path(__file__).resolve().parent.parent
 SPECS = ROOT / "specs" / "tla"
 MINUTES = ROOT / "scripts" / "tla-minutes.txt"
 
-# A job of the TLA workflow has 30 minutes; a group holds at most this much
-# measured check time, so a runner that is a third slower still finishes.
-GROUP_MINUTES = 22.0
+# A job of the TLA workflow has 30 minutes, about 27 of them for its checks
+# once Nix is set up. A line of `scripts/tla-minutes.txt` is the largest time
+# the folder took on GitHub's runners, and the time of one folder still moves
+# by a third from one runner to the next. A group holds at most
+# `GROUP_MINUTES` of measured checks, so a runner 1.8 times as slow as the
+# slowest one measured still finishes. A folder above it runs alone in its
+# job, with less margin: a folder at `FOLDER_MINUTES` fits a runner 1.2 times
+# as slow. No folder may be above `FOLDER_MINUTES`: such a folder splits its
+# checks.
+GROUP_MINUTES = 15.0
+FOLDER_MINUTES = 22.0
 
 # The files that no Rust build reads. Keep in step with `paths-ignore` of
 # `.github/workflows/rust.yml`, which is a subset of this list.
 NOT_RUST = re.compile(
     r"^(website/|docs/|specs/|scripts/build-wasm\.sh$|scripts/check-tla\.sh$"
     r"|scripts/check-proofs\.sh$|scripts/proof-hashes\.sh$|scripts/mutate-tla\.py$|scripts/tla-minutes\.txt$"
+    r"|scripts/mutate-tla-shards\.txt$|\.github/workflows/tla-mutants\.yml$"
     r"|\.github/workflows/tla\.yml$)|\.md$"
 )
 
 # The files that every folder's check reads: a change runs every folder.
+# `scripts/tla-minutes.txt` is not one: no check reads it, it only packs the
+# folders into jobs, and every plan judges it (a line for each folder), so a
+# change that adds the line of a new folder runs that folder alone.
 TLA_TOOLS = {
     "scripts/check-tla.sh",
     "scripts/mutate-tla.py",
     "scripts/ci-plan.py",
-    "scripts/tla-minutes.txt",
     "flake.nix",
     "flake.lock",
     ".github/workflows/tla.yml",
@@ -128,9 +140,9 @@ def minutes(all_folders: list[str]) -> dict[str, float]:
     extra = sorted(set(table) - set(all_folders))
     if missing or extra:
         sys.exit(f"scripts/tla-minutes.txt: no line for {missing}, no folder for {extra}")
-    too_long = sorted(f for f, m in table.items() if m > GROUP_MINUTES)
+    too_long = sorted(f for f, m in table.items() if m > FOLDER_MINUTES)
     if too_long:
-        sys.exit(f"{too_long} take more than {GROUP_MINUTES} minutes: split the folder's checks")
+        sys.exit(f"{too_long} take more than {FOLDER_MINUTES} minutes: split the folder's checks")
     return table
 
 

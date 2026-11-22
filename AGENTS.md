@@ -322,7 +322,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `--no-default-features`, `cargo check -p paros-consensus --features serde`,
   `scripts/check-layers.sh --wasm` (each crate of layers 0 to 5), and
   `cargo check --target wasm32-unknown-unknown -p paros`
-- the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
+- the `wasm` job: `cargo test -p paros-wasm --test paxos_traces --test journal_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - the site (`.github/workflows/pages.yml`, on pull requests that touch the site, `paros-wasm`,
   `paros-consensus`, `paros-journal`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
@@ -331,7 +331,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `website/site/AGENTS.md`, "Tests")
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow: the folders that the change can break, packed into `spec` jobs of at
-  most 22 minutes of checks by `scripts/ci-plan.py` and `scripts/tla-minutes.txt`, and the trace checks of consensus-sim and journal-sim, the live check of `journal-sim/tests/live.rs` too, in four
+  most 15 minutes of measured checks (a larger folder alone, at most 22) by `scripts/ci-plan.py` and `scripts/tla-minutes.txt`, and the trace checks of consensus-sim and journal-sim, the live check of `journal-sim/tests/live.rs` too, in four
   `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); each `spec` job also checks that
   each guard mutant of its folders parses (`scripts/mutate-tla.py --parse`)
 - the `TLA mutants` workflow, each week and on demand: `scripts/mutate-tla.py` sets each guard
@@ -419,7 +419,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   job whose inputs changed is a loosened judge (`REVIEW.md`). Put small checks of one kind as
   steps of one job (`checks`), not one job each, and keep each job inside its 30 minutes.
   A new folder of `specs/tla/` gets its line in `scripts/tla-minutes.txt` (the plan fails
-  without it).
+  without it). A `spec` job prints the minutes of each folder and warns when a folder is far
+  from its line: measure it again and update the line in the same PR as the change that slowed it.
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
