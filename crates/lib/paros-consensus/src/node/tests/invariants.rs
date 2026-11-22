@@ -439,3 +439,158 @@ fn the_matched_fact_follows_its_configuration() {
         "another configuration drops it"
     );
 }
+
+// ---- the checks of #907 (core unit tests) and #1100 (contract) -------------
+
+/// Agreement at the acceptor (P2c, #1100 (contract and assertions)): an
+/// `Accept` at a higher ballot for a slot this node holds chosen carries
+/// the chosen command. Another command is a detected safety violation.
+#[test]
+#[should_panic(expected = "an Accept for a chosen slot carries the chosen command")]
+fn an_accept_for_a_chosen_slot_with_another_command_trips_the_node() {
+    let mut nodes = cluster_with_three_chosen();
+    assert!(nodes[1].replica.is_chosen(Slot(0)));
+    nodes[1].step(accept(2, ballot(9, 2), 0, ucmd(1, 1, 99)));
+}
+
+/// The same `Accept` with the chosen command is a correct re-proposal
+/// (P2c): it lands.
+#[test]
+fn an_accept_for_a_chosen_slot_with_the_chosen_command_lands() {
+    let mut nodes = cluster_with_three_chosen();
+    let chosen = nodes[1].replica.chosen_at(Slot(0)).cloned().unwrap();
+    nodes[1].step(accept(2, ballot(9, 2), 0, chosen.clone()));
+    assert_eq!(
+        nodes[1].acceptor().record(Slot(0)),
+        Some(&(ballot(9, 2), chosen))
+    );
+}
+
+/// The read side of the chosen/record pair: a chosen slot whose record
+/// carries another command breaks the check.
+#[test]
+#[should_panic(expected = "a chosen slot's record carries the chosen command")]
+fn a_chosen_slot_whose_record_differs_breaks_the_check() {
+    let mut nodes = cluster_with_three_chosen();
+    let mut writes: Vec<WriteOp> = Vec::new();
+    nodes[1].acceptor.set_promise(ballot(9, 2), &mut writes);
+    nodes[1]
+        .acceptor
+        .record_accepted(Slot(2), ballot(9, 2), ucmd(1, 9, 99), &mut writes);
+    nodes[1].assert_invariants();
+}
+
+/// The `None` arm: a plain deployment hears no GC floor.
+#[test]
+#[should_panic(expected = "a plain deployment hears no GC floor")]
+fn a_plain_node_with_a_heard_floor_breaks_the_check() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.gc_floor_heard = Some(ballot(1, 1));
+    n.assert_invariants();
+}
+
+/// Only a handoff successor ages an inherited fence.
+#[test]
+#[should_panic(expected = "only a handoff successor ages an inherited fence")]
+fn a_follower_aging_an_inherited_fence_breaks_the_check() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.handoff_fence_elapsed = 1;
+    n.assert_invariants();
+}
+
+/// A pull counts at a chosen index this node held.
+#[test]
+#[should_panic(expected = "a pull counts at a chosen index this node held")]
+fn a_pull_above_the_chosen_index_breaks_the_check() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.pull_index = Some(Slot(3));
+    n.assert_invariants();
+}
+
+/// An open election's configuration is drawn from the pool.
+#[test]
+#[should_panic(expected = "an open election's configuration is drawn from the pool")]
+fn an_election_outside_the_pool_breaks_the_check() {
+    let mut n = node(0, &[0, 1, 2]);
+    let outside = AcceptorConfig::new(
+        vec![NodeId(0), NodeId(7), NodeId(8)],
+        crate::membership::QuorumSystem::Majority,
+    );
+    let _ = n.proposer.open_phase1(
+        crate::proposer::Campaign {
+            me: Some(NodeId(0)),
+            ballot: ballot(1, 0),
+            config: outside.clone(),
+            prior: vec![outside],
+            from_slot: Slot(0),
+        },
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    n.assert_pooled_configurations();
+}
+
+// ---- one batch in flight (#1100 (contract and assertions)) ------------------
+
+/// A released batch flies until the driver gives it back: an input in
+/// between panics.
+#[test]
+#[should_panic(expected = "no input reaches a node while its batch is in flight")]
+fn a_step_while_a_batch_flies_panics() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.campaign();
+    let _flight = n.ready().release();
+    n.tick();
+}
+
+/// No batch is drained while an earlier one flies.
+#[test]
+#[should_panic(expected = "no batch is drained while an earlier batch is in flight")]
+fn a_ready_while_a_batch_flies_panics() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.campaign();
+    let _flight = n.ready().release();
+    let _ = n.ready();
+}
+
+/// A flight goes back to the node that released it, once.
+#[test]
+#[should_panic(expected = "a flight is given back to the node that released it")]
+fn a_flight_given_to_another_node_panics() {
+    let mut a = node(0, &[0, 1, 2]);
+    let mut b = node(1, &[0, 1, 2]);
+    let flight = a.ready().release();
+    let _other = b.ready().release();
+    b.durable(flight);
+}
+
+/// A token of an earlier flight is stale.
+#[test]
+#[should_panic(expected = "a flight is given back once, while it is in flight")]
+fn a_stale_flight_panics() {
+    let mut n = node(0, &[0, 1, 2]);
+    let first = n.ready().release();
+    let copy = crate::node::Flight {
+        node: first.node,
+        batch: first.batch,
+    };
+    n.durable(first);
+    n.durable(copy);
+}
+
+/// The whole path: release, persist, give back, then the node takes inputs
+/// again, and each flight has its own number.
+#[test]
+fn a_landed_flight_lets_the_node_take_inputs() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.campaign();
+    let first = n.ready().release();
+    assert!(n.in_flight());
+    let number = first.batch;
+    n.durable(first);
+    assert!(!n.in_flight());
+    n.tick();
+    let second = n.ready().release();
+    assert!(second.batch > number, "each flight has its own number");
+    n.durable(second);
+}

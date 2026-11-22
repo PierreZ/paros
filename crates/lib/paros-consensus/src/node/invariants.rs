@@ -67,6 +67,15 @@ impl ColocatedNode {
     /// public mutating entry point: the maps are small, and crash beats
     /// corruption.
     pub(super) fn assert_invariants(&self) {
+        // One batch in flight (`Ready::release`): no input reaches the node
+        // until the driver gives the batch back as durable. An acceptor emits
+        // no write for a `Prepare` at the ballot it already promised, so a
+        // `Promise` sent before the earlier batch is durable is a vote that a
+        // crash takes back.
+        assert!(
+            self.flight.is_none(),
+            "no input reaches a node while its batch is in flight"
+        );
         // The believed matchmaker set is drawn from the matchmaker pool
         // (#501 (matchmaker sets off the founders)): a set outside it is
         // never learned.
@@ -170,6 +179,99 @@ impl ColocatedNode {
         self.assert_read_basis_invariants();
         self.assert_role_invariants();
         self.assert_leadership_state_invariants();
+        self.assert_plain_arm_invariants();
+        self.assert_pooled_configurations();
+        self.assert_chosen_records();
+        self.assert_pull_invariants();
+    }
+
+    /// The `None` arm (root `AGENTS.md`, "Plain Multi-Paxos is a shape of
+    /// the core"): a plain deployment hears no GC floor and queues no
+    /// matchmaker or GC request. The `Ready` getters and the floor's getter
+    /// check the same, but only when a driver calls them.
+    fn assert_plain_arm_invariants(&self) {
+        if self.config.has_matchmakers() {
+            return;
+        }
+        assert!(
+            self.gc_floor_heard.is_none(),
+            "a plain deployment hears no GC floor"
+        );
+        assert!(
+            self.pending_match_requests.is_empty(),
+            "a plain deployment queues no matchmaking request"
+        );
+        assert!(
+            self.pending_gc_requests.is_empty(),
+            "a plain deployment queues no GC request"
+        );
+    }
+
+    /// Every configuration the node holds is drawn from its pool: the
+    /// belief (checked in [`Self::assert_deployment_invariants`]), the
+    /// configuration and the prior configurations of an open election, the
+    /// configuration of an open matchmaking phase, and the prior
+    /// configurations of the GC campaign. A quorum of a configuration with
+    /// a member outside the pool counts votes that no handler takes.
+    pub(super) fn assert_pooled_configurations(&self) {
+        if let Some(election) = self.proposer.election() {
+            assert!(
+                self.pooled_all(election.config()),
+                "an open election's configuration is drawn from the pool"
+            );
+            assert!(
+                election.prior().iter().all(|c| self.pooled_all(c)),
+                "an open election's prior configurations are drawn from the pool"
+            );
+        }
+        if let Some(matchmaking) = self.matchmaking.as_ref() {
+            assert!(
+                self.pooled_all(matchmaking.config()),
+                "a matchmaking phase registers a configuration drawn from the pool"
+            );
+        }
+        if let Some(gc) = self.gc.as_ref() {
+            assert!(
+                gc.prior().iter().all(|c| self.pooled_all(c)),
+                "a GC campaign's prior configurations are drawn from the pool"
+            );
+        }
+    }
+
+    /// The read side of the pair that `mark_chosen` asserts at the write: a
+    /// slot the replica holds chosen, at or above the floor, has its
+    /// authoritative accepted record, and the record carries the chosen
+    /// command. The two maps are one fact held twice (the boot rebuilds the
+    /// chosen map from the records). The check reads the lowest and the
+    /// highest chosen slot, so it stays O(log n) at every entry point.
+    fn assert_chosen_records(&self) {
+        let floor = self.acceptor.first_slot();
+        let chosen = self.replica.chosen();
+        let ends = [
+            chosen.range(floor..).next(),
+            chosen.range(floor..).next_back(),
+        ];
+        for (slot, command) in ends.into_iter().flatten() {
+            let record = self.acceptor.record(*slot);
+            assert!(
+                record.is_some(),
+                "a chosen slot holds its authoritative accepted record"
+            );
+            assert!(
+                record.is_some_and(|(_, recorded)| recorded == command),
+                "a chosen slot's record carries the chosen command"
+            );
+        }
+    }
+
+    /// The beat-triggered pull ([`super::PULL_FALLBACK_BEATS`]): the count
+    /// belongs to a chosen index that this node held, and the chosen index
+    /// never falls, so the pull's index is never above it.
+    fn assert_pull_invariants(&self) {
+        assert!(
+            self.pull_index <= self.replica.chosen_index(),
+            "a pull counts at a chosen index this node held"
+        );
     }
 
     /// The repair hole (#343): a faulty record under the chosen prefix is a
@@ -486,6 +588,7 @@ impl ColocatedNode {
                     self.acceptor.promised() == self.ballot,
                     "a live campaign's promise sits at its ballot"
                 );
+                self.assert_candidate_invariants();
             }
             NodeRole::Follower => {
                 assert!(
@@ -497,6 +600,36 @@ impl ColocatedNode {
                     "a follower has no open matchmaking phase"
                 );
             }
+        }
+    }
+
+    /// What a campaign may hold beyond its open phase: on a matchmaker
+    /// deployment a node registers only a belief that it heard (root
+    /// `AGENTS.md`, "Membership probe"). A campaign whose configuration names
+    /// this node raised the retirement fence to its ballot when it opened
+    /// (`last_member_ballot`, #1002 (retire fence gaps)): the registration
+    /// stays in the matchmakers' histories whether or not the campaign goes
+    /// on.
+    ///
+    /// The round floor is not checked here: it bounds the campaigns that open
+    /// later (`open_campaign` asserts it), and a rejoin that opens during a
+    /// campaign raises it above the open campaign's round on purpose
+    /// (`fold_retired`), while the campaign waits for the matchmakers.
+    fn assert_candidate_invariants(&self) {
+        if !self.config.has_matchmakers() {
+            return;
+        }
+        assert!(
+            self.belief_source == BeliefSource::Heard,
+            "a matchmaker deployment campaigns only on a heard belief"
+        );
+        if let Some(matchmaking) = self.matchmaking.as_ref()
+            && matchmaking.config().contains(self.config.id)
+        {
+            assert!(
+                self.last_member_ballot >= self.ballot,
+                "a campaign that names this node is under its retirement fence"
+            );
         }
     }
 
@@ -597,6 +730,18 @@ impl ColocatedNode {
                 .all(|slot| self.acceptor.record(*slot).is_some()),
             "a leader's every open round is recorded in its own log"
         );
+        // Phase 2 addresses `C_b` alone (root `AGENTS.md`, "Matchmaking,
+        // then Phase 1"): on a matchmaker deployment the belief in force is
+        // the configuration the leadership's ballot registered, bound to that
+        // ballot. An elected leader adopts its election's configuration at
+        // the win, and a handoff successor the configuration the
+        // `Relinquish` carried at the inherited ballot.
+        if self.config.has_matchmakers() {
+            assert!(
+                self.acceptors_since == self.ballot,
+                "a matchmaker leader's configuration is bound to its own ballot"
+            );
+        }
         // Delegation (#142) is the `None` arm's opt-in: a deployment
         // without proxies delegates nothing, and a delegated round
         // names a proxy the deployment has.
@@ -618,6 +763,14 @@ impl ColocatedNode {
             assert!(
                 self.leadership_origin == LeadershipOrigin::Elected,
                 "only a leader carries an inherited leadership origin"
+            );
+        }
+        // The clock of an uncovered inherited fence runs only on a handoff
+        // successor: every other leadership resets it.
+        if !matches!(self.leadership_origin, LeadershipOrigin::Handoff { .. }) {
+            assert!(
+                self.handoff_fence_elapsed == 0,
+                "only a handoff successor ages an inherited fence"
             );
         }
         // Volatile leadership state exists only on a leader.

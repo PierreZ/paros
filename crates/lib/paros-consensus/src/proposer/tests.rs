@@ -820,3 +820,97 @@ fn the_recovery_pump_hands_out_a_blocked_slot_as_blocked() {
     assert_eq!(p.recovery_next(), Some((Slot(2), RecoveryStep::Fill)));
     assert_eq!(p.recovery_next(), None);
 }
+
+/// `Election::keep_alive_from` at the role (#907 (core unit tests), #428
+/// (paging livelock)): before any report it is the campaign's first slot,
+/// then one past the highest slot a merged page reported, readable or
+/// faulty, so an answered acceptor re-affirms with an empty page.
+#[test]
+fn a_keep_alive_asks_from_past_the_merged_reports() {
+    let mut p: Proposer<NodeId, Command> = Proposer::new();
+    let _ = p.open_phase1(
+        Campaign {
+            me: Some(NodeId(0)),
+            ballot: ballot(1, 0),
+            config: config(&[0, 1, 2]),
+            prior: vec![config(&[0, 1, 2])],
+            from_slot: Slot(3),
+        },
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    );
+    let keep_alive = |p: &Proposer<NodeId, Command>| p.election().map(Election::keep_alive_from);
+    assert_eq!(keep_alive(&p), Some(Slot(3)), "nothing reported yet");
+    let mut report = BTreeMap::new();
+    report.insert(Slot(6), (ballot(0, 1), cmd(6)));
+    let _ = p.fold_promise(
+        NodeId(1),
+        ballot(1, 0),
+        Slot(3),
+        report,
+        BTreeMap::new(),
+        None,
+    );
+    assert_eq!(
+        keep_alive(&p),
+        Some(Slot(7)),
+        "one past the readable report"
+    );
+    let mut faulty = BTreeMap::new();
+    faulty.insert(Slot(9), ballot(0, 2));
+    let _ = p.fold_promise(
+        NodeId(2),
+        ballot(1, 0),
+        Slot(3),
+        BTreeMap::new(),
+        faulty,
+        None,
+    );
+    assert_eq!(keep_alive(&p), Some(Slot(10)), "a faulty report counts too");
+}
+
+/// `Authority` at the role (#907 (core unit tests)): an opened authority
+/// holds its fence and a fresh window with the own vote; credits fill the
+/// window until it holds a Phase-2 quorum; a tick ages it; a renewal starts
+/// it again from the own vote; `clear` drops the fence and the window.
+#[test]
+fn an_authority_holds_on_a_phase2_quorum_of_credits() {
+    use super::authority::Authority;
+    let members = config(&[0, 1, 2]);
+    let mut authority: Authority<NodeId> = Authority::new();
+    assert_eq!(authority.fence(), None);
+    assert!(!authority.holds(&members), "an empty window holds nothing");
+    authority.open(Some(Slot(4)), Some(NodeId(0)));
+    assert_eq!(authority.fence(), Some(Slot(4)));
+    assert!(
+        !authority.holds(&members),
+        "the own vote alone is no quorum"
+    );
+    authority.credit(NodeId(1));
+    authority.credit(NodeId(1));
+    assert!(authority.holds(&members), "two of three hold the authority");
+    assert_eq!(authority.tick(), 1);
+    assert_eq!(authority.tick(), 2);
+    authority.renew(Some(NodeId(0)));
+    assert!(!authority.holds(&members), "a renewed window starts again");
+    assert_eq!(authority.tick(), 1, "a renewed window starts at age zero");
+    assert_eq!(
+        authority.fence(),
+        Some(Slot(4)),
+        "a renewal keeps the fence"
+    );
+    authority.renew(None);
+    authority.credit(NodeId(1));
+    authority.credit(NodeId(2));
+    assert!(
+        authority.holds(&members),
+        "a leader outside its configuration holds on its peers' credits"
+    );
+    authority.clear();
+    assert_eq!(
+        authority.fence(),
+        None,
+        "the fence dies with the leadership"
+    );
+    assert!(!authority.holds(&members));
+}

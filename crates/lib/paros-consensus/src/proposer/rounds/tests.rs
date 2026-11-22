@@ -210,3 +210,43 @@ fn a_move_to_the_same_column_is_refused() {
     assert!(rounds.move_to(&grid, Slot(1), Some(0), None));
     assert_eq!(rounds.by_slot()[&Slot(1)].moves(), 2);
 }
+
+/// `fold_accepted_in` at the role (#907 (core unit tests)): the addressee
+/// guard counts a vote only from the round's own column of the
+/// configuration. A vote from another column, from outside the
+/// configuration, or for a slot with no round never counts, and only the
+/// round's full column decides it.
+#[test]
+fn a_vote_counts_only_from_the_rounds_column() {
+    // A 2 x 2 grid, members in row order: column 1 holds nodes 1 and 3.
+    let config = AcceptorConfig::new(
+        vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+        QuorumSystem::grid(2, 2),
+    );
+    let vhash = command_fingerprint(&cmd(1));
+    let mut rounds: Rounds<NodeId, Command> = Rounds::new();
+    rounds.open(Slot(5), ballot(1, 0), cmd(1), None, Some(1));
+    assert!(
+        !rounds.fold_accepted_in(&config, NodeId(0), ballot(1, 0), Slot(5), vhash),
+        "a vote from another column is not the round's"
+    );
+    assert!(
+        !rounds.fold_accepted_in(&config, NodeId(9), ballot(1, 0), Slot(5), vhash),
+        "a vote from outside the configuration never counts"
+    );
+    assert!(
+        !rounds.fold_accepted_in(&config, NodeId(1), ballot(1, 0), Slot(6), vhash),
+        "a vote for a slot with no round never counts"
+    );
+    assert!(rounds.fold_accepted_in(&config, NodeId(1), ballot(1, 0), Slot(5), vhash));
+    assert!(
+        rounds.decided(Slot(5), &config).is_none(),
+        "one vote of a full column does not decide"
+    );
+    assert!(rounds.fold_accepted_in(&config, NodeId(3), ballot(1, 0), Slot(5), vhash));
+    assert_eq!(
+        rounds.decided(Slot(5), &config),
+        Some((ballot(1, 0), cmd(1))),
+        "the full column decides"
+    );
+}

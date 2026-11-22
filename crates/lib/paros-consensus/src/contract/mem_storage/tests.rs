@@ -67,3 +67,58 @@ fn an_empty_log_has_no_last_slot() {
     assert_eq!(store(1).last_slot(), Some(Slot(0)));
     assert_eq!(store(3).last_slot(), Some(Slot(2)));
 }
+
+/// A slot is readable, faulty or absent, never two of them: a write at a
+/// rotted slot makes it readable again and drops its faulty entry, so a
+/// boot after the repair reads no faulty record (#907 (core unit tests)).
+#[test]
+fn a_write_at_a_rotted_slot_heals_it() {
+    let mut disk = promised(store(3));
+    let rotted = disk.rot(Slot(1));
+    assert_eq!(disk.faulty_entries(), vec![(Slot(1), rotted)]);
+    assert!(
+        disk.accepted(Slot(1)).is_none(),
+        "a rotted slot is not readable"
+    );
+    disk.apply(&[WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
+        slot: Slot(1),
+        ballot: rotted,
+        value: Command::Control(Control::Noop),
+    })]);
+    assert!(
+        disk.faulty_entries().is_empty(),
+        "the repair heals the slot"
+    );
+    assert!(
+        disk.accepted(Slot(1)).is_some(),
+        "the repaired slot is readable"
+    );
+    // A boot reads the healed store with no faulty record.
+    let node = crate::node::ColocatedNode::new(&disk, crate::contract::limits::Limits::DEFAULT);
+    assert!(node.acceptor().faulty().is_empty());
+}
+
+/// The test helper `from_node` keeps the faulty entries of a node: a reboot
+/// of the snapshot reads the same faulty slots, never an absent slot.
+#[test]
+fn a_snapshot_of_a_node_keeps_its_faulty_entries() {
+    let mut disk = promised(store(3));
+    let rotted = disk.rot(Slot(2));
+    let node = crate::node::ColocatedNode::new(&disk, crate::contract::limits::Limits::DEFAULT);
+    assert_eq!(node.acceptor().faulty().get(&Slot(2)), Some(&rotted));
+    let snapshot = MemStorage::from_node(&node);
+    assert_eq!(snapshot.faulty_entries(), vec![(Slot(2), rotted)]);
+    let again =
+        crate::node::ColocatedNode::new(&snapshot, crate::contract::limits::Limits::DEFAULT);
+    assert_eq!(again.acceptor().faulty(), node.acceptor().faulty());
+}
+
+/// `disk` with the promise at the ballot of its records, as a node that
+/// accepted them wrote it.
+fn promised(mut disk: MemStorage) -> MemStorage {
+    disk.apply(&[WriteOp::Acceptor(AcceptorWrite::SetPromise(Ballot {
+        round: 1,
+        node: NodeId(1),
+    }))]);
+    disk
+}

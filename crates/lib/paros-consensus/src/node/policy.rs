@@ -100,6 +100,7 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return Vec::new();
         }
+        let marks = self.durable_marks();
         let mut taken = Vec::new();
         for slot in self.proposer.stalled_delegations(after_resends) {
             if let Some(proxy) = self.proposer.rounds().get(&slot).and_then(Round::proxy) {
@@ -131,6 +132,7 @@ impl ColocatedNode {
                 .all(|r| r.proxy().is_none() || r.resends() < after_resends),
             "no delegation past the take-back budget stays delegated"
         );
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
         taken
     }
@@ -344,6 +346,7 @@ impl ColocatedNode {
             !self.needs_election_timeout,
             "a fed timeout clears the request"
         );
+        self.assert_invariants();
     }
 
     /// Admit `nodes` to the addressable pool (#189): a node registered with
