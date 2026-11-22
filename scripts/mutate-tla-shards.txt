@@ -46,6 +46,7 @@ seal-ctrl 7
 segment-records 5
 segment-replicas 19
 segment-truncate 29
+takeover 3
 truncation 6
 truncation-reconfig 6
 zero-stall 17
