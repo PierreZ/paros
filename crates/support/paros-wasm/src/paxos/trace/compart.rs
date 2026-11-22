@@ -24,10 +24,12 @@ use paros_consensus::{
     ColocatedNode, Config, Limits, Message, NodeId, ProxyLeader, ReplicaNode, Slot, Value,
 };
 
-use super::content::{self, Field};
+use super::content;
 use super::story::{self, Beats, Durable, Flight, NodeState};
-use super::words::{self, Stage};
+use super::words;
 use super::{Chapter, Lane, LogCell, Scenario, Step, Tally, Trace, message_label};
+use crate::steps::Field;
+use crate::steps::Stage;
 
 pub(crate) mod desk;
 use crate::paxos::view::{RoleView, message_view, show_ballot, show_role, value_text};
@@ -1139,7 +1141,7 @@ impl Run {
     fn finish(mut self, id: &str, label: &str) -> Scenario {
         let mut stages: Vec<Option<Stage>> =
             self.steps.iter().map(|step| step.stage.clone()).collect();
-        words::fill_stages(&mut stages);
+        crate::steps::fill_stages(&mut stages);
         for (step, stage) in self.steps.iter_mut().zip(stages) {
             step.stage = stage;
         }

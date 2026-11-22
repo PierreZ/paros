@@ -484,6 +484,16 @@ pub struct ColocatedNode {
     /// matchmaking cousin of the dueling-proposer livelock, seen in the
     /// hunt as two hundred registrations for three completed campaigns.
     round_floor: u64,
+    /// The ballot of this incarnation's last campaign while that campaign
+    /// has sent no `Prepare` (#890 (learner above the leader), option (b)):
+    /// set when a campaign opens, cleared when its Phase 1 opens. While the
+    /// promise is this ballot and no matchmaking is open, the promise is an
+    /// abandoned campaign that no acceptor heard of, and a node outside a
+    /// won leadership's configuration takes that leadership as its read
+    /// basis (`specs/tla/reads/`, `Learner = "own"`). Volatile: a restart
+    /// does not know whether its last campaign prepared, so it starts at
+    /// `None`, the strict rule.
+    unprepared_campaign: Option<Ballot>,
     /// How this node came to hold its current leadership (see
     /// [`LeadershipOrigin`]). `Elected` on every non-leader.
     leadership_origin: LeadershipOrigin,

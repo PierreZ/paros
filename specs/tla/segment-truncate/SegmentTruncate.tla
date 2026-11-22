@@ -233,16 +233,18 @@ Init ==
   /\ down = {}
   /\ rd = [q \in Seqs |-> None]
 
-\* The leader chooses the next slot. A slot of a trimmed S2 cannot be chosen.
+\* The leader chooses the next slot. Only the control TrimOpen trims S2, and
+\* that run must break TrimTrue: no check needs a rule for a trimmed S2 here.
 Choose(v) ==
   /\ Frontier < NS
-  /\ Seg(Frontier) = 2 => state[2] # "trimmed"
   /\ chosen' = [chosen EXCEPT ![Frontier] = v]
   /\ UNCHANGED <<held, applied, base, bnd, state, accFloor, obj, down, rd>>
 
 \* A replica gets a chosen slot of its segment from the acceptors or a peer.
+\* A slot can also reach a replica that is down: it counts nowhere, because
+\* a down replica applies and serves nothing, and Findable reads the live
+\* replicas only.
 Learn(r, s) ==
-  /\ r \notin down
   /\ chosen[s] # None
   /\ Seg(s) = SetOf(r)
   /\ s >= Front(r)

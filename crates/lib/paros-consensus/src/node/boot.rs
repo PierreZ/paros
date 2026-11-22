@@ -168,6 +168,7 @@ impl ColocatedNode {
             matchmaker_pool,
             gc: None,
             round_floor: 0,
+            unprepared_campaign: None,
             leadership_origin: LeadershipOrigin::Elected,
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),

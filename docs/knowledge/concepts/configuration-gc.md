@@ -141,7 +141,7 @@ operator retires no node that a reconfiguration it asked for above the floor nam
 **A released slot is not a retirement.** The leader's beat carries the floor it made effective
 (`Heartbeat::gc_floor`). A node whose slot the coordinator released without a `Retire` keeps
 answering the journal until `may_retire` holds on a floor it heard
-(`ColocatedNode::may_retire_heard`); then it stops (`paros-roles`, `SystemCtx::settle_lingering`).
+(`ColocatedNode::may_retire_heard`); then it stops (`paros-roles`, `SystemCtx::settle_lingering`, at the tag `v0.2.0-alpha.1`).
 A lingering node whose other legs hold asks the matchmakers on its next beat
 (`ColocatedNode::check_retirement_heard`), and the probe is asked again on its own clock while
 the node follows a leader.
@@ -188,7 +188,23 @@ A node that stopped at the release instead left every later campaign short of a 
 | The analysis | `docs/analysis/consensus/matchmaker-gc-and-generations.md` |
 | The TLA+ model | `specs/tla/matchmaker/` (#1200): scenarios 1 and 2, the effective floor and the retirement above it, with the controls `gc_early`, `retire_one_ack` and `retire_removed` |
 
-**Sim gates and oracles** (`paros-sim/src/audit/matchmaking.rs` unless named):
+The rows that name `paros-client`, `paros-coordinator`, `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+
+**Judges today:**
+
+- The models `specs/tla/matchmaker/` (GC and retirement), `specs/tla/retire-fence/`,
+  `specs/tla/truncation-reconfig/` and the trace spec `specs/tla/node/RetireTrace.tla`.
+- `consensus-sim`'s flavors `Flavor::retirement` and `Flavor::retiring` and the walk moves
+  `Action::Retire`, `Action::Rejoin` and `Action::Admit` (`cluster/retire.rs`), with the sites
+  "cluster: a matchmaker raised its GC watermark", "cluster: the operator retired a node" and
+  "cluster: the operator booked a retired node again".
+- Controls refused by the trace check: `Mutant::EarlyGc` (`MatchmakerTrace.tla`) and
+  `Mutant::RetireUnchecked` (`RetireTrace.tla`).
+- Core probes of `node/gc.rs` ("gc: a refused ack teaches the successor") and
+  `node/matchmaking.rs` ("gc: every matchmaker agreed the node may retire", "rejoin: every
+  matchmaker took the rejoin").
+
+**Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/matchmaking.rs` unless named):
 
 - `"gc: a GC request is licensed by a quorum holding the fence"`.
 - `"gc: a floor is effective only once a quorum of the generation's matchmakers acked"`.

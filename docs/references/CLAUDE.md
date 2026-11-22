@@ -42,6 +42,11 @@ The knowledge base in [`../knowledge/`](../knowledge/) organizes these sources b
   the acceptor set via per-round configuration registries (matchmakers).
 - [`papers/scaling-rsm-compartmentalization/`](papers/scaling-rsm-compartmentalization/) — Whittaker
   et al. Decouple the leader into independent roles (batchers, proxy leaders, …) for throughput.
+- [`papers/paxos-quorum-reads/`](papers/paxos-quorum-reads/): Charapko, Ailijiang, Demirbas
+  (HotStorage 2019). Paxos Quorum Reads (PQR): read the highest accepted slot from a majority of
+  followers, then rinse (wait until that slot executes at one node); no leader, no lease. The
+  source that Compartmentalized Paxos §3.4 builds its leaderless read on; backs the knowledge
+  base's leaderless reads card (#745).
 
 ### Zones & placement
 - [`papers/wpaxos/`](papers/wpaxos/): Ailijiang, Charapko, Demirbas, Tasci. Per-zone flexible

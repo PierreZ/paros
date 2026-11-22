@@ -153,9 +153,9 @@ const CONSENSUS: Claim[] = [
     walk: "",
     controls: ["inductive_ignore", "inductive_prefix"],
     mutants: [],
-    state: "open",
+    state: "checked",
     issue: { n: 1307, name: "inductive invariants, then proofs" },
-    note: "Decree: TLAPS proves that Inv holds at the start, that every step keeps it and that it implies Agreement (DecreeProof.tla); the temporal rule that joins them is not checked (no LS4 in the TLAPS of nixpkgs). Multi-Paxos: the same three facts are proved by TLAPS too (MultiPaxosProof.tla), with the same rule not checked.",
+    note: "TLAPS proves Spec => []Agreement for both: Inv holds at the start, every step keeps it and it implies Agreement (DecreeProof.tla, MultiPaxosProof.tla), and LS4 checks the temporal rule that joins them. The Lean proofs are a later step of #1307.",
   },
 ];
 

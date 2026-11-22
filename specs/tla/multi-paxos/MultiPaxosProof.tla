@@ -68,19 +68,20 @@ THEOREM StepInv ==
 (* The theorem. `InitInv` and `StepInv` are the two premises of the TLA   *)
 (* proof rule INV1 (Lamport, "The Temporal Logic of Actions", 1994):      *)
 (*   Init => Inv,  Inv /\ [Next]_vars => Inv'  |-  Init /\ [][Next]_vars => []Inv. *)
-(* TLAPS checks a use of that rule with its PTL backend, LS4, which the   *)
-(* TLAPS of nixpkgs does not ship. So the last step is the one step that  *)
-(* TLAPS does not check here: it is the rule itself, applied as written.  *)
+(* TLAPS checks the use of that rule with its PTL backend, LS4, which the *)
+(* proofs shell of the flake builds from source.                          *)
 (***************************************************************************)
 
 THEOREM Safety == Hyp => (Spec => []Agreement)
-<1>1. Hyp /\ Init => Inv
+<1> SUFFICES ASSUME Hyp PROVE Spec => []Agreement
+  OBVIOUS
+<1>1. Init => Inv
   BY InitInv
-<1>2. Hyp /\ Inv /\ [Next]_vars => Inv'
+<1>2. Inv /\ [Next]_vars => Inv'
   BY StepInv
-<1>3. Inv /\ Hyp => Agreement
+<1>3. Inv => Agreement
   BY InvAgreement
 <1> QED
-  PROOF OMITTED
+  BY <1>1, <1>2, <1>3, PTL DEF Spec
 
 =============================================================================

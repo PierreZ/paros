@@ -7,15 +7,18 @@
 
 #![allow(dead_code)]
 
+use paros_journal::client::{CallId as ClientCall, Client, Outcome, Request, RequestId, Response};
 use paros_journal::register::{Ballot, Change, RegisterValue};
+use paros_journal::resolve::ResolveAnswer;
 use paros_journal::roles::{Campaign, LeaderPhase};
 use paros_journal::{
     Answer, Command, Fence, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, Reply,
     SegmentId, Seq, Slot, Write,
 };
+use paros_journal_io::mem::{Endpoint, ManualClock, MemNetwork, MemRegister, MemStorage};
 use paros_journal_io::{
-    Address, Assignment, CallId, CallOutcome, CallReply, Clock, Driver, Events, JournalId,
-    Register, Storage, Transport,
+    Address, Assignment, CallId, CallOutcome, CallReply, Clock, Driver, Events, HostConfig,
+    JournalId, Register, Storage, Transport,
 };
 
 /// The journal of the examples.
@@ -142,4 +145,208 @@ pub fn reply_of(replies: &[CallReply], call: CallId) -> Option<&CallOutcome> {
 /// Print one step of an example: what was asked, and what came back.
 pub fn show(what: &str, answer: &impl std::fmt::Debug) {
     println!("  {what:<46} -> {answer:?}");
+}
+
+/// One process that serves every role of the journal, on the backends of
+/// `paros_journal_io::mem`: three acceptors and the replicas of segment 1
+/// at first, one leader at a time.
+pub struct OneProcess {
+    /// The driver.
+    pub process: Driver<MemStorage, Endpoint, ManualClock, MemRegister, ()>,
+    /// The clock, which the loop moves one tick at a time.
+    pub clock: ManualClock,
+    /// The journal's register, shared with the driver.
+    pub register: MemRegister,
+}
+
+impl OneProcess {
+    /// Segment 1 opens, with leader `leader` at round 1.
+    pub fn new(leader_node: u64) -> Self {
+        let clock = ManualClock::new();
+        let register = MemRegister::new();
+        register.create(JOURNAL, elected());
+        let mut journal = Self {
+            process: Driver::new(
+                HostConfig {
+                    tick: TICK,
+                    resend_page: 16,
+                },
+                MemStorage::new(),
+                MemNetwork::new().endpoint(),
+                clock.clone(),
+                register.clone(),
+                (),
+            ),
+            clock,
+            register,
+        };
+        journal.open_segment(1);
+        for node in 1..=3 {
+            journal.assign(acceptor(node));
+            journal.assign(replica(10 + node, 1));
+        }
+        journal.assign(leader(leader_node, 1, 1, Slot(0)));
+        journal
+    }
+
+    /// Serve `role`.
+    pub fn assign(&mut self, role: Assignment) {
+        self.process.transport_mut().route(role.address());
+        self.process.assign(role);
+    }
+
+    /// The controller opens segment `id`.
+    pub fn open_segment(&mut self, id: u64) {
+        let value = self.register.read(JOURNAL).expect("the register");
+        self.register
+            .change(JOURNAL, &reshape(&value, id))
+            .expect("the reshape");
+    }
+
+    /// The controller opens segment `id`, the old leader `old` goes, and
+    /// leader `new` at round `id` seals the segment before.
+    pub fn reshape(&mut self, id: u64, old: u64, new: u64) {
+        self.open_segment(id);
+        for node in replicas(id) {
+            self.assign(replica(node.0, id));
+        }
+        self.process.unassign(at(old));
+        // The new leader reads from the applied prefix of the segment before.
+        let from = replicas(id - 1)
+            .iter()
+            .filter_map(|node| self.process.host().replica(at(node.0))?.front())
+            .max()
+            .expect("a replica of the segment before");
+        self.assign(leader(new, id, id, from));
+    }
+
+    /// Poll until the process has no work: the answers of the calls.
+    pub fn settle(&mut self) -> Vec<CallReply> {
+        while self.process.poll() {}
+        self.process.take_replies()
+    }
+
+    /// The fold of replica `node`.
+    pub fn fold(&self, node: u64) -> paros_journal::JournalState {
+        *self
+            .process
+            .host()
+            .replica(at(node))
+            .and_then(|r| r.state())
+            .expect("a replica with its base")
+    }
+}
+
+/// A program of one writer: a [`Client`] of `paros_journal::client`, and
+/// the glue that sends its requests to the process and gives it back the
+/// answers. This glue is all a program writes: the client settles every
+/// ambiguous answer itself.
+pub struct Program {
+    /// The client.
+    pub client: Client,
+    /// The leader the program sends commands to.
+    pub leader: u64,
+    /// How many `Resolve` calls the program sent.
+    pub resolves: usize,
+    /// The commands in flight: the driver's call id, and the client's
+    /// request id.
+    calls: Vec<(CallId, RequestId)>,
+    outcomes: Vec<(ClientCall, Outcome)>,
+}
+
+impl Program {
+    /// A program whose commands go to leader `leader`.
+    pub fn new(leader: u64) -> Self {
+        Self {
+            client: Client::new(),
+            leader,
+            resolves: 0,
+            calls: Vec::new(),
+            outcomes: Vec::new(),
+        }
+    }
+
+    /// Send what the client asks. A command goes to the leader. A `Resolve`
+    /// goes to the replicas of the segments in turn, here in the same
+    /// process, until one covers the position.
+    pub fn send(&mut self, journal: &mut OneProcess) {
+        for request in self.client.take_requests() {
+            match request {
+                Request::Command { id, command } => {
+                    let call = journal.process.call(at(self.leader), command);
+                    self.calls.push((call, id));
+                }
+                Request::Resolve {
+                    id,
+                    uuid,
+                    expected_seq,
+                    records,
+                } => {
+                    self.resolves += 1;
+                    let answer = (1..)
+                        .map_while(|segment| {
+                            let node = replicas(segment)[0].0;
+                            journal.process.host().replica(at(node))
+                        })
+                        // A program sends after `settle`, when the process
+                        // has no work left: the batch an answer waits on is
+                        // durable.
+                        .map(|r| r.resolve(uuid, expected_seq, &records).0)
+                        .find(|a| *a != ResolveAnswer::NotCovered)
+                        .unwrap_or(ResolveAnswer::NotCovered);
+                    self.client.answer(id, Response::Resolved(answer));
+                }
+                Request::Read { .. } => unreachable!("these examples do not read"),
+            }
+        }
+        self.take();
+    }
+
+    /// Give the client the answers of its calls among `replies`.
+    pub fn receive(&mut self, replies: &[CallReply]) {
+        for reply in replies {
+            if let Some(i) = self.calls.iter().position(|(c, _)| *c == reply.call) {
+                let (_, id) = self.calls.remove(i);
+                let response = match &reply.outcome {
+                    CallOutcome::Reply(reply) => Response::Reply(reply.clone()),
+                    CallOutcome::NotLeader => Response::NotLeader,
+                };
+                self.client.answer(id, response);
+            }
+        }
+        self.take();
+    }
+
+    /// The program stops waiting for its commands in flight: their answers
+    /// are lost.
+    pub fn lose(&mut self) {
+        for (_, id) in std::mem::take(&mut self.calls) {
+            self.client.answer(id, Response::Lost);
+        }
+        self.take();
+    }
+
+    fn take(&mut self) {
+        self.outcomes.extend(self.client.take_outcomes());
+    }
+
+    /// The outcome of `call`, once it ended.
+    pub fn outcome(&mut self, call: ClientCall) -> Option<Outcome> {
+        let i = self.outcomes.iter().position(|(c, _)| *c == call)?;
+        Some(self.outcomes.remove(i).1)
+    }
+
+    /// Send, poll and tick until `call` ends: its outcome.
+    pub fn run(&mut self, journal: &mut OneProcess, call: ClientCall) -> Outcome {
+        for _ in 0..100 {
+            self.send(journal);
+            let replies = journal.settle();
+            self.receive(&replies);
+            if let Some(outcome) = self.outcome(call) {
+                return outcome;
+            }
+            journal.clock.advance(TICK);
+        }
+        panic!("{call:?} did not end in 100 ticks");
+    }
 }

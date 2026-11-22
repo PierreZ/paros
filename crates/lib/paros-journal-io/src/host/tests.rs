@@ -96,7 +96,11 @@ fn an_acceptor_starts_with_a_read_and_routes_by_journal() {
     let effects = host.step(Time(8), prepare(K, 1));
     let [
         Effect::Persist { address, id, ops },
-        Effect::Send { envelope, after },
+        Effect::Send {
+            sender: _,
+            envelope,
+            after,
+        },
     ] = effects.as_slice()
     else {
         panic!("a promise persists, then waits on its batch: {effects:?}");
@@ -231,7 +235,7 @@ fn a_leader_needs_a_register_value_and_answers_calls() {
     let effects = host.step(Time(0), assign);
     let prepares = effects
         .iter()
-        .filter(|e| matches!(e, Effect::Send { envelope, after: None } if matches!(envelope.message, Message::Prepare { .. })))
+        .filter(|e| matches!(e, Effect::Send { envelope, after: None, .. } if matches!(envelope.message, Message::Prepare { .. })))
         .count();
     assert_eq!(prepares, 3, "one Prepare to each acceptor of the grid");
     assert_eq!(
@@ -287,7 +291,10 @@ fn the_timer_ticks_every_role_and_arms_again() {
         }),
     );
     assert!(effects.contains(&Effect::SetTimer { at: Time(10) }));
-    host.step(Time(0), recovered(replica));
+    host.step(
+        Time(0),
+        recovered(Address::replica(J, NodeId(11), SegmentId(1))),
+    );
     let base = host.replica(replica).and_then(SegmentReplica::front);
     assert_eq!(
         base,
@@ -331,11 +338,17 @@ fn a_value_reaches_only_the_roles_of_its_journal() {
     };
     for journal in [J, K] {
         host.step(Time(0), replica(journal));
-        host.step(Time(0), recovered(at(journal, 11)));
+        host.step(
+            Time(0),
+            recovered(Address::replica(journal, NodeId(11), SegmentId(1))),
+        );
     }
     assert_eq!(
         host.addresses().collect::<Vec<_>>(),
-        vec![at(J, 11), at(K, 11)]
+        vec![
+            Address::replica(J, NodeId(11), SegmentId(1)),
+            Address::replica(K, NodeId(11), SegmentId(1))
+        ]
     );
     host.step(
         Time(0),
@@ -351,4 +364,59 @@ fn a_value_reaches_only_the_roles_of_its_journal() {
     assert_eq!(front(K), Some(Slot(0)), "the replica of K took its base");
     assert_eq!(front(J), None, "the replica of J did not");
     assert_eq!(host.value(J), None);
+}
+
+#[test]
+fn a_replica_node_holds_one_replica_for_each_segment() {
+    let mut host = Host::new(CONFIG);
+    let set = vec![NodeId(11), NodeId(12), NodeId(13)];
+    for segment in [SegmentId(1), SegmentId(2)] {
+        host.step(
+            Time(0),
+            Input::Assign(Assignment::Replica {
+                address: at(J, 11),
+                segment,
+                set: set.clone(),
+                initial: Leader::Unset,
+            }),
+        );
+        host.step(Time(0), recovered(Address::replica(J, NodeId(11), segment)));
+    }
+    let first = Address::replica(J, NodeId(11), SegmentId(1));
+    let second = Address::replica(J, NodeId(11), SegmentId(2));
+    assert_eq!(host.addresses().collect::<Vec<_>>(), vec![first, second]);
+    assert_eq!(
+        host.replica(at(J, 11)).map(SegmentReplica::segment),
+        Some(SegmentId(2)),
+        "a lookup with no segment finds the newest replica of the node"
+    );
+    assert_eq!(
+        host.replica(first).map(SegmentReplica::segment),
+        Some(SegmentId(1))
+    );
+    let pull = |segment| Envelope {
+        journal: J,
+        from: NodeId(12),
+        to: NodeId(11),
+        message: Message::Pull {
+            segment,
+            from: Slot(0),
+        },
+    };
+    assert_eq!(
+        pull(SegmentId(1)).receiver(),
+        first,
+        "a Pull names its replica"
+    );
+    assert_eq!(pull(SegmentId(2)).receiver(), second);
+    let stopped: Vec<Address> = host
+        .step(Time(1), Input::Unassign(at(J, 11)))
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Stopped { address, .. } => Some(address),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stopped, vec![first, second], "the node stops every replica");
+    assert_eq!(host.addresses().count(), 0);
 }

@@ -42,11 +42,13 @@ use paros_journal::{
     Answer, Command, Fence, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, Reply,
     SegmentId, Seq, Slot, Write,
 };
-use paros_journal_io::mem::{ManualClock, MemRegister, MemStorage};
+use paros_journal_io::mem::{ManualClock, MemRegister};
 use paros_journal_io::{
-    Address, Assignment, CallId, CallOutcome, Driver, Entry, Envelope, HostConfig, JournalId, Key,
-    Kind, Op, Storage, StorageError, Transport,
+    Address, Assignment, CallId, CallOutcome, Driver, Envelope, HostConfig, JournalId, Key, Kind,
+    Op,
 };
+
+use crate::backend::{Disk, Wire};
 
 use crate::oracle::{Truth, label};
 
@@ -114,106 +116,10 @@ const CONFIG: HostConfig = HostConfig {
 };
 const A: LeaderUuid = LeaderUuid(0xA);
 
-/// The faults that the walk arms on a disk, for its next commit.
-#[derive(Clone, Copy, Debug, Default)]
-struct Faults {
-    /// The commit fails and writes nothing.
-    fail_before: bool,
-    /// The commit writes its batch, then fails.
-    fail_after: bool,
-    /// The mutant: the commit writes nothing and says it is done.
-    lie: bool,
-}
-
-/// The disk of one process: it survives the process.
-#[derive(Clone, Default)]
-struct Disk {
-    store: Rc<RefCell<MemStorage>>,
-    faults: Rc<RefCell<Faults>>,
-}
-
-impl Storage for Disk {
-    fn commit(&mut self, ops: &[Op], sync: bool) -> Result<(), StorageError> {
-        let roles: BTreeSet<Address> = ops.iter().map(|op| op.key.address).collect();
-        sometimes!(roles.len() >= 2, reach::GROUPED);
-        let faults = std::mem::take(&mut *self.faults.borrow_mut());
-        if faults.lie {
-            return Ok(());
-        }
-        if faults.fail_before {
-            return Err(StorageError("the walk failed the commit".into()));
-        }
-        self.store.borrow_mut().commit(ops, sync)?;
-        if faults.fail_after {
-            return Err(StorageError(
-                "the walk failed the commit after its write".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
-        self.store.borrow_mut().scan(address)
-    }
-}
-
-impl Disk {
-    fn record(&self, key: Key) -> Option<Vec<u8>> {
-        let entries = self
-            .store
-            .borrow_mut()
-            .scan(key.address)
-            .expect("a scan of memory");
-        entries.into_iter().find_map(|(k, entry)| match entry {
-            Entry::Value(bytes) if k == key => Some(bytes),
-            _ => None,
-        })
-    }
-}
-
-fn ballot_bytes(ballot: Ballot) -> Vec<u8> {
-    let mut bytes = ballot.round.to_be_bytes().to_vec();
-    bytes.extend(ballot.node.0.to_be_bytes());
-    bytes
-}
-
-/// The transport of one process: it sends into the walk's mailbox (through
-/// `outbox`) and receives what the walk delivered.
-struct Wire {
-    inbox: Rc<RefCell<VecDeque<Envelope>>>,
-    outbox: Rc<RefCell<Vec<Envelope>>>,
-    disk: Disk,
-}
-
-impl Transport for Wire {
-    fn send(&mut self, envelope: Envelope) {
-        match &envelope.message {
-            Message::Accepted { ballot, slot } => {
-                let vote = self
-                    .disk
-                    .record(Key::new(envelope.sender(), Kind::Vote, slot.0));
-                assert!(
-                    vote.is_some_and(|v| v[..16] >= ballot_bytes(*ballot)[..]),
-                    "{FLIGHT}: {envelope:?} leaves with no vote on the disk"
-                );
-            }
-            Message::Promise { ballot, .. } => {
-                let promise = self
-                    .disk
-                    .record(Key::new(envelope.sender(), Kind::Promise, 0));
-                assert!(
-                    promise.is_some_and(|p| p >= ballot_bytes(*ballot)),
-                    "{FLIGHT}: {envelope:?} leaves with no promise on the disk"
-                );
-            }
-            _ => {}
-        }
-        self.outbox.borrow_mut().push(envelope);
-    }
-
-    fn receive(&mut self) -> Option<Envelope> {
-        self.inbox.borrow_mut().pop_front()
-    }
+/// [`reach::GROUPED`] on each commit.
+fn grouped(ops: &[Op]) {
+    let roles: BTreeSet<Address> = ops.iter().map(|op| op.key.address).collect();
+    sometimes!(roles.len() >= 2, reach::GROUPED);
 }
 
 type Proc = Driver<Disk, Wire, ManualClock, MemRegister, ()>;
@@ -357,7 +263,7 @@ impl Model for HostModel {
             return;
         }
         if self.mutant == HostMutant::WipeDisk {
-            *self.processes[node].disk.store.borrow_mut() = MemStorage::new();
+            self.processes[node].disk.wipe();
         }
         self.start(*node);
         let driver = self.processes[node].driver.as_ref().expect("started");
@@ -460,7 +366,7 @@ impl HostModel {
                 p,
                 Process {
                     driver: None,
-                    disk: Disk::default(),
+                    disk: Disk::new(grouped),
                     inbox: Rc::default(),
                     outbox: Rc::default(),
                 },
@@ -510,6 +416,7 @@ impl HostModel {
             inbox: Rc::clone(&process.inbox),
             outbox: Rc::clone(&process.outbox),
             disk: process.disk.clone(),
+            flight: FLIGHT,
         };
         let mut driver = Driver::new(
             CONFIG,
@@ -759,13 +666,11 @@ impl HostModel {
         let Some(p) = cx.rng().pick(&PROCESSES).copied() else {
             return;
         };
-        let mut faults = self.processes[&p].disk.faults.borrow_mut();
+        let disk = &self.processes[&p].disk;
         if self.mutant == HostMutant::LyingDisk {
-            faults.lie = true;
-        } else if cx.rng().chance(1, 2) {
-            faults.fail_before = true;
+            disk.arm_lie();
         } else {
-            faults.fail_after = true;
+            disk.arm(!cx.rng().chance(1, 2));
         }
     }
 

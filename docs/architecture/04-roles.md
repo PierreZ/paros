@@ -290,5 +290,38 @@ These points are decided:
   tenant keeps its registration record in the universe directory: it is one write at creation,
   and it is where the fold checks the `TenantId` (section 3.8).
 
-**Open**: the layer table and the calls of the placement port. They are proposals until Pierre
-agrees.
+**How CI holds the layers** (#1411 (CI checks that hold the layering)). The layer of each crate
+is one table, `scripts/layers.sh`. `scripts/check-layers.sh` reads the manifests through `cargo metadata` (no build) and the
+sources, and fails when:
+
+1. a crate of the workspace has no row, or a row names a crate that is gone;
+2. a crate depends on a crate of the same layer or of a higher layer (normal, build and dev
+   dependencies);
+3. a crate of layers 0 to 6 has the identifier of a higher crate (`paros_journal_io`) in its
+   `src/`, in code or in a doc comment. The prose name of a crate (`paros-journal-io`) is not an
+   item, so a doc comment may cite it. The facade `paros` is not checked: it defines no item, and
+   each `paros::` path is a re-export of a lower layer;
+4. a crate of layers 0 to 5 has a fault switch (`buggify!` or a fault `hint!`) outside a comment.
+
+The pure crates of `scripts/check-core-deps.sh` (no dependency outside the workspace with no
+feature on, observation crates only with every feature on) are the crates of layers 0 to 5 of
+the same table, and `scripts/check-layers.sh --wasm` builds each of them for
+`wasm32-unknown-unknown`. `scripts/check-examples.sh` stays the check that each composing crate
+has an example. A new crate gets its row in the pull request that creates it.
+
+The table today, as a proposal (the names and the numbers are **Open**, open point 1 of #1409):
+
+| Layer | Crates today | Why there |
+|---|---|---|
+| 0 | `paros-consensus` | The Paxos flavors. |
+| 1 | `paros-journal` | The journal v1. |
+| 2 | `paros-journal-control`, `paros-journal-io` | Both depend on `paros-journal`. The table of #1409 puts the controller in layer 1, but a dependency inside one layer is sideways, so the controller is one layer up. |
+| 6 | `paros-authz-biscuit` | It implements the `Authz` port over an external crate (`biscuit-auth`, which draws on `getrandom`), so it cannot be pure. It is an adapter, as the moonpool adapters are. |
+| 7 | `paros` | The facade. It will bundle the adapters of layer 6 behind a feature. |
+| 8 | `consensus-sim`, `journal-sim`, `paros-wasm` | Crates that only test or show the others. Nothing depends on them. |
+
+The calls of the placement port are `standing`, `place` and `release`, and the cell places its
+own control journal through the same port (Pierre, 2026-11-22, #1421 (the placement port);
+`docs/journal/06-controller.md` §J6.3, `specs/tla/placement-port/`).
+
+**Open**: the layer table. It is a proposal until Pierre agrees.
