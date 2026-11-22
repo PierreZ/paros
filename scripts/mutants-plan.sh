@@ -17,7 +17,9 @@
 # took 85 minutes at `-j 2`, about 0.16 minutes for each line. With 250 lines,
 # the first pass of a shard takes about 40 minutes, so a runner 1.5 times as
 # slow still ends inside the 90 minutes of the job, with the Nix setup, the
-# build and the second pass.
+# build and the second pass. The measure is of paros-journal only: when a
+# shard of another crate nears the 90 minutes, measure that crate and give it
+# its own number here.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
