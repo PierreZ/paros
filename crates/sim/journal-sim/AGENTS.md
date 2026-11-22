@@ -46,7 +46,8 @@ Test only: `publish = false`.
   set)): the controller role heals a retired segment while replica machines are lost for good or
   come back, two controllers depose each other, requests and replies are lost and the segment is
   trimmed, and requests arrive twice and late; the walk plays the replicas itself (copy from a
-  full member, the highest copy per node, drop outside the set). Its oracles (`HELD`,
+  full member, the highest copy per node, drop outside the set, each on the current register value,
+  so it cannot see a stale view: `specs/tla/heal-reuse/` checks that). Its oracles (`HELD`,
   `COMPARED`, `CONVERGES`), its reach sites and its planted mutants
   (`HealMutant`). `tests/heal.rs`; `tests/controller.rs` runs it in the gate of the role's probes.
 - `src/host.rs`: the driver walk (`HostModel`, #1329): three processes, each a `Driver` of

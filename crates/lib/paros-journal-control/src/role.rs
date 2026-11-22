@@ -90,8 +90,10 @@ pub enum Ask {
     /// register refuses it for the term, so a lower copy that replaced a
     /// complete higher one could leave the new holder's compare-and-set
     /// counting a node with nothing on it (`journal-sim`'s heal walk, the
-    /// mutant `AnyCopy`). A node that serves the segment as a member refuses
-    /// every copy: the ask may come from an old view.
+    /// mutant `AnyCopy`; `specs/tla/heal-reuse/`, control `copy_any`). A
+    /// node that serves the segment as a member refuses every copy: the ask
+    /// may come from an old view. It judges that on a register value that it
+    /// saw done after the ask arrived (control `stale_view`).
     Copy {
         /// The segment.
         segment: SegmentId,
@@ -102,9 +104,12 @@ pub enum Ask {
         /// The copy.
         copy: CopyId,
     },
-    /// The heal of `copy` ended with no new set: tell the new replica `node`
-    /// (`SegmentReplica::abandon`), which keeps its copy only if a register
-    /// value shows it in the set.
+    /// The heal of `copy` ended with no new set, as far as the controller
+    /// knows: tell the new replica `node` (`SegmentReplica::abandon`). The
+    /// heal may have committed (an "ok" can be lost), so the node acts only
+    /// on a register value that it saw done after this ask arrived, and
+    /// keeps its copy when that value names it (`specs/tla/heal-reuse/`,
+    /// control `stale_view`).
     Abandon {
         /// The segment.
         segment: SegmentId,

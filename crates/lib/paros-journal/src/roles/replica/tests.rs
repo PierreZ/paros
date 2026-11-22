@@ -787,21 +787,48 @@ fn a_source_that_stops_holding_is_no_source() {
 fn a_new_replica_whose_plan_ended_drops_its_copy() {
     let mut replica = joiner();
     replica.observe(&retired_two());
-    assert_eq!(replica.abandon(CopyId { term: 1, number: 4 }), vec![]);
     assert_eq!(
-        replica.joining(),
-        Some(COPY),
-        "another copy's end changes nothing"
+        replica.abandon(
+            CopyId { term: 1, number: 4 },
+            &healed(&retired_two(), 13, 21)
+        ),
+        vec![],
+        "another copy's end changes nothing while the replica runs its copy"
     );
+    assert_eq!(replica.joining(), Some(COPY));
+    let effects = replica.abandon(COPY, &retired_two());
     assert_eq!(
-        persists(&replica.abandon(COPY)),
+        persists(&effects),
         vec![(PersistId(2), vec![ReplicaOp::Joining(None)])]
     );
+    assert!(effects.contains(&ReplicaEffect::Drop));
     assert_eq!(replica.joining(), None);
-    assert_eq!(replica.abandon(COPY), vec![], "abandoned once");
-    assert!(!replica.dropped(), "it waits for the next register value");
-    assert_eq!(replica.observe(&retired_two()), vec![ReplicaEffect::Drop]);
-    assert!(replica.dropped());
+    assert!(
+        replica.dropped(),
+        "a value that leaves it out drops the copy"
+    );
+    assert_eq!(
+        replica.abandon(COPY, &retired_two()),
+        vec![],
+        "abandoned once"
+    );
+}
+
+#[test]
+fn an_abandon_after_the_commit_keeps_a_member() {
+    let mut replica = joiner();
+    replica.observe(&retired_two());
+    // The heal committed, its "ok" was lost, and a late copy of the change
+    // was refused: the controller abandons a copy that is a member now.
+    let effects = replica.abandon(COPY, &healed(&retired_two(), 11, 20));
+    assert_eq!(
+        persists(&effects),
+        vec![(PersistId(2), vec![ReplicaOp::Joining(None)])],
+        "the value that names it ends the copy: it is a member"
+    );
+    assert!(!replica.dropped(), "a member keeps its copy");
+    assert_eq!(replica.joining(), None);
+    assert!(replica.set().contains(&NEW));
 }
 
 #[test]
@@ -859,7 +886,7 @@ fn a_new_replica_that_restarts_keeps_its_copy_while_its_plan_runs() {
         vec![],
         "a new replica of a running plan keeps its copy"
     );
-    keep(&again.abandon(COPY), &mut disk);
+    keep(&again.abandon(COPY, &retired_two()), &mut disk);
     assert_eq!(disk.joining, None);
     let mut removed = SegmentReplica::recover(NEW, SegmentId(1), set(), Leader::Unset, disk);
     assert_eq!(

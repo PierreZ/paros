@@ -8,7 +8,7 @@
 # two controllers that depose each other and crash, two crashes and two
 # restarts of nodes, three plans; requests and answers delivered twice and late.
 safety             pass       ci
-# The same with three terms and four plans.
+# The same with three terms.
 safety_wide        pass       ci
 # Reach: a check that must break, so that the passing check is not empty.
 reach_heal         violation  ci
@@ -16,8 +16,10 @@ reach_reuse        violation  ci
 reach_come_back    violation  ci
 reach_two_answers  violation  ci
 reach_lower_ask    violation  ci
+reach_late_abandon violation  ci
 # Controls: one for each rule; each one breaks `Held`.
 copy_any           violation  ci
 version_only       violation  ci
 no_heals           violation  ci
 sent_abort         violation  ci
+stale_view         violation  ci

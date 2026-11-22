@@ -291,8 +291,11 @@ impl SegmentReplica {
     /// driver starts a copy only above the copy the node runs: a lower one
     /// comes from a deposed controller and is refused, so the copy that a
     /// later term counts stays on the disk. It never starts a copy of a
-    /// segment that the node serves as a member: an ask built on an old
-    /// view would wipe a member's disk.
+    /// segment that the node serves as a member, and it judges that on a
+    /// register value that it saw done after the ask arrived: a commit that
+    /// named the node may be done although the node has not seen it, and
+    /// the new copy would wipe a member's disk (`specs/tla/heal-reuse/`,
+    /// control `stale_view`).
     ///
     /// # Panics
     ///
@@ -331,21 +334,31 @@ impl SegmentReplica {
         &self.set
     }
 
-    /// The plan of the copy `copy` ended with no new set: the controller
-    /// lost its term, its read became old, or the record was trimmed. The
-    /// replica is no plan's new replica any more; the next register value
-    /// keeps it as a member or drops its copy.
+    /// The plan of the copy `copy` ended with no new set, as its controller
+    /// knows: the controller lost its term, its read became old, or the
+    /// register refused the change. `value` is a register value that the
+    /// driver saw done after the abandon arrived. A refusal does not prove
+    /// that the heal did not commit (the "ok" of an earlier copy of the
+    /// change can be lost), but a change that the register refused or that
+    /// an old read ended can never commit later, so `value` shows whether it
+    /// did. If `value` names the replica, it is a member and keeps its copy;
+    /// else it is no plan's new replica any more and drops its copy
+    /// (`specs/tla/heal-reuse/`, control `stale_view`).
     ///
     /// # Panics
     ///
-    /// When an assertion on its own postconditions fails: a programmer
-    /// error, never an operating condition.
-    pub fn abandon(&mut self, copy: CopyId) -> Vec<ReplicaEffect> {
-        let effects = if self.joining == Some(copy) && !self.dropped {
+    /// When `value` moves a fact the replica already holds (as
+    /// [`Self::observe`]), or an assertion on its own postconditions fails.
+    pub fn abandon(&mut self, copy: CopyId, value: &RegisterValue) -> Vec<ReplicaEffect> {
+        let named = value
+            .segment(self.segment)
+            .is_some_and(|record| record.replicas().contains(&self.id));
+        let mut effects = if self.joining == Some(copy) && !self.dropped && !named {
             self.set_joining(None)
         } else {
             Vec::new()
         };
+        effects.extend(self.observe(value));
         assert!(self.joining != Some(copy), "an abandoned copy is over");
         self.assert_invariants();
         effects

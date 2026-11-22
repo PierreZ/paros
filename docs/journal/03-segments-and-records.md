@@ -147,9 +147,11 @@ checked, each with a control that TLC breaks:
     plan, then its number in that term; #1314, found by the heal walk). A higher copy replaces
     the one it runs, and a lower one, from a deposed controller, is refused (`heal-reuse/`,
     control `copy_any`; mutant `AnyCopy`). `specs/tla/heal-reuse/` models a node that a later
-    plan asks again, and requests and answers that the network delivers twice and late; it
-    checks the four rules of this list and of "As built" below that `re-replication/` cannot
-    see, each with a control.
+    plan asks again, requests and answers that the network delivers twice and late, and a node
+    that knows the set only from the last register value it saw; it checks the five rules of
+    this list and of "As built" below that `re-replication/` cannot see, each with a control.
+    The highest-copy rule and the fresh-value rule are a contract of the driver that starts and
+    abandons copies: no built driver runs a copy yet (the Open below).
   - **A "done" report belongs to one copy.** A new plan starts a new copy. A report kept from an
     aborted copy (`report_sticky`) counts a replica that dropped its copy since.
   - **A replica that does not hold a slot refuses the read**, and the reader reads the record and
@@ -175,15 +177,26 @@ checked, each with a control that TLC breaks:
   count a heal delayed in the network could apply a second time on a set that only looks like
   the one it read (`heal-reuse/`, control `no_heals`; `journal-sim`'s heal walk, mutant
   `NoHealCount`, oracle `COMPARED`; found by the review of PR #1470).
-  - **A heal whose compare-and-set was sent ends only on an answer** (found by the heal walk
-    with delayed copies of requests). A copy of the change can still be in the network; if the
-    heal ended when its new replica went down, the replica would drop its copy when it came back
-    and the late copy would write an empty member (`heal-reuse/`, control `sent_abort`). A down
-    new replica that holds its copy is a member that a later heal replaces.
+  - **A heal whose compare-and-set was sent ends only on an answer, or on a record that is
+    neither its read nor its result** (found by the heal walk with delayed copies of requests).
+    A copy of the change can still be in the network; if the heal ended when its new replica
+    went down, the replica would drop its copy when it came back and the late copy would write an
+    empty member (`heal-reuse/`, control `sent_abort`). A record that moved past the read can
+    never come back to it (the heal count), so the change can no longer apply. A down new replica
+    that holds its copy is a member that a later heal replaces.
+  - **A node acts on an abandon or a copy ask only on a register value that it saw done after
+    the message arrived** (found by the review of `heal-reuse/`). A refusal or an old read does
+    not prove that the heal did not commit: the "ok" of an earlier copy of the change can be
+    lost, and the record can move on. A node that has not seen the commit that named it would
+    take the abandon and then a late copy ask, which wipes a member (`heal-reuse/`, control
+    `stale_view`). A change that the register refused, or that an old read ended, can never
+    commit later, so a value seen after the abandon shows whether it did: if the value names the
+    node, it is a member and keeps its copy (`SegmentReplica::abandon` takes that value).
   The controller role plans one heal at a time, the first member that is down, asks the new
   replica to copy (`Ask::Copy` with its `CopyId`), counts it on its own report of that copy, and
   gives the compare-and-set until it is answered; a read that changed, a new replica that is down
-  or a refusal ends the heal (`Ask::Abandon`). The new replica (`SegmentReplica::join`) persists
+  or a refusal ends the heal (`Ask::Abandon`; a sent heal ends only on a read that changed or on
+  an answer). The new replica (`SegmentReplica::join`) persists
   its copy id (`ReplicaOp::Joining`, so a restart keeps the copy while the plan runs), pulls only
   from members of the set that say they hold the whole segment (`Holding`, `Holds`), and reports
   `Copied` when it is full. A replica in no set that runs no copy, or of a trimmed segment, drops
