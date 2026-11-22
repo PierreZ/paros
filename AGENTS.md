@@ -323,7 +323,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `website/site/AGENTS.md`, "Tests")
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow: the folders that the change can break, packed into `spec` jobs of at
-  most 22 minutes of checks by `scripts/ci-plan.py` and `scripts/tla-minutes.txt`, and the trace checks of consensus-sim and journal-sim, the live check of `journal-sim/tests/live.rs` too, in four
+  most 15 minutes of measured checks (a larger folder alone) by `scripts/ci-plan.py` and `scripts/tla-minutes.txt`, and the trace checks of consensus-sim and journal-sim, the live check of `journal-sim/tests/live.rs` too, in four
   `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); each `spec` job also checks that
   each guard mutant of its folders parses (`scripts/mutate-tla.py --parse`)
 - the `TLA mutants` workflow, each week and on demand: `scripts/mutate-tla.py` sets each guard

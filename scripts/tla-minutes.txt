@@ -3,8 +3,8 @@
 # guard mutants, measured on GitHub's runners, rounded up to a half minute.
 # `scripts/ci-plan.py` packs the folders that a change needs into as few
 # jobs as it can, each at most `GROUP_MINUTES` of checks, so that each job
-# stays inside its 30 minutes. Every folder is listed: the plan fails on a
-# folder with no line, and on a line with no folder. When a folder's checks
+# stays inside its 30 minutes on a slow runner too. Every folder is listed:
+# the plan fails on a folder with no line, and on a line with no folder. When a folder's checks
 # grow, measure them again (the step time of its job) and update its line.
 # Measured on run 44961887578 (2026-11-22).
 abandoned-ballot 4

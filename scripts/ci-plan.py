@@ -26,7 +26,8 @@ or deleted). A change of a tool runs every folder.
 
 The folders that run are packed into groups, each at most `GROUP_MINUTES` of
 checks (`scripts/tla-minutes.txt`), largest first, so that a job of the TLA
-workflow stays inside its 30 minutes and the number of jobs is small.
+workflow stays inside its 30 minutes and the number of jobs is small. A folder
+above `GROUP_MINUTES` (at most `FOLDER_MINUTES`) runs alone.
 
 The trace checks (`traces`) run the walks of consensus-sim and journal-sim
 against the `*Trace.tla` specs. They run in the TLA workflow when a folder of a
@@ -51,9 +52,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SPECS = ROOT / "specs" / "tla"
 MINUTES = ROOT / "scripts" / "tla-minutes.txt"
 
-# A job of the TLA workflow has 30 minutes; a group holds at most this much
-# measured check time, so a runner that is a third slower still finishes.
-GROUP_MINUTES = 22.0
+# A job of the TLA workflow has 30 minutes, and the same group of folders
+# takes from half to more than 1.35 times its measured minutes from one
+# runner to the next. A group holds at most `GROUP_MINUTES` of measured
+# checks, so a runner twice as slow still finishes. A folder above it runs
+# alone in its job, and no folder may be above `FOLDER_MINUTES`: such a
+# folder splits its checks.
+GROUP_MINUTES = 15.0
+FOLDER_MINUTES = 20.0
 
 # The files that no Rust build reads. Keep in step with `paths-ignore` of
 # `.github/workflows/rust.yml`, which is a subset of this list.
@@ -131,9 +137,9 @@ def minutes(all_folders: list[str]) -> dict[str, float]:
     extra = sorted(set(table) - set(all_folders))
     if missing or extra:
         sys.exit(f"scripts/tla-minutes.txt: no line for {missing}, no folder for {extra}")
-    too_long = sorted(f for f, m in table.items() if m > GROUP_MINUTES)
+    too_long = sorted(f for f, m in table.items() if m > FOLDER_MINUTES)
     if too_long:
-        sys.exit(f"{too_long} take more than {GROUP_MINUTES} minutes: split the folder's checks")
+        sys.exit(f"{too_long} take more than {FOLDER_MINUTES} minutes: split the folder's checks")
     return table
 
 
