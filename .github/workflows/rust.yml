@@ -71,6 +71,10 @@ jobs:
       # docs/journal/04-roles.md §J4.3: no runtime, I/O or storage dependency in the pure crates.
       - name: Check the pure crates' dependencies
         run: nix develop --command scripts/check-core-deps.sh
+      # docs/architecture/04-roles.md §4.4: the layer table (scripts/layers.sh), no dependency
+      # up or sideways, no name of a higher crate, no fault switch in a pure crate. Files only.
+      - name: Check the layers of the crates
+        run: scripts/check-layers.sh
       # AGENTS.md, "Examples": every composing crate has examples, and the examples steps of the `checks` job run each one.
       - name: Check the examples of the composing crates
         run: scripts/check-examples.sh
@@ -138,18 +142,13 @@ jobs:
 
       # The sans-IO core and the library facade stay portable to wasm32: paros-consensus
       # is zero-dep/std-only. The browser build itself is the `wasm` job.
-      - name: Build paros-consensus for wasm32-unknown-unknown
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-consensus
       - name: Check paros-consensus builds for wasm with every feature off (zero deps)
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-consensus --no-default-features
       - name: Check paros-consensus with the serde derives on (no crate enables the feature)
         run: nix develop --command cargo check -p paros-consensus --features serde
-      - name: Build paros-journal (the journal core) for wasm32-unknown-unknown
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal
-      - name: Build paros-journal-control (the grid controller) for wasm32-unknown-unknown
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal-control
-      - name: Build paros-journal-io (the journal's traits and driver) for wasm32-unknown-unknown
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-journal-io
+      # Every pure crate (layers 0 to 5 of scripts/layers.sh) builds for wasm32-unknown-unknown.
+      - name: Build each pure crate for wasm32-unknown-unknown
+        run: nix develop --command scripts/check-layers.sh --wasm
       - name: Build paros (the library facade) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
       # The two public crates (`release-plz.toml`) build as crates.io builds
