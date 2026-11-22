@@ -101,7 +101,7 @@ The marks in the "Home" column:
 | # | Feature | At the tag | Home |
 |---|---|---|---|
 | F52 | Root keys of the universe: `universe key list\|add\|remove`; `key generate\|show` offline | `cmd/universe.rs`, `cmd/key.rs` | #1432 (root keys in the directory), #1434 |
-| F53 | Biscuit tokens: `token mint\|derive\|inspect` offline; admin and tenant roles; tokens name tenants and journals by name | `paros-authz-biscuit`, `cmd/token.rs` | #1431, #1434 |
+| F53 | Biscuit tokens: `token mint\|derive\|inspect` offline; admin and tenant roles; tokens name tenants and journals by name, and a tenant token is pinned to the tenant's id (§3.8) | `paros-authz-biscuit`, `cmd/token.rs` | #1431, #1434 |
 | F54 | The frontend checks the token on each call | `paros-roles` (frontend), `BiscuitAuthz` | #1431 |
 | F55 | The bootstrap pin: an idle machine checks an `admin` token on `init` and `Admit` | `paros-machine/src/pin.rs` | #1426, #1431 |
 | F56 | Mutual TLS between machines, frontends and operators | `paros-net`, `parosd` | #1427 |

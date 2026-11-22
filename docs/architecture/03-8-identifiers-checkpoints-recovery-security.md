@@ -74,13 +74,19 @@ the core) tracks the change.
   id, the coordinator draws again. A create resumes by its request id: the fold keeps the id it
   gave, so a coordinator that restarts reads the id back and draws nothing.
 - **Genesis.** At `cell init`, the cell tenant draws its `TenantId` and writes it in the cell
-  plan. `JoinFleet` records that id in the universe fold, which refuses an id in use. A refused
-  cell stays out of the universe, because its id is already on its disks and it cannot draw
-  again. Safety does not depend on a fresh draw; only the join does (the chance of a collision is
-  about `2^-64`). A counter in the cell is refused: every cell would get the same first id.
-- **Token.** A Biscuit token is pinned to a tenant id: it carries the tenant's `u64` as a fact
-  from its mint, and the frontend checks it against the id that the name resolves to. So a token
-  for a deleted tenant fails after its name is used again.
+  plan. `universe add-cell` records that id in the universe fold: its directory half, `AddCell`
+  (section 3.7), refuses an id in use, and the cell's own half, `JoinFleet`, follows only an
+  accepted `AddCell`. A refused cell stays out of the universe, because its id is already on its
+  disks and it cannot draw again. Safety does not depend on a fresh draw; only the join does (the
+  chance of a collision is about `2^-64`). A counter in the cell is refused: every cell would get
+  the same first id. The universe tenant's own id, drawn at `universe init`, and the id of each
+  tenant's control journal, drawn with the tenant and recorded beside it (below), are drawn the
+  same way; `journal-ids/` does not model them, and a collision there has the same `2^-64` chance.
+- **Token.** A tenant token is pinned to a tenant id: it carries the tenant's `u64` as a fact
+  beside its name, and the frontend checks it against the id that the name resolves to. So a
+  token for a deleted tenant fails after its name is used again. This amends "Names, not ids" of
+  section 3.5. **Open** (#1431 (the frontend role, the resolver, the Biscuit adapter)): how the
+  offline mint of `parosctl` learns the `u64` of the tenant.
 - **Birth nonce.** No birth nonce in `Assign` in the first build: the tombstones and the order
   (the id is in the fold before a booking) keep the rule without it (`journal-ids/`). **Open**
   (§3.10, recovery): a control journal that recovery rebuilds forgets its tombstones; a nonce in
@@ -93,18 +99,18 @@ the core) tracks the change.
   `u64` each. They are the one part of control state bounded by history rather than by live
   entities (section 3.9), accepted as such (decided on 2026-10-04). Names are not tombstoned
   (section 3.5).
-- `TenantId(u64)`: random, drawn by the creator and recorded by the universe tenant in the `REGISTERING` step;
-  the universe tenant refuses a duplicate at apply and the creator redraws. It is universe-unique, so moving a
+- `TenantId(u64)`: random, drawn by the universe coordinator and recorded by the universe tenant in the `REGISTERING` step;
+  the universe tenant refuses a duplicate at apply and the coordinator draws again. It is universe-unique, so moving a
   tenant between cells never needs a new id. The system tenants are no exception: each cell's
-  cell tenant gets a random id at the cell's `init` (so two cells' cell tenants differ), and the
+  cell tenant gets a random id at the cell's `init` (`AddCell` refuses a cell whose cell tenant's id is in use), and the
   universe tenant gets one when `init` creates the universe, kept when the universe tenant moves. The universe tenant records both
   (its own in its first entry, each cell tenant in that cell's entry), so its duplicate check
   covers them too. The universe tenant records each tenant's tags beside its id
   (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
   checked by the universe tenant needs no prefix.
 - `JournalId(u64)`: random, unique within its tenant, recorded and checked at apply by the tenant
-  coordinator, the single writer of the tenant's control journal; a duplicate is refused and the
-  creator redraws. A tenant's **control journal** has a random id too, drawn with the tenant and
+  coordinator, the single writer of the tenant's control journal, which also draws it; a
+  duplicate is refused and the coordinator draws again. A tenant's **control journal** has a random id too, drawn with the tenant and
   recorded where the tenant is recorded: in the universe directory's tenant entry, and for the two system tenants
   in the cell plan (the cell tenant's in its own cell's plan, the universe tenant's in the plan of
   every admitted cell). A journal's id never changes when its tenant moves; a control journal that

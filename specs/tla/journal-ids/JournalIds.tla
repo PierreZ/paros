@@ -12,9 +12,11 @@
 (*                                                                         *)
 (* The model has:                                                          *)
 (*   - cells, each with a cell tenant whose id is minted at `cell init`,   *)
-(*     before any universe (the genesis record); `JoinFleet` records it in *)
-(*     the fold of the universe, which refuses an id in use;              *)
-(*   - user tenants, created through the universe once a cell joined;     *)
+(*     before any universe (the genesis record); `AddCell`, the half of   *)
+(*     `universe add-cell` in the fold of the universe, records it and    *)
+(*     refuses an id in use;                                              *)
+(*   - user tenants, created through the fold of the universe (their      *)
+(*     journals wait until Home joined);                                  *)
 (*   - journals of the tenants of one cell, `Home`, all booked on one host *)
 (*     of that cell;                                                       *)
 (*   - draws that can collide (a small id space), a refusal at apply and a *)
@@ -33,7 +35,9 @@
 (*   Order     "fold_first": the host books slots only under an id that   *)
 (*             the fold gave; "book_first": a control, slots are booked    *)
 (*             under the id the coordinator drew, before the fold checks   *)
-(*             it (the bug of the old resumed create).                     *)
+(*             it: two creates whose draws collide both book under one     *)
+(*             key, and so does a create resumed after a lost draw (the   *)
+(*             bug of the old resumed create).                             *)
 (*   Tombs     TRUE: a deleted id stays used in the fold (a tombstone);    *)
 (*             FALSE: a control, a delete frees the id.                    *)
 (*   Key       "pair": the host key is (TenantId, JournalId); "journal":   *)
@@ -42,7 +46,7 @@
 (*             "counter": a control, a counter of the cell gives it.       *)
 (*   Fresh     TRUE: a TenantId draw never collides with another TenantId *)
 (*             (a 64-bit random draw); only the liveness checks set it.   *)
-(*             A refused `JoinFleet` is final, so without it a universe   *)
+(*             A refused `AddCell` is final, so without it a universe     *)
 (*             draw for a user tenant can take the id of a cell that has  *)
 (*             not joined yet, and that cell never joins.                 *)
 (***************************************************************************)
@@ -76,12 +80,13 @@ VARIABLES
   jstate,    \* journal -> "new", "live" or "gone"
   disk,      \* the host: a set of records <<key, journal>>
   restarts,  \* the restarts of the coordinators so far
+  lost,      \* history: the tenants and journals whose draw a restart lost
   given,     \* history: every <<tenant, JournalId, journal>> a tenant fold gave
   tgiven,    \* history: every <<TenantId, tenant>> the universe fold gave
   events     \* history: the rare steps that happened, for the reach checks
 
 vars == <<ctid, joined, uused, utid, udraw, utried, tused, jrec, jdraw, jtried,
-          jstate, disk, restarts, given, tgiven, events>>
+          jstate, disk, restarts, lost, given, tgiven, events>>
 
 TidOf(t) == IF t \in Cells THEN ctid[t] ELSE utid[t]
 
@@ -106,6 +111,7 @@ Init ==
   /\ jstate = [j \in Journals |-> "new"]
   /\ disk = {}
   /\ restarts = 0
+  /\ lost = {}
   /\ given = {}
   /\ tgiven = {}
   /\ events = {}
@@ -124,9 +130,9 @@ Genesis(c) ==
                          /\ \A u \in Users : udraw[u] # i
        /\ ctid' = [ctid EXCEPT ![c] = i]
   /\ UNCHANGED <<joined, uused, utid, udraw, utried, tused, jrec, jdraw, jtried,
-                 jstate, disk, restarts, given, tgiven, events>>
+                 jstate, disk, restarts, lost, given, tgiven, events>>
 
-\* `JoinFleet` at apply in the fold of the universe: the cell tenant's id is
+\* `AddCell` at apply in the fold of the universe: the cell tenant's id is
 \* recorded, or refused when it is in use. A refused cell stays out: its id
 \* is already on its own disks.
 Join(c) ==
@@ -141,7 +147,7 @@ Join(c) ==
             /\ events' = events \cup {"join_refused"}
             /\ UNCHANGED <<uused, tgiven>>
   /\ UNCHANGED <<ctid, utid, udraw, utried, tused, jrec, jdraw, jtried, jstate,
-                 disk, restarts, given>>
+                 disk, restarts, lost, given>>
 
 \* The universe coordinator draws an id for a user tenant that the fold has
 \* not given one yet. A new draw replaces a draw not yet recorded (a retry).
@@ -151,7 +157,7 @@ DrawTenant(u) ==
        /\ Fresh => \A c \in Cells : ctid[c] # i
        /\ udraw' = [udraw EXCEPT ![u] = i]
   /\ UNCHANGED <<ctid, joined, uused, utid, utried, tused, jrec, jdraw, jtried,
-                 jstate, disk, restarts, given, tgiven, events>>
+                 jstate, disk, restarts, lost, given, tgiven, events>>
 
 \* The fold of the universe applies the create: it gives the drawn id, or
 \* refuses an id in use and the coordinator draws again.
@@ -167,17 +173,20 @@ RecordTenant(u) ==
             /\ events' = events \cup {"tenant_refused"}
             /\ UNCHANGED <<utid, uused, tgiven>>
   /\ UNCHANGED <<ctid, joined, tused, jrec, jdraw, jtried, jstate, disk,
-                 restarts, given>>
+                 restarts, lost, given>>
 
 -----------------------------------------------------------------------------
 (* The tenant level and the host. *)
 
+\* `jstate[j] = "new"` only bounds the state space: a draw of a journal
+\* that is live or gone changes nothing, because `RecordJournal` and `Book`
+\* have their own guards.
 DrawJournal(j) ==
   /\ Ready(Owner[j])
   /\ jstate[j] = "new"
   /\ \E i \in JIds \ jtried[j] : jdraw' = [jdraw EXCEPT ![j] = i]
   /\ UNCHANGED <<ctid, joined, uused, utid, udraw, utried, tused, jrec, jtried,
-                 jstate, disk, restarts, given, tgiven, events>>
+                 jstate, disk, restarts, lost, given, tgiven, events>>
 
 \* The fold of the tenant applies the create. A used id, a tombstone too,
 \* is refused, and the coordinator draws again.
@@ -199,7 +208,8 @@ RecordJournal(j) ==
                     (IF \E g \in given : g[1] = t /\ g[2] = i /\ jstate[g[3]] = "gone"
                        THEN {"tomb_refused"} ELSE {})
                /\ UNCHANGED <<jrec, jstate, tused, given>>
-  /\ UNCHANGED <<ctid, joined, uused, utid, udraw, utried, disk, restarts, tgiven>>
+  /\ UNCHANGED <<ctid, joined, uused, utid, udraw, utried, disk, restarts, lost,
+                 tgiven>>
 
 \* The placement books slots for a journal on the host: under the id the
 \* fold gave (the rule), or under the id the coordinator drew (the control).
@@ -209,7 +219,7 @@ Book(j) ==
      IN /\ i # 0
         /\ disk' = disk \cup {<<KeyOf(j, i), j>>}
   /\ UNCHANGED <<ctid, joined, uused, utid, udraw, utried, tused, jrec, jdraw,
-                 jtried, jstate, restarts, given, tgiven, events>>
+                 jtried, jstate, restarts, lost, given, tgiven, events>>
 
 \* A delete is final. A delete of a create not yet recorded cancels it.
 Delete(j) ==
@@ -217,14 +227,14 @@ Delete(j) ==
   /\ IF Tombs THEN UNCHANGED tused
      ELSE tused' = [tused EXCEPT ![Owner[j]] = @ \ {jrec[j]}]
   /\ UNCHANGED <<ctid, joined, uused, utid, udraw, utried, jrec, jdraw, jtried,
-                 disk, restarts, given, tgiven, events>>
+                 disk, restarts, lost, given, tgiven, events>>
 
 \* The host drops the records of a deleted journal, at some later time.
 Drop(j) ==
   /\ jstate[j] = "gone"
   /\ disk' = {r \in disk : r[2] # j}
   /\ UNCHANGED <<ctid, joined, uused, utid, udraw, utried, tused, jrec, jdraw,
-                 jtried, jstate, restarts, given, tgiven, events>>
+                 jtried, jstate, restarts, lost, given, tgiven, events>>
 
 \* The coordinators restart: every draw not yet recorded is lost. The folds
 \* and the disks stay.
@@ -233,10 +243,10 @@ Restart ==
   /\ restarts' = restarts + 1
   /\ udraw' = [u \in Users |-> 0]
   /\ jdraw' = [j \in Journals |-> 0]
-  /\ events' = events \cup
-       (IF \E j \in Journals : jdraw[j] # 0 THEN {"draw_lost"} ELSE {})
+  /\ lost' = lost \cup {u \in Users : udraw[u] # 0}
+               \cup {j \in Journals : jdraw[j] # 0}
   /\ UNCHANGED <<ctid, joined, uused, utid, utried, tused, jrec, jtried, jstate,
-                 disk, given, tgiven>>
+                 disk, given, tgiven, events>>
 
 Next ==
   \/ \E c \in Cells : Genesis(c) \/ Join(c)
@@ -283,7 +293,15 @@ TypeOK ==
   /\ joined \in [Cells -> {"out", "in", "refused"}]
   /\ uused \subseteq TIds
   /\ utid \in [Users -> TIds \cup {0}]
+  /\ udraw \in [Users -> TIds \cup {0}]
+  /\ utried \in [Users -> SUBSET TIds]
+  /\ jdraw \in [Journals -> JIds \cup {0}]
+  /\ jtried \in [Journals -> SUBSET JIds]
+  /\ restarts \in 0..Restarts
+  /\ lost \subseteq Users \cup Journals
   /\ jrec \in [Journals -> JIds \cup {0}]
+  /\ tused \in [Tenants -> SUBSET JIds]
+  /\ \A j \in Journals : jstate[j] = "live" => jrec[j] \in JIds
   /\ jstate \in [Journals -> {"new", "live", "gone"}]
 
 \* Every create ends: each cell joins the universe, each user tenant and
@@ -307,5 +325,7 @@ NoJournalRefused == "journal_refused" \notin events
 NoTombRefused == "tomb_refused" \notin events
 NoTenantRefused == "tenant_refused" \notin events
 NoJoinRefused == "join_refused" \notin events
-NoDrawLost == "draw_lost" \notin events \/ \A j \in Journals : jrec[j] = 0
+\* A restart lost the draw of a create, and that create still got its id.
+NoDrawLost == /\ \A u \in lost \cap Users : utid[u] = 0
+              /\ \A j \in lost \cap Journals : jrec[j] = 0
 =============================================================================
