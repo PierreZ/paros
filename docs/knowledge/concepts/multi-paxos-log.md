@@ -131,8 +131,9 @@ never covers Phase-1-shaped work).
 **Judges today:**
 
 - The model `specs/tla/multi-paxos/` (Phase 1 recovery, the allocator frontier, the `Noop` gap
-  fill, commit and catch-up, restarts), with an inductive invariant checked on drawn states.
-- `consensus-sim`'s cluster walks (`Flavor::multi_paxos`, `Flavor::multi_paxos_five`) and the
+  fill, commit and catch-up, restarts), with an inductive invariant `Inv` that TLC checks on drawn
+  states and TLAPS proves at every size (`MultiPaxosProof.tla`).
+- `consensus-sim`'s walks of a `Cluster` (`Flavor::multi_paxos`, `Flavor::multi_paxos_five`) and the
   oracles of `oracle/ledger.rs`: `ONE_VALUE`, `COMMIT_BACKED`, `LEARNED_CHOSEN`, `PREFIX_SHRINKS`
   and `ONE_PROPOSAL`; `JOURNAL_FOLD` (`oracle/journal.rs`) folds the chosen commands with the
   journal rules written again. Controls: `Mutant::ForgetVotes`, `Mutant::EarlyCommit`,

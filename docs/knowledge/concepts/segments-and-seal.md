@@ -1,6 +1,6 @@
 # Segments and the seal
 
-Group: On the log. Status: written 2026-11-22, waits for a second reviewer.
+Group: On the log. Status: verified 2026-11-22.
 
 The journal v1 runs **one** Multi-Paxos log across a chain of **segments**. A segment is the run
 of slots that one configuration (one acceptor grid and one replica set) holds. The chain lives
@@ -87,8 +87,9 @@ sequenceDiagram
 
 ## 5. Recovery flow
 
-- **Two first leaders race.** The end is a compare-and-set from `InForce`: one wins, the other
-  gets a refusal and stops (`RecordRefusal`; tests `a_first_leader_whose_end_lost_stops` and
+- **Two first leaders race.** The end is a compare-and-set from `InForce`: one wins. The other
+  sees the end that won, or the register refuses its write (`ChangeRefusal::Record`, which
+  carries a `RecordRefusal`), and it stops (tests `a_first_leader_whose_end_lost_stops` and
   `a_refused_seal_stops_the_leader`). Delos has the same race on its MetaStore: "If many clients
   race, at most one wins" ([Delos §3.2]).
 - **A leader stops after the seal.** The next leader reads the record, finds the end written, and
@@ -128,8 +129,8 @@ segment, never from the newest record written: a deposed writer can write the ne
 
 ## 7. Liveness
 
-- The seal needs a Phase-1 quorum of the old grid, a matchmaker majority and a Phase-2 quorum of
-  the new grid. It does not wait for the repair probe of a faulty slot: a blocked slot below the
+- The seal needs a Phase-1 quorum of the old grid and of the new grid, and a matchmaker
+  majority; the fill below the end then needs Phase-2 quorums of the new grid. It does not wait for the repair probe of a faulty slot: a blocked slot below the
   end stays in the tally of every later Phase 1 (§J3.1).
 - Without the `Noop` gap fill below the end, a slot with no vote is a hole that no ballot can
   write once the old grid is sealed: the replicas stop at it for ever, and retire and trim never
@@ -152,7 +153,7 @@ segment, never from the newest record written: a deposed writer can write the ne
 | What | Where |
 |---|---|
 | The segment record and its states | `paros-journal/src/segment.rs`: `SegmentRecord` (`seal` and the other compare-and-set steps), `SegmentState`, `SegmentId`, `Grid`, `OpeningCall`, `RecordRefusal` |
-| The register that holds the records | `paros-journal/src/register.rs`: `RegisterValue`, `Change`, `ChangeRefusal`; its handover in `register/handover.rs` |
+| The register that holds the records | `paros-journal/src/register/value.rs`: `RegisterValue`, `Change`, `ChangeRefusal` (re-exported by `register.rs`); its handover in `register/handover.rs` |
 | The boundary state and the fold across a seal | `paros-journal/src/fold.rs`: `BoundaryState`, `JournalState`, `Answer::Below` for a resend across a seal |
 | The leader's Phase 1 over the segments and its end | `paros-journal/src/roles/leader.rs`: `JournalLeader`, `ReadSegment`; `roles/leader/phase1.rs` (the end) |
 | The replica of a segment and its boundary write | `paros-journal/src/roles/replica.rs`: `SegmentReplica` |
@@ -201,8 +202,8 @@ segment, never from the newest record written: a deposed writer can write the ne
   grid only below the end chooses two values for one slot (#1213 experiment, §J3.1).
 - **A faulty vote is a vote** for the end (#1313); see §6.
 - **Two seals in a row and an empty segment.** The first form put the writer uuid in the
-  journal's matchmaker record and a `Fence` at the first slot of the next segment; it needed
-  three more rules. The whole boundary state in the segment record needs none (#1303,
+  journal's matchmaker record and a `Fence` at the first slot of the next segment; it needed two
+  more rules (`meta_any`, `meta_blank`), the `Fence` slot and a refusal before it (§J3.1). The whole boundary state in the segment record needs none (#1303,
   `specs/tla/seal-chain/`).
 - **Act on a write seen done, never on a read.** A replica drops its copy only after a write of
   the mark is done at a majority; a read that shows the mark can be a minority's (control

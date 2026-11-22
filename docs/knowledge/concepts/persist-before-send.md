@@ -129,7 +129,7 @@ crash. paros quarantines a journal on a storage fault and re-opens it later
 - One fsync per acceptor per batch on the write path, one per promise on Phase 1.
 - Batching amortizes the fsync: one `Ready` can carry many records.
 - Before #578, a write paid two flushes in series: the leader's, then the followers'. After it,
-  the two run in parallel. On `parosctl bench --local 3` with 5 ms per flush, throughput went
+  the two run in parallel. On `parosctl bench --local 3` (at the tag `v0.2.0-alpha.1`) with 5 ms per flush, throughput went
   from 41.5 to 74.8 writes/s and p50 from 23.3 to 11.9 ms (commit `25d00a7`).
 - A batch that only moves the chosen index pays no fsync (`MustSync::Relaxed`).
 

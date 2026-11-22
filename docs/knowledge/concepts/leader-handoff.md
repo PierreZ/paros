@@ -187,8 +187,8 @@ disks:
 - `ONE_PROPOSAL`, "a ballot proposes one command per slot" (`oracle/ledger.rs`): every `Accept`
   that a node or a proxy sends at one `(slot, ballot)` carries one command. It judges the
   proposer side, so it fires even when the acceptors' own check holds a second command back.
-  Its control is `Mutant::RewindHandoff` (`tests/mutants.rs`). The old `paros-sim` had this
-  oracle; it came back after #1292 (duplicated Relinquish).
+  Its control is `Mutant::RewindHandoff` (`tests/mutants.rs`). The removed `paros-sim`
+  (at the tag `v0.2.0-alpha.1`) had this oracle; it came back after #1292 (duplicated Relinquish).
 - `ONE_VALUE`, `COMMIT_BACKED`, `PERSIST_BEFORE_SEND` and `LEARNED_CHOSEN` judge the votes and
   the decisions.
 - The trace check: each walk is a behaviour of `specs/tla/node/LeaderHandoffTrace.tla`, and TLC

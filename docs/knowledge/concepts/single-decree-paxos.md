@@ -150,7 +150,7 @@ votes) and `decree.rs` (no separate kernel: a decree is the `Proposer` over one 
 - `consensus-sim`'s decree walk (`src/decree.rs`) must reach "decree: a value was chosen",
   "decree: Phase 1 adopted a prior vote", "decree: a proposal was preempted" and "decree: a later
   ballot proposed the chosen value again"; each walk is traced against the model.
-- In the cluster walks, `ONE_VALUE` ("at most one value is chosen per slot") and
+- In the walks of a `Cluster`, `ONE_VALUE` ("at most one value is chosen per slot") and
   `PERSIST_BEFORE_SEND` (`oracle/ledger.rs`) judge every step; their controls are
   `Mutant::ForgetVotes` and `Mutant::SkipPersist`.
 

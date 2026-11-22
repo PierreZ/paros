@@ -1,6 +1,6 @@
 # Leaderless quorum reads
 
-Group: Reads. Status: verified 2026-10-31; the Paxos Quorum Reads source added 2026-11-22, waits for a second reviewer.
+Group: Reads. Status: verified 2026-10-31; the Paxos Quorum Reads source added and verified 2026-11-22.
 
 A linearizable read that never touches the leader and never reads a clock. The reader asks a
 **Phase-1** quorum of acceptors for their **vote watermarks** (the highest slot each voted in),

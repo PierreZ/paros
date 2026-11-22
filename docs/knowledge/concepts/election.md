@@ -172,8 +172,7 @@ lists two of them under "Protocol invariants to remember".
 **Judges today:**
 
 - The model `specs/tla/multi-paxos/` (Phase 1 recovery, the `Noop` gap fill,
-  `record_own_round`), and the trace specs of `specs/tla/node/`: each names "a `Noop` gap fill",
-  "a win above slot 0" and "three wins in one walk" as rules its walks must meet
+  `record_own_round`), and the trace specs of `specs/tla/node/`: each names "a leader fills a gap with a Noop", "a leader wins with a frontier above slot 0" and "three ballots win in one walk" as rules its walks must meet
   (`cluster/trace/rules.rs`).
 - `ONE_VALUE` and `ONE_PROPOSAL` (`consensus-sim/src/oracle/ledger.rs`); `Mutant::HideVotes`
   (a `Promise` that hides its votes) is refused by the trace check at the first such promise.

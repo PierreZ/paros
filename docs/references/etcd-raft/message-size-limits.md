@@ -74,10 +74,10 @@ cheap, and costs throughput. The limits are per process and checked at `Config` 
 one relationship between two of them (a window must hold at least one message).
 
 **(c) maps to paros.** `paros_consensus::contract::Limits` is the same idea, counted in entries,
-not bytes: `promise_page`, `recovery_page`, `resend_page`, `apply_page`, `registry_page` and the
-read window, each under a compile-time ceiling (`PROMISE_BATCH`, `RECOVERY_BATCH`,
+not bytes: `promise_page`, `recovery_page`, `resend_page`, `apply_page` and `registry_page`, each
+under a compile-time ceiling (`PROMISE_BATCH`, `RECOVERY_BATCH`,
 `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE` in `contract/limits.rs`) and checked by
-`Limits::assert_valid` at construction. Like etcd-raft, a limit is per process and
+`Limits::assert_valid` at construction (the read window has a floor, `READ_TTL_TICKS`, and no ceiling). Like etcd-raft, a limit is per process and
 never on the wire: "a receiver checks a page against the ceiling, never against the sender's
 size" (`contract/limits.rs` module doc).
 
@@ -189,16 +189,17 @@ case pb.MsgHeartbeatResp:
 	}
 ```
 
-**(b) principle.** A paged exchange can stall when its messages are lost. etcd-raft does not
-re-send the lost pages; it sends an **empty** append on each heartbeat answer, so the follower
-answers, and its answer moves the exchange on. The keep-alive is cheap because it carries no
-entries.
+**(b) principle.** A paged exchange can stall when its messages are lost. On each heartbeat
+answer from a follower that lags (or that is in probe state), the leader sends an append. When
+the follower's inflight window is full, that append is **empty** (`maybeSendAppend`,
+`raft.go:618`): the follower answers it, and the answer clears the window and moves the exchange
+on. The empty append is cheap because it carries no entries.
 
 **(c) maps to paros.** A paging candidate re-sends its `Prepare` to the peers that already
 answered on every tick, so they keep their election clocks quiet while it pages another peer
 (`ColocatedNode::keep_paging_promisers`, `node/election.rs`). It asks from one past every slot it
 merged (`Election::keep_alive_from`, `proposer/election.rs`), so an answered peer sends an
-**empty** page, the same cheap keep-alive as etcd-raft's empty append. Before that rule, each
+**empty** page, the same cheap keep-alive as etcd-raft's empty append to a full window. Before that rule, each
 keep-alive asked from the campaign's first slot and carried the whole suffix again (#428 (paging
 livelock)).
 
@@ -257,6 +258,6 @@ than zero.
 | `MaxSizePerMsg`, bytes per `MsgApp` | `Limits::promise_page`, records per `Promise` page (and the other pages of `Limits`) |
 | `limitSize` keeps at least one entry | `PROMISE_BATCH > 0`, `promise_page` in `1..=PROMISE_BATCH` |
 | The ack moves `pr.Next`, the next page starts there | `Promise::next_from_slot` is the cursor, `request_promise_page` asks from it |
-| An empty append on each heartbeat answer | A keep-alive `Prepare` from `Election::keep_alive_from`, answered with an empty page |
+| An append on each heartbeat answer from a lagging follower, empty when its window is full | A keep-alive `Prepare` from `Election::keep_alive_from`, answered with an empty page |
 | `scan` pages a local read | the recovery, re-send, apply and registry pages |
 | A vote carries no log | A promise carries the accepted suffix, so Phase 1 is paged |

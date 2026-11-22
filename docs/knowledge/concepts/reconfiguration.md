@@ -143,8 +143,7 @@ The rows that name `paros-client`, `paros-coordinator` point to code at the git 
 **Judges today:**
 
 - The models `specs/tla/matchmaker/` (a reconfiguration as a round change) and
-  `specs/tla/zero-stall/` (the Phase-1 bypass), and the trace rules "a second configuration" and
-  "a `Prepare` over two configurations" (`cluster/trace/rules.rs`).
+  `specs/tla/zero-stall/` (the Phase-1 bypass), and the trace rules "a leader selects a second configuration" and "a candidate prepares over two configurations" (`cluster/trace/rules.rs`).
 - `consensus-sim`'s flavors `Flavor::reconfiguring` and `Flavor::reconfigured_compartments`, with
   the walk sites "cluster: a leader started a reconfiguration" and "cluster: a slot was chosen
   after a reconfiguration".

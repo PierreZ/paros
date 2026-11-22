@@ -1,6 +1,6 @@
 # Paging a campaign
 
-Group: Leader. Status: written 2026-11-22, waits for a second reviewer.
+Group: Leader. Status: verified 2026-11-22.
 
 A Paxos `Promise` carries the acceptor's whole accepted suffix from the asked slot, and that
 suffix has no bound. paros sends it in **pages**: at most `Limits::promise_page` entries per
@@ -27,8 +27,9 @@ problem in its replication, and it solves it with pages: a `MsgApp` carries at m
 Paging makes a second problem. A paging candidate talks to one slow peer for many round trips.
 The peers that answered at once hear nothing more, their election clocks fire, and a rival
 campaigns one ballot higher. The next candidate meets the same long suffix, and the cell can
-elect no leader (#428 (paging livelock)). etcd-raft meets the same stall when its appends are
-lost, and sends an **empty** append on each heartbeat answer to keep the exchange alive
+elect no leader (#428 (paging livelock)). etcd-raft meets a similar stall when its appends are
+lost: on each heartbeat answer from a follower that lags, the leader sends an append, and that
+append is empty when the follower's inflight window is full, so the exchange goes on
 ([etcd-raft §4]).
 
 ## 2. Model
@@ -148,7 +149,7 @@ keep-alive adds no entry to the merge and removes none.
 | The cursor on the wire | `paros-consensus/src/contract/message.rs`: `Message::Promise::next_from_slot` |
 | The acceptor's page | `paros-consensus/src/acceptor.rs`: `Acceptor::promise_page`, `PromisePage` |
 | The acceptor's answer | `paros-consensus/src/node/acceptor.rs` (a same-ballot continuation re-sends no write) |
-| The fold and the cursor check | `paros-consensus/src/proposer/election.rs`: `Proposer::fold_promise`, `PromiseFold`; `paros-consensus/src/proposer.rs`: `promise_page_shape_valid` |
+| The fold and the cursor check | `paros-consensus/src/proposer/election.rs`: `Proposer::fold_promise`; `paros-consensus/src/proposer.rs`: `PromiseFold`, `promise_page_shape_valid` |
 | Paging state and the keep-alive slot | `paros-consensus/src/proposer/election.rs`: `Election::paging`, `Election::keep_alive_from` |
 | The next-page request and the keep-alive | `paros-consensus/src/node/election.rs`: `request_promise_page`, `ColocatedNode::keep_paging_promisers` (called from `ColocatedNode::tick`) |
 | The model | `specs/tla/node/Node.tla`: the `Page(a, b, lo, hi)` action and the `Paged` constant; `specs/tla/multi-paxos/` names `Acceptor::promise_page` |
@@ -163,9 +164,10 @@ The rule is stated in the doc comments of `Election::keep_alive_from` and
   readable and faulty entries", "phase1: a candidate pages a Promise suffix longer than one
   page", "phase1: a paging candidate re-sends its Prepare to the peers that answered" and
   "repair: a leader's probe pages a straggler's late Promise".
-- `consensus-sim`: `Flavor::paged` puts every page at its floor (one entry), so the walks page
-  every promise; the oracles `ONE_VALUE` and `LEARNED_CHOSEN` judge each step, and the node trace
-  spec checks each page against `Page` in `Node.tla`.
+- `consensus-sim`: `Flavor::paged` puts every page at one entry in the walks of the coverage
+  gate, and the oracles `ONE_VALUE` and `LEARNED_CHOSEN` judge each step. The traced
+  `Flavor::disk_faults` pages promises at two entries, and `specs/tla/node/FaultsTrace.tla` checks
+  each page against the `Page` action of `Node.tla`.
 - Unit tests: `promise_suffix_is_served_in_bounded_pages`,
   `a_partial_promise_page_does_not_count_toward_the_quorum` and
   `a_paging_campaign_keeps_its_promisers_quiet` (`src/node/tests/election.rs`),
@@ -181,7 +183,8 @@ The rule is stated in the doc comments of `Election::keep_alive_from` and
 - etcd-raft pages the log transfer from leader to follower, and the cursor is the leader's
   `pr.Next`. paros pages Phase 1, from acceptor to candidate, and the cursor travels in the page
   (`next_from_slot`).
-- etcd-raft's empty append comes on each heartbeat answer. paros's keep-alive is a `Prepare` at
+- etcd-raft's append on a heartbeat answer goes to a follower that lags, and it is empty only
+  when that follower's inflight window is full. paros's keep-alive is a `Prepare` at
   the campaign's own ballot, sent on the beat cadence only while the campaign pages, and only to
   the members of the campaign's configurations (a pool node outside them is not asked).
 - The papers ([PMMC], [PML]) describe a `Promise` as one message and do not page it.
@@ -190,7 +193,8 @@ The rule is stated in the doc comments of `Election::keep_alive_from` and
 
 - **The paging livelock (#428).** Before the keep-alive, the peers that answered at once heard
   nothing while the candidate paged a long suffix; their clocks fired first, a rival campaigned
-  one round higher, and the next candidate met the same suffix. The old sweep went red on
+  one round higher, and the next candidate met the same suffix. The sweep of the removed
+  `paros-sim` (at the tag `v0.2.0-alpha.1`) went red on
   "cluster converged after chaos" (a Phase 1 that needed all five nodes, one node alone holding
   an 18-slot suffix, a one-entry promise page) and was green with the rule
   (`keep_paging_promisers` doc).
@@ -209,7 +213,7 @@ The rule is stated in the doc comments of `Election::keep_alive_from` and
   invariant is an assertion: "a paging sender has not answered completely" (`Election::paging`).
 - The doc comment of `keep_paging_promisers` still opens with "same ballot, same first slot";
   the rule, and the rest of that comment, ask from `keep_alive_from`. Trust the code and the
-  second paragraph.
+  last paragraph.
 
 ## 11. Relatives
 

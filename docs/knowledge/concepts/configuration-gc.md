@@ -200,8 +200,9 @@ The rows that name `paros-client`, `paros-coordinator`, `paros-roles` point to c
   "cluster: the operator booked a retired node again".
 - Controls refused by the trace check: `Mutant::EarlyGc` (`MatchmakerTrace.tla`) and
   `Mutant::RetireUnchecked` (`RetireTrace.tla`).
-- Core probes of `node/gc.rs` and `node/matchmaking.rs` ("gc: every matchmaker agreed the node may
-  retire", "rejoin: every matchmaker took the rejoin").
+- Core probes of `node/gc.rs` ("gc: a refused ack teaches the successor") and
+  `node/matchmaking.rs` ("gc: every matchmaker agreed the node may retire", "rejoin: every
+  matchmaker took the rejoin").
 
 **Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history (paths: `paros-sim/src/audit/matchmaking.rs` unless named):
 

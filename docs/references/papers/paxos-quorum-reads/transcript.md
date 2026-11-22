@@ -123,8 +123,8 @@ handles fewer messages, and the client handles more.
   1000 objects and 8-byte values.
 - At 75% writes, PQR has better latency and about 12% higher maximum throughput than
   read-from-leader (Figure 3). The advantage falls at lower write ratios.
-- High contention (2, 5 and 10 keys, 4000 ops/s): with 2 objects and 75% writes, about 155 rinse
-  phases per second; **no read took more than 2 round trips** (Figure 5).
+- High contention (2, 5 and 10 keys, 4000 ops/s, 50% writes): the paper's own example, with 2
+  objects and 75% writes, gives about 155 rinse phases per second (the paper names both ratios); **no read took more than 2 round trips** (Figure 5).
 - Paxi's linearizability checker found no violation in over a hundred 30-second runs.
 - **Without the rinse** (Figure 6), a quorum read has fewer non-linearizable reads than a read
   from any single node, but still many: "the quorum read guarantees reading at least the latest
@@ -134,7 +134,7 @@ handles fewer messages, and the client handles more.
 ## 7. Concluding remarks
 
 Future work named by the authors: hash digests from all but one follower for large objects, and
-running PQR **inside the cluster**, with followers acting as proxies for the clients (which also
+running PQR inside the set of replicas, with followers acting as proxies for the clients (which also
 allows batching of reads).
 
 ---
