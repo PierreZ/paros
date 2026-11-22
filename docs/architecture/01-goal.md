@@ -95,7 +95,10 @@ decide some sort of control plane component interacting with data plane", for ex
 controller of a journal that takes the telemetry of its roles and grows the journal with calls.
 So a task of an operator is first a question: which control component does it? The grid
 controller of a journal (journal §J6) is the first one: it decides when and where, and the
-protocol decides whether it is safe. The scaling is for after the journal v1, whose controller
+protocol decides whether it is safe. Two habits follow (Pierre, 2026-11-22): split the
+responsibilities, so that one component holds one duty, and expose each capability over the
+network, as a call that another component or a tool can use. The scaling is for after the
+journal v1, whose controller
 takes no action from load (journal §J6).
 
 | # | Goal | In short |
