@@ -104,6 +104,9 @@ Free(j, keep) == {m \in Machines \ (Leaving \cup keep) :
 Req(rid, j, keep, leave) ==
     [t |-> "place", rid |-> rid, j |-> j, keep |-> keep, leave |-> leave]
 
+Requests == {r \in net : r.t = "place"}
+Releases == {r \in net : r.t = "release"}
+
 Send(msgs) == net' = net \cup msgs
 
 -----------------------------------------------------------------------------
@@ -189,7 +192,6 @@ New(r) ==
 \* The grant and its bookings in one write of the cell's control journal.
 PlaceGrant(r) ==
     /\ CellUp
-    /\ r.t = "place"
     /\ New(r)
     /\ ~Busy
     /\ \E S \in Choices(r) :
@@ -216,7 +218,6 @@ CommitStaged(p) ==
 \* or not.
 PlaceRefuse(r) ==
     /\ CellUp
-    /\ r.t = "place"
     /\ New(r)
     /\ Choices(r) = {}
     /\ grants' = grants \cup {[rid |-> r.rid, j |-> r.j, leave |-> r.leave,
@@ -227,7 +228,6 @@ PlaceRefuse(r) ==
 \* release(rid): end the grant and free the bookings of the members that left.
 Release(msg) ==
     /\ CellUp
-    /\ msg.t = "release"
     /\ \E g \in grants :
          /\ g.rid = msg.rid
          /\ grants' = (grants \ {g}) \cup {[g EXCEPT !.state = "done"]}
@@ -302,7 +302,8 @@ GotReleased(j) ==
 CellStep ==
     \/ \E m \in Machines : RecordGone(m)
     \/ \E g \in grants : PlaceAgain(g)
-    \/ \E r \in net : PlaceGrant(r) \/ PlaceRefuse(r) \/ Release(r)
+    \/ \E r \in Requests : PlaceGrant(r) \/ PlaceRefuse(r)
+    \/ \E r \in Releases : Release(r)
     \/ \E p \in staged : CommitStaged(p)
 
 CtlStep(j) ==
@@ -323,7 +324,8 @@ Spec == Init /\ [][Next]_vars
 Fairness ==
     /\ \A m \in Machines : WF_vars(RecordGone(m))
     /\ WF_vars(\E g \in grants : PlaceAgain(g))
-    /\ WF_vars(\E r \in net : PlaceGrant(r) \/ PlaceRefuse(r) \/ Release(r))
+    /\ WF_vars(\E r \in Requests : PlaceGrant(r) \/ PlaceRefuse(r))
+    /\ WF_vars(\E r \in Releases : Release(r))
     /\ WF_vars(\E p \in staged : CommitStaged(p))
     /\ \A j \in Journals : WF_vars(CtlStep(j))
 
