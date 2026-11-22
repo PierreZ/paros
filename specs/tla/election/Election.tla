@@ -86,7 +86,7 @@ VARIABLES inc,       \* the incarnation of each actor
           jleader, jlog,   \* the journal: the leader value and the log
           net,       \* calls to the journal, their answers and hand-on messages
           onet,      \* the orders in flight to the receiver: their terms
-          seen, top, \* the receiver: the highest term on disk, the highest applied
+          seen,      \* the receiver: the highest term it saw, on disk
           nuuid,     \* the uuids drawn so far
           owner,     \* owner[u]: <<actor, incarnation>> that took a term with u
           crashes, lost, hands, users,
@@ -97,7 +97,7 @@ VARIABLES inc,       \* the incarnation of each actor
 
 actor == <<inc, st, mine, base, term, pub, wfly>>
 journal == <<jleader, jlog>>
-receiver == <<onet, seen, top>>
+receiver == <<onet, seen>>
 budget == <<crashes, lost, hands, users>>
 ghost == <<stale, regress, userSet, reached>>
 vars == <<actor, journal, net, receiver, nuuid, owner, budget, ghost>>
@@ -162,7 +162,7 @@ Init ==
   /\ base = [a \in Actors |-> <<Unset, 0, a>>] /\ term = [a \in Actors |-> 0]
   /\ pub = [a \in Actors |-> FALSE] /\ wfly = [a \in Actors |-> FALSE]
   /\ jleader = Unset /\ jlog = <<>>
-  /\ net = {} /\ onet = {} /\ seen = 0 /\ top = 0
+  /\ net = {} /\ onet = {} /\ seen = 0
   /\ nuuid = 0 /\ owner = [u \in Uuids |-> <<>>]
   /\ crashes = 0 /\ lost = 0 /\ hands = 0 /\ users = 0
   /\ stale = FALSE /\ regress = FALSE /\ userSet = FALSE /\ reached = FALSE
@@ -241,7 +241,6 @@ Renew(a) ==
 \* A write with no answer (it or its answer was lost) is given up; the next
 \* write goes again.
 Timeout(a) ==
-  /\ wfly[a]
   /\ Pending(a) = {}
   /\ wfly' = [wfly EXCEPT ![a] = FALSE]
   /\ UNCHANGED <<inc, st, mine, base, term, pub, journal, net, receiver, nuuid,
@@ -274,11 +273,11 @@ WriteAnswer(a) ==
 Order(a) ==
   /\ st[a] = "lead"
   /\ onet' = onet \cup {term[a]}
-  /\ UNCHANGED <<actor, journal, net, seen, top, nuuid, owner, budget, ghost>>
+  /\ UNCHANGED <<actor, journal, net, seen, nuuid, owner, budget, ghost>>
 
 \* A clean stop: `SetLeader(next, me)`, with a fresh uuid for the next actor.
 HandOn(a, b) ==
-  /\ st[a] = "lead" /\ b # a /\ hands < MaxHands
+  /\ st[a] = "lead" /\ hands < MaxHands
   /\ nuuid < MaxUuids
   /\ hands' = hands + 1
   /\ nuuid' = nuuid + 1
@@ -305,11 +304,13 @@ HandAnswer(a) ==
                    budget, ghost>>
 
 \* The next actor takes the handed term when it is idle. Else the term has
-\* no holder, and a challenge takes the next one.
+\* no holder, and a challenge takes the next one. A write of an earlier term
+\* of the next actor may still be in flight: its answer does not count for
+\* the new term (OwnAnswer).
 Adopt(b) ==
   \E m \in net :
     /\ m.k = "lead" /\ m.to = b
-    /\ IF st[b] = "idle" /\ ~wfly[b]
+    /\ IF st[b] = "idle"
        THEN /\ Take(b, m.u, m.t)
             /\ net' = (net \ {m}) \cup {TermRecord(b, m.u, m.t)}
             /\ Hit("adopted")
@@ -362,10 +363,9 @@ Deliver ==
     /\ onet' = onet \ {t}
     /\ IF Fence /\ t < seen
        THEN /\ Hit("stale_refused")
-            /\ UNCHANGED <<seen, top, regress>>
+            /\ UNCHANGED <<seen, regress>>
        ELSE /\ seen' = IF t > seen THEN t ELSE seen
-            /\ top' = IF t > top THEN t ELSE top
-            /\ regress' = (regress \/ t < top)
+            /\ regress' = (regress \/ t < seen)
             /\ UNCHANGED reached
     /\ UNCHANGED <<actor, journal, net, nuuid, owner, budget, stale, userSet>>
 
@@ -394,7 +394,7 @@ Lose ==
 
 \* The user of the journal switches it to multi-writer mode.
 UserMulti ==
-  /\ users < MaxUser /\ jleader \in Uuids
+  /\ users < MaxUser
   /\ users' = users + 1
   /\ jleader' = None
   /\ jlog' = Append(jlog, [k |-> "set", u |-> None, iface |-> NoIface])
@@ -452,6 +452,14 @@ IfaceOfTerm ==
     LET f == FoldOf(s) IN
     f.iface = NoIface \/ (f.leader \in Uuids /\ f.iface = owner[f.leader])
 
+\* A holder that believes its interface is published finds its term record,
+\* with its own incarnation, in the journal.
+PubTrue ==
+  \A a \in Actors :
+    st[a] = "lead" /\ pub[a] =>
+      \E i \in 1..Len(jlog) : jlog[i].k = "term" /\ jlog[i].u = mine[a]
+                               /\ jlog[i].iface = <<a, inc[a]>>
+
 \* The election never takes a journal out of multi-writer mode.
 ModeKept == userSet => jleader = None
 
@@ -466,4 +474,5 @@ TypeOK ==
   /\ st \in [Actors -> {"idle", "campaign", "lead", "handing"}]
   /\ jleader \in Uuids \cup {Unset, None}
   /\ nuuid \in 0..MaxUuids
+  /\ onet \subseteq 1..MaxUuids
 =============================================================================

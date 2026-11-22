@@ -37,7 +37,7 @@ candidate) fail.
   candidates is kept, and no candidate comes from a booking or from the first configuration
   (step 3.6, #1023).
 - **One election mechanism for everyone** (decision 13). The election over a journal is its own
-  crate of layer 3, `paros-election` (section 4.4, #1420 (paros-election)): win a journal with
+  crate (section 4.4; working name `paros-election`, #1420 (paros-election)): win a journal with
   `SetLeader`, renew by writing, stop at the first refused write, hand on with `SetLeader(next,
   me)`. It is the public election API, and each coordinator uses it over its control journal. The
   election journal library (`paros::client::election`) is deleted. Multi-writer journals stay a
