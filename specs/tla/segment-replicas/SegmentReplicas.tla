@@ -204,9 +204,9 @@ Init ==
   /\ acked = [s \in Slots |-> None]
   /\ rd = [s \in Slots |-> None]
 
-\* The leader chooses the next slot.
+\* The leader chooses the next slot. Once every slot is chosen, Frontier is
+\* NS, outside the log, and the step changes nothing.
 Choose(v) ==
-  /\ Frontier < NS
   /\ ~(MetaMode /\ Frontier = K)
   /\ chosen' = [chosen EXCEPT ![Frontier] = v]
   /\ UNCHANGED <<held, applied, base, rec, meta, retired, down, acked, rd>>
@@ -214,9 +214,11 @@ Choose(v) ==
 \* The first leader of S2 proposes the leader uuid that it read in the
 \* journal's metadata as the first slot of S2. With "meta_stale" it may read
 \* the metadata before the seal wrote it, and finds the first uuid.
+\* The metadata holds a uuid only once a replica of R1 applied all of S1
+\* (WriteRecord), so with Boundary = "meta" the slots below K are chosen;
+\* once K is chosen, the step writes the same fence again.
 ChooseFence ==
   /\ MetaMode
-  /\ Frontier = K
   /\ K < NS
   /\ Boundary = "meta" => meta # None
   /\ chosen' = [chosen EXCEPT ![K] = [op |-> "fence", u |-> IF meta = None THEN U0 ELSE meta]]
@@ -244,11 +246,12 @@ Apply(r) ==
   /\ applied' = [applied EXCEPT ![r] = @ + 1]
   /\ UNCHANGED <<chosen, held, base, rec, meta, retired, down, acked, rd>>
 
-\* A replica of R1 writes the boundary state into the record of S1, once.
+\* A replica of R1 writes the boundary state into the record of S1. The
+\* code writes it once (a compare-and-set); a second write writes the same
+\* state, since each replica of R1 folds the same slots up to K.
 WriteRecord(p) ==
   /\ RecordMode
   /\ p \in R1 \ down
-  /\ rec = None
   /\ Boundary # "early" => Front(p) = K
   /\ rec' = StateOf(p)
   /\ meta' = IF MetaMode THEN StateOf(p).leader ELSE meta
@@ -301,11 +304,11 @@ Reroute(s) ==
        rd' = [rd EXCEPT ![s] = [rep |-> r, basis |-> Count(SetOf(r)), ans |-> Wait]]
   /\ UNCHANGED <<chosen, held, applied, base, rec, meta, retired, down, acked>>
 
-\* The replica's applied prefix covers the basis: it answers.
+\* The replica's applied prefix covers the basis: it answers. A replica that
+\* stopped may answer too: its answer left before it stopped.
 Serve(s) ==
   /\ rd[s] # None
   /\ rd[s].ans = Wait
-  /\ rd[s].rep \notin down
   /\ Ready(rd[s].rep)
   /\ applied[rd[s].rep] >= rd[s].basis
   /\ rd' = [rd EXCEPT ![s].ans = Lookup(rd[s].rep, acked[s])]
@@ -314,7 +317,6 @@ Serve(s) ==
 \* S1 retires: RetireAt replicas of R1 hold it, and with the boundary in the
 \* record, the record holds it.
 Retire ==
-  /\ ~retired
   /\ S1Full
   /\ Cardinality(Holders) >= RetireAt
   /\ RetireRecord /\ RecordMode => rec # None
@@ -332,7 +334,6 @@ Crash(r) ==
 Vanish ==
   /\ Gone
   /\ retired
-  /\ ~(R1 \subseteq down)
   /\ down' = down \cup R1
   /\ UNCHANGED <<chosen, held, applied, base, rec, meta, retired, acked, rd>>
 
@@ -371,6 +372,10 @@ RecordTrue == rec # None => S1Full /\ rec = Truth(K)
 
 \* Each writer got the answer of the whole log.
 AckTrue == \A s \in Slots : acked[s] # None => acked[s] = Res(Truth(s), chosen[s])
+
+\* A writer gets its answer from a replica of the slot's set that applied the
+\* slot.
+AckApplied == \A s \in Slots : acked[s] # None => \E r \in Set(Seg(s)) : s < Front(r)
 
 \* Each served read of an acked write returns that write: never "tail" (a
 \* stale read) and never `Truncated` (nothing was trimmed).

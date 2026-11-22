@@ -167,12 +167,14 @@ PromiseMsg(a, b, from) ==
 
 \* The owner of ballot b opens a campaign from its first unlearned slot. It
 \* is its own first acceptor: it promises b, and its own records seed the
-\* tally (`open_phase1` takes `acceptor.records()`).
+\* tally (`open_phase1` takes `acceptor.records()`). The owner opens each
+\* ballot once: it promises its ballot when it opens it, a promise never
+\* falls, so `prom[o] < b` holds only for a ballot that it never opened, or
+\* after it lost its disk (`BallotInv`).
 Prepare(b) ==
   LET o == Owner[b]
       from == FirstUnlearned(o)
-  IN /\ phase[b] = "idle"
-     /\ Live(o)
+  IN /\ Live(o)
      /\ prom[o] < b
      /\ phase' = [phase EXCEPT ![b] = "p1"]
      /\ prom' = [prom EXCEPT ![o] = b]
@@ -216,12 +218,13 @@ Recovery(S, b, from, f) ==
         ELSE {})
 
 \* The owner of ballot b wins Phase 1 on the promises S, one for each
-\* acceptor, its own among them, and a Phase-1 quorum. It opens the recovery.
+\* acceptor, and a Phase-1 quorum. It opens the recovery. An acceptor sends
+\* one promise for each ballot (`MsgInv`), so S holds one for each acceptor.
+\* In the code the owner's own promise is always among them; the model lets
+\* any quorum of promises win, which only adds behaviours.
 Win(b) ==
   /\ phase[b] = "p1"
   /\ \E S \in SUBSET {m \in msgs : m.type = "1b" /\ m.bal = b} :
-       /\ \A m, n \in S : m.acc = n.acc => m = n
-       /\ Owner[b] \in {m.acc : m \in S}
        /\ \E Q \in Q1 : Q \subseteq {m.acc : m \in S}
        /\ LET from == (CHOOSE m \in msgs : m.type = "1a" /\ m.bal = b).from
               f == Frontier(S, from)
@@ -257,10 +260,10 @@ Accept(a, b, s) ==
   /\ UNCHANGED <<learned, phase, next, front, wiped, restarts>>
 
 \* The late write of an acceptor that answered first (Durable = "after").
+\* With Durable = "before" the disk always holds the memory, so this step
+\* changes nothing; it changes nothing either when the disk is up to date.
 Persist(a) ==
-  /\ Durable = "after"
   /\ Live(a)
-  /\ <<dprom[a], dvote[a]>> # <<prom[a], vote[a]>>
   /\ dprom' = [dprom EXCEPT ![a] = prom[a]]
   /\ dvote' = [dvote EXCEPT ![a] = vote[a]]
   /\ UNCHANGED <<prom, vote, learned, phase, next, front, wiped, restarts, msgs>>
@@ -291,9 +294,10 @@ LearnAll(n, rec) ==
                                     THEN "dead" ELSE phase[c]]
 
 \* The leader of ballot b learns slot s at a Phase-2 quorum and commits it.
+\* A late quorum of 2b for a slot that the leader learned already learns the
+\* same value again: a learn keeps a record at or above its ballot.
 Decide(b, s) ==
   /\ phase[b] = "p2"
-  /\ learned[Owner[b]][s] = None
   /\ \E v \in Values, Q \in Q2[s] :
        /\ \A a \in Q : [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
        /\ LearnAll(Owner[b], [t \in {s} |-> [bal |-> b, val |-> v]])
@@ -316,8 +320,8 @@ CatchUp(n, p) ==
 
 \* Node a restarts: memory goes back to the disk, its ballots die, and it
 \* keeps a prefix of what it learned (up to its durable chosen index).
+\* A node that is down or gone may restart too: it still takes no other step.
 Restart(a) ==
-  /\ Live(a)
   /\ a \in Restartable
   /\ restarts < Restarts
   /\ restarts' = restarts + 1

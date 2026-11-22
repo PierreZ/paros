@@ -24,42 +24,7 @@ THEOREM StepInv ==
   ASSUME Inv, Hyp, [Next]_vars
   PROVE  Inv'
 <1>1. CASE UNCHANGED vars
-  <2>0. TypeOK /\ UNCHANGED <<prom, vote, dprom, dvote, learned, phase, next, front, wiped, restarts, msgs>>
-    BY <1>1 DEF Inv, vars
-  <2>1. \A x, c, s, v : VotedFor(x, c, s, v)' = VotedFor(x, c, s, v)
-    BY <2>0 DEF VotedFor
-  <2>2. \A x \in Acceptors : prom'[x] \in Nat /\ prom'[x] >= prom[x]
-    BY <2>0 DEF TypeOK
-  <2>3. KeepsVW
-    <3>1. \A x \in Acceptors, c \in Ballots, s \in Slots :
-            WontVoteIn(x, c, s) => \A v \in Values : ~VotedFor(x, c, s, v)'
-      BY <2>1 DEF WontVoteIn
-    <3> QED
-      BY <2>0, <2>2, <3>1, KeepsVWFrom
-  <2>4. TypeOK' /\ restarts' <= Restarts /\ Cardinality(wiped') <= Wipes
-        /\ dprom' = prom' /\ dvote' = vote'
-    BY <2>0 DEF Inv, TypeOK
-  <2>5. NodeInv'
-    <3> SUFFICES ASSUME NEW x \in Acceptors PROVE NodeOK(x)'
-      BY DEF NodeInv
-    <3>1. IF x \in wiped THEN prom'[x] = prom[x] ELSE prom'[x] \in Nat /\ prom'[x] >= prom[x]
-      BY <2>0 DEF TypeOK
-    <3> QED
-      BY <2>0, <2>1, <3>1, NodeKeep
-  <2>6. BallotInv'
-    <3> SUFFICES ASSUME NEW c \in Ballots PROVE BallotOK(c)'
-      BY DEF BallotInv
-    <3>1. phase[c] \in {"p1", "p2"} => Owner[c] \notin wiped'
-      BY <2>0 DEF Inv, BallotInv, BallotOK
-    <3> QED
-      BY <2>0, <2>2, <2>3, <3>1, BallotKeep
-  <2>7. MsgInv'
-    <3> SUFFICES ASSUME NEW m \in msgs' PROVE MsgOK(m)'
-      BY DEF MsgInv
-    <3> QED
-      BY <2>0, <2>1, <2>2, <2>3, OldMsg
-  <2> QED
-    BY <2>4, <2>5, <2>6, <2>7 DEF Inv
+  BY <1>1, UnchangedInv
 <1> QED
   BY <1>1, PrepareInv, WinInv, AllocateInv, PromiseInv, AcceptInv, DecideInv, CatchUpInv,
      PersistInv, RestartInv, WipeInv DEF Next
