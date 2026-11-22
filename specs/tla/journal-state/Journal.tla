@@ -399,8 +399,8 @@ Phase1(b) == \E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : Phase1On(b, Qs)
 (* by compare-and-set from "no end". Its read may miss a partial write of  *)
 (* another sealer, and then it writes over it.                             *)
 (***************************************************************************)
-\* The code writes the seal in Phase 1; the model also lets a leader that
-\* already writes seal again. Only its Phase 1 sets `bend[b]`, so each
+\* The code writes the seal in Phase 1; in the model, a leader that already
+\* writes may also write the seal again. Only its Phase 1 sets `bend[b]`, so each
 \* write is still the end that its Phase 1 read.
 SealWrite(b) ==
   LET g == bgen[b] IN
@@ -588,12 +588,12 @@ BoundLost(p) ==
   /\ rbound' = [rbound EXCEPT ![p] = None]
   /\ UNCHANGED <<top, rend, rret, rtrim, bgen, ldr, acc, rep>>
 
-\* A replica of g starts from the boundary state of g - 1. A second take
-\* changes nothing: every boundary write of g - 1 is the state of a full
-\* replica, and the full replicas of a segment hold one state.
+\* A replica of g starts from the boundary state of g - 1, one time: so
+\* `RolesTrace` refuses a base taken twice (`BaseOnce`).
 TakeBase(r) ==
   LET g == GenOf(r) IN
   /\ g >= 2 /\ g <= top
+  /\ rbase[r] = None
   /\ IF BoundAct = "done" THEN Done(rbound[g - 1]) ELSE rbound[g - 1] # None
   /\ StartKnown(g)
   /\ rbase' = [rbase EXCEPT ![r] = rbound[g - 1].v]
@@ -745,6 +745,10 @@ Readable == \A s \in Slots :
 
 \* A written seal end never changes.
 EndOnce == [][\A p \in Gens : Done(rend[p]) => rend'[p] = rend[p]]_vars
+\* A replica that holds its base takes no other: a trace that takes one base
+\* two times is refused at the copy.
+BaseOnce == \A r \in Replicas : rbase[r] # None => ~ENABLED TakeBase(r)
+
 \* A boundary state written at a majority never changes.
 BoundOnce == [][\A p \in Gens : Done(rbound[p]) => rbound'[p] = rbound[p]]_vars
 

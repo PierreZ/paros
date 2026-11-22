@@ -90,8 +90,9 @@ hold the data read them back with their checksums. Each rule has a control that 
   peer's vote that is not known to be chosen loses a chosen value (`repair_peer`). With no repair
   at all the journal stays safe (`repair_none`): the repair adds a copy, it never decides.
 - **A repair replaces the damaged record in one write.** A repair that deletes the record first
-  and writes the new one after is safe while the acceptor answers nothing between the two
-  (`drop_first_up`), but a restart between the two forgets the repair, and the slot reads as a
+  and writes the new one after is safe while the acceptor promises nothing and does not
+  campaign between the two (`drop_first_up`, `drop_first_two`, `drop_first_lead`; a vote between
+  the two stays safe), but a restart between the two forgets the repair, and the slot reads as a
   slot with no vote (`drop_first`).
 - **A sealed segment retires at `F + 1` replica holders, and a repair never needs the retired
   grid** (§J5.2). A found damaged replica log is repaired from a live peer of its set, from the

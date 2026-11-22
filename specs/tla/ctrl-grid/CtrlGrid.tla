@@ -56,9 +56,10 @@
 (*               later `Accept` heals the record (`record_accepted`).      *)
 (*   RepairWrite "atomic": the new record replaces the damaged one in one  *)
 (*               write. "drop_first": the store first deletes the damaged  *)
-(*               record, then writes the new one; the acceptor answers     *)
-(*               nothing between the two, but a restart between the two    *)
-(*               forgets that a repair was running.                        *)
+(*               record, then writes the new one; the acceptor promises    *)
+(*               nothing and campaigns not between the two (it may vote),  *)
+(*               but a restart between the two forgets that a repair was   *)
+(*               running.                                                  *)
 (*   Faults      how many damaged records may be found (in the whole run), *)
 (*               on the nodes `RotNodes` only.                             *)
 (*   Restarts    how many restarts may happen (in the whole run).          *)
@@ -146,7 +147,8 @@ Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 Readable(v) == v.bal > 0 /\ v.val \notin {Lost, None}
 Faulty(v) == v.bal > 0 /\ v.val = Lost
 
-\* An acceptor in the middle of a "drop_first" repair answers nothing.
+\* An acceptor in the middle of a "drop_first" repair promises nothing and
+\* campaigns not: its empty slot would read as a slot with no vote.
 Busy(a) == \E s \in Slots : repairing[a][s] # 0
 
 \* The history of ballot b: the configurations of every ballot up to b (no
@@ -293,9 +295,12 @@ Allocate(b, c) ==
 \* Acceptor a, a member of the configuration of ballot b, votes. A vote over
 \* a faulty record heals it. A vote that the record holds already changes
 \* nothing. A vote during a "drop_first" repair writes a whole record over
-\* the deleted one, of the chosen value (the repair writes only a chosen
-\* value, and every ballot above the one that chose it proposes it), and
-\* `RepairEnd` writes that value back: no guard on `Busy` is needed here.
+\* the deleted one, and `RepairEnd` then writes the repaired record over it,
+\* under the ballot of the faulty record: the record's ballot can fall below
+\* a vote that the acceptor sent. Every value stays safe with no guard on
+\* `Busy` here (`drop_first_two`, `drop_first_lead`, and `drop_first_up` with
+\* three ballots); the code answers nothing during the repair, which is
+\* stricter.
 Accept(a, b, s) ==
   /\ a \in Members[Cfg[b]]
   /\ prom[a] <= b
