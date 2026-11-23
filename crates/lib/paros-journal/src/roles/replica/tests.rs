@@ -1236,3 +1236,30 @@ fn a_compaction_keeps_the_position_of_a_write_at_the_floor() {
         "a resend at the floor is a Duplicate: {answers:?}"
     );
 }
+
+#[test]
+fn a_compaction_ask_of_another_segment_is_not_answered() {
+    let mut replica = based();
+    let asked = |replica: &mut SegmentReplica, segment: u64| {
+        replica
+            .step(
+                LEADER,
+                Message::Compaction {
+                    segment: SegmentId(segment),
+                },
+            )
+            .into_iter()
+            .filter(|effect| {
+                matches!(
+                    effect,
+                    ReplicaEffect::Send {
+                        message: Message::CompactedTo { .. },
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    assert_eq!(asked(&mut replica, 2), 0, "another segment");
+    assert_eq!(asked(&mut replica, 1), 1, "its own segment");
+}

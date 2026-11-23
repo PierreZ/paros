@@ -493,3 +493,62 @@ fn a_compact_drops_the_votes_of_its_range_and_keeps_the_range() {
         "the slot at `below` stays"
     );
 }
+
+#[test]
+fn a_compact_drops_the_faulty_entries_of_its_range() {
+    let disk = AcceptorDisk {
+        promised: ballot(1),
+        faulty: BTreeMap::from([(Slot(1), ballot(1)), (Slot(5), ballot(1))]),
+        ..AcceptorDisk::default()
+    };
+    let mut acceptor = JournalAcceptor::recover(ME, disk, PROMISE_BATCH);
+    acceptor.step(
+        LEADER,
+        Message::Compact {
+            segment: SegmentId(1),
+            start: Slot(0),
+            below: Slot(3),
+        },
+    );
+    let (_, sends, _) = split(acceptor.step(LEADER, prepare(2, 0)));
+    let [Message::Promise { page, .. }] = &sends[..] else {
+        panic!("a promise: {sends:?}");
+    };
+    assert_eq!(
+        page.faulty.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(5)],
+        "the faulty entry in the range goes, the one above stays"
+    );
+    assert_eq!(page.dropped, BTreeMap::from([(Slot(0), Slot(3))]));
+}
+
+#[test]
+fn the_read_watermark_counts_the_last_slot_of_a_dropped_range() {
+    let mut acceptor = fresh();
+    acceptor.step(LEADER, prepare(1, 0));
+    acceptor.step(
+        LEADER,
+        Message::Compact {
+            segment: SegmentId(1),
+            start: Slot(0),
+            below: Slot(3),
+        },
+    );
+    let (_, sends, _) = split(acceptor.step(
+        LEADER,
+        Message::PreRead {
+            segment: SegmentId(1),
+            read: 1,
+        },
+    ));
+    assert!(
+        matches!(
+            sends[..],
+            [Message::PreReadAck {
+                watermark: Some(Slot(2)),
+                ..
+            }]
+        ),
+        "the last dropped slot is the watermark: {sends:?}"
+    );
+}

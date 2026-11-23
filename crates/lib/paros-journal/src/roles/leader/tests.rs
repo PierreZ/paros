@@ -1231,3 +1231,18 @@ fn only_the_replicas_of_a_segment_count_toward_its_compaction() {
     effects.extend(leader.tick(4));
     assert!(compacts(&effects) > 0, "F + 1 replicas compacted");
 }
+
+#[test]
+fn a_first_leader_seals_above_a_dropped_range() {
+    let value = two_segments();
+    let (mut leader, _) = campaign(&value, 2, 2, 0);
+    for node in [4, 5] {
+        leader.step(NodeId(node), promise(2, 0, page(&[], &[])));
+    }
+    let mut dropped = page(&[], &[]);
+    dropped.dropped = BTreeMap::from([(Slot(0), Slot(3))]);
+    leader.step(NodeId(1), promise(2, 0, dropped));
+    leader.step(NodeId(2), promise(2, 0, page(&[], &[])));
+    // A dropped range counts as voted: the end is one above its last slot.
+    assert_eq!(*leader.phase(), LeaderPhase::Sealing { end: Slot(3) });
+}
