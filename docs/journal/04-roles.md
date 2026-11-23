@@ -179,7 +179,22 @@ checks each of these against `Journal.tla` (§J7.3).
 pure (§J4.3): the four traits that a backend implements, the `Host`, the generic `Driver`, the
 backends in memory (`mem`) and the contract suites (`contract`).
 
-- *Rule 1.* The `Driver` steps the `Host` at once for each input and keeps every persist batch of
+- *The generic host of actors* (#1410 (split the generic host of actors), `crates/lib/paros-host`,
+  2026-11-23). The part of the `Host` and the `Driver` that knows no journal is a crate of its own,
+  with no dependency: the `Role` trait (start at once or from the records, step, tick, stop, and
+  an end by the role's own step), the `Host` of many roles over an opaque address, the generic
+  `Driver` (group commit, held sends, held outputs, recovery reads, the timer), the `Storage`,
+  `Transport` and `Clock` traits and the `Events` and output ports. A `Family` names the types that
+  the roles of one host share: an address, a message, a batch id, an op and the records of the
+  disk format, an assignment, an input, an output and a stop. `paros-journal-io` keeps the journal
+  roles behind the `Role` trait, their address, the register, the disk layout and the contract
+  suites; a backend of the journal implements `Storage<Journal>` and `Transport<Journal>`. A send
+  waits on a batch, and so does an output (a register change, a read answer); a periodic report
+  (a heal's copy report) is dropped when its batch is not durable yet. One trait fits the four
+  journal roles and a toy coordinator; the example `coordinator` of `paros-host` runs roles that
+  are not journal roles. `specs/tla/flight-rule/` is the model of the host.
+
+- *Rule 1.* The generic `Driver` steps the `Host` at once for each input and keeps every persist batch of
   a round in one group. At the end of `Driver::poll` it commits the group in one storage write
   (group commit), in id order for each role, then transmits the sends and runs the register
   changes that waited on a batch of the group. A commit that fails stops every role that had a
@@ -236,6 +251,14 @@ it in.
 *Why.* The effects of a step are then a function of the role's inputs alone. Any run, in
 simulation or in production, replays from its recorded inputs, and a failing run of the whole
 journal under moonpool-sim replays exactly.
+
+*Proof.* `specs/tla/recorded-inputs/` (#1413 (the time, the timers and the draws in each role)):
+roles that arm and fire timers whose deadline adds a random jitter. With the time and the draw in
+each input and one deadline for each role, every recorded run replays to the same effects at any
+clock and with any random source (`ReplayExact`), and a role gets a fire only at or after its own
+deadline (`OwnTimer`). Three controls break it: a role that reads the clock (`clock`), a role that
+draws its own jitter (`draw`), and one timer for every role whose fire goes to every role
+(`shared`).
 
 **Rule 3: a pure `Host`.** A process serves many roles of many journals. The `Host` is a pure
 state machine in the core: it maps (journal, role, instance) to a role, routes each input to it

@@ -15,6 +15,7 @@ use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, ChangeRefusal, RegisterValue};
 
 use crate::clock::Clock;
+use crate::family::Journal;
 use crate::layout::{Entry, KEY_LEN, Key, Op, PREFIX_LEN};
 use crate::register::Register;
 use crate::storage::{Storage, StorageError};
@@ -60,7 +61,7 @@ impl MemStorage {
     }
 }
 
-impl Storage for MemStorage {
+impl Storage<Journal> for MemStorage {
     fn commit(&mut self, ops: &[Op], _sync: bool) -> Result<(), StorageError> {
         if std::mem::take(&mut self.fail_next) {
             return Err(StorageError("a planted failure".into()));
@@ -162,7 +163,7 @@ impl Endpoint {
     }
 }
 
-impl Transport for Endpoint {
+impl Transport<Journal> for Endpoint {
     fn send(&mut self, envelope: Envelope) {
         let mut network = self.network.borrow_mut();
         if let Some(to) = network

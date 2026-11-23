@@ -6,19 +6,21 @@ loop:
 
 | Trait | What a backend does |
 |---|---|
-| `Storage` | One atomic `commit` of ops, and a `scan` of one role's records. The format is this crate's (`layout`): a backend stores keys and bytes |
-| `Transport` | `send` a message, `receive` the next one. Every message goes through it, between two roles of one process too |
+| `Storage<Journal>` | One atomic `commit` of ops, and a `scan` of one role's records. The format is this crate's (`layout`): a backend stores keys and bytes |
+| `Transport<Journal>` | `send` a message, `receive` the next one. Every message goes through it, between two roles of one process too |
 | `Clock` | The time now. The roles read no clock: the driver gives the time with every input |
 | `Register` | The journal's compare-and-set register: run a change, read the value of a done write |
 
-The `Host` is the pure state machine that serves many roles of many journals in one process: it
-routes each input to its role and turns the role's effects into effects that name their journal.
-The `Driver` steps the `Host`, commits the persist batches of a round in one write (group
+`Storage`, `Transport` and `Clock` are the traits of the generic host of actors (`paros-host`),
+for the journal's family `Journal`. The `Host` is the pure state machine that serves many roles
+of many journals in one process, on the generic host: it routes each input to its role and turns
+the role's effects into effects that name their journal. The `Driver` is the generic driver with
+the journal's ports: it steps the `Host`, commits the persist batches of a round in one write (group
 commit), and sends each message only once the batch that it waits on is durable (the flight
 rule). The `Events` port reports each step, for the trace check and the grid controller.
 
-No trait requires `Send`, an executor or a runtime type. The crate depends on `paros-consensus`
-and `paros-journal` alone. `mem` has backends in memory, written with the standard library, and
+No trait requires `Send`, an executor or a runtime type. The crate depends on `paros-consensus`,
+`paros-journal` and `paros-host` alone. `mem` has backends in memory, written with the standard library, and
 `contract` has the suites that check a backend's API.
 
 ## Examples

@@ -15,7 +15,9 @@ use std::rc::Rc;
 use paros_journal::register::Ballot;
 use paros_journal::roles::Message;
 use paros_journal_io::mem::MemStorage;
-use paros_journal_io::{Address, Entry, Envelope, Key, Kind, Op, Storage, StorageError, Transport};
+use paros_journal_io::{
+    Address, Entry, Envelope, Journal, Key, Kind, Op, Storage, StorageError, Transport,
+};
 
 /// The faults that a walk arms on a disk, for its next commit.
 #[derive(Clone, Copy, Debug, Default)]
@@ -91,7 +93,7 @@ impl Disk {
     }
 }
 
-impl Storage for Disk {
+impl Storage<Journal> for Disk {
     fn commit(&mut self, ops: &[Op], sync: bool) -> Result<(), StorageError> {
         (self.seen)(ops);
         let faults = std::mem::take(&mut *self.faults.borrow_mut());
@@ -140,7 +142,7 @@ pub struct Wire {
     pub flight: &'static str,
 }
 
-impl Transport for Wire {
+impl Transport<Journal> for Wire {
     fn send(&mut self, envelope: Envelope) {
         let flight = self.flight;
         match &envelope.message {

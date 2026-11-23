@@ -282,6 +282,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The heal when a later plan asks a node again, the network delivers a request twice and late, and a node acts on its own view of the register: the highest copy per node, the term check of the heal's compare-and-set, the heal count of the record, a sent heal that ends only on an answer, and a fresh register value before an abandon or a copy wipes a node | `paros_journal::register` (`Rereplicate`, `SegmentRecord::heals`), `SegmentReplica::join`, the controller's heal in `paros_journal_control::role`; walked by `journal-sim`'s heal walk | `heal-reuse/` | #1314 (re-replication of a sealed segment's replica set) |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
+| Rule 2 of the journal's sans-IO contract, every input is recorded: the time and the random draws in each input, one timer for each role (`docs/journal/04-roles.md` §J4.2) | not built (`paros-host`, #1413) | `recorded-inputs/` | #1413 (the time, the timers and the draws in each role) |
 | The election over a journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after #1323 (build the paros journal v1)) | `election/` | #1420 (paros-election) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
@@ -3684,6 +3685,23 @@ rules, and each rule is needed. They are proposals for Pierre (PR #1470, rules t
 What is not in the model: reads, the trim and the floor (`re-replication/`), the register across a
 matchmaker handover (`segment-records/`), and a controller's own stale view of the register (the
 controller reads the current record).
+
+### `recorded-inputs/`: every input is recorded, for #1413 (the time, the timers and the draws in each role)
+
+`RecordedInputs.tla` is a host of two roles. A role asks a timer (`Arm`) at the time of its input
+plus a fixed `Delay` plus a jitter, a random draw; it may set its timer again. The host fires a
+timer that is due (`Fire`). The step of a role is a pure function `Step` of its state and its
+input, and the model records each input with the effects of its step. `Rule` selects how the host
+and the roles do it: the time and the draw in the input and one deadline for each role
+(`recorded`), or one of three controls.
+
+| Check | Result | What it shows |
+|---|---|---|
+| `recorded` | pass | every recorded run replays to the same effects at every clock and with every draw (`ReplayExact`), and a role gets a fire only at or after its own deadline (`OwnTimer`) |
+| `clock` | violation | control: a role that reads the clock of the process breaks `ReplayExact` |
+| `draw` | violation | control: a role that draws its own jitter breaks `ReplayExact` |
+| `shared` | violation | control: one timer for every role, whose fire goes to every role, breaks `OwnTimer` |
+| `reach_fire`, `reach_two` | violation | the model fires a timer, and holds two timers at once |
 
 ### `election/`: the election over a journal, for #1420 (paros-election)
 

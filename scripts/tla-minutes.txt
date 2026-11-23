@@ -53,6 +53,7 @@ re-replication 8
 read-replica 1
 reads 22
 reads-rows4 9
+recorded-inputs 0.1
 retire-fence 16
 seal-chain 2.5
 seal-ctrl 13.5

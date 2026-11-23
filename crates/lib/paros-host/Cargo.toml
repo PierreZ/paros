@@ -1,0 +1,21 @@
+[package]
+name = "paros-host"
+description = "A pure host of actors: many roles in one process, each a deterministic step under the flight rule, and a generic driver with group commit and held sends. No runtime, no storage engine"
+version.workspace = true
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude = ["AGENTS.md", "CLAUDE.md"]
+
+# A pure crate (docs/journal/04-roles.md §J4.3, docs/architecture/04-roles.md
+# §4.4): it depends on no crate at all. A program brings the storage, the
+# transport and the clock by implementing the traits of this crate.
+[dependencies]
+
+[lints]
+workspace = true

@@ -17,8 +17,8 @@ use paros_journal::{
 };
 use paros_journal_io::mem::{Endpoint, ManualClock, MemNetwork, MemRegister, MemStorage};
 use paros_journal_io::{
-    Address, Assignment, CallId, CallOutcome, CallReply, Clock, Driver, Events, HostConfig,
-    JournalId, Register, Storage, Transport,
+    Address, Assignment, CallId, CallOutcome, CallReply, Clock, Driver, Events, Host, HostConfig,
+    Journal, JournalId, Register, Storage, Transport,
 };
 
 /// The journal of the examples.
@@ -99,11 +99,11 @@ pub fn leader(node: u64, round: u64, id: u64, from: Slot) -> Assignment {
 /// Whether the leader at `node` writes.
 pub fn open<S, T, C, R, E>(driver: &Driver<S, T, C, R, E>, node: u64) -> bool
 where
-    S: Storage,
-    T: Transport,
+    S: Storage<Journal>,
+    T: Transport<Journal>,
     C: Clock,
     R: Register,
-    E: Events,
+    E: Events<Host>,
 {
     driver
         .host()

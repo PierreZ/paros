@@ -12,7 +12,7 @@ use crate::wire::Time;
 /// A disk that writes and reads nothing.
 struct Forgetful;
 
-impl Storage for Forgetful {
+impl Storage<Journal> for Forgetful {
     fn commit(&mut self, _ops: &[Op], _sync: bool) -> Result<(), StorageError> {
         Ok(())
     }
@@ -41,7 +41,7 @@ struct Forger {
     inbox: Rc<RefCell<VecDeque<Envelope>>>,
 }
 
-impl Transport for Forger {
+impl Transport<Journal> for Forger {
     fn send(&mut self, mut envelope: Envelope) {
         envelope.from = NodeId(u64::MAX);
         self.inbox.borrow_mut().push_back(envelope);

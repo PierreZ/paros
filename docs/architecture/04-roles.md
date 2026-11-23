@@ -217,7 +217,10 @@ These points are decided:
 - **A role is an actor.** A role (an acceptor, a leader, a coordinator, the frontend) is a pure
   `step` under the flight rule of the journal ([docs/journal/04-roles.md](../journal/04-roles.md)
   §J4.2): a send waits for the persist batch that it names, the step reads no clock and draws no
-  random number, and a refusal is data. One host of actors serves every role of a process.
+  random number, and a refusal is data. One host of actors serves every role of a process. The
+  host is `paros-host` (#1410 (split the generic host of actors)): the `Role` trait, the `Host`
+  over an opaque address and the generic driver, with no journal in it; the journal roles of
+  `paros-journal-io` run on it, and its example runs a toy coordinator.
 - **The frontend is a role like the others.** It has no layer and no crate of its own.
 - **The election over a journal is its own crate.** It is the `SetLeader` compare-and-set of
   section 3.3, and a user can elect a leader with it as the coordinators do.
@@ -357,7 +360,7 @@ The table today, as a proposal (the names and the numbers are **Open**, open poi
 
 | Layer | Crates today | Why there |
 |---|---|---|
-| 0 | `paros-consensus` | The Paxos flavors. |
+| 0 | `paros-consensus`, `paros-host` | The Paxos flavors, and the pure host of actors (#1410 (split the generic host of actors)): the `Role` trait, the host of many roles and the generic driver under the flight rule. The host depends on no crate, so it sits at the bottom, below every crate whose roles run on it. |
 | 1 | `paros-journal` | The journal v1. |
 | 2 | `paros-journal-control`, `paros-journal-io` | Both depend on `paros-journal`. The table of #1409 puts the controller in layer 1, but a dependency inside one layer is sideways, so the controller is one layer up. |
 | 6 | `paros-authz-biscuit` | It implements the `Authz` port over an external crate (`biscuit-auth`, which draws on `getrandom`), so it cannot be pure. It is an adapter, as the moonpool adapters are. |

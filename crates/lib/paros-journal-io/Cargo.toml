@@ -18,6 +18,7 @@ exclude = ["AGENTS.md", "CLAUDE.md"]
 # (paros-journal-moonpool, #1330) is a crate of its own.
 [dependencies]
 paros-consensus = { workspace = true }
+paros-host = { workspace = true }
 paros-journal = { workspace = true }
 
 [lints]

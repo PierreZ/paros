@@ -32,7 +32,9 @@ use paros_journal::Slot;
 use paros_journal_io::contract;
 use paros_journal_io::layout::KEY_LEN;
 use paros_journal_io::mem::{ManualClock, MemNetwork, MemRegister};
-use paros_journal_io::{Address, Driver, Entry, HostConfig, Key, Op, Storage, StorageError};
+use paros_journal_io::{
+    Address, Driver, Entry, HostConfig, Journal, Key, Op, Storage, StorageError,
+};
 
 use common::{
     JOURNAL, TICK, acceptor, at, claim, elected, leader, open, replica, reply_of, reshape, show,
@@ -93,7 +95,7 @@ impl LogStorage {
     }
 }
 
-impl Storage for LogStorage {
+impl Storage<Journal> for LogStorage {
     fn commit(&mut self, ops: &[Op], _sync: bool) -> Result<(), StorageError> {
         let mut batch = Vec::new();
         for op in ops {
