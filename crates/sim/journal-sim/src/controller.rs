@@ -434,7 +434,7 @@ fn boundary() -> BoundaryState {
     BoundaryState {
         next_seq: Seq(0),
         first_seq: Seq(0),
-        leader: Leader::Multi,
+        leader: Leader::multi(paros_journal::LeaderUuid(1)),
     }
 }
 

@@ -5,10 +5,12 @@
 //!
 //! A journal has two modes (§J2.4). In single-writer mode one writer holds
 //! the leader uuid, and each write names its position (`expected_seq`), so
-//! a resend is exactly-once. `SetLeader(None, old)` moves the journal to
-//! multi-writer mode: writes carry no fence, any writer may write, and the
+//! a resend is exactly-once. `SetLeader(mode, old)` moves the journal to
+//! multi-writer mode, under a fresh tag that the caller draws as it draws a
+//! uuid: writes carry no fence, any writer may write, and the
 //! journal gives each write the next position at apply.
-//! `SetLeader(Some(uuid), Multi)` moves it back.
+//! `SetLeader(uuid, mode)` moves it back. It names the mode with its tag, so
+//! a late copy of it never applies after a later multi-writer mode (§J2.4.1).
 //!
 //! Each writer is a program with a [`Client`](paros_journal::client::Client)
 //! of `paros_journal::client` (#1331): a client that won no `SetLeader` of
@@ -23,7 +25,7 @@
 //!    write gets its own position.
 //! 3. A reply of Y is lost. An unfenced write has no position, so the
 //!    client's resend lands a second time: at-least-once.
-//! 4. Writer B claims the journal (`SetLeader(B, Multi)`) and writes at the
+//! 4. Writer B claims the journal (`SetLeader(B, mode X)`) and writes at the
 //!    next position with `expected_seq`. X's unfenced write is now refused
 //!    `WrongMode`.
 //!
@@ -38,6 +40,8 @@ use common::{OneProcess, Program, show};
 
 const LEADER: u64 = 100;
 const B: LeaderUuid = LeaderUuid(0xB);
+/// The multi-writer mode of X: a fresh tag that X drew.
+const X_MODE: LeaderUuid = LeaderUuid(0x3A);
 
 fn records(text: &str) -> Vec<Record> {
     vec![Record::new(text.as_bytes().to_vec())]
@@ -49,10 +53,10 @@ fn main() {
     let mut y = Program::new(LEADER);
 
     println!("1. Segment 1 opens; X makes the journal multi-writer.");
-    let call = x.client.set_leader(None, Leader::Unset);
+    let call = x.client.set_leader(Leader::multi(X_MODE), Leader::Unset);
     let outcome = x.run(&mut journal, call);
-    show("X: set_leader(None, Unset)", &outcome);
-    assert!(matches!(outcome, Outcome::LeaderSet(v) if v.leader == Leader::Multi));
+    show("X: set_leader(mode X, Unset)", &outcome);
+    assert!(matches!(outcome, Outcome::LeaderSet(v) if v.leader == Leader::multi(X_MODE)));
     assert_eq!(x.client.mode(), Mode::Open);
 
     println!("2. X and Y write at the same time; the journal orders them.");
@@ -93,9 +97,9 @@ fn main() {
 
     println!("4. B claims the journal; back to one writer.");
     let mut b = Program::new(LEADER);
-    let call = b.client.set_leader(Some(B), Leader::Multi);
+    let call = b.client.set_leader(Leader::uuid(B), Leader::multi(X_MODE));
     let outcome = b.run(&mut journal, call);
-    show("B: set_leader(B, Multi)", &outcome);
+    show("B: set_leader(B, mode X)", &outcome);
     assert!(matches!(outcome, Outcome::LeaderSet(_)));
     let call = b.client.write(records("b5"));
     let outcome = b.run(&mut journal, call);

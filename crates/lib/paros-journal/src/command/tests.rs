@@ -65,20 +65,30 @@ fn a_write_counts_its_records() {
 }
 
 #[test]
-fn a_new_leader_is_multi_or_a_set_uuid() {
-    assert_eq!(Leader::from_new(None), Leader::Multi);
-    assert_eq!(
-        Leader::from_new(Some(LeaderUuid(7))),
-        Leader::Uuid(LeaderUuid(7))
-    );
-    assert!(Leader::Unset.is_valid() && Leader::Multi.is_valid());
+fn an_installable_leader_is_a_set_uuid_or_a_set_tag() {
+    assert_eq!(Leader::multi(LeaderUuid(7)), Leader::Multi(LeaderUuid(7)));
+    assert_eq!(Leader::uuid(LeaderUuid(7)), Leader::Uuid(LeaderUuid(7)));
+    assert_ne!(Leader::multi(LeaderUuid(7)), Leader::uuid(LeaderUuid(7)));
+    assert_ne!(Leader::multi(LeaderUuid(7)), Leader::multi(LeaderUuid(8)));
+    assert!(Leader::Unset.is_valid() && !Leader::Unset.is_installable());
+    assert!(Leader::multi(LeaderUuid(7)).is_installable());
+    assert!(Leader::multi(LeaderUuid(7)).is_multi());
+    assert!(!Leader::uuid(LeaderUuid(7)).is_multi());
     assert!(!Leader::Uuid(LeaderUuid::UNSET).is_valid());
+    assert!(!Leader::Multi(LeaderUuid::UNSET).is_valid());
+    assert!(!Leader::Multi(LeaderUuid::UNSET).is_installable());
 }
 
 #[test]
 #[should_panic(expected = "the unset uuid never leads")]
 fn the_unset_uuid_never_leads() {
     let _ = Leader::uuid(LeaderUuid::UNSET);
+}
+
+#[test]
+#[should_panic(expected = "the unset uuid never names a mode")]
+fn the_unset_uuid_never_names_a_mode() {
+    let _ = Leader::multi(LeaderUuid::UNSET);
 }
 
 #[test]

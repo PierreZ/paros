@@ -6,7 +6,8 @@
 //! pure data and pure functions, with no I/O, no clock and no randomness:
 //!
 //! - [`fold`]: the journal fold, judged at apply in slot order. `Write`,
-//!   `Truncate` and `SetLeader` with `SetLeader(None)` (multi-writer), the
+//!   `Truncate` and `SetLeader`, whose multi-writer modes each carry a tag
+//!   (`Leader::Multi(tag)`, #1495), the
 //!   order "position before fence" and the answer `Below` for a resend across
 //!   a seal (`docs/journal/02-data-plane.md` §J2.2, §J2.4.1, §J2.6).
 //! - [`mod@resolve`]: the read-only `Resolve` call that settles a `Below` answer

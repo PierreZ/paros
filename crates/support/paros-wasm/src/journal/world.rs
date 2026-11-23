@@ -32,7 +32,8 @@ const SEGMENTS: usize = 8;
 pub enum Call {
     /// `SetLeader(writer, believed leader)`.
     SetLeader(usize),
-    /// `SetLeader(None, believed leader)`: multi-writer.
+    /// `SetLeader(fresh mode, believed leader)`: multi-writer, under a fresh
+    /// tag (`M1`, `M2`, ...).
     SetMulti(usize),
     /// A new fenced write of one record at the writer's believed `next_seq`.
     Write(usize),
@@ -158,6 +159,8 @@ pub struct Journal {
     writers: Vec<Writer>,
     segments: Vec<Segment>,
     events: Vec<Event>,
+    /// The tags of the multi-writer modes drawn so far.
+    modes: u128,
 }
 
 impl Default for Journal {
@@ -185,6 +188,7 @@ impl Journal {
             writers,
             segments: vec![first],
             events: Vec::new(),
+            modes: 0,
         }
     }
 
@@ -213,13 +217,15 @@ impl Journal {
             }
             Call::Resolve(w) => self.resolve(w)?,
             Call::SetLeader(w) | Call::SetMulti(w) => {
-                let new = matches!(call, Call::SetLeader(_)).then_some(self.writers[w].uuid);
+                let new = if matches!(call, Call::SetLeader(_)) {
+                    Leader::uuid(self.writers[w].uuid)
+                } else {
+                    // Each multi-writer mode gets a fresh tag (§J2.4.1).
+                    self.modes += 1;
+                    Leader::multi(LeaderUuid(self.modes))
+                };
                 let old = self.writers[w].belief.leader;
-                let sent = format!(
-                    "SetLeader({}, {})",
-                    new.map_or("None".to_string(), name_of),
-                    show_leader(old)
-                );
+                let sent = format!("SetLeader({}, {})", show_leader(new), show_leader(old));
                 self.apply(call, sent, &Command::SetLeader { new, old }, false)
             }
             Call::Write(w) | Call::WriteLost(w) | Call::WriteOpen(w) => {
@@ -257,7 +263,7 @@ impl Journal {
             }
             Call::Truncate(w) => {
                 let writer = &self.writers[w];
-                let fence = (writer.belief.leader != Leader::Multi).then_some(writer.uuid);
+                let fence = (!writer.belief.leader.is_multi()).then_some(writer.uuid);
                 let up_to = writer.belief.next_seq;
                 let sent = format!(
                     "Truncate({}, {})",
@@ -425,7 +431,8 @@ impl Journal {
                 show_leader(writer.belief.leader)
             ),
             Call::SetMulti(_) => format!(
-                "{name}: SetLeader(None, {})",
+                "{name}: SetLeader(M{}, {})",
+                self.modes + 1,
                 show_leader(writer.belief.leader)
             ),
             Call::Write(_) => format!("{name} writes {next} at {at}"),
@@ -501,7 +508,7 @@ pub struct WorldView {
 /// A journal view in words.
 #[derive(Clone, Debug, Serialize)]
 pub struct ViewText {
-    /// `A`, `None` (multi-writer) or `unset`.
+    /// `A`, `M1` (a multi-writer mode) or `unset`.
     pub leader: String,
     /// `next_seq`.
     pub next_seq: u64,
@@ -565,7 +572,7 @@ fn name_of(uuid: LeaderUuid) -> String {
 pub fn show_leader(leader: Leader) -> String {
     match leader {
         Leader::Unset => "unset".to_string(),
-        Leader::Multi => "None".to_string(),
+        Leader::Multi(tag) => format!("M{}", tag.0),
         Leader::Uuid(uuid) => name_of(uuid),
     }
 }

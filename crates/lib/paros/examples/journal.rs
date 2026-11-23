@@ -82,7 +82,7 @@ fn main() {
         &mut process,
         &clock,
         Command::SetLeader {
-            new: Some(A),
+            new: Leader::uuid(A),
             old: Leader::Unset,
         },
     );

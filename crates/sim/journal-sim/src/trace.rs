@@ -69,7 +69,7 @@ pub(crate) fn uuid(uuid: LeaderUuid) -> Value {
 pub(crate) fn leader(leader: Leader) -> Value {
     match leader {
         Leader::Unset => Value::from("unset"),
-        Leader::Multi => Value::from("none"),
+        Leader::Multi(tag) => Value::Str(format!("m{}", tag.0)),
         Leader::Uuid(id) => uuid(id),
     }
 }
@@ -117,7 +117,7 @@ pub(crate) fn command_fields(fields: &mut Vec<(&'static str, Value)>, command: &
         }
         Command::SetLeader { new, old } => {
             fields.push(("op", Value::from("sl")));
-            fields.push(("new", new.map_or(Value::from("none"), uuid)));
+            fields.push(("new", leader(*new)));
             fields.push(("old", leader(*old)));
         }
         Command::Upgrade { .. } => panic!("the model has no Upgrade"),

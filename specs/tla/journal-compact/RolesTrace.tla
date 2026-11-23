@@ -43,9 +43,10 @@ VARIABLES l
 e == Trace[l]
 Has(f) == f \in DOMAIN e
 
-\* The names of the trace: "none" is no uuid or multi-writer, "unset" no
-\* leader.
+\* The names of the trace: "none" is no uuid, "unset" no leader, "u<n>" a
+\* uuid and "m<n>" the tag of a multi-writer mode.
 Lv(x) == IF x = "none" THEN None ELSE IF x = "unset" THEN Unset ELSE x
+TraceTags == {x \in STRING : SubSeq(x, 1, 1) = "m"}
 
 Cmd(ev) ==
   CASE ev.op = "noop" -> Noop

@@ -53,7 +53,7 @@ fn served() -> SegmentReplica {
     );
     replica.observe(&one_segment());
     let claim = Command::SetLeader {
-        new: Some(LeaderUuid(7)),
+        new: Leader::uuid(LeaderUuid(7)),
         old: Leader::Unset,
     };
     replica.step(LEADER, commit(0, claim));

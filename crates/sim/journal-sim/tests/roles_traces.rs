@@ -8,7 +8,7 @@ use journal_sim::campaign::try_campaign;
 use journal_sim::roles::{RolesEvent, RolesMutant, Shape, walk};
 use journal_sim::trace::roles::{EDITS, roles_spec, trace};
 use journal_sim::trace::{Trace, Verdict, require_tlc};
-use paros_journal::Command;
+use paros_journal::{Command, Leader};
 
 /// The value of the knob `name`, or `default`.
 fn knob(name: &str, default: u64) -> u64 {
@@ -144,9 +144,15 @@ const RULES: &[Rule] = &[
     ("a Resolve answered written", |e| {
         has(e, |e| matches!(e, RolesEvent::Resolve { res: "dup", .. }))
     }),
-    ("SetLeader(None) applied", |e| {
+    ("a SetLeader to a multi-writer mode applied", |e| {
         applied(e, |c, res| {
-            matches!(c, Command::SetLeader { new: None, .. }) && res == "ok"
+            matches!(
+                c,
+                Command::SetLeader {
+                    new: Leader::Multi(_),
+                    ..
+                }
+            ) && res == "ok"
         })
     }),
     ("a truncate applied", |e| {

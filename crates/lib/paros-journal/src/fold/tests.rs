@@ -5,6 +5,9 @@ use crate::command::Record;
 
 const U1: LeaderUuid = LeaderUuid(1);
 const U2: LeaderUuid = LeaderUuid(2);
+/// Two multi-writer modes, each with its own tag.
+const M1: Leader = Leader::Multi(LeaderUuid(101));
+const M2: Leader = Leader::Multi(LeaderUuid(102));
 
 /// A segment under test: its fold and the writes it took, by position.
 struct Segment {
@@ -59,7 +62,7 @@ fn open(bytes: &[u8]) -> Command {
     })
 }
 
-fn set(new: Option<LeaderUuid>, old: Leader) -> Command {
+fn set(new: Leader, old: Leader) -> Command {
     Command::SetLeader { new, old }
 }
 
@@ -78,7 +81,7 @@ fn led(uuid: LeaderUuid) -> Leader {
 fn claimed() -> Segment {
     let mut seg = Segment::fresh(Leader::Unset);
     assert!(matches!(
-        seg.apply(&set(Some(U1), Leader::Unset)),
+        seg.apply(&set(led(U1), Leader::Unset)),
         Answer::LeaderSet(_)
     ));
     assert_eq!(
@@ -179,13 +182,10 @@ fn another_write_at_a_taken_position_is_taken() {
 
 #[test]
 fn the_position_is_judged_before_the_fence() {
-    // `dedup_after` of multi-writer/: after SetLeader(None, U1), the resend
+    // `dedup_after` of multi-writer/: after SetLeader(M1, U1), the resend
     // of a written write of U1 is a duplicate, not fenced.
     let mut seg = claimed();
-    assert!(matches!(
-        seg.apply(&set(None, led(U1))),
-        Answer::LeaderSet(_)
-    ));
+    assert!(matches!(seg.apply(&set(M1, led(U1))), Answer::LeaderSet(_)));
     assert_eq!(
         seg.apply(&write(U1, 2, b"c")),
         Answer::Duplicate {
@@ -225,7 +225,7 @@ fn an_empty_write_is_refused() {
 
 #[test]
 fn a_multi_writer_journal_takes_open_writes_at_the_next_position() {
-    let mut seg = Segment::fresh(Leader::Multi);
+    let mut seg = Segment::fresh(M1);
     assert_eq!(
         seg.apply(&open(b"ab")),
         Answer::Written {
@@ -253,13 +253,10 @@ fn an_open_write_on_a_single_writer_journal_is_wrong_mode() {
 #[test]
 fn set_leader_none_and_back() {
     let mut seg = claimed();
-    assert!(matches!(
-        seg.apply(&set(None, led(U1))),
-        Answer::LeaderSet(_)
-    ));
-    assert_eq!(seg.state.leader(), Leader::Multi);
+    assert!(matches!(seg.apply(&set(M1, led(U1))), Answer::LeaderSet(_)));
+    assert_eq!(seg.state.leader(), M1);
     assert!(matches!(seg.apply(&open(b"m")), Answer::Written { .. }));
-    let Answer::LeaderSet(view) = seg.apply(&set(Some(U2), Leader::Multi)) else {
+    let Answer::LeaderSet(view) = seg.apply(&set(led(U2), M1)) else {
         panic!("set back");
     };
     assert_eq!(view.next_seq, Seq(4), "the view gives the writer its basis");
@@ -274,31 +271,77 @@ fn set_leader_none_and_back() {
 fn set_leader_is_a_compare_and_set() {
     let mut seg = claimed();
     assert!(matches!(
-        seg.apply(&set(Some(U2), Leader::Unset)),
+        seg.apply(&set(led(U2), Leader::Unset)),
         Answer::LeaderRefused(_)
     ));
     assert!(matches!(
-        seg.apply(&set(Some(U1), led(U1))),
+        seg.apply(&set(led(U1), led(U1))),
         Answer::LeaderRefused(_)
     ));
+    // A client can send any `new`: one that SetLeader may not install is
+    // refused.
+    for new in [
+        Leader::Uuid(LeaderUuid::UNSET),
+        Leader::Multi(LeaderUuid::UNSET),
+        Leader::Unset,
+    ] {
+        assert!(matches!(
+            seg.apply(&set(new, led(U1))),
+            Answer::LeaderRefused(_)
+        ));
+    }
     assert!(matches!(
-        seg.apply(&set(Some(LeaderUuid::UNSET), led(U1))),
-        Answer::LeaderRefused(_)
-    ));
-    assert!(matches!(
-        seg.apply(&set(Some(U2), led(U1))),
+        seg.apply(&set(led(U2), led(U1))),
         Answer::LeaderSet(_)
     ));
     // A reinstated uuid leads again (decision C, §J2.3).
     assert!(matches!(
-        seg.apply(&set(Some(U1), led(U2))),
+        seg.apply(&set(led(U1), led(U2))),
         Answer::LeaderSet(_)
     ));
-    let mut multi = Segment::fresh(Leader::Multi);
+    let mut multi = Segment::fresh(M1);
     assert!(matches!(
-        multi.apply(&set(None, Leader::Multi)),
+        multi.apply(&set(M1, M1)),
         Answer::LeaderRefused(_)
     ));
+    // `old` names the mode with its tag: another tag is another value.
+    assert!(matches!(
+        multi.apply(&set(led(U1), M2)),
+        Answer::LeaderRefused(_)
+    ));
+    // A new mode with a fresh tag replaces the one in force.
+    assert!(matches!(multi.apply(&set(M2, M1)), Answer::LeaderSet(_)));
+    assert_eq!(multi.state.leader(), M2);
+}
+
+#[test]
+fn a_late_copy_of_a_set_leader_never_applies_after_a_later_mode() {
+    // #1495 (a late copy of SetLeader reinstates a uuid), seed 100603 of the
+    // client walk: SetLeader(U1, M1) applies, then SetLeader(M2, U1) makes
+    // the journal multi-writer again, and U1's write is refused `Fenced`, a
+    // final answer. A late copy of the first SetLeader must not bring U1
+    // back, or a late copy of the refused write lands.
+    let mut seg = Segment::fresh(M1);
+    let claim = set(led(U1), M1);
+    assert!(matches!(seg.apply(&claim), Answer::LeaderSet(_)));
+    assert!(matches!(
+        seg.apply(&write(U1, 0, b"a")),
+        Answer::Written { .. }
+    ));
+    assert!(matches!(seg.apply(&set(M2, led(U1))), Answer::LeaderSet(_)));
+    let refused = write(U1, 1, b"b");
+    assert!(matches!(seg.apply(&refused), Answer::Fenced(_)));
+    assert!(
+        matches!(seg.apply(&claim), Answer::LeaderRefused(_)),
+        "a late copy of SetLeader(U1, M1) does not match the mode M2"
+    );
+    assert_eq!(seg.state.leader(), M2);
+    assert!(matches!(seg.apply(&refused), Answer::Fenced(_)));
+    assert_eq!(
+        seg.state.next_seq(),
+        Seq(1),
+        "the refused write never lands"
+    );
 }
 
 #[test]
@@ -306,11 +349,11 @@ fn a_deposed_writer_is_fenced() {
     // The `Move` script of journal-state/.
     let mut seg = Segment::fresh(Leader::Unset);
     assert!(matches!(
-        seg.apply(&set(Some(U1), Leader::Unset)),
+        seg.apply(&set(led(U1), Leader::Unset)),
         Answer::LeaderSet(_)
     ));
     assert!(matches!(
-        seg.apply(&set(Some(U2), led(U1))),
+        seg.apply(&set(led(U2), led(U1))),
         Answer::LeaderSet(_)
     ));
     assert!(matches!(seg.apply(&write(U1, 0, b"a")), Answer::Fenced(_)));
@@ -335,7 +378,7 @@ fn truncate_is_fenced_monotone_and_clamped() {
         panic!("trimmed");
     };
     assert_eq!(view.first_seq, Seq(3), "never lowered");
-    let mut multi = Segment::fresh(Leader::Multi);
+    let mut multi = Segment::fresh(M1);
     assert!(matches!(multi.apply(&open(b"ab")), Answer::Written { .. }));
     assert!(matches!(
         multi.apply(&truncate(None, 1)),
@@ -390,17 +433,14 @@ fn the_boundary_carries_the_leader_and_the_floor() {
         old.apply(&truncate(Some(U1), 1)),
         Answer::Trimmed(_)
     ));
-    assert!(matches!(
-        old.apply(&set(None, led(U1))),
-        Answer::LeaderSet(_)
-    ));
+    assert!(matches!(old.apply(&set(M1, led(U1))), Answer::LeaderSet(_)));
     let boundary = old.state.boundary();
     assert_eq!(
         boundary,
         BoundaryState {
             next_seq: Seq(3),
             first_seq: Seq(1),
-            leader: Leader::Multi
+            leader: M1
         }
     );
     let mut next = old.seal();
@@ -445,7 +485,7 @@ fn a_refusal_names_the_state_it_was_judged_against() {
         write(U1, 9, b"x"),
         write(U1, 0, b"zz"),
         open(b"x"),
-        set(Some(U2), Leader::Multi),
+        set(led(U2), M1),
     ] {
         let answer = seg.apply(&command);
         assert!(!answer.applied(), "{command:?} is refused");
@@ -461,7 +501,7 @@ fn a_fresh_journal_has_no_writer() {
 
 #[test]
 fn applied_names_the_answers_that_move_the_state() {
-    let view = JournalState::from_boundary(BoundaryState::fresh(Leader::Multi)).view();
+    let view = JournalState::from_boundary(BoundaryState::fresh(M1)).view();
     for moved in [
         Answer::Written {
             seq: Seq(0),
@@ -483,14 +523,14 @@ fn a_boundary_with_its_floor_above_its_next_is_refused() {
     let _ = JournalState::from_boundary(BoundaryState {
         next_seq: Seq(1),
         first_seq: Seq(2),
-        leader: Leader::Multi,
+        leader: M1,
     });
 }
 
 #[test]
 #[should_panic(expected = "first position never passes")]
 fn the_invariants_see_a_floor_above_next() {
-    let mut state = JournalState::from_boundary(BoundaryState::fresh(Leader::Multi));
+    let mut state = JournalState::from_boundary(BoundaryState::fresh(M1));
     state.first_seq = Seq(1);
     state.assert_invariants();
 }
@@ -498,7 +538,7 @@ fn the_invariants_see_a_floor_above_next() {
 #[test]
 #[should_panic(expected = "a segment starts at or below")]
 fn the_invariants_see_a_start_above_next() {
-    let mut state = JournalState::from_boundary(BoundaryState::fresh(Leader::Multi));
+    let mut state = JournalState::from_boundary(BoundaryState::fresh(M1));
     state.start_seq = Seq(1);
     state.assert_invariants();
 }
@@ -509,7 +549,7 @@ fn the_transition_check_sees_next_seq_go_back() {
     let before = JournalState::from_boundary(BoundaryState {
         next_seq: Seq(3),
         first_seq: Seq(0),
-        leader: Leader::Multi,
+        leader: M1,
     });
     let mut after = before;
     after.next_seq = Seq(2);

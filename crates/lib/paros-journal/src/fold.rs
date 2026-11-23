@@ -25,7 +25,10 @@
 //!   `Fenced`, a call shaped for the other mode is `WrongMode`. It raises
 //!   `first_seq`, clamped to `next_seq`, and never lowers it.
 //! - **`SetLeader(new, old)`**: a compare-and-set. It applies when `old` is
-//!   the leader value and `new` is not (`None` is multi-writer, §J2.4.1).
+//!   the whole leader value (a uuid, or a multi-writer mode with its tag),
+//!   `new` is not, and `new` is a set uuid or a set tag (§J2.4.1). Each
+//!   multi-writer mode has its own tag, so a late copy of a `SetLeader`
+//!   whose `old` named an earlier mode never applies again.
 //! - **`Upgrade`** is reserved: `Reserved`, nothing moves.
 //!
 //! **The fold has no term.** The boundary state of a segment (§J3.1) holds
@@ -56,18 +59,21 @@ pub struct BoundaryState {
 
 impl BoundaryState {
     /// The boundary state of a fresh journal: no record, and the leader
-    /// value that the journal's initial configuration gives (`Unset`, or
-    /// `Multi` for a journal that starts multi-writer; §J2.4.1).
+    /// value that the journal's initial configuration gives (`Unset`, or a
+    /// `Multi` with the tag of the configuration for a journal that starts
+    /// multi-writer; §J2.4.1).
     ///
     /// # Panics
     ///
-    /// When `leader` is a uuid: a fresh journal has no writer yet.
+    /// When `leader` is a uuid (a fresh journal has no writer yet) or a mode
+    /// with the unset tag.
     #[must_use]
     pub fn fresh(leader: Leader) -> Self {
         assert!(
-            matches!(leader, Leader::Unset | Leader::Multi),
+            matches!(leader, Leader::Unset | Leader::Multi(_)),
             "a fresh journal is unset or multi-writer"
         );
+        assert!(leader.is_valid(), "a fresh journal's mode has a set tag");
         let state = Self {
             next_seq: Seq(0),
             first_seq: Seq(0),
@@ -425,7 +431,7 @@ impl JournalState {
         if write.records.is_empty() {
             return Answer::Empty(self.view());
         }
-        if self.leader != Leader::Multi {
+        if !self.leader.is_multi() {
             return Answer::WrongMode(self.view());
         }
         self.append(write)
@@ -451,8 +457,8 @@ impl JournalState {
     fn apply_truncate(&mut self, fence: Option<LeaderUuid>, up_to: Seq) -> Answer {
         match (fence, self.leader) {
             (Some(uuid), Leader::Uuid(leader)) if uuid == leader => self.trim(up_to),
-            (None, Leader::Multi) => self.trim(up_to),
-            (Some(_), Leader::Multi) | (None, Leader::Uuid(_) | Leader::Unset) => {
+            (None, Leader::Multi(_)) => self.trim(up_to),
+            (Some(_), Leader::Multi(_)) | (None, Leader::Uuid(_) | Leader::Unset) => {
                 Answer::WrongMode(self.view())
             }
             (Some(_), Leader::Uuid(_) | Leader::Unset) => Answer::Fenced(self.view()),
@@ -473,20 +479,20 @@ impl JournalState {
         Answer::Trimmed(self.view())
     }
 
-    /// `SetLeader(new, old)`: a compare-and-set on the leader value.
-    fn apply_set_leader(&mut self, new: Option<LeaderUuid>, old: Leader) -> Answer {
-        if new.is_some_and(|uuid| !uuid.is_set()) || old != self.leader {
-            return Answer::LeaderRefused(self.view());
-        }
-        let installed = Leader::from_new(new);
-        if installed == self.leader {
+    /// `SetLeader(new, old)`: a compare-and-set on the whole leader value,
+    /// the tag of a multi-writer mode too. A client can send any `new`, so
+    /// one that `SetLeader` may not install is a refusal.
+    fn apply_set_leader(&mut self, new: Leader, old: Leader) -> Answer {
+        if !new.is_installable() || old != self.leader || new == self.leader {
             return Answer::LeaderRefused(self.view());
         }
         assert!(
             old == self.leader,
             "a won SetLeader named the leader in force"
         );
-        self.leader = installed;
+        assert!(new.is_valid(), "an installed leader is valid");
+        assert!(new != Leader::Unset, "a SetLeader never installs Unset");
+        self.leader = new;
         assert!(self.leader != old, "a won SetLeader changes the leader");
         Answer::LeaderSet(self.view())
     }

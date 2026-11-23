@@ -56,7 +56,7 @@ fn main() {
     let mut a = Program::new(L1);
 
     println!("1. Writer A claims the journal, and writes.");
-    let call = a.client.set_leader(Some(A), Leader::Unset);
+    let call = a.client.set_leader(Leader::uuid(A), Leader::Unset);
     let outcome = a.run(&mut journal, call);
     show("set_leader(A, Unset)", &outcome);
     assert!(matches!(outcome, Outcome::LeaderSet(_)));
@@ -113,7 +113,7 @@ fn main() {
 
     println!("5. Writer B claims the journal; A is deposed.");
     let mut b = Program::new(L2);
-    let call = b.client.set_leader(Some(B), Leader::Uuid(A));
+    let call = b.client.set_leader(Leader::uuid(B), Leader::Uuid(A));
     let outcome = b.run(&mut journal, call);
     show("set_leader(B, A)", &outcome);
     assert!(matches!(outcome, Outcome::LeaderSet(_)));

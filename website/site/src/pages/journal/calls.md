@@ -62,8 +62,12 @@ that bug in [`multi-writer/`](https://github.com/PierreZ/paros/tree/main/specs/t
 
 ## No leader: many writers
 
-`SetLeader(None, old)` makes the journal multi-writer, and `SetLeader(new, None)` makes it
-single-writer again (§J2.4). With no leader, `Write(batch)` is unfenced, and the journal gives it
+`SetLeader(M, old)` makes the journal multi-writer, and `SetLeader(new, M)` makes it
+single-writer again (§J2.4). `M` is a multi-writer mode with a fresh tag that the caller draws, as
+it draws a uuid. A request can stay in the network and apply late: with one value for every
+multi-writer mode, a late copy of an old `SetLeader(u, M)` would match again and bring `u` back.
+With a tag for each mode, it never matches a later mode (§J2.4.1). The lab names the modes `M1`,
+`M2`. With no leader, `Write(batch)` is unfenced, and the journal gives it
 its `seq` at apply. A batcher can merge many writers' writes into one slot. A write sent again
 after a lost answer can land two times: multi-writer is at-least-once, and the writers own that.
 

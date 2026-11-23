@@ -22,7 +22,7 @@ fn boundary() -> BoundaryState {
     BoundaryState {
         next_seq: Seq(4),
         first_seq: Seq(0),
-        leader: Leader::Multi,
+        leader: Leader::multi(paros_consensus::journal::LeaderUuid(0x3A)),
     }
 }
 

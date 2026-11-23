@@ -2,6 +2,8 @@ use super::*;
 
 const A: LeaderUuid = LeaderUuid(0xA);
 const B: LeaderUuid = LeaderUuid(0xB);
+/// A multi-writer mode, with its tag.
+const M: Leader = Leader::Multi(LeaderUuid(0x3A));
 
 fn records(text: &str) -> Vec<Record> {
     vec![Record::new(text.as_bytes().to_vec())]
@@ -41,7 +43,7 @@ fn reply(answer: Answer) -> Response {
 fn floor_page(next: u64, first: u64) -> Response {
     Response::Read(ReadAnswer::Page {
         records: Vec::new(),
-        view: view(Leader::Multi, next, first),
+        view: view(M, next, first),
         sealed: false,
     })
 }
@@ -74,12 +76,12 @@ fn one_outcome(client: &mut Client) -> (CallId, Outcome) {
 /// A client that holds the journal under `uuid`, its next write at `next`.
 fn leader(uuid: LeaderUuid, next: u64) -> Client {
     let mut client = Client::new();
-    let call = client.set_leader(Some(uuid), Leader::Unset);
+    let call = client.set_leader(Leader::uuid(uuid), Leader::Unset);
     let (id, command) = one_command(&mut client);
     assert_eq!(
         command,
         Command::SetLeader {
-            new: Some(uuid),
+            new: Leader::uuid(uuid),
             old: Leader::Unset
         }
     );
@@ -296,11 +298,13 @@ fn below_is_resolved_written_at_the_old_segment() {
             }
         )
     );
+    // The write ends at 8, in the sealed segment; the tail that the `Below`
+    // named is 9, and the client never goes back below it.
     assert_eq!(
         client.mode(),
         Mode::Fenced {
             uuid: A,
-            next: Seq(8)
+            next: Seq(9)
         }
     );
 }
@@ -540,19 +544,19 @@ fn an_open_client_truncates_unfenced() {
 #[test]
 fn set_leader_none_makes_the_client_write_open() {
     let mut client = leader(A, 2);
-    let call = client.set_leader(None, Leader::Uuid(A));
+    let call = client.set_leader(M, Leader::Uuid(A));
     let (id, command) = one_command(&mut client);
     assert_eq!(
         command,
         Command::SetLeader {
-            new: None,
+            new: M,
             old: Leader::Uuid(A)
         }
     );
-    client.answer(id, reply(Answer::LeaderSet(view(Leader::Multi, 2, 0))));
+    client.answer(id, reply(Answer::LeaderSet(view(M, 2, 0))));
     assert_eq!(
         one_outcome(&mut client),
-        (call, Outcome::LeaderSet(view(Leader::Multi, 2, 0)))
+        (call, Outcome::LeaderSet(view(M, 2, 0)))
     );
     assert_eq!(client.mode(), Mode::Open);
 }
@@ -560,7 +564,7 @@ fn set_leader_none_makes_the_client_write_open() {
 #[test]
 fn a_lost_set_leader_that_won_settles_itself() {
     let mut client = Client::new();
-    let call = client.set_leader(Some(A), Leader::Unset);
+    let call = client.set_leader(Leader::uuid(A), Leader::Unset);
     let (id, command) = one_command(&mut client);
     client.answer(id, Response::Lost);
     let (id, again) = one_command(&mut client);
@@ -578,19 +582,34 @@ fn a_lost_set_leader_that_won_settles_itself() {
 }
 
 #[test]
-fn a_lost_set_leader_none_refused_stays_refused() {
-    // Another caller can make the journal multi-writer: a refused resend of
-    // `SetLeader(None, _)` proves nothing.
+fn a_lost_set_leader_of_a_mode_settles_itself() {
+    // The tag of the mode is the caller's own and fresh: a refused resend
+    // whose view names it means that the first copy won.
     let mut client = leader(A, 2);
-    let call = client.set_leader(None, Leader::Uuid(A));
+    let call = client.set_leader(M, Leader::Uuid(A));
     let (id, _) = one_command(&mut client);
     client.answer(id, Response::Lost);
     let (id, _) = one_command(&mut client);
-    let multi = view(Leader::Multi, 4, 0);
+    let multi = view(M, 4, 0);
     client.answer(id, reply(Answer::LeaderRefused(multi)));
+    assert_eq!(one_outcome(&mut client), (call, Outcome::LeaderSet(multi)));
+    assert_eq!(client.mode(), Mode::Open);
+}
+
+#[test]
+fn a_lost_set_leader_refused_under_another_mode_stays_refused() {
+    // Another caller made the journal multi-writer, with its own tag: the
+    // resend proves nothing.
+    let mut client = leader(A, 2);
+    let call = client.set_leader(M, Leader::Uuid(A));
+    let (id, _) = one_command(&mut client);
+    client.answer(id, Response::Lost);
+    let (id, _) = one_command(&mut client);
+    let other = view(Leader::multi(LeaderUuid(0x3B)), 4, 0);
+    client.answer(id, reply(Answer::LeaderRefused(other)));
     assert_eq!(
         one_outcome(&mut client),
-        (call, Outcome::LeaderRefused(multi))
+        (call, Outcome::LeaderRefused(other))
     );
     assert_eq!(
         client.mode(),
@@ -603,13 +622,13 @@ fn a_lost_set_leader_none_refused_stays_refused() {
 
 #[test]
 fn a_first_copy_refused_is_refused() {
-    for new in [Some(A), None] {
+    for new in [Leader::uuid(A), M] {
         let mut client = Client::new();
         let call = client.set_leader(new, Leader::Unset);
         let (id, _) = one_command(&mut client);
-        // The journal names `new`: on a first copy, another call put it
-        // there (the journal was multi-writer already).
-        let refused = view(Leader::from_new(new), 4, 0);
+        // The journal names `new` on a first copy: the client claims no win
+        // that no copy of its own can have made.
+        let refused = view(new, 4, 0);
         client.answer(id, reply(Answer::LeaderRefused(refused)));
         assert_eq!(
             one_outcome(&mut client),
@@ -622,7 +641,7 @@ fn a_first_copy_refused_is_refused() {
 #[test]
 fn a_resend_refused_under_another_leader_is_refused() {
     let mut client = Client::new();
-    let call = client.set_leader(Some(A), Leader::Unset);
+    let call = client.set_leader(Leader::uuid(A), Leader::Unset);
     let (id, _) = one_command(&mut client);
     client.answer(id, Response::Reply(Reply::Unknown));
     let (id, _) = one_command(&mut client);
@@ -638,7 +657,7 @@ fn a_resend_refused_under_another_leader_is_refused() {
 #[test]
 fn a_set_leader_answered_out_of_shape_is_refused() {
     let mut client = Client::new();
-    let call = client.set_leader(Some(A), Leader::Unset);
+    let call = client.set_leader(Leader::uuid(A), Leader::Unset);
     let (id, _) = one_command(&mut client);
     client.answer(id, reply(Answer::Noop));
     assert_eq!(
@@ -726,7 +745,7 @@ fn a_read_below_the_floor_is_truncated() {
     let Request::Read { id, .. } = client.take_requests()[0].clone() else {
         panic!("a read at the floor leaves")
     };
-    let floor = view(Leader::Multi, 9, 4);
+    let floor = view(M, 9, 4);
     client.answer(id, Response::Read(ReadAnswer::Truncated(floor)));
     assert_eq!(one_outcome(&mut client), (read, Outcome::Truncated(floor)));
     assert!(client.idle());
@@ -743,7 +762,7 @@ fn a_read_below_the_floor_of_the_segment_in_force_never_leaves() {
     assert_eq!(client.take_requests(), [], "no read below the floor");
     assert_eq!(
         one_outcome(&mut client),
-        (read, Outcome::Truncated(view(Leader::Multi, 9, 2)))
+        (read, Outcome::Truncated(view(M, 9, 2)))
     );
     assert!(client.idle());
 }
@@ -756,11 +775,11 @@ fn a_floor_from_a_sealed_segment_or_none_is_asked_again() {
     for again in [
         Response::Read(ReadAnswer::Page {
             records: Vec::new(),
-            view: view(Leader::Multi, 5, 0),
+            view: view(M, 5, 0),
             sealed: true,
         }),
-        Response::Read(ReadAnswer::Truncated(view(Leader::Multi, 9, 1))),
-        Response::Read(ReadAnswer::Below(view(Leader::Multi, 5, 0))),
+        Response::Read(ReadAnswer::Truncated(view(M, 9, 1))),
+        Response::Read(ReadAnswer::Below(view(M, 5, 0))),
         Response::Read(ReadAnswer::Superseded(crate::segment::SegmentId(2))),
         Response::Read(ReadAnswer::Unserved),
         Response::NotLeader,
@@ -777,10 +796,7 @@ fn a_floor_from_a_sealed_segment_or_none_is_asked_again() {
     };
     assert_eq!((from, limit), (Seq(1), 4));
     assert_eq!(client.reads[&id].floor, Some(Seq(1)));
-    client.answer(
-        id,
-        Response::Read(ReadAnswer::Truncated(view(Leader::Multi, 9, 2))),
-    );
+    client.answer(id, Response::Read(ReadAnswer::Truncated(view(M, 9, 2))));
     assert_eq!(one_outcome(&mut client).0, read);
 }
 

@@ -42,6 +42,10 @@
 (*                        write at the position e) or None (unfenced).     *)
 (*   [op "tr", u, up]     a `Truncate` to the position up, under u.        *)
 (*   [op "sl", new, old]  `SetLeader(new, old)`; new may be None.          *)
+(* A multi-writer mode is None or a tag of `Tags`: the code gives each     *)
+(* mode a fresh tag (section J2.4.1, #1495), so a trace names it with its  *)
+(* tag. `multi-writer/` checks the tag rule; this model folds a tag as     *)
+(* it folds None.                                                          *)
 (* The fold of a replica is (leader, next, first, recs): recs holds the    *)
 (* positions written in this segment, with their write. Every command is   *)
 (* judged at apply (section J2.2, J2.4.1).                                 *)
@@ -114,8 +118,9 @@ CONSTANTS
   Acceptors, CfgOf, QOf,  \* the acceptors, the grid of each configuration, its quorums
   RepOf,                  \* the replica set of each configuration
   Values,                 \* slot -> the commands that a leader may propose there
-  L0,                     \* the leader of a fresh journal: Unset or None
+  L0,                     \* the leader of a fresh journal: Unset, None or a tag
   None, Unset, Noop,
+  Tags,                   \* the tags of multi-writer modes other than None
   G, NS, NB, MaxCrash, RetireAt,
   Partial,                \* TRUE: a register write can be partial and lost
   GenOK,                  \* the pairs <<ballot, configuration>> that may register
@@ -124,7 +129,7 @@ CONSTANTS
 
 ASSUME G \in Nat /\ G >= 1 /\ NS \in Nat /\ NS >= 1 /\ NB \in Nat /\ NB >= 1
 ASSUME MaxCrash \in Nat /\ RetireAt \in Nat /\ RetireAt >= 1
-ASSUME L0 \in {Unset, None} /\ Partial \in BOOLEAN
+ASSUME (L0 \in {Unset, None} \/ L0 \in Tags) /\ Partial \in BOOLEAN
 ASSUME Reply1b \in {"disk", "mem"} /\ Reply2b \in {"disk", "mem"}
 ASSUME WriteOrder \in {"atomic", "prom_first", "vote_first"}
 ASSUME EndRule \in {"voted", "applied"}
@@ -232,6 +237,8 @@ Frontier == IF \A s \in Slots : IsChosen(s) THEN NS
 (***************************************************************************)
 Empty == [leader |-> L0, next |-> 0, first |-> 0, recs |-> {}]
 Fenced(v) == v.u # None
+\* The journal is multi-writer: None, or a mode with its tag.
+IsMulti(l) == l = None \/ l \in Tags
 
 \* The answer of a command to the state st of a fold that started at base.
 Res(base, st, v) ==
@@ -245,8 +252,10 @@ Res(base, st, v) ==
          ELSE IF v.u # st.leader THEN "fenced"
          ELSE IF v.e > st.next THEN "early"
          ELSE "ok"
-    [] v.op = "w" -> IF st.leader = None THEN "ok" ELSE "wrong"
-    [] v.op = "tr" -> IF v.u = st.leader THEN "ok" ELSE "fenced"
+    [] v.op = "w" -> IF IsMulti(st.leader) THEN "ok" ELSE "wrong"
+    [] v.op = "tr" -> IF \/ v.u = None /\ IsMulti(st.leader)
+                         \/ v.u # None /\ v.u = st.leader
+                      THEN "ok" ELSE "fenced"
     [] v.op = "sl" -> IF v.old = st.leader /\ v.new # st.leader THEN "ok" ELSE "refused"
 
 Step(base, st, v) ==

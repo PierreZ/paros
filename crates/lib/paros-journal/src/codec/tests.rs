@@ -42,16 +42,16 @@ fn commands() -> Vec<Command> {
             up_to: Seq(0),
         },
         Command::SetLeader {
-            new: None,
+            new: Leader::multi(LeaderUuid(4)),
             old: Leader::uuid(LeaderUuid(5)),
         },
         Command::SetLeader {
-            new: Some(LeaderUuid(6)),
+            new: Leader::uuid(LeaderUuid(6)),
             old: Leader::Unset,
         },
         Command::SetLeader {
-            new: Some(LeaderUuid(6)),
-            old: Leader::Multi,
+            new: Leader::uuid(LeaderUuid(6)),
+            old: Leader::multi(LeaderUuid(u128::MAX)),
         },
         Command::Upgrade {
             release: Release(2),
@@ -112,7 +112,7 @@ fn segment_records_and_boundaries_round_trip() {
         pending.is_err(),
         "the expected segment is below the new one"
     );
-    let boundary = BoundaryState::fresh(Leader::Multi);
+    let boundary = BoundaryState::fresh(Leader::multi(LeaderUuid(8)));
     assert_eq!(decode_boundary(&encode_boundary(&boundary)), Ok(boundary));
 }
 
@@ -189,6 +189,24 @@ fn an_unset_uuid_is_refused() {
     });
     // header, tag 2, option 1, then the uuid.
     let at = HEADER_LEN + 2;
+    bytes[at..at + 16].copy_from_slice(&0u128.to_le_bytes());
+    assert!(matches!(
+        decode_command(&bytes),
+        Err(DecodeError::Invalid(_))
+    ));
+}
+
+#[test]
+fn an_unset_multi_writer_tag_is_refused() {
+    let tag = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128;
+    let mut bytes = encode_command(&Command::SetLeader {
+        new: Leader::multi(LeaderUuid(tag)),
+        old: Leader::Unset,
+    });
+    let at = bytes
+        .windows(16)
+        .position(|window| window == tag.to_le_bytes())
+        .expect("the tag is encoded");
     bytes[at..at + 16].copy_from_slice(&0u128.to_le_bytes());
     assert!(matches!(
         decode_command(&bytes),

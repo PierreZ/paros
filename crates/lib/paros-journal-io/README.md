@@ -32,6 +32,6 @@ Each example prints a trace and asserts what it shows. Read them in this order:
 | `in_memory` | A journal on three processes, on the backends of `mem`. A process crashes and starts again from its storage; a second segment seals the first |
 | `custom_storage` | A storage backend written by hand (an append-only log with a checksum per batch), checked by the contract suite, with a journal on it. A crash cuts the last batch, and the batch is dropped whole |
 | `single_writer` | The pure client of `paros_journal::client`: a writer claims the journal, a lost reply and its resend answered `Duplicate`, a lost reply across a seal answered `Below` and settled by `Resolve`, then a deposed writer refused `Fenced` |
-| `multi_writer` | Multi-writer mode with the client: `SetLeader(None)`, open writes from two writers sent at once and ordered by the journal, a lost reply whose resend lands twice (at-least-once), then back to one writer |
+| `multi_writer` | Multi-writer mode with the client: `SetLeader` of a multi-writer mode with a fresh tag, open writes from two writers sent at once and ordered by the journal, a lost reply whose resend lands twice (at-least-once), then back to one writer |
 
 The rules are in `docs/journal/` of the repository (§J4.2, §J4.3).

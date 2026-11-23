@@ -125,7 +125,7 @@ pub fn write(seq: u64, text: &str) -> Command {
 /// Writer A takes the journal.
 pub fn claim() -> Command {
     Command::SetLeader {
-        new: Some(A),
+        new: Leader::uuid(A),
         old: Leader::Unset,
     }
 }

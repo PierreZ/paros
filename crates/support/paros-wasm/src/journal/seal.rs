@@ -464,7 +464,7 @@ impl Run {
             Payload::Write {
                 token,
                 command: Command::SetLeader {
-                    new: Some(UUID),
+                    new: Leader::uuid(UUID),
                     old: Leader::Unset,
                 },
             },

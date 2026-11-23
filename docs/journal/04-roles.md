@@ -365,7 +365,8 @@ the mapping of a moonpool RPC endpoint to a role of the `Host`.
 models in step with the v1 scope)):
 
 - **The journal fold stays out of the core.** `Write`, `Truncate` and `SetLeader`, with
-  `SetLeader(None)`, the unset leader, the order "position before fence" and the answer `Below`,
+  `SetLeader(None)` (a multi-writer mode with its tag, §J2.4.1), the unset leader, the order
+  "position before fence" and the answer `Below`,
   live only in the journal crates. The core's `Command`, `Outcome` and fold
   (`journal/command.rs`, `journal/state.rs`) stay as they are today. The journal does not make
   the core generic over the command for this.

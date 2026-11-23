@@ -38,7 +38,8 @@ request.
   Compartmentalized Paxos and the reconfiguration of Matchmaker Paxos. One consensus leader
   orders the journal (§J1).
 - **Four calls**: `Write`, `Read`, `Truncate`, `SetLeader(new, old)`. A single writer is
-  exactly-once through `expected_seq`; `SetLeader(None, old)` makes the journal multi-writer and
+  exactly-once through `expected_seq`; `SetLeader(None, old)` (in the code, a multi-writer mode
+  with a fresh tag, §J2.4.1) makes the journal multi-writer and
   at-least-once. No dedup table (§J2).
 - **Segments in the matchmakers** (design A): one record for each segment, written by
   compare-and-set at a majority. A segment opens only on a reshape; the first leader of the new

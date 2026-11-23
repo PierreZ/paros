@@ -74,7 +74,7 @@ The marks in the "Home" column:
 | # | Feature | At the tag | Home |
 |---|---|---|---|
 | F35 | `write`, `read`, `tail`, `truncate`, `set-leader` | `cmd/data.rs` | Journal v1 (§J2), #1331 (the pure journal client); through the frontend: #1431, #1434 |
-| F36 | Fenced single writer by leader uuid; multi-writer with `SetLeader(None)` | `paros-client` | Journal v1 (§J2.2 to §J2.4), #1331 |
+| F36 | Fenced single writer by leader uuid; multi-writer through a `SetLeader` to a tagged mode (`Leader::Multi(tag)`, #1495) | `paros-client` | Journal v1 (§J2.2 to §J2.4), #1331 |
 | F37 | An ambiguous write is a typed result, settled by read-back and the same re-send | `paros-client/src/lib.rs` (`resolve`) | #1331, #1431 |
 | F38 | A pipeline of writes in flight at consecutive positions, merged | `paros-client/src/pipeline.rs` | #1331, #1431 (model first) |
 | F39 | A reader cursor with gap reports; tail by long poll | `paros-client/src/reader.rs` | Journal v1 (§J2.5), #1331 |

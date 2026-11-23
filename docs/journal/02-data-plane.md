@@ -17,12 +17,13 @@ built yet.
 Every journal exposes four calls (and the recovery call `Resolve` of §J2.2), in one of two **modes**: **single-writer**, where one leader
 appends under its leader uuid, and **multi-writer**, where anyone with access appends. The mode
 is what the last applied `SetLeader` left: `SetLeader(None, old)` makes the journal
-multi-writer, and `SetLeader(new, None)` makes it single-writer again (decided by Pierre on
+multi-writer, and `SetLeader(new, None)` makes it single-writer again. In the code, `None` is a
+multi-writer mode with a fresh tag, `Leader::Multi(tag)` (§J2.4.1, #1495) (decided by Pierre on
 2026-11-20, #1274 (multi-writer mode through SetLeader(None) and expected_seq); it replaces the
 mode fixed at create time of 2026-10-04). §J2.4 has the rules of the switch. Every rule below is judged at apply time, in
 slot order, by a small per-journal state machine beside the replica's walk:
-`paros_journal::JournalState`, which holds the leader value (unset, a uuid, or `None` for
-multi-writer), `next_seq`, `first_seq` and the first position of the segment in force (§J3.1).
+`paros_journal::JournalState`, which holds the leader value (unset, a uuid, or a multi-writer
+mode with its tag), `next_seq`, `first_seq` and the first position of the segment in force (§J3.1).
 The fold holds no term (§J2.3). **The journal fold
 lives in the journal crates, not in `paros-consensus`** (decided by Pierre on 2026-11-20, #1315
 (bring docs and models in step with the v1 scope), decision 2): `SetLeader(None)`, the unset
@@ -258,8 +259,10 @@ position, and the journal judges it (a single-writer journal merges in its `Pipe
 #### J2.4.1 The switch between modes
 
 `SetLeader(new, old)` may name `new = None` (decided by Pierre on 2026-11-20, #1274). The
-journal state holds one leader value: a uuid (single-writer) or `None` (multi-writer). The
-compare-and-set does not change: it succeeds iff `old` is the current value and `new` is not.
+journal state holds one leader value: a uuid (single-writer) or `None` (multi-writer), and each
+multi-writer mode carries its own fresh tag (the rule "Each multi-writer mode has its own tag"
+below). The compare-and-set does not change: it succeeds iff `old` is the current value, with
+its tag, and `new` is not.
 There is no dedup table and no dedup role: a single writer gets exactly-once through
 `expected_seq`, and multi-writer is at-least-once. TLC checks the rules below in
 `specs/tla/multi-writer/`, each one with a control that breaks it:
@@ -295,8 +298,8 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   used (control `basis_stale`). The journal stays safe without this rule: the position check
   refuses such a write. The rule is for the writer: its first write after the switch lands.
 - **Each multi-writer mode has its own tag** (#1495 (a late copy of SetLeader reinstates a uuid),
-  proposed on 2026-11-23 under Pierre's standing rule to take the recommended option; **Open**:
-  the wire change waits for his review of the PR that builds it). A request stays in the network,
+  decided on 2026-11-23 under Pierre's standing rule to take the recommended option, and listed
+  for his review in the PR that builds it). A request stays in the network,
   so a late copy of `SetLeader(u, old)` can apply again. When `old` is the multi-writer mode and
   every multi-writer mode is the same `None`, a copy of `SetLeader(u, None)` matches again after
   `A → None → … → None`: `u` leads again with no call of its writer, and a fenced write of `u`
@@ -304,8 +307,17 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   seeds (100603, 100033). The rule: `SetLeader(None, old)` names a fresh multi tag, the journal
   leads with that tag, and a `SetLeader` compares its `old` with the tag, so a copy of an older
   call never matches a later multi-writer mode (`safety` and every check above, with copies of
-  `SetLeader` proposed again; control `setleader_copy`: one `None` breaks `RefusalFinal`). The
-  code still holds one `Multi` value until the wire change is built.
+  `SetLeader` proposed again; control `setleader_copy`: one `None` breaks `RefusalFinal`).
+  **The caller draws the tag**, fresh, as it draws a leader uuid: the journal trusts its clients
+  to draw fresh uuids (§J2.3, decision C), and a tag is one more such id. In the code the value
+  is `Leader::Multi(tag)`, the tag a set `LeaderUuid`; `SetLeader { new, old }` takes a `Leader`
+  as `new` (a uuid leader or a mode), and the fold refuses a `new` that is `Unset`, that holds the
+  unset uuid, or that is the value in force. A journal that starts multi-writer takes its first
+  tag from its initial configuration (`BoundaryState::fresh(Leader::Multi(tag))`); the one who creates the journal draws that tag fresh, as a client draws its tags. **Open**: the create call that carries it (the control plane, not built). A lost
+  `SetLeader` of a mode settles as one of a uuid does: a refused resend whose view names the
+  caller's own tag means that the first copy won (`paros_journal::client`). The fold of
+  `journal-state/` folds a tag as it folds `None` (`IsMulti`), so the trace checks of
+  `journal-sim` accept the tags of the code.
 - **A refusal of an unfenced write is true for that copy only.** An unfenced write has no
   identity in the log, so a resend cannot tell the writer whether an earlier copy landed: a copy
   can land while another copy is refused `WRONG_MODE` (check `multi_refusal`, not a rule). A
@@ -323,7 +335,8 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   segment starts only from a written record.
 
 **The leader of a fresh journal is unset**, as §J2.3 says: every write and truncate is refused
-until a `SetLeader`. A fresh journal that is multi-writer (`None`) is safe too. `multi-writer/`
+until a `SetLeader`. A fresh journal that is multi-writer (`None`, in the code a mode with the
+tag of its configuration) is safe too. `multi-writer/`
 passes with both (`safety`, `unset`), and so does the composed model `journal-state/` across three
 segments (`chain` starts unset, `chain_fresh_none` starts at `None`; #1189 (the journal state
 model)). The choice is not a safety rule: a change to `None` needs no new check.

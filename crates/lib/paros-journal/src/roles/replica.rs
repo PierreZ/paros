@@ -334,7 +334,7 @@ impl SegmentReplica {
         disk: ReplicaDisk,
     ) -> Self {
         assert!(
-            matches!(initial, Leader::Unset | Leader::Multi),
+            matches!(initial, Leader::Unset | Leader::Multi(_)),
             "a fresh journal is unset or multi-writer"
         );
         let mut replica = Self {

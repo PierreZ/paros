@@ -1326,7 +1326,7 @@ impl WholeModel {
         } else if !journal.claimed {
             (
                 Command::SetLeader {
-                    new: Some(A),
+                    new: Leader::uuid(A),
                     old: Leader::Unset,
                 },
                 false,

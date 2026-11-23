@@ -88,7 +88,7 @@ impl Truth {
             Command::Write(write) if write.records.is_empty() => "empty",
             Command::Write(write) => match write.fence {
                 Fence::Open => {
-                    if self.leader == Leader::Multi {
+                    if matches!(self.leader, Leader::Multi(_)) {
                         self.next += write.records.len() as u64;
                         "ok"
                     } else {
@@ -119,7 +119,7 @@ impl Truth {
             Command::Truncate { fence, up_to } => {
                 let allowed = match (fence, self.leader) {
                     (Some(uuid), Leader::Uuid(leader)) if *uuid == leader => true,
-                    (None, Leader::Multi) => true,
+                    (None, Leader::Multi(_)) => true,
                     (Some(_), Leader::Uuid(_) | Leader::Unset) => return "fenced",
                     _ => return "wrong",
                 };
@@ -129,10 +129,12 @@ impl Truth {
                 "ok"
             }
             Command::SetLeader { new, old } => {
-                let installed = match new {
-                    None => Leader::Multi,
-                    Some(uuid) if uuid.0 != 0 => Leader::Uuid(*uuid),
-                    Some(_) => return "refused",
+                // §J2.4.1: `new` is a uuid leader or a multi-writer mode,
+                // each with a set id; the compare is on the whole value, tag
+                // included.
+                let installed = match *new {
+                    Leader::Uuid(id) | Leader::Multi(id) if id.0 != 0 => *new,
+                    Leader::Uuid(_) | Leader::Multi(_) | Leader::Unset => return "refused",
                 };
                 if *old == self.leader && installed != self.leader {
                     self.leader = installed;
@@ -186,7 +188,7 @@ mod tests {
         assert_eq!(truth.apply(&write(1, 0, 1)), "fenced");
         assert_eq!(
             truth.apply(&Command::SetLeader {
-                new: Some(LeaderUuid(1)),
+                new: Leader::uuid(LeaderUuid(1)),
                 old: Leader::Unset
             }),
             "ok"
@@ -194,7 +196,7 @@ mod tests {
         assert_eq!(truth.apply(&write(1, 0, 1)), "ok");
         assert_eq!(
             truth.apply(&Command::SetLeader {
-                new: None,
+                new: Leader::multi(LeaderUuid(2)),
                 old: Leader::Uuid(LeaderUuid(1))
             }),
             "ok"
@@ -202,5 +204,25 @@ mod tests {
         assert_eq!(truth.apply(&write(1, 0, 1)), "dup");
         assert_eq!(truth.apply(&write(1, 0, 2)), "taken");
         assert_eq!(truth.apply(&write(1, 1, 2)), "fenced");
+    }
+
+    #[test]
+    fn the_truth_refuses_a_late_copy_after_a_later_mode() {
+        let m1 = Leader::multi(LeaderUuid(1));
+        let claim = Command::SetLeader {
+            new: Leader::uuid(LeaderUuid(2)),
+            old: m1,
+        };
+        let mut truth = Truth::new(m1);
+        assert_eq!(truth.apply(&claim), "ok");
+        assert_eq!(
+            truth.apply(&Command::SetLeader {
+                new: Leader::multi(LeaderUuid(3)),
+                old: Leader::uuid(LeaderUuid(2)),
+            }),
+            "ok"
+        );
+        assert_eq!(truth.apply(&claim), "refused");
+        assert_eq!(truth.apply(&write(2, 0, 1)), "fenced");
     }
 }

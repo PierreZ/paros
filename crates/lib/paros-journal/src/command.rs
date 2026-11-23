@@ -14,15 +14,20 @@ use crate::codec::Release;
 /// The leader value of a journal (§J2.3, §J2.4.1): who may write.
 ///
 /// The journal state holds one leader value. `SetLeader(new, old)` is a
-/// compare-and-set on it.
+/// compare-and-set on it, and it compares the whole value: the uuid of a
+/// single-writer leader, the tag of a multi-writer mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Leader {
     /// Nobody leads, and the journal is not multi-writer: every write and
     /// every truncate is refused until a `SetLeader`. A fresh journal starts
     /// here unless its initial configuration says multi-writer.
     Unset,
-    /// Multi-writer: no leader. `SetLeader(None, old)` puts the journal here.
-    Multi,
+    /// Multi-writer: no leader. The tag names this multi-writer mode. The
+    /// caller of `SetLeader` draws it fresh, as it draws a leader uuid
+    /// (§J2.3), so a late copy of a `SetLeader` whose `old` named an earlier
+    /// multi-writer mode never matches a later one (§J2.4.1). The tag is
+    /// set.
+    Multi(LeaderUuid),
     /// Single-writer: the writer that holds this uuid writes.
     Uuid(LeaderUuid),
 }
@@ -41,28 +46,41 @@ impl Leader {
         leader
     }
 
-    /// The leader that `SetLeader(new, _)` installs: `None` is multi-writer.
+    /// The multi-writer mode that the fresh tag `tag` names.
     ///
     /// # Panics
     ///
-    /// When `new` is the unset uuid. The fold refuses such a `SetLeader`
-    /// before it builds a leader from it.
+    /// When `tag` is the unset uuid, which never names a mode.
     #[must_use]
-    pub fn from_new(new: Option<LeaderUuid>) -> Self {
-        let leader = new.map_or(Self::Multi, Self::uuid);
-        assert!(leader != Self::Unset, "a SetLeader never installs Unset");
-        assert!(leader.is_valid(), "an installed leader is valid");
+    pub fn multi(tag: LeaderUuid) -> Self {
+        assert!(tag.is_set(), "the unset uuid never names a mode");
+        let leader = Self::Multi(tag);
+        assert!(leader.is_valid(), "a mode built from a set tag is valid");
+        assert!(leader.is_multi(), "a mode built from a tag is multi-writer");
         leader
     }
 
     /// Whether the value can be a journal's leader: a uuid leader holds a
-    /// set uuid.
+    /// set uuid, and a multi-writer mode a set tag.
     #[must_use]
     pub fn is_valid(self) -> bool {
         match self {
-            Self::Unset | Self::Multi => true,
-            Self::Uuid(uuid) => uuid.is_set(),
+            Self::Unset => true,
+            Self::Multi(id) | Self::Uuid(id) => id.is_set(),
         }
+    }
+
+    /// Whether the value is a multi-writer mode, whatever its tag.
+    #[must_use]
+    pub fn is_multi(self) -> bool {
+        matches!(self, Self::Multi(_))
+    }
+
+    /// Whether `SetLeader` may install the value: a valid uuid leader or
+    /// multi-writer mode. `Unset` is only the leader of a fresh journal.
+    #[must_use]
+    pub fn is_installable(self) -> bool {
+        self != Self::Unset && self.is_valid()
     }
 }
 
@@ -273,10 +291,12 @@ pub enum Command {
         up_to: Seq,
     },
     /// `SetLeader(new, old)` (§J2.3, §J2.4.1): a compare-and-set on the
-    /// leader value. `new = None` makes the journal multi-writer.
+    /// leader value. A `new` that is a multi-writer mode makes the journal
+    /// multi-writer under the fresh tag that the caller drew.
     SetLeader {
-        /// The leader from the next command on, `None` for multi-writer.
-        new: Option<LeaderUuid>,
+        /// The leader from the next command on: a uuid leader, or a
+        /// multi-writer mode with a fresh tag. The fold refuses `Unset`.
+        new: Leader,
         /// The leader value the caller believes current.
         old: Leader,
     },
