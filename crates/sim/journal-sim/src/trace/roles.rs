@@ -186,6 +186,7 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
         ),
         RolesEvent::Rot { .. }
         | RolesEvent::Probe { .. }
+        | RolesEvent::Skip { .. }
         | RolesEvent::Learn { .. }
         | RolesEvent::Repair { .. } => encode_ctrl(event, sizes),
         RolesEvent::Resolve { s, r, res } => (
@@ -213,6 +214,9 @@ fn encode_ctrl(
                 ("q", set(q.iter().copied())),
             ],
         ),
+        RolesEvent::Skip { b, s, a } => {
+            ("skip", vec![("b", int(*b)), ("s", int(*s)), ("a", int(*a))])
+        }
         RolesEvent::Learn { b, s, command: c } => {
             let mut fields = vec![("b", int(*b)), ("s", int(*s))];
             command_fields(&mut fields, c);
@@ -534,6 +538,10 @@ pub const EDITS: &[Edit] = &[
                 with(e, "q", Value::Set(q[..1].to_vec()))
             },
         )
+    }),
+    repeat_edit!("a skip repeated", "skip"),
+    Edit::new("a skip by an acceptor that did not answer", |events| {
+        change_first(events, |e, i| is(&e[i], "skip"), |e| with(e, "a", int(99)))
     }),
     repeat_edit!("a learn repeated", "learn"),
     Edit::new("a learn of another command", |events| {

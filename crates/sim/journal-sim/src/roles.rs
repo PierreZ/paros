@@ -197,6 +197,8 @@ pub mod reach {
     pub const BLOCKED: &str = "roles walk: a faulty vote blocked a slot";
     /// A late answer decided a blocked slot.
     pub const PROBED: &str = "roles walk: a late answer decided a blocked slot";
+    /// A late answer dropped a blocked slot, and the leader skipped it.
+    pub const SKIPPED: &str = "roles walk: a late answer dropped a blocked slot";
     /// A replica gave a blocked slot its chosen command.
     pub const LEARNED: &str = "roles walk: a replica gave a blocked slot its command";
     /// An acceptor repaired its faulty vote.
@@ -234,6 +236,7 @@ pub mod reach {
         ROTTED,
         BLOCKED,
         PROBED,
+        SKIPPED,
         LEARNED,
         REPAIRED,
     ];
@@ -486,6 +489,16 @@ pub enum RolesEvent {
         s: u64,
         /// The qualifying answers.
         q: Vec<u64>,
+    },
+    /// The complete answer of acceptor `a` dropped the blocked slot `s` of
+    /// the leader of `b`, which proposes nothing there (`ProbeSkip`).
+    Skip {
+        /// The ballot.
+        b: u64,
+        /// The slot.
+        s: u64,
+        /// The acceptor whose answer dropped the slot.
+        a: u64,
     },
     /// A replica gave the blocked slot `s` of the leader of `b` its chosen
     /// command (`LearnChosen`).
@@ -1172,6 +1185,13 @@ impl RolesModel {
                     b,
                     s: slot.0,
                     command: command.clone(),
+                });
+            } else if let Some(a) = leader.phase1().dropped_by(*slot) {
+                sometimes!(true, reach::SKIPPED);
+                cx.record(RolesEvent::Skip {
+                    b,
+                    s: slot.0,
+                    a: a.0,
                 });
             } else {
                 sometimes!(true, reach::PROBED);

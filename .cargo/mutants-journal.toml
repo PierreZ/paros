@@ -12,7 +12,13 @@
 
 # Equivalent mutants only, each with its reason (AGENTS.md, the absolute
 # rule: no allow list).
-exclude_re = []
+exclude_re = [
+  # `slot <= front` in `SegmentReplica::learn`: the replica never holds a
+  # chosen command at its front (`assert_invariants`: "the fold applies
+  # every slot it can"), so the slot at the front has no command either way
+  # and the Learn is not answered.
+  'replace < with <= in SegmentReplica::learn$',
+]
 
 test_package = ["paros-journal", "journal-sim"]
 test_tool = "nextest"

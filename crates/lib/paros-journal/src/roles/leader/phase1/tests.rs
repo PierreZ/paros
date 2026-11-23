@@ -250,13 +250,15 @@ fn the_highest_faulty_ballot_of_the_quorum_blocks() {
         None,
         "one answer qualifies"
     );
-    assert_eq!(phase1.faulty_at(Slot(1)), vec![NodeId(2)]);
+    assert_eq!(phase1.faulty_at(&segments, Slot(1)), vec![NodeId(2)]);
     // A late answer with a faulty vote at or below the threshold qualifies:
     // the tally decides the readable vote.
     phase1.fold(NodeId(3), Slot(0), page(&[], &[(1, 3)], None));
-    assert!(phase1.all_complete());
     assert_eq!(phase1.decide(&segments, Slot(1)), Some(noop_or(1)));
-    assert_eq!(phase1.faulty_at(Slot(1)), vec![NodeId(2), NodeId(3)]);
+    assert_eq!(
+        phase1.faulty_at(&segments, Slot(1)),
+        vec![NodeId(2), NodeId(3)]
+    );
 }
 
 #[test]
@@ -293,4 +295,8 @@ fn a_faulty_entry_the_segment_does_not_read_blocks_nothing() {
     }
     let close = phase1.close(&segments).expect("a quorum");
     assert_eq!(close.blocked, Vec::<Slot>::new());
+    // Node 1 is not an acceptor of segment 2, the one segment that reads
+    // slots 3 and 5: a repair there does not write to it.
+    assert_eq!(phase1.faulty_at(&segments, Slot(3)), Vec::<NodeId>::new());
+    assert_eq!(phase1.faulty_at(&segments, Slot(5)), Vec::<NodeId>::new());
 }

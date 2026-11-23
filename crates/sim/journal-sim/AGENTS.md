@@ -42,8 +42,8 @@ Test only: `publish = false`.
   of its oldest segment, so its Phase 1 reads the dropped slots. CTRL (§J5.3): a move damages a vote of an
   acceptor's disk at a boot, inside the contract (a replica applied the slot, or the slot chose
   another command); the leader's blocked slot, its probe on a late answer, its learn from a
-  replica and the acceptor's repair (`REPAIRED`, mutant `RepairForged`; trace events `Rot`,
-  `Probe`, `Learn` and `Repair`).
+  replica, its skip of a slot that a late answer dropped, and the acceptor's repair (`REPAIRED`,
+  mutant `RepairForged`; trace events `Rot`, `Probe`, `Skip`, `Learn` and `Repair`).
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
   controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
   `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each

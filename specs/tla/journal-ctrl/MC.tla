@@ -26,6 +26,11 @@ SRace1 == Script(<<{W(None, 0, 1), W(None, 0, 2)}>>)
 \* Multi-writer: one write at each slot.
 SOne == Script(<<{W(None, 0, 1)}, {W(None, 1, 2)}>>)
 
+TR(u, up) == [op |-> "tr", u |-> u, up |-> up]
+\* One write at slot 0, and a Truncate over it at slot 1: the replica
+\* compacts past slot 0, and an acceptor drops it.
+SOneTrunc == Script(<<{W(None, 0, 1)}, {TR(None, 1)}>>)
+
 \* Ballot b registers configuration b only; or any ballot the first.
 OneEach == {<<b, b>> : b \in 1..2}
 AllFirst == {<<b, 1>> : b \in 1..3}

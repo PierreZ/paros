@@ -10,9 +10,12 @@
 #
 ctrl                pass       ci
 ctrl_g2             pass       ci
+ctrl_trunc          pass       ci
 ctrl_drop           violation  ci
 ctrl_peer           violation  ci
+ctrl_probe_drop     violation  ci
 reach_blocked       violation  ci
 reach_probe         violation  ci
 reach_learn         violation  ci
 reach_repair        violation  ci
+reach_skip          violation  ci

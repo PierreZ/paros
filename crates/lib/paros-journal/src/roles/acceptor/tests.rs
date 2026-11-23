@@ -625,3 +625,23 @@ fn a_repair_writes_the_chosen_command_at_the_higher_ballot_in_one_batch() {
     assert_eq!(acceptor.step(LEADER, repair(6, 7, write(9))).len(), 0);
     assert_eq!(acceptor.vote(Slot(3)), Some(&(ballot(2), write(3))));
 }
+
+#[test]
+fn a_repair_that_raises_the_promise_drops_the_belief() {
+    let disk = AcceptorDisk {
+        promised: ballot(4),
+        faulty: BTreeMap::from([(Slot(1), ballot(4)), (Slot(2), ballot(1))]),
+        ..AcceptorDisk::default()
+    };
+    let mut acceptor = JournalAcceptor::recover(ME, disk, PROMISE_BATCH);
+    let _ = acceptor.step(LEADER, prepare_in(4, 1));
+    assert_eq!(acceptor.bound(), Some(SegmentId(1)));
+    // At the promise: the belief stays.
+    let _ = acceptor.step(LEADER, repair(3, 1, write(1)));
+    assert_eq!(acceptor.promised(), ballot(4));
+    assert_eq!(acceptor.bound(), Some(SegmentId(1)));
+    // Above it: a promise that no `Prepare` raised names no segment.
+    let _ = acceptor.step(LEADER, repair(6, 2, write(2)));
+    assert_eq!(acceptor.promised(), ballot(6));
+    assert_eq!(acceptor.bound(), None);
+}

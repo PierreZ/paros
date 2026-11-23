@@ -28,11 +28,12 @@
 (***************************************************************************)
 EXTENDS JournalCompact
 
-CONSTANTS MaxRot, Damage, Repair
+CONSTANTS MaxRot, Damage, Repair, ProbeDrops
 
 ASSUME MaxRot \in Nat
 ASSUME Damage \in {"keep", "drop"}
 ASSUME Repair \in {"chosen", "peer"}
+ASSUME ProbeDrops \in {"skip", "ignore"}
 
 Faulty(x) == x[1] > 0 /\ x[2] = None
 
@@ -84,16 +85,22 @@ ProbePromised(b, Q) ==
 
 \* The probe of b decides the blocked slot s on the promise quorum Qs[h] of
 \* each configuration h that reads s: every answer qualifies, so a faulty
-\* vote is at or below the highest readable vote.
+\* vote is at or below the highest readable vote. No answer dropped s: an
+\* answer that dropped it reports no vote there, and the other answers may
+\* predate the compaction, so the tally would read a stale vote
+\* (`ProbeSkip`). The control "ignore" tallies the slot anyway, and
+\* `Agreement` breaks.
 ProbeDecide(b, s, Qs) ==
   LET hs == {h \in bH[b] : s \in ReadSet(b, h)}
-      xs == {x[2][s] : x \in UNION {Reports(b, Qs[h]) : h \in hs}}
+      rs == UNION {Reports(b, Qs[h]) : h \in hs}
+      xs == {x[2][s] : x \in rs}
       rd == {x \in xs : x[1] > 0 /\ x[2] # None}
       thr == Max({0} \cup {x[1] : x \in rd})
       all == UNION {Qs[h] : h \in hs}
   IN
   /\ s \in bblock[b]
   /\ \A h \in hs : Qs[h] \in QOf[h] /\ ProbePromised(b, Qs[h])
+  /\ ProbeDrops = "ignore" \/ \A x \in rs : s \notin x[3]
   /\ \A x \in xs : ~(Faulty(x) /\ x[1] > thr)
   /\ bsafe' = [bsafe EXCEPT ![b][s] =
        IF rd = {} THEN None ELSE (CHOOSE x \in rd : x[1] = thr)[2]]
@@ -104,6 +111,18 @@ ProbeDecide(b, s, Qs) ==
      ELSE UNCHANGED <<mprom, dprom>>
   /\ UNCHANGED <<reg, bst, bH, bE, bend, blo, bstart, prop, bskip, mvote, pend, dvote,
                  crashes, rots, p1b, sent2b, adrop, dadrop, rep>>
+
+\* The answer of a, a late one too, dropped the blocked slot s of b: s is
+\* chosen and applied at F + 1 replicas (`JournalCompact.tla`), so the
+\* leader proposes nothing there, as Phase 1 skips a dropped slot
+\* (`SkipCompacted`). Any report that dropped s proves it, whatever ballot
+\* it answers: an acceptor drops a slot only after the compaction.
+ProbeSkip(b, s, a) ==
+  /\ s \in bblock[b]
+  /\ \E x \in Reports(b, {a}) : s \in x[3]
+  /\ bblock' = [bblock EXCEPT ![b] = @ \ {s}]
+  /\ bskip' = [bskip EXCEPT ![b] = @ \cup {s}]
+  /\ UNCHANGED <<reg, bst, bH, bE, bsafe, bend, blo, bstart, prop, acc, rep>>
 
 \* The leader of b learns the chosen value of its blocked slot s from a
 \* replica that applied it, and proposes it. The answer may arrive after the
@@ -131,6 +150,8 @@ AccRepair(a, s, v, c) ==
       w == <<at, v>>
       raise == mprom[a] < at
   IN
+  \* The acceptors of a retired configuration stop (`PromiseRead`).
+  /\ a \in Active
   \* A dropped slot holds no vote (`DroppedEmpty`), so it is not faulty.
   /\ Faulty(mvote[a][s])
   /\ IF Repair = "chosen"
@@ -153,6 +174,7 @@ NextR ==
   \/ \E b \in Ballots, s \in Slots : LearnChosen(b, s)
   \/ \E b \in Ballots, s \in Slots :
        \E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : ProbeDecide(b, s, Qs)
+  \/ \E b \in Ballots, s \in Slots, a \in Acceptors : ProbeSkip(b, s, a)
   \/ \E a \in Acceptors, s \in Slots, v \in Cmds, c \in Ballots : AccRepair(a, s, v, c)
 
 SpecR == Init /\ [][NextR]_vars
@@ -167,6 +189,10 @@ OneValueAtBallot == \A s \in Slots, a, c \in Acceptors :
     x[1] > 0 /\ y[1] = x[1] /\ x[2] # None /\ y[2] # None => x[2] = y[2]
 
 \* A leader never proposes at a slot that its Phase 1 left blocked.
+\* A slot that a leader skips is chosen and applied at CompactAt replicas
+\* of its segment.
+SkipCompacted == \A b \in Ballots : \A s \in bskip[b] :
+  \E p \in Gens : StartKnown(p) /\ Start(p) <= s /\ CompactedTo(p, s + 1)
 NoProposeBlocked == \A b \in Ballots : \A s \in bblock[b] : prop[b][s] = None
 
 \* A blocked slot is chosen: only a damaged vote blocks a slot, and a rot
@@ -177,6 +203,8 @@ BlockedChosen == \A b \in Ballots : \A s \in bblock[b] : IsChosen(s)
 (* Reach: each must be violated, so that a passing check is not empty.     *)
 (***************************************************************************)
 NoBlocked == \A b \in Ballots : bblock[b] = {}
+\* No blocked slot is skipped.
+NoSkip == \A b \in Ballots : bskip[b] = {}
 \* No blocked slot opens. With one acceptor in a grid the probe never
 \* decides (the faulty vote is the only answer), so this reaches `LearnChosen`.
 NoUnblock == [][\A b \in Ballots : bblock[b] \subseteq bblock'[b]]_vars

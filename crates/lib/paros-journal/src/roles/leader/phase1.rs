@@ -252,21 +252,25 @@ impl Phase1 {
         })
     }
 
-    /// The acceptors whose complete answer reports a faulty vote at `slot`:
-    /// the acceptors that a CTRL repair of the slot writes to.
+    /// The acceptors of the segments that read `slot` whose complete
+    /// answer reports a faulty vote there: the acceptors that a CTRL repair
+    /// of the slot writes to.
     #[must_use]
-    pub fn faulty_at(&self, slot: Slot) -> Vec<NodeId> {
-        self.reports
-            .iter()
-            .filter(|(_, report)| report.faulty.contains_key(&slot))
-            .map(|(node, _)| *node)
+    pub fn faulty_at(&self, segments: &[ReadSegment], slot: Slot) -> Vec<NodeId> {
+        self.answers(segments, slot)
+            .into_iter()
+            .filter(|node| self.reports[node].faulty.contains_key(&slot))
             .collect()
     }
 
-    /// Whether every acceptor answered completely.
+    /// The first acceptor whose complete answer dropped `slot`: the slot is
+    /// then chosen and applied at `F + 1` replicas (§J3.2), and the leader
+    /// proposes nothing there, as [`Self::close`] skips it.
     #[must_use]
-    pub fn all_complete(&self) -> bool {
-        self.reports.values().all(|report| report.complete)
+    pub fn dropped_by(&self, slot: Slot) -> Option<NodeId> {
+        self.complete()
+            .into_iter()
+            .find(|node| in_ranges(&self.reports[node].dropped, slot))
     }
 
     /// The tri-state tally of `slot` (CTRL, §J5.3, `specs/tla/journal-ctrl/`,

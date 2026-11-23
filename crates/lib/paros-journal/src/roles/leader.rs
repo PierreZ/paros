@@ -484,8 +484,17 @@ impl<T> JournalLeader<T> {
                 page,
             } if ballot == self.campaign.ballot && !self.blocked.is_empty() => {
                 // A late answer folds into the tally of the blocked slots
-                // (CTRL's repair probe).
-                match self.phase1.fold(from, at, page) {
+                // (CTRL's repair probe). A slot that a complete answer
+                // dropped is skipped first.
+                let next = self.phase1.fold(from, at, page);
+                let dropped: Vec<Slot> = self
+                    .blocked
+                    .iter()
+                    .copied()
+                    .filter(|slot| self.phase1.dropped_by(*slot).is_some())
+                    .collect();
+                self.skip_blocked(&dropped);
+                match next {
                     Some(next) => vec![LeaderEffect::Send {
                         to: from,
                         message: Message::Prepare {
@@ -890,6 +899,29 @@ impl<T> JournalLeader<T> {
         effects
     }
 
+    /// Each slot of `slots` leaves the blocked slots with no proposal: a
+    /// complete answer dropped it, so it is chosen and applied at `F + 1`
+    /// replicas (§J3.2), and no proposal and no repair is needed. The tally
+    /// must not decide it: the answer that dropped it reports no vote
+    /// there, and the other answers may predate the compaction
+    /// (`specs/tla/journal-ctrl/`, `ProbeSkip`, and `ProbeDecide` with its
+    /// control `ctrl_probe_drop`).
+    fn skip_blocked(&mut self, slots: &[Slot]) {
+        for slot in slots {
+            probe!(
+                reachable,
+                "leader: a blocked slot that an answer dropped is skipped"
+            );
+            self.blocked.retain(|s| s != slot);
+            let held = self.dropped.entry(*slot).or_insert(Slot(slot.0 + 1));
+            *held = (*held).max(Slot(slot.0 + 1));
+        }
+        assert!(
+            slots.iter().all(|slot| !self.blocked.contains(slot)),
+            "a skipped slot is no longer blocked"
+        );
+    }
+
     /// `slot` leaves the blocked slots with `command`, the command that is
     /// safe there: an open leader proposes it now, a sealing leader when it
     /// opens.
@@ -1122,7 +1154,7 @@ impl<T> JournalLeader<T> {
             probe!(reachable, "leader: a chosen blocked slot is repaired");
             effects.extend(
                 self.phase1
-                    .faulty_at(slot)
+                    .faulty_at(&self.segments, slot)
                     .into_iter()
                     .map(|to| LeaderEffect::Send {
                         to,

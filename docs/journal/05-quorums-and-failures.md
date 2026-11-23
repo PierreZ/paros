@@ -128,7 +128,11 @@ a boot that finds a vote damaged (`Rot`), the leader's probe, its learn and the 
 - **The leader's Phase 1 takes the tri-state tally.** A slot whose top report is a faulty vote is
   decided when the qualifying answers hold a Phase-1 quorum of every grid that reads it; else it is
   blocked, and no proposal, a client's included, takes it. A late answer folds into the tally and
-  can decide the slot (`ProbeDecide`).
+  can decide the slot (`ProbeDecide`). An answer that dropped the slot never enters that tally:
+  the slot is then chosen and applied at `F + 1` replicas, and the other answers may predate the
+  compaction, so the tally would read a stale vote. The leader skips the slot and proposes
+  nothing there (`ProbeSkip`; the control `ctrl_probe_drop` tallies it and chooses a `Noop` over
+  the chosen write).
 - **A replica that applied a blocked slot gives its chosen command** (`Learn`, `Learned`;
   `LearnChosen`). The leader then proposes that command at its own ballot.
 - **The leader repairs once its own round chose the command.** It sends `Repair` with its ballot to

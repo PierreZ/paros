@@ -1313,6 +1313,42 @@ fn a_tick_asks_the_missing_answers_and_the_replicas_of_a_blocked_slot() {
     );
 }
 
+/// A late answer that dropped the blocked slot proves that the slot is
+/// chosen and applied at `F + 1` replicas. Its page shows no vote there,
+/// and the other answers predate the compaction: the tally would read a
+/// stale vote. The leader proposes nothing there and repairs nothing
+/// (`specs/tla/journal-ctrl/`, `ProbeDecide`, control `ctrl_probe_drop`).
+#[test]
+fn a_late_answer_that_dropped_a_blocked_slot_skips_it() {
+    let mut leader = blocked_leader();
+    let mut dropped = page(&[], &[]);
+    dropped.dropped.insert(Slot(0), Slot(2));
+    let effects = leader.step(NodeId(3), promise(3, 0, dropped));
+    assert_eq!(leader.blocked().len(), 0);
+    assert_eq!(accepts(&effects), BTreeMap::new());
+    let effects = chosen_at(&mut leader, 1);
+    assert!(
+        sends(&effects)
+            .iter()
+            .all(|(_, m)| !matches!(m, Message::Repair { .. }))
+    );
+    // A later tick asks nothing more for the slot.
+    assert!(
+        sends(&leader.tick(RESEND_BATCH))
+            .iter()
+            .all(|(_, m)| !matches!(m, Message::Learn { .. } | Message::Prepare { .. }))
+    );
+}
+
+#[test]
+fn a_promise_at_another_ballot_does_not_decide_a_blocked_slot() {
+    let mut leader = blocked_leader();
+    // The page would decide slot 1 at ballot 3, but it answers ballot 2.
+    let effects = leader.step(NodeId(3), promise(2, 0, page(&[], &[])));
+    assert_eq!(effects, Vec::new());
+    assert_eq!(leader.blocked(), &[Slot(1)]);
+}
+
 #[test]
 fn a_late_answer_that_decides_a_blocked_slot_proposes_it_and_repairs_the_faulty_vote() {
     let mut leader = blocked_leader();

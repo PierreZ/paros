@@ -33,6 +33,8 @@
 (*   "rot"      `Rot(a, s)`: acceptor a booted with its vote at s damaged. *)
 (*   "probe"    `ProbeDecide(b, s, Qs)`: a late answer decided the blocked *)
 (*              slot s on the qualifying answers q.                        *)
+(*   "skip"     `ProbeSkip(b, s, a)`: the late answer of acceptor a      *)
+(*              dropped the blocked slot s, so the leader skips it.        *)
 (*   "learn"    `LearnChosen(b, s)`: a replica gave the blocked slot s its *)
 (*              chosen command.                                            *)
 (*   "repair"   `AccRepair(a, s, v, c)`: acceptor a queued the repair of   *)
@@ -126,6 +128,7 @@ TraceStep ==
   \* The walk damages a readable vote, and repairs a faulty one.
   \/ e.event = "rot" /\ dvote[e.a][e.s][2] # None /\ Rot(e.a, e.s)
   \/ e.event = "probe" /\ ProbeDecide(e.b, e.s, QsOf(e.b, e.q))
+  \/ e.event = "skip" /\ ProbeSkip(e.b, e.s, e.a)
   \/ /\ e.event = "learn"
      /\ LearnChosen(e.b, e.s)
      /\ IsChosen(e.s)
