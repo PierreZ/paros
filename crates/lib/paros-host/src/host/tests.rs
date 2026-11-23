@@ -1,11 +1,16 @@
 use super::*;
-use crate::toy::{Assignment, In, LIMIT, Note, Out, Stop, Toy, ToyRole};
-
-const TICK: u64 = 10;
+use crate::toy::{Assignment, In, LIMIT, Note, Out, Stop, TICK, Toy, ToyRole};
 
 fn host() -> Host<ToyRole> {
-    Host::new(TICK, 0)
+    Host::new(0)
 }
+
+/// A watcher that has not seen a value, nor its draw.
+const FRESH: ToyRole = ToyRole::Watcher {
+    seen: 0,
+    jitter: None,
+    woke: false,
+};
 
 fn counter(address: u32, peers: Vec<u32>) -> Input<Toy> {
     Input::Assign(Assignment::Counter { address, peers })
@@ -16,27 +21,47 @@ fn watcher(address: u32) -> Input<Toy> {
 }
 
 #[test]
-fn a_role_with_no_disk_runs_at_once_and_the_first_assign_arms_the_timer() {
+fn a_role_with_no_disk_runs_at_once_and_its_draw_is_an_input() {
     let mut host = host();
     let effects = host.step(Time(5), watcher(2));
-    assert_eq!(effects, vec![Effect::SetTimer { at: Time(15) }]);
+    assert_eq!(effects, vec![Effect::Draw { address: 2 }]);
     assert!(host.serves(2));
-    assert_eq!(host.role(2), Some(&ToyRole::Watcher { seen: 0 }));
-    // A second role does not arm the timer again.
-    assert_eq!(host.step(Time(6), watcher(3)), Vec::new());
+    assert_eq!(host.role(2), Some(&FRESH));
+    assert_eq!(host.deadline(2), None, "no timer before the draw");
+    // The drawn value sets the jitter of the role's timer.
+    let effects = host.step(
+        Time(6),
+        Input::Drawn {
+            address: 2,
+            value: 13,
+        },
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::SetTimer {
+            address: 2,
+            at: Time(6 + TICK + 3),
+        }]
+    );
+    assert_eq!(host.deadline(2), Some(Time(6 + TICK + 3)));
+    // A draw for a role that the host does not serve is lost.
+    assert_eq!(
+        host.step(
+            Time(7),
+            Input::Drawn {
+                address: 9,
+                value: 1
+            }
+        ),
+        Vec::new()
+    );
 }
 
 #[test]
 fn a_role_with_a_disk_reads_its_records_first_and_loses_its_inputs_until_then() {
     let mut host = host();
     let effects = host.step(Time(0), counter(1, vec![2]));
-    assert_eq!(
-        effects,
-        vec![
-            Effect::SetTimer { at: Time(TICK) },
-            Effect::Read { address: 1 }
-        ]
-    );
+    assert_eq!(effects, vec![Effect::Read { address: 1 }]);
     assert!(host.serves(1));
     assert!(host.role(1).is_none(), "a role that recovers does not run");
     assert!(host.pending(1).is_some());
@@ -55,7 +80,14 @@ fn a_role_with_a_disk_reads_its_records_first_and_loses_its_inputs_until_then() 
             records: vec![(1, 4), (2, 7)],
         },
     );
-    assert_eq!(effects, Vec::new());
+    assert_eq!(
+        effects,
+        vec![Effect::SetTimer {
+            address: 1,
+            at: Time(2 + TICK),
+        }],
+        "the role sets its timer when it starts"
+    );
     assert_eq!(
         host.role(1),
         Some(&ToyRole::Counter {
@@ -86,12 +118,12 @@ fn an_address_takes_one_role_and_placement_may_say_it_again() {
     host.step(Time(0), watcher(2));
     assert_eq!(host.step(Time(1), watcher(2)), Vec::new());
     assert_eq!(host.step(Time(1), counter(2, vec![])), Vec::new());
-    assert_eq!(host.role(2), Some(&ToyRole::Watcher { seen: 0 }));
+    assert_eq!(host.role(2), Some(&FRESH));
 }
 
 #[test]
 fn records_that_refuse_a_start_stop_the_role() {
-    let mut host: Host<ToyRole> = Host::new(TICK, 9);
+    let mut host: Host<ToyRole> = Host::new(9);
     host.step(Time(0), counter(1, vec![]));
     let effects = host.step(
         Time(1),
@@ -184,7 +216,7 @@ fn a_message_goes_to_the_role_it_names_and_a_role_ends_by_its_own_step() {
 }
 
 #[test]
-fn the_timer_steps_every_role_that_runs_and_arms_again() {
+fn a_timer_fires_its_role_alone_and_only_once_due() {
     let mut host = host();
     host.step(Time(0), counter(1, vec![]));
     host.step(
@@ -195,7 +227,26 @@ fn the_timer_steps_every_role_that_runs_and_arms_again() {
         },
     );
     host.step(Time(0), watcher(2));
-    let effects = host.step(Time(10), Input::TimerFired);
+    host.step(
+        Time(0),
+        Input::Drawn {
+            address: 2,
+            value: 4,
+        },
+    );
+    assert_eq!(host.deadline(1), Some(Time(TICK)));
+    assert_eq!(host.deadline(2), Some(Time(TICK + 4)));
+    // A fire before the deadline, or for a role with no timer, changes
+    // nothing.
+    assert_eq!(
+        host.step(Time(TICK - 1), Input::TimerFired { address: 1 }),
+        Vec::new()
+    );
+    assert_eq!(
+        host.step(Time(TICK), Input::TimerFired { address: 9 }),
+        Vec::new()
+    );
+    let effects = host.step(Time(TICK), Input::TimerFired { address: 1 });
     assert_eq!(
         effects,
         vec![
@@ -204,8 +255,53 @@ fn the_timer_steps_every_role_that_runs_and_arms_again() {
                 output: Out::Report { value: 5 },
                 after: Some(3),
             },
-            Effect::SetTimer { at: Time(20) },
+            Effect::SetTimer {
+                address: 1,
+                at: Time(2 * TICK),
+            },
         ]
+    );
+    assert_eq!(
+        host.role(2),
+        Some(&ToyRole::Watcher {
+            seen: 0,
+            jitter: Some(4),
+            woke: false,
+        }),
+        "the fire of a role reaches no other role"
+    );
+    assert_eq!(
+        host.step(Time(TICK + 4), Input::TimerFired { address: 2 }),
+        Vec::new()
+    );
+    assert_eq!(host.deadline(2), None, "a timer that fired is gone");
+    assert!(matches!(
+        host.role(2),
+        Some(ToyRole::Watcher { woke: true, .. })
+    ));
+    // The timer fired once: a second fire is stale.
+    host.step(Time(TICK + 5), Input::TimerFired { address: 2 });
+    assert_eq!(host.deadline(2), None);
+}
+
+#[test]
+fn a_stop_takes_the_timer_of_its_role() {
+    let mut host = host();
+    host.step(Time(0), counter(1, vec![]));
+    host.step(
+        Time(0),
+        Input::Recovered {
+            address: 1,
+            records: Vec::new(),
+        },
+    );
+    assert_eq!(host.deadline(1), Some(Time(TICK)));
+    host.step(Time(1), Input::Unassign(1));
+    assert_eq!(host.deadline(1), None);
+    // A late fire of a stopped role is lost.
+    assert_eq!(
+        host.step(Time(TICK), Input::TimerFired { address: 1 }),
+        Vec::new()
     );
 }
 
@@ -245,11 +341,5 @@ fn the_shared_state_is_what_every_start_reads() {
             records: vec![(1, 8)],
         },
     );
-    assert_eq!(effects, Vec::new(), "a value at the floor starts");
-}
-
-#[test]
-#[should_panic(expected = "the timer moves time forward")]
-fn a_tick_of_zero_is_refused() {
-    let _ = Host::<ToyRole>::new(0, 0);
+    assert_eq!(effects.len(), 1, "a value at the floor starts");
 }

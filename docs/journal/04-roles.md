@@ -203,15 +203,20 @@ backends in memory (`mem`) and the contract suites (`contract`).
   after a batch waits on that batch.
 - *Rule 2.* A role with a disk starts with `Effect::Read`; the driver scans the role's records
   and gives them back as `Input::Recovered`, and learns from them the role's highest durable
-  batch. The driver gives the time (`Time`) with every input of the `Host`. The `Host` arms one
-  timer (`Effect::SetTimer`); when it fires (`Input::TimerFired`), each leader and each replica
-  takes its periodic step. The leader takes the time of each proposal from its caller
+  batch. The driver gives the time (`Time`) with every input of the `Host`. Each role has its own
+  timer: it sets the deadline (`Effect::SetTimer`, which names the role), the `Host` keeps one
+  deadline for each role, and the driver fires a due timer to its role alone
+  (`Input::TimerFired`, which names the role; #1413 (the time, the timers and the draws in each
+  role)). A leader, a proxy and a replica set their timer when they start and again at each
+  fire, and take their periodic step then; an acceptor sets none. A role draws no random value:
+  it asks one (`Effect::Draw`), and the driver draws it from its `Entropy` source and gives it
+  back as `Input::Drawn`, a recorded input. No journal role draws today; the election does
+  (the jitter of a challenge). A test in `paros-host` records a run with timers and draws and
+  replays its inputs on a new `Host` to the same effects. The leader takes the time of each proposal from its caller
   (`JournalLeader::propose`, the leader time of §J2.8). A client read is an input
   (`Input::Read`) to a replica, answered by `Effect::ReadReply` once the replica's batch is
   durable; the driver gives it back as `ReadReply` (`Driver::read`, `Driver::take_reads`).
-  **Open**: timers and random draws inside each role (the roles keep `tick(page)` and take no
-  random value yet), and reads of a slot range as effects (`ReadDone`), which wait for the
-  offload.
+  **Open**: reads of a slot range as effects (`ReadDone`), which wait for the offload.
 - *Rule 3.* The `Host` maps each `Address` (a journal, a node, and the segment of a replica) to
   its role, routes each input, and turns the role's effects into `Effect`s that name their journal
   and their sender. A replica node serves one replica for each segment of its journal, so a heal

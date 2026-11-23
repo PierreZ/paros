@@ -441,14 +441,16 @@ fn the_events_port_reports_every_step_once_its_batches_are_durable() {
 }
 
 #[test]
-fn poll_says_when_it_worked_and_the_timer_is_the_hosts() {
+fn poll_says_when_it_worked_and_the_timer_is_the_roles() {
     let world = World::new();
     let disk = Shared::default();
-    let mut driver = world.process(&disk, &[1]);
+    let acceptor = world.process(&disk, &[1]);
+    assert_eq!(acceptor.timer(), None, "an acceptor sets no timer");
+    let mut driver = world.process(&Shared::default(), &[11]);
     assert_eq!(
         driver.timer(),
         Some(Time(TICK)),
-        "armed one tick after time 0"
+        "the replica set its timer one tick after its start at time 0"
     );
     while driver.poll() {}
     assert!(!driver.poll(), "nothing to do");
