@@ -727,13 +727,13 @@ impl ProxyLeader {
             self.belief.config().is_drawn_from(&self.pool),
             "a proxy's configuration is drawn from its pool"
         );
-        // A delegated round runs over the configuration its `Accept`
-        // carried: on a matchmaker deployment, the belief bound to the
-        // round's ballot.
-        if self.belief.has_matchmakers() && !self.rounds.is_empty() {
+        // The round that just closed ran over the configuration its
+        // `Accept` carried: on a matchmaker deployment, the belief stays
+        // bound to the round's ballot until a newer ballot moves both.
+        if self.belief.has_matchmakers() {
             assert!(
                 self.belief.since() == self.ballot,
-                "an open proxy round runs over the configuration its ballot carried"
+                "a closed proxy round ran over the configuration its ballot carried"
             );
         }
     }
