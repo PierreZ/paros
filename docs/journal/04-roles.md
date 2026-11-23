@@ -287,6 +287,19 @@ ops serves all three, and one contract suite tests every backend. An atomic comm
 its meaning: a batch is durable or not, never torn. A contract suite certifies the API only;
 crash safety is claimed only on a faultable disk (decided by Pierre on 2026-11-19).
 
+*The faults of a storage* (#1414 (Storage lists the roles on a disk and reports typed faults)). A
+storage lists the roles that have records on its disk, and reports each fault as a typed value
+with one verdict. `Full`: a commit wrote nothing; its roles stop (`Stop::Failed`) and start again
+from a scan. `Lost`: a disk lost a record of a role; the list still names the role (faulty, not
+empty), its scan reports `Lost`, and the role stops for good (`Stop::Damaged`). `Unknown`: a
+commit failed and the backend does not know what it wrote (fsyncgate); the page cache may still
+show a batch that is not durable, so the process stops and a new one reads the disk.
+`specs/tla/flight-rule/` checks these verdicts (`storage`) under single-decree Paxos, with three
+controls: a role that starts from the records that a loss left (`lost_restore`), a list that
+leaves out a damaged role so that placement starts it empty (`list_readable`), and a scan in the
+same process after `Unknown` (`unknown_rescan`). **Open** (#1414): the code; the trait still has
+one `StorageError`.
+
 **Rule 5: two ports.** `Events` carries the recorded (input, effects) pair of each `Host` step,
 after durability. The trace check reads it, live and chunk by chunk (moonpool-tla `Live`,
 §J7.3, #1310 (check long runs live)), and so does the grid controller, for its signals.

@@ -19,7 +19,7 @@ ctrl-segments 1
 decree 2
 degraded-reshape 12
 election 3
-flight-rule 1
+flight-rule 2
 generations 8
 grid 0
 grid-controller 4
