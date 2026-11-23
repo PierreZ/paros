@@ -464,3 +464,32 @@ fn an_acceptor_that_starts_again_has_no_belief() {
     assert_eq!(restarted.promised(), ballot(2));
     assert_eq!(restarted.bound(), None, "the belief is in memory only");
 }
+
+#[test]
+fn a_compact_drops_the_votes_of_its_range_and_keeps_the_range() {
+    let mut acceptor = fresh();
+    for slot in 0..3 {
+        acceptor.step(LEADER, accept(1, slot, write(1)));
+    }
+    let (batches, sends, _) = split(acceptor.step(
+        LEADER,
+        Message::Compact {
+            segment: SegmentId(1),
+            start: Slot(0),
+            below: Slot(2),
+        },
+    ));
+    assert_eq!(batches.len(), 1, "the drop is a batch of its own");
+    assert!(sends.is_empty());
+    assert_eq!(
+        acceptor.dropped(),
+        &BTreeMap::from([(Slot(0), Slot(2))]),
+        "the acceptor keeps the range it dropped"
+    );
+    assert!(acceptor.vote(Slot(0)).is_none());
+    assert!(acceptor.vote(Slot(1)).is_none());
+    assert!(
+        acceptor.vote(Slot(2)).is_some(),
+        "the slot at `below` stays"
+    );
+}

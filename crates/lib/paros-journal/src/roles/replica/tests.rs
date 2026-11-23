@@ -1090,3 +1090,84 @@ fn a_floor_inside_a_retired_segment_does_not_trim_it() {
     assert_eq!(trims(&effects), vec![], "the floor is below the last seq");
     assert_eq!(trims(&second.observe(&value)), vec![]);
 }
+
+#[test]
+fn a_laggard_jumps_into_a_blind_fold_that_answers_nothing_until_the_truncate() {
+    let mut replica = based();
+    replica.step(LEADER, commit(1, 0, claim(7)));
+    // A peer compacted to slot 2: the fold there has the claim and one
+    // write, and the floor 1 that the `Truncate` at slot 3 raises.
+    let state = JournalState::resume(
+        BoundaryState {
+            next_seq: Seq(1),
+            first_seq: Seq(0),
+            leader: Leader::Uuid(LeaderUuid(7)),
+        },
+        Seq(0),
+    )
+    .expect("a fold");
+    let effects = replica.step(
+        NodeId(12),
+        Message::TrimmedTo {
+            segment: SegmentId(1),
+            slot: Slot(2),
+            state,
+            floor: Seq(1),
+        },
+    );
+    let trims: Vec<ReplicaOp> = persists(&effects)
+        .into_iter()
+        .flat_map(|(_, ops)| ops)
+        .collect();
+    assert!(
+        matches!(trims.as_slice(), [ReplicaOp::Compact(trim)] if trim.slot == Slot(2) && trim.floor == Seq(1)),
+        "the jump writes the peer's trim: {trims:?}"
+    );
+    assert_eq!(replica.front(), Some(Slot(2)));
+    // The write at slot 2 applies blind: no answer leaves.
+    let effects = replica.step(LEADER, commit(1, 2, write(7, 1, 2)));
+    assert!(applied(&effects).is_empty(), "a blind fold answers nothing");
+    assert_eq!(replica.front(), Some(Slot(3)));
+    let report = |replica: &mut SegmentReplica| {
+        replica
+            .step(
+                LEADER,
+                Message::Compaction {
+                    segment: SegmentId(1),
+                },
+            )
+            .into_iter()
+            .find_map(|effect| match effect {
+                ReplicaEffect::Send {
+                    message:
+                        Message::CompactedTo {
+                            compacted, answers, ..
+                        },
+                    ..
+                } => Some((compacted, answers)),
+                _ => None,
+            })
+            .expect("a report")
+    };
+    assert_eq!(
+        report(&mut replica),
+        (Slot(2), Slot(3)),
+        "no answer below the slot after the blind apply"
+    );
+    // The `Truncate` applies blind too, and makes the fold whole again:
+    // the next slot answers.
+    let truncate = Command::Truncate {
+        fence: Some(LeaderUuid(7)),
+        up_to: Seq(1),
+    };
+    let effects = replica.step(LEADER, commit(1, 3, truncate));
+    assert!(applied(&effects).is_empty(), "the Truncate applies blind");
+    assert_eq!(report(&mut replica), (Slot(2), Slot(4)));
+    let effects = replica.step(LEADER, commit(1, 4, write(7, 2, 3)));
+    assert_eq!(
+        applied(&effects).len(),
+        1,
+        "the fold reached the floor: it answers"
+    );
+    assert_eq!(report(&mut replica).1, Slot(4), "the answers start at 4");
+}

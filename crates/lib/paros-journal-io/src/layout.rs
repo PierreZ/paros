@@ -296,11 +296,12 @@ impl Damage {
 pub fn decode_acceptor(address: Address, entries: &[(Key, Entry)]) -> Result<AcceptorDisk, Damage> {
     let mut disk = AcceptorDisk::default();
     let mut damage = Damage::default();
-    // The dropped ranges first: they hide the votes in them.
+    // The dropped ranges first: they hide the votes in them. A range that
+    // holds no slot hides nothing, and the loop below reports it.
     for (key, entry) in entries {
         if let (true, Kind::Dropped, Entry::Value(bytes)) =
             (key.address == address, key.kind, entry)
-            && let Some(below) = u64_of(bytes).filter(|below| *below > key.index)
+            && let Some(below) = u64_of(bytes)
         {
             disk.dropped.insert(Slot(key.index), Slot(below));
         }
