@@ -294,6 +294,18 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   position it knew before, so it never aims a write at a position that the multi-writer mode
   used (control `basis_stale`). The journal stays safe without this rule: the position check
   refuses such a write. The rule is for the writer: its first write after the switch lands.
+- **Each multi-writer mode has its own tag** (#1495 (a late copy of SetLeader reinstates a uuid),
+  proposed on 2026-11-23 under Pierre's standing rule to take the recommended option; **Open**:
+  the wire change waits for his review of the PR that builds it). A request stays in the network,
+  so a late copy of `SetLeader(u, old)` can apply again. When `old` is the multi-writer mode and
+  every multi-writer mode is the same `None`, a copy of `SetLeader(u, None)` matches again after
+  `A → None → … → None`: `u` leads again with no call of its writer, and a fenced write of `u`
+  that was refused (final) lands from a late copy. journal-sim's client walk found it on fresh
+  seeds (100603, 100033). The rule: `SetLeader(None, old)` names a fresh multi tag, the journal
+  leads with that tag, and a `SetLeader` compares its `old` with the tag, so a copy of an older
+  call never matches a later multi-writer mode (`safety` and every check above, with copies of
+  `SetLeader` proposed again; control `setleader_copy`: one `None` breaks `RefusalFinal`). The
+  code still holds one `Multi` value until the wire change is built.
 - **A refusal of an unfenced write is true for that copy only.** An unfenced write has no
   identity in the log, so a resend cannot tell the writer whether an earlier copy landed: a copy
   can land while another copy is refused `WRONG_MODE` (check `multi_refusal`, not a rule). A

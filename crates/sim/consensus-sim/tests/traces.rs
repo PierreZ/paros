@@ -980,7 +980,9 @@ fn tlc_refuses_the_edited_decree_traces() {
 fn tlc_refuses_the_edited_batcher_traces() {
     let recorded: Vec<Trace> = (1..=EDITED_SEEDS)
         .filter_map(|seed| {
-            let run = batcher_walk(BatchMutant::None).replay(seed).ok()?;
+            let run = batcher_walk(BatchMutant::None)
+                .replay(seed)
+                .unwrap_or_else(|failure| panic!("{failure}"));
             let events: Vec<BatchEvent> = run.events().cloned().collect();
             (events.len() <= 200).then(|| batcher::trace(&events))
         })

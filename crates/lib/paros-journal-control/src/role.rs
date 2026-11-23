@@ -25,8 +25,9 @@
 //! - **The heal of a retired segment** (§J3.1, #1314, checked by
 //!   `specs/tla/re-replication/`). A re-replication plan of [`decide`]
 //!   becomes the heal in flight: one member that is down out, one new
-//!   replica in, as in the model (the first pair of the plan; the next
-//!   decision heals the next member). The controller asks the driver to start
+//!   replica in, as in the model ([`decide`] plans one replacement, so
+//!   each set the heal writes meets the zone rule on its own; the next
+//!   decision heals the next member, #1496). The controller asks the driver to start
 //!   the new replica for one copy ([`Ask::Copy`], a [`CopyId`] of its term),
 //!   and writes the new set only on that copy's report that it is complete
 //!   ([`Controller::copied`], control `count_start`), by a compare-and-set
@@ -348,7 +349,7 @@ impl Controller {
 }
 
 impl Controller {
-    /// A heal from a re-replication plan of `decide`: the first member that
+    /// A heal from a re-replication plan of `decide`: the one member that
     /// the plan replaces, with its new replica, and a new copy.
     fn plan_heal(
         &mut self,
@@ -358,6 +359,10 @@ impl Controller {
         from: &[NodeId],
         to: &[NodeId],
     ) -> Ask {
+        assert!(
+            from.iter().zip(to).filter(|(old, new)| old != new).count() == 1,
+            "a re-replication plan replaces exactly one member"
+        );
         let (remove, add) = from
             .iter()
             .zip(to)

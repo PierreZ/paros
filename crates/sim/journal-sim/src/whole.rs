@@ -1546,12 +1546,10 @@ impl WholeModel {
         for ask in polled.sends {
             match ask {
                 Ask::Act(action) => {
-                    // The repair is a rule group of #1326 that is not built:
-                    // no role runs it yet.
-                    assert!(
-                        matches!(action, Action::Repair { .. }),
-                        "the role runs a re-replication as a heal, not {action:?}"
-                    );
+                    // The walk damages no record (a disk fault is an I/O
+                    // error), so no decision has a damaged copy to repair,
+                    // and the role runs a re-replication as a heal.
+                    panic!("the controller asked {action:?}, but no record is damaged");
                 }
                 ask @ Ask::Copy { .. } => {
                     sometimes!(true, reach::REREPLICATE);

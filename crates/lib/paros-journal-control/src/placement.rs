@@ -263,6 +263,56 @@ pub fn heal_replicas(
     Some(healed)
 }
 
+/// The next step of the heal of a retired segment's replica set: one
+/// member of `replicas` that is down replaced by a candidate that is up and
+/// not in the set, with every other member kept, such that the new set
+/// admits the zone rule of one column ([`set_zones`]). The down members are
+/// tried in the set's order. A re-replication writes one replacement at a
+/// time (§J3.1), so each set that it writes meets the zone rule on its own:
+/// a joint plan of [`heal_replicas`] whose pairs run one by one can leave a
+/// set that breaks the rule and that no later replacement can fix (#1496).
+/// `None`: no member is down, or no single replacement exists.
+///
+/// # Panics
+///
+/// When an assertion on its own postconditions fails: a programmer error,
+/// never an operating condition.
+#[must_use]
+pub fn heal_one_replica(
+    replicas: &[NodeId],
+    liveness: &BTreeMap<NodeId, Liveness>,
+    candidates: &[NodeId],
+    zones: &BTreeMap<NodeId, FailureDomain>,
+) -> Option<Vec<NodeId>> {
+    let members: BTreeSet<NodeId> = replicas.iter().copied().collect();
+    let usable = usable(candidates, liveness, &members);
+    let healed = (0..replicas.len())
+        .filter(|i| liveness.get(&replicas[*i]) == Some(&Liveness::Down))
+        .find_map(|hole| {
+            let mut set = replicas.to_vec();
+            let mut taken = vec![false; usable.len()];
+            fill_set(&mut set, &[hole], &usable, &mut taken, zones)
+        })?;
+    assert!(
+        healed.len() == replicas.len(),
+        "a heal keeps the set's size"
+    );
+    assert!(
+        healed
+            .iter()
+            .zip(replicas)
+            .filter(|(new, old)| new != old)
+            .count()
+            == 1,
+        "a heal of a retired set replaces exactly one member"
+    );
+    assert!(
+        set_zones(&healed, zones).admits(),
+        "a heal of a replica set meets the zone rule"
+    );
+    Some(healed)
+}
+
 fn fill_set(
     set: &mut Vec<NodeId>,
     holes: &[usize],

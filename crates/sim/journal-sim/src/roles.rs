@@ -1838,17 +1838,13 @@ impl RolesModel {
         {
             *state = base.0;
         }
+        self.judge_claim(&change);
         match self.register.apply(&change) {
             Ok(value) => {
                 match (&change, origin) {
-                    (Change::Boundary { segment, state }, _) => {
-                        let end = value.segment(*segment).and_then(SegmentRecord::end);
-                        let at = end.map(|e| usize::try_from(e.0).expect("small"));
-                        let truth = at.and_then(|at| self.states.get(at));
-                        assert!(
-                            truth == Some(&(state.leader, state.next_seq.0, state.first_seq.0)),
-                            "{BOUNDARY}: {segment:?} wrote {state:?}, the whole log at {end:?} is {truth:?}"
-                        );
+                    // `judge_claim` judged the state against the segment's
+                    // end, which the change does not move.
+                    (Change::Boundary { .. }, _) => {
                         sometimes!(true, reach::BOUNDARY);
                         if let Origin::Replica(node) = origin {
                             cx.record(RolesEvent::Boundary { r: node.0 });
@@ -1914,6 +1910,39 @@ impl RolesModel {
                     self.leader_effects(node, effects, cx);
                 }
             }
+        }
+    }
+
+    /// [`BOUNDARY`] and [`TRIM`] on a replica's change before the register
+    /// takes it: a change that the register then refuses is still the
+    /// replica's claim, and is judged as if done. BOUNDARY reads the end
+    /// from the register: a replica writes a boundary only once the register
+    /// holds the segment's end (`Replica::boundary` needs a full copy), so
+    /// the end is there whenever a replica claims one.
+    fn judge_claim(&self, change: &Change) {
+        match change {
+            Change::Boundary { segment, state } => {
+                let end = self.register.segment(*segment).and_then(SegmentRecord::end);
+                let at = end.map(|e| usize::try_from(e.0).expect("small"));
+                let truth = at.and_then(|at| self.states.get(at));
+                assert!(
+                    truth == Some(&(state.leader, state.next_seq.0, state.first_seq.0)),
+                    "{BOUNDARY}: {segment:?} asked {state:?}, the whole log at {end:?} is {truth:?}"
+                );
+            }
+            Change::Trim { segment, .. } => {
+                let last = self
+                    .register
+                    .segment(*segment)
+                    .and_then(SegmentRecord::boundary)
+                    .map(|b| b.next_seq.0);
+                assert!(
+                    last.is_none_or(|last| self.truth.first >= last),
+                    "{TRIM}: {segment:?} asked a trim with its last seq {last:?}, the decided floor is {}",
+                    self.truth.first
+                );
+            }
+            _ => {}
         }
     }
 

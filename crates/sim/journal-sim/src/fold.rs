@@ -168,9 +168,14 @@ pub enum FoldMutant {
     /// takes "not covered" as not written. [`RESOLVE`] catches it.
     ResolveInForce,
     /// The driver answers `Below` for a write taken in the segment in force.
-    /// [`FOLD`] passes it (it allows `Below` where the truth says taken),
-    /// and the trace check refuses it: the trace control.
+    /// The trace control: the walk turns off the leg of [`FOLD`] that judges
+    /// the position of a `Below` and the leg of [`RESOLVE`] that needs a
+    /// sealed segment to hold it, so only the trace check refuses it. A walk
+    /// with no mutant judges both legs.
     BelowInSegment,
+    /// The same bug as [`FoldMutant::BelowInSegment`], with every oracle on.
+    /// [`FOLD`] catches it.
+    BelowJudged,
 }
 
 /// One step of the fold walk, for `specs/tla/journal-state/FoldTrace.tla`.
@@ -731,16 +736,30 @@ impl FoldModel {
             if let (Answer::Written { seq, .. }, Command::Write(write)) = (&answer, &command) {
                 segment.log.insert(*seq, write.clone());
             }
-            if self.mutant == FoldMutant::BelowInSegment
-                && let Answer::Taken(view) = answer
+            if matches!(
+                self.mutant,
+                FoldMutant::BelowInSegment | FoldMutant::BelowJudged
+            ) && let Answer::Taken(view) = answer
             {
                 answer = Answer::Below(view);
             }
             segment.applied += 1;
             let state = (fold.leader(), fold.next_seq().0, fold.first_seq().0);
             let name = label(&answer);
+            // `Below` is the answer of a fenced write whose position is in an
+            // older segment (§J2.2): its verdict in the whole log is a
+            // duplicate or a taken position, below the base of this segment.
+            let below_base = self.mutant == FoldMutant::BelowInSegment
+                || matches!(
+                    &command,
+                    Command::Write(write) if matches!(
+                        write.fence,
+                        Fence::Leader { expected_seq, .. } if expected_seq < segment.base.next_seq
+                    )
+                );
             assert!(
-                name == verdict || (name == "below" && (verdict == "dup" || verdict == "taken")),
+                name == verdict
+                    || (name == "below" && below_base && (verdict == "dup" || verdict == "taken")),
                 "{FOLD}: {command:?} answered {answer:?}, the whole log says {verdict}"
             );
             self.observe(&command, &answer);
@@ -849,16 +868,19 @@ impl FoldModel {
                 segment.base.next_seq <= expected_seq && expected_seq < fold.next_seq()
             })
         };
+        // FOLD lets a `Below` only below the base of the segment in force, and
+        // the sealed segments cover every position below it.
         let Some(index) = asked else {
-            // No sealed segment holds the position: every replica answers
-            // "not covered", and the client reads the tail instead.
+            assert!(
+                self.mutant == FoldMutant::BelowInSegment,
+                "{RESOLVE}: {write:?} was answered Below, but no sealed segment holds it"
+            );
+            // The trace control: the client reads the tail instead.
             self.belows.remove(pick);
             return;
         };
         let segment = &self.segments[index];
-        let Some(fold) = segment.fold else {
-            return;
-        };
+        let fold = segment.fold.expect("a sealed segment's replica is up");
         let mut answer = resolve(&fold, uuid, expected_seq, &write.records, |seq| {
             segment.log.get(&seq)
         });

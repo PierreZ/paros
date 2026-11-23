@@ -42,7 +42,7 @@ journal-state 21
 leader-handoff 15
 matchmaker 6.5
 multi-paxos 20
-multi-writer 5
+multi-writer 10
 node 12.5
 offload 1.5
 placement-port 5.5
