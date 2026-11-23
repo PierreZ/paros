@@ -3477,12 +3477,16 @@ the client's pipeline and resolve.
   drop is a write of its own (kind `"d"`): a crash before it is durable brings back the votes on
   the disk (`adrop`, `dadrop`). A promise names the dropped ranges (`drop`), and Phase 1 skips
   them.
-- **A laggard jumps** (`JumpFrom`) to a trim of a peer (`trims`) above its front.
+- **A laggard jumps** (`JumpFrom`) to a trim of a peer (`trims`) above its front. A leader's
+  `Commit` of a chosen slot is a source after the drop (`ApplyIf(r, TRUE)`), and a campaign may
+  write from the start of its oldest segment (`RegisterFrom(b, LowFrom)`), so its Phase 1 reads
+  the dropped slots.
 
 | Check | Result | What it shows |
 |---|---|---|
-| `compact` | pass | two segments, two ballots: `DropChosen` (every dropped slot is chosen), `TrimTrue` (every write below a trim is below its floor), and the safety of `Journal.tla` |
+| `compact` | pass | two segments, two ballots, multi-writer, a replica that lags into a blind fold: `DropChosen` (every dropped slot is chosen), `TrimTrue` (every write below a trim is below its floor), and the safety of `Journal.tla` |
 | `compact_g1` | pass | one segment and a crash between two writes: a queued drop that a crash loses brings back the votes (`DroppedEmpty`) |
+| `jump_g2` | pass | a replica set of two in the second segment: a replica with no base does not jump (`BaseFirst`) |
 | `compact_floor` | violation | control: acceptors that drop below the decided floor alone lose a slot that no replica applied |
 | `reach_jump`, `reach_skip`, `reach_blind` | violation | the model reaches a jump, a Phase 1 that skips a dropped range, and a blind fold |
 

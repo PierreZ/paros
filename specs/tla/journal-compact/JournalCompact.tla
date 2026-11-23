@@ -131,6 +131,10 @@ Learnable == \A r \in Replicas :
   => \/ ~NoSource(r)
      \/ \E q \in RepOf[g] \ {r} : rbase[q] # None /\ rcomp[q] > s
 
+\* A replica applies, compacts and jumps only once it holds a base: a
+\* `TrimmedTo` answers a `Pull`, which only a replica with a base sends.
+BaseFirst == \A r \in Replicas : rbase[r] = None => rapp[r] = 0 /\ rcomp[r] = 0
+
 \* An acceptor drops chosen slots only, and keeps no vote where it dropped.
 DropChosen == \A a \in Acceptors : \A s \in adrop[a] \cup dadrop[a] : IsChosen(s)
 DroppedEmpty == \A a \in Acceptors :

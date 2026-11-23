@@ -18,6 +18,9 @@ Q3 == [g \in 1..2 |-> {{a1, a2}, {a1, a3}, {a2, a3}}]
 Rep2 == [g \in 1..2 |-> IF g = 1 THEN {r1, r2} ELSE {r3}]
 \* One replica in each set.
 Rep1 == [g \in 1..2 |-> IF g = 1 THEN {r1} ELSE {r2}]
+\* One replica in the first set, two in the second: a replica of the second
+\* set can be without a base while its peer compacts.
+Rep12 == [g \in 1..2 |-> IF g = 1 THEN {r1} ELSE {r2, r3}]
 
 W(u, e, id) == [op |-> "w", u |-> u, e |-> e, id |-> id]
 SL(new, old) == [op |-> "sl", new |-> new, old |-> old]

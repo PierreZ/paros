@@ -20,9 +20,9 @@
 (*              the acceptors q; a first leader computed `end`.            *)
 (*   "seal"     `SealWrite(b)`; "open" `Open(b)` from `start`.             *)
 (*   "propose"  `Propose(b, s, v)`.                                        *)
-(*   "base"     `TakeBase(r)`; "apply" `ApplyIf(r, TRUE)` at slot s,     *)
-(*              answered res, with no res when the fold was blind (a       *)
-(*              `Commit` of the leader is a source too);                   *)
+(*   "base"     `TakeBase(r)`; "apply" `Apply(r)` at slot s, answered      *)
+(*              res, with no res when the fold was blind (a `Commit` of    *)
+(*              the leader is a source too once an acceptor dropped s);    *)
 (*   "boundary" `BoundWrite(r)`; "retire" `Retire(p)`;                     *)
 (*   "trim"     `Trim(p, r)`: the register took the trim of replica r.     *)
 (*   "drop"     `Drop(r)`: replica r dropped its copy of a trimmed segment.*)
@@ -96,7 +96,11 @@ TraceStep ==
   \/ e.event = "propose" /\ Propose(e.b, e.s, Cmd(e))
   \/ e.event = "base" /\ TakeBase(e.r)
   \/ /\ e.event = "apply"
-     /\ ApplyIf(e.r, TRUE)
+     \* A leader's `Commit` is a source only once an acceptor dropped the
+     \* slot: before, the slot has a source of `Apply`.
+     /\ \/ Apply(e.r)
+        \/ /\ \E a \in Acceptors : e.s \in adrop[a] \cup dadrop[a]
+           /\ ApplyIf(e.r, TRUE)
      /\ Front(e.r) = e.s
      /\ ChosenVal(e.s) = Cmd(e)
      /\ IF Has("res") THEN ~Blind(e.r) /\ acked'[e.s] = e.res ELSE Blind(e.r)

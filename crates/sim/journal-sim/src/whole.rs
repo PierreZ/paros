@@ -1624,7 +1624,8 @@ impl WholeModel {
     /// retired segment holds every slot of the segment on its disk while
     /// the set names it, but the slots below its `Trim`: the compaction
     /// drops a slot only when every record it wrote is below the trim
-    /// floor, and the floor is one that the chosen log decided.
+    /// floor, the floor is one that the chosen log decided, and the fold of
+    /// the `Trim` is the fold of the chosen log at its slot.
     fn judge_heals(&self) {
         for (j, journal) in self.journals.iter().enumerate() {
             let value = self.value_of(journal.id);
@@ -1662,6 +1663,24 @@ impl WholeModel {
                 };
                 sometimes!(true, reach::HEALED_TRIM);
                 let (states, _, truth) = self.truth(j);
+                // The fold that the healed node starts from at its trim is
+                // the fold of the chosen log before the trim's slot.
+                let mut before = Truth::new(Leader::Unset);
+                for slot in 0..trim.slot.0 {
+                    before.apply(&journal.chosen[&Slot(slot)]);
+                }
+                assert!(
+                    (
+                        trim.state.leader(),
+                        trim.state.next_seq().0,
+                        trim.state.first_seq().0
+                    ) == (before.leader, before.next, before.first),
+                    "{HEAL_HELD}: {node:?} of {segment:?} trims at {:?} with the fold {:?}, \
+                     the chosen log has {:?} there",
+                    trim.slot,
+                    trim.state.view(),
+                    (before.leader, before.next, before.first)
+                );
                 assert!(
                     trim.floor.0 <= truth.first,
                     "{HEAL_HELD}: {node:?} of {segment:?} trims at the floor {:?}, above the \

@@ -9,6 +9,7 @@
 #
 compact             pass       ci
 compact_g1          pass       ci
+jump_g2             pass       ci
 compact_floor       violation  ci
 reach_jump          violation  ci
 reach_skip          violation  ci

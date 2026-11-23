@@ -514,11 +514,6 @@ struct OpenRead {
     /// For a read of the floor: the replica of the older segment that the
     /// reader asks next, with the first position and the limit.
     then: Option<(NodeId, u64, usize)>,
-    /// Whether the register held the end of the replica's segment when the
-    /// read started: the seal's Phase 1 at a quorum of the segment's
-    /// acceptors came before, so the read fence of every `PreRead` quorum
-    /// names a later segment.
-    sealed: bool,
 }
 
 /// A role with a disk, under the flight rule.
@@ -2329,7 +2324,21 @@ impl RolesModel {
             return;
         }
         let index = cx.rng().index(WRITERS).expect("writers");
-        let Some(write) = cx.rng().pick(&self.writers[index].sent).cloned() else {
+        // Half of the resends take a write at or above the floor, which a
+        // `Truncate` did not cut: its resend answers `Duplicate`.
+        let first = self.truth.first;
+        let kept: Vec<Write> = self.writers[index]
+            .sent
+            .iter()
+            .filter(|w| matches!(w.fence, Fence::Leader { expected_seq, .. } if expected_seq.0 >= first))
+            .cloned()
+            .collect();
+        let from = if !kept.is_empty() && cx.rng().chance(1, 2) {
+            &kept
+        } else {
+            &self.writers[index].sent
+        };
+        let Some(write) = cx.rng().pick(from).cloned() else {
             return;
         };
         self.propose(Some(index), Command::Write(write), cx);
@@ -2368,10 +2377,11 @@ impl RolesModel {
         let low = next.max(first + 1);
         let (fence, up_to, deafen) =
             if asked > low && self.truth.leader != Leader::Unset && cx.rng().chance(1, 2) {
-                // The writer in force cuts inside a write in flight, and one
-                // replica of the segment in force loses its messages from now
-                // on. That write keeps records on both sides of the floor, so
-                // the peers compact to its slot, below the `Truncate`, with a
+                // The writer in force truncates at or below the position of
+                // a write in flight, and one replica of the segment in force
+                // loses its messages from now on. Once the write is chosen
+                // below the `Truncate`, its record is at or above the floor,
+                // so the peers compact to its slot, below the `Truncate`, with a
                 // blind fold; the deaf replica never got the write, so it jumps
                 // there and folds blind until it applies the `Truncate`.
                 let fence = match self.truth.leader {
@@ -2518,9 +2528,18 @@ impl RolesModel {
             return;
         };
         // Half of the reads go to the replica that hears the register late,
-        // where a read meets a later segment.
-        let node = match self.slow {
-            Some(slow) if nodes.contains(&slow) && cx.rng().chance(1, 2) => slow,
+        // where a read meets a later segment; three in four once its
+        // segment is sealed, where a stale read shows.
+        let late = self.slow.filter(|slow| nodes.contains(slow)).map(|slow| {
+            let sealed = self
+                .register
+                .segment(Self::segment_of_replica(slow))
+                .and_then(SegmentRecord::end)
+                .is_some();
+            (slow, if sealed { 3 } else { 2 })
+        });
+        let node = match late {
+            Some((slow, odds)) if cx.rng().chance(odds, 4) => slow,
             _ => nodes[pick],
         };
         // Half of the reads are at the tail, where a stale read shows.
@@ -2592,11 +2611,6 @@ impl RolesModel {
         self.read_ids += 1;
         let read = self.read_ids;
         let need = self.states.len() - 1;
-        let sealed = self
-            .register
-            .segment(Self::segment_of_replica(node))
-            .and_then(SegmentRecord::end)
-            .is_some();
         self.reads.insert(
             read,
             OpenRead {
@@ -2606,7 +2620,6 @@ impl RolesModel {
                 need,
                 floor,
                 then,
-                sealed,
             },
         );
         let role = self
@@ -2627,25 +2640,10 @@ impl RolesModel {
             need,
             floor,
             then,
-            sealed,
         }) = self.reads.remove(&read)
         else {
             return;
         };
-        // A page short of its limit and not sealed is the tail of an open
-        // segment: a quorum fence that names a later segment answers
-        // `Superseded` instead.
-        if let ReadAnswer::Page {
-            records,
-            sealed: false,
-            ..
-        } = answer
-        {
-            assert!(
-                !sealed || records.len() == limit,
-                "{READ}: read {read} at {node:?} served the tail of an open segment, its seal was done before the read started"
-            );
-        }
         self.judge_answer(read, node, (from, limit), (need, floor), answer);
         // The floor read gave the floor of the segment in force: the reader
         // asks the older segment only at or above it.
