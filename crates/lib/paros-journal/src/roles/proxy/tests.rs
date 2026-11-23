@@ -194,3 +194,21 @@ fn a_tick_sends_again_and_drops_a_stalled_round() {
     assert!(proxy.tick(4).is_empty(), "a stalled round is dropped");
     assert_eq!(proxy.open(), 0);
 }
+
+#[test]
+#[should_panic(expected = "each open round has its delegation")]
+fn a_round_with_no_delegation_breaks_the_proxy() {
+    let mut proxy = JournalProxy::new(PROXY);
+    proxy.step(LEADER, delegate(1, 4));
+    proxy.delegations.clear();
+    proxy.assert_invariants();
+}
+
+#[test]
+#[should_panic(expected = "every open round runs at the highest ballot taken")]
+fn a_round_below_the_ballot_taken_breaks_the_proxy() {
+    let mut proxy = JournalProxy::new(PROXY);
+    proxy.step(LEADER, delegate(1, 4));
+    proxy.ballot = Some(ballot(2));
+    proxy.assert_invariants();
+}
