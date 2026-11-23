@@ -349,7 +349,7 @@ impl Controller {
 }
 
 impl Controller {
-    /// A heal from a re-replication plan of `decide`: the first member that
+    /// A heal from a re-replication plan of `decide`: the one member that
     /// the plan replaces, with its new replica, and a new copy.
     fn plan_heal(
         &mut self,
