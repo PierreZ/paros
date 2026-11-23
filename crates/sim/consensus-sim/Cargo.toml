@@ -17,20 +17,20 @@ paros-consensus = { workspace = true, features = ["assertions"] }
 # The seeded walk (moonpool #554). Pinned to the same moonpool rev as the
 # `moonpool-assertions` line of paros-consensus, so the workspace resolves one
 # copy of the assertion table.
-moonpool-walk = { git = "https://github.com/PierreZ/moonpool", rev = "cf24c75f38b945a2b306c3ee0125a37dfd26e1e6" }
+moonpool-walk = { git = "https://github.com/PierreZ/moonpool", rev = "c698161bf4dea4ffbf43253254ce0fdf8204a905" }
 # The campaign owns the assertion table, so it judges which sites a flavor
 # must reach (`src/campaign.rs`).
-moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "cf24c75f38b945a2b306c3ee0125a37dfd26e1e6" }
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "c698161bf4dea4ffbf43253254ce0fdf8204a905" }
 # Model-based trace checking (moonpool #550): a walk's steps as a TLA+
 # trace, judged by TLC against the models of `specs/tla/` (#1198).
-moonpool-tla = { git = "https://github.com/PierreZ/moonpool", rev = "cf24c75f38b945a2b306c3ee0125a37dfd26e1e6" }
+moonpool-tla = { git = "https://github.com/PierreZ/moonpool", rev = "c698161bf4dea4ffbf43253254ce0fdf8204a905" }
 
 # Tests only: `tests/coverage.rs`.
 [dev-dependencies]
 # Code coverage for the exploring walks (#1199): `sancov_edges_covered_live`
 # reads the SanitizerCoverage counters of `paros-consensus` when
 # `scripts/sancov-rustc.sh` instruments it, and returns 0 otherwise.
-moonpool-explorer = { git = "https://github.com/PierreZ/moonpool", rev = "cf24c75f38b945a2b306c3ee0125a37dfd26e1e6" }
+moonpool-explorer = { git = "https://github.com/PierreZ/moonpool", rev = "c698161bf4dea4ffbf43253254ce0fdf8204a905" }
 
 [lints]
 workspace = true
