@@ -17,6 +17,7 @@ Usage: scripts/count-assertions.py [--src DIR] [--min DENSITY] [--functions]
 """
 
 import argparse
+import math
 import pathlib
 import re
 import sys
@@ -165,13 +166,17 @@ def main() -> int:
         density = asserts / fns if fns else 0.0
         print(f"{name:<16} {fns:>5} {asserts:>8} {density:>7.2f} {consts:>6}")
     density = total[1] / total[0] if total[0] else 0.0
-    print(f"{'total':<16} {total[0]:>5} {total[1]:>8} {density:>7.4f} {total[2]:>6}")
+    # The total is printed rounded down, so the printed number is always a
+    # floor that `--min` accepts: a rounded-up total would be a floor above
+    # the density.
+    floor = math.floor(density * 10_000) / 10_000
+    print(f"{'total':<16} {total[0]:>5} {total[1]:>8} {floor:>7.4f} {total[2]:>6}")
     if args.functions:
         print()
         for count, where, name in sorted(listing):
             print(f"{count:>3} {where} {name}")
     if args.min is not None and density < args.min:
-        print(f"count-assertions: density {density:.4f} is below {args.min}", file=sys.stderr)
+        print(f"count-assertions: density {density:.6f} is below {args.min}", file=sys.stderr)
         return 1
     return 0
 
