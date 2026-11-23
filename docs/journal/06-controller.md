@@ -330,7 +330,11 @@ alert, in this order:
 4. The cheap action first: the repair of a found damage, with no token.
 5. The re-replication of the first retired segment that has a replica down, under a token. A
    sealed segment retires first (the leader's write at `F + 1` holders), and the register heals
-   only a retired record (#1314).
+   only a retired record (#1314). The plan replaces one member: the first member that is down for
+   which one candidate keeps the zone rule with every other member in place. The heal writes one
+   replacement at a time, so each set that it writes must meet the zone rule on its own: the
+   first pair of a joint plan can leave a set that no later replacement fixes (#1496, found by
+   journal-sim's whole walk on fresh seeds, 2026-11-23).
 6. The heal reshape of the segment in force, when the state is AtRisk and a member is down, or a
    replica of its set is down: it waits for the retire of every older segment, the minimum
    interval and a token. The new grid keeps every member that is not down in its place and puts

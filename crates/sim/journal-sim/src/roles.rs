@@ -1838,6 +1838,7 @@ impl RolesModel {
         {
             *state = base.0;
         }
+        self.judge_claim(&change);
         match self.register.apply(&change) {
             Ok(value) => {
                 match (&change, origin) {
@@ -1914,6 +1915,36 @@ impl RolesModel {
                     self.leader_effects(node, effects, cx);
                 }
             }
+        }
+    }
+
+    /// [`BOUNDARY`] and [`TRIM`] on a replica's change before the register
+    /// takes it: a change that the register then refuses is still the
+    /// replica's claim, and is judged as if done.
+    fn judge_claim(&self, change: &Change) {
+        match change {
+            Change::Boundary { segment, state } => {
+                let end = self.register.segment(*segment).and_then(SegmentRecord::end);
+                let at = end.map(|e| usize::try_from(e.0).expect("small"));
+                let truth = at.and_then(|at| self.states.get(at));
+                assert!(
+                    truth == Some(&(state.leader, state.next_seq.0, state.first_seq.0)),
+                    "{BOUNDARY}: {segment:?} asked {state:?}, the whole log at {end:?} is {truth:?}"
+                );
+            }
+            Change::Trim { segment, .. } => {
+                let last = self
+                    .register
+                    .segment(*segment)
+                    .and_then(SegmentRecord::boundary)
+                    .map(|b| b.next_seq.0);
+                assert!(
+                    last.is_none_or(|last| self.truth.first >= last),
+                    "{TRIM}: {segment:?} asked a trim with its last seq {last:?}, the decided floor is {}",
+                    self.truth.first
+                );
+            }
+            _ => {}
         }
     }
 

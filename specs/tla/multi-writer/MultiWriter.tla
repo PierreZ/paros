@@ -55,6 +55,13 @@
 (*   Boundary  "wait": the first leader of the next segment reads the uuid *)
 (*             in the matchmaker record only after the seal wrote it.      *)
 (*             "early": it may read it before.                             *)
+(*   Multi     "tagged": `SetLeader(None, old)` names a fresh multi tag,   *)
+(*             and the journal leads with that tag, so a late copy of a    *)
+(*             `SetLeader(new, old)` whose `old` was the multi-writer mode *)
+(*             does not match a later multi-writer mode (#1495). "plain":  *)
+(*             a control, every multi-writer mode is the same `None`, so   *)
+(*             such a copy brings its uuid back and a refused fenced write *)
+(*             lands.                                                      *)
 (*   InitLeader None or Unset: the leader of a fresh journal. Unset        *)
 (*             refuses every write and truncate until a SetLeader.         *)
 (*                                                                         *)
@@ -86,7 +93,7 @@ CONSTANTS
   MaxSlots,    \* slots of the log
   SealAt,      \* the first slot of the next segment, 0 for no seal
   InitLeader,
-  FenceAt, Dedup, Basis, Boundary, Lookup,
+  FenceAt, Dedup, Basis, Boundary, Lookup, Multi,
   DigestSize   \* the old records that the "digest" control keeps
 
 ASSUME FenceAt \in {"apply", "propose"}
@@ -95,11 +102,18 @@ ASSUME Basis \in {"view", "stale"}
 ASSUME Boundary \in {"wait", "early"}
 ASSUME InitLeader \in {None, Unset}
 ASSUME Lookup \in {"boundary", "global", "local", "digest"}
+ASSUME Multi \in {"tagged", "plain"}
 ASSUME DigestSize \in Nat
 ASSUME SealAt = 0 \/ (SealAt >= 2 /\ SealAt < MaxSlots)
 
 Uuids == [w : Writers, k : 1..MaxSL]
-Leaders == Uuids \cup {None, Unset}
+\* The multi tags: the k-th `SetLeader` that names None leads with [m |-> k].
+Tags == [m : 1..MaxSL]
+Leaders == Uuids \cup Tags \cup {None, Unset}
+
+\* The journal is multi-writer: a fresh journal with InitLeader = None, or a
+\* multi tag.
+IsMulti(l) == l = None \/ l \in Tags
 Ops == [w : Writers, n : 1..MaxOps]
 
 VARIABLES
@@ -135,8 +149,8 @@ WithCheck(m, ok) == m @@ [ok |-> ok]
 
 ProposeOk(m) ==
   CASE m.kind = "f" -> leader = m.u
-    [] m.kind = "u" -> leader = None
-    [] m.kind = "t" -> \/ leader = None /\ m.u = None
+    [] m.kind = "u" -> IsMulti(leader)
+    [] m.kind = "t" -> \/ IsMulti(leader) /\ m.u = None
                        \/ leader \in Uuids /\ m.u = leader
     [] OTHER -> TRUE
 
@@ -152,7 +166,7 @@ FenceOk(c) == IF FenceAt = "apply" THEN leader = c.u ELSE c.ok
 
 TruncOk(c) ==
   IF FenceAt = "apply"
-  THEN \/ leader = None /\ c.u = None
+  THEN \/ IsMulti(leader) /\ c.u = None
        \/ leader \in Uuids /\ c.u = leader
   ELSE c.ok
 
@@ -207,7 +221,7 @@ ApplyFenced(c, s) ==
   /\ Seal(s, leader)
 
 ApplyUnfenced(c, s) ==
-  LET a == IF leader = None THEN "applied" ELSE "wrongmode" IN
+  LET a == IF IsMulti(leader) THEN "applied" ELSE "wrongmode" IN
   /\ IF a = "applied"
      THEN log' = Append(log, [u |-> None, op |-> c.op, slot |-> s])
      ELSE UNCHANGED log
@@ -262,14 +276,19 @@ Apply ==
 (* The clients and the leader that proposes.                               *)
 
 \* A client calls SetLeader(new, old): `old` is the leader it read, `new` is a
-\* fresh uuid of its own or None. The call races with the slots in flight.
+\* fresh uuid of its own, or the multi-writer mode: a fresh tag (Multi =
+\* "tagged") or None. The call races with the slots in flight. The request
+\* stays in the network, so a copy of it can be proposed again later.
 CallSetLeader(w, toNone) ==
   /\ slCount < MaxSL
   /\ CanAppend
-  /\ LET new == IF toNone THEN None ELSE [w |-> w, k |-> slCount + 1] IN
-     AppendCmd([kind |-> "sl", new |-> new, old |-> leader])
+  /\ LET new == IF ~toNone THEN [w |-> w, k |-> slCount + 1]
+                ELSE IF Multi = "tagged" THEN [m |-> slCount + 1] ELSE None
+         cmd == [kind |-> "sl", new |-> new, old |-> leader]
+     IN /\ AppendCmd(cmd)
+        /\ sent' = sent \cup {cmd}
   /\ slCount' = slCount + 1
-  /\ UNCHANGED <<applied, leader, first, log, truncs, answers, sent, lead,
+  /\ UNCHANGED <<applied, leader, first, log, truncs, answers, lead,
                  basis, nops, meta, metaSet, starts>>
 
 \* A client that won a uuid writes under it, pipelined: each write at the
@@ -398,11 +417,12 @@ TypeOK ==
   /\ meta \in Leaders
 
 \* The fence: a record of a uuid was judged under that uuid, and an unfenced
-\* record under None, in both directions of a switch and across the seal.
-\* The same for the accepted truncates.
+\* record in multi-writer mode, in both directions of a switch and across the
+\* seal. The same for the accepted truncates.
+Judged(l, u) == IF u = None THEN IsMulti(l) ELSE l = u
 FenceTrue ==
-  /\ \A s \in DOMAIN log : OracleAt(log[s].slot) = log[s].u
-  /\ \A t \in truncs : OracleAt(t.slot) = t.u
+  /\ \A s \in DOMAIN log : Judged(OracleAt(log[s].slot), log[s].u)
+  /\ \A t \in truncs : Judged(OracleAt(t.slot), t.u)
 
 \* Every write acknowledged (applied, or dup on a resend) is in the journal at
 \* the seq of the answer.
@@ -448,17 +468,17 @@ UnfencedRefusalFinal ==
 
 \* A write applied before SetLeader(None, u) is answered dup on its resend
 \* after it.
-NoDupAfterSwitch == ~\E a \in answers : a.kind = "dup" /\ a.leader = None
+NoDupAfterSwitch == ~\E a \in answers : a.kind = "dup" /\ IsMulti(a.leader)
 
 \* After SetLeader(u, None), a write of u is applied.
 NoWriteAfterBack ==
   ~\E a \in answers, st \in starts :
-     a.kind = "applied" /\ a.m.kind = "f" /\ st.from = None /\ a.m.u = st.u
+     a.kind = "applied" /\ a.m.kind = "f" /\ IsMulti(st.from) /\ a.m.u = st.u
 
 \* The Fence at the seal carries None, and a write is judged after it.
 NoFenceNone ==
   ~\E a \in answers : SealAt > 0 /\ a.slot > SealAt
-                      /\ slots[SealAt].leader = None /\ a.kind = "applied"
+                      /\ IsMulti(slots[SealAt].leader) /\ a.kind = "applied"
 
 \* A resend after the seal finds its write below the boundary.
 NoBelow == ~\E a \in answers : a.kind = "below"
