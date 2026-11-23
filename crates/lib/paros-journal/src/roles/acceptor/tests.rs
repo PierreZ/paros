@@ -480,7 +480,7 @@ fn a_compact_drops_the_votes_of_its_range_and_keeps_the_range() {
         },
     ));
     assert_eq!(batches.len(), 1, "the drop is a batch of its own");
-    assert!(sends.is_empty());
+    assert_eq!(sends, Vec::new(), "a compaction sends nothing");
     assert_eq!(
         acceptor.dropped(),
         &BTreeMap::from([(Slot(0), Slot(2))]),
