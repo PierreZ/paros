@@ -14,18 +14,20 @@
 //! node `n` runs on machine `n % 10`: each new role on a machine takes the
 //! next free node of that machine (`n + 10`).
 //!
-//! **The control.** Each journal has two grid controllers
-//! (`paros_journal_control::Controller`) on two machines. A controller
-//! campaigns for the term of the journal's register, and the one that holds
-//! it runs `decide` on a view that the walk gathers as a host does: the
-//! register, the liveness of each machine (up; suspect while it is down for
-//! less than [`DOWN_AFTER`] ticks; down after), the zones, the candidates of
-//! the host's placement (the next free node of each machine that is up and
-//! serves no member of the segment in force), a live leader, the matchmakers
-//! (three machines, one in each zone), the time since the last reshape and
-//! since the oldest seal, and one token of the rate limiter that the two
-//! journals share. The controller's reshape call runs on the register; a
-//! request or its reply may be lost. The walk is the host's placement: it
+//! **The control.** Each journal has two grid controllers on two machines,
+//! each run by a `paros_journal_control::ControlDriver`. Before a step of
+//! the controllers, every machine that is up publishes its report to them
+//! (a beat, and the segment of each leader on it that writes), so a machine
+//! not heard for a tick is suspect and down after [`DOWN_AFTER`] ticks. The
+//! walk is the driver's two ports: the register (a request or its reply may
+//! be lost), and the cell: the zones, the candidates of the host's placement
+//! (the next free node of each machine that is up and serves no member of
+//! the segment in force), the matchmakers (three machines, one in each
+//! zone) and one token of the rate limiter that the two journals share.
+//! Journal 1 starts with a holder that runs on no machine, journal 2 with no
+//! holder. The walk delivers the driver's copy and abandon asks to the new
+//! replicas, and each complete copy back to the drivers. The
+//! walk is the host's placement: it
 //! serves each acceptor and replica that the register names on its machine,
 //! and campaigns a leader of the newest segment when none writes. The
 //! leader retires a sealed segment once `F + 1` replicas of its set hold it
@@ -102,6 +104,7 @@ use std::rc::Rc;
 use moonpool_walk::{Cx, Model, Phase, Walk, sometimes};
 
 use paros_journal::register::{Ballot, Change, MatchmakerGeneration, RegisterValue};
+use paros_journal::roles::CopyId;
 use paros_journal::roles::{Campaign, LeaderPhase, Message, PROMISE_BATCH};
 use paros_journal::segment::{OpeningCall, SegmentRecord, SegmentState};
 use paros_journal::{
@@ -109,8 +112,8 @@ use paros_journal::{
     ResolveAnswer, SegmentId, Seq, Slot, Write,
 };
 use paros_journal_control::{
-    Action, Alert, Ask, Controller, FailureDomain, Liveness, MatchmakerId, MatchmakerSet, Outcome,
-    Tunables, View,
+    Action, Alert, Ask, Cell, ControlConfig, ControlDriver, ControlRegister, FailureDomain,
+    MatchmakerId, MatchmakerSet, Outcome, Polled, ProcessId, Report, Tunables, Windows,
 };
 use paros_journal_io::mem::{ManualClock, MemRegister};
 use paros_journal_io::storage::Storage as _;
@@ -137,6 +140,10 @@ pub const ONCE: &str = "whole journal: no record is written twice in the whole l
 pub const ACKED: &str = "whole journal: each acked write holds its position in the whole log";
 /// Oracle: each alert of the controller is true.
 pub const ALERTS: &str = "whole journal: each controller alert is true of the machines";
+/// Oracle: the journals share one token, so at most one reshapes or heals
+/// at a time.
+pub const BOUNDED_IN_FLIGHT: &str =
+    "whole journal: at most one journal reshapes or heals at a time under the shared token";
 /// Oracle: a node that a heal added to a retired set holds the whole
 /// segment on its disk while the set names it.
 pub const HEAL_HELD: &str =
@@ -172,6 +179,8 @@ pub mod reach {
     pub const HEALED_WRITE: &str = "whole journal: a write chosen in a segment a heal opened";
     /// The controller held a heal and alerted that no placement exists.
     pub const UNPLACEABLE: &str = "whole journal: the controller alerted no placement";
+    /// A controller that runs read that another took its term, and stopped.
+    pub const DEPOSED: &str = "whole journal: a running controller saw it was deposed";
     /// A heal waited for the token that the journals share.
     pub const NO_TOKEN: &str = "whole journal: a heal waited for the shared token";
     /// The controller asked to re-replicate a sealed segment.
@@ -196,6 +205,7 @@ pub mod reach {
         RESTARTED,
         ZONE_OUT,
         TAKEOVER,
+        DEPOSED,
         HEALED,
         HEAL_LOST,
         SEALED,
@@ -239,9 +249,12 @@ pub enum WholeMutant {
     /// The wire moves a `Commit` of a sealed segment to the segment's end.
     /// [`SEALED`] catches it.
     CommitAtEnd,
-    /// The host keeps a machine down in the view once it ever was.
-    /// [`ALERTS`] catches it.
+    /// The walk drops the reports of a machine once it was ever down, so
+    /// the controllers keep it down. [`ALERTS`] catches it.
     StaleLiveness,
+    /// The cell gives a token to every journal. [`BOUNDED_IN_FLIGHT`]
+    /// catches it.
+    NoToken,
     /// The walk reports a new replica's copy complete as soon as it asks
     /// the copy. [`HEAL_HELD`] catches it.
     EarlyCopied,
@@ -266,6 +279,15 @@ const TUNABLES: Tunables = Tunables {
     stale_after: 10 * TICK,
     min_reshape_interval: 6 * TICK,
     stall_window: 80 * TICK,
+};
+/// The numbers of the controllers' drivers: a machine not heard for a tick
+/// is suspect, and down after [`DOWN_AFTER`] ticks.
+const CONTROL: ControlConfig = ControlConfig {
+    tunables: TUNABLES,
+    windows: Windows {
+        suspect_after: TICK,
+        down_after: DOWN_AFTER * TICK,
+    },
 };
 /// The nodes of the leaders: `LEADERS + 10 * round + machine`.
 const LEADERS: u64 = 100_000;
@@ -312,16 +334,15 @@ struct Machine {
     outbox: Rc<RefCell<Vec<Envelope>>>,
     /// The acceptors and replicas that placement put here.
     placed: Vec<Assignment>,
-    /// The time it went down, while it is down.
-    down_since: Option<u64>,
     /// It was ever down (for the mutant `StaleLiveness`).
     ever_down: bool,
 }
 
-/// One grid controller: its machine, and its role while the machine is up.
+/// One grid controller: its machine, and its driver while the machine is
+/// up.
 struct Ctl {
     machine: u64,
-    role: Option<Controller>,
+    driver: Option<ControlDriver>,
 }
 
 impl Ctl {
@@ -356,6 +377,9 @@ struct Journal {
     healed: BTreeSet<SegmentId>,
     /// The nodes that a done heal added to the set of a retired segment.
     added: BTreeSet<(SegmentId, NodeId)>,
+    /// The last time each machine was up when the walk published the
+    /// reports to the journal's controllers: the truth of [`ALERTS`].
+    heard: BTreeMap<u64, u64>,
     ctls: Vec<Ctl>,
     claimed: bool,
     next: u64,
@@ -381,6 +405,11 @@ pub struct WholeModel {
     /// The copy and abandon asks that the network still holds: each may
     /// arrive again, late ([`WholeAction::Late`]).
     late: Vec<(usize, Ask)>,
+    /// The journal that holds the one token of the cell's rate limiter.
+    token: Option<usize>,
+    /// The controllers whose reports are lost until a time, by journal and
+    /// controller.
+    muted: BTreeMap<(usize, usize), u64>,
     /// The machine lost for good, once one is.
     lost: Option<u64>,
 }
@@ -419,6 +448,9 @@ pub enum WholeAction {
     ZoneOut,
     /// A copy or abandon ask that the network held arrives again, late.
     Late,
+    /// The reports of one controller are lost for a while: the other
+    /// controller of its journal takes the term from a holder that runs.
+    Mute,
     /// A machine that is not a matchmaker is lost for good.
     Lose,
 }
@@ -444,6 +476,7 @@ impl Model for WholeModel {
             WholeAction::Fault,
             WholeAction::ZoneOut,
             WholeAction::Late,
+            WholeAction::Mute,
             WholeAction::Lose,
         ]
     }
@@ -451,11 +484,19 @@ impl Model for WholeModel {
     fn weight(action: WholeAction, phase: Phase) -> u32 {
         match (action, phase) {
             (
-                WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late | WholeAction::Lose,
+                WholeAction::Fault
+                | WholeAction::ZoneOut
+                | WholeAction::Late
+                | WholeAction::Mute
+                | WholeAction::Lose,
                 Phase::Chaos,
             ) => 1,
             (
-                WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late | WholeAction::Lose,
+                WholeAction::Fault
+                | WholeAction::ZoneOut
+                | WholeAction::Late
+                | WholeAction::Mute
+                | WholeAction::Lose,
                 _,
             ) => 0,
             (_, Phase::Settle) => 1,
@@ -478,6 +519,7 @@ impl Model for WholeModel {
             WholeAction::Fault => self.fault(cx),
             WholeAction::ZoneOut => self.zone_out(cx),
             WholeAction::Late => self.late(cx),
+            WholeAction::Mute => self.mute(cx),
             WholeAction::Lose => self.lose(cx),
         }
         self.place();
@@ -518,10 +560,16 @@ impl Model for WholeModel {
             .filter_map(|a| driver.host().acceptor(a))
             .any(|a| a.vote(Slot(0)).is_some());
         sometimes!(voted, reach::RESTARTED);
+        let now = self.now();
         for journal in &mut self.journals {
             for ctl in &mut journal.ctls {
                 if ctl.machine == *node {
-                    ctl.role = Some(Controller::new(ctl.node()));
+                    ctl.driver = Some(ControlDriver::new(
+                        ctl.node(),
+                        ProcessId(ctl.node().0),
+                        CONTROL,
+                        now,
+                    ));
                 }
             }
         }
@@ -627,9 +675,17 @@ impl WholeModel {
             let shift = u64::try_from(i).expect("two journals");
             let acceptors: Vec<NodeId> = [1, 4, 7].map(|m| NodeId(m + shift)).to_vec();
             let replicas: Vec<NodeId> = [2, 5, 8].map(|m| NodeId(m + shift)).to_vec();
-            let value = RegisterValue::new()
-                .apply(&Change::Elect { holder: NodeId(0) })
-                .expect("an election");
+            // Journal 1 was created by a creator that holds the term and
+            // is gone (node 0 runs on no machine): its controllers take the
+            // term once its process is down. Journal 2 was created with no
+            // election: its controllers find no holder.
+            let value = if i == 0 {
+                RegisterValue::new()
+                    .apply(&Change::Elect { holder: NodeId(0) })
+                    .expect("an election")
+            } else {
+                RegisterValue::new()
+            };
             let value = value
                 .apply(&Change::Reshape {
                     opening: OpeningCall {
@@ -646,7 +702,12 @@ impl WholeModel {
                 .map(|m| (m - 1) % 9 + 1)
                 .map(|machine| Ctl {
                     machine,
-                    role: Some(Controller::new(NodeId(CONTROLLERS + machine))),
+                    driver: Some(ControlDriver::new(
+                        NodeId(CONTROLLERS + machine),
+                        ProcessId(CONTROLLERS + machine),
+                        CONTROL,
+                        0,
+                    )),
                 })
                 .into_iter()
                 .collect();
@@ -660,6 +721,7 @@ impl WholeModel {
                 sealed_at: BTreeMap::new(),
                 healed: BTreeSet::new(),
                 added: BTreeSet::new(),
+                heard: BTreeMap::new(),
                 ctls,
                 claimed: false,
                 next: 0,
@@ -679,6 +741,8 @@ impl WholeModel {
             machines: BTreeMap::new(),
             journals,
             late: Vec::new(),
+            token: None,
+            muted: BTreeMap::new(),
             lost: None,
         };
         for m in MACHINES {
@@ -690,7 +754,6 @@ impl WholeModel {
                     inbox: Rc::default(),
                     outbox: Rc::default(),
                     placed: Vec::new(),
-                    down_since: None,
                     ever_down: false,
                 },
             );
@@ -768,25 +831,22 @@ impl WholeModel {
             driver.assign(assignment.clone());
         }
         machine.driver = Some(driver);
-        machine.down_since = None;
     }
 
     /// `machine` goes down: its driver, its leaders and its controllers are
     /// gone; its disk and its placed roles stay.
     fn down(&mut self, m: u64) {
-        let now = self.now();
         let machine = self.machines.get_mut(&m).expect("a machine");
         if machine.driver.take().is_none() {
             return;
         }
         machine.inbox.borrow_mut().clear();
         machine.outbox.borrow_mut().clear();
-        machine.down_since = Some(now);
         machine.ever_down = true;
         for journal in &mut self.journals {
             for ctl in &mut journal.ctls {
                 if ctl.machine == m {
-                    ctl.role = None;
+                    ctl.driver = None;
                 }
             }
             if journal.call.as_ref().is_some_and(|c| c.machine == m) {
@@ -797,25 +857,12 @@ impl WholeModel {
         }
     }
 
-    /// The liveness of `machine` as the host's signals give it.
-    fn liveness_of(&self, machine: u64) -> Liveness {
-        let m = &self.machines[&machine];
-        if self.mutant == WholeMutant::StaleLiveness && m.ever_down {
-            return Liveness::Down;
-        }
-        match m.down_since {
-            None => Liveness::Up,
-            Some(since) if self.now() - since < DOWN_AFTER * TICK => Liveness::Suspect,
-            Some(_) => Liveness::Down,
-        }
-    }
-
-    /// The truth of a machine, for the oracle [`ALERTS`]: up, or down for
-    /// long enough to be replaced.
-    fn truly_gone(&self, machine: u64) -> bool {
-        self.machines[&machine]
-            .down_since
-            .is_some_and(|since| self.now() - since >= DOWN_AFTER * TICK)
+    /// The truth of a machine, for the oracle [`ALERTS`] of journal `j`:
+    /// down, and not up at a report of the journal's controllers for long
+    /// enough to be replaced.
+    fn truly_gone(&self, j: usize, machine: u64) -> bool {
+        let heard = self.journals[j].heard.get(&machine).copied().unwrap_or(0);
+        !self.up(machine) && self.now() - heard >= DOWN_AFTER * TICK
     }
 
     /// Every node of journal `j` that the register names.
@@ -1047,11 +1094,7 @@ impl WholeModel {
         };
         sometimes!(true, reach::COPIED);
         for c in 0..self.journals[j].ctls.len() {
-            let Some(role) = self.journals[j].ctls[c].role.as_mut() else {
-                continue;
-            };
-            let ask = role.copied(*segment, *copy);
-            self.act(j, c, ask, cx);
+            self.copied(j, c, *segment, *copy, cx);
         }
     }
 
@@ -1322,31 +1365,14 @@ impl WholeModel {
         }
     }
 
-    /// Run `change` on the register of journal `j` as a controller's
-    /// register operation: in the chaos phase its request or its reply may
-    /// be lost.
-    fn operate(&mut self, j: usize, change: &Change, cx: &mut Cx<'_, Self>) -> (Outcome, bool) {
-        let id = self.journals[j].id;
-        let chaos = cx.phase() == Phase::Chaos;
-        if chaos && cx.rng().chance(1, 10) {
-            return (Outcome::NoAnswer, false);
-        }
-        let result = self.register.change(id, change);
-        let done = result.is_ok();
-        if chaos && cx.rng().chance(1, 8) {
-            return (Outcome::NoAnswer, done);
-        }
-        let outcome = match result {
-            Ok(value) => Outcome::Done(value),
-            Err(refusal) => Outcome::Refused(refusal),
-        };
-        (outcome, done)
-    }
-
-    /// One step of a controller of journal `j` on a machine that is up.
+    /// One step of the controllers of journal `j` (each controller in the
+    /// settle phase, else one at random). First every machine that is up
+    /// publishes its report to every controller of the journal that is up:
+    /// a beat, and the segment of each leader on it that writes.
     fn control(&mut self, j: usize, cx: &mut Cx<'_, Self>) {
+        self.publish(j, cx.phase() == Phase::Chaos);
         let alive: Vec<usize> = (0..self.journals[j].ctls.len())
-            .filter(|c| self.journals[j].ctls[*c].role.is_some())
+            .filter(|c| self.journals[j].ctls[*c].driver.is_some())
             .collect();
         let picked: Vec<usize> = if cx.phase() == Phase::Settle {
             alive
@@ -1358,196 +1384,206 @@ impl WholeModel {
         }
     }
 
-    fn control_one(&mut self, j: usize, c: usize, cx: &mut Cx<'_, Self>) {
-        let value = self.value(j);
-        let ctl = &self.journals[j].ctls[c];
-        let role = ctl.role.as_ref().expect("a controller that is up");
-        if role.term().is_none() {
-            self.elect(j, c, &value, cx);
-            return;
-        }
-        let term = role.term().expect("a holder");
-        let me = role.me();
-        self.plan(j, c, me, term, &value, cx);
-    }
-
-    /// An idle controller campaigns when no live controller holds the
-    /// term, and now and then in the chaos phase: two controllers race.
-    fn elect(&mut self, j: usize, c: usize, value: &RegisterValue, cx: &mut Cx<'_, Self>) {
-        let ctl = &self.journals[j].ctls[c];
-        {
-            // Campaign when no live controller holds the term, and now and
-            // then in the chaos phase: two controllers race.
-            let holder = value.term().holder;
-            let held = self.journals[j].ctls.iter().any(|other| {
-                Some(other.node()) == holder
-                    && other
-                        .role
-                        .as_ref()
-                        .is_some_and(|r| r.term() == Some(value.term().number))
-            });
-            if held && (cx.phase() != Phase::Chaos || !cx.rng().chance(1, 10)) {
-                return;
-            }
-            let me = ctl.node();
-            let change = self.journals[j].ctls[c]
-                .role
-                .as_mut()
-                .expect("up")
-                .campaign();
-            let (outcome, _) = self.operate(j, &change, cx);
-            if let Outcome::Done(done) = &outcome {
-                sometimes!(
-                    done.term().holder == Some(me)
-                        && holder.is_some_and(|h| h != me && h.0 >= CONTROLLERS),
-                    reach::TAKEOVER
-                );
-            }
-            self.journals[j].ctls[c]
-                .role
-                .as_mut()
-                .expect("up")
-                .elected(&outcome);
-        }
-    }
-
-    /// A controller that holds its term steps on the host's view, and the
-    /// walk runs what it asks.
-    fn plan(
-        &mut self,
-        j: usize,
-        c: usize,
-        me: NodeId,
-        term: u64,
-        value: &RegisterValue,
-        cx: &mut Cx<'_, Self>,
-    ) {
-        let liveness = self.view_liveness(value);
-        let zones: BTreeMap<NodeId, FailureDomain> = liveness
-            .keys()
-            .map(|n| (*n, domain(machine_of(*n))))
-            .collect();
-        let candidates = self.candidates(value);
-        let matchmakers =
-            MatchmakerSet::new(MatchmakerGeneration(0), (1..=3).map(MatchmakerId).collect());
-        let matchmakers_live: BTreeSet<MatchmakerId> = MATCHMAKERS
-            .iter()
-            .zip(1..)
-            .filter(|(m, _)| self.up(**m))
-            .map(|(_, id)| MatchmakerId(id))
-            .collect();
-        let repairs = BTreeSet::new();
-        let newest = value.newest().expect("a segment").id();
-        let leader_live = self
-            .open_leader(j)
-            .is_some_and(|(_, node)| self.journals[j].bound.get(&node) == Some(&newest));
+    /// The reports of every machine that is up, and of every controller of
+    /// journal `j` that is up, to every controller of the journal that is
+    /// up. In the chaos phase a muted controller's report is lost
+    /// ([`WholeAction::Mute`]). The planted bug
+    /// [`WholeMutant::StaleLiveness`] drops the reports of a machine that
+    /// was ever down.
+    fn publish(&mut self, j: usize, chaos: bool) {
         let now = self.now();
-        let journal = &self.journals[j];
-        let since = journal.opened_at.get(&newest).map(|at| now - at);
-        let seal_age = value
-            .segments()
-            .values()
-            .find(|r| r.state() == SegmentState::Sealed)
-            .and_then(|r| journal.sealed_at.get(&r.id()))
-            .map(|at| now - at);
-        let token_free = self.token_free(j);
-        let view = View {
-            me,
-            term,
-            register: value,
-            liveness: &liveness,
-            zones: &zones,
-            candidates: &candidates,
-            leader_live,
-            matchmakers: &matchmakers,
-            matchmakers_live: &matchmakers_live,
-            repairs_pending: &repairs,
-            data_lost: false,
-            signal_age: 0,
-            since_last_reshape: since,
-            seal_age,
-            token_free,
+        let id = self.journals[j].id;
+        let mut reports = Vec::new();
+        for (c, ctl) in self.journals[j].ctls.iter().enumerate() {
+            let muted = chaos && self.muted.get(&(j, c)).is_some_and(|until| now < *until);
+            if let Some(driver) = ctl.driver.as_ref()
+                && !muted
+            {
+                reports.push(driver.report());
+            }
+        }
+        for (m, machine) in &self.machines {
+            let Some(driver) = machine.driver.as_ref() else {
+                continue;
+            };
+            self.journals[j].heard.insert(*m, now);
+            if self.mutant == WholeMutant::StaleLiveness && machine.ever_down {
+                continue;
+            }
+            let process = ProcessId(*m);
+            reports.push(Report::Beat { process });
+            for address in driver.host().addresses() {
+                if address.journal != id {
+                    continue;
+                }
+                if let Some(leader) = driver.host().leader(address)
+                    && matches!(leader.phase(), LeaderPhase::Open { .. })
+                {
+                    reports.push(Report::Writes {
+                        process,
+                        segment: leader.segment(),
+                    });
+                }
+            }
+        }
+        for ctl in &mut self.journals[j].ctls {
+            if let Some(driver) = ctl.driver.as_mut() {
+                for report in &reports {
+                    driver.publish(now, *report);
+                }
+            }
+        }
+    }
+
+    /// The ports of controller `c` of journal `j`: the register, lossy in
+    /// the chaos phase, and the walk's placement and token.
+    fn ports<'a, 'b>(
+        &self,
+        j: usize,
+        cx: &'a mut Cx<'b, Self>,
+    ) -> (WalkRegister<'a, 'b>, WalkCell) {
+        let id = self.journals[j].id;
+        let value = self.value(j);
+        let register = WalkRegister {
+            register: self.register.clone(),
+            id,
+            chaos: cx.phase() == Phase::Chaos,
+            cx,
+            ran: Vec::new(),
         };
-        let (ask, decision) = self.journals[j].ctls[c]
-            .role
-            .as_mut()
-            .expect("up")
-            .step(&view, &TUNABLES);
-        if let Some(decision) = &decision {
-            self.judge_alerts(j, value, &decision.alerts);
+        let cell = WalkCell {
+            j,
+            candidates: self.candidates(&value),
+            matchmakers_live: MATCHMAKERS
+                .iter()
+                .zip(1..)
+                .filter(|(m, _)| self.up(**m))
+                .map(|(_, id)| MatchmakerId(id))
+                .collect(),
+            token: self.token,
+            any_token: self.mutant == WholeMutant::NoToken,
+        };
+        (register, cell)
+    }
+
+    /// One step of controller `c` of journal `j`, on a machine that is up.
+    fn control_one(&mut self, j: usize, c: usize, cx: &mut Cx<'_, Self>) {
+        let now = self.now();
+        let holder = self.value(j).term().holder;
+        let mut driver = self.journals[j].ctls[c].driver.take().expect("up");
+        let (mut register, mut cell) = self.ports(j, cx);
+        let polled = driver.poll(now, &mut register, &mut cell);
+        let ran = std::mem::take(&mut register.ran);
+        drop(register);
+        self.token = cell.token;
+        let me = driver.controller().me();
+        let value = self.value(j);
+        sometimes!(
+            driver.controller().term() == Some(value.term().number)
+                && value.term().holder == Some(me)
+                && holder.is_some_and(|h| h != me && h.0 >= CONTROLLERS),
+            reach::TAKEOVER
+        );
+        self.journals[j].ctls[c].driver = Some(driver);
+        self.ran(j, &ran);
+        self.polled(j, c, polled, cx);
+    }
+
+    /// Note the register operations that a controller of journal `j` ran.
+    fn ran(&mut self, j: usize, ran: &[(Change, Outcome, bool)]) {
+        let value = self.value(j);
+        for (change, outcome, done) in ran {
+            match change {
+                Change::Reshape { opening, release } => {
+                    assert_eq!(*release, RELEASE, "a reshape at this release");
+                    let opened = value
+                        .segments()
+                        .values()
+                        .find(|r| r.opening() == opening)
+                        .map(SegmentRecord::id);
+                    if let Some(segment) = opened {
+                        sometimes!(true, reach::HEALED);
+                        sometimes!(*done && *outcome == Outcome::NoAnswer, reach::HEAL_LOST);
+                        self.journals[j].healed.insert(segment);
+                    }
+                }
+                Change::Rereplicate {
+                    segment,
+                    add,
+                    remove,
+                    ..
+                } => {
+                    if *done {
+                        sometimes!(true, reach::REREPLICATED);
+                        sometimes!(self.lost == Some(machine_of(*remove)), reach::LOST_HEALED);
+                        self.journals[j].added.insert((*segment, *add));
+                    }
+                }
+                Change::Elect { .. } => {}
+                other => {
+                    panic!("a controller asks an election, a reshape or a heal, not {other:?}")
+                }
+            }
+        }
+    }
+
+    /// Run what one step of controller `c` of journal `j` gives: judge its
+    /// alerts, and send its asks to the new replicas.
+    fn polled(&mut self, j: usize, c: usize, polled: Polled, cx: &mut Cx<'_, Self>) {
+        if let Some(decision) = &polled.decision {
+            let value = self.value(j);
+            sometimes!(decision.action == Action::Stop, reach::DEPOSED);
+            self.judge_alerts(j, &value, &decision.alerts);
             sometimes!(
                 decision.action == Action::Wait(paros_journal_control::Wait::NoToken),
                 reach::NO_TOKEN
             );
         }
-        self.act(j, c, ask, cx);
+        for ask in polled.sends {
+            match ask {
+                Ask::Act(action) => {
+                    // The repair is a rule group of #1326 that is not built:
+                    // no role runs it yet.
+                    assert!(
+                        matches!(action, Action::Repair { .. }),
+                        "the role runs a re-replication as a heal, not {action:?}"
+                    );
+                }
+                ask @ Ask::Copy { .. } => {
+                    sometimes!(true, reach::REREPLICATE);
+                    self.send_ask(j, c, &ask, cx);
+                }
+                ask @ Ask::Abandon { .. } => self.send_ask(j, c, &ask, cx),
+                other => {
+                    panic!("a driver sends only a copy, an abandon or a repair, not {other:?}")
+                }
+            }
+        }
+        self.judge_in_flight();
     }
 
-    /// Run what the controller `c` of journal `j` asks.
-    fn act(&mut self, j: usize, c: usize, ask: Ask, cx: &mut Cx<'_, Self>) {
-        match ask {
-            Ask::Nothing => {}
-            Ask::Call(change @ Change::Rereplicate { .. }) => {
-                let (outcome, done) = self.operate(j, &change, cx);
-                if done
-                    && let Change::Rereplicate {
-                        segment,
-                        add,
-                        remove,
-                        ..
-                    } = &change
-                {
-                    sometimes!(true, reach::REREPLICATED);
-                    sometimes!(self.lost == Some(machine_of(*remove)), reach::LOST_HEALED);
-                    self.journals[j].added.insert((*segment, *add));
-                }
-                let Some(role) = self.journals[j].ctls[c].role.as_mut() else {
-                    return;
-                };
-                match role.rereplicated(&change, &outcome) {
-                    // A compare-and-set with no answer is sent again at the
-                    // controller's next step.
-                    Ask::Call(_) => {}
-                    next => self.act(j, c, next, cx),
-                }
-            }
-            Ask::Call(change) => {
-                let Change::Reshape { opening, release } = &change else {
-                    panic!("a holder asks only a reshape or a heal, not {change:?}");
-                };
-                assert_eq!(*release, RELEASE, "a reshape at this release");
-                let (outcome, done) = self.operate(j, &change, cx);
-                let opened = self
-                    .value(j)
-                    .segments()
-                    .values()
-                    .find(|r| r.opening() == opening)
-                    .map(SegmentRecord::id);
-                if let Some(segment) = opened {
-                    sometimes!(true, reach::HEALED);
-                    sometimes!(done && outcome == Outcome::NoAnswer, reach::HEAL_LOST);
-                    self.journals[j].healed.insert(segment);
-                }
-                self.journals[j].ctls[c]
-                    .role
-                    .as_mut()
-                    .expect("up")
-                    .reshaped(opening, &outcome);
-            }
-            Ask::Act(action) => {
-                // The repair is a rule group of #1326 that is not built: no
-                // role runs it yet.
-                assert!(
-                    matches!(action, Action::Repair { .. }),
-                    "the role runs a re-replication as a heal, not {action:?}"
-                );
-            }
-            ask @ Ask::Copy { .. } => {
-                sometimes!(true, reach::REREPLICATE);
-                self.send_ask(j, c, &ask, cx);
-            }
-            ask @ Ask::Abandon { .. } => self.send_ask(j, c, &ask, cx),
-        }
+    /// The new replica of `copy` reports its complete copy to controller
+    /// `c` of journal `j`.
+    fn copied(
+        &mut self,
+        j: usize,
+        c: usize,
+        segment: SegmentId,
+        copy: CopyId,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        let now = self.now();
+        let Some(mut driver) = self.journals[j].ctls[c].driver.take() else {
+            return;
+        };
+        let (mut register, mut cell) = self.ports(j, cx);
+        let polled = driver.copied(now, segment, copy, &mut register, &mut cell);
+        let ran = std::mem::take(&mut register.ran);
+        drop(register);
+        self.token = cell.token;
+        self.journals[j].ctls[c].driver = Some(driver);
+        self.ran(j, &ran);
+        self.polled(j, c, polled, cx);
     }
 
     /// A copy or abandon ask of controller `c` goes to the new replica's
@@ -1562,18 +1598,12 @@ impl WholeModel {
                 return;
             }
         }
+        self.deliver_ask(j, ask);
         if self.mutant == WholeMutant::EarlyCopied
             && let Ask::Copy { segment, copy, .. } = &ask
         {
-            let next = self.journals[j].ctls[c]
-                .role
-                .as_mut()
-                .map_or(Ask::Nothing, |role| role.copied(*segment, *copy));
-            self.deliver_ask(j, ask);
-            self.act(j, c, next, cx);
-            return;
+            self.copied(j, c, *segment, *copy, cx);
         }
-        self.deliver_ask(j, ask);
     }
 
     /// The new replica's driver takes the ask, when its machine is up.
@@ -1655,31 +1685,35 @@ impl WholeModel {
         }
     }
 
-    /// One token for both journals: a reshape in flight, or a sealed
-    /// segment not retired, of the other journal holds it.
-    fn token_free(&self, j: usize) -> bool {
-        !self.journals.iter().enumerate().any(|(k, other)| {
-            k != j
-                && (other
-                    .ctls
-                    .iter()
-                    .any(|ctl| ctl.role.as_ref().is_some_and(|r| r.call().is_some()))
-                    || self
-                        .value(k)
-                        .segments()
-                        .values()
-                        .any(|r| r.state() == SegmentState::Sealed))
-        })
-    }
-
-    /// The liveness of every node of the register and of every candidate,
-    /// as the host's signals give it.
-    fn view_liveness(&self, value: &RegisterValue) -> BTreeMap<NodeId, Liveness> {
-        Self::named(value)
-            .into_iter()
-            .chain(self.candidates(value))
-            .map(|n| (n, self.liveness_of(machine_of(n))))
-            .collect()
+    /// [`BOUNDED_IN_FLIGHT`]: at most one journal has an expensive action
+    /// in flight: a reshape that its retire has not ended (a pending or a
+    /// sealed segment), or a heal of the controller that holds the
+    /// register's term. The two journals share one token.
+    fn judge_in_flight(&self) {
+        let busy: Vec<u64> =
+            self.journals
+                .iter()
+                .filter(|journal| {
+                    let value = self.value_of(journal.id);
+                    let term = value.term();
+                    let healing = journal.ctls.iter().any(|ctl| {
+                        ctl.driver.as_ref().is_some_and(|d| {
+                            term.holder == Some(d.controller().me())
+                                && d.controller().term() == Some(term.number)
+                                && d.controller().heal().is_some()
+                        })
+                    });
+                    healing
+                        || value.segments().values().any(|r| {
+                            matches!(r.state(), SegmentState::Pending | SegmentState::Sealed)
+                        })
+                })
+                .map(|journal| journal.id.0)
+                .collect();
+        assert!(
+            busy.len() <= 1,
+            "{BOUNDED_IN_FLIGHT}: the journals {busy:?} reshape or heal at once"
+        );
     }
 
     /// [`ALERTS`]: each alert is true of the machines as they are. The
@@ -1698,7 +1732,7 @@ impl WholeModel {
         let gone: Vec<NodeId> = members
             .iter()
             .copied()
-            .filter(|n| self.truly_gone(machine_of(*n)))
+            .filter(|n| self.truly_gone(j, machine_of(*n)))
             .collect();
         let kept_zones: BTreeSet<u64> = members
             .iter()
@@ -1733,7 +1767,7 @@ impl WholeModel {
                 let (gone, kept): (Vec<NodeId>, Vec<NodeId>) = r
                     .replicas()
                     .iter()
-                    .partition(|n| self.truly_gone(machine_of(**n)));
+                    .partition(|n| self.truly_gone(j, machine_of(**n)));
                 let kept_zones: BTreeSet<u64> =
                     kept.iter().map(|n| zone_of(machine_of(*n))).collect();
                 let free_zones = MACHINES
@@ -1929,10 +1963,10 @@ impl WholeModel {
         let holder = value.term().holder;
         let holding = journal.ctls.iter().any(|ctl| {
             Some(ctl.node()) == holder
-                && ctl
-                    .role
-                    .as_ref()
-                    .is_some_and(|r| r.term() == Some(value.term().number) && r.call().is_none())
+                && ctl.driver.as_ref().is_some_and(|d| {
+                    d.controller().term() == Some(value.term().number)
+                        && d.controller().call().is_none()
+                })
         });
         if !holding {
             return Err("no controller holds the term with no call in flight".into());
@@ -2032,6 +2066,18 @@ impl WholeModel {
         }
     }
 
+    /// The reports of one controller are lost for longer than the down
+    /// window.
+    fn mute(&mut self, cx: &mut Cx<'_, Self>) {
+        let j = cx.rng().index(self.journals.len()).expect("journals");
+        let c = cx
+            .rng()
+            .index(self.journals[j].ctls.len())
+            .expect("controllers");
+        let until = self.now() + (DOWN_AFTER + 2) * TICK;
+        self.muted.insert((j, c), until);
+    }
+
     /// Once in a run, a machine that is not a matchmaker is lost for good:
     /// it goes down and never comes back.
     fn lose(&mut self, cx: &mut Cx<'_, Self>) {
@@ -2061,5 +2107,94 @@ impl WholeModel {
             }
         }
         sometimes!(true, reach::ZONE_OUT);
+    }
+}
+
+/// The register as a controller of the walk reaches it: in the chaos phase
+/// a request (1 in 10) or a reply (1 in 8) is lost. It notes each operation
+/// with its outcome and whether the write took place.
+struct WalkRegister<'a, 'b> {
+    register: MemRegister,
+    id: JournalId,
+    chaos: bool,
+    cx: &'a mut Cx<'b, WholeModel>,
+    ran: Vec<(Change, Outcome, bool)>,
+}
+
+impl ControlRegister for WalkRegister<'_, '_> {
+    fn read(&mut self) -> Option<RegisterValue> {
+        self.register.value(self.id)
+    }
+
+    fn run(&mut self, change: &Change) -> Outcome {
+        if self.chaos && self.cx.rng().chance(1, 10) {
+            self.ran.push((change.clone(), Outcome::NoAnswer, false));
+            return Outcome::NoAnswer;
+        }
+        let result = self.register.change(self.id, change);
+        let done = result.is_ok();
+        let outcome = if self.chaos && self.cx.rng().chance(1, 8) {
+            Outcome::NoAnswer
+        } else {
+            match result {
+                Ok(value) => Outcome::Done(value),
+                Err(refusal) => Outcome::Refused(refusal),
+            }
+        };
+        self.ran.push((change.clone(), outcome.clone(), done));
+        outcome
+    }
+}
+
+/// The walk's placement and the cell's one token, for journal `j`.
+struct WalkCell {
+    j: usize,
+    candidates: Vec<NodeId>,
+    matchmakers_live: BTreeSet<MatchmakerId>,
+    token: Option<usize>,
+    /// The planted bug [`WholeMutant::NoToken`].
+    any_token: bool,
+}
+
+impl Cell for WalkCell {
+    fn process_of(&self, node: NodeId) -> Option<ProcessId> {
+        // A controller is a process of its own, on a stateless machine
+        // (§J6.1); a role runs in the process of its machine.
+        if node.0 >= CONTROLLERS {
+            return Some(ProcessId(node.0));
+        }
+        let machine = machine_of(node);
+        MACHINES.contains(&machine).then_some(ProcessId(machine))
+    }
+
+    fn zone(&self, process: ProcessId) -> Option<FailureDomain> {
+        Some(domain(process.0))
+    }
+
+    fn candidates(&mut self, _value: &RegisterValue) -> Vec<NodeId> {
+        self.candidates.clone()
+    }
+
+    fn matchmakers(&self) -> (MatchmakerSet, BTreeSet<MatchmakerId>) {
+        (
+            MatchmakerSet::new(MatchmakerGeneration(0), (1..=3).map(MatchmakerId).collect()),
+            self.matchmakers_live.clone(),
+        )
+    }
+
+    fn token_free(&self) -> bool {
+        self.any_token || self.token.is_none_or(|holder| holder == self.j)
+    }
+
+    fn take_token(&mut self) {
+        if self.token.is_none() {
+            self.token = Some(self.j);
+        }
+    }
+
+    fn give_back(&mut self) {
+        if self.token == Some(self.j) {
+            self.token = None;
+        }
     }
 }

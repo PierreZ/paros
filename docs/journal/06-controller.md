@@ -375,8 +375,90 @@ role. TLC checks the traced walks against `ControllerTrace.tla`, which extends
 `GridController.tla` (`tests/controller_traces.rs`), refuses the control `ElectNoCas` (a campaign
 with no compare, which the oracles pass) and refuses every edit of the recorded traces at or
 after the edited event. The model has the step `Stand` for this: a holder with no plan that reads
-another term stops, as `decide` does first. Test 4 (the moonpool-sim scenario library) waits for
-the driver (#1329, #1330).
+another term stops, as `decide` does first. Test 4 (the scenario library) runs in the whole
+journal on the in-memory IO (#1445, below); its moonpool-sim version is #1417, in the layered
+parosd.
+
+#### The signals and the driver as built
+
+**The roles publish their signals; the driver of the controller turns them into the view**
+(#1328 (paros-journal-control)). Two modules of `paros-journal-control` build the rest of the v1
+controller:
+
+- **`signals.rs`**: each process of the deployment (a machine that serves roles of the journal,
+  or a controller) publishes a `Report` to the controllers of the journal: `Beat` (it is alive)
+  or `Writes` (it is alive, and a leader of the journal on it writes in a segment). A report
+  names its **process**, not a role: a failure is a process's, so a member is as live as the
+  process that serves it, and a candidate of the placement is as live as its process although it
+  serves no role yet. The controller stamps each report with its own clock when it takes it, so
+  the clocks of two processes never meet. `Signals` gives the liveness of a process from the age
+  of its last report (`up` below the suspicion window, `suspect` below the down window, `down`
+  after; both windows are the host's, **Open**), `leader_known` (a `Writes` of a segment
+  inside the suspicion window; the view's `leader_live` asks it of the segment
+  in force) and `signal_age` (the time since the newest report of any
+  process: a controller that hears nobody is cut off and plans nothing expensive; a process that
+  is down does not make the signals stale). A process never heard ages from the start of the
+  signals, so a controller that just started replaces no member before it could hear it. The
+  v1 reports carry liveness only. A measure of the catalogue that a later decision needs
+  becomes a new kind of `Report` (the decision of which measure drives which action stays
+  **decided later**).
+- **`driver.rs`**: `ControlDriver` runs the `Controller` of one journal. It is pure (the program
+  gives the time of each call) and reaches the world through two ports that the program
+  implements: `ControlRegister` (a done read of the register, and one register operation for a
+  change: done, refused or no answer) and `Cell` (the process of a node, its zone, the
+  candidates, the matchmakers, and the cell's token for the journal). One `poll`: read the
+  register; note each segment and each seal the driver sees for the first time, at that time,
+  and forget each segment that left the register;
+  an idle controller campaigns when the register names no holder, names this controller (it
+  restarted and forgot its term) or names a holder whose process is down or unknown; a holder
+  builds its view (the liveness of every node of the register and of every candidate, the zones,
+  the time since the driver first saw the newest segment, the age of the oldest seal it saw),
+  steps the role and runs what the role asks: a register change at once, its outcome back to the
+  role; a copy, an abandon or a repair as a send that the program delivers. A notice of a
+  complete copy goes to `ControlDriver::copied`. The driver takes the cell's token before an
+  expensive action (a reshape call, a heal's copy or its compare-and-set) and gives it back once
+  the journal has no call, no heal and no pending or sealed segment; both are idempotent at the
+  cell, so a new holder gives back the token of a holder that crashed. Only the holder that the
+  register names, at its own term, takes or gives back the token: a deposed holder touches it
+  no more. The driver drops the reports of its own process (its controller knows it is alive,
+  and its own beat must not hide that it hears no other process), so the cell must place the
+  controller on the driver's own process; `poll` asserts it. The scrub is not built
+  (the CTRL repair group of #1326), so the driver gives no pending repair and no data loss.
+
+The whole-journal walk of `journal-sim` (#1445, `src/whole.rs`) runs the controllers through
+`ControlDriver`: each machine that is up publishes a beat and the segment of each leader on it
+that writes, each controller publishes its own beat (a controller is a process of its own, on
+a stateless machine), the walk is the register port (a request or a reply lost in the chaos phase) and the
+cell port (its placement, and one token for the two journals), and it delivers the driver's sends
+to the new replicas. Journal 1 starts with a holder that runs on no machine, journal 2 with no
+holder. The move `Mute` loses the reports of one controller for longer than the down window,
+so the other controller takes the term from a holder that runs, and the reach site `DEPOSED`
+requires that a running holder reads it and stops. The oracle `ALERTS` judges each alert against
+the machines as they are (a machine is gone once it is down and was not up at a report for the
+down window: the truth counts the window from the last report, as the driver does); the mutant
+`StaleLiveness` drops the reports of a machine that was ever down. The new oracle
+`BOUNDED_IN_FLIGHT` judges that at most one journal has an expensive action in flight at a time
+(a pending or sealed segment, or a heal of the holder that the register names)
+(mutant `NoToken`: the cell gives a token to every journal). `tests/whole.rs` also requires every
+`probe!` of the driver and of the signals (`driver::PROBES`, `signals::PROBES`). The example
+`driver` of the crate shows a campaign, a heal after a process goes silent and a takeover.
+
+**Proposals of the driver, for Pierre's review** (readings of this chapter, not decisions):
+
+- **Liveness is a process's, not a role's.** The report names the process; the cell maps a node
+  to its process.
+- **The controller stamps a report with its own clock.** The age of a signal never compares two
+  clocks.
+- **`signal_age` is the time since the newest report of any process**, not the age of the
+  oldest input: with the oldest input, a member that is down would make every view stale, and
+  no heal could ever run.
+- **A segment first seen counts as just opened.** A driver that starts (after a crash, or a
+  takeover) waits the minimum interval before its first reshape and the stall window before it
+  reports a stalled seal.
+- **An idle controller campaigns only when the holder is down or unknown** (or is itself): a
+  holder that is up or suspect keeps its term.
+- **The token is held from the expensive call until the retire** (no pending or sealed
+  segment): one token covers the whole reshape, the seal and the retire included.
 
 **Proposals of the build, for Pierre's review** (each is a reading of this chapter, not a
 decision of Pierre):

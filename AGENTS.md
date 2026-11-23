@@ -303,7 +303,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
   `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
   `single_writer`, `multi_writer`; #1370 (journal examples)), the grid controller's example:
-  `cargo run -p paros-journal-control --example controller`, and the facade examples:
+  `cargo run -p paros-journal-control --example <name>` (`controller`, `driver`), and the facade examples:
   `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
   each one (the workflow rule "Composing crates have examples" below)
@@ -782,11 +782,14 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-journal-control` — the grid controller of the journal v1
   (`docs/journal/06-controller.md` §J6, #1328): the P measures of a v1 grid, the placement of a
   heal under the zone rule, the pure `decide` of the v1 controller (heal, repair,
-  re-replicate, hold and alert), and the controller role (`role`: its election by a term and
-  its fenced reshape call, as asks to a driver), with a `probe!` on every branch. Sans-IO,
+  re-replicate, hold and alert), the controller role (`role`: its election by a term and
+  its fenced reshape call, as asks to a driver), the signals that the processes publish to it
+  (`signals`) and its driver (`driver`: `ControlDriver`, over a register port and a cell port),
+  with a `probe!` on every branch. Sans-IO,
   wasm-safe, on `paros-consensus` and `paros-journal`; every **Open** number of §J6 comes from
   the host. Not published yet, and not in the facade. Its example `controller` drives the role
-  over a register written by hand: an election, a heal, a lost reply and a takeover.
+  over a register written by hand: an election, a heal, a lost reply and a takeover; its example
+  `driver` runs two `ControlDriver`s: a campaign, a heal after a process goes silent, a takeover.
 - `crates/lib/paros-journal-io` — the journal's IO side, pure (#1329): the four traits a backend
   implements (`Storage`, `Transport`, `Clock`, `Register`), the on-disk format (`layout`), the
   pure `Host` that serves many roles of many journals in one process, the generic `Driver` under
