@@ -133,9 +133,10 @@ Restart(r) ==
   /\ UNCHANGED <<hi, cid, seen, rec, w, Ctl, Net, crashes>>
 
 \* A node reads the register: a value done now. A value that names it ends
-\* the copy it runs: it is a member.
+\* the copy it runs: it is a member. A node that is down may read too: the
+\* model allows more than the code, whose nodes read only when up, and a read
+\* of the value it already saw changes nothing.
 Read(r) ==
-  /\ r \in Live /\ seen[r].at < w
   /\ seen' = [seen EXCEPT ![r] = [set |-> rec.set, at |-> w]]
   /\ cid' = [cid EXCEPT ![r] = IF r \in rec.set THEN NoCopy ELSE @]
   /\ UNCHANGED <<hi, down, rec, w, Ctl, Net, crashes, restarts>>
@@ -150,7 +151,11 @@ Orphan(t, id) ==
     [] OrphanEnds = "none" -> FALSE
 
 \* A node takes a copy ask: it starts that copy, empty. Under "term", not
-\* an ask of a term that is over.
+\* an ask of a term that is over. The guard reads the register term itself,
+\* as `Ends` does: the code judges the ask on a register value it reads when
+\* the ask comes (`Driver::join` reads first), so a node never starts a copy of
+\* a term that a value it read had ended. A node that starts one on an older
+\* value ends it at its next read (`Ends`), which `Orphaned` covers.
 Join(r) ==
   \E a \in asks :
     /\ a.n = r /\ r \in Live /\ Fresh(r, a)
@@ -211,8 +216,8 @@ Takes(m) == (TermFence => m.term = rterm) /\ Eq(rec, m.rd)
 \* The register's answer to m now.
 Ok(m) == Taken(m) \/ Takes(m)
 
+\* The register applies m, a compare-and-set of `cas` (each caller binds it).
 ApplyOn(m) ==
-  /\ m \in cas
   /\ ans' = ans \cup {[m |-> m, ok |-> Ok(m)]}
   /\ IF ~Taken(m) /\ Takes(m)
      THEN /\ rec' = [set |-> After(m).set, heals |-> rec.heals + 1]
@@ -351,8 +356,7 @@ NoLowerAsk == ~\E r \in Pool, a \in asks :
 \* copy is sent.
 NoLateAbandon == ~\E r \in rec.set, a \in abandons :
   a.n = r /\ r \notin seen[r].set /\ a.id = cid[r]
-\* A node ends a copy that no abandon named: its term is over.
-NoOrphanEnd == ~\E r \in Pool :
-  /\ r \notin rec.set /\ cid[r] = NoCopy /\ hi[r] > 0
-  /\ ~\E a \in abandons : a.n = r
+\* A node ends an orphan copy: the step `Ends` happens (an action property,
+\* so the reach is the step itself and not a state that other steps give).
+NoOrphanEnd == [][\A r \in Pool : ~Ends(r)]_vars
 =============================================================================

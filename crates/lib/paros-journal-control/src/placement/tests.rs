@@ -127,3 +127,18 @@ fn a_heal_of_a_replica_set_meets_the_zone_rule() {
     );
     assert_eq!(set_zones(&nodes(&[30, 31]), &labels), GridZones::Unlabeled);
 }
+
+#[test]
+fn a_replica_set_with_no_member_down_is_kept_whatever_its_zones() {
+    let live = alive(&[11, 13, 20, 21, 12], &[]);
+    let labels = zones(&[(11, "a"), (12, "b"), (13, "c"), (20, "a"), (21, "b")]);
+    assert!(matches!(
+        set_zones(&nodes(&[11, 20, 13]), &labels),
+        GridZones::Breaks(_)
+    ));
+    assert_eq!(
+        heal_replicas(&nodes(&[11, 20, 13]), &live, &nodes(&[21]), &labels),
+        Some(nodes(&[11, 20, 13])),
+        "the zone rule judges a placement; a grid heal never waits on a set it carries over"
+    );
+}

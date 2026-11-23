@@ -222,6 +222,8 @@ fn fill(
 /// replaced by a candidate that is up and not in the set, such that the new
 /// set admits the zone rule of one column ([`set_zones`]). The search tries
 /// the candidates in the host's order and backtracks, as [`heal_grid`].
+/// A set with no member down is kept as it is: the zone rule judges a
+/// placement, so a grid heal that carries the set over never waits on it.
 /// `None`: no placement exists.
 ///
 /// # Panics
@@ -240,6 +242,9 @@ pub fn heal_replicas(
     let holes: Vec<usize> = (0..replicas.len())
         .filter(|i| liveness.get(&replicas[*i]) == Some(&Liveness::Down))
         .collect();
+    if holes.is_empty() {
+        return Some(replicas.to_vec());
+    }
     let mut set = replicas.to_vec();
     let mut taken = vec![false; usable.len()];
     let healed = fill_set(&mut set, &holes, &usable, &mut taken, zones)?;

@@ -3572,8 +3572,8 @@ crashes and two restarts of nodes, two terms, three plans. The source of a copy 
 
 | Check | CI | Result |
 |---|---|---|
-| `safety` | ci | pass (642 thousand distinct states) |
-| `safety_wide` | ci | pass: three terms (4.0 million, about 2 minutes with 4 workers) |
+| `safety` | ci | pass (776 thousand distinct states) |
+| `safety_wide` | ci | pass: three terms (4.9 million, about 3 minutes with 4 workers) |
 | `reach_heal`, `reach_reuse`, `reach_come_back`, `reach_two_answers`, `reach_lower_ask`, `reach_late_abandon` | ci | violation: a heal, one node asked by two terms, a set that comes back to the first set, a compare-and-set applied twice, a lower ask that reaches a node that runs a higher copy, an abandon of a copy that a commit made a member before the node saw it |
 | `copy_any` | ci | violation of `Held`: a plan ends before it sends anything, the next plan's copy on the same node completes and is counted, the first plan's late ask wipes it, and the compare-and-set adds an empty member |
 | `version_only` | ci | violation of `Held`: the new controller's ask wipes the deposed controller's complete copy, and the deposed controller's compare-and-set, on an unchanged record, adds the empty node |
@@ -3584,7 +3584,7 @@ crashes and two restarts of nodes, two terms, three plans. The source of a copy 
 | `orphans` | ci | pass: liveness `Orphaned` under `LiveSpec` (weak fairness on `Ends`): once the faults stop, every copy that the record does not name ends; `Held` holds |
 | `orphan_kept` | ci | violation of `Orphaned`: with no end (`OrphanEnds = "none"`), a crashed controller's copy runs for ever |
 | `orphan_same` | ci | violation of `Held`: an end at the same term (`OrphanEnds = "same"`) ends a copy that the controller of that term still counts, and its compare-and-set adds the empty node |
-| `reach_orphan_end` | ci | violation: a node ends an orphan copy that no abandon reached |
+| `reach_orphan_end` | ci | violation of the action property `NoOrphanEnd`: the step `Ends` happens |
 
 Orphan copies (`OrphanEnds`, first value `term`): a node that is live, runs a copy, and is not in
 the record ends the copy when the register term is above the copy's term (`Ends`, which reads the

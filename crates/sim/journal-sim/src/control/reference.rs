@@ -161,6 +161,10 @@ fn replica_placement(case: &Case, set: &[NodeId]) -> Option<Vec<NodeId>> {
     let holes: Vec<usize> = (0..set.len())
         .filter(|i| is(case, set[*i], Liveness::Down))
         .collect();
+    // No replica down: the set stays, whatever its zones.
+    if holes.is_empty() {
+        return Some(set.to_vec());
+    }
     let pool = usable(case, set);
     if holes.len() > pool.len() {
         return None;
@@ -195,7 +199,8 @@ fn replica_placement(case: &Case, set: &[NodeId]) -> Option<Vec<NodeId>> {
 }
 
 /// Whether a plan from `old` to `new` (and its replica sets) names no
-/// member that is down and admits the zone rule.
+/// member that is down and admits the zone rule (the replica set's rule only
+/// when the plan changes the set).
 #[must_use]
 pub fn plan_is_safe(
     case: &Case,
@@ -219,7 +224,10 @@ pub fn plan_is_safe(
     let fit = new.columns().iter().flatten().chain(new_replicas).all(|m| {
         !is(case, *m, Liveness::Down) && (before.contains(m) || is(case, *m, Liveness::Up))
     });
-    shape && fit && zones_admit(case, new) && set_admits(case, new_replicas)
+    shape
+        && fit
+        && zones_admit(case, new)
+        && (new_replicas == old_replicas || set_admits(case, new_replicas))
 }
 
 /// The decision of the reference.

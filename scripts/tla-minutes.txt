@@ -34,7 +34,7 @@ handover 10
 handover-chain 7.5
 handover-gc 1.5
 handover-scalars 2
-heal-reuse 4
+heal-reuse 5
 health 3.5
 journal-ids 6
 journal-state 17
