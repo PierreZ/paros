@@ -62,7 +62,9 @@
 //!    replica of the slot's segment. A late answer folds into the tally,
 //!    which then decides the slot (`ProbeDecide`); a replica's `Learned`
 //!    gives it the chosen command (`LearnChosen`). Either way the leader
-//!    proposes that command at its ballot. Once its round chooses it, the
+//!    proposes that command at its ballot. A late answer that dropped the
+//!    slot never enters the tally: the slot is chosen and applied at
+//!    `F + 1` replicas, and the leader skips it (`ProbeSkip`). Once its round chooses it, the
 //!    leader sends a `Repair` to each acceptor that reported the slot
 //!    faulty, which writes the command at the higher of the two ballots in
 //!    one write (`AccRepair`; control `ctrl_peer`: a value from a peer's
