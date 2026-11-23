@@ -1,6 +1,6 @@
 //! The value a journal decides into one slot: a client write or a control command.
 
-use crate::types::{FNV_OFFSET, Fingerprint, Value, fnv1a};
+use crate::types::{FNV_OFFSET, Fingerprint, Value, Weigh, fnv1a};
 
 use super::ids::{LeaderUuid, Seq};
 
@@ -110,6 +110,29 @@ pub enum Command {
 impl Fingerprint for Command {
     fn fingerprint(&self) -> u64 {
         command_fingerprint(self)
+    }
+}
+
+impl Weigh for Command {
+    /// A write weighs its records' bytes, the measure of a read's
+    /// `max_bytes`. A control command carries no client bytes and weighs
+    /// nothing.
+    fn weight(&self) -> u64 {
+        match self {
+            Self::Write(entry) => {
+                let bytes: u64 = entry
+                    .records
+                    .iter()
+                    .map(|record| u64::try_from(record.len()).expect("a record fits in u64"))
+                    .sum();
+                assert!(
+                    entry.records.iter().all(|r| r.is_empty()) == (bytes == 0),
+                    "a write weighs nothing only when every record is empty"
+                );
+                bytes
+            }
+            Self::Control(_) => 0,
+        }
     }
 }
 

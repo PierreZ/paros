@@ -1,6 +1,8 @@
 //! The node's **read-only accessors**: what a driver, an oracle or an
 //! example reads, never a mutation.
 
+use crate::types::Weigh;
+
 use super::{
     Acceptor, AcceptorConfig, Ballot, BeliefSource, ColocatedNode, Command, Config, HardState,
     LeadershipOrigin, Limits, MatchmakerId, MembershipProbe, NodeId, NodeRole, Proposer, ProxyId,
@@ -392,6 +394,30 @@ impl ColocatedNode {
             "no faulty record survives below the floor"
         );
         &self.acceptor
+    }
+
+    /// The bytes of the records this node's acceptor holds in memory, from
+    /// the compaction floor up ([`Acceptor::retained_bytes`]): the node's one
+    /// copy of the retained log. A driver reads it to bound that memory:
+    /// above a limit of its own, it refuses a client before it calls
+    /// `propose`, and a `Truncate` brings the sum down (#1153 (retained log
+    /// memory)). The core sets no limit and refuses nothing for it.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        let bytes = self.acceptor.retained_bytes();
+        assert!(
+            self.replica
+                .chosen_index()
+                .and_then(|slot| self.chosen_at(slot))
+                .is_none_or(|command| command.weight() <= bytes),
+            "the retained bytes bound the last chosen record's weight"
+        );
+        bytes
     }
 
     /// Every slot this node knows chosen (contiguous or not) with its

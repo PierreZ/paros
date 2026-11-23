@@ -162,6 +162,22 @@ pub trait Fingerprint {
     fn fingerprint(&self) -> u64;
 }
 
+/// A value that can say how many bytes it holds: the unit of the retained
+/// bytes an [`crate::acceptor::Acceptor`] counts over its records
+/// (`Acceptor::retained_bytes`), so a driver can bound the memory of the
+/// retained log (#1153 (retained log memory)).
+///
+/// The measure is the value's payload bytes, not its exact heap footprint:
+/// a client write counts its records' bytes, the same measure as the
+/// `max_bytes` of a journal read, and a value with no payload (a control
+/// command) weighs nothing. Two equal values weigh the same. A driver that
+/// must also bound a log of empty or control commands bounds the number of
+/// records too (`Acceptor::records`).
+pub trait Weigh {
+    /// The bytes this value holds.
+    fn weight(&self) -> u64;
+}
+
 /// The FNV-1a offset basis every paros fingerprint folds from.
 pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 

@@ -328,3 +328,65 @@ fn promise_pages_walk_the_readable_and_faulty_union() {
     assert_eq!(whole.accepted.len() + whole.faulty.len(), 4);
     assert_eq!(whole.next_from_slot, None, "a page that fits has no cursor");
 }
+
+fn sized(byte: u8, len: usize) -> Command {
+    Command::Write(Entry {
+        leader: LeaderUuid(1),
+        seq: Seq(u64::from(byte)),
+        records: vec![Value::from(vec![byte; len])],
+    })
+}
+
+/// The retained bytes (#1153 (retained log memory)) are the sum of the
+/// records' weights: a boot sums what it read back, a record adds its
+/// bytes, a record that replaces another swaps their bytes, and a
+/// truncation and a trim-point jump drop the bytes below the floor.
+#[test]
+fn the_retained_bytes_follow_every_record_written_and_dropped() {
+    let mut records = BTreeMap::new();
+    records.insert(Slot(0), (ballot(1), sized(0, 3)));
+    records.insert(Slot(1), (ballot(1), sized(1, 5)));
+    let mut acceptor: Acceptor<Command> =
+        Acceptor::new(ballot(1), records, Slot(0), BTreeMap::new());
+    assert_eq!(
+        acceptor.retained_bytes(),
+        8,
+        "a boot sums the records read back"
+    );
+    let mut writes: Vec<WriteOp> = Vec::new();
+    acceptor.set_promise(ballot(2), &mut writes);
+    acceptor.record_accepted(Slot(2), ballot(2), sized(2, 7), &mut writes);
+    assert_eq!(acceptor.retained_bytes(), 15, "a new record adds its bytes");
+    acceptor.record_accepted(Slot(1), ballot(2), sized(9, 2), &mut writes);
+    assert_eq!(
+        acceptor.retained_bytes(),
+        12,
+        "a record that replaces another swaps their bytes"
+    );
+    acceptor.record_accepted(
+        Slot(3),
+        ballot(2),
+        Command::Control(crate::journal::Control::Noop),
+        &mut writes,
+    );
+    assert_eq!(
+        acceptor.retained_bytes(),
+        12,
+        "a control command weighs nothing"
+    );
+    acceptor.truncate(Slot(1), JournalState::default(), &mut writes);
+    assert_eq!(
+        acceptor.retained_bytes(),
+        9,
+        "a truncation drops the bytes below the floor"
+    );
+    acceptor.trim_to(Slot(3), JournalState::default(), &mut writes);
+    assert_eq!(
+        acceptor.retained_bytes(),
+        0,
+        "a trim-point jump drops the bytes below its point"
+    );
+    acceptor.trim_to(Slot(4), JournalState::default(), &mut writes);
+    assert!(acceptor.records().is_empty());
+    assert_eq!(acceptor.retained_bytes(), 0, "no record, no byte");
+}

@@ -34,6 +34,20 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
             ],
             "`chosen_commands` lists every chosen write, in slot order"
         );
+        let summed: u64 = n
+            .acceptor()
+            .records()
+            .values()
+            .filter_map(|(_, command)| command.write())
+            .flat_map(|entry| entry.records.iter())
+            .map(|record| record.len() as u64)
+            .sum();
+        assert_eq!(summed, 3, "three one-byte records are retained");
+        assert_eq!(
+            n.retained_bytes(),
+            summed,
+            "the retained bytes are the records' bytes"
+        );
         assert_eq!(
             n.hard_state().chosen_index,
             Some(Slot(2)),
@@ -587,11 +601,20 @@ fn a_truncation_seals_the_journal_state_a_restart_folds_from() {
         let _ = nodes[0].propose(write(7, seq, 10 + u8::try_from(seq).expect("small")));
         settle(&mut nodes);
     }
+    let before: Vec<u64> = nodes.iter().map(ColocatedNode::retained_bytes).collect();
+    assert_eq!(before, vec![3; 3], "three one-byte writes are retained");
     let _ = nodes[0].propose_control(Control::Truncate {
         leader: LeaderUuid(7),
         up_to: Seq(2),
     });
     settle(&mut nodes);
+    for n in &nodes {
+        assert_eq!(
+            n.retained_bytes(),
+            1,
+            "a truncation drops the bytes of the writes below the floor"
+        );
+    }
     // Slot 0 is the claim, slots 1..=3 hold positions 0..=2: position 2's
     // slot (3) is the first retained one.
     for n in &nodes {
@@ -602,4 +625,9 @@ fn a_truncation_seals_the_journal_state_a_restart_folds_from() {
     let storage = MemStorage::from_node(&nodes[1]);
     let rebooted = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(rebooted.replica().journal(), nodes[1].replica().journal());
+    assert_eq!(
+        rebooted.retained_bytes(),
+        nodes[1].retained_bytes(),
+        "a reboot after a truncation reads the retained bytes back"
+    );
 }

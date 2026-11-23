@@ -1,7 +1,7 @@
 use super::quorum_system::{rank_is_in, slot_rank};
 #[cfg(doc)]
 use crate::types::NodeId;
-use crate::types::{FNV_OFFSET, Fingerprint, Slot, fnv1a};
+use crate::types::{FNV_OFFSET, Fingerprint, Slot, Weigh, fnv1a};
 
 /// Stable identity of a matchmaker within the matchmaker pool. A distinct
 /// namespace from [`NodeId`]: a matchmaker is not an acceptor.
@@ -144,6 +144,14 @@ impl Fingerprint for Vec<MatchmakerId> {
         self.iter().fold(FNV_OFFSET, |hash, member| {
             fnv1a(hash, &member.0.to_le_bytes())
         })
+    }
+}
+
+impl Weigh for Vec<MatchmakerId> {
+    /// The payload of a matchmaker set: the bytes of its member ids.
+    fn weight(&self) -> u64 {
+        u64::try_from(core::mem::size_of_val(self.as_slice()))
+            .expect("a matchmaker set fits in u64")
     }
 }
 

@@ -289,6 +289,22 @@ pub enum Command {
     },
 }
 
+impl paros_consensus::types::Weigh for Command {
+    /// The payload bytes of a write's records, as the core's command
+    /// weighs them; every other command carries no payload and weighs
+    /// nothing.
+    fn weight(&self) -> u64 {
+        match self {
+            Self::Write(write) => write
+                .records
+                .iter()
+                .map(|record| u64::try_from(record.payload.len()).expect("a payload fits in u64"))
+                .sum(),
+            _ => 0,
+        }
+    }
+}
+
 impl paros_consensus::types::Fingerprint for Command {
     /// The FNV-1a hash of the command's bytes ([`crate::codec`]): two equal
     /// commands encode to the same bytes. The core's Phase-2 tally checks a

@@ -113,6 +113,17 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
         Some(val(2)),
         "restart must rebuild the chosen value, not the stale never-chosen accept"
     );
+    // The retained bytes read back at boot: the same records, the same sum.
+    assert_eq!(
+        restarted.retained_bytes(),
+        n.retained_bytes(),
+        "a reboot reads the retained bytes back"
+    );
+    assert_eq!(
+        n.retained_bytes(),
+        1,
+        "the one record held weighs its one byte"
+    );
 }
 
 #[test]

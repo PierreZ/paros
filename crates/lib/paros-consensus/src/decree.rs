@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::membership::AcceptorConfig;
 use crate::proposer::{Campaign, PromiseFold, Proposer, Round};
-use crate::types::{Ballot, Fingerprint, Slot};
+use crate::types::{Ballot, Fingerprint, Slot, Weigh};
 
 /// The one slot a decree runs over: its value is chosen once.
 pub const DECREE_SLOT: Slot = Slot(0);
@@ -106,7 +106,7 @@ pub struct Decree<Id, V> {
     rule: Phase1Rule,
 }
 
-impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
+impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint + Weigh> Decree<Id, V> {
     /// Open Phase 1 of `proposal` at `ballot` over `acceptors`.
     ///
     /// # Panics

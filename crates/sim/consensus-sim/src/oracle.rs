@@ -5,5 +5,6 @@
 
 pub mod journal;
 pub mod ledger;
+pub mod memory;
 pub mod quorum;
 pub mod reads;

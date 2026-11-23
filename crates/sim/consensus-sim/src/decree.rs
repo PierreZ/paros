@@ -32,7 +32,7 @@ use paros_consensus::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_consensus::contract::write::AcceptorWrite;
 use paros_consensus::decree::{AcceptFold, DECREE_SLOT, Decree, DecreePromise, Phase1Rule};
 use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
-use paros_consensus::types::Fingerprint;
+use paros_consensus::types::{Fingerprint, Weigh};
 use paros_consensus::{Ballot, NodeId, Slot};
 
 use crate::oracle::ledger::{COMMIT_BACKED, ONE_VALUE, PERSIST_BEFORE_SEND};
@@ -61,6 +61,12 @@ const PROPOSER_BASE: u64 = 10;
 /// A value a proposer wants chosen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pick(pub u64);
+
+impl Weigh for Pick {
+    fn weight(&self) -> u64 {
+        8
+    }
+}
 
 impl Fingerprint for Pick {
     fn fingerprint(&self) -> u64 {

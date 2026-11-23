@@ -14,3 +14,12 @@ fn a_matchmaker_set_fingerprint_folds_its_members() {
     assert_ne!(set(&[1, 2]).fingerprint(), set(&[1, 3]).fingerprint());
     assert_ne!(set(&[1, 2]).fingerprint(), set(&[2, 1]).fingerprint());
 }
+
+/// A matchmaker set weighs the bytes of its member ids.
+#[test]
+fn a_matchmaker_set_weighs_its_member_ids() {
+    use crate::types::Weigh;
+    let set = |ids: &[u64]| ids.iter().copied().map(MatchmakerId).collect::<Vec<_>>();
+    assert_eq!(set(&[1, 2, 3]).weight(), 24);
+    assert_eq!(set(&[]).weight(), 0);
+}
