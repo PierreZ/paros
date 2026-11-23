@@ -1171,3 +1171,68 @@ fn a_laggard_jumps_into_a_blind_fold_that_answers_nothing_until_the_truncate() {
     );
     assert_eq!(report(&mut replica).1, Slot(4), "the answers start at 4");
 }
+
+#[test]
+fn a_trim_from_outside_the_set_or_of_another_segment_is_not_taken() {
+    let mut replica = based();
+    let state = JournalState::resume(BoundaryState::fresh(Leader::Unset), Seq(0)).expect("a fold");
+    let trimmed = |segment: u64| Message::TrimmedTo {
+        segment: SegmentId(segment),
+        slot: Slot(2),
+        state,
+        floor: Seq(0),
+    };
+    assert!(
+        persists(&replica.step(NodeId(99), trimmed(1))).is_empty(),
+        "not a peer"
+    );
+    assert!(
+        persists(&replica.step(NodeId(12), trimmed(2))).is_empty(),
+        "another segment"
+    );
+    assert_eq!(replica.front(), Some(Slot(0)));
+    assert_eq!(
+        persists(&replica.step(NodeId(12), trimmed(1))).len(),
+        1,
+        "a peer's trim"
+    );
+    assert_eq!(replica.front(), Some(Slot(2)));
+}
+
+#[test]
+fn a_compaction_keeps_the_position_of_a_write_at_the_floor() {
+    let mut replica = based();
+    replica.step(LEADER, commit(1, 0, claim(7)));
+    replica.step(LEADER, commit(1, 1, write(7, 0, 1)));
+    replica.step(LEADER, commit(1, 2, write(7, 1, 2)));
+    let truncate = Command::Truncate {
+        fence: Some(LeaderUuid(7)),
+        up_to: Seq(1),
+    };
+    replica.step(LEADER, commit(1, 3, truncate));
+    let trims: Vec<ReplicaOp> = persists(&replica.tick())
+        .into_iter()
+        .flat_map(|(_, ops)| ops)
+        .filter(|op| matches!(op, ReplicaOp::Compact(_)))
+        .collect();
+    assert!(
+        matches!(trims.as_slice(), [ReplicaOp::Compact(trim)] if trim.slot == Slot(2) && trim.floor == Seq(1)),
+        "the point is the write at the floor: {trims:?}"
+    );
+    // The resend of the write at the floor still finds its position.
+    let effects = replica.step(LEADER, commit(1, 4, write(7, 1, 2)));
+    let answers: Vec<Answer> = effects
+        .into_iter()
+        .filter_map(|effect| match effect {
+            ReplicaEffect::Send {
+                message: Message::Applied { answer, .. },
+                ..
+            } => Some(answer),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(answers.as_slice(), [Answer::Duplicate { .. }]),
+        "a resend at the floor is a Duplicate: {answers:?}"
+    );
+}

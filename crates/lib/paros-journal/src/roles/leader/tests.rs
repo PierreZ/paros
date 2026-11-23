@@ -1203,3 +1203,31 @@ fn a_proposal_carries_the_leader_time_of_its_write() {
         "a command with no record is not stamped"
     );
 }
+
+#[test]
+fn only_the_replicas_of_a_segment_count_toward_its_compaction() {
+    let mut leader = open_leader();
+    let report = |segment: u64| Message::CompactedTo {
+        segment: SegmentId(segment),
+        compacted: Slot(2),
+        answers: Slot(2),
+    };
+    let compacts = |effects: &[LeaderEffect<u32>]| {
+        sends(effects)
+            .into_iter()
+            .filter(|(_, m)| matches!(m, Message::Compact { .. }))
+            .count()
+    };
+    // Two nodes outside the set of segment 1, and a replica of segment 1
+    // that reports for another segment: none counts.
+    let mut effects = leader.step(NodeId(21), report(1));
+    effects.extend(leader.step(NodeId(22), report(1)));
+    effects.extend(leader.step(NodeId(11), report(9)));
+    effects.extend(leader.tick(4));
+    assert_eq!(compacts(&effects), 0, "no report of the set: no compaction");
+    // Two replicas of the set are F + 1: the acceptors drop the votes.
+    let mut effects = leader.step(NodeId(11), report(1));
+    effects.extend(leader.step(NodeId(12), report(1)));
+    effects.extend(leader.tick(4));
+    assert!(compacts(&effects) > 0, "F + 1 replicas compacted");
+}

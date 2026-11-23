@@ -1241,8 +1241,10 @@ impl Folded {
         );
         self.origin = trim;
         self.answers.retain(|slot, _| *slot >= trim.slot);
-        self.positions
-            .retain(|seq, write| seq.0 + write.count() > trim.floor.0);
+        // A resend is looked up at or above `first_seq`, which is at or
+        // above the floor once the fold answers: a write below the floor is
+        // never looked up.
+        self.positions.retain(|seq, _| *seq >= trim.floor);
         self.answered = self.answered.max(trim.slot);
     }
 
