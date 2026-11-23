@@ -33,6 +33,12 @@
 //!   names the journal's tail: a sole writer's client follows the tail, so
 //!   it never writes below it or above it.
 //! - [`PAGE`]: a page holds the log's records at its positions.
+//! - [`FLOOR`]: a page holds no record below the trim floor that the
+//!   journal had when its read was asked. The journal answers each read
+//!   from the segment that holds its position, and a sealed segment folds
+//!   only up to its seal, so it still serves records that a later
+//!   `Truncate` cut (§J3.2): the client must take its floor from the
+//!   segment in force.
 //!
 //! The liveness claim: once the faults stop, every call of every client
 //! ends.
@@ -59,6 +65,8 @@ pub const LED: &str = "client walk: a SetLeader reported set applied";
 pub const TAIL: &str = "client walk: a leading writer's new write names the tail";
 /// Oracle: a page holds the log's records.
 pub const PAGE: &str = "client walk: a page holds the log's records at its positions";
+/// Oracle: a page holds no record below the floor of the journal.
+pub const FLOOR: &str = "client walk: a page holds no record below the floor of the journal";
 
 /// The coverage sites of the client walk.
 pub mod reach {
@@ -84,6 +92,9 @@ pub mod reach {
     pub const PAGE: &str = "client walk: a page read";
     /// A read below the floor.
     pub const READ_TRUNCATED: &str = "client walk: a read below the floor";
+    /// A read below the floor of the segment in force, at a position that
+    /// the sealed segment which holds it still serves.
+    pub const FLOOR_REFUSED: &str = "client walk: a read below the floor its holder kept";
     /// A truncate applied.
     pub const TRIMMED: &str = "client walk: a truncate applied";
     /// A leading writer's new write after the journal answered one of its
@@ -104,6 +115,7 @@ pub mod reach {
         BATCH,
         PAGE,
         READ_TRUNCATED,
+        FLOOR_REFUSED,
         TRIMMED,
         THIRD,
         AFTER_TRUNCATED,
@@ -132,6 +144,9 @@ pub enum ClientMutant {
     /// The journal answers a `SetLeader` that applied with a view one
     /// position short. [`TAIL`] catches it.
     ShortView,
+    /// The program asks the floor of the oldest segment, not of the segment
+    /// in force. [`FLOOR`] catches it.
+    FloorFromOldest,
 }
 
 /// A message in the walk's mailbox.
@@ -178,7 +193,13 @@ enum Asked {
     Write(Vec<u64>),
     SetLeader(Option<LeaderUuid>),
     Truncate,
-    Read { limit: u64 },
+    /// A read of `limit` records from `from`, asked when the floor of the
+    /// journal was `floor`.
+    Read {
+        from: Seq,
+        limit: u64,
+        floor: Seq,
+    },
 }
 
 /// A segment of the journal: its fold and the fenced writes it accepted.
@@ -287,12 +308,18 @@ impl Model for ClientModel {
             return;
         }
         if action == ClientAction::Replay {
-            // On one move in two, the last truncate sent.
+            // On one move in two, the last truncate sent under the leader
+            // value of the journal: a late copy of it applies, and can cut a
+            // write that the leader resends.
+            let leader = match self.current().fold.leader() {
+                Leader::Uuid(uuid) => Some(uuid),
+                _ => None,
+            };
             let last_truncate = self
                 .sent
                 .iter()
                 .rev()
-                .find(|(_, c)| matches!(c, Command::Truncate { .. }))
+                .find(|(_, c)| matches!(c, Command::Truncate { fence, .. } if *fence == leader))
                 .cloned();
             let late = if cx.rng().chance(1, 2) && last_truncate.is_some() {
                 last_truncate
@@ -354,8 +381,9 @@ impl Model for ClientModel {
             ClientAction::Read => {
                 let from = Seq(cx.rng().below(next + 2));
                 let limit = 1 + cx.rng().below(4);
+                let floor = self.current().fold.first_seq();
                 let client = &mut self.programs[index].client;
-                (client.read(from, limit), Asked::Read { limit })
+                (client.read(from, limit), Asked::Read { from, limit, floor })
             }
             ClientAction::Seal | ClientAction::Timeout | ClientAction::Replay => {
                 unreachable!("handled above")
@@ -589,6 +617,35 @@ impl ClientModel {
                 }
                 cx.send(ClientMsg::Response(index, id, Response::Resolved(answer)));
             }
+            Request::Floor { id } => {
+                let sealed = self.segments.len() - 1;
+                let answer = if chaos && cx.rng().chance(1, 6) {
+                    ReadAnswer::Unserved
+                } else if self.mutant == ClientMutant::FloorFromOldest {
+                    ReadAnswer::Page {
+                        records: Vec::new(),
+                        view: self.segments[0].fold.view(),
+                        sealed: false,
+                    }
+                } else if let Some(stale) = cx.rng().index(sealed).filter(|_| cx.rng().chance(1, 4))
+                {
+                    // The program routed the copy on a register value that a
+                    // seal made stale: a replica of a sealed segment answers
+                    // at its tail.
+                    ReadAnswer::Page {
+                        records: Vec::new(),
+                        view: self.segments[stale].fold.view(),
+                        sealed: true,
+                    }
+                } else {
+                    ReadAnswer::Page {
+                        records: Vec::new(),
+                        view: self.current().fold.view(),
+                        sealed: false,
+                    }
+                };
+                cx.send(ClientMsg::Response(index, id, Response::Read(answer)));
+            }
             Request::Read { id, from, limit } => {
                 let answer = if chaos && cx.rng().chance(1, 6) {
                     ReadAnswer::Unserved
@@ -726,8 +783,11 @@ impl ClientModel {
         })
     }
 
+    /// The segment that holds `from` answers: a sealed segment folds only up
+    /// to its seal, so its floor misses every later `Truncate`.
     fn read(&self, from: Seq, limit: u64) -> ReadAnswer {
-        let fold = &self.current().fold;
+        let holder = self.holder(from);
+        let fold = &self.segments[holder].fold;
         let view = fold.view();
         if from < fold.first_seq() {
             return ReadAnswer::Truncated(view);
@@ -747,8 +807,17 @@ impl ClientModel {
         ReadAnswer::Page {
             records,
             view,
-            sealed: false,
+            sealed: holder + 1 < self.segments.len() && end == fold.next_seq().0,
         }
+    }
+
+    /// The index of the segment whose range holds `seq`: a sealed one, or
+    /// the segment in force for a position at or above its start.
+    fn holder(&self, seq: Seq) -> usize {
+        self.segments
+            .iter()
+            .position(|s| s.base.next_seq <= seq && seq < s.fold.next_seq())
+            .unwrap_or(self.segments.len() - 1)
     }
 
     /// The oracles on one reported outcome.
@@ -800,8 +869,12 @@ impl ClientModel {
                 );
             }
             (Asked::Truncate, Outcome::Trimmed(_)) => sometimes!(true, reach::TRIMMED),
-            (Asked::Read { limit }, Outcome::Page { from, records, .. }) => {
+            (Asked::Read { limit, floor, .. }, Outcome::Page { from, records, .. }) => {
                 assert!(records.len() as u64 <= *limit, "{PAGE}: over the limit");
+                assert!(
+                    records.is_empty() || from >= floor,
+                    "{FLOOR}: a page from {from:?}, the floor was {floor:?} when the read was asked"
+                );
                 for (i, record) in records.iter().enumerate() {
                     let at = self.log.get(&(from.0 + i as u64)).map(|(_, r)| r);
                     assert!(
@@ -812,8 +885,12 @@ impl ClientModel {
                 }
                 sometimes!(!records.is_empty(), reach::PAGE);
             }
-            (Asked::Read { .. }, Outcome::Truncated(_)) => {
+            (Asked::Read { from, .. }, Outcome::Truncated(_)) => {
                 sometimes!(true, reach::READ_TRUNCATED);
+                sometimes!(
+                    *from >= self.segments[self.holder(*from)].fold.first_seq(),
+                    reach::FLOOR_REFUSED
+                );
             }
             _ => {}
         }

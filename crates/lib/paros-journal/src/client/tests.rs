@@ -36,6 +36,25 @@ fn reply(answer: Answer) -> Response {
     Response::Reply(Reply::Answer(answer))
 }
 
+/// The answer of a replica of the segment in force to a floor request: an
+/// empty page at the tail, with the floor `first`.
+fn floor_page(next: u64, first: u64) -> Response {
+    Response::Read(ReadAnswer::Page {
+        records: Vec::new(),
+        view: view(Leader::Multi, next, first),
+        sealed: false,
+    })
+}
+
+/// The one request out, which must be a floor request: its id.
+fn one_floor(client: &mut Client) -> RequestId {
+    let requests = client.take_requests();
+    match requests.as_slice() {
+        [Request::Floor { id }] => *id,
+        other => panic!("not one floor request: {other:?}"),
+    }
+}
+
 /// The one request out, which must be a command: its id and command.
 fn one_command(client: &mut Client) -> (RequestId, Command) {
     let requests = client.take_requests();
@@ -635,7 +654,11 @@ fn reads_leave_at_once_and_ask_again_when_unserved() {
     let read = client.read(Seq(1), 10);
     let requests = client.take_requests();
     assert_eq!(requests.len(), 2, "the read does not wait: {requests:?}");
-    let Request::Read { id, from, limit } = requests[1].clone() else {
+    let Request::Floor { id } = requests[1].clone() else {
+        panic!("a floor request first")
+    };
+    client.answer(id, floor_page(2, 1));
+    let Request::Read { id, from, limit } = client.take_requests()[0].clone() else {
         panic!("a read")
     };
     assert_eq!((from, limit), (Seq(1), 10));
@@ -697,12 +720,87 @@ fn reads_leave_at_once_and_ask_again_when_unserved() {
 #[test]
 fn a_read_below_the_floor_is_truncated() {
     let mut client = Client::new();
-    let read = client.read(Seq(0), 1);
-    let id = client.take_requests()[0].id();
-    let floor = view(Leader::Multi, 9, 3);
+    let read = client.read(Seq(3), 1);
+    let id = one_floor(&mut client);
+    client.answer(id, floor_page(9, 3));
+    let Request::Read { id, .. } = client.take_requests()[0].clone() else {
+        panic!("a read at the floor leaves")
+    };
+    let floor = view(Leader::Multi, 9, 4);
     client.answer(id, Response::Read(ReadAnswer::Truncated(floor)));
     assert_eq!(one_outcome(&mut client), (read, Outcome::Truncated(floor)));
     assert!(client.idle());
+}
+
+#[test]
+fn a_read_below_the_floor_of_the_segment_in_force_never_leaves() {
+    // The holder of position 1 is a replica of a sealed segment that still
+    // has it: only the floor of the segment in force says that it is gone.
+    let mut client = Client::new();
+    let read = client.read(Seq(1), 4);
+    let id = one_floor(&mut client);
+    client.answer(id, floor_page(9, 2));
+    assert_eq!(client.take_requests(), [], "no read below the floor");
+    assert_eq!(
+        one_outcome(&mut client),
+        (read, Outcome::Truncated(view(Leader::Multi, 9, 2)))
+    );
+    assert!(client.idle());
+}
+
+#[test]
+fn a_floor_from_a_sealed_segment_or_none_is_asked_again() {
+    let mut client = Client::new();
+    let read = client.read(Seq(1), 4);
+    let mut current = one_floor(&mut client);
+    for again in [
+        Response::Read(ReadAnswer::Page {
+            records: Vec::new(),
+            view: view(Leader::Multi, 5, 0),
+            sealed: true,
+        }),
+        Response::Read(ReadAnswer::Truncated(view(Leader::Multi, 9, 1))),
+        Response::Read(ReadAnswer::Below(view(Leader::Multi, 5, 0))),
+        Response::Read(ReadAnswer::Superseded(crate::segment::SegmentId(2))),
+        Response::Read(ReadAnswer::Unserved),
+        Response::NotLeader,
+        Response::Lost,
+    ] {
+        client.answer(current, again);
+        let id = one_floor(&mut client);
+        assert_ne!(id, current, "a new copy of the floor request");
+        current = id;
+    }
+    client.answer(current, floor_page(9, 1));
+    let Request::Read { id, from, limit } = client.take_requests()[0].clone() else {
+        panic!("the read leaves at its floor")
+    };
+    assert_eq!((from, limit), (Seq(1), 4));
+    assert_eq!(client.reads[&id].floor, Some(Seq(1)));
+    client.answer(
+        id,
+        Response::Read(ReadAnswer::Truncated(view(Leader::Multi, 9, 2))),
+    );
+    assert_eq!(one_outcome(&mut client).0, read);
+}
+
+#[test]
+#[should_panic(expected = "a floor is answered by a read")]
+fn a_reply_for_a_floor_panics() {
+    let mut client = Client::new();
+    client.read(Seq(0), 1);
+    let id = one_floor(&mut client);
+    client.answer(id, Response::Reply(Reply::Unknown));
+}
+
+#[test]
+#[should_panic(expected = "a read leaves only at or above its floor")]
+fn a_read_above_its_position_breaks_an_invariant() {
+    let mut client = Client::new();
+    client.read(Seq(0), 1);
+    let id = one_floor(&mut client);
+    client.reads.get_mut(&id).expect("the read").floor = Some(Seq(1));
+    client.assert_invariants();
 }
 
 #[test]
@@ -745,6 +843,8 @@ fn a_reply_for_a_resolve_panics() {
 fn a_reply_for_a_read_panics() {
     let mut client = Client::new();
     client.read(Seq(0), 1);
+    let id = one_floor(&mut client);
+    client.answer(id, floor_page(1, 0));
     let id = client.take_requests()[0].id();
     client.answer(id, Response::Lost);
     let id = client.take_requests()[0].id();
@@ -765,6 +865,7 @@ fn request_ids_name_every_kind() {
             expected_seq: Seq(0),
             records: Vec::new(),
         },
+        Request::Floor { id },
         Request::Read {
             id,
             from: Seq(0),

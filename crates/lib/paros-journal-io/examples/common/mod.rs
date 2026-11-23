@@ -297,7 +297,9 @@ impl Program {
                         .unwrap_or(ResolveAnswer::NotCovered);
                     self.client.answer(id, Response::Resolved(answer));
                 }
-                Request::Read { .. } => unreachable!("these examples do not read"),
+                Request::Floor { .. } | Request::Read { .. } => {
+                    unreachable!("these examples do not read")
+                }
             }
         }
         self.take();
