@@ -336,12 +336,6 @@ impl<T> JournalLeader<T> {
         self.proxies = proxies;
     }
 
-    /// The proxy leaders of the leader.
-    #[must_use]
-    pub fn proxies(&self) -> &[NodeId] {
-        &self.proxies
-    }
-
     /// The leader's ballot.
     #[must_use]
     pub fn ballot(&self) -> Ballot {

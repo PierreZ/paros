@@ -208,16 +208,23 @@ impl JournalProxy {
             return Vec::new();
         }
         let mut effects = Vec::new();
-        if let Some(known) = self.ballot.filter(|known| ballot > *known) {
-            let mut leaders: Vec<NodeId> = Vec::new();
-            for stale in self.rounds.close_below(ballot) {
-                probe!(reachable, "proxy: a higher ballot drops the rounds below");
-                if let Some(dropped) = self.delegations.remove(&stale)
-                    && !leaders.contains(&dropped.leader)
-                {
-                    leaders.push(dropped.leader);
-                }
+        // A delegation at or above the ballot taken: the rounds strictly
+        // below it are dropped, and each of their leaders hears the ballot
+        // that dropped them.
+        let mut leaders: Vec<NodeId> = Vec::new();
+        for stale in self.rounds.close_below(ballot) {
+            probe!(reachable, "proxy: a higher ballot drops the rounds below");
+            if let Some(dropped) = self.delegations.remove(&stale)
+                && !leaders.contains(&dropped.leader)
+            {
+                leaders.push(dropped.leader);
             }
+        }
+        if !leaders.is_empty() {
+            let known = self
+                .ballot
+                .expect("a dropped round ran at the ballot taken");
+            assert!(known < ballot, "only a higher ballot drops a round");
             effects.extend(leaders.into_iter().map(|to| ProxyEffect {
                 to,
                 message: Message::Nack {
