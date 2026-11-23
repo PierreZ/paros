@@ -324,7 +324,9 @@ impl SegmentReplica {
     /// reports complete only on what it holds. The
     /// driver starts a copy only above the copy the node runs: a lower one
     /// comes from a deposed controller and is refused, so the copy that a
-    /// later term counts stays on the disk. It never starts a copy of a
+    /// later term counts stays on the disk. It refuses a copy whose term is
+    /// below the term of the register value it holds: that copy's plan can
+    /// no longer commit. It never starts a copy of a
     /// segment that the node serves as a member, and it judges that on a
     /// register value that it saw done after the ask arrived: a commit that
     /// named the node may be done although the node has not seen it, and
@@ -525,7 +527,10 @@ impl SegmentReplica {
 
     /// A register value that a done write gave: the replica learns the end
     /// of its segment and the base of its fold, and writes the boundary
-    /// state when its fold is at the end.
+    /// state when its fold is at the end. A new replica whose copy has a
+    /// term below the value's term, and that the value does not name, ends
+    /// its copy and drops it: no plan of a term that is over can write it
+    /// into the set.
     ///
     /// # Panics
     ///
@@ -537,6 +542,18 @@ impl SegmentReplica {
         }
         let mut effects = Vec::new();
         if let Some(record) = value.segment(self.segment) {
+            if !record.replicas().contains(&self.id)
+                && self
+                    .joining
+                    .is_some_and(|copy| copy.term < value.term().number)
+            {
+                // An orphan copy: its controller's term is over, so the
+                // register refuses every change of that term and no plan
+                // writes this copy into the set (`TermFence`). The copy
+                // ends here, with no abandon (`specs/tla/heal-reuse/`,
+                // `Orphaned`, control `orphan_kept`).
+                effects.extend(self.set_joining(None));
+            }
             if record.state() == SegmentState::Trimmed
                 || (self.joining.is_none() && !record.replicas().contains(&self.id))
             {
@@ -544,7 +561,8 @@ impl SegmentReplica {
                     reachable,
                     "replica: a replica outside the set drops its copy"
                 );
-                return self.drop_copy();
+                effects.extend(self.drop_copy());
+                return effects;
             }
             if record.replicas().contains(&self.id) && self.joining.is_some() {
                 // The heal that added this replica is done: it is a member.

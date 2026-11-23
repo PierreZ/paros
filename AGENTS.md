@@ -56,14 +56,15 @@ reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmak
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
 only a resize record changes, the floor and the register across the handover; #1097 (rework
 1.8); `specs/tla/handover-chain/`: three generations, clients that reach one member at a time,
-and the two fences of the state transfer; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
+and the two fences of the state transfer; `specs/tla/handover-scalars/`: the retirement records
+and the effective configuration across a handover; #1230 (rules no check tests)), the batcher, the replica and the read replica (`specs/tla/compartments/`: each write of a
 batch gets one range, the walk in slot order, the refold at boot, the read replica's leaderless
 read, the held answers of a deposed leader (#1232 (held writes)); #1190 (rework 6.10)), the proxy leader (`specs/tla/proxy-leader/`: a `Commit` only on a
 Phase-2 quorum of the configuration that the round's `Accept` carried, a round that moves to
 another proxy when its proxy is gone; #1188 (rework 2.9)), leaderless reads
 (`specs/tla/reads/`: the read basis of a leadership that won, the fence of a `PreReadAck` on the
 promise with the old belief fence as a control, a lagging pool, a lagging reader gated on its promise (#1228 (stale read by a lagging reader)), a restart and the refusal of a
-rebooted node; #1016 (model of leaderless reads), #1099 (rework 1.10)), truncation on plain
+rebooted node, and the read replica with a stale basis in `specs/tla/read-replica/`; #1016 (model of leaderless reads), #1099 (rework 1.10)), truncation on plain
 Multi-Paxos (`specs/tla/truncation/`: the decided `Truncate` and the floor as a fold of the
 journal, the floor guard of Phase 1 and the retry of a refused laggard, the trim-point jump that
 keeps the promise, the vote watermark over the floor, the faulty entries of CTRL with the
@@ -166,7 +167,7 @@ matchmaker register as an optional role)). The first journal roles are `paros_jo
 and traced against `specs/tla/journal-state/RolesTrace.tla`;
 the leader's retire at `F + 1` holders and the heal of a retired segment's replica set (the new
 replica's copy, the register's `Rereplicate`, the controller's heal) are built; the controller's
-heal and the register are walked by `journal-sim`'s heal walk, which plays the replicas itself (#1314 (re-replication of a sealed segment's replica set)); the proxy
+heal and the register are walked by `journal-sim`'s heal walk, which plays the replicas itself and is traced against `specs/tla/heal-reuse/HealTrace.tla` (#1314 (re-replication of a sealed segment's replica set)); the proxy
 leader, the leaderless reads, the trim of a retired segment with the reader's floor, and the
 leader time of each write (#1299) are built and walked too; the compaction of the acceptors, the
 trim-point jump and CTRL repair (the last rule groups of #1326) are not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
@@ -803,7 +804,7 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`control`, #1261) and the walk of the controller role (`controller`), with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
   `specs/tla/journal-state/FoldTrace.tla`, `specs/tla/segment-records/RegisterTrace.tla` and
-  `specs/tla/journal-state/RolesTrace.tla` (and of the controller walk against `specs/tla/grid-controller/ControllerTrace.tla`), and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
+  `specs/tla/journal-state/RolesTrace.tla` (and of the controller walk against `specs/tla/grid-controller/ControllerTrace.tla`, and of the heal walk against `specs/tla/heal-reuse/HealTrace.tla`), and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
   (check long runs live); four hours each night in the `Journal live` workflow).
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with

@@ -609,10 +609,23 @@ impl Host {
             })
     }
 
+    /// Whether `copy` is of the term of the value that the `Host` holds, or
+    /// later: a copy of a term that is over can never be written into the
+    /// set, so its ask is refused (`specs/tla/heal-reuse/`, `Join`).
+    fn current(&self, address: Address, copy: CopyId) -> bool {
+        self.values
+            .get(&address.journal)
+            .is_some_and(|value| copy.term >= value.term().number)
+    }
+
     fn join(&mut self, now: Time, address: Address, ask: JoinAsk, effects: &mut Vec<Effect>) {
         // A set that names the node is no copy ask a correct controller
         // sends: refused, as the value's own member check.
-        if address.segment.is_none() || !self.may_copy(address) || ask.set.contains(&address.node) {
+        if address.segment.is_none()
+            || !self.may_copy(address)
+            || !self.current(address, ask.copy)
+            || ask.set.contains(&address.node)
+        {
             return;
         }
         match self.roles.get(&address) {
@@ -659,9 +672,9 @@ impl Host {
     /// The new replica at `address` read its records: it goes on with the
     /// copy on its disk when that copy is not lower than the one asked,
     /// else it starts the copy asked. When the value no longer lets it copy
-    /// (it names the node, or the segment is trimmed), the replica starts
-    /// from its disk as any replica, and the value makes it a member or
-    /// drops it.
+    /// (it names the node, or the segment is trimmed), or the ask's term is
+    /// over, the replica starts from its disk as any replica, and the value
+    /// makes it a member, ends an orphan copy or drops it.
     fn joined(
         &mut self,
         address: Address,
@@ -679,22 +692,24 @@ impl Host {
                 return;
             }
         };
-        let (replica, out) =
-            if self.may_copy(address) && disk.joining.is_none_or(|runs| runs < ask.copy) {
-                SegmentReplica::join(
-                    address.node,
-                    segment,
-                    ask.set,
-                    ask.initial,
-                    ask.copy,
-                    disk.durable,
-                )
-            } else {
-                (
-                    SegmentReplica::recover(address.node, segment, ask.set, ask.initial, disk),
-                    Vec::new(),
-                )
-            };
+        let (replica, out) = if self.may_copy(address)
+            && self.current(address, ask.copy)
+            && disk.joining.is_none_or(|runs| runs < ask.copy)
+        {
+            SegmentReplica::join(
+                address.node,
+                segment,
+                ask.set,
+                ask.initial,
+                ask.copy,
+                disk.durable,
+            )
+        } else {
+            (
+                SegmentReplica::recover(address.node, segment, ask.set, ask.initial, disk),
+                Vec::new(),
+            )
+        };
         self.roles.insert(address, Role::Replica(replica));
         replica_effects(address, out, effects);
         if let (Some(Role::Replica(replica)), Some(value)) = (

@@ -172,16 +172,18 @@ jobs:
           cache-on-failure: true
       # The coverage gate walks every flavor at its full budget: it runs in
       # release, in the `coverage` job, and not here in debug. The edits of
-      # recorded traces run TLC on hundreds of edited walks: they run in
-      # release, in the `trace-edits` job.
+      # recorded traces run TLC on hundreds of edited walks, and the driver
+      # mutants of each flavor on dozens of walks: they run in release, in the
+      # `trace-edits` job.
       - name: Run cargo nextest
         run: >-
           nix develop --command cargo nextest run --profile ci
-          -E 'not (package(consensus-sim) & (binary(coverage) | (binary(traces) & (test(edited) | test(no_record)))))'
+          -E 'not (package(consensus-sim) & (binary(coverage) | (binary(traces) & (test(edited) | test(no_record) | test(driver_mutants)))))'
 
   # The edits of recorded traces (#1308 (mutate recorded traces)): each trace
   # spec refuses every named edit of its recorded walks at the edited event or
-  # after it, and refuses a learn whose record is gone. A change of the
+  # after it, and refuses a learn whose record is gone; and each trace spec
+  # refuses the driver mutants of other flavors (#1198). A change of the
   # walks can change the traces they start from, so they run for a change of
   # the code. In debug they took the `test` job over its 30 minutes.
   trace-edits:
@@ -199,7 +201,7 @@ jobs:
       - name: Check that every trace spec refuses the edits of its walks
         run: >-
           nix develop --command cargo nextest run --profile ci --release
-          -p consensus-sim --test traces -E 'test(edited) | test(no_record)'
+          -p consensus-sim --test traces -E 'test(edited) | test(no_record) | test(driver_mutants)'
 
   # Coverage-driven simulation with real branch coverage (#1199): the coverage
   # gate of consensus-sim, with `paros-consensus` alone instrumented by
