@@ -573,3 +573,55 @@ fn the_read_watermark_counts_the_last_slot_of_a_dropped_range() {
         "the last dropped slot is the watermark: {sends:?}"
     );
 }
+
+fn repair(round: u64, slot: u64, command: Command) -> Message {
+    Message::Repair {
+        ballot: ballot(round),
+        slot: Slot(slot),
+        command,
+    }
+}
+
+#[test]
+fn a_repair_writes_the_chosen_command_at_the_higher_ballot_in_one_batch() {
+    let disk = AcceptorDisk {
+        promised: ballot(4),
+        faulty: BTreeMap::from([(Slot(1), ballot(4)), (Slot(2), ballot(1))]),
+        votes: BTreeMap::from([(Slot(3), (ballot(2), write(3)))]),
+        ..AcceptorDisk::default()
+    };
+    let mut acceptor = JournalAcceptor::recover(ME, disk.clone(), PROMISE_BATCH);
+    let mut image = disk;
+    // Above the choosing ballot: the faulty vote keeps its ballot, and the
+    // promise does not move.
+    let (batches, sends, _) = split(acceptor.step(LEADER, repair(3, 1, write(1))));
+    assert!(sends.is_empty(), "a repair has no answer");
+    let [(id, ops)] = &batches[..] else {
+        panic!("one batch: {batches:?}");
+    };
+    image.apply(*id, ops);
+    assert_eq!(image.votes[&Slot(1)], (ballot(4), write(1)));
+    assert_eq!(image.promised, ballot(4));
+    // Below the choosing ballot: the vote is written at the choosing ballot,
+    // with the promise raised first in the same batch.
+    let (batches, _, _) = split(acceptor.step(LEADER, repair(6, 2, write(2))));
+    let [(id, ops)] = &batches[..] else {
+        panic!("one batch: {batches:?}");
+    };
+    assert!(matches!(
+        ops[..],
+        [
+            AcceptorOp::Write(AcceptorWrite::SetPromise(_)),
+            AcceptorOp::Write(AcceptorWrite::AppendAccepted { .. })
+        ]
+    ));
+    image.apply(*id, ops);
+    assert_eq!(image.votes[&Slot(2)], (ballot(6), write(2)));
+    assert_eq!(image.promised, ballot(6));
+    assert!(image.faulty.is_empty(), "both faulty votes are repaired");
+    assert_eq!(acceptor.vote(Slot(2)), Some(&(ballot(6), write(2))));
+    // A readable vote, or a slot with no vote, takes no repair.
+    assert_eq!(acceptor.step(LEADER, repair(6, 3, write(9))).len(), 0);
+    assert_eq!(acceptor.step(LEADER, repair(6, 7, write(9))).len(), 0);
+    assert_eq!(acceptor.vote(Slot(3)), Some(&(ballot(2), write(3))));
+}

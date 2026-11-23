@@ -179,17 +179,20 @@ no checked model takes. The trace specs today are:
   it `m<n>`, `FoldTrace` and `RolesTrace` set the constant `Tags` of `Journal.tla` to the
   strings that start with `m`, and the fold folds a tag as it folds `None` (`IsMulti`). The
   models set `Tags = {}`.
-- `journal-compact/RolesTrace`: the journal roles of `paros-journal` (the acceptor, the leader and
+- `journal-ctrl/RolesTrace`: the journal roles of `paros-journal` (the acceptor, the leader and
   the segment replica), on the roles walk of `journal-sim` (#1326 (the journal roles over the
-  core)). Each event is one action of `JournalCompact.tla` (the compaction over `Journal.tla`)
-  with the parameters the code chose: a
+  core)). Each event is one action of `JournalCtrl.tla` (CTRL over the compaction over
+  `Journal.tla`) with the parameters the code chose: a
   campaign is `Register`, an acceptor's queued batch is `Promise` or `Accept` and its durable
   batch `Flush`, a Phase 1 that closed is `Phase1On` with the reports the leader read, then
   `SealWrite`, `Open`, `Propose`, and a replica's durable base, applied slot and boundary write
   are `TakeBase`, `Apply` and `BoundWrite`. The model's leader takes what its Phase 1 reads and
   the first slot it writes at `Register`, as the code takes them from the register value of its
   campaign. A replica's compaction is `RepCompact`, a jump `JumpFrom` a trim of a peer, and an
-  acceptor's dropped range `AccCompact`; an `apply` with no answer is a blind fold. The walk is
+  acceptor's dropped range `AccCompact`; an `apply` with no answer is a blind fold. A boot with a
+  damaged vote is `Rot`, a late answer that decides a blocked slot `ProbeDecide` with the
+  qualifying answers, a replica's chosen command for a blocked slot `LearnChosen`, and an
+  acceptor's repair `AccRepair` with the ballot that chose the command. The walk is
   the narrow shape (one column of three): a grid of two columns chooses a slot in one column,
   which `Journal.tla` does not have.
 
@@ -274,6 +277,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
 | The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None` or a multi tag of `Tags`, folded as `None`; `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the acceptor, the leader and the segment replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
 | The compaction of the journal roles: a replica's `Trim` and its blind fold, the acceptors' dropped ranges in their promises, a crash before the drop is durable, the laggard's jump | the replica, the leader and the acceptor of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-compact/` | #1326 (the journal roles over the core) |
+| CTRL in the journal roles: a vote damaged at a boot inside the contract, the leader's tri-state tally, a late answer that decides a blocked slot, the learn from a replica, the acceptor's repair at the higher ballot in one write | the leader, the acceptor and the replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-ctrl/` | #1326 (the journal roles over the core) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The heal when a later plan asks a node again, the network delivers a request twice and late, and a node acts on its own view of the register: the highest copy per node, the term check of the heal's compare-and-set, the heal count of the record, a sent heal that ends only on an answer, and a fresh register value before an abandon or a copy wipes a node | `paros_journal::register` (`Rereplicate`, `SegmentRecord::heals`), `SegmentReplica::join`, the controller's heal in `paros_journal_control::role`; walked by `journal-sim`'s heal walk | `heal-reuse/` | #1314 (re-replication of a sealed segment's replica set) |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
@@ -3495,7 +3499,34 @@ the client's pipeline and resolve.
 | `compact_floor` | violation | control: acceptors that drop below the decided floor alone lose a slot that no replica applied |
 | `reach_jump`, `reach_skip`, `reach_blind` | violation | the model reaches a jump, a Phase 1 that skips a dropped range, and a blind fold |
 
-`RolesTrace.tla` is here, since the roles walk traces the compaction too.
+`RolesTrace.tla` is in `journal-ctrl/`, since the roles walk traces CTRL too.
+
+### `journal-ctrl/`: CTRL in the journal roles, for #1326
+
+`JournalCtrl.tla` extends `JournalCompact.tla` with CTRL as the roles build it
+(`docs/journal/05-quorums-and-failures.md` §J5.3, "CTRL in the journal roles"). `Journal.tla` holds
+the leader's part: its Phase 1 takes the tri-state tally (the threshold is the highest readable
+report; an answer qualifies unless it is a faulty vote above it), and a slot whose top report is a
+faulty vote with no quorum of qualifying answers is blocked (`bblock`): no proposal takes it, and
+the next slot of a client is above it. `JournalCtrl.tla` adds:
+
+- **A boot with a damaged vote** (`Rot`): the value is lost (`Damage = "keep"`: the ballot stays),
+  and the acceptor starts from its disk. A damage stays inside the contract (`Spare`): a replica
+  applied the slot, the slot chose another value, or a quorum of a live grid holds the chosen value
+  on disk at or above the ballot that chose it. A rot of the last copy is data loss (`Readable`).
+- **The probe** (`ProbeDecide`): a blocked slot is decided on qualifying answers that hold a
+  quorum of each grid that reads it, with the readable vote at the threshold, or none.
+- **The learn** (`LearnChosen`): the leader takes the chosen value of a blocked slot.
+- **The repair** (`AccRepair`): an acceptor writes a value chosen at ballot `c` at the higher of
+  `c` and its faulty ballot, with its promise, in one write (`Repair = "chosen"`).
+
+| Check | Result | What it shows |
+|---|---|---|
+| `ctrl` | pass | one grid of three, two writes that race for one slot, three ballots, one rot: the safety of `Journal.tla` and `JournalCompact.tla`, `OneValueAtBallot` (two readable votes at one slot and ballot carry one value, in memory and on disk) and `NoProposeBlocked` |
+| `ctrl_g2` | pass | two segments of one acceptor each, a seal: a blocked slot of the old grid below the end |
+| `ctrl_drop` | violation | control: a damage that drops the vote (`Damage = "drop"`) breaks `Agreement` |
+| `ctrl_peer` | violation | control: a repair from a peer's vote (`Repair = "peer"`) breaks `OneValueAtBallot` |
+| `reach_blocked`, `reach_probe`, `reach_learn`, `reach_repair` | violation | the model blocks a slot, decides one on the probe, learns one, and repairs a faulty vote |
 
 ### `re-replication/`: the heal of a sealed segment's replica set, for #1314
 

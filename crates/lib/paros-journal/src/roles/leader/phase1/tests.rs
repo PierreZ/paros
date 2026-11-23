@@ -236,9 +236,8 @@ fn phase_one_reads_a_segment() {
 fn the_highest_faulty_ballot_of_the_quorum_blocks() {
     let segments = [segment(1, &[1, 2, 3], Some(0), None)];
     let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
-    phase1.fold(NodeId(1), Slot(0), page(&[(1, 3, 1)], &[(1, 2)], None));
+    phase1.fold(NodeId(1), Slot(0), page(&[(1, 3, 1)], &[], None));
     phase1.fold(NodeId(2), Slot(0), page(&[], &[(1, 4)], None));
-    phase1.fold(NodeId(3), Slot(0), page(&[], &[(1, 1)], None));
     let close = phase1.close(&segments).expect("a quorum");
     assert_eq!(
         close.blocked,
@@ -246,6 +245,39 @@ fn the_highest_faulty_ballot_of_the_quorum_blocks() {
         "the faulty ballot 4 is above the vote at 3"
     );
     assert_eq!(close.safe, BTreeMap::new());
+    assert_eq!(
+        phase1.decide(&segments, Slot(1)),
+        None,
+        "one answer qualifies"
+    );
+    assert_eq!(phase1.faulty_at(Slot(1)), vec![NodeId(2)]);
+    // A late answer with a faulty vote at or below the threshold qualifies:
+    // the tally decides the readable vote.
+    phase1.fold(NodeId(3), Slot(0), page(&[], &[(1, 3)], None));
+    assert!(phase1.all_complete());
+    assert_eq!(phase1.decide(&segments, Slot(1)), Some(noop_or(1)));
+    assert_eq!(phase1.faulty_at(Slot(1)), vec![NodeId(2), NodeId(3)]);
+}
+
+#[test]
+fn the_tally_decides_a_faulty_top_when_a_quorum_qualifies_without_it() {
+    let segments = [segment(1, &[1, 2, 3], Some(0), None)];
+    let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
+    phase1.fold(NodeId(1), Slot(0), page(&[(1, 3, 1)], &[], None));
+    phase1.fold(NodeId(2), Slot(0), page(&[], &[(1, 4), (2, 2)], None));
+    phase1.fold(NodeId(3), Slot(0), page(&[], &[], None));
+    let close = phase1.close(&segments).expect("a quorum");
+    assert_eq!(close.blocked, Vec::<Slot>::new(), "nodes 1 and 3 qualify");
+    assert_eq!(
+        close.safe,
+        BTreeMap::from([(Slot(1), noop_or(1))]),
+        "Case 1: the readable vote at the threshold"
+    );
+    // Case 2: no readable vote, so every faulty vote is above the
+    // threshold; nodes 1 and 3 still hold a quorum, and the slot takes a
+    // `Noop` (no entry in `safe`).
+    assert_eq!(phase1.decide(&segments, Slot(2)), Some(Command::Noop));
+    assert!(!close.safe.contains_key(&Slot(2)));
 }
 
 #[test]

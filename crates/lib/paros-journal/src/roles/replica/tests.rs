@@ -221,7 +221,7 @@ fn a_commit_of_another_segment_or_past_the_end_is_not_taken() {
     replica.observe(&sealed(1));
     assert_eq!(replica.end(), Some(Slot(1)));
     assert_eq!(replica.step(LEADER, commit(1, 1, claim(7))).len(), 0);
-    assert!(replica.chosen().is_empty());
+    assert_eq!(replica.chosen().len(), 0);
     assert_eq!(
         replica
             .step(
@@ -1262,4 +1262,29 @@ fn a_compaction_ask_of_another_segment_is_not_answered() {
     };
     assert_eq!(asked(&mut replica, 2), 0, "another segment");
     assert_eq!(asked(&mut replica, 1), 1, "its own segment");
+}
+
+#[test]
+fn a_learn_is_answered_with_the_chosen_command_once_it_is_durable() {
+    let mut replica = based();
+    replica.step(LEADER, commit(1, 0, claim(7)));
+    let learn = |segment, slot| Message::Learn {
+        segment: SegmentId(segment),
+        slot: Slot(slot),
+    };
+    assert_eq!(
+        replica.step(LEADER, learn(1, 0)),
+        vec![ReplicaEffect::Send {
+            to: LEADER,
+            message: Message::Learned {
+                segment: SegmentId(1),
+                slot: Slot(0),
+                command: claim(7),
+            },
+            after: replica.flight.last(),
+        }]
+    );
+    // A slot it does not hold, or another segment, has no answer.
+    assert_eq!(replica.step(LEADER, learn(1, 1)).len(), 0);
+    assert_eq!(replica.step(LEADER, learn(2, 0)).len(), 0);
 }

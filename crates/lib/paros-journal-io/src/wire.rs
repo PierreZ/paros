@@ -87,7 +87,7 @@ impl Envelope {
     }
 
     /// The role of the receiver. A `Commit`, a `Pull`, a `Holding`, a
-    /// `PreReadAck`, a `Compaction` and a `TrimmedTo` go to the replica of
+    /// `PreReadAck`, a `Compaction`, a `TrimmedTo` and a `Learn` go to the replica of
     /// the segment that they name; every other message goes
     /// to an acceptor or a leader. A `Holds` answers the asker of `Holding`,
     /// a leader or a new replica, so its receiver is the node: the `Host`
@@ -100,9 +100,8 @@ impl Envelope {
             | Message::Holding { segment }
             | Message::PreReadAck { segment, .. }
             | Message::Compaction { segment }
-            | Message::TrimmedTo { segment, .. } => {
-                Address::replica(self.journal, self.to, *segment)
-            }
+            | Message::TrimmedTo { segment, .. }
+            | Message::Learn { segment, .. } => Address::replica(self.journal, self.to, *segment),
             // No wildcard: a new message kind chooses its receiver here.
             Message::Prepare { .. }
             | Message::Promise { .. }
@@ -115,7 +114,9 @@ impl Envelope {
             | Message::Chosen { .. }
             | Message::PreRead { .. }
             | Message::CompactedTo { .. }
-            | Message::Compact { .. } => Address::new(self.journal, self.to),
+            | Message::Compact { .. }
+            | Message::Learned { .. }
+            | Message::Repair { .. } => Address::new(self.journal, self.to),
         }
     }
 }

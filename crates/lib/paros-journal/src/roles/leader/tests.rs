@@ -927,7 +927,7 @@ fn a_retire_ends_the_rounds_and_the_commits_of_the_retired_segment() {
     // stop: the leader sends neither the commit nor the accept again.
     let tick = leader.tick(4);
     assert!(!sends(&tick).contains(&(NodeId(11), commit)));
-    assert!(accepts(&tick).is_empty());
+    assert_eq!(accepts(&tick).len(), 0);
     leader.assert_invariants();
 }
 
@@ -1245,4 +1245,152 @@ fn a_first_leader_seals_above_a_dropped_range() {
     leader.step(NodeId(2), promise(2, 0, page(&[], &[])));
     // A dropped range counts as voted: the end is one above its last slot.
     assert_eq!(*leader.phase(), LeaderPhase::Sealing { end: Slot(3) });
+}
+
+#[test]
+fn a_blocked_slot_above_every_vote_is_never_given_to_a_new_command() {
+    let value = one_segment();
+    let (mut leader, _) = campaign(&value, 3, 1, 0);
+    leader.step(NodeId(1), promise(3, 0, page(&[], &[(2, 2)])));
+    leader.step(NodeId(2), promise(3, 0, page(&[], &[])));
+    assert_eq!(leader.blocked(), &[Slot(2)]);
+    // The faulty vote at slot 2 may be the chosen value: the gap fill
+    // writes a `Noop` below it, and the callers write above it.
+    for call in 0..3 {
+        let (proposed, _) = leader.propose(call, write(9), 0);
+        assert_eq!(proposed, Proposed::Slot(Slot(3 + u64::from(call))));
+    }
+}
+
+/// A leader of segment 1 whose Phase 1 left slot 1 blocked: node 1 voted
+/// `write(1)` at ballot 1 there, node 2 reports a faulty vote at ballot 2.
+fn blocked_leader() -> JournalLeader<u32> {
+    let value = one_segment();
+    let (mut leader, _) = campaign(&value, 3, 1, 0);
+    leader.step(NodeId(1), promise(3, 0, page(&[(1, 1, write(1))], &[])));
+    leader.step(NodeId(2), promise(3, 0, page(&[], &[(1, 2)])));
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(0) });
+    assert_eq!(leader.blocked(), &[Slot(1)]);
+    leader
+}
+
+fn chosen_at(leader: &mut JournalLeader<u32>, slot: u64) -> Vec<LeaderEffect<u32>> {
+    let accepted = Message::Accepted {
+        ballot: ballot(3),
+        slot: Slot(slot),
+    };
+    leader.step(NodeId(1), accepted.clone());
+    leader.step(NodeId(3), accepted)
+}
+
+#[test]
+fn a_tick_asks_the_missing_answers_and_the_replicas_of_a_blocked_slot() {
+    let mut leader = blocked_leader();
+    let asks = sends(&leader.tick(RESEND_BATCH));
+    assert!(asks.contains(&(
+        NodeId(3),
+        Message::Prepare {
+            ballot: ballot(3),
+            from: Slot(0),
+            segment: SegmentId(1),
+        }
+    )));
+    for replica in [11, 12, 13] {
+        assert!(asks.contains(&(
+            NodeId(replica),
+            Message::Learn {
+                segment: SegmentId(1),
+                slot: Slot(1),
+            }
+        )));
+    }
+    // A leader with no blocked slot asks nothing of the kind.
+    let mut open = open_leader();
+    assert!(
+        sends(&open.tick(RESEND_BATCH))
+            .iter()
+            .all(|(_, m)| !matches!(m, Message::Learn { .. } | Message::Prepare { .. }))
+    );
+}
+
+#[test]
+fn a_late_answer_that_decides_a_blocked_slot_proposes_it_and_repairs_the_faulty_vote() {
+    let mut leader = blocked_leader();
+    // Node 3 has no vote at slot 1: with node 1 it holds a quorum that
+    // qualifies, and the readable vote at the threshold is safe.
+    let effects = leader.step(NodeId(3), promise(3, 0, page(&[], &[])));
+    assert_eq!(leader.blocked().len(), 0);
+    assert_eq!(accepts(&effects), BTreeMap::from([(Slot(1), write(1))]));
+    let effects = chosen_at(&mut leader, 1);
+    let repair = Message::Repair {
+        ballot: ballot(3),
+        slot: Slot(1),
+        command: write(1),
+    };
+    assert!(
+        sends(&effects).contains(&(NodeId(2), repair)),
+        "the faulty acceptor gets the chosen command"
+    );
+    assert_eq!(
+        sends(&effects)
+            .iter()
+            .filter(|(_, m)| matches!(m, Message::Repair { .. }))
+            .count(),
+        1,
+        "only the faulty acceptor is repaired"
+    );
+}
+
+#[test]
+fn a_replica_that_applied_a_blocked_slot_unblocks_it() {
+    let mut leader = blocked_leader();
+    let learned = |segment| Message::Learned {
+        segment: SegmentId(segment),
+        slot: Slot(1),
+        command: write(7),
+    };
+    // An answer from a node outside the set, or of another segment, counts
+    // for nothing.
+    assert_eq!(leader.step(NodeId(9), learned(1)).len(), 0);
+    assert_eq!(leader.step(NodeId(11), learned(2)).len(), 0);
+    assert_eq!(leader.blocked(), &[Slot(1)]);
+    let effects = leader.step(NodeId(11), learned(1));
+    assert_eq!(leader.blocked().len(), 0);
+    assert_eq!(accepts(&effects), BTreeMap::from([(Slot(1), write(7))]));
+    // A second answer finds the slot proposed already.
+    assert_eq!(leader.step(NodeId(12), learned(1)).len(), 0);
+    let effects = chosen_at(&mut leader, 1);
+    assert!(sends(&effects).contains(&(
+        NodeId(2),
+        Message::Repair {
+            ballot: ballot(3),
+            slot: Slot(1),
+            command: write(7),
+        }
+    )));
+    // A slot that was never blocked sends no repair when it is chosen.
+    let (proposed, _) = leader.propose(1, write(2), 0);
+    let Proposed::Slot(slot) = proposed else {
+        panic!("a slot")
+    };
+    let effects = chosen_at(&mut leader, slot.0);
+    assert!(
+        sends(&effects)
+            .iter()
+            .all(|(_, m)| !matches!(m, Message::Repair { .. }))
+    );
+}
+
+#[test]
+fn a_late_answer_that_does_not_decide_keeps_the_slot_blocked() {
+    let mut leader = blocked_leader();
+    // Node 3 reports a faulty vote above the threshold too.
+    let effects = leader.step(NodeId(3), promise(3, 0, page(&[], &[(1, 2)])));
+    assert_eq!(effects.len(), 0);
+    assert_eq!(leader.blocked(), &[Slot(1)]);
+    // An answer of another ballot is not folded.
+    assert_eq!(
+        leader.step(NodeId(3), promise(4, 0, page(&[], &[]))).len(),
+        0
+    );
 }

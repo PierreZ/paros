@@ -30,6 +30,7 @@ handover-scalars 2
 heal-reuse 2
 health 0
 journal-compact 1
+journal-ctrl 1
 journal-ids 3
 journal-state 29
 leader-handoff 12

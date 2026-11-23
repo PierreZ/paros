@@ -59,6 +59,12 @@
 (* acceptor refuses an `Accept` there, and a replica serves a peer only    *)
 (* the slots that it keeps.                                                *)
 (*                                                                         *)
+(* DAMAGE. `JournalCtrl.tla` adds CTRL (section J5.3): a vote that a disk  *)
+(* lost keeps its ballot and loses its value, `<<b, None>>` (a faulty      *)
+(* vote). This module holds what the other steps do with it: a Phase 1     *)
+(* whose top report at a slot is a faulty vote blocks the slot (`bblock`): *)
+(* the leader proposes nothing there, and its next slot is above it.       *)
+(*                                                                         *)
 (* Constants select the rules. The first value of each is the design; each *)
 (* other value is a control that TLC must break.                          *)
 (*   Reply1b  "disk": a promise is sent once it is durable. "mem": it is   *)
@@ -177,11 +183,13 @@ VARIABLES
   bstart,  \* ballot -> the start of its segment when it opened, or None
   prop,    \* ballot -> slot -> its proposal, or None
   bskip,   \* ballot -> the slots that its Phase 1 saw dropped
+  bblock,  \* ballot -> the slots whose top report was a faulty vote
   \* Acceptors: memory, the queue of writes, disk.
   mprom, mvote, pend, dprom, dvote,
   adrop,   \* acceptor -> the slots whose votes it dropped, in memory
   dadrop,  \* acceptor -> the slots whose votes it dropped, on disk
   crashes, \* the crashes so far
+  rots,    \* the votes that a disk lost so far (`JournalCtrl.tla`)
   p1b,     \* the promises sent: [a, b, votes]
   sent2b,  \* the votes sent: <<s, b, v, a>>
   \* Replicas, on disk.
@@ -196,8 +204,8 @@ VARIABLES
   trims    \* the compaction points on a disk: <<segment, slot, floor>>
 
 reg == <<top, rend, rbound, rret, rtrim, bgen>>
-ldr == <<bst, bH, bE, bsafe, bend, blo, bstart, prop, bskip>>
-acc == <<mprom, mvote, pend, dprom, dvote, crashes, p1b, sent2b, adrop, dadrop>>
+ldr == <<bst, bH, bE, bsafe, bend, blo, bstart, prop, bskip, bblock>>
+acc == <<mprom, mvote, pend, dprom, dvote, crashes, rots, p1b, sent2b, adrop, dadrop>>
 rep == <<rapp, rbase, rstart, acked, resolved, rdrop, rcomp, rfloor, trims>>
 vars == <<reg, ldr, acc, rep>>
 
@@ -326,6 +334,7 @@ Init ==
   /\ dprom = [a \in Acceptors |-> 0]
   /\ dvote = [a \in Acceptors |-> [s \in Slots |-> NoVote]]
   /\ crashes = 0
+  /\ rots = 0
   /\ p1b = {}
   /\ sent2b = {}
   /\ rapp = [r \in Replicas |-> 0]
@@ -337,6 +346,7 @@ Init ==
   /\ rfloor = [r \in Replicas |-> 0]
   /\ trims = {}
   /\ bskip = [b \in Ballots |-> {}]
+  /\ bblock = [b \in Ballots |-> {}]
   /\ adrop = [a \in Acceptors |-> {}]
   /\ dadrop = [a \in Acceptors |-> {}]
   /\ resolved = [s \in Slots |-> None]
@@ -390,7 +400,7 @@ RegisterFrom(b, lo) ==
   /\ bH' = [bH EXCEPT ![b] = H(top)]
   /\ bE' = [bE EXCEPT ![b] = [h \in Gens |-> IF Done(rend[h]) THEN rend[h].v ELSE None]]
   /\ blo' = [blo EXCEPT ![b] = lo]
-  /\ UNCHANGED <<top, rend, rbound, rret, rtrim, bst, bsafe, bend, bstart, prop, bskip, acc, rep>>
+  /\ UNCHANGED <<top, rend, rbound, rret, rtrim, bst, bsafe, bend, bstart, prop, bskip, bblock, acc, rep>>
 
 Register(b) == RegisterFrom(b, HighFrom)
 
@@ -420,7 +430,23 @@ Phase1On(b, Qs) ==
   /\ LET \* The votes seen at each slot, in the read set of each grid.
           seen(s) == {x[2][s] : x \in UNION {Reports(b, Qs[h]) : h \in {h \in bH[b] : s \in ReadSet(b, h)}}}
           voted(s) == {x \in seen(s) : x[1] > 0}
-          top1(s) == CHOOSE x \in voted(s) : \A y \in voted(s) : y[1] <= x[1]
+          \* A faulty vote has a ballot and no value.
+          readable(s) == {x \in voted(s) : x[2] # None}
+          top1(s) == CHOOSE x \in readable(s) : \A y \in readable(s) : y[1] <= x[1]
+          \* The tri-state tally (section J5.3): the threshold is the
+          \* highest readable report; an answer qualifies unless it is a
+          \* faulty vote above it. The top report is a faulty vote and the
+          \* qualifying answers hold no quorum of some grid that reads s:
+          \* the faulty value may be the chosen one, so the slot waits for
+          \* a late answer (`JournalCtrl.tla`, `ProbeDecide`) or a replica.
+          thr(s) == IF readable(s) = {} THEN 0 ELSE top1(s)[1]
+          qual(s, h) == {a \in Qs[h] :
+                          \A x \in Reports(b, {a}) :
+                            ~(x[2][s][1] > thr(s) /\ x[2][s][2] = None)}
+          blocked(s) == /\ \E x \in voted(s) : x[2] = None /\
+                               \A y \in readable(s) : y[1] < x[1]
+                        /\ ~\A h \in {h \in bH[b] : s \in ReadSet(b, h)} :
+                              \E Q \in QOf[h] : Q \subseteq qual(s, h)
           \* The slots with a vote in the old grid: a dropped vote counts.
           old == IF g >= 2 /\ g - 1 \in bH[b]
                  THEN {s \in Slots : \E x \in Reports(b, Qs[g - 1]) :
@@ -432,8 +458,10 @@ Phase1On(b, Qs) ==
           \* nothing there.
           skip == UNION {x[3] : x \in UNION {Reports(b, Qs[h]) : h \in bH[b]}}
       IN /\ bsafe' = [bsafe EXCEPT ![b] =
-              [s \in Slots |-> IF voted(s) # {} /\ s \notin skip THEN top1(s)[2] ELSE None]]
+              [s \in Slots |-> IF readable(s) # {} /\ ~blocked(s) /\ s \notin skip
+                               THEN top1(s)[2] ELSE None]]
          /\ bskip' = [bskip EXCEPT ![b] = skip]
+         /\ bblock' = [bblock EXCEPT ![b] = {s \in Slots : blocked(s) /\ s \notin skip}]
          \* A first leader of g: the end of g - 1 was not written at its
          \* Register. The end is at or above the first slot it writes.
          /\ bend' = [bend EXCEPT ![b] =
@@ -448,7 +476,7 @@ Phase1On(b, Qs) ==
                  /\ dprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE dprom[a]]
             ELSE UNCHANGED <<mprom, dprom>>
   /\ bst' = [bst EXCEPT ![b] = "p1"]
-  /\ UNCHANGED <<reg, bH, bE, blo, prop, bstart, mvote, pend, dvote, crashes, p1b, sent2b, adrop, dadrop, rep>>
+  /\ UNCHANGED <<reg, bH, bE, blo, prop, bstart, mvote, pend, dvote, crashes, rots, p1b, sent2b, adrop, dadrop, rep>>
 
 Phase1(b) == \E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : Phase1On(b, Qs)
 
@@ -493,7 +521,7 @@ Open(b) ==
   /\ IF g >= 2 /\ bend[b] # None THEN rend[g - 1].v = bend[b] ELSE TRUE
   /\ bst' = [bst EXCEPT ![b] = "w"]
   /\ bstart' = [bstart EXCEPT ![b] = Start(g)]
-  /\ UNCHANGED <<reg, bH, bE, bsafe, bend, blo, prop, bskip, acc, rep>>
+  /\ UNCHANGED <<reg, bH, bE, bsafe, bend, blo, prop, bskip, bblock, acc, rep>>
 
 (***************************************************************************)
 (* Phase 2. The leader of b writes every slot of its segment, and below    *)
@@ -503,12 +531,14 @@ Open(b) ==
 Writable(b) ==
   {s \in Slots : /\ s >= blo[b]
                  /\ s \notin bskip[b]
+                 /\ s \notin bblock[b]
                  /\ \/ s >= bstart[b]
                     \/ bsafe[b][s] # None
                     \/ GapFill}
 
-\* One above the highest slot where the Phase 1 of b saw a vote.
-TopSeen(b) == Max({0} \cup {s + 1 : s \in {s \in Slots : bsafe[b][s] # None}})
+\* One above the highest slot where the Phase 1 of b saw a vote, a blocked
+\* slot included: a new command never takes a blocked slot.
+TopSeen(b) == Max({0} \cup {s + 1 : s \in {s \in Slots : bsafe[b][s] # None} \cup bblock[b]})
 
 \* The gap fill writes a `Noop` at each slot with no vote below the start of
 \* the segment and below the highest vote seen (`JournalLeader::open`).
@@ -521,7 +551,7 @@ Propose(b, s, v) ==
            ELSE IF s < bstart[b] \/ s < TopSeen(b) THEN {Noop}
            ELSE Values[s]
   /\ prop' = [prop EXCEPT ![b][s] = v]
-  /\ UNCHANGED <<reg, bst, bH, bE, bsafe, bend, blo, bstart, bskip, acc, rep>>
+  /\ UNCHANGED <<reg, bst, bH, bE, bsafe, bend, blo, bstart, bskip, bblock, acc, rep>>
 
 (***************************************************************************)
 (* Acceptors: a step changes memory and queues its writes. A write is      *)
@@ -544,7 +574,7 @@ Promise(a, b) ==
        [] OTHER ->
           /\ pend' = [pend EXCEPT ![a] = Append(@, <<"p", 0, b, None, TRUE>>)]
           /\ UNCHANGED <<p1b, dprom>>
-  /\ UNCHANGED <<reg, ldr, mvote, dvote, crashes, sent2b, adrop, dadrop, rep>>
+  /\ UNCHANGED <<reg, ldr, mvote, dvote, crashes, rots, sent2b, adrop, dadrop, rep>>
 
 Accept(a, b, s) ==
   LET v == prop[b][s]
@@ -573,7 +603,7 @@ Accept(a, b, s) ==
      ELSE /\ pend' = [pend EXCEPT ![a] = @ \o ws]
           /\ sent2b' = IF Reply2b = "mem" THEN sent2b \cup {<<s, b, v, a>>} ELSE sent2b
           /\ UNCHANGED <<dprom, dvote>>
-  /\ UNCHANGED <<reg, ldr, crashes, p1b, adrop, dadrop, rep>>
+  /\ UNCHANGED <<reg, ldr, crashes, rots, p1b, adrop, dadrop, rep>>
 
 \* The driver makes the first queued write durable, and sends its reply.
 Flush(a) ==
@@ -592,7 +622,7 @@ Flush(a) ==
   /\ dadrop' = [dadrop EXCEPT ![a] = dd]
   /\ p1b' = IF k = "p" /\ w[5] THEN p1b \cup {[a |-> a, b |-> w[3], votes |-> dv, drop |-> dd]} ELSE p1b
   /\ sent2b' = IF k \in {"v", "pv"} /\ w[5] THEN sent2b \cup {<<w[2], w[3], w[4], a>>} ELSE sent2b
-  /\ UNCHANGED <<reg, ldr, mprom, mvote, crashes, adrop, rep>>
+  /\ UNCHANGED <<reg, ldr, mprom, mvote, crashes, rots, adrop, rep>>
 
 \* A crash between two writes: the queue is lost, and the role starts again
 \* from its disk.
@@ -603,7 +633,7 @@ Crash(a) ==
   /\ mvote' = [mvote EXCEPT ![a] = dvote[a]]
   /\ adrop' = [adrop EXCEPT ![a] = dadrop[a]]
   /\ pend' = [pend EXCEPT ![a] = <<>>]
-  /\ UNCHANGED <<reg, ldr, dprom, dvote, p1b, sent2b, dadrop, rep>>
+  /\ UNCHANGED <<reg, ldr, dprom, dvote, rots, p1b, sent2b, dadrop, rep>>
 
 \* A quorum of a grid that still runs holds a chosen vote of slot s on disk.
 \* (A later ballot can only vote the chosen value again, so a quorum may hold

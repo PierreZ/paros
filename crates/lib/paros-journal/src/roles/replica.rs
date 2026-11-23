@@ -546,6 +546,7 @@ impl SegmentReplica {
                 command,
             } if segment == self.segment => self.commit(from, slot, command),
             Message::Pull { segment, from: at } if segment == self.segment => self.pull(from, at),
+            Message::Learn { segment, slot } if segment == self.segment => self.learn(from, slot),
             Message::Holding { segment } if segment == self.segment => {
                 probe!(
                     sometimes,
@@ -1045,6 +1046,31 @@ impl SegmentReplica {
         assert!(self.reads.is_empty(), "a dropped replica holds no read");
         effects.push(ReplicaEffect::Drop);
         effects
+    }
+
+    /// The answer to a leader's `Learn` (CTRL, §J5.3): the command that
+    /// `slot` chose, once the batch that holds it is durable. No answer when
+    /// the replica did not apply the slot, or dropped it (`Holds` of
+    /// `specs/tla/journal-state/`).
+    fn learn(&self, from: NodeId, slot: Slot) -> Vec<ReplicaEffect> {
+        let applied = self.front().is_some_and(|front| slot < front);
+        let Some(command) = self.chosen.get(&slot).filter(|_| applied) else {
+            probe!(
+                reachable,
+                "replica: a Learn of a slot it did not apply is not answered"
+            );
+            return Vec::new();
+        };
+        probe!(reachable, "replica: a Learn is answered");
+        vec![ReplicaEffect::Send {
+            to: from,
+            message: Message::Learned {
+                segment: self.segment,
+                slot,
+                command: command.clone(),
+            },
+            after: self.flight.last(),
+        }]
     }
 
     fn pull(&self, from: NodeId, at: Slot) -> Vec<ReplicaEffect> {

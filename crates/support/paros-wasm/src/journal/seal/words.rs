@@ -3,7 +3,9 @@
 //! read off a role's message, a register change or an answer of the fold.
 
 use paros_journal::register::{Ballot, Change};
-use paros_journal::roles::{AcceptorOp, AcceptorWrite, LeaderPhase, Message, ReplicaOp};
+use paros_journal::roles::{
+    AcceptorOp, AcceptorWrite, LeaderPhase, Message, PromisePage, ReplicaOp,
+};
 use paros_journal::segment::SegmentState;
 use paros_journal::{Answer, Command, Fence, NodeId, Reply, ResolveAnswer, Write};
 
@@ -243,6 +245,9 @@ pub(super) fn kind_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::CompactedTo { .. }) => "CompactedTo",
         Payload::Role(Message::Compact { .. }) => "Compact",
         Payload::Role(Message::TrimmedTo { .. }) => "TrimmedTo",
+        Payload::Role(Message::Learn { .. }) => "Learn",
+        Payload::Role(Message::Learned { .. }) => "Learned",
+        Payload::Role(Message::Repair { .. }) => "Repair",
         Payload::Write { .. } => "Write",
         Payload::Reply { .. } => "Reply",
         Payload::Change(Change::Reshape { .. }) => "Reshape",
@@ -271,7 +276,10 @@ pub(super) fn phase_of(payload: &Payload) -> &'static str {
             | Message::Compaction { .. }
             | Message::CompactedTo { .. }
             | Message::Compact { .. }
-            | Message::TrimmedTo { .. },
+            | Message::TrimmedTo { .. }
+            | Message::Learn { .. }
+            | Message::Learned { .. }
+            | Message::Repair { .. },
         ) => "catchup",
         Payload::Write { .. } | Payload::Reply { .. } => "other",
         Payload::Change(_) | Payload::Done { .. } => "reconfigure",
@@ -294,10 +302,25 @@ pub(super) fn is_reply(payload: &Payload) -> bool {
                 | Message::PreReadAck { .. }
                 | Message::CompactedTo { .. }
                 | Message::TrimmedTo { .. }
+                | Message::Learned { .. }
         ) | Payload::Reply { .. }
             | Payload::Done { .. }
             | Payload::Resolved { .. }
     )
+}
+
+/// The label of a promise: its ballot and the votes it reports.
+fn promise_label(ballot: Ballot, page: &PromisePage) -> String {
+    let votes: Vec<String> = page
+        .votes
+        .iter()
+        .map(|(slot, (_, command))| format!("{} at {}", value_name(command), slot.0))
+        .collect();
+    if votes.is_empty() {
+        format!("Promise {} · no vote", ballot_text(ballot))
+    } else {
+        format!("Promise {} · {}", ballot_text(ballot), votes.join(", "))
+    }
 }
 
 pub(super) fn label_of(payload: &Payload) -> String {
@@ -305,18 +328,7 @@ pub(super) fn label_of(payload: &Payload) -> String {
         Payload::Role(Message::Prepare { ballot, from, .. }) => {
             format!("Prepare {} · from slot {}", ballot_text(*ballot), from.0)
         }
-        Payload::Role(Message::Promise { ballot, page, .. }) => {
-            let votes: Vec<String> = page
-                .votes
-                .iter()
-                .map(|(slot, (_, command))| format!("{} at {}", value_name(command), slot.0))
-                .collect();
-            if votes.is_empty() {
-                format!("Promise {} · no vote", ballot_text(*ballot))
-            } else {
-                format!("Promise {} · {}", ballot_text(*ballot), votes.join(", "))
-            }
-        }
+        Payload::Role(Message::Promise { ballot, page, .. }) => promise_label(*ballot, page),
         Payload::Role(Message::Nack { promised, .. }) => {
             format!("Nack · promised {}", ballot_text(*promised))
         }
@@ -360,8 +372,11 @@ pub(super) fn label_of(payload: &Payload) -> String {
             message @ (Message::Compaction { .. }
             | Message::CompactedTo { .. }
             | Message::Compact { .. }
-            | Message::TrimmedTo { .. }),
-        ) => compaction_text(message),
+            | Message::TrimmedTo { .. }
+            | Message::Learn { .. }
+            | Message::Learned { .. }
+            | Message::Repair { .. }),
+        ) => upkeep_text(message),
         Payload::Role(Message::Holds { segment, full }) => {
             format!(
                 "Holds · segment {} · {}",
@@ -595,7 +610,10 @@ fn role_content(message: &Message) -> (Vec<Field>, String) {
         Message::Compaction { .. }
         | Message::CompactedTo { .. }
         | Message::Compact { .. }
-        | Message::TrimmedTo { .. } => (Vec::new(), compaction_text(message)),
+        | Message::TrimmedTo { .. }
+        | Message::Learn { .. }
+        | Message::Learned { .. }
+        | Message::Repair { .. } => (Vec::new(), upkeep_text(message)),
         Message::Holds { segment, full } => (
             vec![
                 field("segment", segment.0.to_string()),
@@ -678,9 +696,10 @@ fn call_content(payload: &Payload) -> (Vec<Field>, String) {
     }
 }
 
-/// The words of a message of the compaction (§J3.2). The seal lab runs no
-/// compaction: a message of it gets its plain words.
-fn compaction_text(message: &Message) -> String {
+/// The words of a message that keeps the copies whole: the compaction
+/// (§J3.2) and CTRL's repair (§J5.3). The seal lab runs neither: a message
+/// of them gets its plain words.
+fn upkeep_text(message: &Message) -> String {
     match message {
         Message::Compaction { segment } => format!("Compaction · segment {}", segment.0),
         Message::CompactedTo {
@@ -692,7 +711,37 @@ fn compaction_text(message: &Message) -> String {
         Message::TrimmedTo { segment, slot, .. } => {
             format!("TrimmedTo · segment {} · slot {}", segment.0, slot.0)
         }
-        _ => unreachable!("a message of the compaction"),
+        _ => repair_text(message),
+    }
+}
+
+/// The words of a message of CTRL's repair (§J5.3).
+fn repair_text(message: &Message) -> String {
+    match message {
+        Message::Learn { segment, slot } => {
+            format!("Learn · segment {} · slot {}", segment.0, slot.0)
+        }
+        Message::Learned {
+            segment,
+            slot,
+            command,
+        } => format!(
+            "Learned · segment {} · slot {} · {}",
+            segment.0,
+            slot.0,
+            value_name(command)
+        ),
+        Message::Repair {
+            ballot,
+            slot,
+            command,
+        } => format!(
+            "Repair {} · slot {} · {}",
+            ballot_text(*ballot),
+            slot.0,
+            value_name(command)
+        ),
+        _ => unreachable!("a message of the repair"),
     }
 }
 

@@ -33,6 +33,13 @@
 //! - **the watermark of a leaderless read counts the dropped slots**: a slot
 //!   that a quorum chose and then dropped is still a slot the reader must
 //!   apply before it serves.
+//!
+//! **A CTRL repair** (§J5.3, `specs/tla/journal-ctrl/`). A vote whose value
+//! the disk lost is faulty: the acceptor reports its ballot in each promise.
+//! The leader sends `Repair` with the command that its round chose at its
+//! ballot; the acceptor writes it at the higher of the two ballots, with the
+//! promise raised to it, in one batch. A vote above the choosing ballot
+//! carries the chosen command (P2c), so the write gives back the lost vote.
 
 use std::collections::BTreeMap;
 
@@ -274,6 +281,11 @@ impl JournalAcceptor {
                 start,
                 below,
             } => self.compact(segment, start, below),
+            Message::Repair {
+                ballot,
+                slot,
+                command,
+            } => self.repair(ballot, slot, command),
             _ => Vec::new(),
         };
         assert!(
@@ -482,6 +494,58 @@ impl JournalAcceptor {
             start,
             below,
         }])
+    }
+
+    /// The CTRL repair of a faulty vote (§J5.3, `specs/tla/journal-ctrl/`,
+    /// `AccRepair`): `command` was chosen at `ballot`, so the acceptor
+    /// writes it at the higher of `ballot` and the ballot that the faulty
+    /// vote keeps, with the promise raised to it, in one batch. A vote above
+    /// `ballot` carries the chosen command (P2c), so the repaired vote is the
+    /// one the disk lost; a vote below gives way to the vote at `ballot`. An
+    /// acceptor whose vote at `slot` is readable, or in a dropped range,
+    /// writes nothing.
+    fn repair(&mut self, ballot: Ballot, slot: Slot, command: Command) -> Vec<AcceptorEffect> {
+        let Some(faulty) = self.acceptor.faulty().get(&slot).copied() else {
+            probe!(
+                reachable,
+                "acceptor: a Repair of a readable vote writes nothing"
+            );
+            return Vec::new();
+        };
+        assert!(
+            !dropped_at(&self.dropped, slot),
+            "a compaction keeps no faulty vote in its range"
+        );
+        probe!(
+            sometimes,
+            faulty > ballot,
+            "acceptor: a Repair keeps the ballot of the faulty vote"
+        );
+        probe!(
+            sometimes,
+            faulty < ballot,
+            "acceptor: a Repair writes at the choosing ballot"
+        );
+        let promised = self.acceptor.promised();
+        let mut ops = Vec::new();
+        let at = self.acceptor.learn_chosen(slot, ballot, &command, &mut ops);
+        if at > promised {
+            // A promise that a `Prepare` did not raise names no segment.
+            self.bound = None;
+        }
+        assert!(
+            at == faulty.max(ballot),
+            "a repair writes at the higher ballot"
+        );
+        assert!(
+            self.acceptor.record(slot) == Some(&(at, command)),
+            "a repair holds the chosen command"
+        );
+        assert!(
+            !self.acceptor.faulty().contains_key(&slot),
+            "a repaired vote is readable"
+        );
+        self.persist(ops)
     }
 
     fn nack(&self, to: NodeId, ballot: Ballot) -> AcceptorEffect {

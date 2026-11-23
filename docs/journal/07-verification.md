@@ -34,6 +34,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 | Quorum everywhere and the grid bound | §J5.1 | `quorum-everywhere/`, `grid/` | #1257 (quorum everywhere); #1318 (the rows of the boundary write and the acceptor compaction) |
 | CTRL on a grid and across segments | §J5.3 | `ctrl-grid/`, `ctrl-segments/` | #1263 (CTRL recovery in the journal) |
 | The seal end against a faulty record: a faulty vote counts | §J3.1, §J5.3 | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record) |
+| CTRL in the journal roles: a damaged vote, the tri-state tally of the leader, the probe, the learn from a replica and the repair at the higher ballot | §J5.3 | `journal-ctrl/` | #1326 (the journal roles over the core) |
 | Re-replication of a sealed segment | §J3.1, §J5.2 | `re-replication/`, `heal-reuse/` (a node asked again, late requests, a node's own view), its row in `quorum-everywhere/` | #1314 (re-replication of a sealed segment's replica set) |
 | The rules composed across three segments, with the acceptors' disk and the write orders | §J7.2 | `journal-state/` | #1189 (the journal state model), #1309 (the state is the disk) |
 | A column below quorum, the bypass and its hold (after v1) | §J5.5 | `degraded-reshape/`, `zero-stall/` | #1258 (reshape with a column below quorum), #1018 (zero-stall model, more rules) |
@@ -119,7 +120,7 @@ force. The narrow shape is the default grid (one column of three); the wide shap
 two columns and promises in pages of two. Each campaign reaches its named sites (a seal lost, a
 `Noop` below the start, an old vote chosen again in a new grid, a third segment, a retire, a
 pull from a peer, a leader stopped on a higher promise, `Unknown`, `Below`, `Resolve`, and
-more). TLC checks the walks of the narrow shape against `journal-compact/RolesTrace.tla`, which
+more). TLC checks the walks of the narrow shape against `journal-ctrl/RolesTrace.tla`, which
 extends `Journal.tla` and binds each event to an action of the model with the parameters the
 code chose (`Register`, `Promise`, `Accept`, `Flush`, `Crash`, `Phase1On`, `SealWrite`, `Open`,
 `Propose`, `TakeBase`, `Apply`, `BoundWrite`, `Retire`, `ResolveBelow`). The checked walks meet
@@ -136,7 +137,12 @@ The walk also runs proxy leaders (oracle `PROXY`, mutant `ForgedAccepted`), lead
 the replicas, one of which hears the register late (oracle `READ`, mutant `ReadNoFence`), the
 trim of a retired segment and the reader's floor (oracles `TRIM` and `FLOOR`, mutants
 `TrimIntent` and `FloorFromHolder`; the trace events `Trim` and `Drop`), and the leader time of each write
-(oracle `STAMPED`, mutant `UnstampedAccept`). **Open**: the coverage gate over the journal's
+(oracle `STAMPED`, mutant `UnstampedAccept`). It damages a vote of an acceptor's disk at a boot,
+inside the contract (a replica applied the slot, or the slot chose another command), so a leader
+meets a blocked slot, decides it on a late answer or learns it from a replica, and repairs the
+faulty votes (oracle `REPAIRED`: a repaired vote holds the chosen command at or above the ballot
+that chose it; mutant `RepairForged`; the trace events `rot`, `probe`, `learn` and `repair`, bound
+to `Rot`, `ProbeDecide`, `LearnChosen` and `AccRepair` of `journal-ctrl/`). **Open**: the coverage gate over the journal's
 probes, with CTRL faulty votes on the acceptors' disks (the leader's blocked slot has unit tests
 only); both come with the last rule group of #1326.
 
