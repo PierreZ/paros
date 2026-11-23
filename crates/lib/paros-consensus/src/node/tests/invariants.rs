@@ -656,3 +656,25 @@ fn a_landed_flight_lets_the_node_take_inputs() {
     assert!(second.batch > number, "each flight has its own number");
     n.durable(second);
 }
+
+/// Agreement on the node's own write path: a write of another command at a
+/// chosen slot is a detected safety violation, whatever path makes it (the
+/// record is the one copy of the chosen command).
+#[test]
+#[should_panic(expected = "a write at a chosen slot carries the chosen command")]
+fn an_own_write_of_another_command_at_a_chosen_slot_trips_the_node() {
+    let mut nodes = cluster_with_three_chosen();
+    assert!(nodes[1].replica.is_chosen(Slot(0)));
+    nodes[1].record_accepted(Slot(0), ballot(9, 1), ucmd(1, 1, 99));
+}
+
+/// The same write with the chosen command lands (a correct re-proposal).
+#[test]
+fn an_own_write_of_the_chosen_command_at_a_chosen_slot_lands() {
+    let mut nodes = cluster_with_three_chosen();
+    let chosen = nodes[1].chosen_at(Slot(0)).cloned().unwrap();
+    let mut writes: Vec<WriteOp> = Vec::new();
+    nodes[1].acceptor.set_promise(ballot(9, 1), &mut writes);
+    nodes[1].record_accepted(Slot(0), ballot(9, 1), chosen.clone());
+    assert_eq!(nodes[1].chosen_at(Slot(0)), Some(&chosen));
+}

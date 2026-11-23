@@ -12,6 +12,20 @@ impl ColocatedNode {
     /// wiring takes to [`crate::acceptor::Acceptor::record_accepted`] (which
     /// tallies an in-place repair of a faulty entry itself).
     pub(super) fn record_accepted(&mut self, slot: Slot, ballot: Ballot, command: Command) {
+        // Agreement on every write path (P2c): the record of a chosen slot is
+        // the node's one copy of the chosen command, which the replica reads
+        // back through its `ChosenLog` port, so no write may replace it with
+        // another command. A wire `Accept` is judged before it gets here; a
+        // re-proposal, a `move_round` or a recovery of this node's own is
+        // judged here.
+        if self.replica.is_chosen(slot) {
+            assert!(
+                self.acceptor
+                    .record(slot)
+                    .is_none_or(|(_, held)| *held == command),
+                "a write at a chosen slot carries the chosen command"
+            );
+        }
         let writes = self.pending_writes.len();
         self.acceptor
             .record_accepted(slot, ballot, command, &mut self.pending_writes);
