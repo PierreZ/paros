@@ -127,7 +127,7 @@ use crate::membership::{AcceptorConfig, MAX_ROLE_COUNT, QuorumSystem, ReplicaId}
 use crate::quorum_read::ReadState;
 use crate::quorum_read::{QuorumReads, ReadBasis, ReadOpen};
 use crate::replica::Replica;
-use crate::types::{Ballot, NodeId, Slot};
+use crate::types::{Ballot, NodeId, Slot, Weigh};
 
 /// Monotone counters this incarnation, for the driver's audit report and
 /// the examples: what a replica did, never what it decided.
@@ -176,6 +176,11 @@ pub struct ReplicaNode {
     /// the slots the replica knows chosen (#1101 (one copy of the retained
     /// log)).
     records: BTreeMap<Slot, (Ballot, Command)>,
+    /// The sum of the weights of `records` ([`Weigh`]): the retained bytes a
+    /// driver reads to bound the memory of the retained log (#1153 (retained
+    /// log memory)). Kept by [`Self::hold`] and [`Self::drop_below`], the only
+    /// writers of `records` after boot.
+    retained_bytes: u64,
     /// The node whose beat this replica heard last — where it pulls from.
     leader: Option<NodeId>,
     /// The belief ([`Belief`]): the acceptor configuration this replica
@@ -286,6 +291,7 @@ impl ReplicaNode {
             replica,
             floor,
             faulty,
+            retained_bytes: below.values().map(|(_, command)| command.weight()).sum(),
             records: below,
             leader: None,
             belief,
@@ -300,7 +306,7 @@ impl ReplicaNode {
         };
         for (slot, record) in above {
             let command = record.1.clone();
-            node.records.insert(slot, record);
+            node.hold(slot, record);
             node.replica.learn(&node.records, slot, &command);
         }
         node.advance();
@@ -833,7 +839,7 @@ impl ReplicaNode {
             ballot,
             command: command.clone(),
         });
-        self.records.insert(slot, (ballot, command.clone()));
+        self.hold(slot, (ballot, command.clone()));
         self.replica.learn(&self.records, slot, command);
         self.faulty.remove(&slot);
         self.counters.learned += 1;
@@ -890,7 +896,7 @@ impl ReplicaNode {
         }
         let writes = self.pending_writes.len();
         let sealed = self.replica.truncate(&self.records, first);
-        self.records = self.records.split_off(&first);
+        self.drop_below(first);
         self.pending_writes
             .push(WriteOp::Truncate { first, sealed });
         assert!(
@@ -915,7 +921,7 @@ impl ReplicaNode {
             return;
         }
         let old_chosen_index = self.replica.chosen_index();
-        self.records = self.records.split_off(&point);
+        self.drop_below(point);
         let sealed = self.replica.trim_to(&self.records, point, state);
         self.floor = point;
         self.faulty = self.faulty.split_off(&point);
@@ -1169,6 +1175,70 @@ impl ReplicaNode {
     #[must_use]
     pub fn counters(&self) -> ReplicaCounters {
         self.counters
+    }
+
+    /// The bytes of the records this replica holds in memory, from its
+    /// compaction floor up: the sum of their [`Weigh::weight`]. A driver
+    /// reads it to bound the memory of the retained log, as on a node
+    /// (`ColocatedNode::retained_bytes`; #1153 (retained log memory)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        assert!(
+            !self.records.is_empty() || self.retained_bytes == 0,
+            "a replica with no record retains no byte"
+        );
+        assert!(
+            self.records
+                .last_key_value()
+                .is_none_or(|(_, (_, command))| command.weight() <= self.retained_bytes),
+            "the retained bytes bound the newest record's weight"
+        );
+        self.retained_bytes
+    }
+
+    /// Hold the record learned at `slot`, and count its bytes.
+    fn hold(&mut self, slot: Slot, record: (Ballot, Command)) {
+        let added = record.1.weight();
+        let replaced = self
+            .records
+            .insert(slot, record)
+            .map_or(0, |(_, old)| old.weight());
+        assert!(
+            replaced <= self.retained_bytes,
+            "the retained bytes hold the weight of the record they replace"
+        );
+        self.retained_bytes = self.retained_bytes - replaced + added;
+        assert!(
+            self.retained_bytes >= added,
+            "the retained bytes hold the record just learned"
+        );
+    }
+
+    /// Drop every record below `first`, and their bytes.
+    fn drop_below(&mut self, first: Slot) {
+        let kept = self.records.split_off(&first);
+        let dropped: u64 = self
+            .records
+            .values()
+            .map(|(_, command)| command.weight())
+            .sum();
+        assert!(
+            dropped <= self.retained_bytes,
+            "the retained bytes hold the weight of every record a prefix drops"
+        );
+        self.retained_bytes -= dropped;
+        self.records = kept;
+        assert!(
+            self.records
+                .first_key_value()
+                .is_none_or(|(s, _)| *s >= first),
+            "no record survives below a dropped prefix"
+        );
     }
 
     fn clear_pending(&mut self) {

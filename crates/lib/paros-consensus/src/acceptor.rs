@@ -46,7 +46,7 @@ use std::collections::BTreeMap;
 
 use crate::contract::write::AcceptorWrite;
 use crate::retained::RetainedWindow;
-use crate::types::{Ballot, Slot};
+use crate::types::{Ballot, Slot, Weigh};
 
 use crate::contract::limits::PROMISE_BATCH;
 
@@ -115,9 +115,14 @@ pub struct Acceptor<V> {
     /// every record" in O(1), where a scan of the log grew with it (#619
     /// (O(n) invariants)).
     ceiling: Ballot,
+    /// The sum of the weights of the records held ([`Weigh`]): the retained
+    /// bytes a driver reads to bound the memory of the retained log (#1153
+    /// (retained log memory)). Kept as records are written and dropped, so a
+    /// read costs nothing however long the log grows.
+    retained_bytes: u64,
 }
 
-impl<V: Clone + PartialEq> Acceptor<V> {
+impl<V: Clone + PartialEq + Weigh> Acceptor<V> {
     /// An acceptor over the durable state a boot scan read back.
     ///
     /// # Panics
@@ -151,12 +156,14 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             .chain(faulty.values().copied())
             .max()
             .unwrap_or_else(Ballot::zero);
+        let retained_bytes = records.values().map(|(_, value)| value.weight()).sum();
         let acceptor = Self {
             promised,
             records: RetainedWindow::new(records, first_slot),
             faulty: RetainedWindow::new(faulty, first_slot),
             faulty_repaired: 0,
             ceiling,
+            retained_bytes,
         };
         acceptor.assert_invariants();
         acceptor
@@ -228,6 +235,41 @@ impl<V: Clone + PartialEq> Acceptor<V> {
                 .all(|ballot| *ballot <= self.ceiling),
             "the ballot ceiling bounds every faulty record"
         );
+        // The retained bytes, read back against the records at their ends:
+        // no record, no byte; and the sum bounds each end record's weight.
+        if self.records.entries().is_empty() {
+            assert!(
+                self.retained_bytes == 0,
+                "an acceptor with no record retains no byte"
+            );
+        }
+        assert!(
+            [self.records.first_key(), self.records.last_key()]
+                .into_iter()
+                .flatten()
+                .filter_map(|slot| self.records.get(slot))
+                .all(|(_, value)| value.weight() <= self.retained_bytes),
+            "the retained bytes bound every record's weight"
+        );
+    }
+
+    /// The bytes of the records this acceptor holds in memory, from the
+    /// compaction floor up: the sum of their [`Weigh::weight`]. A driver
+    /// reads it to bound the memory of the retained log: above a limit of
+    /// its own, it refuses a client before it calls `propose`, and a
+    /// `Truncate` brings the sum down (#1153 (retained log memory)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        assert!(
+            !self.records.entries().is_empty() || self.retained_bytes == 0,
+            "an acceptor with no record retains no byte"
+        );
+        self.retained_bytes
     }
 
     // ---- reads --------------------------------------------------------------
@@ -622,7 +664,21 @@ impl<V: Clone + PartialEq> Acceptor<V> {
                 .is_none_or(|(held, _)| ballot >= *held),
             "an accepted record's ballot never falls"
         );
-        self.records.insert(slot, (ballot, command.clone()));
+        let bytes_before = self.retained_bytes;
+        let added = command.weight();
+        let replaced = self
+            .records
+            .insert(slot, (ballot, command.clone()))
+            .map_or(0, |(_, old)| old.weight());
+        assert!(
+            replaced <= bytes_before,
+            "the retained bytes hold the weight of the record they replace"
+        );
+        self.retained_bytes = bytes_before - replaced + added;
+        assert!(
+            self.retained_bytes >= added,
+            "the retained bytes hold the record just written"
+        );
         self.ceiling = self.ceiling.max(ballot);
         writes.push(
             AcceptorWrite::AppendAccepted {

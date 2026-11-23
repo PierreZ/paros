@@ -1,8 +1,9 @@
 # A bound on the memory of the retained log (#1153)
 
-Status: **proposal**. This note is the design that #1153 (a bound on the memory of the
-retained log) asks for before code. Pierre asked for the simplest bound (2026-11-23), and this note proposes it: a measure
-in the core and a refusal in the driver. No code of the bound is in the tree yet.
+Status: **the measure is built**. This note is the design that #1153 (a bound on the memory
+of the retained log) asked for before code. Pierre asked for the simplest bound (2026-11-23):
+a measure in the core and a refusal in the driver. The measure is in the tree
+(`ColocatedNode::retained_bytes`, `ReplicaNode::retained_bytes`); the window below is not.
 
 ## Where paros is after #1101
 
@@ -88,10 +89,12 @@ forward, as a FoundationDB peek does.
 
 The simplest bound changes no protocol rule. The core counts, and the driver decides.
 
-1. **The measure.** The retained bytes: the sum of the command bytes of the records that the
-   acceptor holds, from the compaction floor up (the same measure as `max_bytes` of a read).
-   The acceptor keeps the sum as it writes and drops records, so the measure costs nothing
-   per step. `NodeCounters` reports it as `retained_bytes`.
+1. **The measure.** The retained bytes: the sum of the weights of the records that a node's
+   acceptor (or a `ReplicaNode`) holds, from the compaction floor up. A value says its weight
+   through the trait `types::Weigh`: a client write weighs its records' bytes (the same
+   measure as `max_bytes` of a read), a control command weighs nothing. The acceptor keeps the
+   sum as it writes and drops records, so a read costs nothing per step.
+   `ColocatedNode::retained_bytes` and `ReplicaNode::retained_bytes` report it.
 2. **The driver refuses above its limit.** The driver reads the counter and turns a client
    away before it calls `propose` when the measure is above a limit that the host sets. The
    refusal is the driver's answer to its client, as FoundationDB's Ratekeeper throttles the
@@ -103,9 +106,13 @@ The simplest bound changes no protocol rule. The core counts, and the driver dec
 4. **The plain arm is unchanged.** A driver that reads no counter behaves as today. The
    digests of `consensus-sim/tests/differential.txt` hold.
 
-How it is checked: unit tests pair the counter with the acceptor's records (it rises on each
-accepted record, falls on a compaction and a trim-point jump, and reads back the same after a
-reboot), and a consensus-sim oracle compares it with a sum over the records at each step.
+How it is checked: unit tests pair the counter with the records (it rises on each record,
+swaps the bytes of a record it replaces, falls on a compaction and a trim-point jump, and
+reads back the same after a reboot, on a node and on a replica node), and paired assertions
+in the core hold it in every walk of consensus-sim (no record, no byte; the sum bounds each
+end record's weight; a drop never takes more than the sum). A consensus-sim oracle would
+compare two outputs of the core, which no planted mutant of the driver can make differ, so
+the core's own tests and its mutants judge it.
 
 ## Later, if a deployment needs it: a window in memory
 

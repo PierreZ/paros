@@ -289,6 +289,13 @@ pub enum Command {
     },
 }
 
+impl paros_consensus::types::Weigh for Command {
+    /// The bytes of the command's encoding ([`crate::codec`]).
+    fn weight(&self) -> u64 {
+        u64::try_from(crate::codec::encode_command(self).len()).expect("a command fits in u64")
+    }
+}
+
 impl paros_consensus::types::Fingerprint for Command {
     /// The FNV-1a hash of the command's bytes ([`crate::codec`]): two equal
     /// commands encode to the same bytes. The core's Phase-2 tally checks a

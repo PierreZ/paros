@@ -352,6 +352,16 @@ fn a_replica_reboots_from_its_learned_records() {
     tier.propose(3, |_, _| true);
     assert_eq!(tier.applied_slots(0), vec![0]);
     let rebooted = ReplicaNode::new(&tier.disks[0], Limits::DEFAULT);
+    assert_eq!(
+        tier.replicas[0].retained_bytes(),
+        2,
+        "two one-byte records are held: slots 0 and 2"
+    );
+    assert_eq!(
+        rebooted.retained_bytes(),
+        tier.replicas[0].retained_bytes(),
+        "a reboot reads the retained bytes back"
+    );
     assert_eq!(rebooted.replica().chosen_index(), Some(Slot(0)));
     assert!(
         rebooted.replica().is_chosen(Slot(2)),
@@ -378,6 +388,14 @@ fn a_replica_executes_a_decided_truncate_and_seals_its_journal_state() {
     for seq in 0..=2 {
         tier.write(1, seq, |_, _| true);
     }
+    for r in 0..REPLICAS.len() {
+        assert_eq!(
+            tier.replicas[r].retained_bytes(),
+            held_bytes(&tier.replicas[r]),
+            "the retained bytes are the held records' bytes"
+        );
+    }
+    let before = tier.replicas[0].retained_bytes();
     let _ = tier.nodes[0].propose_control(Control::Truncate {
         leader: LeaderUuid(1),
         up_to: Seq(2),
@@ -395,7 +413,27 @@ fn a_replica_executes_a_decided_truncate_and_seals_its_journal_state() {
         );
         assert_eq!(tier.disks[r].sealed.leader, Some(LeaderUuid(1)));
         assert_eq!(tier.applied_slots(r), vec![0, 1, 2, 3, 4]);
+        assert_eq!(
+            tier.replicas[r].retained_bytes(),
+            held_bytes(&tier.replicas[r]),
+            "a truncation drops the bytes of the records below the floor"
+        );
     }
+    assert!(
+        tier.replicas[0].retained_bytes() < before,
+        "a truncation lowers the retained bytes"
+    );
+}
+
+/// The bytes of the client records a replica holds, summed by hand over its
+/// chosen log (the records it holds are exactly its chosen slots).
+fn held_bytes(replica: &ReplicaNode) -> u64 {
+    replica
+        .chosen_commands()
+        .filter_map(|(_, command)| command.write())
+        .flat_map(|entry| entry.records.iter())
+        .map(|record| record.len() as u64)
+        .sum()
 }
 
 #[test]

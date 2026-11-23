@@ -5,7 +5,7 @@
 
 use paros_consensus::Ballot;
 use paros_consensus::membership::{MatchmakerGeneration, MatchmakerSet};
-use paros_consensus::types::{FNV_OFFSET, Fingerprint, fnv1a};
+use paros_consensus::types::{FNV_OFFSET, Fingerprint, Weigh, fnv1a};
 
 use super::value::RegisterValue;
 use crate::codec::encode_segment;
@@ -33,6 +33,14 @@ pub struct Successor {
     pub written: Written,
     /// The highest read generation of the stop quorum.
     pub read: Ballot,
+}
+
+impl Weigh for Successor {
+    /// The bytes of the successor's scalars and of its members' ids.
+    fn weight(&self) -> u64 {
+        let members = core::mem::size_of_val(self.set.members());
+        u64::try_from(core::mem::size_of::<Self>() + members).expect("a successor fits in u64")
+    }
 }
 
 impl Fingerprint for Successor {

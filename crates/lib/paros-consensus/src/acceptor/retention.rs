@@ -20,7 +20,7 @@ use super::Acceptor;
 use crate::contract::write::WriteOp;
 use crate::journal::Command;
 use crate::journal::state::JournalState;
-use crate::types::Slot;
+use crate::types::{Slot, Weigh};
 
 impl Acceptor<Command> {
     /// Drop every record and faulty entry below `first`, raise the floor to
@@ -85,6 +85,16 @@ impl Acceptor<Command> {
             "the compaction floor never moves backward"
         );
         let watermark_before = self.vote_watermark();
+        let dropped: u64 = self
+            .records
+            .range(..first)
+            .map(|(_, (_, command))| command.weight())
+            .sum();
+        assert!(
+            dropped <= self.retained_bytes,
+            "the retained bytes hold the weight of every record a prefix drops"
+        );
+        self.retained_bytes -= dropped;
         self.records.raise_floor(first);
         self.faulty.raise_floor(first);
         self.assert_invariants();
