@@ -119,11 +119,11 @@ use paros_journal_control::{
 use paros_journal_io::mem::{ManualClock, MemRegister};
 use paros_journal_io::storage::Storage as _;
 use paros_journal_io::{
-    Address, Assignment, CallId, CallOutcome, Clock, Driver, Envelope, HostConfig, JournalId,
-    Notice, Op, Register,
+    Address, Assignment, CallId, CallOutcome, ChangeError, Clock, Driver, Envelope, HostConfig,
+    JournalId, Notice, Op, Register,
 };
 
-use crate::backend::{Disk, Wire};
+use crate::backend::{Disk, LossyRegister, Wire};
 use crate::oracle::{Truth, as_written, label};
 
 /// Oracle: one command is chosen at each slot of a journal.
@@ -152,6 +152,10 @@ pub const HEAL_HELD: &str =
 
 /// The coverage sites of the whole journal walk.
 pub mod reach {
+    /// A machine's register change got no answer, and its write took place.
+    pub const LOST_DONE: &str = "whole journal: a lost register reply hid a done write";
+    /// A machine's register change got no answer, and no write took place.
+    pub const LOST_UNDONE: &str = "whole journal: a register change was lost before it ran";
     /// One commit held the batches of two journals.
     pub const TWO_JOURNALS: &str = "whole journal: one commit held the batches of two journals";
     /// A commit failed and stopped its roles.
@@ -203,6 +207,8 @@ pub mod reach {
 
     /// Every site of the walk.
     pub const ALL: &[&str] = &[
+        LOST_DONE,
+        LOST_UNDONE,
         TWO_JOURNALS,
         FAILED,
         RESTARTED,
@@ -278,6 +284,9 @@ pub const DOWN_AFTER: u64 = 4;
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 4,
+    // One answer held: the writer of each journal has one call in flight,
+    // and a call sent again while the first is still held is busy.
+    window: 1,
 };
 const TUNABLES: Tunables = Tunables {
     stale_after: 10 * TICK,
@@ -327,13 +336,22 @@ fn two_journals(ops: &[Op]) {
 /// and the verdict; the payload at each position written; the fold.
 type Judged = (Vec<(u64, &'static str)>, BTreeMap<u64, Vec<u8>>, Truth);
 
-type Proc = Driver<Disk, Wire, ManualClock, MemRegister, ()>;
+/// [`reach::LOST_DONE`] and [`reach::LOST_UNDONE`] on each register change
+/// that got no answer.
+fn lost_change(done: bool) {
+    sometimes!(done, reach::LOST_DONE);
+    sometimes!(!done, reach::LOST_UNDONE);
+}
+
+type Proc = Driver<Disk, Wire, ManualClock, LossyRegister, ()>;
 
 /// One machine: its driver while it is up, its disk and its placed roles
 /// always.
 struct Machine {
     driver: Option<Proc>,
     disk: Disk,
+    /// The register as the machine reaches it.
+    register: LossyRegister,
     inbox: Rc<RefCell<VecDeque<Envelope>>>,
     outbox: Rc<RefCell<Vec<Envelope>>>,
     /// The acceptors and replicas that placement put here.
@@ -755,6 +773,7 @@ impl WholeModel {
                 Machine {
                     driver: None,
                     disk: Disk::new(two_journals),
+                    register: LossyRegister::new(model.register.clone(), lost_change),
                     inbox: Rc::default(),
                     outbox: Rc::default(),
                     placed: Vec::new(),
@@ -828,7 +847,7 @@ impl WholeModel {
             machine.disk.clone(),
             wire,
             self.clock.clone(),
-            self.register.clone(),
+            machine.register.clone(),
             (),
         );
         for assignment in &machine.placed {
@@ -1177,7 +1196,7 @@ impl WholeModel {
             return;
         };
         let answer = match outcome {
-            CallOutcome::NotLeader => {
+            CallOutcome::NotLeader | CallOutcome::Busy => {
                 journal.again = Some(call.command);
                 return;
             }
@@ -2107,14 +2126,17 @@ impl WholeModel {
         Ok(())
     }
 
-    /// Arm a commit fault on a machine.
+    /// Arm a commit fault on a machine, or one in three times the loss of
+    /// its next register change (its request or its reply).
     fn fault(&mut self, cx: &mut Cx<'_, Self>) {
         let m = *cx.rng().pick(&MACHINES).expect("machines");
-        let disk = &self.machines[&m].disk;
+        let machine = &self.machines[&m];
         if self.mutant == WholeMutant::LyingDisk {
-            disk.arm_lie();
+            machine.disk.arm_lie();
+        } else if cx.rng().chance(1, 3) {
+            machine.register.arm(cx.rng().chance(1, 2));
         } else {
-            disk.arm(cx.rng().chance(1, 2));
+            machine.disk.arm(cx.rng().chance(1, 2));
         }
     }
 
@@ -2190,7 +2212,8 @@ impl ControlRegister for WalkRegister<'_, '_> {
         } else {
             match result {
                 Ok(value) => Outcome::Done(value),
-                Err(refusal) => Outcome::Refused(refusal),
+                Err(ChangeError::Refused(refusal)) => Outcome::Refused(refusal),
+                Err(other) => panic!("the walk's register holds journal {:?}: {other:?}", self.id),
             }
         };
         self.ran.push((change.clone(), outcome.clone(), done));

@@ -13,7 +13,7 @@ use crate::wire::Time;
 struct Forgetful;
 
 impl Storage<Journal> for Forgetful {
-    fn commit(&mut self, _ops: &[Op], _sync: bool) -> Result<(), StorageError> {
+    fn commit(&mut self, _ops: &[Op]) -> Result<(), StorageError> {
         Ok(())
     }
 
@@ -29,8 +29,8 @@ fn the_storage_suite_fails_a_disk_that_forgets() {
 }
 
 #[test]
-#[should_panic(expected = "storage: a synced commit is seen after a reopen")]
-fn the_reopen_suite_fails_a_disk_that_loses_a_synced_commit() {
+#[should_panic(expected = "storage: a commit is seen after a reopen")]
+fn the_reopen_suite_fails_a_disk_that_loses_a_commit() {
     storage_reopen(MemStorage::new, |_| MemStorage::new());
 }
 

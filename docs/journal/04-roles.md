@@ -219,10 +219,26 @@ backends in memory (`mem`) and the contract suites (`contract`).
   memory)); an `Unassign` of the node with no segment stops every role of the node. The driver gives every
   send to the `Transport`, a send between two roles of one process too. One process may serve
   every role, or one role; the `Host` does not change.
-- *Rule 4.* `Storage` is one trait: `commit(ops, sync)`, atomic, and `scan(address)`, every
+- *Rule 4.* `Storage` is one trait: `commit(ops)`, atomic and durable when it returns `Ok`, and `scan(address)`, every
   record of one role in key order. The format is the crate's (`layout`): a `Key` is the journal,
   the node, the segment of a replica (0 for every other role), the kind of the record and an index (a slot), and its bytes sort as the key does,
   so each op is namespaced by (journal, role). Each batch ends with the role's `Durable` record.
+  `commit` has no `sync` flag (proposal of the Fable review of 2026-11-23, item 4): every batch
+  of a role holds state that a send waits on, so the driver never had a batch that a crash may
+  lose, and the flag was always on.
+- *A leader's window* (Fable review of 2026-11-23, item 2; decision 30, a limit on each size). A
+  leader holds at most `window` answers, which the driver chooses (`HostConfig::window`, at
+  least one): a proposal above it is `Proposed::Busy`, and the `Host` answers the call
+  `CallOutcome::Busy`. The command holds no slot, so the caller sends it again later, as after
+  `NotLeader`. So a leader whose rounds do not close (a column below quorum) holds a bounded
+  memory. **Open**: the window of a deployment, which the program chooses.
+- *A register change with no answer* (Fable review of 2026-11-23, item 3). `Register::change`
+  answers a done value, a refusal, `Unknown` (no register for the journal) or `NoAnswer` (a lost
+  request or reply: the write may or may not have taken place). The driver gives the roles the
+  done value or the refusal; it keeps a change with no answer and runs it again at the next
+  timer, after it gave the roles the newest value that a read of the register shows. A write of
+  the first try that took place reaches the role first, so a leader whose seal took place opens,
+  and the refusal of the second try finds it open and changes nothing.
   The damage report is per role: a record the backend reports corrupt (`Entry::Corrupt`), or that
   does not decode as its kind, stops the role with `Stop::Damaged` and its keys. A
   `StorageError` means "unknown". The contract suites (`contract::storage`,

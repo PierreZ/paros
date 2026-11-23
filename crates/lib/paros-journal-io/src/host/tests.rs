@@ -13,6 +13,7 @@ const K: JournalId = JournalId(2);
 const CONFIG: HostConfig = HostConfig {
     tick: 10,
     resend_page: 4,
+    window: 64,
 };
 
 fn at(journal: JournalId, node: u64) -> Address {

@@ -9,6 +9,20 @@
 use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, ChangeRefusal, RegisterValue};
 
+/// Why a change gave no done value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangeError {
+    /// The register refused the change: its guard failed, so the write did
+    /// not take place.
+    Refused(ChangeRefusal),
+    /// The register holds no journal of this id: no write took place.
+    Unknown,
+    /// No answer came (a lost request or a lost reply): the write may or
+    /// may not have taken place. The caller learns which from a later done
+    /// value, or from a refusal of the same change asked again.
+    NoAnswer,
+}
+
 /// The registers of the journals that a process serves.
 ///
 /// In one process the register is a value in memory
@@ -22,12 +36,10 @@ pub trait Register {
     ///
     /// # Errors
     ///
-    /// The register refused the change (its guard failed).
-    fn change(
-        &mut self,
-        journal: JournalId,
-        change: &Change,
-    ) -> Result<RegisterValue, ChangeRefusal>;
+    /// The register refused the change (its guard failed), it holds no
+    /// journal of this id, or no answer came ([`ChangeError`]).
+    fn change(&mut self, journal: JournalId, change: &Change)
+    -> Result<RegisterValue, ChangeError>;
 
     /// The value of the last done write on the register of `journal`, if
     /// the register exists.

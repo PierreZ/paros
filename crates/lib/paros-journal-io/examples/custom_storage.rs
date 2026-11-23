@@ -96,7 +96,7 @@ impl LogStorage {
 }
 
 impl Storage<Journal> for LogStorage {
-    fn commit(&mut self, ops: &[Op], _sync: bool) -> Result<(), StorageError> {
+    fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
         let mut batch = Vec::new();
         for op in ops {
             batch.extend(op.key.to_bytes());
@@ -136,6 +136,7 @@ type Process = Driver<LogStorage, paros_journal_io::mem::Endpoint, ManualClock, 
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 16,
+    window: 64,
 };
 const NODES: [u64; 6] = [1, 2, 3, 11, 12, 13];
 const L1: u64 = 100;

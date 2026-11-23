@@ -42,7 +42,7 @@ use paros_journal::{Command, Leader, NodeId, SegmentId, Seq};
 
 use crate::family::Journal;
 use crate::host::{Assignment, CallId, CallOutcome, Host, HostConfig, Input, Output, Stop};
-use crate::register::Register;
+use crate::register::{ChangeError, Register};
 use crate::wire::{Address, Time};
 
 /// The answer of a client call, with the leader that gave it.
@@ -97,6 +97,9 @@ struct JournalPorts<R> {
     register: R,
     /// The value of the last done write that the `Host` observed.
     observed: BTreeMap<JournalId, RegisterValue>,
+    /// The register changes that got no answer: each runs again at the
+    /// next timer, until the register answers it.
+    unanswered: Vec<(Address, Change)>,
     replies: Vec<CallReply>,
     reads: Vec<ReadReply>,
     notices: Vec<Notice>,
@@ -107,6 +110,7 @@ impl<R: Register> JournalPorts<R> {
         Self {
             register,
             observed: BTreeMap::new(),
+            unanswered: Vec::new(),
             replies: Vec::new(),
             reads: Vec::new(),
             notices: Vec::new(),
@@ -124,17 +128,29 @@ impl<R: Register> JournalPorts<R> {
         Some(Input::Observe { journal, value })
     }
 
-    /// Run `change` on the register: the input of its result.
-    fn change(&mut self, address: Address, change: &Change) -> Input {
+    /// Run `change` on the register: the input of its result, the done
+    /// value or the refusal. A change with no answer gives no input: it
+    /// waits for the next timer and runs again ([`ChangeError::NoAnswer`]).
+    fn change(&mut self, address: Address, change: &Change) -> Option<Input> {
         match self.register.change(address.journal, change) {
             Ok(value) => {
                 self.observed.insert(address.journal, value.clone());
-                Input::Observe {
+                Some(Input::Observe {
                     journal: address.journal,
                     value,
-                }
+                })
             }
-            Err(_) => Input::Refused { address },
+            Err(ChangeError::Refused(_) | ChangeError::Unknown) => Some(Input::Refused { address }),
+            Err(ChangeError::NoAnswer) => {
+                if !self
+                    .unanswered
+                    .iter()
+                    .any(|(a, c)| *a == address && c == change)
+                {
+                    self.unanswered.push((address, change.clone()));
+                }
+                None
+            }
         }
     }
 }
@@ -151,7 +167,9 @@ impl<R: Register> Ports<Host> for JournalPorts<R> {
 
     fn output(&mut self, address: Address, output: Output) -> Vec<Input> {
         match output {
-            Output::Register { change } => return vec![self.change(address, &change)],
+            Output::Register { change } => {
+                return self.change(address, &change).into_iter().collect();
+            }
             Output::Reply { call, outcome } => self.replies.push(CallReply {
                 address,
                 call,
@@ -357,7 +375,34 @@ where
     /// output that still waits on a batch: the flight rule of the driver is
     /// broken.
     pub fn poll(&mut self) -> bool {
-        self.inner.poll()
+        let fired = self
+            .inner
+            .timer()
+            .is_some_and(|at| at <= self.inner.clock().now());
+        let mut busy = self.inner.poll();
+        // A change that got no answer runs again, paced by the timer, once
+        // the roles saw the newest done value: a write of the first try that
+        // took place reached them first, and they judge a refusal of the
+        // second try on it. A change of a role that stopped is dropped.
+        if fired {
+            let unanswered = std::mem::take(&mut self.inner.ports_mut().unanswered);
+            let mut again = false;
+            for (address, change) in unanswered {
+                if !self.host().serves(address) {
+                    continue;
+                }
+                again = true;
+                if let Some(input) = self.inner.ports_mut().change(address, &change) {
+                    self.inner.input(input);
+                }
+            }
+            // A second round commits what the answers stepped.
+            if again {
+                self.inner.poll();
+                busy = true;
+            }
+        }
+        busy
     }
 
     /// Give the `Host` the register value of `journal` when it is new.

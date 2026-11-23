@@ -89,6 +89,8 @@ pub mod reach {
     pub const UNKNOWN: &str = "driver walk: a call was answered Unknown";
     /// A send waited on a batch that was not durable yet.
     pub const HELD: &str = "driver walk: a reply waited on a batch in the group";
+    /// A leader answered a call busy.
+    pub const BUSY: &str = "driver walk: a leader answered a call busy";
     /// A read served a page with a record.
     pub const READ_SERVED: &str = "driver walk: a read served a page with a record";
     /// An answer to a read of a driver before a restart reached the new
@@ -107,6 +109,7 @@ pub mod reach {
         HELD,
         READ_SERVED,
         STALE_READ_ACK,
+        BUSY,
     ];
 }
 
@@ -135,6 +138,9 @@ const TICK: u64 = 1_000;
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 4,
+    // One answer held: a call sent again while the first is still held is
+    // busy.
+    window: 1,
 };
 const A: LeaderUuid = LeaderUuid(0xA);
 
@@ -256,7 +262,7 @@ impl Model for HostModel {
 
     fn weight(action: HostAction, phase: Phase) -> u32 {
         match (action, phase) {
-            (HostAction::Fault | HostAction::Campaign, Phase::Chaos) => 2,
+            (HostAction::Fault | HostAction::Campaign, Phase::Chaos) | (HostAction::Late, _) => 2,
             (HostAction::Fault, _) | (HostAction::Read, Phase::Settle) => 0,
             (HostAction::Poll | HostAction::Tick | HostAction::Write, Phase::Settle)
             | (HostAction::Campaign, _) => 1,
@@ -264,7 +270,6 @@ impl Model for HostModel {
             (HostAction::Tick, _) => 5,
             (HostAction::Write, _) => 10,
             (HostAction::Read, _) => 6,
-            (HostAction::Late, _) => 2,
         }
     }
 
@@ -676,6 +681,10 @@ impl HostModel {
         };
         match outcome {
             CallOutcome::NotLeader => self.again = Some(call.command),
+            CallOutcome::Busy => {
+                sometimes!(true, reach::BUSY);
+                self.again = Some(call.command);
+            }
             CallOutcome::Reply(Reply::Unknown) => {
                 sometimes!(true, reach::UNKNOWN);
                 self.again = Some(call.command);
@@ -766,7 +775,14 @@ impl HostModel {
     /// The writer's next call, to a leader that writes.
     fn write(&mut self, cx: &mut Cx<'_, Self>) {
         if self.call.is_some() {
-            return;
+            // The caller times out while its call is held, and sends it
+            // again: the fate of the first call is unknown, and a leader
+            // whose window is full answers the second busy.
+            if cx.phase() != Phase::Chaos || !cx.rng().chance(1, 4) {
+                return;
+            }
+            let call = self.call.take().expect("a call");
+            self.again = Some(call.command);
         }
         let Some(p) = self.open_leader() else {
             return;

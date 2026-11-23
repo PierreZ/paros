@@ -58,6 +58,7 @@ fn main() {
         HostConfig {
             tick: TICK,
             resend_page: 16,
+            window: 64,
         },
         MemStorage::new(),
         MemNetwork::new().endpoint(),

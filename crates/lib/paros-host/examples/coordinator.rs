@@ -271,7 +271,7 @@ impl Role for CellRole {
 struct Disk(Rc<RefCell<Vec<TermRecord>>>);
 
 impl Storage<Cell> for Disk {
-    fn commit(&mut self, ops: &[TermRecord], _sync: bool) -> Result<(), StorageError> {
+    fn commit(&mut self, ops: &[TermRecord]) -> Result<(), StorageError> {
         self.0.borrow_mut().extend(ops.iter().cloned());
         Ok(())
     }

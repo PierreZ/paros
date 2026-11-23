@@ -30,9 +30,9 @@ impl core::error::Error for StorageError {}
 /// - **In order.** The ops of a batch apply in order: a later op at the
 ///   same key wins. A commit that returned `Ok` is seen by every later
 ///   [`scan`](Storage::scan).
-/// - **Durable.** With `sync`, a batch that returned `Ok` survives a crash.
-///   Without `sync`, it may be lost by a crash, but only together with every
-///   later batch.
+/// - **Durable.** A batch that returned `Ok` survives a crash: every batch
+///   of a role carries state that a send of the role may wait on (the flight
+///   rule), so the driver has no batch that a crash may lose.
 /// - **Ranges.** [`scan`](Storage::scan) gives every record of one role,
 ///   and no record of another role.
 pub trait Storage<F: Family> {
@@ -41,7 +41,7 @@ pub trait Storage<F: Family> {
     /// # Errors
     ///
     /// The batch may or may not be durable.
-    fn commit(&mut self, ops: &[F::Op], sync: bool) -> Result<(), StorageError>;
+    fn commit(&mut self, ops: &[F::Op]) -> Result<(), StorageError>;
 
     /// Every record of the role at `address`.
     ///

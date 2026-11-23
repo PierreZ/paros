@@ -107,10 +107,13 @@ TraceStep ==
   \/ e.event = "propose" /\ Propose(e.b, e.s, Cmd(e))
   \/ e.event = "base" /\ TakeBase(e.r)
   \/ /\ e.event = "apply"
-     \* A leader's `Commit` is a source only once an acceptor dropped the
-     \* slot: before, the slot has a source of `Apply`.
+     \* A `Commit` in flight is a source only once its sender may no
+     \* longer be one: a leader's once an acceptor dropped the slot, a
+     \* peer's once that peer compacted past it. Before, the slot has a
+     \* source of `Apply`.
      /\ \/ Apply(e.r)
-        \/ /\ \E a \in Acceptors : e.s \in adrop[a] \cup dadrop[a]
+        \/ /\ \/ \E a \in Acceptors : e.s \in adrop[a] \cup dadrop[a]
+              \/ \E q \in RepOf[GenOf(e.r)] \ {e.r} : rcomp[q] > e.s
            /\ ApplyIf(e.r, TRUE)
      /\ Front(e.r) = e.s
      /\ ChosenVal(e.s) = Cmd(e)

@@ -523,8 +523,24 @@ pub const EDITS: &[Edit] = &[
         )
     }),
     repeat_edit!("a rot repeated", "rot"),
-    Edit::new("a rot of the next slot", |events| {
-        change_first(events, |e, i| is(&e[i], "rot"), |e| plus(e, "s", 1))
+    // A rot of a slot that no leader proposed yet: an unchosen slot is never
+    // spare. (The next slot may be spare too, so it is no edit.)
+    Edit::new("a rot of a slot not yet proposed", |events| {
+        let at = events.iter().position(|e| is(e, "rot"))?;
+        let proposed = |e: &Value| is(e, "propose");
+        let earlier: Vec<i64> = events[..at]
+            .iter()
+            .filter(|e| proposed(e))
+            .filter_map(|e| num(e, "s"))
+            .collect();
+        let slot = events[at..]
+            .iter()
+            .filter(|e| proposed(e))
+            .filter_map(|e| num(e, "s"))
+            .find(|s| !earlier.contains(s))?;
+        let mut edited = events.to_vec();
+        edited[at] = with(&events[at], "s", Value::Int(slot));
+        Some((at, edited))
     }),
     repeat_edit!("a probe repeated", "probe"),
     Edit::new("a probe on one answer", |events| {

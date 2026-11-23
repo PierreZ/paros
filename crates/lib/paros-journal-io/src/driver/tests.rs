@@ -26,6 +26,7 @@ const TICK: u64 = 1_000;
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 4,
+    window: 64,
 };
 const LEADER: Address = Address {
     journal: J,
@@ -41,8 +42,8 @@ const A: LeaderUuid = LeaderUuid(0xA);
 struct Shared(Rc<RefCell<MemStorage>>);
 
 impl Storage<Journal> for Shared {
-    fn commit(&mut self, ops: &[Op], sync: bool) -> Result<(), StorageError> {
-        self.0.borrow_mut().commit(ops, sync)
+    fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
+        self.0.borrow_mut().commit(ops)
     }
 
     fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
@@ -565,14 +566,17 @@ fn a_restarted_acceptor_answers_with_no_write_at_its_promise() {
     world.run(&mut drivers, "the leader opens again", open);
 }
 
-#[test]
-fn a_second_leader_seals_the_first_segment_through_the_register() {
-    let world = World::new();
-    let disk = Shared::default();
-    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
-    world.run(&mut drivers, "the leader opens", open);
+/// Segment 2 opens, and a second leader of it runs on the process of
+/// `drivers`, with segment 1's replicas at slot `from`; `before` runs just
+/// before its campaign. Gives the leader and `from`.
+fn second_leader(
+    world: &World,
+    drivers: &mut [TestDriver],
+    before: impl FnOnce(&World),
+) -> (Address, Slot) {
+    world.run(drivers, "the leader opens", open);
     let set = drivers[0].call(LEADER, claim());
-    answer(&world, &mut drivers, 0, set);
+    answer(world, drivers, 0, set);
 
     let mut register = world.register.clone();
     let value = register.read(J).expect("the register");
@@ -608,6 +612,7 @@ fn a_second_leader_seals_the_first_segment_through_the_register() {
         .replica(Address::new(J, NodeId(11)))
         .and_then(paros_journal::roles::SegmentReplica::front)
         .expect("a front");
+    before(world);
     drivers[0].assign(Assignment::Leader {
         address: next,
         proxies: Vec::new(),
@@ -620,11 +625,20 @@ fn a_second_leader_seals_the_first_segment_through_the_register() {
             from,
         },
     });
-    world.run(&mut drivers, "the second leader opens", |d| {
+    world.run(drivers, "the second leader opens", |d| {
         d[0].host()
             .leader(next)
             .is_some_and(|l| matches!(l.phase(), LeaderPhase::Open { .. }))
     });
+    (next, from)
+}
+
+#[test]
+fn a_second_leader_seals_the_first_segment_through_the_register() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
+    let (_, from) = second_leader(&world, &mut drivers, |_| {});
     let value = world.register.value(J).expect("the register");
     let first = value.segment(SegmentId(1)).expect("segment 1");
     assert_eq!(first.end(), Some(from), "sealed one above the last vote");
@@ -899,4 +913,32 @@ fn a_read_that_a_stop_drops_is_unserved_and_a_dropped_notice_is_lost() {
     assert_eq!(ports.reads.len(), 1);
     assert_eq!(ports.replies, Vec::new());
     assert_eq!(ports.notices, Vec::new());
+}
+
+#[test]
+fn a_seal_whose_reply_is_lost_opens_the_leader_from_the_done_value() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
+    // The seal of the second leader takes place, and its reply is lost: the
+    // leader learns the done seal from the register, and opens.
+    let (_, from) = second_leader(&world, &mut drivers, |world| {
+        world.register.lose_next(true);
+    });
+    let value = world.register.value(J).expect("the register");
+    let first = value.segment(SegmentId(1)).expect("segment 1");
+    assert_eq!(first.end(), Some(from), "the lost seal took place");
+}
+
+#[test]
+fn a_seal_whose_request_is_lost_runs_again_at_the_next_timer() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
+    let (_, from) = second_leader(&world, &mut drivers, |world| {
+        world.register.lose_next(false);
+    });
+    let value = world.register.value(J).expect("the register");
+    let first = value.segment(SegmentId(1)).expect("segment 1");
+    assert_eq!(first.end(), Some(from), "the seal ran again");
 }

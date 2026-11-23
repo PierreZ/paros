@@ -12,12 +12,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use paros_consensus::journal::JournalId;
-use paros_journal::register::{Change, ChangeRefusal, RegisterValue};
+use paros_journal::register::{Change, RegisterValue};
 
 use crate::clock::Clock;
 use crate::family::Journal;
 use crate::layout::{Entry, KEY_LEN, Key, Op, PREFIX_LEN};
-use crate::register::Register;
+use crate::register::{ChangeError, Register};
 use crate::storage::{Storage, StorageError};
 use crate::transport::Transport;
 use crate::wire::{Address, Envelope, Time};
@@ -62,7 +62,7 @@ impl MemStorage {
 }
 
 impl Storage<Journal> for MemStorage {
-    fn commit(&mut self, ops: &[Op], _sync: bool) -> Result<(), StorageError> {
+    fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
         if std::mem::take(&mut self.fail_next) {
             return Err(StorageError("a planted failure".into()));
         }
@@ -206,10 +206,15 @@ impl Clock for ManualClock {
 }
 
 /// The registers of many journals, in memory: a change is done or refused
-/// at once. Its copies share the registers.
+/// at once, and a change of a journal that has no register (none was
+/// [`create`](Self::create)d) is [`ChangeError::Unknown`]. Its copies share
+/// the registers.
 #[derive(Clone, Debug, Default)]
 pub struct MemRegister {
     values: Rc<RefCell<BTreeMap<JournalId, RegisterValue>>>,
+    /// A planted loss for the next change: of its reply (`true`) or of its
+    /// request (`false`).
+    lose: Rc<Cell<Option<bool>>>,
 }
 
 impl MemRegister {
@@ -217,6 +222,13 @@ impl MemRegister {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Lose the next change of any copy: its reply when `reply`, so the
+    /// change takes place or is refused unheard, else its request, so it
+    /// does not run. The change answers [`ChangeError::NoAnswer`].
+    pub fn lose_next(&self, reply: bool) {
+        self.lose.set(Some(reply));
     }
 
     /// The register of `journal`, at `value`.
@@ -236,12 +248,25 @@ impl Register for MemRegister {
         &mut self,
         journal: JournalId,
         change: &Change,
-    ) -> Result<RegisterValue, ChangeRefusal> {
-        let mut values = self.values.borrow_mut();
-        let value = values.entry(journal).or_default();
-        let next = value.apply(change)?;
-        *value = next.clone();
-        Ok(next)
+    ) -> Result<RegisterValue, ChangeError> {
+        let lose = self.lose.take();
+        if lose == Some(false) {
+            return Err(ChangeError::NoAnswer);
+        }
+        let result = {
+            let mut values = self.values.borrow_mut();
+            let value = values.get_mut(&journal).ok_or(ChangeError::Unknown)?;
+            value
+                .apply(change)
+                .map_err(ChangeError::Refused)
+                .inspect(|next| {
+                    *value = next.clone();
+                })
+        };
+        if lose == Some(true) {
+            return Err(ChangeError::NoAnswer);
+        }
+        result
     }
 
     fn read(&mut self, journal: JournalId) -> Option<RegisterValue> {

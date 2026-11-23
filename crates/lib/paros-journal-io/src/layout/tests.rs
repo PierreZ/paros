@@ -57,7 +57,7 @@ fn key_bytes_sort_as_keys_and_read_back() {
 }
 
 fn commit(storage: &mut MemStorage, ops: &[Op]) {
-    storage.commit(ops, true).expect("a healthy disk");
+    storage.commit(ops).expect("a healthy disk");
 }
 
 #[test]
