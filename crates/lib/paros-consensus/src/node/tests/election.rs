@@ -343,6 +343,44 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
     assert_eq!(n.role(), NodeRole::Leader);
 }
 
+/// A correct acceptor cuts a promise page at `PROMISE_BATCH` records, so a
+/// longer page from a pooled peer is ignored whole: it counts toward no
+/// quorum, and the same promise in a bounded page still wins.
+#[test]
+fn a_promise_page_past_the_batch_is_ignored() {
+    let mut n = node(0, &[0, 1, 2]);
+    campaign(&mut n);
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+    let accepted: BTreeMap<Slot, (Ballot, Command)> = (0..=PROMISE_BATCH as u64)
+        .map(|slot| (Slot(slot), (ballot(0, 1), ucmd(8, slot, 1))))
+        .collect();
+    assert_eq!(accepted.len(), PROMISE_BATCH + 1);
+
+    n.step(Message::Promise {
+        faulty: BTreeMap::new(),
+        from: NodeId(1),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted,
+        next_from_slot: None,
+        prepared: None,
+    });
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let _ = drain(&mut n);
+
+    n.step(Message::Promise {
+        faulty: BTreeMap::new(),
+        from: NodeId(1),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted: BTreeMap::new(),
+        next_from_slot: None,
+        prepared: None,
+    });
+    assert_eq!(n.role(), NodeRole::Leader);
+}
+
 #[test]
 fn a_same_ballot_continuation_closes_a_different_stale_leadership() {
     let mut nodes = cluster::<3>();

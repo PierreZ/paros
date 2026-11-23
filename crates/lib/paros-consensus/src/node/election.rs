@@ -12,7 +12,7 @@ use super::{
     BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Control, Delegation, LeadershipOrigin,
     Message, NodeId, NodeRole, Slot,
 };
-use crate::contract::limits::{PROMISE_BATCH, RECOVERY_BATCH};
+use crate::contract::limits::RECOVERY_BATCH;
 use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::Matchmaking;
 use crate::membership::AcceptorConfig;
@@ -362,10 +362,10 @@ impl ColocatedNode {
         // misrouted or misconfigured sender is not a quorum member). Which
         // *configurations* the promise counts toward is the per-configuration
         // tally's business, not this guard's.
-        // A correct acceptor cuts each page at `PROMISE_BATCH`
-        // (`Acceptor::promise_page`), so a longer page is ignored whole: no
-        // handler takes an input of unbounded size (decision 30).
-        if !self.in_pool(from) || accepted.len() + faulty.len() > PROMISE_BATCH {
+        // The page size needs no check here: the tally refuses a page past
+        // `PROMISE_BATCH` (`promise_page_shape_valid`), on the campaign and
+        // on the repair probe alike (decision 30).
+        if !self.in_pool(from) {
             return;
         }
         if self.role == NodeRole::Leader {
