@@ -300,6 +300,17 @@ breaks:
   and no peer holds, takes the trim point of a peer (`TrimmedTo`, as in `truncation/`) and never
   fetches a slot of a trimmed segment (`nojump` stops it for ever).
 
+**As built** (#1326 (the journal roles over the core), 2026-11-22). A replica writes `Trim` for
+each retired segment below its own once its fold's `first_seq` covers the segment's last `seq`,
+after the batch of the slot that moved the floor; it waits for the retire because the controller
+opens a segment only over retired ones (`ReshapeGuard`), and a trimmed record never retires.
+Every replica of a trimmed segment drops its copy. The reader of `journal-sim`'s roles walk takes
+its floor from a leaderless read at the segment in force before it reads an older segment, and
+answers `Truncated` itself below it. The oracles `TRIM` (mutant `TrimIntent`) and `FLOOR` (mutant
+`FloorFromHolder`) judge the two rules, and the trace check binds each trim to `Trim(p, r)`.
+**Open** (the last rule groups of #1326): the compaction of the acceptors to the floor of `F + 1`
+replicas of each segment's set, and the laggard's trim-point jump.
+
 ### J3.3 A leaderless read of the tail across a reshape
 
 **A leaderless read of the tail across a reshape** (#1254 (leaderless reads across a reshape),

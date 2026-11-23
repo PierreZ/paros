@@ -161,8 +161,8 @@ pub mod reach {
     pub const READ_SUPERSEDED: &str = "roles walk: a read met a later segment";
     /// A read of a sealed segment served its last records.
     pub const READ_SEALED: &str = "roles walk: a read reached the end of a sealed segment";
-    /// A sealed segment trimmed under the floor.
-    pub const SEGMENT_TRIMMED: &str = "roles walk: a floor over a sealed segment trimmed it";
+    /// A retired segment trimmed under the floor.
+    pub const SEGMENT_TRIMMED: &str = "roles walk: a floor over a retired segment trimmed it";
     /// A read of an older segment refused below the floor of the segment
     /// in force.
     pub const FLOOR_REFUSED: &str = "roles walk: a read met the floor of the segment in force";

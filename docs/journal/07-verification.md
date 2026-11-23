@@ -132,8 +132,13 @@ keeps the read set and the first slot of its campaign (`Register` takes them), t
 writes a `Noop` above the start below the highest vote it saw, and the replica's boundary write
 and its `Resolve` answer wait on the replica's batch. The wide shape (two columns) has no trace
 check: `Journal.tla` chooses a slot at a quorum of the whole grid, not of one column.
-**Open**: the coverage gate over the journal's probes (the next rule group of #1326); CTRL
-faulty votes on the acceptors' disks (the leader's blocked slot has unit tests only).
+The walk also runs proxy leaders (oracle `PROXY`, mutant `ForgedAccepted`), leaderless reads at
+the replicas, one of which hears the register late (oracle `READ`, mutant `ReadNoFence`), the
+trim of a retired segment and the reader's floor (oracles `TRIM` and `FLOOR`, mutants
+`TrimIntent` and `FloorFromHolder`; the trace event `Trim`), and the leader time of each write
+(oracle `STAMPED`, mutant `UnstampedAccept`). **Open**: the coverage gate over the journal's
+probes, with CTRL faulty votes on the acceptors' disks (the leader's blocked slot has unit tests
+only); both come with the last rule group of #1326.
 
 **The heal walk** (#1314 (re-replication of a sealed segment's replica set), `src/heal.rs`):
 the controller role heals a retired segment while replica machines are lost for good or come

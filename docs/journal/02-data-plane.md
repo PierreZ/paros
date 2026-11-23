@@ -326,6 +326,14 @@ answers. No read goes through the Paxos leader, so reads scale with replicas and
 acceptors one watermark round per page (decided on 2026-10-04). The read-index path and
 `CheckTail` retire.
 
+**The journal roles build it** (#1326 (the journal roles over the core), 2026-11-22):
+`SegmentReplica::read` asks `F + 1` of each column of its segment's grid for their watermarks
+(`PreRead`), serves once its fold is past the highest, and answers `Below` below its segment,
+`Truncated` below its floor, `Superseded` when an acceptor knows a later segment, and
+`Unserved` when it has no base, holds 64 open reads, or waits more than 8 ticks. A page holds at
+most 256 records (§J2.7). The roles walk of `journal-sim` judges each answer (oracle `READ`, mutant
+`ReadNoFence`).
+
 A read costs one Phase-1 round of watermarks (decided on 2026-10-07, #253). In a multi-region cell
 `QuorumRead` asks three of five acceptors, so a page costs one cross-region round trip (the 2025
 Journal reconstruction says the same: reads are performed from at least two regions, architecture §10).

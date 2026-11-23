@@ -768,7 +768,10 @@ impl SegmentReplica {
         covered
             .into_iter()
             .map(|segment| {
-                probe!(reachable, "replica: a floor over a sealed segment trims it");
+                probe!(
+                    reachable,
+                    "replica: a floor over a retired segment trims it"
+                );
                 let last = self.older.remove(&segment).expect("an older segment");
                 assert!(first_seq >= last, "a trim never cuts above the floor");
                 assert!(
