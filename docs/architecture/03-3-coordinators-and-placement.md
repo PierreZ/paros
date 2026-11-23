@@ -44,7 +44,9 @@ candidate) fail.
   data-plane feature: the election refuses a journal whose leader is `None`. TLC checks the
   election alone in `specs/tla/election/`: one holder for each term, a holder that stops at its
   first refused write, a fenced order of an old term refused, an interface that ends with its
-  term, and a multi-writer journal that the election never takes back.
+  term, and a multi-writer journal that the election never takes back. The crate is a thin layer
+  on the pure journal client (`paros_journal::client`), and not an actor on the host (Pierre,
+  2026-11-23; section 4.4).
 - **Each control journal has one writer, its coordinator.** An operator or a client sends a
   request with an idempotency id, and the coordinator writes it under its own term. No admin
   session claims a control journal (section 3.1).
