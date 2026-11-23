@@ -164,6 +164,12 @@ The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`:
   the resend of a write in flight across a switch still tells its writer whether it landed. TLC
   checks it, with controls, in `specs/tla/multi-writer/` (02-data-plane.md §2.4.1). The sources
   have no such switch: it is paros's own rule.
+- **Each multi-writer mode has its own tag** (#1495 (a late copy of SetLeader reinstates a
+  uuid)): the leader value of the mode is `Leader::Multi(tag)`, the caller draws the tag fresh as
+  it draws a uuid, and `SetLeader(new, old)` compares `old` with the whole value. A late copy of
+  a call made in an earlier mode then never matches a later one. `specs/tla/multi-writer/` checks
+  the rule with copies of `SetLeader` proposed again; its control `setleader_copy` (one value for
+  every mode) breaks `RefusalFinal`.
 
 ## 10. Pitfalls
 
@@ -176,6 +182,11 @@ The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`:
 - **A batcher that merges fenced writes.** A re-send is an ack only if identical, so a batcher
   that re-merged a fenced write would make the journal refuse a write it holds. Fenced writes merge
   only in the client's `Pipeline` (#709 (merge fenced writes), [batchers](batchers.md)).
+- **One value for every multi-writer mode.** A request stays in the network, so a late copy of
+  `SetLeader(u, old = Multi)` applied again after `u → Multi → … → Multi`: `u` led again with no
+  call of its writer, and a fenced write of `u` that was refused (final) landed from a late copy.
+  journal-sim's client walk found it on fresh seeds 100603 and 100033 (#1495). A tag for each
+  mode closes it.
 
 ## 11. Relatives
 

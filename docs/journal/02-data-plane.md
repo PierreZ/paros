@@ -313,7 +313,7 @@ There is no dedup table and no dedup role: a single writer gets exactly-once thr
   is `Leader::Multi(tag)`, the tag a set `LeaderUuid`; `SetLeader { new, old }` takes a `Leader`
   as `new` (a uuid leader or a mode), and the fold refuses a `new` that is `Unset`, that holds the
   unset uuid, or that is the value in force. A journal that starts multi-writer takes its first
-  tag from its initial configuration (`BoundaryState::fresh(Leader::Multi(tag))`). A lost
+  tag from its initial configuration (`BoundaryState::fresh(Leader::Multi(tag))`); the one who creates the journal draws that tag fresh, as a client draws its tags. **Open**: the create call that carries it (the control plane, not built). A lost
   `SetLeader` of a mode settles as one of a uuid does: a refused resend whose view names the
   caller's own tag means that the first copy won (`paros_journal::client`). The fold of
   `journal-state/` folds a tag as it folds `None` (`IsMulti`), so the trace checks of

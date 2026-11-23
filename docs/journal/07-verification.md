@@ -18,7 +18,7 @@ controls. This table maps each journal rule to its model. "Open" models are not 
 |---|---|---|---|
 | The flight rule of the sans-IO contract | §J4.2 | `flight-rule/` | #1255 (journal sans-IO contract) |
 | Held writes: `Unknown`, never `NotLeader` (`AckedChosen`) | §J2.2 | `compartments/` | #1232 (held writes) |
-| Multi-writer mode through `SetLeader(None)`, position before fence, the resend across a seal (`Below`) | §J2.2, §J2.4.1 | `multi-writer/` | #1274 (multi-writer mode), #1301 (a resent write across a seal) |
+| Multi-writer mode through a `SetLeader` to a tagged mode (`Leader::Multi(tag)`, #1495), position before fence, the resend across a seal (`Below`) | §J2.2, §J2.4.1 | `multi-writer/` | #1274 (multi-writer mode), #1301 (a resent write across a seal) |
 | The `Resolve` call that settles `Below` | §J2.2 | `journal-state/` | #1320 (the wire shape that resolves a `Below` answer) |
 | Leaderless reads: the read fence on the promise and the belief ballot | §J2.5 | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), #1228 (stale read by a lagging reader) |
 | The row seal of a full grid (not a v1 grid) | §J2.5 | `reads/` (`grid_full_seal`, `grid_full_seal_others`) | #1102 (rework 1.13), #1209 (seal each row of a full grid) |
