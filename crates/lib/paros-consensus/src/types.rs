@@ -326,6 +326,9 @@ mod tests {
         assert_eq!(value.len(), 3);
         let bytes: &[u8] = value.as_ref();
         assert_eq!(bytes, b"abc", "`AsRef` reads the value's own bytes");
+        let from_slice = Value::from(&b"abc"[..]);
+        assert_eq!(from_slice.as_bytes(), b"abc", "a slice builds its bytes");
+        assert_eq!(from_slice, value, "the three builders agree");
     }
 
     #[test]
