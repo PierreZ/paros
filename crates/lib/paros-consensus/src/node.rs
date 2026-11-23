@@ -1170,6 +1170,10 @@ impl ColocatedNode {
     /// Borrow the node to drain one batch of work. The returned [`Ready`] holds
     /// the unique `&mut` borrow, so a second `ready()` before [`Ready::advance`]
     /// is a **compile error**.
+    ///
+    /// # Panics
+    ///
+    /// If a batch is still in flight ([`Ready::release`]): a driver bug.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub fn ready(&mut self) -> Ready<'_> {
         assert!(

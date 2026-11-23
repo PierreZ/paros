@@ -222,6 +222,9 @@ fn reconfigured_compartments() {
             reach::PROXY_COMMIT,
             reach::REPLICA_APPLIED,
             reach::NODE_READ,
+            reach::ADMITTED,
+            reach::REPLICA_ADMITTED,
+            reach::PROXY_ADMITTED,
         ],
     );
 }

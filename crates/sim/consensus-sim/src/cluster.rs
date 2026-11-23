@@ -143,6 +143,10 @@ pub mod reach {
     pub const REBOOKED: &str = "cluster: the operator booked a retired node again";
     /// A node admitted a late node to its pool.
     pub const ADMITTED: &str = "cluster: a node admitted a late node to its pool";
+    /// A replica admitted a late node to its pool.
+    pub const REPLICA_ADMITTED: &str = "cluster: a replica admitted a late node to its pool";
+    /// A proxy leader admitted a late node to its pool.
+    pub const PROXY_ADMITTED: &str = "cluster: a proxy admitted a late node to its pool";
     /// A handover chose a new matchmaker set.
     pub const HANDED_OVER: &str = "cluster: a handover chose a new matchmaker set";
 }
@@ -303,9 +307,12 @@ pub struct Cluster {
     /// The node a [`Steer::Retiring`] operator asked the matchmakers to
     /// check, and retires on its next retire moves while it may still.
     checking: Option<NodeId>,
-    /// The late nodes each node admitted to its pool. The deployment's
+    /// The late nodes each node and each replica admitted to its pool. The deployment's
     /// registry is durable: a node that boots admits them again.
     admitted: BTreeMap<NodeId, BTreeSet<NodeId>>,
+    /// The late nodes each proxy leader admitted to its pool, read again
+    /// when the proxy boots.
+    proxy_admitted: BTreeMap<ProxyId, BTreeSet<NodeId>>,
     /// The FNV-1a fold of every batch a party of the core handed this
     /// driver ([`Cluster::ready_digest`]).
     ready_digest: u64,
@@ -515,7 +522,7 @@ impl Model for Cluster {
                 }
             }
             Party::Proxy(id) => {
-                let config = self.proxy_config();
+                let config = self.proxy_config(id);
                 let limits = self.proxy_limits();
                 let site = self.proxy_mut(id);
                 if site.live.is_none() && !site.dead_for_good {
@@ -525,8 +532,12 @@ impl Model for Cluster {
             Party::Replica(id) => {
                 if self.replica(id).live.is_none() {
                     let limits = self.flavor.limits;
+                    let admitted: Vec<NodeId> = self.admitted(id).into_iter().collect();
                     let site = self.replica_mut(id);
-                    let replica = ReplicaNode::new(&site.disk, limits);
+                    let mut replica = ReplicaNode::new(&site.disk, limits);
+                    // The registry is durable: a replica that boots admits
+                    // again the late nodes it admitted.
+                    let _ = replica.extend_pool(&admitted);
                     let from = replica.replica().folded();
                     site.live = Some(replica);
                     cx.record(ClusterEvent::ReplicaBoot { replica: id, from });
@@ -711,6 +722,7 @@ impl Cluster {
             asked: Vec::new(),
             checking: None,
             admitted: BTreeMap::new(),
+            proxy_admitted: BTreeMap::new(),
             ready_digest: paros_consensus::types::FNV_OFFSET,
             pool,
             flavor,
@@ -742,7 +754,10 @@ impl Cluster {
             cluster.register_sibling();
         }
         cluster.proxies = (0..cluster.flavor.proxies)
-            .map(|i| ProxySite::new(ProxyId(i), &cluster.proxy_config(), cluster.proxy_limits()))
+            .map(|i| {
+                let id = ProxyId(i);
+                ProxySite::new(id, &cluster.proxy_config(id), cluster.proxy_limits())
+            })
             .collect();
         for id in cluster.pool.clone() {
             cluster.boot_node(id, false, cx);
@@ -927,12 +942,18 @@ impl Cluster {
     /// with no counts (a proxy never names a reply owner), and the whole
     /// pool, late nodes too. A proxy has no registry fold of its own here:
     /// it runs any configuration a leader of the deployment registered.
-    fn proxy_config(&self) -> Config {
+    fn proxy_config(&self, id: ProxyId) -> Config {
         let mut config = self.party_config(NodeId(0));
         config.proxy_count = 0;
         config.replica_count = 0;
         if !config.matchmakers.is_empty() {
-            config.nodes.clone_from(&self.pool);
+            // A proxy boots knowing no late node, as a node does, and
+            // admits again the late nodes it admitted before.
+            config
+                .nodes
+                .extend(self.proxy_admitted.get(&id).into_iter().flatten());
+            config.nodes.sort_unstable();
+            config.nodes.dedup();
         }
         config
     }

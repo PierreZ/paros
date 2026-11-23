@@ -13,6 +13,7 @@
 //! operator books it again: it then boots from its disk and rejoins.
 
 use moonpool_walk::{Cx, sometimes};
+use paros_consensus::membership::ProxyId;
 use paros_consensus::{Ballot, NodeId};
 
 use super::{Cluster, ClusterEvent, Mutant, Steer, reach};
@@ -116,31 +117,81 @@ impl Cluster {
         self.drain_node(id, cx);
     }
 
-    /// One node admits one late node to its pool.
+    /// One party admits one late node to its pool: a node, a replica or a
+    /// proxy leader. Each pool lags on its own, as a deployment's registry
+    /// reaches each process at its own time.
     pub(super) fn admit(&mut self, cx: &mut Cx<'_, Self>) {
         let late = self.late_ids();
         // A lagging-reader walk admits the late nodes only at node 0: when
         // node 0 or a late node leads, it moves onto a late node while every
         // other pool lags until the settle rounds (`Cluster::tick_all`).
         let steer = self.flavor.steer == Steer::LaggingReader;
-        let pairs: Vec<(NodeId, NodeId)> = self
+        let nodes = self
             .nodes
             .iter()
             .filter(|site| site.live.is_some())
             .filter(|site| !steer || site.id == NodeId(0))
-            .flat_map(|site| late.iter().map(move |l| (site.id, *l)))
-            .filter(|(id, l)| id != l && !self.admitted(*id).contains(l))
+            .map(|site| Admitter::Node(site.id));
+        // A replica's pool lags as a node's does: it ignores what a late
+        // node teaches until it admits it.
+        let replicas = self
+            .replicas
+            .iter()
+            .filter(|site| site.live.is_some() && !steer)
+            .map(|site| Admitter::Replica(site.id));
+        // A proxy leader's pool lags too: a delegation whose configuration
+        // names a late node it has not admitted is ignored.
+        let proxies = self
+            .proxies
+            .iter()
+            .filter(|site| site.live.is_some() && !steer)
+            .map(|site| Admitter::Proxy(site.id));
+        let pairs: Vec<(Admitter, NodeId)> = nodes
+            .chain(replicas)
+            .chain(proxies)
+            .flat_map(|who| late.iter().map(move |l| (who, *l)))
+            .filter(|(who, l)| !self.admits(*who, *l))
             .collect();
-        let Some(&(id, late)) = cx.rng().pick(&pairs) else {
+        let Some(&(who, late)) = cx.rng().pick(&pairs) else {
             return;
         };
-        let node = self.node_mut(id).live.as_mut().expect("a live node");
-        let grew = node.extend_pool(&[late]);
-        sometimes!(grew, reach::ADMITTED);
-        self.admitted.entry(id).or_default().insert(late);
+        match who {
+            Admitter::Node(id) => {
+                let node = self.node_mut(id).live.as_mut().expect("a live node");
+                let grew = node.extend_pool(&[late]);
+                sometimes!(grew, reach::ADMITTED);
+                self.admitted.entry(id).or_default().insert(late);
+            }
+            Admitter::Replica(id) => {
+                let replica = self.replica_mut(id).live.as_mut().expect("a live replica");
+                let grew = replica.extend_pool(&[late]);
+                sometimes!(grew, reach::REPLICA_ADMITTED);
+                self.admitted.entry(id).or_default().insert(late);
+            }
+            Admitter::Proxy(id) => {
+                let proxy = self.proxy_mut(id).live.as_mut().expect("a live proxy");
+                let grew = proxy.extend_pool(&[late]);
+                sometimes!(grew, reach::PROXY_ADMITTED);
+                self.proxy_admitted.entry(id).or_default().insert(late);
+            }
+        }
     }
 
-    /// Every node admits every late node.
+    /// Whether `who` already holds `late` in its pool: its own id, or a
+    /// late node it admitted.
+    fn admits(&self, who: Admitter, late: NodeId) -> bool {
+        match who {
+            Admitter::Node(id) | Admitter::Replica(id) => {
+                id == late || self.admitted(id).contains(&late)
+            }
+            Admitter::Proxy(id) => self
+                .proxy_admitted
+                .get(&id)
+                .is_some_and(|known| known.contains(&late)),
+        }
+    }
+
+    /// Every node, replica and proxy leader admits every late node.
     pub(super) fn admit_all(&mut self) {
         let late = self.late_ids();
         if late.is_empty() {
@@ -153,5 +204,31 @@ impl Cluster {
                 let _ = node.extend_pool(&late);
             }
         }
+        for site in &mut self.replicas {
+            self.admitted
+                .entry(site.id)
+                .or_default()
+                .extend(late.iter().copied());
+            if let Some(replica) = site.live.as_mut() {
+                let _ = replica.extend_pool(&late);
+            }
+        }
+        for site in &mut self.proxies {
+            self.proxy_admitted
+                .entry(site.id)
+                .or_default()
+                .extend(late.iter().copied());
+            if let Some(proxy) = site.live.as_mut() {
+                let _ = proxy.extend_pool(&late);
+            }
+        }
     }
+}
+
+/// A party whose pool may lag: it admits a late node on its own.
+#[derive(Clone, Copy)]
+enum Admitter {
+    Node(NodeId),
+    Replica(NodeId),
+    Proxy(ProxyId),
 }

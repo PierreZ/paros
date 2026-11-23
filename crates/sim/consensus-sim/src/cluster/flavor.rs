@@ -228,19 +228,24 @@ impl Flavor {
     }
 
     /// Matchmakers and reconfiguration with every compartment: a grid,
-    /// proxies, replicas, handoff, reads and truncation.
+    /// proxies, replicas, handoff, reads and truncation. The last spare
+    /// joins the pool late, and each node and each proxy leader admits it
+    /// on its own ([`Action::Admit`]): a proxy whose pool lags ignores a
+    /// delegation whose configuration names it.
     #[must_use]
     pub fn reconfigured_compartments() -> Self {
         Self {
             name: "reconfigured-compartments",
             matchmakers: 3,
             spares: 4,
+            late: 1,
             options: &[
                 Action::Handoff,
                 Action::Read,
                 Action::Truncate,
                 Action::Reconfigure,
                 Action::MoveRound,
+                Action::Admit,
             ],
             ..Self::compartments()
         }
@@ -248,12 +253,20 @@ impl Flavor {
 
     /// Matchmakers and every compartment, steered toward reconfigurations
     /// ([`Steer::Reconfiguring`]): the walk of `matchmaker/`'s grid trace
-    /// spec.
+    /// spec. Every pool holds every node from boot.
     #[must_use]
     pub fn reconfiguring() -> Self {
         Self {
             name: "reconfiguring",
             steer: Steer::Reconfiguring,
+            late: 0,
+            options: &[
+                Action::Handoff,
+                Action::Read,
+                Action::Truncate,
+                Action::Reconfigure,
+                Action::MoveRound,
+            ],
             ..Self::reconfigured_compartments()
         }
     }

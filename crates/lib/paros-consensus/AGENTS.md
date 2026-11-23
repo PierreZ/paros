@@ -13,7 +13,7 @@ The modules make three layers that point down only (#730 (paros-consensus rework
 
 - **Foundations**: `probe`, `types`, `membership`, `journal`, `contract`, `retained`. A
   foundation uses only foundations.
-- **Roles**: `acceptor`, `proposer`, `replica`, `quorum_read`, `batcher`, `collector`,
+- **Roles**: `acceptor`, `proposer`, `replica`, `belief`, `quorum_read`, `batcher`, `collector`,
   `decree`, `matchmaking`, `matchmaker`. A role uses foundations and roles, never a deployment.
 - **Deployments**: `node`, `proxy_leader`, `replica_node`. A deployment wires roles and owns
   one `Ready`. It never uses another deployment.
@@ -32,7 +32,7 @@ Foundations:
 
 - `probe.rs` → `probe!(reachable, "..")` / `probe!(sometimes, cond, "..")` → coverage probes
   (#317) behind `assertions` (first in `lib.rs`: a textual-scope macro).
-- `types.rs` → the Paxos scalars: `NodeId`, `Slot`, `Ballot`, `Value`, `Fingerprint`, and `fnv1a` with `FNV_OFFSET`, the one FNV-1a step every fingerprint and trace digest folds with.
+- `types.rs` → the Paxos scalars: `NodeId`, `Slot`, `Ballot`, `Value` (its bytes are shared, `Arc<[u8]>`: a clone costs a count), `Fingerprint`, and `fnv1a` with `FNV_OFFSET`, the one FNV-1a step every fingerprint and trace digest folds with.
 - `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`, `shape_error.rs`) → `ShapeError` (why a membership from the wire or an operator is refused), `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, #215 (zones); it names no cell: cells are the upper stack's, #1264 (remove the cell)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`); a grid with `acks < rows` is admitted only when its Phase-1 quorums meet (`phase1_quorums_meet`, #1483 (read fence on a grid whose Phase-1 quorums do not meet)).
 - `journal.rs` + `journal/` → what the log carries, judged at apply (not Paxos):
   - `ids.rs` → `TenantId`, `JournalId`, `JournalIdentifier` (the identifier, #235), `LeaderUuid`, `Seq`.
@@ -57,7 +57,8 @@ Roles (pure tallies, no deployment knowledge):
 - `proposer/recovery.rs` → `RecoveryPolicy::{Phase1Backed, Inherited}` → the bounded recovery a fresh leadership drains.
 - `proposer/rounds.rs` → `proposer::Rounds`, `Custody` → the one Phase-2 tally (#142); a proxy runs it alone.
 - `proposer/authority.rs` → `proposer::Authority` → the leadership fence and the `CheckQuorum` window.
-- `replica.rs` → `Replica`, `LogRead`, `LogPage` → chosen prefix, apply walk, journal fold (`journal`, `outcome_at`, `accepted_at`, `fold_hole`, `chosen_gap`, `covers`).
+- `replica.rs` → `Replica`, `LogRead`, `LogPage`, `ChosenLog` → chosen prefix, apply walk, journal fold (`journal`, `outcome_at`, `accepted_at`, `fold_hole`, `chosen_gap`, `covers`). The replica holds the set of chosen slots, never their commands: it reads each chosen command through the `ChosenLog` port from the one copy its deployment holds (the acceptor's records on a node, the learned records on a `ReplicaNode`; #1101 (one copy of the retained log)). The deployment writes the record before `Replica::learn`, which asserts it. `ColocatedNode::chosen_at` / `chosen_commands` and the same on `ReplicaNode` read it for a driver or an oracle.
+- `belief.rs` → `Belief`, `Judgement` → the configuration a deployment believes in force, its ballot and the read basis (#1101 (one Belief role)): the follower rule (`judge`, `learn`: matchmakers, a strictly newer ballot, a configuration drawn from the pool), `bind` for a reason the deployment owns, and the read basis (`learn_read_basis`, `read_basis`). `ColocatedNode`, `ProxyLeader` and `ReplicaNode` each hold one and call `Belief::assert_invariants` in their own.
 - `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold`, `ReadBasis`, `ReadState` → the leaderless read tally (#143) and the won leadership's configuration and fence it is judged over (#260).
 - `batcher.rs` → `Batcher`, `BatchLimits`, `Batch`, `Unbatcher` → the batcher's pure lanes (#145 (batchers)): one lane per journal, flushed at `flush_records`, before it would pass the limits, or at a tick; an empty or over-limit write goes alone; `Unbatcher::scatter` cuts a merged write's range into each write's own, densely and in order.
 - `collector.rs` → `Collector`, `GcStep` → the leader-side GC tally (#123): chosen-index reports, matchmaker acks, the effective floor. Its rule across a reconfiguration onto empty stores (`covered`: a Phase-2 quorum of `C_b` at or past the fence) has its TLA+ model in `specs/tla/truncation-reconfig/` (#1218 (truncation model, part 3)).
@@ -79,7 +80,7 @@ Deployments (each wires roles and owns one `Ready`):
 - `node/{handoff,gc,matchmaking,reconfigure}.rs` → `DPaxos` handoff, GC wiring, matchmaking wiring, online reconfiguration (`relinquish_to`, `reconfigure`, `quorum_read`).
 - `node/{boot,acceptor,helpers,invariants}.rs` → boot path, acceptor wiring, `adopt_configuration`, `assert_invariants`.
 - `node/tests.rs` + `node/tests/*.rs` → unit tests, one file per concern.
-- `proxy_leader.rs` → `ProxyLeader` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, and the beat `tick` (re-send page and bounded retention, both from its `Limits`); `proxy_leader/ready.rs` → `ProxyReady`. Its TLA+ model is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration.
+- `proxy_leader.rs` → `ProxyLeader` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, and the beat `tick` (re-send page and bounded retention, both from its `Limits`); `proxy_leader/ready.rs` → `ProxyReady`. Its TLA+ model is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration. `ProxyLeader::new(id, &Config, limits)` reads the bootstrap configuration, the pool and the matchmakers from the deployment's `Config`; a delegation whose configuration it cannot run (outside its pool, or none after a restart) is ignored, and the leader moves the round.
 - `replica_node.rs` → `ReplicaNode`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis; `replica_node/ready.rs` → `ReplicaReady`; `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network.
 
 Test-only:
