@@ -919,3 +919,61 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
         "{effects:?}"
     );
 }
+
+#[test]
+fn a_proxy_sends_the_accepts_of_a_delegation_and_nacks_a_lower_one() {
+    let mut host = Host::new(CONFIG);
+    let proxy = at(J, 50);
+    host.step(Time(0), Input::Assign(Assignment::Proxy { address: proxy }));
+    assert!(host.serves(proxy), "a proxy needs no recovery");
+    let delegate = |round| {
+        Input::Message(Envelope {
+            journal: J,
+            from: NodeId(100 + round),
+            to: NodeId(50),
+            message: Message::Delegate {
+                ballot: Ballot {
+                    round,
+                    node: NodeId(100 + round),
+                },
+                slot: Slot(0),
+                command: Command::Noop,
+                column: vec![NodeId(1), NodeId(2), NodeId(3)],
+                segment: SegmentId(1),
+                replicas: vec![NodeId(11), NodeId(12), NodeId(13)],
+            },
+        })
+    };
+    let sends = |effects: Vec<Effect>| -> Vec<Envelope> {
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Send { envelope, .. } => Some(envelope),
+                _ => None,
+            })
+            .collect()
+    };
+    let accepts = sends(host.step(Time(1), delegate(2)));
+    assert_eq!(
+        accepts.iter().map(|e| e.to).collect::<Vec<_>>(),
+        vec![NodeId(1), NodeId(2), NodeId(3)]
+    );
+    assert!(
+        accepts.iter().all(|e| e.journal == J
+            && e.from == NodeId(50)
+            && matches!(e.message, Message::Accept { slot: Slot(0), .. })),
+        "{accepts:?}"
+    );
+    let nack = sends(host.step(Time(2), delegate(1)));
+    assert!(
+        matches!(
+            nack.as_slice(),
+            [Envelope {
+                to: NodeId(101),
+                message: Message::Nack { .. },
+                ..
+            }]
+        ),
+        "a delegation below the proxy's ballot is answered Nack: {nack:?}"
+    );
+}

@@ -131,6 +131,9 @@ const RULES: &[Rule] = &[
     ("a sealed segment trimmed", |e| {
         has(e, |e| matches!(e, RolesEvent::Trim { .. }))
     }),
+    ("a copy of a trimmed segment dropped", |e| {
+        has(e, |e| matches!(e, RolesEvent::Drop { .. }))
+    }),
     ("a resend answered Duplicate", |e| {
         applied(e, |_, res| res == "dup")
     }),

@@ -57,7 +57,11 @@ The proxy leader, the leaderless read and the trim are built too (2026-11-22):
 - `JournalProxy` (`roles/proxy.rs`): the proxy leader of Compartmentalized Paxos. A leader
   delegates a round (`Delegate`) to a proxy, which sends the `Accept`s, counts `F + 1` votes of
   the round's column on the configuration that the round carries, and sends `Chosen` to the leader
-  and `Commit` to the replica set (`specs/tla/proxy-leader/`).
+  and `Commit` to the replica set (`specs/tla/proxy-leader/`). The leader sends the same `Commit`
+  on `Chosen` and again until a replica applies it, because the proxy keeps nothing. A proxy
+  `Nack`s the leader of each round that a higher ballot dropped, and a delegation below its ballot.
+  The `Host` runs one role for each address (journal, node), so a proxy needs a node where the
+  journal runs no other role.
 - The leaderless read (`roles/replica/read.rs`, §J2.5, §J3.3): `SegmentReplica::read` asks `F + 1`
   of each column of its segment's grid for their vote watermarks (`PreRead`, `PreReadAck`) and
   answers once its fold covers the highest; an answer that names a later segment ends the read
@@ -65,7 +69,9 @@ The proxy leader, the leaderless read and the trim are built too (2026-11-22):
   batch.
 - The trim (§J3.2): a replica writes `Trim` for each retired segment below its own once its fold's
   floor covers the segment's last `seq`, and every replica of a trimmed segment drops its copy.
-  The reader takes its floor from the segment in force before it reads an older segment.
+  The reader of `journal-sim`'s roles walk takes its floor from the segment in force before it
+  reads an older segment. **Open**: `paros_journal::client` does not take that floor yet; the
+  next rule group of #1326 adds it.
 - The leader stamps the leader time of each write at propose (§J2.8, #1299).
 
 The compaction of the acceptors per segment, the laggard's trim-point jump and the repair of a

@@ -118,13 +118,39 @@ fn a_nack_drops_the_ballot_and_goes_to_the_leader() {
 }
 
 #[test]
-fn a_higher_ballot_drops_the_rounds_below_and_a_lower_one_is_not_taken() {
+fn a_higher_ballot_drops_the_rounds_below_and_nacks_their_leader() {
     let mut proxy = JournalProxy::new(PROXY);
-    proxy.step(LEADER, delegate(1, 4));
-    proxy.step(LEADER, delegate(2, 5));
+    let old = NodeId(102);
+    proxy.step(old, delegate(1, 4));
+    let effects = proxy.step(LEADER, delegate(2, 5));
     assert_eq!(proxy.open(), 1);
     assert_eq!(proxy.round(Slot(5)).map(|r| r.0), Some(ballot(2)));
-    assert_eq!(proxy.step(LEADER, delegate(1, 6)), Vec::new());
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(e.message, Message::Nack { .. }))
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![ProxyEffect {
+            to: old,
+            message: Message::Nack {
+                ballot: ballot(1),
+                promised: ballot(2),
+            },
+        }],
+        "the leader of the dropped round hears the higher ballot"
+    );
+    assert_eq!(
+        proxy.step(old, delegate(1, 6)),
+        vec![ProxyEffect {
+            to: old,
+            message: Message::Nack {
+                ballot: ballot(1),
+                promised: ballot(2),
+            },
+        }],
+        "a lower delegation is not taken, and its leader hears why"
+    );
     assert_eq!(proxy.open(), 1);
 }
 

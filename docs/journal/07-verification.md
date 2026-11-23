@@ -135,7 +135,7 @@ check: `Journal.tla` chooses a slot at a quorum of the whole grid, not of one co
 The walk also runs proxy leaders (oracle `PROXY`, mutant `ForgedAccepted`), leaderless reads at
 the replicas, one of which hears the register late (oracle `READ`, mutant `ReadNoFence`), the
 trim of a retired segment and the reader's floor (oracles `TRIM` and `FLOOR`, mutants
-`TrimIntent` and `FloorFromHolder`; the trace event `Trim`), and the leader time of each write
+`TrimIntent` and `FloorFromHolder`; the trace events `Trim` and `Drop`), and the leader time of each write
 (oracle `STAMPED`, mutant `UnstampedAccept`). **Open**: the coverage gate over the journal's
 probes, with CTRL faulty votes on the acceptors' disks (the leader's blocked slot has unit tests
 only); both come with the last rule group of #1326.

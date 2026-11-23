@@ -545,7 +545,10 @@ impl Host {
     fn assign(&mut self, now: Time, assignment: Assignment, effects: &mut Vec<Effect>) {
         let address = assignment.address();
         if self.roles.contains_key(&address) {
-            // Placement may say it again: the role already runs.
+            // Placement may say it again: the role already runs. The `Host`
+            // runs one role for each address, so an assignment of another
+            // role at an address that has one is not taken either: placement
+            // gives a proxy an address with no other role (§J4.1).
             return;
         }
         self.arm(now, effects);

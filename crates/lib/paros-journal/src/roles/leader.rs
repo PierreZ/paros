@@ -31,7 +31,10 @@
 //!    column (#1257). The tally is the core's [`Rounds`].
 //! 5. **Commit**: a chosen slot goes to the replica set of its segment, and
 //!    only there (#1271). The leader sends it again until a replica of the
-//!    set answers `Applied`.
+//!    set answers `Applied`. With proxies the leader sends it too, on the
+//!    proxy's `Chosen`: the proxy keeps nothing, so the leader is the one
+//!    role that can send a `Commit` again, and a replica takes a second
+//!    `Commit` of a slot as a no-op.
 //! 6. **Held answers** (#1232): the answer of a command the leader proposed
 //!    goes to its caller when the slot applied that command, else `Unknown`.
 //!    A leader that stops answers `Unknown` for every held command.

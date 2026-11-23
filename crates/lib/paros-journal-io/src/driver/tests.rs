@@ -860,3 +860,34 @@ fn a_read_at_a_role_that_stops_is_unserved() {
         "a role that is not served answers at once"
     );
 }
+
+#[test]
+fn a_stop_answers_only_the_held_reads_of_its_role() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[11, 12]);
+    let stopped = Address::replica(J, NodeId(11), SegmentId(1));
+    let kept = Address::replica(J, NodeId(12), SegmentId(1));
+    // Two reads that wait on a batch of their replica, as inside a round.
+    driver
+        .held_reads
+        .push((PersistId(1), stopped, 7, ReadAnswer::Unserved));
+    driver
+        .held_reads
+        .push((PersistId(1), kept, 8, ReadAnswer::Unserved));
+    driver.on_stopped(stopped, Stop::Unassigned);
+    assert_eq!(
+        driver.take_reads(),
+        vec![ReadReply {
+            address: stopped,
+            read: 7,
+            answer: ReadAnswer::Unserved,
+        }]
+    );
+    assert_eq!(
+        driver.held_reads,
+        vec![(PersistId(1), kept, 8, ReadAnswer::Unserved)],
+        "the read of a role that runs still waits on its batch"
+    );
+    driver.held_reads.clear();
+}

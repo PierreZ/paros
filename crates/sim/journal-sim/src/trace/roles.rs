@@ -163,6 +163,7 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
         RolesEvent::Boundary { r } => ("boundary", vec![("r", int(*r))]),
         RolesEvent::Retire { p } => ("retire", vec![("p", int(*p))]),
         RolesEvent::Trim { p, r } => ("trim", vec![("p", int(*p)), ("r", int(*r))]),
+        RolesEvent::Drop { r } => ("drop", vec![("r", int(*r))]),
         RolesEvent::Resolve { s, r, res } => (
             "resolve",
             vec![("s", int(*s)), ("r", int(*r)), ("res", Value::from(*res))],
@@ -400,6 +401,22 @@ pub const EDITS: &[Edit] = &[
     repeat_edit!("a boundary written twice", "boundary"),
     repeat_edit!("a retire repeated", "retire"),
     repeat_edit!("a trim repeated", "trim"),
+    repeat_edit!("a drop repeated", "drop"),
+    Edit::new("a drop before its trim", |events| {
+        let at = events.iter().position(|e| is(e, "trim"))?;
+        let r = fields(&events[at])["p"].clone();
+        let mut edited = events.to_vec();
+        // A replica of the trimmed segment: replica 10p + 1.
+        let Value::Int(p) = r else { return None };
+        edited.insert(
+            at,
+            Value::record([
+                ("event", Value::from("drop")),
+                ("r", Value::Int(10 * p + 1)),
+            ]),
+        );
+        Some((at, edited))
+    }),
     Edit::new("a trim of the open segment", |events| {
         let at = events.iter().position(|e| is(e, "trim"))?;
         let newest = events[..at]

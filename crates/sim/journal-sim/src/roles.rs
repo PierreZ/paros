@@ -71,7 +71,7 @@ use paros_journal::{
     Record, Reply, Seq, Slot, Write,
 };
 
-use crate::oracle::{Truth, Verdict, label};
+use crate::oracle::{Truth, Verdict, as_written, label};
 
 /// Oracle: a read serves the records of the whole log, and a page of a
 /// segment that no seal ended covers every slot chosen before the read
@@ -384,6 +384,11 @@ pub enum RolesEvent {
         /// The replica.
         r: u64,
     },
+    /// Replica `r` dropped its copy of a trimmed segment (`Drop`).
+    Drop {
+        /// The replica.
+        r: u64,
+    },
     /// Replica `r` answered `res` to the `Resolve` of the write at `s`
     /// (`ResolveBelow`).
     Resolve {
@@ -573,8 +578,11 @@ pub struct RolesModel {
     records: BTreeMap<u64, Record>,
     /// The open reads, by id.
     reads: BTreeMap<u64, OpenRead>,
-    /// The time of each proposal: its call's token.
-    stamps: BTreeSet<u64>,
+    /// The replicas that dropped their copy.
+    dropped: BTreeSet<NodeId>,
+    /// The command of each proposal, as its client wrote it, by its time:
+    /// its call's token.
+    stamps: BTreeMap<u64, Command>,
     /// The reads of an older segment whose floor read was not served, with
     /// the floor when the reader started: the reader asks the floor again
     /// later.
@@ -908,6 +916,11 @@ impl Model for RolesModel {
                 }
             }
         }
+        // Every call is answered: a deposed leader stops (a proxy tells it
+        // too) and answers what it holds `Unknown`.
+        if !self.calls.is_empty() {
+            return Err(format!("calls are not answered: {:?}", self.calls.keys()));
+        }
         if !self.belows.is_empty() {
             return Err(format!(
                 "{} Below answers are not resolved",
@@ -992,7 +1005,8 @@ impl RolesModel {
             traced: BTreeMap::new(),
             records: BTreeMap::new(),
             reads: BTreeMap::new(),
-            stamps: BTreeSet::new(),
+            stamps: BTreeMap::new(),
+            dropped: BTreeSet::new(),
             waiting: Vec::new(),
             held_reads: BTreeMap::new(),
             read_ids: 0,
@@ -1490,14 +1504,25 @@ impl RolesModel {
                     }
                 }
                 // A replica of a trimmed segment drops its copy: it answers
-                // no read and takes no step after it, and the writes of the
-                // copy still in flight never land.
+                // no read and takes no step after it. Its batches in flight
+                // still reach the disk, as the driver keeps them for a
+                // dropped role (`Stop::Dropped`), and then the copy goes
+                // (`Drop` of the model).
                 ReplicaEffect::Drop => {
-                    let replica = self.replicas.get_mut(&node).expect("a replica");
-                    replica.batches.clear();
-                    replica.held.clear();
-                    replica.changes.clear();
-                    self.held_reads.remove(&node);
+                    assert!(
+                        self.register
+                            .segment(Self::segment_of_replica(node))
+                            .is_some_and(|r| r.state() == SegmentState::Trimmed),
+                        "the roles walk drops only the copies of a trimmed segment: {node:?}"
+                    );
+                    while !self.replicas[&node].batches.is_empty() {
+                        self.flush_replica(node, cx);
+                    }
+                    // A replica that restarts after its drop drops again:
+                    // the model's copy went once.
+                    if self.dropped.insert(node) {
+                        cx.record(RolesEvent::Drop { r: node.0 });
+                    }
                 }
                 ReplicaEffect::Copied { .. } => {
                     unreachable!("the roles walk has no heal: {node:?}")
@@ -1512,9 +1537,10 @@ impl RolesModel {
         if let Command::Write(write) = command {
             let time = write.records.first().and_then(|r| r.headers.leader_time);
             assert!(
-                time.is_some_and(|t| self.stamps.contains(&t))
+                time.and_then(|t| self.stamps.get(&t)) == Some(&as_written(command))
                     && write.records.iter().all(|r| r.headers.leader_time == time),
-                "{STAMPED}: slot {slot:?} chose {write:?}"
+                "{STAMPED}: slot {slot:?} chose {write:?}, the proposal of its time was {:?}",
+                time.and_then(|t| self.stamps.get(&t))
             );
         }
         if let Some((held, ..)) = self.chosen.get(&slot) {
@@ -1605,7 +1631,6 @@ impl RolesModel {
         {
             *state = base.0;
         }
-        let mut trimmed = None;
         match self.register.apply(&change) {
             Ok(value) => {
                 match (&change, origin) {
@@ -1652,7 +1677,6 @@ impl RolesModel {
                                 r: node.0,
                             });
                         }
-                        trimmed = Some(*segment);
                         sometimes!(true, reach::SEGMENT_TRIMMED);
                     }
                     (Change::Seal { segment, end }, _) => {
@@ -1670,14 +1694,6 @@ impl RolesModel {
                     _ => {}
                 }
                 self.register = value;
-                // The replicas of a trimmed segment learn the trim with its
-                // write, slow or not: `Journal.tla` has no replica that
-                // applies a slot of a trimmed segment.
-                if let Some(segment) = trimmed {
-                    for node in Self::set_of(segment) {
-                        self.observe_replica(node, cx);
-                    }
-                }
                 self.observe_all(cx);
             }
             Err(_) => {
@@ -1967,7 +1983,7 @@ impl RolesModel {
         let ballot = leader.ballot();
         // The walk's clock is the count of its calls: each proposal has its
         // own time.
-        self.stamps.insert(token);
+        self.stamps.insert(token, as_written(&command));
         let (proposed, effects) = leader.propose(token, command.clone(), token);
         if let Proposed::Slot(slot) = proposed {
             self.calls.insert(
@@ -2389,10 +2405,19 @@ impl RolesModel {
                 "{READ}: read {read} from {from} answered Truncated, the floor is {}",
                 self.truth.first
             ),
-            ReadAnswer::Below(view) => assert!(
-                from < view.next_seq.0,
-                "{READ}: read {read} from {from} answered Below with {view:?}"
-            ),
+            ReadAnswer::Below(view) => {
+                // The first position of the segment: the next of the
+                // boundary state of the segment before, 0 for the first.
+                let start = segment
+                    .0
+                    .checked_sub(1)
+                    .and_then(|before| self.register.segment(SegmentId(before)))
+                    .map_or(Some(0), |before| before.boundary().map(|b| b.next_seq.0));
+                assert!(
+                    start.is_some_and(|start| from < start),
+                    "{READ}: read {read} from {from} at {segment:?} answered Below with {view:?}, the segment starts at {start:?}"
+                );
+            }
             ReadAnswer::Superseded(bound) => {
                 assert!(
                     *bound > segment && self.register.segment(*bound).is_some(),

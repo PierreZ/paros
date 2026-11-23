@@ -32,7 +32,7 @@ Test only: `publish = false`.
   each), the leader's retire judged by `RETIRE` (mutant `HoldsLie`) and the trace control `BoundaryBeforeDurable`.
   It also runs proxy leaders (`PROXY`, mutant `ForgedAccepted`); leaderless reads, half of them at
   a replica that hears the register late (`READ`, mutant `ReadNoFence`); the trim of a retired
-  segment (`TRIM`, mutant `TrimIntent`, trace event `Trim`) and a reader that takes its floor from
+  segment (`TRIM`, mutant `TrimIntent`, trace events `Trim` and `Drop`) and a reader that takes its floor from
   the segment in force (`FLOOR`, mutant `FloorFromHolder`); and the leader time of each write
   (`STAMPED`, mutant `UnstampedAccept`).
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid

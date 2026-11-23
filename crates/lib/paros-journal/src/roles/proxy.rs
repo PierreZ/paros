@@ -8,7 +8,9 @@
 //! the `Accepted`s with the core's [`Rounds`] on that column, and, at a
 //! Phase-2 quorum of it (`F + 1` of the column, §J5.1), sends the `Commit` to
 //! the replica set of the slot's segment (#1271) and tells the leader
-//! ([`Message::Chosen`]).
+//! ([`Message::Chosen`]). The leader then sends the same `Commit` and sends
+//! it again until a replica applies it: the proxy's `Commit` only saves a
+//! hop.
 //!
 //! The rules, from `specs/tla/proxy-leader/` (#1188):
 //!
@@ -31,9 +33,13 @@
 //!   decided opens it again: the acceptors answer a vote they hold again
 //!   (P2b is idempotent), and the proxy decides it again with the same
 //!   command.
-//! - **One ballot at a time.** A delegation of a higher ballot drops the
-//!   rounds below it: no decision closes them. A delegation of a lower
-//!   ballot is not taken.
+//! - **One ballot at a time, and the leader below hears it.** A delegation
+//!   of a higher ballot drops the rounds below it: no decision closes them,
+//!   and the proxy sends a `Nack` naming the higher ballot to each leader
+//!   whose round it dropped. A delegation of a lower ballot is not taken and
+//!   is answered with the same `Nack`. So a deposed leader stops even when
+//!   only proxies reach the acceptors, and answers its held writes
+//!   `Unknown`; without the `Nack` it would delegate for ever.
 //! - **Bounded state.** A round that the proxy sent again [`RETENTION`]
 //!   times with no decision is dropped; the leader's next delegation opens
 //!   it again.
@@ -180,12 +186,18 @@ impl JournalProxy {
         segment: SegmentId,
         replicas: Vec<NodeId>,
     ) -> Vec<ProxyEffect> {
-        if self.ballot.is_some_and(|known| ballot < known) {
+        if let Some(known) = self.ballot.filter(|known| ballot < *known) {
             probe!(
                 reachable,
                 "proxy: a delegation of a lower ballot is not taken"
             );
-            return Vec::new();
+            return vec![ProxyEffect {
+                to: leader,
+                message: Message::Nack {
+                    ballot,
+                    promised: known,
+                },
+            }];
         }
         // A column of a v1 grid is `2F + 1` acceptors; anything else comes
         // from no correct leader and is not taken.
@@ -195,11 +207,24 @@ impl JournalProxy {
         if column.members().len() % 2 == 0 {
             return Vec::new();
         }
-        if self.ballot.is_some_and(|known| ballot > known) {
+        let mut effects = Vec::new();
+        if let Some(known) = self.ballot.filter(|known| ballot > *known) {
+            let mut leaders: Vec<NodeId> = Vec::new();
             for stale in self.rounds.close_below(ballot) {
                 probe!(reachable, "proxy: a higher ballot drops the rounds below");
-                self.delegations.remove(&stale);
+                if let Some(dropped) = self.delegations.remove(&stale)
+                    && !leaders.contains(&dropped.leader)
+                {
+                    leaders.push(dropped.leader);
+                }
             }
+            effects.extend(leaders.into_iter().map(|to| ProxyEffect {
+                to,
+                message: Message::Nack {
+                    ballot: known,
+                    promised: ballot,
+                },
+            }));
         }
         self.ballot = Some(ballot);
         match self.rounds.by_slot().get(&slot) {
@@ -223,7 +248,8 @@ impl JournalProxy {
         );
         let (_, command) = self.round(slot).expect("the round is open");
         let command = command.clone();
-        self.accepts(slot, ballot, &command)
+        effects.extend(self.accepts(slot, ballot, &command));
+        effects
     }
 
     /// The `Accept`s of `slot`: to every acceptor of its column.
