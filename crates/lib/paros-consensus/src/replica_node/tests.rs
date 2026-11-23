@@ -1269,6 +1269,18 @@ fn a_replica_takes_a_trim_point_only_as_an_answer() {
         Slot(0),
         "a stranger's point is ignored"
     );
+    let ignored = replica.counters().ignored;
+    replica.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(0),
+        state: JournalState::default(),
+    });
+    assert_eq!(
+        replica.counters().ignored,
+        ignored + 1,
+        "a point at the floor is counted as ignored"
+    );
+    assert!(ignored >= 1, "the stranger's point is counted as ignored");
     replica.step(trimmed(0));
     assert_eq!(replica.first_slot(), Slot(4), "the answer is taken");
     assert_eq!(replica.counters().trim_jumps, 1);
