@@ -324,6 +324,8 @@ mod tests {
         );
         assert_eq!(value.as_bytes(), b"abc");
         assert_eq!(value.len(), 3);
+        let bytes: &[u8] = value.as_ref();
+        assert_eq!(bytes, b"abc", "`AsRef` reads the value's own bytes");
     }
 
     #[test]
