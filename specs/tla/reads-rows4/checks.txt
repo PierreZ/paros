@@ -13,3 +13,5 @@
 # that a grid must have Phase-1 quorums that meet, or be a full grid.
 grid_rows4        violation  ci
 grid_rows4_meet   pass       ci
+# Reach: under acks = 2 a read that started after an ack is served.
+grid_rows4_reach  violation  ci

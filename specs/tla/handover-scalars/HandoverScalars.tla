@@ -204,7 +204,7 @@ CloseStop(Q) ==
   /\ \A m \in Q : \E r \in reports : r[1] = m
   /\ LET R  == {r \in reports : r[1] \in Q}
          one == CHOOSE r \in R : TRUE
-         f  == Max({r[2 + 1] : r \in R})
+         f  == Max({r[3] : r \in R})
          carried == {b \in UNION {r[4] : r \in R} : b >= f}
          recs == IF Close = "merge"
                  THEN [n \in Nodes |-> MergeSet({r[2][n] : r \in R})]

@@ -1232,8 +1232,9 @@ configuration accepts). Restarts are not fair. `ReadEnds`: an open read ends.
 names the readers that are not acceptors. A replica has no promise, so nothing of its own gates
 its read. It learns its basis only from the beat of a leadership that won, and a beat can be
 late. A replica restart forgets its basis and its open read, so its next basis can be the late
-beat of an older leadership: a stale basis. Only the fences of the answers end a read on a
-stale basis. The checks run in their own folder, `read-replica/`, which links `Reads.tla` and
+beat of an older leadership. A replica that hears its first beat late has a stale basis too
+(the trace of `replica_no_fence` takes that path, with no restart). Only the fences of the
+answers end a read on a stale basis. The checks run in their own folder, `read-replica/`, which links `Reads.tla` and
 `MC.tla`, so that the `reads` job stays inside its minutes. The replica `r1` is the one reader.
 
 | Check | Shape | Result |
@@ -1269,9 +1270,11 @@ leader acks it. `a1` hears the beat of ballot 1 and takes it as its basis, asks 
 `a1..a4`, and closes on the answers of `a1` and `a4`, a Phase-1 quorum of the old members that
 misses `{a2, a3}`. No answer holds a fence above 1 or a vote, so the read serves index 0 after
 the ack. A write at the new members meets every Phase-1 quorum of the new members, but not of the
-old ones. So the rule is: a grid that is not full must have Phase-1 quorums that meet
-(`2 * (rows - acks + 1) > rows`, `phase1_quorums_meet`), and `admits` refuses the others; this
-is candidate rule 1 of #1483. Rule 2 (seal each row) would make a one-column grid wait for every
+old ones. The rule that the checks select is candidate rule 1 of #1483: a grid that is not full
+must have Phase-1 quorums that meet (`2 * (rows - acks + 1) > rows`), and `admits` must refuse
+the others. **Open**: the code does not have this rule yet; `QuorumSystem::admits` still admits
+`grid(4, 1, 3)`, and #1483 tracks the change. `grid_rows4_reach` shows that under `acks = 2` a
+read that started after an ack is served. Rule 2 (seal each row) would make a one-column grid wait for every
 member at an election, against quorum everywhere (#1257).
 
 `live_no_leader` shows what a leaderless read rests on: a read whose index is a slot that only a

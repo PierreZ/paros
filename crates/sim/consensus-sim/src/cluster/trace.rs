@@ -983,9 +983,12 @@ impl Spec {
     /// model does not have is left out of its trace.
     #[must_use]
     pub fn keeps(self, event: &ClusterEvent) -> bool {
-        // Every spec of `node/` judges the proxy rounds and the handoff of
-        // its walks: one model has every step of `ColocatedNode`.
-        let node = proxy_leader::keeps(event) || leader_handoff::keeps(event);
+        // Every spec of `node/` judges the proxy rounds, the handoff and the
+        // floors of its walks: one model has every step of `ColocatedNode`.
+        // A node that jumps to a trim point learns from it on, so a spec
+        // that dropped the jump would refuse its next learn.
+        let node =
+            proxy_leader::keeps(event) || leader_handoff::keeps(event) || truncation::keeps(event);
         match self {
             Self::MultiPaxos | Self::ProxyLeader | Self::LeaderHandoff => {
                 node || multi_paxos::keeps(event)
@@ -1263,5 +1266,44 @@ mod tests {
             })),
             Cmd::Fresh(_)
         ));
+    }
+
+    /// A node of any walk may jump to a peer's trim point, and it learns
+    /// from that point on: every spec of `node/` keeps the floor steps, or
+    /// TLC refuses the first learn above the jump of a correct walk (a
+    /// `reconfiguring` walk of 60 chaos steps, seed 1, met it).
+    #[test]
+    fn every_node_spec_keeps_the_floors() {
+        let floors = [
+            ClusterEvent::Trim {
+                node: NodeId(0),
+                floor: Slot(1),
+            },
+            ClusterEvent::Compact {
+                node: NodeId(0),
+                floor: Slot(1),
+            },
+            ClusterEvent::Fold {
+                slot: Slot(0),
+                high: 0,
+                first: 0,
+            },
+        ];
+        for spec in [
+            Spec::MultiPaxos,
+            Spec::ProxyLeader,
+            Spec::LeaderHandoff,
+            Spec::Matchmaker,
+            Spec::MatchmakerGrid,
+            Spec::Reads,
+            Spec::Truncation,
+            Spec::Compartments,
+            Spec::Faults,
+            Spec::Retire,
+        ] {
+            for event in &floors {
+                assert!(spec.keeps(event), "{spec:?} drops {event:?}");
+            }
+        }
     }
 }

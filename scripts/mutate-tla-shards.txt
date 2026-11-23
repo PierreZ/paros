@@ -42,7 +42,7 @@ proxy-leader 1
 quorum-everywhere 3
 re-replication 9
 read-replica 0
-reads 32
+reads 40
 reads-rows4 0
 retire-fence 18
 seal-chain 3

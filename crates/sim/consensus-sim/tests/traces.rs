@@ -625,9 +625,12 @@ fn tlc_refuses_a_bootstrap_that_lost_a_registration() {
 /// (trace checking)): the mutants planted for another flavor also break the
 /// rules that this flavor's spec shares. Each runs the walks of 60 chaos
 /// steps from seed 1 up to the last seed of its row, and TLC must refuse
-/// one of them before any oracle sees the bug.
+/// one of them before any oracle sees the bug. The control: TLC accepts the
+/// walk of the same seed without the mutant, so the refusal is the
+/// mutant's.
 fn refuses_the_driver_mutants(spec: Spec, flavor: &Flavor, mutants: &[(Mutant, u64)]) {
-    require_tlc(&spec.check());
+    let check = spec.check();
+    require_tlc(&check);
     for &(mutant, last) in mutants {
         let (seed, event, _) = first_refused_cluster(spec, flavor, mutant, 1..=last, 60)
             .unwrap_or_else(|| {
@@ -638,6 +641,18 @@ fn refuses_the_driver_mutants(spec: Spec, flavor: &Flavor, mutants: &[(Mutant, u
             });
         eprintln!(
             "{spec:?} {} {mutant:?}: seed {seed}, TLC refused {event:?}",
+            flavor.name
+        );
+        let clean = cluster_walk_of(flavor.clone(), 60)
+            .replay(seed)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let verdict = check
+            .check(&spec.trace(flavor, &kept(spec, &clean)))
+            .expect("TLC gives a verdict");
+        assert_eq!(
+            verdict,
+            Verdict::Accepted,
+            "{spec:?} {} seed {seed}: TLC refuses the walk without {mutant:?} too",
             flavor.name
         );
     }
