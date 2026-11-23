@@ -27,6 +27,14 @@
 //!   reaches it).
 //! - **`Truncated`** resolves nothing: the position is below the trim floor,
 //!   and the call ends with [`Outcome::Truncated`], fate unknown.
+//! - **A read takes its floor from the segment in force** (§J3.2). A
+//!   replica of a sealed segment folds only up to its seal, so its own trim
+//!   floor misses every later `Truncate`, and it serves records below the
+//!   floor of the journal. Each read first asks the floor
+//!   ([`Request::Floor`]) of a replica of the segment in force, at the basis
+//!   of its leaderless read. Below that floor the client answers
+//!   [`Outcome::Truncated`] itself; at or above it, it sends the read
+//!   ([`Request::Read`]), and every holder still has the records there.
 //! - **At-least-once in multi-writer mode** (§J2.4). An unfenced write has
 //!   no position, so after an ambiguous answer the client sends it again,
 //!   and it can land two times. The writers own that.
@@ -109,7 +117,16 @@ pub enum Request {
         /// The records of the write.
         records: Vec<Record>,
     },
-    /// Send `Read(from, limit)` to a server of the journal (§J2.5).
+    /// Send a read of the tail to a replica of the segment in force: the
+    /// view of its answer gives the trim floor at the basis of its
+    /// leaderless read (§J3.2). Answer it with [`Response::Read`].
+    Floor {
+        /// The id of this copy.
+        id: RequestId,
+    },
+    /// Send `Read(from, limit)` to a server of the journal (§J2.5). `from`
+    /// is at or above the floor that the client took from the segment in
+    /// force for this read.
     Read {
         /// The id of this copy.
         id: RequestId,
@@ -125,7 +142,10 @@ impl Request {
     #[must_use]
     pub fn id(&self) -> RequestId {
         match self {
-            Self::Command { id, .. } | Self::Resolve { id, .. } | Self::Read { id, .. } => *id,
+            Self::Command { id, .. }
+            | Self::Resolve { id, .. }
+            | Self::Floor { id }
+            | Self::Read { id, .. } => *id,
         }
     }
 }
@@ -143,7 +163,7 @@ pub enum Response {
     Lost,
     /// The replica's answer to a [`Request::Resolve`].
     Resolved(ResolveAnswer),
-    /// The server's answer to a [`Request::Read`].
+    /// The server's answer to a [`Request::Floor`] or a [`Request::Read`].
     Read(ReadAnswer),
 }
 
@@ -237,6 +257,10 @@ struct Reading {
     call: CallId,
     from: Seq,
     limit: u64,
+    /// The floor that the segment in force gave for this read: `None` while
+    /// the [`Request::Floor`] is out, then the floor, at or below `from`,
+    /// while the [`Request::Read`] is out.
+    floor: Option<Seq>,
 }
 
 /// The client of one journal.
@@ -315,7 +339,9 @@ impl Client {
         self.ask(Call::SetLeader { new, old })
     }
 
-    /// `Read(from, limit)`. It leaves at once, beside the call in flight.
+    /// `Read(from, limit)`. It leaves at once, beside the call in flight:
+    /// first a [`Request::Floor`], then the [`Request::Read`] when `from` is
+    /// at or above the floor (§J3.2).
     ///
     /// # Panics
     ///
@@ -323,7 +349,12 @@ impl Client {
     pub fn read(&mut self, from: Seq, limit: u64) -> CallId {
         assert!(limit > 0, "a read asks for at least one record");
         let call = self.new_call();
-        let reading = Reading { call, from, limit };
+        let reading = Reading {
+            call,
+            from,
+            limit,
+            floor: None,
+        };
         self.send_read(reading);
         assert!(
             self.reads.values().any(|r| r.call == call),
@@ -399,6 +430,12 @@ impl Client {
         assert!(
             self.reads.keys().all(|id| id.0 < self.next_request),
             "every read has a given id"
+        );
+        assert!(
+            self.reads
+                .values()
+                .all(|r| r.floor.is_none_or(|floor| floor <= r.from)),
+            "a read leaves only at or above its floor"
         );
     }
 
@@ -480,12 +517,20 @@ impl Client {
         self.send(call, command, copies + 1);
     }
 
+    /// Send the copy of `reading` that its stage asks for: the floor, or
+    /// the read once the floor is known.
     fn send_read(&mut self, reading: Reading) {
         let id = self.new_request();
-        self.outbox.push(Request::Read {
-            id,
-            from: reading.from,
-            limit: reading.limit,
+        self.outbox.push(match reading.floor {
+            None => Request::Floor { id },
+            Some(floor) => {
+                assert!(floor <= reading.from, "a read leaves at or above its floor");
+                Request::Read {
+                    id,
+                    from: reading.from,
+                    limit: reading.limit,
+                }
+            }
         });
         let previous = self.reads.insert(id, reading);
         assert!(previous.is_none(), "a request id names one read");
@@ -668,6 +713,10 @@ impl Client {
     }
 
     fn answer_read(&mut self, reading: Reading, response: Response) {
+        if reading.floor.is_none() {
+            self.answer_floor(reading, &response);
+            return;
+        }
         match response {
             Response::Read(ReadAnswer::Page {
                 records,
@@ -699,6 +748,41 @@ impl Client {
                 panic!("a read is answered by a page: {response:?}")
             }
         }
+    }
+
+    /// The answer to the [`Request::Floor`] of `reading`. Only a replica of
+    /// the segment in force gives the floor: a page or `Truncated` at the
+    /// tail. `Below` comes from a replica of a sealed segment, whose floor
+    /// misses the later `Truncate`s, so the client asks again, as for a
+    /// lost or unserved copy.
+    fn answer_floor(&mut self, mut reading: Reading, response: &Response) {
+        assert!(reading.floor.is_none(), "the floor is asked once per read");
+        let view = match response {
+            Response::Read(ReadAnswer::Page { view, .. } | ReadAnswer::Truncated(view)) => *view,
+            Response::Read(
+                ReadAnswer::Unserved | ReadAnswer::Below(_) | ReadAnswer::Superseded(_),
+            )
+            | Response::NotLeader
+            | Response::Lost => {
+                self.send_read(reading);
+                return;
+            }
+            Response::Reply(_) | Response::Resolved(_) => {
+                panic!("a floor is answered by a read: {response:?}")
+            }
+        };
+        if reading.from < view.first_seq {
+            // Every record below the floor of the segment in force is gone,
+            // even when the holder of `from` still has it.
+            self.end(reading.call, Outcome::Truncated(view));
+            return;
+        }
+        reading.floor = Some(view.first_seq);
+        self.send_read(reading);
+        assert!(
+            self.reads.values().any(|r| r.call == reading.call),
+            "the read is out after its floor"
+        );
     }
 }
 

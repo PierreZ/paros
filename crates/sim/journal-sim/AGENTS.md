@@ -67,7 +67,8 @@ Test only: `publish = false`.
   `FLIGHT`, `ANSWER`), its reach sites and its planted mutants (`HostMutant`). `tests/host.rs`.
 - `src/client.rs`: the client walk (`ClientModel`, #1331): two programs with a `Client` of
   `paros_journal::client`, a lossy mailbox, held and lost answers, seals, `Resolve`, reads; its
-  oracles (`WRITTEN`, `ONCE`, `REFUSED`, `LED`, `TAIL`, `PAGE`), judged on a log that the walk keeps, its
+  oracles (`WRITTEN`, `ONCE`, `REFUSED`, `LED`, `TAIL`, `PAGE`, `FLOOR`: a page holds no record
+  below the floor, while a sealed segment still serves the records that a later `Truncate` cut), judged on a log that the walk keeps, its
   reach sites and its planted mutants (`ClientMutant`). `tests/client.rs`.
 - `src/backend.rs`: the backends of the driver walk and the whole walk: `Disk`, a disk that
   survives its process and fails commits inside the contract, and `Wire`, a transport that judges

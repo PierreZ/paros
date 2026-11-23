@@ -69,9 +69,9 @@ The proxy leader, the leaderless read and the trim are built too (2026-11-22):
   batch.
 - The trim (§J3.2): a replica writes `Trim` for each retired segment below its own once its fold's
   floor covers the segment's last `seq`, and every replica of a trimmed segment drops its copy.
-  The reader of `journal-sim`'s roles walk takes its floor from the segment in force before it
-  reads an older segment. **Open**: `paros_journal::client` does not take that floor yet; the
-  next rule group of #1326 adds it.
+  The reader of `journal-sim`'s roles walk and the client (`paros_journal::client`) take the
+  floor from the segment in force before they read: the client sends `Request::Floor` first, ends
+  the read `Truncated` itself below that floor, and sends `Request::Read` only at or above it.
 - The leader stamps the leader time of each write at propose (§J2.8, #1299).
 
 The compaction of the acceptors per segment, the laggard's trim-point jump and the repair of a
