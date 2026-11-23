@@ -376,3 +376,35 @@ fn only_data_loss_a_frozen_control_and_a_blocked_or_stopped_journal_page() {
         ]
     );
 }
+
+/// Every member of a retired set down, zones a, b and c: a joint plan of
+/// three pairs is valid as a whole, but its first pair alone (11 -> 20,
+/// zone c) leaves two members in zone c, and no later step can fix it
+/// (#1496). The plan replaces one member, with a candidate of its zone.
+#[test]
+fn a_re_replication_replaces_one_member_and_keeps_the_zone_rule() {
+    let mut fixture = Fixture::new(retired())
+        .set(11, Liveness::Down)
+        .set(12, Liveness::Down)
+        .set(13, Liveness::Down);
+    for (node, zone) in [
+        (11, "a"),
+        (12, "b"),
+        (13, "c"),
+        (20, "c"),
+        (21, "a"),
+        (22, "b"),
+    ] {
+        fixture
+            .zones
+            .insert(NodeId(node), FailureDomain::new("r", zone));
+    }
+    assert_eq!(
+        fixture.action(),
+        Action::Rereplicate {
+            segment: SegmentId(1),
+            from: nodes(&[11, 12, 13]),
+            to: nodes(&[21, 12, 13]),
+        }
+    );
+}

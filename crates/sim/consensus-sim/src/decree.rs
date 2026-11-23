@@ -318,10 +318,18 @@ impl Model for DecreeModel {
     }
 
     fn converged(&self) -> Result<(), String> {
-        if self.reported.is_empty() {
-            Err("no decree reported a value chosen".into())
-        } else {
+        // Once the faults stop, proposer 0 alone keeps proposing (Paxos
+        // liveness needs one distinguished proposer): it must learn the
+        // value, whatever a proposer reported during the chaos.
+        let distinguished = NodeId(PROPOSER_BASE);
+        if self
+            .reported
+            .iter()
+            .any(|(who, _, _)| *who == distinguished)
+        {
             Ok(())
+        } else {
+            Err("the distinguished proposer reported no value chosen".into())
         }
     }
 

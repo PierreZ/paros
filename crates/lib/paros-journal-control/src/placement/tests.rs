@@ -142,3 +142,29 @@ fn a_replica_set_with_no_member_down_is_kept_whatever_its_zones() {
         "the zone rule judges a placement; a grid heal never waits on a set it carries over"
     );
 }
+
+#[test]
+fn a_single_heal_replaces_one_down_member_with_a_candidate_of_its_zone() {
+    let set = nodes(&[11, 12, 13]);
+    let rows = zones(&[(11, "a"), (12, "b"), (13, "c"), (20, "a"), (21, "c")]);
+    // No member is down: nothing to heal.
+    let up = alive(&[11, 12, 13, 20, 21], &[]);
+    assert_eq!(heal_one_replica(&set, &up, &nodes(&[20, 21]), &rows), None);
+    // 13 (zone c) is down: the first candidate, 20, is in zone a, which 11
+    // already holds; 21 is in zone c and keeps the rule.
+    let one = alive(&[11, 12, 20, 21], &[13]);
+    assert_eq!(
+        heal_one_replica(&set, &one, &nodes(&[20, 21]), &rows),
+        Some(nodes(&[11, 12, 21]))
+    );
+    // Two members down: the first one that a candidate can replace on its
+    // own is replaced, and only it.
+    let two = alive(&[13, 20], &[11, 12]);
+    assert_eq!(
+        heal_one_replica(&set, &two, &nodes(&[20]), &rows),
+        Some(nodes(&[20, 12, 13]))
+    );
+    // No candidate keeps the rule: no heal.
+    let none = alive(&[11, 12, 20], &[13]);
+    assert_eq!(heal_one_replica(&set, &none, &nodes(&[20]), &rows), None);
+}

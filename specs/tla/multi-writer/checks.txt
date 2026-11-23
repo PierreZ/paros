@@ -26,6 +26,11 @@ fence_propose_write violation  ci
 dedup_after         violation  ci
 dedup_after_twice   violation  ci
 basis_stale         violation  ci
+# #1495: a late copy of SetLeader(u, old) whose old was the multi-writer
+# mode. With one None for every multi-writer mode, it brings u back and a
+# refused fenced write lands. The rule (Multi = "tagged") keeps the safety
+# checks above with these copies.
+setleader_copy      violation  ci
 boundary_early      violation  ci
 # #1301 (a resent write across a seal): the fold of the next segment does
 # not hold the old records. The rule: a position in the old segment is

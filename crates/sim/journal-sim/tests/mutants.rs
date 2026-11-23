@@ -38,6 +38,11 @@ fn resolve_catches_a_resolve_at_the_segment_in_force() {
     caught(FoldMutant::ResolveInForce, RESOLVE);
 }
 
+#[test]
+fn fold_catches_a_below_in_the_segment_in_force() {
+    caught(FoldMutant::BelowJudged, FOLD);
+}
+
 /// The trace control passes every oracle.
 #[test]
 fn the_oracles_pass_a_below_in_the_segment_in_force() {

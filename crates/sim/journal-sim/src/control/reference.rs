@@ -307,6 +307,23 @@ fn act(case: &Case, alerts: &mut BTreeSet<Alert>) -> Action {
     heal(case, in_force, state, reshaping, alerts)
 }
 
+/// One step of a retired set's heal: the first member that is down, in the
+/// set's order, that one candidate can replace with the rest kept and the
+/// zone rule met. A re-replication writes one replacement at a time, so each
+/// written set meets the rule on its own (§J3.1).
+fn one_replacement(case: &Case, set: &[NodeId]) -> Option<Vec<NodeId>> {
+    let pool = usable(case, set);
+    (0..set.len())
+        .filter(|i| is(case, set[*i], Liveness::Down))
+        .find_map(|hole| {
+            pool.iter().find_map(|candidate| {
+                let mut healed = set.to_vec();
+                healed[hole] = *candidate;
+                set_admits(case, &healed).then_some(healed)
+            })
+        })
+}
+
 /// The re-replication of the first retired segment with a replica that is
 /// down.
 fn rereplicate(case: &Case, alerts: &mut BTreeSet<Alert>) -> Option<Action> {
@@ -315,7 +332,7 @@ fn rereplicate(case: &Case, alerts: &mut BTreeSet<Alert>) -> Option<Action> {
             && r.replicas().iter().any(|m| is(case, *m, Liveness::Down))
     });
     if let Some(record) = copy {
-        let Some(to) = replica_placement(case, record.replicas()) else {
+        let Some(to) = one_replacement(case, record.replicas()) else {
             alerts.insert(Alert::ReplicasUnplaceable);
             return Some(Action::Wait(Wait::NoReplicaPlacement));
         };

@@ -38,7 +38,7 @@ use paros_journal::register::{RegisterValue, Term};
 use paros_journal::segment::{OpeningCall, SegmentId, SegmentRecord, SegmentState};
 
 use crate::measure::{GridState, Liveness, grid_state};
-use crate::placement::{down, heal_grid, heal_replicas};
+use crate::placement::{down, heal_grid, heal_one_replica, heal_replicas};
 
 /// The host's numbers, in the host's unit of time. Each one is **Open**
 /// (§J6): no number is set until Pierre or a source gives one, so this type
@@ -356,7 +356,7 @@ fn rereplicate(view: &View<'_>, alerts: &mut BTreeSet<Alert>) -> Option<Action> 
     let record = view.register.segments().values().find(|r| {
         r.state() == SegmentState::Retired && !down(r.replicas(), view.liveness).is_empty()
     })?;
-    let Some(to) = heal_replicas(
+    let Some(to) = heal_one_replica(
         record.replicas(),
         view.liveness,
         view.candidates,
