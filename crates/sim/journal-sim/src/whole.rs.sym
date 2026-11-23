@@ -1,0 +1,164 @@
+ /// The planted bug [`WholeMutant::CommitAtEnd`]: a `Commit` of a
+ /// The planted bug [`WholeMutant::NoToken`].
+ /// [`WholeMutant::StaleLiveness`] drops the reports of a machine that
+ AckOffByOne,
+ Action, Alert, Ask, Cell, ControlConfig, ControlDriver, ControlRegister, FailureDomain,
+ Address, Assignment, CallId, CallOutcome, Clock, Driver, Envelope, HostConfig, JournalId,
+ Answer, Command, Fence, Grid, Leader, LeaderUuid, NodeId, RELEASE, Record, Reply,
+ Campaign,
+ CommitAtEnd,
+ Control,
+ EarlyCopied,
+ Fault,
+ Late,
+ Lose,
+ LyingDisk,
+ MatchmakerId, MatchmakerSet, Outcome, Polled, ProcessId, Report, Tunables, Windows,
+ Mute,
+ NoToken,
+ None,
+ Notice, Op, Register,
+ Poll,
+ Resolve,
+ ResolveAnswer, SegmentId, Seq, Slot, Write,
+ Self::build(WholeMutant::None, cx)
+ StaleLiveness,
+ TakenAsWritten,
+ Tick,
+ WholeMutant::TakenAsWritten,
+ WipeDisk,
+ Write,
+ WriteTwice,
+ ZoneOut,
+ any_token: self.mutant == WholeMutant::NoToken,
+ fn act(&mut self, action: WholeAction, cx: &mut Cx<'_, Self>) {
+ fn actions() -> &'static [WholeAction] {
+ fn applied_from(&self, j: usize, value: &RegisterValue) -> Slot {
+ fn campaign(&mut self, j: usize, cx: &mut Cx<'_, Self>) {
+ fn candidates(&mut self, _value: &RegisterValue) -> Vec<NodeId> {
+ fn candidates(&self, value: &RegisterValue) -> Vec<NodeId> {
+ fn check(&mut self) {
+ fn commit_at_end(&self, envelope: &mut Envelope) {
+ fn control(&mut self, j: usize, cx: &mut Cx<'_, Self>) {
+ fn control_one(&mut self, j: usize, c: usize, cx: &mut Cx<'_, Self>) {
+ fn converged(&self) -> Result<(), String> {
+ fn converged_one(&self, j: usize, journal: &Journal) -> Result<(), String> {
+ fn copied(
+ fn crash(&mut self, node: &u64, _cx: &mut Cx<'_, Self>) {
+ fn deliver(&mut self, envelope: Envelope, _cx: &mut Cx<'_, Self>) {
+ fn deliver_ask(&mut self, j: usize, ask: &Ask) {
+ fn describe(&self) -> String {
+ fn down(&mut self, m: u64) {
+ fn each(&mut self, cx: &mut Cx<'_, Self>, step: fn(&mut Self, usize, &mut Cx<'_, Self>)) {
+ fn fault(&mut self, cx: &mut Cx<'_, Self>) {
+ fn finish(&mut self) {
+ fn flush(&mut self, m: u64, cx: &mut Cx<'_, Self>) {
+ fn give_back(&mut self) {
+ fn in_force_machines(value: &RegisterValue) -> BTreeSet<u64> {
+ fn is_up(&self, node: &u64) -> bool {
+ fn journal_index(&self, id: JournalId) -> usize {
+ fn judge(&mut self, j: usize) {
+ fn judge_alerts(&self, j: usize, value: &RegisterValue, alerts: &BTreeSet<Alert>) {
+ fn judge_heals(&self) {
+ fn judge_in_flight(&self) {
+ fn late(&mut self, cx: &mut Cx<'_, Self>) {
+ fn leaders(&self, j: usize) -> Vec<(u64, NodeId)> {
+ fn lose(&mut self, cx: &mut Cx<'_, Self>) {
+ fn matchmakers(&self) -> (MatchmakerSet, BTreeSet<MatchmakerId>) {
+ fn mute(&mut self, cx: &mut Cx<'_, Self>) {
+ fn named(value: &RegisterValue) -> BTreeSet<NodeId> {
+ fn new(cx: &mut Cx<'_, Self>) -> Self {
+ fn node(&self) -> NodeId {
+ fn nodes(&self) -> Vec<u64> {
+ fn now(&self) -> u64 {
+ fn on_notice(&mut self, notice: &Notice, cx: &mut Cx<'_, Self>) {
+ fn on_reply(&mut self, m: u64, id: JournalId, call: CallId, outcome: CallOutcome) {
+ fn on_wire(&mut self, envelope: &Envelope) {
+ fn open_leader(&self, j: usize) -> Option<(u64, NodeId)> {
+ fn place(&mut self) {
+ fn poll(&mut self, cx: &mut Cx<'_, Self>) {
+ fn polled(&mut self, j: usize, c: usize, polled: Polled, cx: &mut Cx<'_, Self>) {
+ fn ports<'a, 'b>(
+ fn process_of(&self, node: NodeId) -> Option<ProcessId> {
+ fn publish(&mut self, j: usize, chaos: bool) {
+ fn ran(&mut self, j: usize, ran: &[(Change, Outcome, bool)]) {
+ fn read(&mut self) -> Option<RegisterValue> {
+ fn resolve(&mut self, j: usize, _cx: &mut Cx<'_, Self>) {
+ fn restart(&mut self, node: &u64, _cx: &mut Cx<'_, Self>) {
+ fn run(&mut self, change: &Change) -> Outcome {
+ fn send_ask(&mut self, j: usize, c: usize, ask: &Ask, cx: &mut Cx<'_, Self>) {
+ fn start(&mut self, m: u64) {
+ fn take_token(&mut self) {
+ fn token_free(&self) -> bool {
+ fn truly_gone(&self, j: usize, machine: u64) -> bool {
+ fn truth(&self, j: usize) -> Judged {
+ fn up(&self, machine: u64) -> bool {
+ fn value(&self, j: usize) -> RegisterValue {
+ fn value_of(&self, id: JournalId) -> RegisterValue {
+ fn verdicts_of(&self, j: usize, command: &Command) -> Option<Vec<(u64, &'static str)>> {
+ fn weight(action: WholeAction, phase: Phase) -> u32 {
+ fn write(&mut self, j: usize, cx: &mut Cx<'_, Self>) {
+ fn zone(&self, process: ProcessId) -> Option<FailureDomain> {
+ fn zone_out(&mut self, cx: &mut Cx<'_, Self>) {
+ if mutant == WholeMutant::WriteTwice && !call.resent {
+ if self.mutant == WholeMutant::CommitAtEnd {
+ if self.mutant == WholeMutant::EarlyCopied
+ if self.mutant == WholeMutant::LyingDisk {
+ if self.mutant == WholeMutant::StaleLiveness && machine.ever_down {
+ if self.mutant == WholeMutant::WipeDisk {
+ let at = if mutant == WholeMutant::AckOffByOne {
+ pub const ALL: &[&str] = &[
+ pub const BELOW: &str = "whole journal: a resend across a seal was answered Below";
+ pub const COPIED: &str = "whole journal: a new replica reported its complete copy";
+ pub const DEPOSED: &str = "whole journal: a running controller saw it was deposed";
+ pub const DUPLICATE: &str = "whole journal: a call sent again was answered Duplicate";
+ pub const FAILED: &str = "whole journal: a failed commit stopped its roles";
+ pub const HEALED: &str = "whole journal: a controller's heal reshape was done";
+ pub const HEALED_WRITE: &str = "whole journal: a write chosen in a segment a heal opened";
+ pub const HEAL_LOST: &str = "whole journal: a heal was done and its reply was lost";
+ pub const LATE_ASK: &str = "whole journal: a copy or abandon ask arrived again, late";
+ pub const LOST: &str = "whole journal: a machine was lost for good";
+ pub const LOST_HEALED: &str = "whole journal: a heal replaced a replica on a lost machine";
+ pub const NO_TOKEN: &str = "whole journal: a heal waited for the shared token";
+ pub const REREPLICATE: &str = "whole journal: the controller asked a re-replication";
+ pub const REREPLICATED: &str = "whole journal: a heal of a retired segment's set was done";
+ pub const RESOLVED: &str = "whole journal: a Resolve at an older replica gave a fate";
+ pub const RESTARTED: &str = "whole journal: an acceptor read its votes back at a restart";
+ pub const RETIRED: &str = "whole journal: a sealed segment retired";
+ pub const SEALED: &str = "whole journal: a first leader sealed the segment before";
+ pub const TAKEOVER: &str = "whole journal: a controller took the term from another";
+ pub const TWO_JOURNALS: &str = "whole journal: one commit held the batches of two journals";
+ pub const UNKNOWN: &str = "whole journal: a call was answered Unknown";
+ pub const UNPLACEABLE: &str = "whole journal: the controller alerted no placement";
+ pub const ZONE_OUT: &str = "whole journal: every machine of a zone was down at once";
+ pub fn build(mutant: WholeMutant, _cx: &mut Cx<'_, Self>) -> Self {
+ pub fn progress(&self) -> Vec<(usize, usize)> {
+const A: LeaderUuid = LeaderUuid(0xA);
+const CONFIG: HostConfig = HostConfig {
+const CONTROL: ControlConfig = ControlConfig {
+const CONTROLLERS: u64 = 1_000_000;
+const CRASH: (u32, u32) = (1, 4);
+const JOURNALS: [JournalId; 2] = [JournalId(1), JournalId(2)];
+const LEADERS: u64 = 100_000;
+const MACHINES: [u64; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const MATCHMAKERS: [u64; 3] = [1, 4, 7];
+const STUCK: u64 = 30;
+const TICK: u64 = 1_000;
+const TUNABLES: Tunables = Tunables {
+fn domain(machine: u64) -> FailureDomain {
+fn frontier(chosen: &BTreeMap<Slot, Command>) -> Slot {
+fn machine_of(node: NodeId) -> u64 {
+fn payload(write: &Write) -> Vec<u8> {
+fn two_journals(ops: &[Op]) {
+fn zone_of(machine: u64) -> u64 {
+pub const ACKED: &str = "whole journal: each acked write holds its position in the whole log";
+pub const AGREE: &str = "whole journal: no two Commits name two commands at one slot";
+pub const ALERTS: &str = "whole journal: each controller alert is true of the machines";
+pub const ANSWER: &str = "whole journal: each answer is the whole log's at a slot of the command";
+pub const BOUNDED_IN_FLIGHT: &str =
+pub const DOWN_AFTER: u64 = 4;
+pub const FLIGHT: &str =
+pub const HEAL_HELD: &str =
+pub const ONCE: &str = "whole journal: no record is written twice in the whole log";
+pub const SEALED: &str = "whole journal: no Commit of a sealed segment is at or above its end";
+pub fn walk(mutant: WholeMutant, seeds: u64, steps: u64) -> Walk<WholeModel> {

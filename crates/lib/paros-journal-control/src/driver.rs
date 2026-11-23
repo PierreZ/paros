@@ -446,20 +446,28 @@ impl ControlDriver {
 
     /// Give back the token once the journal has no call, no heal, and no
     /// segment that a reshape opened and the seal and the retire have not
-    /// ended (pending or sealed) on a read after the step. Only a holder
-    /// gives it back: a deposed controller leaves it to the new holder.
+    /// ended (pending or sealed) on a read after the step. Only the holder
+    /// that this read names, at its own term, gives it back: a deposed
+    /// controller that ends its own heal (a done compare-and-set read back,
+    /// or an idempotent resend answered "ok") leaves the token to the new
+    /// holder, whose expensive action may run under it.
     fn settle_token(&self, register: &mut impl ControlRegister, cell: &mut impl Cell) {
         if self.controller.term().is_none() {
             return;
         }
+        let Some(value) = register.read() else {
+            return;
+        };
+        if !self.owns(&value) {
+            probe!(reachable, "driver: a deposed holder gives back no token");
+            return;
+        }
         let busy = self.controller.call().is_some()
             || self.controller.heal().is_some()
-            || register.read().is_some_and(|value| {
-                value
-                    .segments()
-                    .values()
-                    .any(|r| matches!(r.state(), SegmentState::Pending | SegmentState::Sealed))
-            });
+            || value
+                .segments()
+                .values()
+                .any(|r| matches!(r.state(), SegmentState::Pending | SegmentState::Sealed));
         if !busy {
             probe!(reachable, "driver: an idle journal gives back the token");
             cell.give_back();
@@ -478,6 +486,7 @@ pub const PROBES: &[&str] = &[
     "driver: an idle journal gives back the token",
     "driver: its own report is dropped",
     "driver: a deposed holder takes no token",
+    "driver: a deposed holder gives back no token",
 ];
 
 #[cfg(test)]

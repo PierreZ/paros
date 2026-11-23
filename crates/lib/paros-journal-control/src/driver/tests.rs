@@ -803,3 +803,52 @@ fn a_copy_that_reports_after_a_later_term_takes_no_token() {
     assert_eq!(cell.takes, 1, "no token for a term this driver lost");
     assert!(!cell.held);
 }
+
+/// A heal of `ME` whose compare-and-set landed with its answer lost, then
+/// a takeover by `OTHER`: the register, the cell (the journal still holds
+/// the token, now for `OTHER`), the driver and the heal's copy.
+fn a_heal_landed_then_taken_over() -> (Register, TestCell, ControlDriver, CopyId) {
+    let mut register = Register::new(retired(ME));
+    let mut cell = TestCell::new();
+    let mut d = driver(0);
+    beat_all(&mut d, 0, &[12]);
+    d.poll(0, &mut register, &mut cell);
+    beat_all(&mut d, 40, &[12]);
+    let polled = d.poll(40, &mut register, &mut cell);
+    let [Ask::Copy { copy, .. }] = polled.sends.as_slice() else {
+        panic!("a copy ask: {polled:?}");
+    };
+    let copy = *copy;
+    register.lose = 1;
+    d.copied(41, SegmentId(1), copy, &mut register, &mut cell);
+    assert!(d.controller().heal().is_some(), "the answer was lost");
+    register.value = Some(apply(
+        &register.read().expect("a register"),
+        &Change::Elect { holder: OTHER },
+    ));
+    assert!(cell.held);
+    (register, cell, d, copy)
+}
+
+#[test]
+fn a_deposed_holder_that_reads_its_heal_done_gives_back_no_token() {
+    let (mut register, mut cell, mut d, _) = a_heal_landed_then_taken_over();
+    let gives = cell.gives;
+    beat_all(&mut d, 42, &[12]);
+    d.poll(42, &mut register, &mut cell);
+    assert!(
+        d.controller().heal().is_none(),
+        "the heal ended on the read"
+    );
+    assert_eq!(cell.gives, gives);
+    assert!(cell.held, "the new holder's token stays");
+}
+
+#[test]
+fn a_deposed_holder_whose_copy_reports_again_gives_back_no_token() {
+    let (mut register, mut cell, mut d, copy) = a_heal_landed_then_taken_over();
+    let gives = cell.gives;
+    d.copied(42, SegmentId(1), copy, &mut register, &mut cell);
+    assert_eq!(cell.gives, gives);
+    assert!(cell.held, "the new holder's token stays");
+}

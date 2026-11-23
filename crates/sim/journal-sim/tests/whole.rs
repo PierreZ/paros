@@ -21,17 +21,22 @@ fn the_whole_journal_walk() {
 /// every replica of a segment loses a slot for good, so the retire stalls
 /// before a false agreement forms. The claim is that the oracle sees the
 /// planted bug, so the walk replays seeds 1 to 200 in order until one fails
-/// on it (Pierre, 2026-11-23).
+/// on it (Pierre, 2026-11-23). Each seed it passes over on another check
+/// must pass with no mutant: the failure is the mutant's, never the walk's.
 fn caught(mutant: WholeMutant, oracle: &str) {
-    let walk = walk(mutant, 1, 1500);
+    let walk_of = |m| walk(m, 1, 1500);
+    let (planted, clean) = (walk_of(mutant), walk_of(WholeMutant::None));
     let mut others = Vec::new();
     for seed in 1..=200 {
-        let Err(failure) = walk.replay(seed) else {
+        let Err(failure) = planted.replay(seed) else {
             continue;
         };
         let text = failure.to_string();
         if text.contains(oracle) {
             return;
+        }
+        if let Err(failure) = clean.replay(seed) {
+            panic!("seed {seed} fails with no mutant: {failure}");
         }
         others.push(text);
     }

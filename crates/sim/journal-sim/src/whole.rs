@@ -140,7 +140,8 @@ pub const ONCE: &str = "whole journal: no record is written twice in the whole l
 pub const ACKED: &str = "whole journal: each acked write holds its position in the whole log";
 /// Oracle: each alert of the controller is true.
 pub const ALERTS: &str = "whole journal: each controller alert is true of the machines";
-/// Oracle: the journals share one token, so at most one reshapes at a time.
+/// Oracle: the journals share one token, so at most one reshapes or heals
+/// at a time.
 pub const BOUNDED_IN_FLIGHT: &str =
     "whole journal: at most one journal reshapes or heals at a time under the shared token";
 /// Oracle: a node that a heal added to a retired set holds the whole
@@ -333,8 +334,6 @@ struct Machine {
     outbox: Rc<RefCell<Vec<Envelope>>>,
     /// The acceptors and replicas that placement put here.
     placed: Vec<Assignment>,
-    /// The time it went down, while it is down.
-    down_since: Option<u64>,
     /// It was ever down (for the mutant `StaleLiveness`).
     ever_down: bool,
 }
@@ -755,7 +754,6 @@ impl WholeModel {
                     inbox: Rc::default(),
                     outbox: Rc::default(),
                     placed: Vec::new(),
-                    down_since: None,
                     ever_down: false,
                 },
             );
@@ -833,20 +831,17 @@ impl WholeModel {
             driver.assign(assignment.clone());
         }
         machine.driver = Some(driver);
-        machine.down_since = None;
     }
 
     /// `machine` goes down: its driver, its leaders and its controllers are
     /// gone; its disk and its placed roles stay.
     fn down(&mut self, m: u64) {
-        let now = self.now();
         let machine = self.machines.get_mut(&m).expect("a machine");
         if machine.driver.take().is_none() {
             return;
         }
         machine.inbox.borrow_mut().clear();
         machine.outbox.borrow_mut().clear();
-        machine.down_since = Some(now);
         machine.ever_down = true;
         for journal in &mut self.journals {
             for ctl in &mut journal.ctls {
@@ -1717,7 +1712,7 @@ impl WholeModel {
                 .collect();
         assert!(
             busy.len() <= 1,
-            "{BOUNDED_IN_FLIGHT}: the journals {busy:?} reshape at once"
+            "{BOUNDED_IN_FLIGHT}: the journals {busy:?} reshape or heal at once"
         );
     }
 
