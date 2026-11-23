@@ -468,8 +468,11 @@ fn an_acceptor_that_starts_again_has_no_belief() {
 #[test]
 fn a_compact_drops_the_votes_of_its_range_and_keeps_the_range() {
     let mut acceptor = fresh();
+    let mut disk = AcceptorDisk::default();
     for slot in 0..3 {
-        acceptor.step(LEADER, accept(1, slot, write(1)));
+        for (id, ops) in split(acceptor.step(LEADER, accept(1, slot, write(1)))).0 {
+            disk.apply(id, &ops);
+        }
     }
     let (batches, sends, _) = split(acceptor.step(
         LEADER,
@@ -492,6 +495,15 @@ fn a_compact_drops_the_votes_of_its_range_and_keeps_the_range() {
         acceptor.vote(Slot(2)).is_some(),
         "the slot at `below` stays"
     );
+    for (id, ops) in &batches {
+        disk.apply(*id, ops);
+    }
+    assert_eq!(
+        disk.votes.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(2)],
+        "the disk drops the votes of the range and keeps the slot at `below`"
+    );
+    assert_eq!(disk.dropped, BTreeMap::from([(Slot(0), Slot(2))]));
 }
 
 #[test]
@@ -501,14 +513,23 @@ fn a_compact_drops_the_faulty_entries_of_its_range() {
         faulty: BTreeMap::from([(Slot(1), ballot(1)), (Slot(5), ballot(1))]),
         ..AcceptorDisk::default()
     };
-    let mut acceptor = JournalAcceptor::recover(ME, disk, PROMISE_BATCH);
-    acceptor.step(
+    let mut acceptor = JournalAcceptor::recover(ME, disk.clone(), PROMISE_BATCH);
+    let (batches, _, _) = split(acceptor.step(
         LEADER,
         Message::Compact {
             segment: SegmentId(1),
             start: Slot(0),
             below: Slot(3),
         },
+    ));
+    let mut disk = disk;
+    for (id, ops) in &batches {
+        disk.apply(*id, ops);
+    }
+    assert_eq!(
+        disk.faulty.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(5)],
+        "the disk drops the faulty entry in the range and keeps the one above"
     );
     let (_, sends, _) = split(acceptor.step(LEADER, prepare(2, 0)));
     let [Message::Promise { page, .. }] = &sends[..] else {
