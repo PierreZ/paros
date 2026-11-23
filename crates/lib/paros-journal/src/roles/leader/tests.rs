@@ -461,6 +461,43 @@ fn an_open_leader_whose_segment_a_later_leader_sealed_stops_and_answers_unknown(
     assert!(leader.tick(4).is_empty(), "a stopped leader sends nothing");
 }
 
+/// A sealing leader whose blocked slot a late answer dropped opens with
+/// the slot in a dropped range: the gap fill writes no `Noop` there.
+#[test]
+fn a_sealing_leader_skips_a_dropped_blocked_slot_when_it_opens() {
+    let value = two_segments();
+    let (mut leader, _) = campaign(&value, 2, 2, 0);
+    for node in [4, 5] {
+        leader.step(NodeId(node), promise(2, 0, page(&[], &[])));
+    }
+    leader.step(NodeId(1), promise(2, 0, page(&[(2, 1, write(1))], &[])));
+    leader.step(NodeId(2), promise(2, 0, page(&[], &[(4, 1)])));
+    assert_eq!(*leader.phase(), LeaderPhase::Sealing { end: Slot(5) });
+    assert_eq!(leader.blocked(), &[Slot(4)]);
+    let mut dropped = page(&[], &[]);
+    dropped.dropped.insert(Slot(4), Slot(5));
+    leader.step(NodeId(3), promise(2, 0, dropped));
+    assert_eq!(leader.blocked().len(), 0);
+    let sealed = value
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(5),
+        })
+        .expect("the seal");
+    let effects = leader.observe(&sealed);
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(5) });
+    assert_eq!(
+        accepts(&effects),
+        BTreeMap::from([
+            (Slot(0), Command::Noop),
+            (Slot(1), Command::Noop),
+            (Slot(2), write(1)),
+            (Slot(3), Command::Noop),
+        ]),
+        "the dropped slot 4 is not written"
+    );
+}
+
 #[test]
 fn a_leader_in_phase_one_does_not_write() {
     let (mut leader, _) = campaign(&one_segment(), 2, 1, 0);
