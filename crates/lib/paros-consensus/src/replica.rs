@@ -6,8 +6,9 @@
 //! was chosen (an accept quorum this node counted, a `Commit` off the wire, a
 //! catch-up replay, a handoff's decided tail). It owns:
 //!
-//! - the **chosen map** and the durable **chosen index** (the commit index:
-//!   every slot at or below it is chosen and applied in order);
+//! - the **chosen set** (the slots it knows chosen) and the durable
+//!   **chosen index** (the commit index: every slot at or below it is chosen
+//!   and applied in order);
 //! - the contiguous **walk** ([`Replica::advance`]) that surfaces newly
 //!   applied entries, bounded per batch;
 //! - the **journal fold** (#204): the [`JournalState`] of the journal the log
@@ -36,15 +37,22 @@
 //! (seed 16921589310752617664); with the journal fold it would judge every
 //! later write against the wrong next position.
 //!
+//! **One copy of the retained log.** The replica holds no command. It
+//! reads the command chosen at a slot through a port, [`ChosenLog`], that
+//! the deployment hands it on each call: on a node the acceptor's records
+//! (every record of a slot known chosen carries the chosen command, the P2c
+//! chain), on a replica node the records it learned. A role must not read
+//! another role, so the replica sees the port, never the acceptor. Before
+//! this, a node held each retained command two times (#1101 (one copy of the
+//! retained log)).
+//!
 //! It knows nothing about ballots, promises, leadership, quorums or the
-//! network. The one cross-component fact it consults is handed to it as
-//! data: for the chosen/accepted coupling the walk asserts, a predicate over
-//! the accepted log. Durable changes are emitted as [`WriteOp`]s into the
-//! caller's batch.
+//! network. Durable changes are emitted as [`WriteOp`]s into the caller's
+//! batch.
 //!
 //! Hard `assert!`s throughout (AGENTS.md, *Assertion doctrine*).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::write::WriteOp;
 use crate::journal::state::{JournalState, JournalView, Outcome, WriterMode};
@@ -52,6 +60,34 @@ use crate::journal::{Command, Entry, Seq};
 use crate::types::{Ballot, Slot, Value};
 
 use crate::contract::limits::APPLY_BATCH;
+
+/// The port through which the [`Replica`] reads the command of a slot it
+/// knows chosen (see the module doc): the store of records the deployment
+/// keeps. A role must not read another role, so the replica sees this
+/// trait, never the acceptor.
+pub trait ChosenLog {
+    /// The record this store holds at `slot`: the ballot it was accepted or
+    /// learned at, and its command. At a slot the replica knows chosen, the
+    /// command is the chosen one.
+    fn record(&self, slot: Slot) -> Option<(Ballot, &Command)>;
+}
+
+impl ChosenLog for BTreeMap<Slot, (Ballot, Command)> {
+    fn record(&self, slot: Slot) -> Option<(Ballot, &Command)> {
+        self.get(&slot).map(|(ballot, command)| (*ballot, command))
+    }
+}
+
+/// The command `log` holds at `slot`, a slot the replica knows chosen.
+///
+/// # Panics
+///
+/// If `log` holds no record there: the deployment broke the coupling of a
+/// chosen slot and its record.
+fn chosen_command<L: ChosenLog + ?Sized>(log: &L, slot: Slot) -> (Ballot, &Command) {
+    log.record(slot)
+        .expect("a slot known chosen holds its record in the chosen log")
+}
 
 /// The answer to a journal read ([`Replica::read`], #204).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,8 +146,9 @@ impl LogPage {
 /// The replica: chosen log, applied prefix, journal fold. See the module doc.
 #[derive(Clone, Debug)]
 pub struct Replica {
-    /// Every slot this node knows chosen, with its value — contiguous or not.
-    chosen: BTreeMap<Slot, Command>,
+    /// Every slot this node knows chosen, contiguous or not. The commands
+    /// are in the deployment's [`ChosenLog`].
+    chosen: BTreeSet<Slot>,
     /// Highest contiguous chosen slot (the commit index), or `None` when
     /// nothing is chosen yet. Durable ([`WriteOp::SetChosenIndex`]).
     chosen_index: Option<Slot>,
@@ -185,10 +222,10 @@ impl Replica {
         sealed: JournalState,
         records: &BTreeMap<Slot, (Ballot, Command)>,
     ) -> Self {
-        let chosen: BTreeMap<Slot, Command> = records
-            .iter()
-            .filter(|(slot, _)| chosen_index.is_some_and(|ci| **slot <= ci))
-            .map(|(slot, (_, command))| (*slot, command.clone()))
+        let chosen: BTreeSet<Slot> = records
+            .keys()
+            .filter(|slot| chosen_index.is_some_and(|ci| **slot <= ci))
+            .copied()
             .collect();
         let mut replica = Self {
             chosen,
@@ -207,13 +244,13 @@ impl Replica {
             mode,
             apply_page: APPLY_BATCH,
         };
-        replica.refold();
+        replica.refold(records);
         replica.truncate_due = false;
         // The boot read-back of the walk's durable writes: everything the
         // chosen index covers is chosen, and the fold lands between the
         // sealed floor and the first unchosen slot.
         assert!(
-            replica.chosen.keys().next_back().copied() <= chosen_index,
+            replica.chosen.last().copied() <= chosen_index,
             "a boot rebuild holds no chosen slot past the chosen index"
         );
         assert!(
@@ -248,7 +285,7 @@ impl Replica {
         // A chosen first-unchosen slot is legal only as the explicit bounded
         // continuation left by the walk — an iff, split into its two
         // directions so a violation names the side that broke.
-        if self.chosen.contains_key(&self.first_unchosen()) {
+        if self.chosen.contains(&self.first_unchosen()) {
             assert!(
                 self.advance_pending,
                 "a chosen first-unchosen slot has a deferred prefix continuation"
@@ -256,12 +293,12 @@ impl Replica {
         }
         if self.advance_pending {
             assert!(
-                self.chosen.contains_key(&self.first_unchosen()),
+                self.chosen.contains(&self.first_unchosen()),
                 "a deferred prefix continuation names a chosen first-unchosen slot"
             );
         }
         assert!(
-            self.chosen.keys().next().is_none_or(|s| *s >= floor),
+            self.chosen.first().is_none_or(|s| *s >= floor),
             "no chosen record survives below the compaction floor"
         );
         assert!(
@@ -278,7 +315,7 @@ impl Replica {
         );
         if self.folded < self.first_unchosen() {
             assert!(
-                !self.chosen.contains_key(&self.folded),
+                !self.chosen.contains(&self.folded),
                 "the journal fold stops only at a slot it does not hold"
             );
         }
@@ -417,9 +454,9 @@ impl Replica {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn chosen(&self) -> &BTreeMap<Slot, Command> {
+    pub fn chosen(&self) -> &BTreeSet<Slot> {
         assert!(
-            self.chosen.keys().next().is_none_or(|s| *s >= self.floor),
+            self.chosen.first().is_none_or(|s| *s >= self.floor),
             "no chosen value survives below the floor"
         );
         &self.chosen
@@ -433,26 +470,32 @@ impl Replica {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_chosen(&self, slot: Slot) -> bool {
-        let chosen = self.chosen.contains_key(&slot);
+        let chosen = self.chosen.contains(&slot);
         if chosen {
             assert!(slot >= self.floor, "a held chosen slot is retained");
         }
         chosen
     }
 
-    /// The value chosen at `slot`, if known.
+    /// The value chosen at `slot`, if known, read from the deployment's
+    /// `log`.
     ///
     /// # Panics
     ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
+    /// If `log` holds no record at a slot known chosen, or another assertion
+    /// on its own invariants fails: a programmer error, never an operating
+    /// condition.
     #[must_use]
-    pub fn chosen_at(&self, slot: Slot) -> Option<&Command> {
-        let command = self.chosen.get(&slot);
-        if command.is_some() {
-            assert!(slot >= self.floor, "a held chosen slot is retained");
+    pub fn chosen_at<'a, L: ChosenLog + ?Sized>(
+        &self,
+        log: &'a L,
+        slot: Slot,
+    ) -> Option<&'a Command> {
+        if !self.chosen.contains(&slot) {
+            return None;
         }
-        command
+        assert!(slot >= self.floor, "a held chosen slot is retained");
+        Some(chosen_command(log, slot).1)
     }
 
     /// The journal state at the fold's head.
@@ -520,7 +563,7 @@ impl Replica {
         if let Some(hole) = hole {
             // The fold stops only at a slot of the prefix it does not hold.
             assert!(
-                !self.chosen.contains_key(&hole),
+                !self.chosen.contains(&hole),
                 "a fold hole is a slot not held"
             );
             assert!(hole >= self.floor, "a fold hole lies at or above the floor");
@@ -606,7 +649,7 @@ impl Replica {
     #[must_use]
     pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
         let hole = self.first_unchosen();
-        let highest = *self.chosen.range(hole..).next_back()?.0;
+        let highest = *self.chosen.range(hole..).next_back()?;
         assert!(
             highest >= hole,
             "a gap's highest chosen slot lies at or past its hole"
@@ -622,11 +665,15 @@ impl Replica {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn accepted_at(&self, seq: Seq) -> Option<&Entry> {
+    pub fn accepted_at<'a, L: ChosenLog + ?Sized>(
+        &self,
+        log: &'a L,
+        seq: Seq,
+    ) -> Option<&'a Entry> {
         let entry = self
             .positions
             .get(&seq)
-            .and_then(|slot| self.chosen.get(slot))
+            .and_then(|slot| self.chosen_at(log, *slot))
             .and_then(Command::write);
         // Read-back of the index `fold_one` writes: a single-writer write
         // indexed at a position names it (a multi-writer write names none,
@@ -678,13 +725,13 @@ impl Replica {
     /// If the positions index lost the write holding a retained record: a
     /// programmer error.
     #[must_use]
-    pub fn compaction_target(&self) -> Option<Slot> {
-        let mut first = self.slot_holding(self.state.first_seq);
+    pub fn compaction_target<L: ChosenLog + ?Sized>(&self, log: &L) -> Option<Slot> {
+        let mut first = self.slot_holding(log, self.state.first_seq);
         loop {
             let needed = self
                 .chosen
                 .range(first..self.folded)
-                .filter_map(|(slot, command)| {
+                .filter_map(|slot| {
                     // Only a single-writer retry reads a retained record: a
                     // multi-writer write is never compared with one.
                     if self.mode == WriterMode::Multi {
@@ -694,9 +741,9 @@ impl Replica {
                     // folded (accepted, or refused ahead) is held at its own
                     // slot or above (`slot_holding`), never below `first`:
                     // only a retry below that position can pull the floor.
-                    let entry = command.write()?;
+                    let entry = chosen_command(log, *slot).1.write()?;
                     let at = self.state_at(*slot);
-                    (entry.seq >= at.first_seq).then(|| self.slot_holding(entry.seq))
+                    (entry.seq >= at.first_seq).then(|| self.slot_holding(log, entry.seq))
                 })
                 .min()
                 .unwrap_or(first);
@@ -726,7 +773,7 @@ impl Replica {
     /// already lies below it (a node that jumped to a peer's trim point holds
     /// nothing below the jump, and a later `Truncate` may still name a
     /// position there). Never below the floor.
-    fn slot_holding(&self, position: Seq) -> Slot {
+    fn slot_holding<L: ChosenLog + ?Sized>(&self, log: &L, position: Seq) -> Slot {
         if position >= self.state.next_seq {
             return self.folded;
         }
@@ -743,8 +790,7 @@ impl Replica {
             return self.floor;
         };
         let entry = self
-            .chosen
-            .get(slot)
+            .chosen_at(log, *slot)
             .and_then(Command::write)
             .expect("an indexed write is a retained chosen write");
         assert!(
@@ -792,7 +838,13 @@ impl Replica {
     /// If the positions index does not cover a position at or past the
     /// base's `next_seq` and below `next_seq` (a programmer error).
     #[must_use]
-    pub fn read(&self, from: Seq, limit: usize, max_bytes: usize) -> LogRead {
+    pub fn read<L: ChosenLog + ?Sized>(
+        &self,
+        log: &L,
+        from: Seq,
+        limit: usize,
+        max_bytes: usize,
+    ) -> LogRead {
         let state = self.state.view();
         if from < state.first_seq {
             return LogRead::Truncated(state);
@@ -820,8 +872,7 @@ impl Replica {
                 .next_back()
                 .expect("every position below next_seq lies in a retained write");
             let entry = self
-                .chosen
-                .get(slot)
+                .chosen_at(log, *slot)
                 .and_then(Command::write)
                 .expect("an indexed write is a retained chosen write");
             let offset = usize::try_from(at.0 - start.0).expect("a batch fits in memory");
@@ -830,7 +881,7 @@ impl Replica {
                 "a position below next_seq lies inside the write indexed below it"
             );
             for record in &entry.records[offset..] {
-                let size = record.0.len();
+                let size = record.len();
                 if page.records.len() >= limit
                     || (!page.records.is_empty() && bytes.saturating_add(size) > max_bytes)
                 {
@@ -880,47 +931,67 @@ impl Replica {
     }
 
     /// The most slots one walk releases (#338), in `1..=APPLY_BATCH`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn apply_page(&self) -> usize {
+        assert!(self.apply_page >= 1, "an apply page releases a slot");
+        assert!(
+            self.apply_page <= APPLY_BATCH,
+            "an apply page never exceeds its ceiling"
+        );
         self.apply_page
     }
 
     // ---- learning -------------------------------------------------------------
 
     /// Learn `slot` chosen with `command`. The caller has already checked the
-    /// slot is retained and not yet known chosen here. A slot that fills the
-    /// hole the fold is stopped at resumes the fold at once.
+    /// slot is retained and not yet known chosen here, and holds the record
+    /// in its `log`. A slot that fills the hole the fold is stopped at
+    /// resumes the fold at once.
     ///
     /// # Panics
     ///
-    /// If `slot` is already known chosen.
-    pub fn learn(&mut self, slot: Slot, command: &Command) {
+    /// If `slot` is already known chosen, or `log` does not hold `command`
+    /// at `slot`.
+    pub fn learn<L: ChosenLog + ?Sized>(&mut self, log: &L, slot: Slot, command: &Command) {
         assert!(
-            !self.chosen.contains_key(&slot),
+            !self.chosen.contains(&slot),
             "a slot is learned chosen once"
         );
         assert!(slot >= self.folded, "a folded slot is never relearned");
+        // The pair of the coupling `chosen_command` reads back: the caller
+        // wrote the record before it hands the slot over.
+        assert!(
+            log.record(slot).is_some_and(|(_, held)| held == command),
+            "a learned slot's record carries the learned command"
+        );
         let folded = self.folded;
-        self.chosen.insert(slot, command.clone());
+        self.chosen.insert(slot);
         // The fold resumes from its head through every chosen slot it now
         // holds: a no-op unless `slot` filled the head.
-        self.refold();
-        assert!(
-            self.chosen.contains_key(&slot),
-            "a learned slot is held chosen"
-        );
+        self.refold(log);
+        assert!(self.chosen.contains(&slot), "a learned slot is held chosen");
         assert!(self.folded >= folded, "learning never moves the fold back");
     }
 
     /// Fold one slot at the fold's head, and return its verdict.
-    fn fold_one(&mut self, slot: Slot, command: &Command) -> Outcome {
+    fn fold_one<L: ChosenLog + ?Sized>(
+        &mut self,
+        log: &L,
+        slot: Slot,
+        command: &Command,
+    ) -> Outcome {
         assert!(
             slot == self.folded,
             "the journal fold advances one slot at a time"
         );
         let before = self.state;
         let mut state = self.state;
-        let outcome = state.apply(self.mode, command, |seq| self.accepted_at(seq));
+        let outcome = state.apply(self.mode, command, |seq| self.accepted_at(log, seq));
         self.state = state;
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
             // The index stays monotone: the head's write starts past every
@@ -967,14 +1038,15 @@ impl Replica {
 
     /// Resume the fold below the first unchosen slot, through every chosen
     /// slot it now holds.
-    fn refold(&mut self) {
+    fn refold<L: ChosenLog + ?Sized>(&mut self, log: &L) {
         let end = self.first_unchosen();
         while self.folded < end {
             let slot = self.folded;
-            let Some(command) = self.chosen.get(&slot).cloned() else {
+            if !self.chosen.contains(&slot) {
                 break;
-            };
-            self.fold_one(slot, &command);
+            }
+            let command = chosen_command(log, slot).1;
+            self.fold_one(log, slot, command);
         }
         // The loop stops at `end` or at a hole: `assert_invariants` checks
         // the hole.
@@ -992,32 +1064,27 @@ impl Replica {
     /// A fold stopped at a hole below the prefix **holds** the walk: nothing
     /// past the hole is judged until it heals.
     ///
-    /// `record_ballot(slot, command)` answers "at which ballot does the
-    /// authoritative record for `slot` hold exactly this command?" (`None`
-    /// when it holds another one or none). It is the coupling assertion, and
-    /// the only thing the walk needs to know about the acceptor. The walk
-    /// hands the ballot on with the slot ([`Replica::committed`]). A
-    /// function, not the acceptor's map: the replica consumes "slot chosen,
-    /// value" and must not acquire the accepted log merely because one
-    /// deployment colocates the two roles.
+    /// The walk reads each applied command and the ballot of its record from
+    /// the deployment's `log`, and hands the ballot on with the slot
+    /// ([`Replica::committed`]). A port, not the acceptor's map: the replica
+    /// consumes "slot chosen, value" and must not acquire the accepted log
+    /// merely because one deployment colocates the two roles.
     ///
     /// # Panics
     ///
     /// If the walk's contiguity or the chosen/accepted coupling is broken.
-    pub fn advance(
+    pub fn advance<L: ChosenLog + ?Sized>(
         &mut self,
-        record_ballot: impl Fn(Slot, &Command) -> Option<Ballot>,
+        log: &L,
         writes: &mut Vec<WriteOp>,
     ) -> Option<Slot> {
         let chosen_before = self.chosen_index;
         let writes_before = writes.len();
-        self.refold();
+        self.refold(log);
         if self.folded == self.first_unchosen() {
             let mut next = self.first_unchosen();
             let mut advanced = 0_usize;
-            while advanced < self.apply_page
-                && let Some(command) = self.chosen.get(&next).cloned()
-            {
+            while advanced < self.apply_page && self.chosen.contains(&next) {
                 // The walk is the *only* writer of `chosen_index`, and it
                 // advances exactly one slot per iteration — the contiguity the
                 // apply seam and the boot rebuild are built on.
@@ -1025,31 +1092,31 @@ impl Replica {
                     next == self.first_unchosen(),
                     "the chosen prefix advances one slot at a time"
                 );
-                // The chosen/accepted coupling, per applied slot.
-                let Some(ballot) = record_ballot(next, &command) else {
-                    panic!("an applied slot's accepted record carries the applied command");
-                };
+                // The chosen/accepted coupling, per applied slot: the log
+                // holds the record of every slot known chosen.
+                let (ballot, command) = chosen_command(log, next);
                 self.chosen_index = Some(next);
                 writes.push(WriteOp::SetChosenIndex(next));
-                let outcome = self.fold_one(next, &command);
-                self.committed.push((next, ballot, command, outcome));
+                let outcome = self.fold_one(log, next, command);
+                self.committed
+                    .push((next, ballot, command.clone(), outcome));
                 next = Slot(next.0 + 1);
                 advanced += 1;
             }
             // A small apply page (#338) makes a walk yield mid-burst.
             probe!(
                 sometimes,
-                advanced == self.apply_page && self.chosen.contains_key(&next),
+                advanced == self.apply_page && self.chosen.contains(&next),
                 "apply: a walk yields with the next slot already chosen"
             );
             // Postcondition: either the walk consumed the entire contiguous
             // chosen prefix, or exactly one bounded chunk was released.
             assert!(
-                advanced == self.apply_page || !self.chosen.contains_key(&self.first_unchosen()),
+                advanced == self.apply_page || !self.chosen.contains(&self.first_unchosen()),
                 "the walk consumes or bounds the contiguous chosen prefix"
             );
         }
-        self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
+        self.advance_pending = self.chosen.contains(&self.first_unchosen());
         // The chosen index only advances, and each advance is one durable
         // write: the walk is its only writer.
         assert!(
@@ -1062,7 +1129,7 @@ impl Replica {
         );
         self.compaction_due = std::mem::take(&mut self.truncate_due);
         if self.compaction_due {
-            self.compaction_target()
+            self.compaction_target(log)
         } else {
             None
         }
@@ -1091,7 +1158,7 @@ impl Replica {
     ///
     /// If the compaction dropped a record a retained retry reads, or left an
     /// unneeded slot at the floor.
-    pub fn assert_compacted(&mut self) {
+    pub fn assert_compacted<L: ChosenLog + ?Sized>(&mut self, log: &L) {
         if !std::mem::take(&mut self.compaction_due) {
             return;
         }
@@ -1113,8 +1180,8 @@ impl Replica {
         // slot accepted.
         let mut pinned = self.floor == self.folded || at_floor(self.state.first_seq);
         if self.mode == WriterMode::Single {
-            for (slot, command) in self.chosen.range(self.floor..self.folded) {
-                let Some(entry) = command.write() else {
+            for slot in self.chosen.range(self.floor..self.folded) {
+                let Some(entry) = chosen_command(log, *slot).1.write() else {
                     continue;
                 };
                 // A write at or past the journal's position when it folded
@@ -1143,9 +1210,10 @@ impl Replica {
     ///
     /// If `first` lies outside `[floor, folded]`, or would drop a record at
     /// or past the journal's first retained position.
-    pub fn truncate(&mut self, first: Slot) -> JournalState {
+    pub fn truncate<L: ChosenLog + ?Sized>(&mut self, log: &L, first: Slot) -> JournalState {
         assert!(
-            self.compaction_target().is_some_and(|t| first.0 <= t.0 + 1),
+            self.compaction_target(log)
+                .is_some_and(|t| first.0 <= t.0 + 1),
             "a truncation never drops a retained record"
         );
         let base = self.state_at(first);
@@ -1157,7 +1225,7 @@ impl Replica {
         );
         let chosen_index = self.chosen_index;
         self.drop_prefix(first, base);
-        self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
+        self.advance_pending = self.chosen.contains(&self.first_unchosen());
         assert!(
             self.floor == first,
             "a truncation lands the floor on its slot"
@@ -1181,7 +1249,12 @@ impl Replica {
     ///
     /// If `point` is slot zero (nothing lies below it, and no honest peer
     /// trims nothing).
-    pub fn trim_to(&mut self, point: Slot, sealed: JournalState) -> JournalState {
+    pub fn trim_to<L: ChosenLog + ?Sized>(
+        &mut self,
+        log: &L,
+        point: Slot,
+        sealed: JournalState,
+    ) -> JournalState {
         assert!(point.0 > 0, "a trim point has a chosen slot below it");
         let boundary = Slot(point.0 - 1);
         self.chosen_index = self.chosen_index.max(Some(boundary));
@@ -1196,8 +1269,8 @@ impl Replica {
             sealed
         };
         self.drop_prefix(point, base);
-        self.refold();
-        self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
+        self.refold(log);
+        self.advance_pending = self.chosen.contains(&self.first_unchosen());
         // Everything below a trim point is chosen and folded here now.
         assert!(
             self.chosen_index.is_some_and(|ci| ci >= boundary),
@@ -1234,7 +1307,7 @@ impl Replica {
         self.outcomes = self.outcomes.split_off(&first);
         self.positions.retain(|_, slot| *slot >= first);
         assert!(
-            self.chosen.keys().next().is_none_or(|s| *s >= first),
+            self.chosen.first().is_none_or(|s| *s >= first),
             "no chosen value survives below the floor"
         );
         assert!(

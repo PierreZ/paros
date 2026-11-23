@@ -130,7 +130,7 @@ fn a_delegated_round_is_handed_to_the_proxy_and_closed_by_its_commit() {
         vhash: command_fingerprint(&ucmd(1, 1, 1)),
     });
     assert!(
-        nodes[0].replica().chosen_at(Slot(0)).is_none(),
+        nodes[0].chosen_at(Slot(0)).is_none(),
         "a delegated round never decides at the leader"
     );
     // The proxy's Commit closes it.
@@ -245,7 +245,7 @@ fn a_stalled_delegation_is_taken_back_and_decided_colocated() {
         .collect();
     deliver_all(&mut nodes, to_send);
     for n in &nodes {
-        assert_eq!(n.replica().chosen_at(Slot(0)), Some(&ucmd(1, 1, 1)));
+        assert_eq!(n.chosen_at(Slot(0)), Some(&ucmd(1, 1, 1)));
     }
     assert_eq!(nodes[0].ballot(), ballot, "no election was needed");
 }
@@ -294,7 +294,7 @@ fn a_fresh_leaderships_recovery_is_never_delegated() {
     let ballot = nodes[0].ballot();
     let _ = nodes[0].propose(entry(1, 1, 1));
     let delegation = raw(&mut nodes[0]);
-    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone(), Limits::DEFAULT);
+    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].config(), Limits::DEFAULT);
     for (_, m) in delegation {
         proxy.step(m);
     }
@@ -334,7 +334,7 @@ fn a_fresh_leaderships_recovery_is_never_delegated() {
     let q = drain(&mut nodes[1]);
     deliver_all(&mut nodes, q);
     for n in &nodes {
-        assert_eq!(n.replica().chosen_at(Slot(0)), Some(&ucmd(1, 1, 1)));
+        assert_eq!(n.chosen_at(Slot(0)), Some(&ucmd(1, 1, 1)));
     }
     assert!(nodes[1].ballot() > ballot, "a fresh ballot, not a handoff");
 }
@@ -346,7 +346,7 @@ fn a_relayed_nack_deposes_the_delegating_leader() {
     let ballot = nodes[0].ballot();
     let _ = nodes[0].propose(entry(1, 1, 1));
     let _ = raw(&mut nodes[0]);
-    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone(), Limits::DEFAULT);
+    let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].config(), Limits::DEFAULT);
     proxy.step(Message::Accept {
         reply_to: Party::Proxy(ProxyId(0)),
         leader: NodeId(0),

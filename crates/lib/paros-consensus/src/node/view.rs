@@ -31,7 +31,7 @@ impl ColocatedNode {
                 "only a leader holds delegated rounds"
             );
             assert!(
-                self.acceptors.proxy_count() > 0,
+                self.belief.config().proxy_count() > 0,
                 "only a proxy deployment delegates"
             );
         }
@@ -168,16 +168,16 @@ impl ColocatedNode {
     #[must_use]
     pub fn acceptors(&self) -> &AcceptorConfig {
         assert!(
-            self.acceptors.is_drawn_from(&self.pool),
+            self.belief.config().is_drawn_from(&self.pool),
             "the configuration in force is drawn from the pool"
         );
         if !self.config.has_matchmakers() {
             assert!(
-                self.acceptors.members() == self.config.peers,
+                self.belief.config().members() == self.config.peers,
                 "a plain deployment runs its bootstrap membership"
             );
         }
-        &self.acceptors
+        self.belief.config()
     }
 
     /// The ballot [`ColocatedNode::acceptors`] was registered under
@@ -189,13 +189,13 @@ impl ColocatedNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn acceptors_since(&self) -> Ballot {
-        if self.acceptors_since != Ballot::zero() {
+        if self.belief.since() != Ballot::zero() {
             assert!(
                 self.belief_source == BeliefSource::Heard,
                 "a configuration bound to a ballot is a heard belief"
             );
         }
-        self.acceptors_since
+        self.belief.since()
     }
 
     /// The basis this node's quorum reads are judged over (#260,
@@ -218,15 +218,7 @@ impl ColocatedNode {
     #[must_use]
     pub fn read_basis(&self) -> Option<ReadBasis<NodeId>> {
         if !self.config.has_matchmakers() {
-            assert!(
-                self.read_basis.is_none(),
-                "a plain node stores no read basis"
-            );
-            return Some(ReadBasis {
-                config: self.acceptors.clone(),
-                since: self.acceptors_since,
-                fence: None,
-            });
+            return self.belief.read_basis(&self.pool);
         }
         // The gate is the read fence of this node (the higher of its promise
         // and its belief ballot), the rule `Below` of the reads model: a
@@ -238,10 +230,10 @@ impl ColocatedNode {
             .wire_read_fence()
             .expect("a matchmaker deployment carries a read fence");
         assert!(
-            wire >= self.acceptors_since,
+            wire >= self.belief.since(),
             "the read fence covers the belief ballot"
         );
-        let basis = self.read_basis.clone().filter(|basis| {
+        let basis = self.belief.read_basis(&self.pool).filter(|basis| {
             let fence = self
                 .reader_fence(&basis.config)
                 .expect("a matchmaker deployment carries a read fence");
@@ -250,7 +242,7 @@ impl ColocatedNode {
                 "the reader fence never exceeds the read fence"
             );
             assert!(
-                fence >= self.acceptors_since,
+                fence >= self.belief.since(),
                 "the reader fence covers the belief ballot"
             );
             basis.since >= fence
@@ -275,7 +267,7 @@ impl ColocatedNode {
     pub fn belief_source(&self) -> BeliefSource {
         if self.belief_source == BeliefSource::Bootstrap {
             assert!(
-                self.acceptors_since == Ballot::zero(),
+                self.belief.since() == Ballot::zero(),
                 "the bootstrap belief is bound to no ballot"
             );
         }
@@ -316,7 +308,7 @@ impl ColocatedNode {
     pub fn last_member_ballot(&self) -> Ballot {
         if self.is_acceptor() {
             assert!(
-                self.last_member_ballot >= self.acceptors_since,
+                self.last_member_ballot >= self.belief.since(),
                 "a member's fence covers its configuration's ballot"
             );
         }
@@ -332,7 +324,7 @@ impl ColocatedNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_acceptor(&self) -> bool {
-        let member = self.acceptors.contains(self.config.id);
+        let member = self.belief.config().contains(self.config.id);
         if member {
             assert!(
                 self.in_pool(self.config.id),
@@ -402,6 +394,51 @@ impl ColocatedNode {
         &self.acceptor
     }
 
+    /// Every slot this node knows chosen (contiguous or not) with its
+    /// command, in slot order, read from the acceptor's records: what a
+    /// driver or an oracle observes of the chosen log.
+    ///
+    /// # Panics
+    ///
+    /// If a chosen slot has no record: the node broke the coupling of a
+    /// chosen slot and its record, a programmer error.
+    pub fn chosen_commands(&self) -> impl Iterator<Item = (Slot, &Command)> + '_ {
+        self.replica.chosen().iter().map(|slot| {
+            let command = self
+                .replica
+                .chosen_at(&self.acceptor, *slot)
+                .expect("a slot known chosen is read from its record");
+            assert!(
+                *slot >= self.acceptor.first_slot(),
+                "a chosen command is read at or above the floor"
+            );
+            (*slot, command)
+        })
+    }
+
+    /// The command chosen at `slot`, if this node knows it chosen and holds
+    /// it: read from the acceptor's record, the node's one copy of the
+    /// retained log ([`Replica::chosen_at`] over the acceptor).
+    ///
+    /// # Panics
+    ///
+    /// If a slot known chosen has no record: a programmer error, never an
+    /// operating condition.
+    #[must_use]
+    pub fn chosen_at(&self, slot: Slot) -> Option<&Command> {
+        let command = self.replica.chosen_at(&self.acceptor, slot);
+        assert_eq!(
+            command.is_some(),
+            self.replica.is_chosen(slot),
+            "a node reads a command exactly at a slot it knows chosen"
+        );
+        assert!(
+            command.is_none() || slot >= self.acceptor.first_slot(),
+            "a node reads a chosen command at or above its floor"
+        );
+        command
+    }
+
     /// The node's **replica** role: the chosen log, the contiguous apply
     /// walk and the journal state it folds. A
     /// read view, like [`ColocatedNode::acceptor`].
@@ -432,7 +469,7 @@ impl ColocatedNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::replica::LogRead {
-        let read = self.replica.read(from, limit, max_bytes);
+        let read = self.replica.read(&self.acceptor, from, limit, max_bytes);
         // A read is served from the fold's head, as it stands.
         if let crate::replica::LogRead::Page(page) = &read {
             assert!(

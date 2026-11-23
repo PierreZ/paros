@@ -8,7 +8,7 @@ use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, Matchmaker, MatchmakerConfig, MatchmakerHardState, MemRegistry,
     ReconfigureReply, ReconfigureRequest,
 };
-use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId};
+use paros_consensus::membership::{MatchmakerId, ProxyId};
 use paros_consensus::{ColocatedNode, Config, Limits, NodeId, ProxyLeader, ReplicaNode, WriteOp};
 
 use super::Mutant;
@@ -164,7 +164,7 @@ pub(super) struct ProxySite {
 }
 
 impl ProxySite {
-    pub(super) fn new(id: ProxyId, config: AcceptorConfig, limits: Limits) -> Self {
+    pub(super) fn new(id: ProxyId, config: &Config, limits: Limits) -> Self {
         Self {
             id,
             live: Some(ProxyLeader::new(id, config, limits)),

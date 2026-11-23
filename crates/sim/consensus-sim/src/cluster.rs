@@ -31,6 +31,8 @@ pub mod trace;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use paros_consensus::types::fnv1a;
+
 use moonpool_walk::{Cx, Model, Phase, sometimes};
 use paros_consensus::Limits;
 use paros_consensus::contract::message::Audience;
@@ -141,6 +143,10 @@ pub mod reach {
     pub const REBOOKED: &str = "cluster: the operator booked a retired node again";
     /// A node admitted a late node to its pool.
     pub const ADMITTED: &str = "cluster: a node admitted a late node to its pool";
+    /// A replica admitted a late node to its pool.
+    pub const REPLICA_ADMITTED: &str = "cluster: a replica admitted a late node to its pool";
+    /// A proxy leader admitted a late node to its pool.
+    pub const PROXY_ADMITTED: &str = "cluster: a proxy admitted a late node to its pool";
     /// A handover chose a new matchmaker set.
     pub const HANDED_OVER: &str = "cluster: a handover chose a new matchmaker set";
 }
@@ -301,9 +307,15 @@ pub struct Cluster {
     /// The node a [`Steer::Retiring`] operator asked the matchmakers to
     /// check, and retires on its next retire moves while it may still.
     checking: Option<NodeId>,
-    /// The late nodes each node admitted to its pool. The deployment's
+    /// The late nodes each node and each replica admitted to its pool. The deployment's
     /// registry is durable: a node that boots admits them again.
     admitted: BTreeMap<NodeId, BTreeSet<NodeId>>,
+    /// The late nodes each proxy leader admitted to its pool, read again
+    /// when the proxy boots.
+    proxy_admitted: BTreeMap<ProxyId, BTreeSet<NodeId>>,
+    /// The FNV-1a fold of every batch a party of the core handed this
+    /// driver ([`Cluster::ready_digest`]).
+    ready_digest: u64,
 }
 
 impl Model for Cluster {
@@ -510,18 +522,22 @@ impl Model for Cluster {
                 }
             }
             Party::Proxy(id) => {
-                let config = self.config.clone();
+                let config = self.proxy_config(id);
                 let limits = self.proxy_limits();
                 let site = self.proxy_mut(id);
                 if site.live.is_none() && !site.dead_for_good {
-                    site.live = Some(ProxyLeader::new(id, config, limits));
+                    site.live = Some(ProxyLeader::new(id, &config, limits));
                 }
             }
             Party::Replica(id) => {
                 if self.replica(id).live.is_none() {
                     let limits = self.flavor.limits;
+                    let admitted: Vec<NodeId> = self.admitted(id).into_iter().collect();
                     let site = self.replica_mut(id);
-                    let replica = ReplicaNode::new(&site.disk, limits);
+                    let mut replica = ReplicaNode::new(&site.disk, limits);
+                    // The registry is durable: a replica that boots admits
+                    // again the late nodes it admitted.
+                    let _ = replica.extend_pool(&admitted);
                     let from = replica.replica().folded();
                     site.live = Some(replica);
                     cx.record(ClusterEvent::ReplicaBoot { replica: id, from });
@@ -562,16 +578,16 @@ impl Model for Cluster {
     fn check(&mut self) {
         for site in &self.nodes {
             let Some(node) = &site.live else { continue };
-            for (slot, command) in node.replica().chosen() {
+            for (slot, command) in node.chosen_commands() {
                 self.ledger
-                    .learned(&format!("node {}", site.id.0), *slot, command);
+                    .learned(&format!("node {}", site.id.0), slot, command);
             }
         }
         for site in &self.replicas {
             let Some(replica) = &site.live else { continue };
-            for (slot, command) in replica.replica().chosen() {
+            for (slot, command) in replica.chosen_commands() {
                 self.ledger
-                    .learned(&format!("replica {}", site.id.0), *slot, command);
+                    .learned(&format!("replica {}", site.id.0), slot, command);
             }
         }
     }
@@ -706,6 +722,8 @@ impl Cluster {
             asked: Vec::new(),
             checking: None,
             admitted: BTreeMap::new(),
+            proxy_admitted: BTreeMap::new(),
+            ready_digest: paros_consensus::types::FNV_OFFSET,
             pool,
             flavor,
         };
@@ -736,7 +754,10 @@ impl Cluster {
             cluster.register_sibling();
         }
         cluster.proxies = (0..cluster.flavor.proxies)
-            .map(|i| ProxySite::new(ProxyId(i), cluster.config.clone(), cluster.proxy_limits()))
+            .map(|i| {
+                let id = ProxyId(i);
+                ProxySite::new(id, &cluster.proxy_config(id), cluster.proxy_limits())
+            })
             .collect();
         for id in cluster.pool.clone() {
             cluster.boot_node(id, false, cx);
@@ -917,6 +938,26 @@ impl Cluster {
         }
     }
 
+    /// The deployment a proxy leader reads: the bootstrap configuration
+    /// with no counts (a proxy never names a reply owner), and the whole
+    /// pool, late nodes too. A proxy has no registry fold of its own here:
+    /// it runs any configuration a leader of the deployment registered.
+    fn proxy_config(&self, id: ProxyId) -> Config {
+        let mut config = self.party_config(NodeId(0));
+        config.proxy_count = 0;
+        config.replica_count = 0;
+        if !config.matchmakers.is_empty() {
+            // A proxy boots knowing no late node, as a node does, and
+            // admits again the late nodes it admitted before.
+            config
+                .nodes
+                .extend(self.proxy_admitted.get(&id).into_iter().flatten());
+            config.nodes.sort_unstable();
+            config.nodes.dedup();
+        }
+        config
+    }
+
     fn replica_ids(&self) -> Vec<NodeId> {
         self.replicas.iter().map(|s| s.id).collect()
     }
@@ -1033,6 +1074,22 @@ impl Cluster {
 
     // ---- draining ---------------------------------------------------------
 
+    /// The FNV-1a fold of every batch that a node, a proxy leader or a
+    /// replica of the core handed this driver, in order: what each party
+    /// sent, wrote, learned and served. Two builds of the core that give
+    /// the same digest on the same seed behave the same on it, which is
+    /// how `tests/differential.rs` checks a change that says it changes no
+    /// behaviour.
+    #[must_use]
+    pub fn ready_digest(&self) -> u64 {
+        self.ready_digest
+    }
+
+    /// Fold the digest of one batch into [`Cluster::ready_digest`].
+    fn fold_digest(&mut self, batch: u64) {
+        self.ready_digest = fnv1a(self.ready_digest, &batch.to_le_bytes());
+    }
+
     /// Run the driver loop of node `id` until its batches are empty.
     fn drain_node(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
         let replicas = self.replica_ids();
@@ -1051,6 +1108,7 @@ impl Cluster {
             let seen = Seen::of(node);
             let belief = node.acceptors_since();
             let ready = node.ready();
+            let digest = node_digest(id, &ready);
             let writes = ready.writes().to_vec();
             let mut batch: Vec<(Audience, Message)> = ready.messages().to_vec();
             plant(mutant, &mut batch);
@@ -1061,15 +1119,12 @@ impl Cluster {
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
             let more = ready.recovery_batch().is_some();
-            let matchmaking: Vec<MatchRequest> = ready
-                .match_requests()
-                .iter()
-                .map(|(_, request)| request.clone())
-                .collect();
+            let matchmaking = requests_of(ready.match_requests());
             let mut gc: Vec<(MatchmakerId, GcRequest)> = ready.gc_requests().to_vec();
             out.extend(to_matchmakers(ready.match_requests(), &gc));
             // The batch flies until its persist below (`Cluster::land`).
             let flight = ready.release();
+            self.fold_digest(digest);
             if mutant == Some(Mutant::EarlyGc) {
                 self.early_gc(id, &seen, &mut gc, &mut out);
             }
@@ -1249,12 +1304,12 @@ impl Cluster {
     ) {
         let site = self.node(id);
         let after = site.disk.hard_state().chosen_index;
-        let chosen = site.live.as_ref().map(|node| node.replica().chosen());
+        let node = site.live.as_ref();
         let first = before.map_or(0, |s| s.0 + 1);
         let last = after.map_or(0, |s| s.0 + 1);
         let learned = (first..last)
             .filter_map(|s| {
-                let command = chosen?.get(&Slot(s)).or_else(|| {
+                let command = node?.chosen_at(Slot(s)).or_else(|| {
                     traced
                         .committed
                         .iter()
@@ -1457,6 +1512,7 @@ impl Cluster {
         let ready = proxy.ready();
         let messages = ready.messages().to_vec();
         ready.advance();
+        self.fold_digest(digest_of(&(id, &messages)));
         let out = route(&messages, &pool, None, &replicas);
         let events = self.tracer.proxy_batch(id, &messages);
         for event in events {
@@ -1483,6 +1539,13 @@ impl Cluster {
                 return;
             };
             let ready = replica.ready();
+            let digest = digest_of(&(
+                id,
+                ready.writes(),
+                ready.messages(),
+                ready.committed(),
+                ready.read_states(),
+            ));
             let writes = ready.writes().to_vec();
             let out = route(ready.messages(), &pool, Some(id), &[]);
             let committed = ready.committed().to_vec();
@@ -1490,6 +1553,7 @@ impl Cluster {
             ready.advance();
             if writes.is_empty() && out.is_empty() && committed.is_empty() && read_states.is_empty()
             {
+                self.fold_digest(digest);
                 return;
             }
             for op in &writes {
@@ -1503,6 +1567,7 @@ impl Cluster {
                 cx.record(event);
             }
             let index = site.disk.hard_state().chosen_index;
+            self.fold_digest(digest);
             self.ledger.disk_chosen(&who, index);
             for envelope in out {
                 cx.send(envelope);
@@ -2146,7 +2211,7 @@ impl Client {
         Entry {
             leader,
             seq: Seq(seq),
-            records: vec![Value(seq.to_le_bytes().to_vec())],
+            records: vec![Value::from(seq.to_le_bytes().to_vec())],
         }
     }
 
@@ -2177,7 +2242,7 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
             *command = Command::Write(Entry {
                 leader: LeaderUuid(u128::MAX),
                 seq: Seq(0),
-                records: vec![Value(b"corrupt".to_vec())],
+                records: vec![Value::from(b"corrupt".to_vec())],
             });
         }
         (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
@@ -2215,10 +2280,9 @@ impl Seen {
             (node.ballot(), Slot(frontier), handoff)
         });
         let known = leading.map_or_else(Vec::new, |(_, frontier, _)| {
-            node.replica()
-                .chosen()
-                .range(..frontier)
-                .map(|(s, command)| (*s, Cmd::of(command)))
+            node.chosen_commands()
+                .take_while(|(s, _)| *s < frontier)
+                .map(|(s, command)| (s, Cmd::of(command)))
                 .collect()
         });
         let prior = node.proposer().election().map_or_else(Vec::new, |e| {
@@ -2290,6 +2354,37 @@ fn to_matchmakers<'a>(
 /// The envelopes of one batch: each audience resolved to parties. A
 /// `Learners` audience reaches the replicas too, as a deployment map
 /// routes it.
+/// The FNV-1a digest of the `Debug` text of `batch`: every field of every
+/// value the core put in it, in order.
+fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
+    fnv1a(
+        paros_consensus::types::FNV_OFFSET,
+        format!("{batch:?}").as_bytes(),
+    )
+}
+
+/// The match requests of a batch, without their addressees.
+fn requests_of(requests: &[(MatchmakerId, MatchRequest)]) -> Vec<MatchRequest> {
+    requests
+        .iter()
+        .map(|(_, request)| request.clone())
+        .collect()
+}
+
+/// The digest of one batch of node `id` ([`digest_of`]).
+fn node_digest(id: NodeId, ready: &paros_consensus::Ready<'_>) -> u64 {
+    digest_of(&(
+        id,
+        ready.writes(),
+        ready.messages(),
+        ready.committed(),
+        ready.read_states(),
+        ready.recovery_batch(),
+        ready.match_requests(),
+        ready.gc_requests(),
+    ))
+}
+
 fn route(
     messages: &[(Audience, Message)],
     pool: &[NodeId],

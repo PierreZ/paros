@@ -33,7 +33,7 @@ fn cmd(seq: u64) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(1),
         seq: Seq(seq),
-        records: vec![Value(vec![u8::try_from(seq).expect("small seq")])],
+        records: vec![Value::from(vec![u8::try_from(seq).expect("small seq")])],
     })
 }
 
@@ -169,7 +169,7 @@ impl Tier {
         let _ = self.nodes[0].propose(Entry {
             leader: LeaderUuid(leader),
             seq: Seq(seq),
-            records: vec![Value(vec![u8::try_from(seq).expect("small seq")])],
+            records: vec![Value::from(vec![u8::try_from(seq).expect("small seq")])],
         });
         let q = self.drain_node(0);
         self.deliver(q, keep);
@@ -252,6 +252,25 @@ fn replicas_apply_in_order_and_heal_a_dropped_commit_through_catch_up() {
     tier.beat(|_, _| true);
     assert_eq!(tier.applied_slots(0), vec![0, 1, 2]);
     assert_eq!(tier.applied[0], tier.applied[1], "one order, every replica");
+    // The healed replica reads the chosen log from its learned records: the
+    // same slots and commands as the leader's.
+    let replica_log: Vec<(Slot, Command)> = tier.replicas[0]
+        .chosen_commands()
+        .map(|(slot, command)| (slot, command.clone()))
+        .collect();
+    let leader_log: Vec<(Slot, Command)> = tier.nodes[0]
+        .chosen_commands()
+        .map(|(slot, command)| (slot, command.clone()))
+        .collect();
+    assert_eq!(
+        replica_log
+            .iter()
+            .map(|(slot, _)| *slot)
+            .collect::<Vec<_>>(),
+        vec![Slot(0), Slot(1), Slot(2)],
+        "the replica lists every chosen slot, in order"
+    );
+    assert_eq!(replica_log, leader_log, "one chosen log, every party");
     assert!(tier.replicas[0].counters().catch_up_requests >= 1);
     assert_eq!(tier.replicas[0].leader(), Some(NodeId(0)));
     // Every acceptor holds the chosen prefix: the replicas never voted, so the
@@ -621,7 +640,7 @@ fn tier_with_a_rotted_replica() -> Tier {
 #[test]
 fn a_replica_with_a_faulty_record_pulls_from_every_acceptor_until_healed() {
     let mut tier = tier_with_a_rotted_replica();
-    let healed = tier.nodes[0].replica().chosen_at(Slot(1)).cloned();
+    let healed = tier.nodes[0].chosen_at(Slot(1)).cloned();
     assert_eq!(tier.replicas[0].leader(), None);
     tier.replicas[0].tick();
     let out = tier.drain_replica(0);
@@ -633,7 +652,7 @@ fn a_replica_with_a_faulty_record_pulls_from_every_acceptor_until_healed() {
     assert_eq!(tier.replicas[0].counters().catch_up_requests, 3);
     tier.deliver(out, |_, _| true);
     assert_eq!(
-        tier.replicas[0].replica().chosen_at(Slot(1)).cloned(),
+        tier.replicas[0].chosen_at(Slot(1)).cloned(),
         healed,
         "the reply heals the record"
     );
@@ -898,7 +917,7 @@ fn a_replica_serves_journal_reads_from_its_fold() {
     for seq in 0..=2 {
         tier.write(1, seq, |_, _| true);
     }
-    let value = |seq: u8| Value(vec![seq]);
+    let value = |seq: u8| Value::from(vec![seq]);
     let LogRead::Page(page) = tier.replicas[0].read_log(Seq(0), 10, usize::MAX) else {
         panic!("a read of a held position is a page");
     };
@@ -943,7 +962,6 @@ fn a_late_hole_fill_that_crosses_a_truncation_keeps_nothing_below_the_floor() {
         .into_iter()
         .map(|s| {
             let command = tier.nodes[0]
-                .replica()
                 .chosen_at(Slot(s))
                 .expect("the leader holds the slot")
                 .clone();
@@ -1034,7 +1052,7 @@ fn a_truncation_inside_the_first_write_keeps_that_write() {
         Command::Write(Entry {
             leader: LeaderUuid(0),
             seq: Seq(0),
-            records: vec![Value(vec![0]), Value(vec![1])],
+            records: vec![Value::from(vec![0]), Value::from(vec![1])],
         }),
     ));
     replica.step(commit(
@@ -1062,7 +1080,7 @@ fn a_truncation_inside_the_first_write_keeps_that_write() {
     let LogRead::Page(page) = replica.read_log(Seq(1), 10, usize::MAX) else {
         panic!("a read of a retained position is a page");
     };
-    assert_eq!(page.records, vec![Value(vec![1])]);
+    assert_eq!(page.records, vec![Value::from(vec![1])]);
 }
 
 /// A deployment that names no replica has no reply owner for a slot.

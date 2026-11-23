@@ -266,7 +266,7 @@ impl ColocatedNode {
                     // leader cannot send another one (decision 30, the trust
                     // rule): its Phase 1 met a quorum that holds the chosen
                     // value. Another command is a detected safety violation.
-                    if let Some(known) = self.replica.chosen_at(slot) {
+                    if let Some(known) = self.replica.chosen_at(&self.acceptor, slot) {
                         assert!(
                             *known == command,
                             "an Accept for a chosen slot carries the chosen command"

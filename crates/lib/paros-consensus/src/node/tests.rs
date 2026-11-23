@@ -166,7 +166,7 @@ fn cfg(members: &[u64]) -> AcceptorConfig {
 }
 
 fn val(b: u8) -> Value {
-    Value(vec![b])
+    Value::from(vec![b])
 }
 
 /// A one-record `Write` by `client` at position `seq` under generation zero:
@@ -243,9 +243,7 @@ fn drain_with<'n, T>(
 /// The chosen client value at `slot` on this node, if any (a control command has
 /// no client value and reads back as `None`).
 fn chosen_at(n: &ColocatedNode, slot: u64) -> Option<Value> {
-    n.replica
-        .chosen()
-        .get(&Slot(slot))
+    n.chosen_at(Slot(slot))
         .and_then(Command::write)
         .map(|e| e.records[0].clone())
 }

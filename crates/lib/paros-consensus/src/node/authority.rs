@@ -35,7 +35,7 @@ impl ColocatedNode {
         if self.proposer.tick_authority() < self.election_timeout {
             return;
         }
-        if self.proposer.authority_holds(&self.acceptors) {
+        if self.proposer.authority_holds(self.belief.config()) {
             let held = self.counters.quorum_windows_held;
             self.counters.quorum_windows_held = held.saturating_add(1);
             assert!(

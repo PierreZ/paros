@@ -98,12 +98,12 @@ fn fresh(id: u64) -> ColocatedNode {
 
 fn command(text: &str, seq: u64) -> Value {
     let _ = seq;
-    Value(text.as_bytes().to_vec())
+    Value::from(text.as_bytes().to_vec())
 }
 
 fn show(command: &Command) -> String {
     match command {
-        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
+        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0])),
         Command::Control(control) => format!("{control:?}"),
     }
 }
@@ -261,7 +261,7 @@ fn half_a_column(cluster: &mut Cluster, leader: NodeId) {
     // Node 3's copy of the Accept lands; node 0's stays in flight.
     cluster.deliver(|to, m| !(to == NodeId(0) && matches!(m, Message::Accept { .. })));
     assert!(
-        cluster.node(leader).replica().chosen_at(Slot(3)).is_none(),
+        cluster.node(leader).chosen_at(Slot(3)).is_none(),
         "half a column decides nothing"
     );
     println!("   node 3 accepted slot 3; node 0's copy is in flight; nothing is chosen");
@@ -332,7 +332,6 @@ fn the_column_completes(cluster: &mut Cluster) {
     );
     let value = cluster
         .node(NodeId(4))
-        .replica()
         .chosen_at(Slot(3))
         .map(show)
         .expect("slot 3 is chosen at node 4");

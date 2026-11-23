@@ -6,7 +6,7 @@ fn write(leader: u128, seq: u64, records: &[&[u8]]) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(leader),
         seq: Seq(seq),
-        records: records.iter().map(|r| Value(r.to_vec())).collect(),
+        records: records.iter().map(|r| Value::from(r.to_vec())).collect(),
     })
 }
 

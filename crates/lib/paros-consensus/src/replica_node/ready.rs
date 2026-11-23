@@ -89,9 +89,19 @@ impl ReplicaReady<'_> {
     /// walked over, in contiguous slot order, after the writes are durable —
     /// the node's [`crate::Ready::committed`] contract. `ballot` is the one
     /// this replica's learned record holds.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn committed(&self) -> &[(Slot, Ballot, Command, crate::journal::Outcome)] {
-        self.node.replica.committed()
+        let committed = self.node.replica.committed();
+        assert!(
+            committed.windows(2).all(|w| w[1].0.0 == w[0].0.0 + 1),
+            "the committed entries are in contiguous slot order"
+        );
+        committed
     }
 
     /// Whether the batch holds no work: nothing to persist, send, answer or

@@ -172,7 +172,7 @@ fn compact_clamps_to_chosen_index_and_prunes_both_maps() {
         "only slot 2 is retained in the accepted log"
     );
     assert_eq!(
-        leader.replica.chosen().keys().copied().collect::<Vec<_>>(),
+        leader.replica.chosen().iter().copied().collect::<Vec<_>>(),
         vec![Slot(2)],
         "only slot 2 is retained in the chosen map"
     );

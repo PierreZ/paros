@@ -128,8 +128,9 @@ Test only: `publish = false`, never a dependency of another crate.
   - `cluster/retire.rs` → `Action::Retire` (the operator retires a node on an effective GC floor or
     on the floor a beat carried, and never one that a reconfiguration it asked for above the
     floor names), `Action::Rejoin` (a retired node boots again, or a running non-member
-    rejoins), `Action::Admit` (a node admits a late spare to its pool; until then a
-    configuration that names the spare is outside that node's pool).
+    rejoins), `Action::Admit` (a node, a replica or a proxy leader admits a late spare to its pool; until
+    then a configuration that names the spare is outside that party's pool, and a proxy ignores
+    a delegation that carries it; `reconfigured-compartments` has a late spare for this).
   - `cluster/handover.rs` → `Action::Handover`: each node's driver holds a
     `MatchmakerReconfigurer`, starts a handover to a target from the matchmaker pool, finishes
     a frozen generation it meets, adopts a chosen set, and republishes it to a matchmaker left
@@ -192,6 +193,13 @@ Test only: `publish = false`, never a dependency of another crate.
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.
 - `tests/mutants.rs` → each oracle catches its mutant.
+- `tests/differential.rs` → the differential check of the core (#1101 (one Belief role, one
+  copy of the retained log)): every flavor walks 12 fixed seeds, and the cluster folds every
+  batch that a node, a proxy leader or a replica hands its driver into one FNV-1a digest
+  (`Cluster::ready_digest`). `tests/differential.txt` holds the digests. A change that says it
+  changes no behaviour of the core leaves the file as it is; a pull request that changes the
+  core's behaviour or a walk on purpose writes it again (`DIFFERENTIAL_WRITE=1`) and names the
+  change.
 - `tests/coverage.rs` → coverage-driven simulation (#1199): every flavor, and nine of them with
   small pages, walk with exploration on (moonpool-walk's `Walk::explore`): a run that passes a
   site for the first time, or covers a new edge of the core, is branched, and its children

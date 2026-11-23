@@ -76,17 +76,22 @@ const PROXIES: usize = 2;
 /// The driver's take-back budget: re-delegations a proxy may swallow.
 const TAKE_BACK_AFTER: u64 = 2;
 
-fn fresh(id: u64) -> ColocatedNode {
-    let config = Config {
+/// The deployment as node `id` holds it: a proxy leader is built from the
+/// same description (its bootstrap configuration and its pool).
+fn deployment(id: NodeId) -> Config {
+    Config {
         peers: (0..NODES).map(NodeId).collect(),
         quorum_system: GRID,
         proxy_count: PROXIES,
-        ..Config::new(
-            NodeId(id),
-            paros_consensus::journal::JournalIdentifier::UNSET,
-        )
-    };
-    ColocatedNode::new(&MemStorage::new(config), paros_consensus::Limits::DEFAULT)
+        ..Config::new(id, paros_consensus::journal::JournalIdentifier::UNSET)
+    }
+}
+
+fn fresh(id: u64) -> ColocatedNode {
+    ColocatedNode::new(
+        &MemStorage::new(deployment(NodeId(id))),
+        paros_consensus::Limits::DEFAULT,
+    )
 }
 
 fn show_party(p: Party) -> String {
@@ -236,9 +241,7 @@ impl Cluster {
     }
 
     fn chosen_everywhere(&self, slot: Slot) -> bool {
-        self.nodes
-            .iter()
-            .all(|n| n.replica().chosen_at(slot).is_some())
+        self.nodes.iter().all(|n| n.chosen_at(slot).is_some())
     }
 
     /// Propose one command at the leader under `delegation`, deliver to
@@ -250,7 +253,7 @@ impl Cluster {
             Entry {
                 leader: LeaderUuid(7),
                 seq: Seq(seq),
-                records: vec![Value(text.as_bytes().to_vec())],
+                records: vec![Value::from(text.as_bytes().to_vec())],
             },
             None,
             delegation,
@@ -273,10 +276,7 @@ fn main() {
             .map(|p| {
                 Some(ProxyLeader::new(
                     ProxyId(p as u64),
-                    paros_consensus::membership::AcceptorConfig::new(
-                        (0..NODES).map(NodeId).collect(),
-                        GRID,
-                    ),
+                    &deployment(NodeId(0)),
                     paros_consensus::Limits::DEFAULT,
                 ))
             })
@@ -370,7 +370,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
         Entry {
             leader: LeaderUuid(7),
             seq: Seq(7),
-            records: vec![Value(b"golf".to_vec())],
+            records: vec![Value::from(b"golf".to_vec())],
         },
         None,
         Delegation::To(ProxyId(1)),
@@ -410,7 +410,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
     // Proxy 1 comes back, empty.
     *cluster.proxy(ProxyId(1)) = Some(ProxyLeader::new(
         ProxyId(1),
-        paros_consensus::membership::AcceptorConfig::new((0..NODES).map(NodeId).collect(), GRID),
+        &deployment(NodeId(0)),
         paros_consensus::Limits::DEFAULT,
     ));
 }
@@ -423,7 +423,7 @@ fn a_handoff_mid_round(cluster: &mut Cluster) {
         Entry {
             leader: LeaderUuid(7),
             seq: Seq(8),
-            records: vec![Value(b"hotel".to_vec())],
+            records: vec![Value::from(b"hotel".to_vec())],
         },
         None,
         Delegation::Auto,

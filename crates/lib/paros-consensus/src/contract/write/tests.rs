@@ -16,7 +16,7 @@ fn append(slot: u64) -> WriteOp {
         value: Command::Write(Entry {
             leader: LeaderUuid(1),
             seq: Seq(1),
-            records: vec![Value(vec![7])],
+            records: vec![Value::from(vec![7])],
         }),
     })
 }

@@ -197,6 +197,7 @@ impl ColocatedNode {
         self.assert_pooled_configurations();
         self.assert_chosen_records();
         self.assert_pull_invariants();
+        self.belief.assert_invariants(&self.pool);
     }
 
     /// The `None` arm (root `AGENTS.md`, "Plain Multi-Paxos is a shape of
@@ -254,10 +255,10 @@ impl ColocatedNode {
 
     /// The read side of the pair that `mark_chosen` asserts at the write: a
     /// slot the replica holds chosen, at or above the floor, has its
-    /// authoritative accepted record, and the record carries the chosen
-    /// command. The two maps are one fact held twice (the boot rebuilds the
-    /// chosen map from the records). The check reads the lowest and the
-    /// highest chosen slot, so it stays O(log n) at every entry point.
+    /// authoritative accepted record, which is the node's one copy of the
+    /// chosen command (the replica reads it through its `ChosenLog` port).
+    /// The check reads the lowest and the highest chosen slot, so it stays
+    /// O(log n) at every entry point.
     fn assert_chosen_records(&self) {
         let floor = self.acceptor.first_slot();
         let chosen = self.replica.chosen();
@@ -265,15 +266,11 @@ impl ColocatedNode {
             chosen.range(floor..).next(),
             chosen.range(floor..).next_back(),
         ];
-        for (slot, command) in ends.into_iter().flatten() {
+        for slot in ends.into_iter().flatten() {
             let record = self.acceptor.record(*slot);
             assert!(
                 record.is_some(),
                 "a chosen slot holds its authoritative accepted record"
-            );
-            assert!(
-                record.is_some_and(|(_, recorded)| recorded == command),
-                "a chosen slot's record carries the chosen command"
             );
         }
     }
@@ -313,7 +310,7 @@ impl ColocatedNode {
                 "a fold hole lies below the first unchosen slot"
             );
             assert!(
-                !self.replica.chosen().contains_key(&h),
+                !self.replica.chosen().contains(&h),
                 "a fold hole is a slot not held"
             );
         }
@@ -323,7 +320,7 @@ impl ColocatedNode {
     /// a won leadership's, drawn from the pool, and on a leader at least its
     /// own ballot.
     fn assert_read_basis_invariants(&self) {
-        let Some(basis) = &self.read_basis else {
+        let Some(basis) = self.belief.stored_basis() else {
             return;
         };
         assert!(
@@ -385,11 +382,11 @@ impl ColocatedNode {
                 "a retirement check runs on a follower"
             );
             assert!(
-                self.acceptors_since == check.watermark(),
+                self.belief.since() == check.watermark(),
                 "a retirement check runs under the belief bound to its floor"
             );
             assert!(
-                !self.acceptors.contains(self.config.id),
+                !self.belief.config().contains(self.config.id),
                 "a retirement check runs with the node outside"
             );
         }
@@ -417,11 +414,11 @@ impl ColocatedNode {
                 "a plain deployment never probes its membership"
             );
             assert!(
-                self.acceptors.members() == self.config.peers,
+                self.belief.config().members() == self.config.peers,
                 "a plain deployment keeps its bootstrap configuration"
             );
             assert!(
-                self.acceptors_since == Ballot::zero(),
+                self.belief.since() == Ballot::zero(),
                 "a plain deployment's configuration is bound to no ballot"
             );
             assert!(
@@ -440,7 +437,7 @@ impl ColocatedNode {
             );
         }
         assert!(
-            self.pooled_all(&self.acceptors),
+            self.pooled_all(self.belief.config()),
             "the active configuration is drawn from the node pool"
         );
         // The pool is grow-only from the boot pool, and stays the sorted,
@@ -472,7 +469,7 @@ impl ColocatedNode {
         // needs the maximum, never the current binding.
         if self.is_acceptor() {
             assert!(
-                self.last_member_ballot >= self.acceptors_since,
+                self.last_member_ballot >= self.belief.since(),
                 "a member's fence is at least the ballot its configuration is bound to"
             );
         }
@@ -481,7 +478,7 @@ impl ColocatedNode {
         // a membership probe is open only on the default it asks about or a
         // heard belief leaving this node outside (#270), beside no campaign
         // and no leadership.
-        if self.acceptors_since != Ballot::zero() {
+        if self.belief.since() != Ballot::zero() {
             assert!(
                 self.belief_source == BeliefSource::Heard,
                 "a configuration bound to a ballot is a heard belief"
@@ -490,7 +487,7 @@ impl ColocatedNode {
         self.assert_fact_invariants();
         if self.probe.is_some() && self.belief_source == BeliefSource::Heard {
             assert!(
-                !self.acceptors.contains(self.config.id),
+                !self.belief.config().contains(self.config.id),
                 "a membership probe asks about a heard belief only from outside it"
             );
         }
@@ -528,7 +525,7 @@ impl ColocatedNode {
         // above the ballot the belief is bound to; a closed probe's tag is
         // kept only while no probe is open.
         assert!(
-            self.belief_fact <= self.acceptors_since,
+            self.belief_fact <= self.belief.since(),
             "a belief is bound at or above the fact it matches"
         );
         if self.belief_fact != Ballot::zero() {
@@ -547,7 +544,7 @@ impl ColocatedNode {
             );
             assert!(
                 self.belief_source == BeliefSource::Heard
-                    && !self.acceptors.contains(self.config.id),
+                    && !self.belief.config().contains(self.config.id),
                 "a closed probe's tag lives on a node outside its heard belief"
             );
             assert!(
@@ -752,7 +749,7 @@ impl ColocatedNode {
         // `Relinquish` carried at the inherited ballot.
         if self.config.has_matchmakers() {
             assert!(
-                self.acceptors_since == self.ballot,
+                self.belief.since() == self.ballot,
                 "a matchmaker leader's configuration is bound to its own ballot"
             );
         }
@@ -764,7 +761,7 @@ impl ColocatedNode {
                 .rounds()
                 .values()
                 .filter_map(Round::proxy)
-                .all(|proxy| proxy.is_in(self.acceptors.proxy_count())),
+                .all(|proxy| proxy.is_in(self.belief.config().proxy_count())),
             "a delegated round names a proxy of the deployment"
         );
     }

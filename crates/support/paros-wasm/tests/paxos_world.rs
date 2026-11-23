@@ -114,11 +114,7 @@ fn applied_text(world: &World, node: u64) -> Vec<String> {
         .iter()
         .map(|(slot, command)| match command {
             Command::Write(entry) => {
-                format!(
-                    "{}:{}",
-                    slot.0,
-                    String::from_utf8_lossy(&entry.records[0].0)
-                )
+                format!("{}:{}", slot.0, String::from_utf8_lossy(&entry.records[0]))
             }
             Command::Control(control) => format!("{}:{control:?}", slot.0),
         })
@@ -514,11 +510,7 @@ fn a_commit_replaces_a_stale_record() {
     }
     deliver_all(&mut world);
     let leader = world.node(NodeId(2)).expect("running");
-    let chosen = leader
-        .replica()
-        .chosen_at(Slot(0))
-        .expect("slot 0 is chosen")
-        .clone();
+    let chosen = leader.chosen_at(Slot(0)).expect("slot 0 is chosen").clone();
     let (at, held) = world
         .node(NodeId(1))
         .expect("running")
@@ -958,7 +950,6 @@ fn a_vote_from_outside_the_column_does_not_count() {
         world
             .node(NodeId(0))
             .expect("running")
-            .replica()
             .chosen_at(Slot(0))
             .is_none(),
         "a vote from outside the column decides nothing, whoever cast it"
@@ -976,7 +967,6 @@ fn a_vote_from_outside_the_column_does_not_count() {
         world
             .node(NodeId(0))
             .expect("running")
-            .replica()
             .chosen_at(Slot(0))
             .is_some(),
         "the column completes and the slot is chosen"

@@ -191,7 +191,7 @@ fn read(cluster: &mut Cluster) {
         let texts: Vec<String> = page
             .records
             .iter()
-            .map(|record| String::from_utf8_lossy(&record.0).into_owned())
+            .map(|record| String::from_utf8_lossy(record).into_owned())
             .collect();
         println!("   read from {} -> {texts:?}", from.0);
         from = page.next();

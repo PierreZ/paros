@@ -18,7 +18,7 @@ use paros_consensus::contract::{Audience, MemStorage};
 use paros_consensus::journal::{
     Command, Control, Entry, JournalIdentifier, Outcome, Seq, WriterMode,
 };
-use paros_consensus::membership::{AcceptorConfig, ProxyId, QuorumSystem};
+use paros_consensus::membership::{ProxyId, QuorumSystem};
 use paros_consensus::node::{Delegation, ProposeResult};
 use paros_consensus::{
     ColocatedNode, Config, Limits, Message, NodeId, ProxyLeader, ReplicaNode, Slot, Value,
@@ -209,10 +209,14 @@ impl Run {
     /// Paxos page's, so it is not recorded here.
     fn new(layout: Layout) -> Self {
         let split = layout == Layout::Compartmentalized;
-        let acceptors = AcceptorConfig::new(
-            NODES.iter().copied().map(NodeId).collect(),
-            QuorumSystem::Majority,
-        );
+        // A proxy leader reads the deployment's bootstrap configuration and
+        // pool. The counts name the reply owner of a slot, which a proxy
+        // never names, so its configuration carries none.
+        let proxy_deployment = Config {
+            proxy_count: 0,
+            replica_count: 0,
+            ..config(NODES[0], layout)
+        };
         let mut run = Self {
             layout,
             nodes: NODES
@@ -226,7 +230,7 @@ impl Run {
                     .map(|p| {
                         Some(ProxyLeader::new(
                             ProxyId(p),
-                            acceptors.clone(),
+                            &proxy_deployment,
                             paros_consensus::Limits::DEFAULT,
                         ))
                     })
@@ -554,12 +558,8 @@ impl Run {
             let learned = self
                 .nodes
                 .iter()
-                .map(|node| node.replica().chosen_at(slot))
-                .chain(
-                    self.replicas
-                        .iter()
-                        .map(|replica| replica.replica().chosen_at(slot)),
-                );
+                .map(|node| node.chosen_at(slot))
+                .chain(self.replicas.iter().map(|replica| replica.chosen_at(slot)));
             for command in learned.flatten() {
                 let text = cell(slot, command, true).value;
                 if !values.contains(&text) {
@@ -817,7 +817,7 @@ impl Run {
                         .records()
                         .iter()
                         .map(|(slot, (_, command))| {
-                            cell(*slot, command, node.replica().chosen_at(*slot).is_some())
+                            cell(*slot, command, node.chosen_at(*slot).is_some())
                         })
                         .collect()
                 }
@@ -829,7 +829,6 @@ impl Run {
                             .map(Slot)
                             .filter_map(|slot| {
                                 replica
-                                    .replica()
                                     .chosen_at(slot)
                                     .map(|command| cell(slot, command, true))
                             })
@@ -845,7 +844,7 @@ impl Run {
         let mut chosen: BTreeMap<Slot, String> = BTreeMap::new();
         for node in &self.nodes {
             for slot in (0..SLOTS).map(Slot) {
-                if let Some(command) = node.replica().chosen_at(slot) {
+                if let Some(command) = node.chosen_at(slot) {
                     chosen.insert(slot, value_text(command));
                 }
             }
@@ -874,7 +873,7 @@ impl Run {
                 seq: Seq(0),
                 records: records
                     .iter()
-                    .map(|record| Value(record.as_bytes().to_vec()))
+                    .map(|record| Value::from(record.as_bytes().to_vec()))
                     .collect(),
             },
             None,
@@ -1050,7 +1049,7 @@ impl Run {
             command: Command::Write(Entry {
                 leader: paros_consensus::journal::LeaderUuid::UNSET,
                 seq: Seq(0),
-                records: vec![Value(value.as_bytes().to_vec())],
+                records: vec![Value::from(value.as_bytes().to_vec())],
             }),
         };
         let fan = self.next_id;
@@ -1205,7 +1204,7 @@ fn waiting(replica: &ReplicaNode) -> Vec<Slot> {
     replica
         .replica()
         .chosen()
-        .keys()
+        .iter()
         .copied()
         .filter(|slot| prefix.is_none_or(|prefix| *slot > prefix))
         .collect()
@@ -1629,7 +1628,7 @@ fn break_the_rule() -> Scenario {
         Entry {
             leader: paros_consensus::journal::LeaderUuid::UNSET,
             seq: Seq(0),
-            records: vec![Value(b"bravo".to_vec())],
+            records: vec![Value::from(b"bravo".to_vec())],
         },
         None,
         Delegation::Colocated,

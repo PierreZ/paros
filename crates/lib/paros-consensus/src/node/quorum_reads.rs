@@ -99,9 +99,9 @@ impl ColocatedNode {
             // promise above it refuses: the lagging reader of the reads model.
             probe!(
                 sometimes,
-                self.read_basis
-                    .as_ref()
-                    .is_some_and(|basis| basis.since >= self.acceptors_since),
+                self.belief
+                    .stored_basis()
+                    .is_some_and(|basis| basis.since >= self.belief.since()),
                 "quorum read: a promise above the basis opens no read"
             );
             self.counters.quorum_reads_without_basis += 1;
@@ -189,7 +189,7 @@ impl ColocatedNode {
             // Negative space: an unheard belief is bound to no ballot, the
             // very thing an answer would have misreported.
             assert!(
-                self.acceptors_since == crate::types::Ballot::zero(),
+                self.belief.since() == crate::types::Ballot::zero(),
                 "an unheard belief is bound to no ballot"
             );
             return;
@@ -354,7 +354,7 @@ impl ColocatedNode {
         let me = self.config.id;
         let unprepared = self
             .promise_is_own_unprepared()
-            .then_some(self.acceptors_since);
+            .then_some(self.belief.since());
         let open = self.quorum_reads.pending().len();
         self.quorum_reads.abandon_below(|config| match unprepared {
             Some(since) if !config.contains(me) => since,

@@ -146,7 +146,7 @@ fn full_none_quorum_noop_fills_over_an_excluded_faulty_reporter() {
     let q = drain(&mut nodes[2]);
     deliver_all(&mut nodes, q);
     assert_eq!(
-        nodes[2].replica.chosen_at(Slot(3)),
+        nodes[2].chosen_at(Slot(3)),
         Some(&Command::Control(Control::Noop)),
         "the faulty-but-uncommitted slot was decided as a no-op"
     );
@@ -227,7 +227,7 @@ fn blocked_slot_waits_then_resolves_case2_from_a_straggler() {
     deliver_all(&mut nodes, q);
     assert_eq!(nodes[0].blocked_repairs(), 0, "the probe closed");
     assert_eq!(
-        nodes[0].replica.chosen_at(Slot(3)),
+        nodes[0].chosen_at(Slot(3)),
         Some(&Command::Control(Control::Noop)),
         "a quorum of none decides the slot a no-op"
     );
@@ -508,7 +508,7 @@ fn ctrl_5_1_1_mixed_epoch_three_decisions_in_one_election() {
     // S1 and S3 form a full Q1 of none at slot 1.
     for n in &nodes {
         assert_eq!(
-            n.replica.chosen_at(Slot(1)),
+            n.chosen_at(Slot(1)),
             Some(&Command::Control(Control::Noop)),
             "slot 1 decided as a no-op"
         );

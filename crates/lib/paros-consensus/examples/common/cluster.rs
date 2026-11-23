@@ -384,7 +384,7 @@ impl Cluster {
         let entry = Entry {
             leader: writer,
             seq: Seq(seq),
-            records: vec![Value(text.as_bytes().to_vec())],
+            records: vec![Value::from(text.as_bytes().to_vec())],
         };
         let ProposeResult::Accepted(slot) = self.node(id).propose(entry) else {
             panic!("node {id} is the leader");
@@ -411,7 +411,7 @@ impl Cluster {
             LogRead::Page(page) => page
                 .records
                 .iter()
-                .map(|record| String::from_utf8_lossy(&record.0).into_owned())
+                .map(|record| String::from_utf8_lossy(record).into_owned())
                 .collect(),
             other => panic!("node {id} serves its own journal: {other:?}"),
         }

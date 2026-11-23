@@ -128,7 +128,7 @@ impl ColocatedNode {
         if !config.is_drawn_from(&self.pool) {
             return ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember);
         }
-        if *config == self.acceptors {
+        if config == self.belief.config() {
             return ReconfigureResult::Refused(ReconfigureRefusal::Unchanged);
         }
         // A reconfiguration moves a *settled* leadership: Phase-1-shaped work

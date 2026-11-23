@@ -122,7 +122,7 @@ impl ColocatedNode {
         assert!(
             taken
                 .iter()
-                .all(|(_, proxy)| proxy.is_in(self.acceptors.proxy_count())),
+                .all(|(_, proxy)| proxy.is_in(self.belief.config().proxy_count())),
             "a round was delegated only to a deployed proxy"
         );
         // Read from the rounds, apart from `stalled_delegations` (#269): no
@@ -173,7 +173,7 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return false;
         }
-        let QuorumSystem::Grid { cols, .. } = self.acceptors.quorum_system() else {
+        let QuorumSystem::Grid { cols, .. } = self.belief.config().quorum_system() else {
             return false;
         };
         assert!(column < cols, "a round moves to a column of the grid");

@@ -497,11 +497,9 @@ fn main() {
     // one slot. Slot 3, which nobody could vouch for, holds the Noop that
     // closes the hole.
     for id in [N2, N3] {
-        assert_eq!(
-            node(&mut cluster, id).replica.chosen_at(s4),
-            Some(&command("E", 4))
-        );
-        assert_eq!(node(&mut cluster, id).replica.chosen_at(s3), Some(&noop()));
+        let n = node(&mut cluster, id);
+        assert_eq!(n.replica.chosen_at(&n.acceptor, s4), Some(&command("E", 4)));
+        assert_eq!(n.replica.chosen_at(&n.acceptor, s3), Some(&noop()));
     }
     // Slot versus ballot, on node 2's disk: slot 0 was chosen under ballot
     // 10 and its record still says so; slot 4's record now carries ballot

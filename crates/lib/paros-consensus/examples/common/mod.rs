@@ -30,7 +30,7 @@ pub fn command(text: &str, seq: u64) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(1),
         seq: Seq(seq),
-        records: vec![Value(text.as_bytes().to_vec())],
+        records: vec![Value::from(text.as_bytes().to_vec())],
     })
 }
 
@@ -43,7 +43,7 @@ pub fn noop() -> Command {
 /// A command as the trace prints it: the text of a write, or the control.
 pub fn show(command: &Command) -> String {
     match command {
-        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
+        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0])),
         Command::Control(control) => format!("{control:?}"),
     }
 }
@@ -153,7 +153,7 @@ impl Node {
     /// prefix forward. Chosen is not yet applied: the walk applies in slot
     /// order, so a slot chosen ahead of a hole waits for the hole to close.
     pub fn learn_chosen(&mut self, slot: Slot, at: Ballot, command: &Command) {
-        if let Some(known) = self.replica.chosen_at(slot) {
+        if let Some(known) = self.replica.chosen_at(&self.acceptor, slot) {
             // Learning a slot twice must bring the same value: that is
             // Paxos safety, observed at one node.
             assert_eq!(known, command, "a slot is chosen once");
@@ -164,12 +164,8 @@ impl Node {
         }
         self.acceptor
             .record_accepted(slot, at, command.clone(), &mut self.disk);
-        self.replica.learn(slot, command);
-        let acceptor = &self.acceptor;
-        self.replica.advance(
-            |s, c| acceptor.record(s).filter(|(_, r)| r == c).map(|(b, _)| *b),
-            &mut self.disk,
-        );
+        self.replica.learn(&self.acceptor, slot, command);
+        self.replica.advance(&self.acceptor, &mut self.disk);
     }
 
     /// The applied log: every chosen value from slot 0 up to the first slot
@@ -180,7 +176,13 @@ impl Node {
         self.replica
             .chosen()
             .range(..end)
-            .map(|(_, c)| show(c))
+            .map(|slot| {
+                let command = self
+                    .replica
+                    .chosen_at(&self.acceptor, *slot)
+                    .expect("a chosen slot holds its record");
+                show(command)
+            })
             .collect()
     }
 }

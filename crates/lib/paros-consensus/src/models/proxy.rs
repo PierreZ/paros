@@ -330,12 +330,12 @@ impl World {
     }
 
     fn boot_proxy(&mut self, id: ProxyId) {
-        let config = self.config.clone();
+        let config = self.node_config(NodeId(0));
         let limits = Limits {
             proxy_retention: self.expire_after,
             ..Limits::DEFAULT
         };
-        self.proxy(id).live = Some(ProxyLeader::new(id, config, limits));
+        self.proxy(id).live = Some(ProxyLeader::new(id, &config, limits));
     }
 
     fn send(&mut self, envelope: Envelope) {
@@ -631,7 +631,7 @@ impl World {
             }
             _ => None,
         };
-        let value = Value(seq.to_le_bytes().to_vec());
+        let value = Value::from(seq.to_le_bytes().to_vec());
         let trace = self.trace;
         let node = self.site(leader).live.as_mut().expect("a leader is live");
         let result = node.propose_in(
@@ -749,8 +749,8 @@ impl World {
         let mut seen = Vec::new();
         for (i, site) in self.sites.iter().enumerate() {
             if let Some(node) = &site.live {
-                for (slot, command) in node.replica().chosen() {
-                    seen.push((i, *slot, command_fingerprint(command)));
+                for (slot, command) in node.chosen_commands() {
+                    seen.push((i, slot, command_fingerprint(command)));
                 }
             }
         }

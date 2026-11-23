@@ -180,7 +180,7 @@ fn redirect(cluster: &mut Cluster) {
     let entry = Entry {
         leader: WRITER,
         seq: Seq(2),
-        records: vec![Value(b"charlie".to_vec())],
+        records: vec![Value::from(b"charlie".to_vec())],
     };
     let result = cluster.node(N2).propose(entry);
     assert_eq!(result, ProposeResult::NotLeader(Some(N1)));
@@ -244,5 +244,5 @@ fn crash_the_leader(cluster: &mut Cluster) {
     for id in [N1, N2, N3] {
         assert_eq!(cluster.journal(id), ["alpha", "bravo", "charlie", "delta"]);
     }
-    assert!(cluster.node(N1).replica().chosen_at(Slot(0)).is_some());
+    assert!(cluster.node(N1).chosen_at(Slot(0)).is_some());
 }

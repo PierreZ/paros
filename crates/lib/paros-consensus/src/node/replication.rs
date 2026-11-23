@@ -109,7 +109,7 @@ impl ColocatedNode {
             // that missed the `Prepare` still learns the latest one.
             // A beat is a won leadership's (#260): what it carries is a read
             // basis, unlike the `Prepare` of a campaign that may never finish.
-            if let Some(basis) = config.clone() {
+            if let Some(basis) = config.as_ref() {
                 self.learn_read_basis(basis, ballot, fence);
             }
             self.follow_ballot(ballot, config);
@@ -153,7 +153,7 @@ impl ColocatedNode {
             // acked: the promise stands.
             probe!(reachable, "beat: a stranded learner takes the read basis");
             let (leader, own) = (self.leader, self.ballot);
-            self.learn_read_basis(basis, ballot, fence);
+            self.learn_read_basis(&basis, ballot, fence);
             assert_eq!(self.leader, leader, "the exception follows no leader");
             assert_eq!(self.ballot, own, "the exception adopts no ballot");
         }
@@ -260,7 +260,7 @@ impl ColocatedNode {
         // a beat reaches the whole pool, but only a member's ack may count
         // toward the `CheckQuorum` window (a joining acceptor
         // never inflates a quorum it is not in, #122).
-        if !self.acceptors.contains(from) {
+        if !self.belief.config().contains(from) {
             return;
         }
         if self.role != NodeRole::Leader || ballot != self.ballot {

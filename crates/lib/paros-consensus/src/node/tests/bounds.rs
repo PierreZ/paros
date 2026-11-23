@@ -19,7 +19,7 @@ fn command(slot: u64) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(7),
         seq: Seq(slot),
-        records: vec![Value(slot.to_le_bytes().to_vec())],
+        records: vec![Value::from(slot.to_le_bytes().to_vec())],
     })
 }
 
@@ -227,14 +227,14 @@ fn accepted_fingerprints_include_identity() {
     let ProposeResult::Accepted(slot) = proposer.propose(Entry {
         leader: LeaderUuid(9),
         seq: Seq(1),
-        records: vec![Value(vec![1, 2, 3])],
+        records: vec![Value::from(vec![1, 2, 3])],
     }) else {
         panic!("leader rejected the proposal");
     };
     let admitted = Command::Write(Entry {
         leader: LeaderUuid(9),
         seq: Seq(1),
-        records: vec![Value(vec![1, 2, 3])],
+        records: vec![Value::from(vec![1, 2, 3])],
     });
     let admitted_hash = command_fingerprint(&admitted);
     assert_ne!(

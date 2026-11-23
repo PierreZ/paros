@@ -20,6 +20,20 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
         assert_eq!(chosen_at(n, 0), Some(val(10)));
         assert_eq!(chosen_at(n, 1), Some(val(20)));
         assert_eq!(chosen_at(n, 2), Some(val(30)));
+        let listed: Vec<(Slot, Option<Value>)> = n
+            .chosen_commands()
+            .map(|(slot, command)| (slot, command.write().map(|e| e.records[0].clone())))
+            .filter(|(_, value)| value.is_some())
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (Slot(0), Some(val(10))),
+                (Slot(1), Some(val(20))),
+                (Slot(2), Some(val(30))),
+            ],
+            "`chosen_commands` lists every chosen write, in slot order"
+        );
         assert_eq!(
             n.hard_state().chosen_index,
             Some(Slot(2)),

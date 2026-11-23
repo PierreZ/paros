@@ -12,6 +12,7 @@ use super::{
     Acceptor, BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Config, Counters,
     HandoffCounters, LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
 };
+use crate::belief::Belief;
 use crate::contract::limits::Limits;
 use crate::contract::write::RetireMark;
 use crate::matchmaking::retire_check::RejoinCheck;
@@ -109,9 +110,7 @@ impl ColocatedNode {
         let pool = config.pool().to_vec();
         let node = Self {
             config,
-            acceptors,
-            acceptors_since: Ballot::zero(),
-            read_basis: None,
+            belief: Belief::new(acceptors, matchmakers.is_some()),
             belief_source: BeliefSource::Bootstrap,
             belief_fact: Ballot::zero(),
             closed_probe: None,
