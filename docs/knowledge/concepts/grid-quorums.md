@@ -106,7 +106,12 @@ every Phase-1 quorum meets each of them, so a later election finds the value or 
 chosen. Slots are independent, so the new column needs no backfill.
 
 `QuorumSystem::admits` refuses a layout that does not tile the membership (`rows * cols == n`),
-because a short row or column would let a predicate answer for a cell that does not exist.
+because a short row or column would let a predicate answer for a cell that does not exist. It also refuses a grid that is not full-column (`acks < rows`) whose Phase-1 quorums do not
+meet (`phase1_quorums_meet`: `2 * (rows - acks + 1) <= rows`, for example `rows = 4, acks = 3`).
+Such a grid has neither of the two read fences of §10, "A row read across a change of members":
+two Phase-1 quorums can miss each other, and an election seals the rows only on a full-column
+grid (#1483 (read fence on a grid whose Phase-1 quorums do not meet); the unit test
+`a_grid_whose_phase1_quorums_miss_is_refused_unless_full`).
 
 ## 7. Liveness
 

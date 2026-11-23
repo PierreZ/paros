@@ -41,7 +41,7 @@ pub mod transport;
 pub mod wire;
 
 pub use clock::Clock;
-pub use driver::{CallReply, Driver, Notice};
+pub use driver::{CallReply, Driver, Notice, ReadReply};
 pub use events::{Event, Events};
 pub use host::{Assignment, CallId, CallOutcome, Effect, Host, HostConfig, Input, Stop};
 pub use layout::{Damage, Entry, Key, Kind, Op};

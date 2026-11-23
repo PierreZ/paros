@@ -242,12 +242,12 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Plain Multi-Paxos, with the majority, the partitioned grid and the full grid | `node.rs`, `proposer/`, `acceptor.rs`, `replica.rs`, `membership/` | `multi-paxos/` | #1185 (rework 1.14), done |
 | The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` | #1187 (rework 2.8), done |
 | Matchmaker Paxos | `matchmaking.rs`, `matchmaker.rs`, `collector.rs` | `matchmaker/` | #1200 (TLA+ model Matchmaker Paxos), done |
-| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time; `generations/` for the chain of handovers that the code runs, with the registrations and the floor of a journal | #1097 (rework 1.8), done |
+| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time; `handover-scalars/` for the retirement records and the effective configuration; `generations/` for the chain of handovers that the code runs, with the registrations and the floor of a journal | #1097 (rework 1.8), done |
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/`; `batcher/` for the batcher walk | #1190 (rework 6.10), done |
 | `ColocatedNode` as one implementation model: the log, the handoff, the rounds of the proxy leaders, matchmaking, the GC and the retirement, the floor and CTRL, the read replica and the leaderless reads, as the code runs them together | `node.rs`, `proxy_leader.rs` and the roles they wire | `node/`, which every trace spec of a cluster walk but `generations/` extends | #1306 (trace specs extend the checked model), #1343 (merge proxy and handoff into the node model), done |
-| Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/` | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
+| Leaderless reads | `quorum_read.rs`, `node/quorum_reads.rs` | `reads/`; `read-replica/` for the read replica with a stale basis | #1016 (model of leaderless reads), #1099 (rework 1.10), done |
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
@@ -790,8 +790,83 @@ floor 1 is effective, but `Z` and `W` hold the floor 0. This is class 5 of item 
 (matchmaker safety and liveness).
 
 Not in the model: the decree that chooses the successor, lost matchmaker state, the effective
-configuration, the size of the successor set and more than one journal. `handover/` (#1097
+configuration and the retirement records (`handover-scalars/`), the size of the successor set and
+more than one journal. `handover/` (#1097
 (rework 1.8)) extends this model with the target, the size and the register.
+
+### `handover-scalars/`: the retirement records and the effective configuration across a handover, for #1230 (rules no check tests)
+
+`handover-gc/` carries the GC floor and the registrations across one handover of a matchmaker
+set. A journal's scalars (`JournalScalars`, `matchmaker/state.rs`) hold two more things that
+cross the handover, and this model checks both. It is the same handover, from `{X, Y, Z}` to
+`{Y, Z, W}`: a member of `M0` freezes and reports, the successor state is built from a majority
+of reports (`close_stop`), and a member of `M1` activates with that state merged into its own.
+
+- **The retirement record** of each node (#1002 (retire fence gaps), #1037 (rejoin)): an
+  incarnation and a flag. A retirement check of incarnation `i` records `[i, retired]`; a rejoin
+  of incarnation `j` clears it to `[j, not retired]`; a check of an incarnation below the
+  record is refused (`Rejoined`), and a check of an earlier incarnation can arrive late. Each
+  completes only when every matchmaker of one generation
+  agreed (`RetireCheck`, `RejoinCheck`). The close merges the records node by node
+  (`Retirement::merge`: the later incarnation wins, equal ones OR their flags). The node
+  retires and rejoins once each (`NI = 2`).
+- **The effective configuration**: the highest ballot of a reconfiguration registration that a
+  matchmaker took. The GC floor drops registrations but never this scalar, and the close takes
+  the maximum of the reports. Two ballots; ballot 1 reconfigures.
+
+| Constant | Values |
+|---|---|
+| `Ask` | `all`: a check completes when every matchmaker of its generation agreed (the code). `quorum`: a majority is enough. |
+| `Frozen` | `FALSE`: a frozen member answers no check (`generation_refusal`, the code). `TRUE`: it answers, after its report left. |
+| `Close` | `merge`: the records of every report of the stop quorum, merged (the code). `one`: the records of one report. |
+| `Eff` | `scalar`: the successor's effective configuration is the maximum of the reports' scalars (the code). `history`: it is the highest reconfiguration among the registrations carried above the floor. |
+
+The invariants: `RetireHeld` (a completed retirement of `i` is held by every member that serves
+its generation or a later one, unless a later incarnation came back), `RetireCarried` (the same,
+for the later generation only), `RejoinHeld` (after a completed rejoin of `j`, no serving member
+holds an earlier incarnation) and `EffCarried` (a reconfiguration registered at a majority is
+the effective configuration, or a later one, at each member of a later generation and at a
+member of each serving majority of its own generation). The `pass` checks also check
+`RegsAboveFloor`, `ActiveInSet` and `ChosenOnce`, which make each guard of the model necessary
+(#1345 (guards that survive mutation)).
+
+Results (`handover-scalars/checks.txt`):
+
+| Check | Rule | Result |
+|---|---|---|
+| `retire` | the code | `RetireHeld`, `RetireCarried`, `RejoinHeld` pass (570 thousand states) |
+| `retire_one` | the close takes the records of one report | pass (704 thousand states) |
+| `retire_frozen` | a frozen member answers a check | `RetireCarried` violation |
+| `quorum_merge` | a majority completes a check, the close merges | `RetireCarried` pass |
+| `quorum_one` | a majority completes a check, the close takes one report | `RetireCarried` violation |
+| `reach_retire`, `reach_rejoin` | reachability: a retirement, then a rejoin, completes at generation 0 and every member of `M1` is active | violation (reached) |
+| `effective` | the code | `EffCarried` pass (246 thousand states) |
+| `eff_history` | the successor rebuilds the effective configuration from the registrations | `EffCarried` violation |
+| `reach_eff` | reachability: a report whose floor passed the matched reconfiguration | violation (reached) |
+
+What the model finds: no rule of the code is refuted. The record crosses the handover because
+of two rules together: a check needs every matchmaker, and a frozen matchmaker answers none.
+Then each member of each stop quorum recorded the retirement before its report left, so even
+a close that takes one report carries it (`retire_one` passes). The merge of the close matters
+only for the weaker rule: with a check that a majority completes, the merge carries the record
+(`quorum_merge` passes; the generation of the check itself is still wrong there,
+`retire-fence/ask_quorum`), and one report does not (`quorum_one`).
+
+The traces of the controls:
+
+- `retire_frozen`: `X` agrees to retire `n`. `Y` freezes and reports no record, then agrees.
+  `Z` freezes and reports no record, then agrees. The check completes on `{X, Y, Z}`, the close
+  takes the reports of `Y` and `Z`, and `W` activates with no record of `n`.
+- `quorum_one`: `X` and `Z` agree and the check completes on a majority. `Y` and `Z` freeze, and
+  the close takes the report of `Y` only, which holds no record.
+- `eff_history`: ballot 1 (a reconfiguration) is registered at a majority, ballot 2 is matched
+  and its GC raises the floor of the stop quorum to 2, which drops the registration of
+  ballot 1. The close finds no reconfiguration above the floor, and `M1` holds no effective
+  configuration. This is the reason for the scalar (`JournalScalars::effective`).
+
+Not in the model: the registrations that block a retirement (`retire-fence/` checks that rule),
+Phase 1, the decree that chooses the successor, lost matchmaker state, more than one handover
+and more than one journal.
 
 ### `handover/`: a matchmaker set handover onto a named target, for #1097 (rework 1.8)
 
@@ -1135,7 +1210,7 @@ stale campaign of a removed node. The row "the node ignores its promise" passes 
 because an acceptor of the basis configuration always reports a later ballot. It is not a
 recommendation: the learner checks have only majority quorums.
 
-Not in the model: GC watermarks, matchmaker generations, the replica tier, a read that expires,
+Not in the model: GC watermarks, matchmaker generations, the replicas that only apply, a read that expires,
 an acceptor that loses its disk (its promise is durable here), the `StaleConfiguration` path
 that binds the belief below the promise (the fence of the code covers it, because it takes the
 higher of the two), the registration of the abandoned campaign, and a move between a grid and a majority. Two slots
@@ -1152,6 +1227,55 @@ configuration accepts). Restarts are not fair. `ReadEnds`: an open read ends.
 |---|---|---|
 | `live` | `reads_plain` | `ReadEnds` pass (663 thousand states, 4 minutes with 2 workers) |
 | `live_no_leader` | the same, no fair campaign (`LiveLeader = FALSE`) | `ReadEnds` violation (12 thousand states) |
+
+**The read replica** (`replica_node.rs`, #1230 (rules no check tests)): the constant `Replicas`
+names the readers that are not acceptors. A replica has no promise, so nothing of its own gates
+its read. It learns its basis only from the beat of a leadership that won, and a beat can be
+late. A replica restart forgets its basis and its open read, so its next basis can be the late
+beat of an older leadership. A replica that hears its first beat late has a stale basis too
+(the trace of `replica_no_fence` takes that path, with no restart). Only the fences of the
+answers end a read on a stale basis. The checks run in their own folder, `read-replica/`, which links `Reads.tla` and
+`MC.tla`, so that the `reads` job stays inside its minutes. The replica `r1` is the one reader.
+
+| Check | Shape | Result |
+|---|---|---|
+| `replica_stale` | `reads_plain` with the replica | `ReadSeesAcked`, `Agreement` pass (120 thousand states) |
+| `replica_again` | the same, and a second read (`ReadAgain`) | pass (164 thousand states) |
+| `reach_replica_stale` | reachability: the replica opens a read on a basis below a ballot that won, after an ack | violation (reached) |
+| `replica_no_fence` | the answers carry no fence (`Fence = "none"`) | `ReadSeesAcked` violation |
+| `replica_grid` (`long`) | `grid_full_seal_others` with the replica | pass (2.0 million states, 1.5 minutes with 4 workers) |
+
+A stale basis is safe for the reasons that the other readers are safe. A newer leadership won
+only after a Phase-1 quorum of every configuration of its history promised it. Under a majority,
+two Phase-1 quorums meet, so the answers that close a read on the old basis hold a fence above
+the basis, and that answer ends the read. On the grid, two Phase-1 quorums need not meet; the
+seal rule of the code (`Seal = "others"`, decision 31) puts a promise of the newer ballot in each
+read target, and `replica_grid` checks it.
+
+**A grid whose Phase-1 quorums do not meet** (#1483): `QuorumSystem::admits` lets in every grid
+with `1 <= acks <= rows`. A grid that is not full (`acks < rows`) gets no row seal, and a reader
+asks every member and closes on a Phase-1 quorum of the answers. When `2 * (rows - acks + 1)
+<= rows`, two Phase-1 quorums of one column can be disjoint. The checks run in their own folder,
+`reads-rows4/`, which links `Reads.tla` and `MC.tla`: four rows, one column, the members
+`a1..a4` and then `a2..a5`, reader `a1`.
+
+| Check | Shape | Result |
+|---|---|---|
+| `grid_rows4` | `acks = 3`: Phase 1 takes two of four, Phase 2 three | `ReadSeesAcked` violation (990 thousand states, 1 minute with 2 workers) |
+| `grid_rows4_meet` | `acks = 2`: Phase 1 takes three, so two Phase-1 quorums meet | pass (3.5 million states, 6 minutes with 2 workers) |
+
+The trace of `grid_rows4`: ballot 1 leads on `a1..a4`. Ballot 2 (the members `a2..a5`) wins
+with the Phase-1 quorum `{a2, a3}` of the old members, and `{a2, a3, a5}` choose slot 1; the
+leader acks it. `a1` hears the beat of ballot 1 and takes it as its basis, asks every member of
+`a1..a4`, and closes on the answers of `a1` and `a4`, a Phase-1 quorum of the old members that
+misses `{a2, a3}`. No answer holds a fence above 1 or a vote, so the read serves index 0 after
+the ack. A write at the new members meets every Phase-1 quorum of the new members, but not of the
+old ones. The rule that the checks select is candidate rule 1 of #1483: a grid that is not full
+must have Phase-1 quorums that meet (`2 * (rows - acks + 1) > rows`), and `admits` must refuse
+the others. **Open**: the code does not have this rule yet; `QuorumSystem::admits` still admits
+`grid(4, 1, 3)`, and #1483 tracks the change. `grid_rows4_reach` shows that under `acks = 2` a
+read that started after an ack is served. Rule 2 (seal each row) would make a one-column grid wait for every
+member at an election, against quorum everywhere (#1257).
 
 `live_no_leader` shows what a leaderless read rests on: a read whose index is a slot that only a
 minority voted waits until a leader finishes that slot.
@@ -2204,9 +2328,10 @@ whose members are up. With the control it answers with an empty store: in `wipe_
 votes slot 0 at ballot 1 and is wiped, then `a2` votes, so slot 0 is chosen on `{a1, a2}`, and
 the quorum `{a1, a3}` of `C1` holds no record of it.
 
-Not in the model, still: a faulty entry (CTRL) across configurations, which is the class of
-#267 (the tri-state tally over every prior configuration, `proposer.rs`, `slot_decidable`;
-`truncation/` checks CTRL on one configuration), and a restart (a restart keeps every durable
+A faulty entry (CTRL) across configurations, the class of #267 (the tri-state tally over every
+prior configuration, `proposer.rs`, `slot_decidable`), is not in this model: `ctrl-grid/` checks
+it (`two_one` passes, and `two_current`, a tally that asks only the newest configuration, breaks
+`NoFillChosen`). Not in the model, still: a restart (a restart keeps every durable
 record, and `learned` is not part of `Recoverable`).
 
 With one slot, a `Noop` never lands on a chosen slot: a candidate whose Phase 1 reports nothing
@@ -3447,14 +3572,31 @@ crashes and two restarts of nodes, two terms, three plans. The source of a copy 
 
 | Check | CI | Result |
 |---|---|---|
-| `safety` | ci | pass (642 thousand distinct states) |
-| `safety_wide` | ci | pass: three terms (4.0 million, about 2 minutes with 4 workers) |
+| `safety` | ci | pass (776 thousand distinct states) |
+| `safety_wide` | ci | pass: three terms (4.9 million, about 3 minutes with 4 workers) |
 | `reach_heal`, `reach_reuse`, `reach_come_back`, `reach_two_answers`, `reach_lower_ask`, `reach_late_abandon` | ci | violation: a heal, one node asked by two terms, a set that comes back to the first set, a compare-and-set applied twice, a lower ask that reaches a node that runs a higher copy, an abandon of a copy that a commit made a member before the node saw it |
 | `copy_any` | ci | violation of `Held`: a plan ends before it sends anything, the next plan's copy on the same node completes and is counted, the first plan's late ask wipes it, and the compare-and-set adds an empty member |
 | `version_only` | ci | violation of `Held`: the new controller's ask wipes the deposed controller's complete copy, and the deposed controller's compare-and-set, on an unchanged record, adds the empty node |
 | `no_heals` | ci | violation of `Held`: the set heals away and back to the record that a late compare-and-set read; the set alone cannot tell, and the late write adds a node whose copy is gone |
 | `sent_abort` | ci | violation of `Held`: a sent heal ends when its new replica is down, its abandon ends the copy, the late copy ask starts it again empty, and the late compare-and-set adds it |
 | `stale_view` | ci | violation of `Held`: a heal commits; a later heal moves the record on, so the first controller ends its sent heal on an old read although it committed; the new replica, on a value from before the commit that named it, takes the abandon and then the late copy ask again, which wipes a member |
+
+| `orphans` | ci | pass: liveness `Orphaned` under `LiveSpec` (weak fairness on `Ends`): once the faults stop, every copy that the record does not name ends; `Held` holds |
+| `orphan_kept` | ci | violation of `Orphaned`: with no end (`OrphanEnds = "none"`), a crashed controller's copy runs for ever |
+| `orphan_same` | ci | violation of `Held`: an end at the same term (`OrphanEnds = "same"`) ends a copy that the controller of that term still counts, and its compare-and-set adds the empty node |
+| `reach_orphan_end` | ci | violation of the action property `NoOrphanEnd`: the step `Ends` happens |
+
+Orphan copies (`OrphanEnds`, first value `term`): a node that is live, runs a copy, and is not in
+the record ends the copy when the register term is above the copy's term (`Ends`, which reads the
+term and the record in one step, as the code reads one register value). It is safe because
+`TermFence` refuses the compare-and-set of an old term. A node also refuses to join a copy ask of
+a term that is over; without that guard the same late ask starts the copy again after each end,
+and `Orphaned` fails. The action `Done` ends a heal whose result the record already shows.
+
+`HealTrace.tla` extends `MC.tla` (this model) and the shared `Trace` module and defines no step of
+its own: each event of `journal-sim`'s heal walk is one action of `HealReuse.tla` with the
+parameters that the code chose (`tests/heal_traces.rs`, 13 rules that the walks meet, the control
+`SameCopyAgain`, 27 edits).
 
 The answer: with node reuse, late requests and a node's own view, the heal is safe with the five
 rules, and each rule is needed. They are proposals for Pierre (PR #1470, rules that

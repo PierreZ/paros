@@ -221,8 +221,20 @@ impl Agreements {
     /// Whether every matchmaker of `matchmakers` agreed — asked at the
     /// membership boundary, never as a count.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// If the membership answers "all agreed" and still lists a matchmaker
+    /// to ask (a programmer error).
     pub fn all_agreed(&self, matchmakers: &MatchmakerSet) -> bool {
-        matchmakers.has_all(&self.agreed)
+        let all = matchmakers.has_all(&self.agreed);
+        // The negative space: all agreed exactly when no one is left to ask.
+        assert_eq!(
+            all,
+            matchmakers.unanswered(&self.agreed).next().is_none(),
+            "all agreed exactly when no matchmaker is left to ask"
+        );
+        all
     }
 
     /// The matchmakers of `matchmakers` that have not agreed yet: whom a

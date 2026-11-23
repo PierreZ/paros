@@ -72,7 +72,10 @@ impl ColocatedNode {
             // Agreement, locally: a slot is chosen once. Relearning it (a
             // duplicated `Commit`, a catch-up replay, a handoff's decided
             // tail) must bring the same value back; a different one is the
-            // two-values-for-one-slot violation, caught where it lands.
+            // two-values-for-one-slot violation, caught where it lands. The
+            // trust rule (decision 30): a correct peer teaches only a value
+            // that a quorum chose, and Paxos chooses one value per slot, so a
+            // pooled peer cannot send another.
             assert!(
                 known == command,
                 "a slot already chosen here is relearned with the same value"

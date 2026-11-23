@@ -87,10 +87,14 @@
 //! ([`reach::COPIED`]), and the heal's compare-and-set runs on the register
 //! like a reshape ([`reach::REREPLICATED`]).
 //!
-//! **Not in this walk yet**: a machine or a zone that never comes back.
-//! The walk loses a machine only for a while, so a heal of a retired set
-//! ends when the machine stays down long enough, and the liveness claim
-//! does not ask for it.
+//! **A machine lost for good** ([`WholeAction::Lose`]): once in a run, a
+//! machine that is not a matchmaker goes down and never comes back. The
+//! liveness claim then asks for the heal too: no grid or replica set of the
+//! segment in force, and no replica set of a retired segment, names a node
+//! of the lost machine ([`reach::LOST_HEALED`]). A matchmaker lost for good
+//! needs a handover of the matchmaker set, which this walk does not run.
+//! A zone lost for good breaks the contract (`F = 1`): no placement meets
+//! the zone rule, and the controller holds and alerts.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -119,7 +123,7 @@ use paros_journal_io::{
 };
 
 use crate::backend::{Disk, Wire};
-use crate::oracle::{Truth, label};
+use crate::oracle::{Truth, as_written, label};
 
 /// Oracle: one command is chosen at each slot of a journal.
 pub const AGREE: &str = "whole journal: no two Commits name two commands at one slot";
@@ -188,6 +192,10 @@ pub mod reach {
     pub const BELOW: &str = "whole journal: a resend across a seal was answered Below";
     /// A `Resolve` gave a fate.
     pub const RESOLVED: &str = "whole journal: a Resolve at an older replica gave a fate";
+    /// A machine was lost for good.
+    pub const LOST: &str = "whole journal: a machine was lost for good";
+    /// A heal replaced a replica of a retired segment on the lost machine.
+    pub const LOST_HEALED: &str = "whole journal: a heal replaced a replica on a lost machine";
 
     /// Every site of the walk.
     pub const ALL: &[&str] = &[
@@ -212,6 +220,8 @@ pub mod reach {
         UNKNOWN,
         BELOW,
         RESOLVED,
+        LOST,
+        LOST_HEALED,
     ];
 }
 
@@ -401,6 +411,8 @@ pub struct WholeModel {
     /// The controllers whose reports are lost until a time, by journal and
     /// controller.
     muted: BTreeMap<(usize, usize), u64>,
+    /// The machine lost for good, once one is.
+    lost: Option<u64>,
 }
 
 /// The walk with `mutant` planted.
@@ -440,6 +452,8 @@ pub enum WholeAction {
     /// The reports of one controller are lost for a while: the other
     /// controller of its journal takes the term from a holder that runs.
     Mute,
+    /// A machine that is not a matchmaker is lost for good.
+    Lose,
 }
 
 impl Model for WholeModel {
@@ -464,17 +478,26 @@ impl Model for WholeModel {
             WholeAction::ZoneOut,
             WholeAction::Late,
             WholeAction::Mute,
+            WholeAction::Lose,
         ]
     }
 
     fn weight(action: WholeAction, phase: Phase) -> u32 {
         match (action, phase) {
             (
-                WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late | WholeAction::Mute,
+                WholeAction::Fault
+                | WholeAction::ZoneOut
+                | WholeAction::Late
+                | WholeAction::Mute
+                | WholeAction::Lose,
                 Phase::Chaos,
             ) => 1,
             (
-                WholeAction::Fault | WholeAction::ZoneOut | WholeAction::Late | WholeAction::Mute,
+                WholeAction::Fault
+                | WholeAction::ZoneOut
+                | WholeAction::Late
+                | WholeAction::Mute
+                | WholeAction::Lose,
                 _,
             ) => 0,
             (_, Phase::Settle) => 1,
@@ -498,6 +521,7 @@ impl Model for WholeModel {
             WholeAction::ZoneOut => self.zone_out(cx),
             WholeAction::Late => self.late(cx),
             WholeAction::Mute => self.mute(cx),
+            WholeAction::Lose => self.lose(cx),
         }
         self.place();
         self.judge_heals();
@@ -523,7 +547,7 @@ impl Model for WholeModel {
     }
 
     fn restart(&mut self, node: &u64, _cx: &mut Cx<'_, Self>) {
-        if self.machines[node].driver.is_some() {
+        if self.machines[node].driver.is_some() || self.lost == Some(*node) {
             return;
         }
         if self.mutant == WholeMutant::WipeDisk {
@@ -559,7 +583,10 @@ impl Model for WholeModel {
     }
 
     fn converged(&self) -> Result<(), String> {
-        if let Some(m) = MACHINES.iter().find(|m| self.machines[m].driver.is_none()) {
+        if let Some(m) = MACHINES
+            .iter()
+            .find(|m| self.machines[m].driver.is_none() && self.lost != Some(**m))
+        {
             return Err(format!("machine {m} is down"));
         }
         for (j, journal) in self.journals.iter().enumerate() {
@@ -717,6 +744,7 @@ impl WholeModel {
             late: Vec::new(),
             token: None,
             muted: BTreeMap::new(),
+            lost: None,
         };
         for m in MACHINES {
             model.machines.insert(
@@ -872,14 +900,21 @@ impl WholeModel {
     }
 
     /// The candidates of the host's placement for journal `j`: the next
-    /// free node of each machine that is up and serves no member of the
-    /// segment in force, in machine order.
+    /// free node of each machine that is up, in machine order, first the
+    /// machines that serve no member of the segment in force, then the
+    /// others. A heal puts a member on a machine that serves another group
+    /// of the journal only when no free machine meets the zone rule (a
+    /// machine lost for good can leave a zone with no free machine); the
+    /// zone rule of each group keeps one member of it on each machine.
     fn candidates(&self, value: &RegisterValue) -> Vec<NodeId> {
         let named = Self::named(value);
         let busy = Self::in_force_machines(value);
-        MACHINES
+        let (free, shared): (Vec<u64>, Vec<u64>) = MACHINES
             .into_iter()
-            .filter(|m| self.up(*m) && !busy.contains(m))
+            .filter(|m| self.up(*m))
+            .partition(|m| !busy.contains(m));
+        free.into_iter()
+            .chain(shared)
             .map(|m| {
                 let mut node = m;
                 while named.contains(&NodeId(node)) {
@@ -1259,6 +1294,7 @@ impl WholeModel {
         let mut replies = driver.take_replies();
         driver.assign(Assignment::Leader {
             address: Address::new(id, node),
+            proxies: Vec::new(),
             campaign: Campaign {
                 ballot: Ballot {
                     round: self.journals[j].round,
@@ -1476,9 +1512,15 @@ impl WholeModel {
                         self.journals[j].healed.insert(segment);
                     }
                 }
-                Change::Rereplicate { segment, add, .. } => {
+                Change::Rereplicate {
+                    segment,
+                    add,
+                    remove,
+                    ..
+                } => {
                     if *done {
                         sometimes!(true, reach::REREPLICATED);
+                        sometimes!(self.lost == Some(machine_of(*remove)), reach::LOST_HEALED);
                         self.journals[j].added.insert((*segment, *add));
                     }
                 }
@@ -1703,19 +1745,21 @@ impl WholeModel {
             .map(|n| zone_of(machine_of(*n)))
             .collect();
         let kept = members.len() - gone.len();
-        // The zones where a candidate can take the place of a member gone.
-        let busy = Self::in_force_machines(value);
+        // The zones where a candidate can take the place of a member gone:
+        // every machine that is up is a candidate.
         let free_zones: BTreeSet<u64> = MACHINES
             .into_iter()
-            .filter(|m| self.up(*m) && !busy.contains(m))
+            .filter(|m| self.up(*m))
             .map(zone_of)
             .filter(|z| !kept_zones.contains(z))
             .collect();
         let placeable = kept_zones.len() == kept && free_zones.len() >= gone.len();
         let matchmakers_up = MATCHMAKERS.iter().filter(|m| self.up(**m)).count();
-        // The replicas gone of each set a heal may replace: the set in
-        // force, and each sealed or retired set.
-        let replicas_gone: Vec<usize> = value
+        // Whether a set a heal may replace (the set in force, and each
+        // sealed or retired set) has a replica gone and no placement that
+        // keeps one replica in each zone: its kept replicas share a zone,
+        // or too few zones have a free machine.
+        let replicas_stuck = value
             .segments()
             .values()
             .filter(|r| {
@@ -1724,17 +1768,22 @@ impl WholeModel {
                     SegmentState::InForce | SegmentState::Sealed | SegmentState::Retired
                 )
             })
-            .map(|r| {
-                r.replicas()
+            .any(|r| {
+                let (gone, kept): (Vec<NodeId>, Vec<NodeId>) = r
+                    .replicas()
                     .iter()
-                    .filter(|n| self.truly_gone(j, machine_of(**n)))
-                    .count()
-            })
-            .collect();
-        let free = MACHINES
-            .into_iter()
-            .filter(|m| self.up(*m) && !busy.contains(m))
-            .count();
+                    .partition(|n| self.truly_gone(j, machine_of(**n)));
+                let kept_zones: BTreeSet<u64> =
+                    kept.iter().map(|n| zone_of(machine_of(*n))).collect();
+                let free_zones = MACHINES
+                    .into_iter()
+                    .filter(|m| self.up(*m))
+                    .map(zone_of)
+                    .filter(|z| !kept_zones.contains(z))
+                    .collect::<BTreeSet<u64>>()
+                    .len();
+                !gone.is_empty() && (kept_zones.len() < kept.len() || free_zones < gone.len())
+            });
         let now = self.now();
         let journal = &self.journals[j];
         for alert in alerts {
@@ -1751,7 +1800,7 @@ impl WholeModel {
                             .get(&r.id())
                             .is_some_and(|at| now - at > TUNABLES.stall_window)
                 }),
-                Alert::ReplicasUnplaceable => replicas_gone.iter().any(|g| *g > 0 && free < *g),
+                Alert::ReplicasUnplaceable => replicas_stuck,
             };
             if *alert == Alert::Unplaceable {
                 sometimes!(true, reach::UNPLACEABLE);
@@ -1852,7 +1901,9 @@ impl WholeModel {
         let at: Vec<(u64, &'static str)> = states
             .iter()
             .enumerate()
-            .filter(|(slot, _)| journal.chosen[&Slot(*slot as u64)] == *command)
+            .filter(|(slot, _)| {
+                as_written(&journal.chosen[&Slot(*slot as u64)]) == as_written(command)
+            })
             .map(|(_, s)| *s)
             .collect();
         (!at.is_empty()).then_some(at)
@@ -1868,7 +1919,9 @@ impl WholeModel {
             let at: Vec<(u64, &str)> = states
                 .iter()
                 .enumerate()
-                .filter(|(slot, _)| journal.chosen[&Slot(*slot as u64)] == *command)
+                .filter(|(slot, _)| {
+                    as_written(&journal.chosen[&Slot(*slot as u64)]) == as_written(command)
+                })
                 .map(|(_, s)| *s)
                 .collect();
             if at.is_empty() {
@@ -1926,6 +1979,31 @@ impl WholeModel {
         let newest = value.newest().expect("a segment");
         if newest.state() != SegmentState::InForce {
             return Err(format!("{:?} is {:?}", newest.id(), newest.state()));
+        }
+        if let Some(lost) = self.lost {
+            let on_lost = |nodes: &mut dyn Iterator<Item = &NodeId>| {
+                nodes
+                    .copied()
+                    .filter(|n| machine_of(*n) == lost)
+                    .collect::<Vec<_>>()
+            };
+            let grid = on_lost(&mut newest.grid().columns().iter().flatten());
+            let replicas = on_lost(&mut newest.replicas().iter());
+            if !grid.is_empty() || !replicas.is_empty() {
+                return Err(format!(
+                    "{:?} names {grid:?} and {replicas:?} on the lost machine {lost}",
+                    newest.id()
+                ));
+            }
+            for record in value.segments().values() {
+                let named = on_lost(&mut record.replicas().iter());
+                if record.state() == SegmentState::Retired && !named.is_empty() {
+                    return Err(format!(
+                        "retired {:?} names {named:?} on the lost machine {lost}",
+                        record.id()
+                    ));
+                }
+            }
         }
         if let Some(old) = value
             .segments()
@@ -2003,6 +2081,25 @@ impl WholeModel {
             .expect("controllers");
         let until = self.now() + (DOWN_AFTER + 2) * TICK;
         self.muted.insert((j, c), until);
+    }
+
+    /// Once in a run, a machine that is not a matchmaker is lost for good:
+    /// it goes down and never comes back.
+    fn lose(&mut self, cx: &mut Cx<'_, Self>) {
+        if self.lost.is_some() || !cx.rng().chance(1, 4) {
+            return;
+        }
+        let others: Vec<u64> = MACHINES
+            .into_iter()
+            .filter(|m| !MATCHMAKERS.contains(m))
+            .collect();
+        let m = *cx.rng().pick(&others).expect("machines");
+        self.lost = Some(m);
+        if self.up(m) {
+            self.down(m);
+            cx.crashed(&m);
+        }
+        sometimes!(true, reach::LOST);
     }
 
     /// Every machine of one zone crashes.

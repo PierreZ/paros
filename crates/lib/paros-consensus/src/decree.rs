@@ -168,6 +168,11 @@ impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
 
     /// Whether Phase 1 is done under [`Phase1Rule`].
     fn phase1_done(&self) -> bool {
+        // Only an acceptor of the decree promises it.
+        assert!(
+            self.promised() <= self.acceptors.members().len(),
+            "only an acceptor of the decree promises"
+        );
         let quorum = self.proposer.phase1_won(self.ballot);
         match self.rule {
             Phase1Rule::Quorum => quorum,

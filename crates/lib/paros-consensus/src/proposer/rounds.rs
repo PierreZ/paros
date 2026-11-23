@@ -529,8 +529,11 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             return false;
         }
         // One command per (slot, ballot) (P2b): an `Accepted` at the open
-        // round's own ballot names the round's command. A mismatch is a
-        // broken invariant, never a vote to ignore.
+        // round's own ballot names the round's command. The trust rule
+        // (decision 30): a correct acceptor votes only for the command of the
+        // one `Accept` that this ballot's owner sent for the slot, so a
+        // pooled peer cannot name another. A mismatch is a detected safety
+        // violation, never a vote to ignore.
         assert!(
             round.command.fingerprint() == vhash,
             "an Accepted at an open round's ballot names the round's command"

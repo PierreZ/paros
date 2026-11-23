@@ -21,6 +21,19 @@ pub type Verdict = &'static str;
 /// wrote them (headers and payload, no leader time).
 type Identity = (u128, Vec<(Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>)>);
 
+/// `command` as its client wrote it: with no leader time, which the
+/// leader stamps at propose and which is not part of a write (§J2.8).
+#[must_use]
+pub fn as_written(command: &Command) -> Command {
+    let mut command = command.clone();
+    if let Command::Write(write) = &mut command {
+        for record in &mut write.records {
+            record.headers.leader_time = None;
+        }
+    }
+    command
+}
+
 fn identity(uuid: u128, write: &Write) -> Identity {
     (
         uuid,

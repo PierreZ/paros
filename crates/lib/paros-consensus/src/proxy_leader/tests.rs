@@ -415,3 +415,44 @@ fn two_commands_at_one_ballot_and_slot_stop_the_proxy() {
     proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
     proxy.step(delegation(0, 1, ballot(3, 0), 4, cmd(5)));
 }
+
+/// On a grid the proxy fans a round out to the slot's column alone, and
+/// counts only the votes of that column (#907 (core unit tests)): a vote
+/// from another column is not the round's, and the full column decides.
+#[test]
+fn a_grid_round_is_fanned_out_and_folded_in_its_column() {
+    // A 2 x 2 grid, members in row order: slot 7 is column 1, nodes 1 and 3.
+    let grid = AcceptorConfig::new(
+        vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+        QuorumSystem::grid(2, 2),
+    );
+    let mut proxy = ProxyLeader::new(ProxyId(0), grid.clone(), Limits::DEFAULT);
+    proxy.step(delegation(0, 0, ballot(3, 0), 7, cmd(7)));
+    let out = drain(&mut proxy);
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        out[0].0,
+        Audience::AcceptorsOf {
+            config: grid,
+            column: Some(1)
+        },
+        "a grid round goes to its slot's column"
+    );
+    proxy.step(accepted(0, ballot(3, 0), 7, &cmd(7)));
+    proxy.step(accepted(2, ballot(3, 0), 7, &cmd(7)));
+    assert!(
+        drain(&mut proxy).is_empty(),
+        "the votes of another column never decide the round"
+    );
+    proxy.step(accepted(1, ballot(3, 0), 7, &cmd(7)));
+    assert!(
+        drain(&mut proxy).is_empty(),
+        "half a column does not decide"
+    );
+    proxy.step(accepted(3, ballot(3, 0), 7, &cmd(7)));
+    let out = drain(&mut proxy);
+    assert!(
+        matches!(out.as_slice(), [(Audience::Learners, Message::Commit { slot, .. })] if *slot == Slot(7)),
+        "the full column decides"
+    );
+}

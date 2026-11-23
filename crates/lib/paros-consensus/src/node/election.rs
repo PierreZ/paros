@@ -322,7 +322,8 @@ impl ColocatedNode {
         // win (a won election gap-fills only *accepted* slots it can re-proposes;
         // this learns *chosen* ones outright). Harmless when we are not behind — a
         // peer with nothing past `from_slot` simply sends nothing.
-        self.broadcast(self.catch_up_request(from_slot));
+        let request = self.catch_up_request(from_slot);
+        self.broadcast(request);
         self.try_become_leader();
         // Phase 1 is open, or it was already won (a configuration this node's
         // own promise covers alone).
@@ -361,6 +362,9 @@ impl ColocatedNode {
         // misrouted or misconfigured sender is not a quorum member). Which
         // *configurations* the promise counts toward is the per-configuration
         // tally's business, not this guard's.
+        // The page size needs no check here: the tally refuses a page past
+        // `PROMISE_BATCH` (`promise_page_shape_valid`), on the campaign and
+        // on the repair probe alike (decision 30).
         if !self.in_pool(from) {
             return;
         }

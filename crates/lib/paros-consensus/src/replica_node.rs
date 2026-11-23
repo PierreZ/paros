@@ -116,13 +116,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::config::Config;
 use crate::contract::limits::Limits;
-use crate::contract::limits::READ_TTL_TICKS;
-use crate::contract::message::{Audience, Message};
+use crate::contract::limits::{CATCHUP_BATCH, READ_TTL_TICKS};
+use crate::contract::message::{Audience, Message, Party};
 use crate::contract::storage::Storage;
 use crate::contract::write::WriteOp;
 use crate::journal::state::JournalState;
 use crate::journal::{Command, Seq};
-use crate::membership::{AcceptorConfig, QuorumSystem, ReplicaId};
+use crate::membership::{AcceptorConfig, MAX_ROLE_COUNT, QuorumSystem, ReplicaId};
 use crate::quorum_read::ReadState;
 use crate::quorum_read::{QuorumReads, ReadBasis, ReadOpen};
 use crate::replica::Replica;
@@ -195,6 +195,10 @@ pub struct ReplicaNode {
     pending_messages: Vec<(Audience, Message)>,
     pending_read_states: Vec<ReadState>,
     counters: ReplicaCounters,
+    /// The lowest slot a `CatchUpRequest` of this replica asked from since
+    /// its last trim-point jump: a `TrimmedTo` is taken only when it answers
+    /// a request below its point, as on a node. Volatile.
+    catchup_asked: Option<Slot>,
 }
 
 impl ReplicaNode {
@@ -290,6 +294,7 @@ impl ReplicaNode {
             pending_messages: Vec::new(),
             pending_read_states: Vec::new(),
             counters: ReplicaCounters::default(),
+            catchup_asked: None,
         };
         for (slot, (ballot, command)) in above {
             node.unwalked.insert(slot, ballot);
@@ -346,18 +351,32 @@ impl ReplicaNode {
     pub fn step(&mut self, msg: Message) {
         let marks = self.marks();
         match msg {
+            // Wire hygiene, as on a node: a decision is taught by a pooled
+            // node or by a proxy leader of the deployment, history only by a
+            // pooled node, and a page only up to the bound a correct server
+            // cuts it at.
             Message::Commit {
+                from,
                 ballot,
                 slot,
                 command,
-                ..
-            } => self.learn(slot, ballot, &command),
-            Message::CatchUpResponse { entries, .. } => {
-                for (slot, (ballot, command)) in entries {
+            } => {
+                if self.is_party_addressable(from) {
                     self.learn(slot, ballot, &command);
+                } else {
+                    self.counters.ignored += 1;
                 }
             }
-            Message::TrimmedTo { point, state, .. } => self.trim_to(point, state),
+            Message::CatchUpResponse { from, entries } => {
+                if self.in_pool(from) && entries.len() <= CATCHUP_BATCH {
+                    for (slot, (ballot, command)) in entries {
+                        self.learn(slot, ballot, &command);
+                    }
+                } else {
+                    self.counters.ignored += 1;
+                }
+            }
+            Message::TrimmedTo { from, point, state } => self.on_trimmed_to(from, point, state),
             // A replica is no acceptor: the floor a beat carries is for the
             // acceptors it retires, not for it.
             Message::Heartbeat {
@@ -683,6 +702,33 @@ impl ReplicaNode {
         self.config.pool().binary_search(&id).is_ok()
     }
 
+    /// Whether `party` may teach a decision: a pooled node, or a proxy
+    /// leader of the deployment's proxy namespace (as on a node).
+    fn is_party_addressable(&self, party: Party) -> bool {
+        match party {
+            Party::Node(node) => self.in_pool(node),
+            Party::Proxy(proxy) => proxy.is_in(MAX_ROLE_COUNT),
+        }
+    }
+
+    /// A peer's trim point: only a pooled node's, and only as the answer to
+    /// a request of this replica below the point. An unasked point (a peer
+    /// that pushes its prefix) makes the replica ask that peer.
+    fn on_trimmed_to(&mut self, from: NodeId, point: Slot, state: JournalState) {
+        if !self.in_pool(from) || point <= self.floor {
+            self.counters.ignored += 1;
+            return;
+        }
+        if self.open_catch_up().is_none_or(|asked| asked >= point) {
+            self.request_catch_up(from, self.catch_up_need());
+            return;
+        }
+        self.trim_to(point, state);
+        self.catchup_asked = None;
+        // The walk after the jump may apply a `Truncate` above the point.
+        assert!(self.floor >= point, "an asked trim point is taken");
+    }
+
     /// Admit `nodes` to the pool this replica learns from (#189: the
     /// registry is the pool). A journal moved onto a machine admitted at
     /// runtime is led from there, and only a pooled leader's beat is
@@ -732,11 +778,47 @@ impl ReplicaNode {
         grew
     }
 
+    /// The lowest slot this replica still misses: its first faulty record,
+    /// or else its first unchosen slot.
+    fn catch_up_need(&self) -> Slot {
+        let first_unchosen = self.replica.first_unchosen();
+        let need = self
+            .faulty
+            .first()
+            .map_or(first_unchosen, |faulty| (*faulty).min(first_unchosen));
+        assert!(
+            need <= first_unchosen,
+            "the need is at or below the first unchosen slot"
+        );
+        assert!(
+            need >= self.floor,
+            "a replica never misses a slot below its floor"
+        );
+        need
+    }
+
+    /// The open catch-up request of this replica (`catchup_asked`), if it
+    /// still asks for a slot the replica misses; a request below
+    /// [`Self::catch_up_need`] is answered and dropped here.
+    fn open_catch_up(&mut self) -> Option<Slot> {
+        let need = self.catch_up_need();
+        if self.catchup_asked.is_some_and(|asked| asked < need) {
+            self.catchup_asked = None;
+        }
+        assert!(
+            self.catchup_asked.is_none_or(|asked| asked >= need),
+            "an open request asks for a slot the replica misses"
+        );
+        self.catchup_asked
+    }
+
     fn request_catch_up(&mut self, to: NodeId, from_slot: Slot) {
         // A pull goes to an acceptor, never to a replica (itself included).
         assert!(to != self.config.id, "a replica never pulls from itself");
         assert!(self.in_pool(to), "a replica pulls only from a pooled node");
         self.counters.catch_up_requests += 1;
+        let open = self.open_catch_up();
+        self.catchup_asked = Some(open.map_or(from_slot, |a| a.min(from_slot)));
         self.pending_messages.push((
             Audience::Node(to),
             Message::CatchUpRequest {

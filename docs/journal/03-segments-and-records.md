@@ -204,8 +204,16 @@ checked, each with a control that TLC breaks:
   its copy and stops (`Stop::Dropped` in the `Host`). A node that serves the segment as a member
   refuses every copy. `decide` heals only a retired segment: a sealed one retires first.
   The `Host` runs `Ask::Copy` and `Ask::Abandon`, and the whole-journal walk drives them (#1445).
-  **Open**: a new replica whose controller crashed keeps its copy until a trim or a higher copy
-  (the model drops it, as no open plan names it); a heal in flight holds back the controller's
+  **A copy of a term that is over ends** (orphan copies): a node that reads a register value
+  that does not name it and whose term is above the term of its copy ends the copy and drops it
+  (`SegmentReplica::observe`), and the `Host` refuses a copy ask of a term that is over and starts
+  no copy from a joining record of such a term at boot. This is safe because the register refuses
+  the compare-and-set of an old term (`TermFence`), so that copy can never be counted. A
+  controller that a view shows deposed and whose heal sent no compare-and-set ends the heal with
+  `Ask::Abandon` and stands down. Checked by `specs/tla/heal-reuse/` (`orphans`: every copy that
+  the register does not hold ends once the faults stop; controls `orphan_kept` and
+  `orphan_same`). **Open**: a copy of the term in force whose abandon is lost runs until the next
+  term or a trim; a heal in flight holds back the controller's
   other decisions until it ends; the storage has no delete, so the records of an earlier copy and
   of a dropped replica stay on the disk (true chosen slots of the segment, a disk leak, where the
   model wipes them).
@@ -299,6 +307,22 @@ breaks:
 - **A laggard jumps.** A replica behind the floor of its segment, whose next slot no acceptor
   and no peer holds, takes the trim point of a peer (`TrimmedTo`, as in `truncation/`) and never
   fetches a slot of a trimmed segment (`nojump` stops it for ever).
+
+**As built** (#1326 (the journal roles over the core), 2026-11-22). A replica writes `Trim` for
+each retired segment below its own once its fold's `first_seq` covers the segment's last `seq`,
+after the batch of the slot that moved the floor; it waits for the retire because the controller
+opens a segment only over retired ones (`ReshapeGuard`), and a trimmed record never retires.
+Every replica of a trimmed segment drops its copy, when it hears the trim: a replica that lags
+can still apply a slot of the segment before then, and the model has the drop as a step of its
+own (`Drop` in `Journal.tla`). The reader of `journal-sim`'s roles walk takes its floor from a
+leaderless read at the segment in force before it reads an older segment, and answers
+`Truncated` itself below it. The client does the same (`Request::Floor`, then `Request::Read`
+at or above the floor), judged by the client walk's oracle `FLOOR` (mutant `FloorFromOldest`: the
+program asks the floor of the oldest segment); the client takes the floor only from an unsealed page,
+so a copy that a stale register value routes to a sealed segment asks again. The roles walk's oracles `TRIM` (mutant `TrimIntent`) and `FLOOR` (mutant
+`FloorFromHolder`) judge the two rules, and the trace check binds each trim to `Trim(p, r)`.
+**Open** (the last rule groups of #1326): the compaction of the acceptors to the floor of `F + 1`
+replicas of each segment's set, and the laggard's trim-point jump.
 
 ### J3.3 A leaderless read of the tail across a reshape
 

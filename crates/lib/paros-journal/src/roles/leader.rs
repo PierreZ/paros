@@ -31,7 +31,10 @@
 //!    column (#1257). The tally is the core's [`Rounds`].
 //! 5. **Commit**: a chosen slot goes to the replica set of its segment, and
 //!    only there (#1271). The leader sends it again until a replica of the
-//!    set answers `Applied`.
+//!    set answers `Applied`. With proxies the leader sends it too, on the
+//!    proxy's `Chosen`: the proxy keeps nothing, so the leader is the one
+//!    role that can send a `Commit` again, and a replica takes a second
+//!    `Commit` of a slot as a no-op.
 //! 6. **Held answers** (#1232): the answer of a command the leader proposed
 //!    goes to its caller when the slot applied that command, else `Unknown`.
 //!    A leader that stops answers `Unknown` for every held command.
@@ -49,7 +52,7 @@ pub mod phase1;
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_consensus::contract::limits::RESEND_BATCH;
-use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+use paros_consensus::membership::{AcceptorConfig, ProxyId, QuorumSystem};
 use paros_consensus::proposer::Rounds;
 use paros_consensus::types::Fingerprint;
 use paros_consensus::{Ballot, NodeId, Slot};
@@ -62,6 +65,10 @@ use crate::register::{Change, RegisterValue};
 use crate::segment::{Grid, SegmentId, SegmentRecord, SegmentState};
 
 use phase1::{Phase1, Phase1Close};
+
+/// The re-sends of a delegated round after which the leader gives it to the
+/// next proxy: a proxy that crashed or lost its messages costs a few ticks.
+pub const MOVE_AFTER: u64 = 3;
 
 /// What the driver gives a new leader.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -248,6 +255,9 @@ pub struct JournalLeader<T> {
     holders: BTreeSet<NodeId>,
     /// Whether a done value showed that segment retired.
     retired: bool,
+    /// The proxy leaders the leader delegates its rounds to; empty: the
+    /// leader runs Phase 2 itself.
+    proxies: Vec<NodeId>,
 }
 
 impl<T> JournalLeader<T> {
@@ -302,10 +312,28 @@ impl<T> JournalLeader<T> {
             unapplied: BTreeMap::new(),
             holders: BTreeSet::new(),
             retired: false,
+            proxies: Vec::new(),
         };
         let effects = leader.prepares();
         leader.assert_invariants();
         Some((leader, effects))
+    }
+
+    /// Delegate the Phase 2 of every round to `proxies` (§J4.1, the proxy
+    /// leader): round `slot` goes to the proxy at `slot % proxies`, and a
+    /// round that stalls moves to the next proxy every [`MOVE_AFTER`]
+    /// re-sends. The leader learns each decision from the proxy's
+    /// [`Message::Chosen`]. Called before the leader opens a round.
+    ///
+    /// # Panics
+    ///
+    /// When the leader already opened a round.
+    pub fn delegate_to(&mut self, proxies: Vec<NodeId>) {
+        assert!(
+            self.rounds.is_empty() && self.unapplied.is_empty(),
+            "the leader delegates before it opens a round"
+        );
+        self.proxies = proxies;
     }
 
     /// The leader's ballot.
@@ -362,16 +390,24 @@ impl<T> JournalLeader<T> {
             .find(|segment| segment.start.is_some_and(|s| s <= slot))
     }
 
-    /// Propose `command` for the caller `token`.
+    /// Propose `command` for the caller `token`, at `time`, the clock of
+    /// the leader's host in nanoseconds: a write carries it as its leader
+    /// time (§J2.8, [`Command::stamped`]).
     ///
     /// # Panics
     ///
     /// When an assertion on its own postconditions fails: a programmer
     /// error, never an operating condition.
-    pub fn propose(&mut self, token: T, command: Command) -> (Proposed, Vec<LeaderEffect<T>>) {
+    pub fn propose(
+        &mut self,
+        token: T,
+        command: Command,
+        time: u64,
+    ) -> (Proposed, Vec<LeaderEffect<T>>) {
         if !matches!(self.phase, LeaderPhase::Open { .. }) {
             return (Proposed::NotLeader, Vec::new());
         }
+        let command = command.stamped(time);
         let slot = self.next;
         self.next = Slot(slot.0 + 1);
         self.held.hold(slot, token, command.clone());
@@ -395,24 +431,30 @@ impl<T> JournalLeader<T> {
                 page,
             } if ballot == self.campaign.ballot && self.phase == LeaderPhase::Phase1 => {
                 match self.phase1.fold(from, at, page) {
-                    Some(next) => vec![LeaderEffect::Send {
-                        to: from,
-                        message: Message::Prepare {
-                            ballot: self.campaign.ballot,
-                            from: next,
-                        },
-                    }],
+                    Some(next) => {
+                        probe!(reachable, "leader: a promise page asks for the next page");
+                        vec![LeaderEffect::Send {
+                            to: from,
+                            message: Message::Prepare {
+                                ballot: self.campaign.ballot,
+                                from: next,
+                                segment: self.campaign.segment,
+                            },
+                        }]
+                    }
                     None => self.after_promise(),
                 }
             }
             Message::Nack { ballot, promised }
                 if ballot == self.campaign.ballot && promised > ballot =>
             {
+                probe!(reachable, "leader: a higher promise stops the leader");
                 self.stop()
             }
             Message::Accepted { ballot, slot } if ballot == self.campaign.ballot => {
                 self.accepted(from, slot)
             }
+            Message::Chosen { ballot, slot } if ballot == self.campaign.ballot => self.chosen(slot),
             Message::Applied {
                 segment,
                 slot,
@@ -425,6 +467,7 @@ impl<T> JournalLeader<T> {
                     && sealed.id == segment
                     && sealed.replicas.contains(&from)
                 {
+                    probe!(reachable, "leader: a replica holds the sealed segment");
                     self.holders.insert(from);
                 }
                 Vec::new()
@@ -448,6 +491,20 @@ impl<T> JournalLeader<T> {
             self.assert_invariants();
             return effects;
         }
+        if self.phase == LeaderPhase::Phase1 {
+            // A done retire that comes during Phase 1 is the last value
+            // that shows it: the leader keeps it, or it asks for the retire
+            // for ever once it opens.
+            if let [.., before, _] = &self.segments[..]
+                && value
+                    .segment(before.id)
+                    .is_some_and(|record| record.state() >= SegmentState::Retired)
+            {
+                probe!(reachable, "leader: a retire seen in Phase 1 is kept");
+                self.retired = true;
+            }
+            return Vec::new();
+        }
         let LeaderPhase::Sealing { end } = self.phase else {
             return Vec::new();
         };
@@ -458,11 +515,13 @@ impl<T> JournalLeader<T> {
             return Vec::new();
         };
         let effects = if done == end {
+            probe!(reachable, "leader: a done seal end opens the leader");
             let own = self.segments.len() - 1;
             self.segments[own - 1].end = Some(end);
             self.segments[own].start = Some(end);
             self.open(end)
         } else {
+            probe!(reachable, "leader: a seal end of another stops the leader");
             self.stop()
         };
         self.assert_invariants();
@@ -473,7 +532,10 @@ impl<T> JournalLeader<T> {
     /// segment moved on. The leader stops.
     pub fn refused(&mut self) -> Vec<LeaderEffect<T>> {
         match self.phase {
-            LeaderPhase::Sealing { .. } => self.stop(),
+            LeaderPhase::Sealing { .. } => {
+                probe!(reachable, "leader: a refused seal stops the leader");
+                self.stop()
+            }
             _ => Vec::new(),
         }
     }
@@ -489,6 +551,11 @@ impl<T> JournalLeader<T> {
         self.rounds.clear();
         self.unapplied.clear();
         self.holders.clear();
+        probe!(
+            sometimes,
+            !self.held.is_empty(),
+            "leader: a stopped leader answers its held commands"
+        );
         let effects: Vec<LeaderEffect<T>> = self
             .held
             .release_all()
@@ -526,7 +593,12 @@ impl<T> JournalLeader<T> {
             LeaderPhase::Open { .. } => {
                 let mut effects = Vec::new();
                 for pending in self.rounds.resend_page(page) {
-                    effects.extend(self.accepts(pending.slot, &pending.command));
+                    probe!(reachable, "leader: an open round is sent again");
+                    if pending.proxy.is_some() {
+                        effects.extend(self.delegate(pending.slot, &pending.command));
+                    } else {
+                        effects.extend(self.accepts(pending.slot, &pending.command));
+                    }
                 }
                 let unapplied: Vec<(Slot, SegmentId, Command)> = self
                     .unapplied
@@ -535,6 +607,7 @@ impl<T> JournalLeader<T> {
                     .map(|(slot, u)| (*slot, u.segment, u.command.clone()))
                     .collect();
                 for (slot, segment, command) in unapplied {
+                    probe!(reachable, "leader: a chosen slot is committed again");
                     effects.extend(self.commits(segment, slot, &command));
                 }
                 effects.extend(self.retire());
@@ -576,6 +649,7 @@ impl<T> JournalLeader<T> {
             })
             .collect();
         if self.holders.len() >= sealed.acks() {
+            probe!(reachable, "leader: F + 1 holders retire the sealed segment");
             effects.push(LeaderEffect::Register(Change::Retire {
                 segment: sealed.id,
                 holders: self.holders.len(),
@@ -596,6 +670,7 @@ impl<T> JournalLeader<T> {
             .segment(segment)
             .is_some_and(|record| record.state() >= SegmentState::Retired)
         {
+            probe!(reachable, "leader: a done value shows the retire");
             self.retired = true;
             self.holders.clear();
             return vec![LeaderEffect::Retired { segment }];
@@ -612,6 +687,7 @@ impl<T> JournalLeader<T> {
                 message: Message::Prepare {
                     ballot: self.campaign.ballot,
                     from,
+                    segment: self.campaign.segment,
                 },
             })
             .collect()
@@ -639,13 +715,17 @@ impl<T> JournalLeader<T> {
         ) {
             (Some(before), _) => {
                 let end = end.expect("Phase 1 over the segment before gives an end");
+                probe!(reachable, "leader: a first leader writes the seal end");
                 self.phase = LeaderPhase::Sealing { end };
                 vec![LeaderEffect::Register(Change::Seal {
                     segment: before,
                     end,
                 })]
             }
-            (None, Some(start)) => self.open(start),
+            (None, Some(start)) => {
+                probe!(reachable, "leader: a leader of a segment in force opens");
+                self.open(start)
+            }
             (None, None) => unreachable!("a segment that is not sealing is in force"),
         }
     }
@@ -666,9 +746,20 @@ impl<T> JournalLeader<T> {
         let mut effects = Vec::new();
         for slot in (from.0..next.0).map(Slot) {
             if self.blocked.contains(&slot) {
+                probe!(reachable, "leader: a blocked slot is not proposed");
                 continue;
             }
             let command = self.safe.get(&slot).cloned().unwrap_or(Command::Noop);
+            probe!(
+                sometimes,
+                command == Command::Noop,
+                "leader: the gap fill writes a Noop"
+            );
+            probe!(
+                sometimes,
+                command != Command::Noop,
+                "leader: the gap fill writes a vote again"
+            );
             effects.extend(self.open_round(slot, command));
         }
         assert!(
@@ -679,10 +770,75 @@ impl<T> JournalLeader<T> {
     }
 
     fn open_round(&mut self, slot: Slot, command: Command) -> Vec<LeaderEffect<T>> {
-        let effects = self.accepts(slot, &command);
-        self.rounds
-            .open(slot, self.campaign.ballot, command, None, None);
-        effects
+        if self.proxies.is_empty() {
+            let effects = self.accepts(slot, &command);
+            self.rounds
+                .open(slot, self.campaign.ballot, command, None, None);
+            return effects;
+        }
+        let index = u64::try_from(self.proxies.len()).expect("few proxies");
+        self.rounds.open_delegated(
+            slot,
+            self.campaign.ballot,
+            command.clone(),
+            None,
+            ProxyId(slot.0 % index),
+        );
+        self.delegate(slot, &command)
+    }
+
+    /// The delegation of the open round at `slot` to its proxy: the proxy
+    /// at `slot % proxies`, moved to the next one every [`MOVE_AFTER`]
+    /// re-sends of the round.
+    fn delegate(&self, slot: Slot, command: &Command) -> Vec<LeaderEffect<T>> {
+        let round = self
+            .rounds
+            .by_slot()
+            .get(&slot)
+            .expect("a delegation is of an open round");
+        let count = u64::try_from(self.proxies.len()).expect("few proxies");
+        let first = round.proxy().expect("a round with proxies is delegated").0;
+        assert!(first < count, "a proxy id is an index of the proxies");
+        assert_eq!(first, slot.0 % count, "a round starts at its slot's proxy");
+        let moves = round.resends() / MOVE_AFTER;
+        probe!(
+            sometimes,
+            moves > 0,
+            "leader: a stalled round moves to another proxy"
+        );
+        let index = usize::try_from((first + moves) % count).expect("a proxy index");
+        let own = self
+            .segments
+            .last()
+            .expect("a leader reads its own segment");
+        let segment = self
+            .segment_of(slot)
+            .expect("a slot the leader writes is in a segment it reads");
+        vec![LeaderEffect::Send {
+            to: self.proxies[index],
+            message: Message::Delegate {
+                ballot: self.campaign.ballot,
+                slot,
+                command: command.clone(),
+                column: own.column(slot).members().to_vec(),
+                segment: segment.id,
+                replicas: segment.replicas.clone(),
+            },
+        }]
+    }
+
+    /// A proxy chose `slot` at the leader's ballot: the round closes, and
+    /// the leader commits the slot until a replica applies it.
+    fn chosen(&mut self, slot: Slot) -> Vec<LeaderEffect<T>> {
+        let Some(round) = self.rounds.by_slot().get(&slot) else {
+            return Vec::new();
+        };
+        if round.proxy().is_none() {
+            return Vec::new();
+        }
+        let command = round.command().clone();
+        probe!(reachable, "leader: a proxy chose a delegated round");
+        self.decide(slot, command)
     }
 
     /// The `Accept`s of `slot`: to every acceptor of its column of the
@@ -726,19 +882,20 @@ impl<T> JournalLeader<T> {
         let Some((_, command)) = self.rounds.decided(slot, &column) else {
             return Vec::new();
         };
+        self.decide(slot, command)
+    }
+
+    /// `slot` is chosen with `command`: close its round, and commit it to
+    /// the replica set of its segment until a replica applies it.
+    fn decide(&mut self, slot: Slot, command: Command) -> Vec<LeaderEffect<T>> {
         self.rounds.close(slot);
         let segment = self
             .segment_of(slot)
             .expect("a slot the leader writes is in a segment it reads")
             .id;
-        self.unapplied.insert(
-            slot,
-            Unapplied {
-                segment,
-                command: command.clone(),
-            },
-        );
-        self.commits(segment, slot, &command)
+        let commits = self.commits(segment, slot, &command);
+        self.unapplied.insert(slot, Unapplied { segment, command });
+        commits
     }
 
     /// The `Commit`s of `slot`: to every replica of its segment.

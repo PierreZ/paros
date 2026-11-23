@@ -3,12 +3,12 @@
 
 use crate::contract::message::{Audience, Message};
 use crate::contract::write::{AcceptorWrite, WriteOp};
-use crate::journal::Command;
+use crate::journal::{Command, JournalIdentifier};
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
 use crate::node::ColocatedNode;
 use crate::quorum_read::ReadState;
-use crate::types::{Ballot, Slot};
+use crate::types::{Ballot, NodeId, Slot};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
 /// enforcing one batch in flight.
@@ -40,19 +40,22 @@ use crate::types::{Ballot, Slot};
 /// The accessors borrow node-owned buffers, so a guard must not be held across
 /// an `.await`. An async driver copies the buckets out
 /// (`writes().to_vec()`, `messages().to_vec()`,
-/// `committed().to_vec()`), calls `advance()`, awaits its I/O, then calls
+/// `committed().to_vec()`), calls [`Ready::release`] in place of `advance()`,
+/// awaits its flush, gives the [`Flight`] back with
+/// [`ColocatedNode::durable`], then calls
 /// [`ColocatedNode::advance_recovery`] to release the next bounded continuation.
 ///
-/// **One batch in flight.** Between `advance()` and the end of the flush of
-/// that batch, the driver must not call `step`, `tick` or `propose*` on the
-/// node, and must not send a message of a later batch. The core assumes that
-/// the batch of an earlier input is durable when a later input arrives: an
-/// acceptor emits no write for a `Prepare` at the ballot it already promised,
-/// because the batch that raised the promise carries it. A `Promise` sent
-/// before that batch is durable can be lost in a crash after a candidate
-/// counted it. The borrow gate covers the buckets only; the driver holds
-/// this rule (the shipped driver: one flight per journal, `paros-roles`'
-/// `node/flight.rs`).
+/// **One batch in flight.** Between the end of a batch and the end of its
+/// flush, the driver must not give the node an input (`step`, `tick`,
+/// `propose*` or any other mutating call) and must not send a message of a
+/// later batch. The core assumes that the batch of an earlier input is
+/// durable when a later input arrives: an acceptor emits no write for a
+/// `Prepare` at the ballot it already promised, because the batch that raised
+/// the promise carries it. A `Promise` sent before that batch is durable can
+/// be lost in a crash after a candidate counted it. The core holds this rule
+/// for a driver that releases its batches: every mutating entry point of a
+/// node with a batch in flight panics, and so does `ready()`. A driver that
+/// flushes before it calls `advance()` holds the rule by its order alone.
 #[must_use = "a Ready must be processed and then advanced; a dropped Ready keeps its batch, which the next ready() returns again"]
 pub struct Ready<'a> {
     node: &'a mut ColocatedNode,
@@ -276,9 +279,40 @@ impl<'a> Ready<'a> {
 
     /// Acknowledge the batch: clears the pending buckets and releases the unique
     /// borrow, so the next [`ColocatedNode::ready`] is allowed. Consumes `self` — the
-    /// guard cannot be reused.
+    /// guard cannot be reused. Call it once the batch is durable and sent; a
+    /// driver that flushes after it lets go of the buckets calls
+    /// [`Ready::release`] instead.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.node.config().id.0)))]
     pub fn advance(self) {
         self.node.clear_pending();
     }
+
+    /// Let go of the buckets before their flush is done: clears them like
+    /// [`Ready::advance`], and puts the batch **in flight**. The node takes
+    /// no input until the driver gives the returned [`Flight`] back with
+    /// [`ColocatedNode::durable`], once every write of the batch is durable.
+    /// The core then holds the rule of one batch in flight (the section
+    /// "Async drivers" above) and does not leave it to the driver's order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.node.config().id.0)))]
+    pub fn release(self) -> Flight {
+        let flight = self.node.begin_flight();
+        assert!(self.node.in_flight(), "a released batch is in flight");
+        flight
+    }
+}
+
+/// A batch in flight ([`Ready::release`]): the token a driver gives back to
+/// [`ColocatedNode::durable`] once every write of the batch is durable. It
+/// names its node, its journal and its batch, so a token given back twice,
+/// to another node or to another journal of the same node panics.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a Flight must be given back to ColocatedNode::durable once its batch is durable; the node takes no input until then"]
+pub struct Flight {
+    pub(crate) node: NodeId,
+    pub(crate) journal: JournalIdentifier,
+    pub(crate) batch: u64,
 }

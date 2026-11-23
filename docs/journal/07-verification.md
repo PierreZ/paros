@@ -132,8 +132,13 @@ keeps the read set and the first slot of its campaign (`Register` takes them), t
 writes a `Noop` above the start below the highest vote it saw, and the replica's boundary write
 and its `Resolve` answer wait on the replica's batch. The wide shape (two columns) has no trace
 check: `Journal.tla` chooses a slot at a quorum of the whole grid, not of one column.
-**Open**: the coverage gate over the journal's probes (the next rule group of #1326); CTRL
-faulty votes on the acceptors' disks (the leader's blocked slot has unit tests only).
+The walk also runs proxy leaders (oracle `PROXY`, mutant `ForgedAccepted`), leaderless reads at
+the replicas, one of which hears the register late (oracle `READ`, mutant `ReadNoFence`), the
+trim of a retired segment and the reader's floor (oracles `TRIM` and `FLOOR`, mutants
+`TrimIntent` and `FloorFromHolder`; the trace events `Trim` and `Drop`), and the leader time of each write
+(oracle `STAMPED`, mutant `UnstampedAccept`). **Open**: the coverage gate over the journal's
+probes, with CTRL faulty votes on the acceptors' disks (the leader's blocked slot has unit tests
+only); both come with the last rule group of #1326.
 
 **The heal walk** (#1314 (re-replication of a sealed segment's replica set), `src/heal.rs`):
 the controller role heals a retired segment while replica machines are lost for good or come
@@ -152,7 +157,14 @@ roles walk's retire is the leader's now, judged by `RETIRE` (a retire counts `F 
 that hold the whole segment on their disk; mutant `HoldsLie`). `specs/tla/heal-reuse/` checks the five rules of the code that these mutants
 remove and one more (highest copy, term check, heal count, a sent heal that ends only on an answer,
 and a fresh register value before an abandon or a copy wipes a node), each with a control. The
-heal walk plays its replicas on the current register value, so it cannot see the last rule. **Open**: a trace check of the heal walk against `heal-reuse/`.
+heal walk plays its replicas on the current register value, so it cannot see the last rule. The
+walk also ends orphan copies (a copy of a term that is over, on a node the register does not
+name; sites `ORPHAN_ENDED`, `ORPHAN_REFUSED`), and `CONVERGES` catches the mutant that keeps them
+(`KeepOrphans`). TLC checks the traced walks against `heal-reuse/HealTrace.tla`, which extends
+`HealReuse.tla` and defines no step of its own (`tests/heal_traces.rs`): each event of the walk
+(`HealEvent`) is one action of the model, the walks meet every rule of its `RULES`, TLC refuses
+the control `SameCopyAgain` (a node starts a copy again from empty, which the oracles pass) and
+refuses each of 27 edits of the recorded traces at the edited event or after it.
 
 **The walk of the register** (#1325 (the matchmaker register as an optional role),
 `src/register.rs`) runs `paros_journal::register` over four machines: operations of every change
@@ -257,8 +269,11 @@ judges each ask on a value done after it was sent), may lose an ask or give it a
 (site `LATE_ASK`), and gives each complete copy to the controllers (sites `REREPLICATE`,
 `COPIED`, `REREPLICATED`). The oracle `HEAL_HELD` judges that each node a done heal added holds
 every slot of the retired segment on its disk while the set names it (mutant `EarlyCopied`: the
-walk reports a copy complete when it asks it). **Open**: the walk loses a
-machine or a zone only for a while; a permanent loss joins the walk as the next step of #1314.
+walk reports a copy complete when it asks it). The walk also loses one machine that hosts no
+matchmaker for good (move `Lose`, site `LOST`): `CONVERGES` then needs the newest grid, its replica
+set and every retired replica set to name no node of that machine (site `LOST_HEALED`). A walk
+host gives the controller the free machines first and the machines that already serve a member
+last, so a heal colocates two nodes on one machine only when no free machine meets the zone rule.
 
 ### J7.5 The controller's `decide`
 

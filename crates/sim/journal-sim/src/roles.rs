@@ -61,9 +61,9 @@ use paros_journal::resolve::ResolveAnswer;
 use paros_journal::roles::acceptor::AcceptorDisk;
 use paros_journal::roles::replica::ReplicaDisk;
 use paros_journal::roles::{
-    AcceptorEffect, AcceptorWrite, Campaign, JournalAcceptor, JournalLeader, LeaderEffect,
-    LeaderPhase, Message, PROMISE_BATCH, PersistId, Proposed, ReplicaEffect, ReplicaOp,
-    SegmentReplica,
+    AcceptorEffect, AcceptorWrite, Campaign, JournalAcceptor, JournalLeader, JournalProxy,
+    LeaderEffect, LeaderPhase, Message, PROMISE_BATCH, PersistId, Proposed, ProxyEffect,
+    ReadAnswer, ReplicaEffect, ReplicaOp, SegmentReplica,
 };
 use paros_journal::segment::{OpeningCall, SegmentId, SegmentRecord, SegmentState};
 use paros_journal::{
@@ -71,8 +71,13 @@ use paros_journal::{
     Record, Reply, Seq, Slot, Write,
 };
 
-use crate::oracle::{Truth, Verdict, label};
+use crate::oracle::{Truth, Verdict, as_written, label};
 
+/// Oracle: a read serves the records of the whole log, and a page of a
+/// segment that no seal ended covers every slot chosen before the read
+/// started (`ServedChosen`, `ReadFresh` of
+/// `specs/tla/experiments/segments/reads/`).
+pub const READ: &str = "a read serves the whole log's records, and an open segment's page covers what was chosen before";
 /// Oracle: one command is chosen at each slot.
 pub const AGREE: &str = "one command is chosen at each slot";
 /// Oracle: a sealed grid chooses nothing at or above its end.
@@ -89,6 +94,26 @@ pub const RESOLVE: &str = "a Resolve at a replica answers the fate that the whol
 /// Oracle: a leader retires a segment only once `F + 1` replicas of its
 /// set hold every slot of it on their disk (`retire_f`).
 pub const RETIRE: &str = "a segment retires only with F + 1 replicas of its set holding it on disk";
+
+/// Oracle: a segment is trimmed only once it is sealed and the decided
+/// floor of the whole log is at or above its last `seq` (§J3.2,
+/// `trim_intent`, `trim_open` of `specs/tla/segment-truncate/`).
+pub const TRIM: &str = "a segment is trimmed only once the decided floor covers its last seq";
+/// Oracle: a read serves no record below the floor that the whole log had
+/// when the read started (§J3.2, `holder` of `specs/tla/segment-truncate/`).
+pub const FLOOR: &str = "a read serves no record below the floor of the whole log";
+
+/// Oracle: every record of a chosen write carries one leader time, the
+/// time of a proposal of that write (§J2.8): the leader stamps it at
+/// propose, in the chosen value, and no replica stamps at apply.
+pub const STAMPED: &str =
+    "every record of a chosen write carries the leader time of a proposal of it";
+
+/// Oracle: a proxy leader commits a slot only once `F + 1` acceptors of the
+/// column of the round hold a vote at the round's ballot or above on their
+/// disk (`specs/tla/proxy-leader/`).
+pub const PROXY: &str =
+    "a proxy commits a slot only once F + 1 acceptors of its column voted it on disk";
 
 /// The coverage sites of the roles walk.
 pub mod reach {
@@ -126,13 +151,49 @@ pub mod reach {
     pub const PAGED: &str = "roles walk: a promise came in more than one page";
     /// An acceptor restarted from its disk with a vote.
     pub const RESTARTED: &str = "roles walk: an acceptor restarted from its disk with a vote";
+    /// A slot chosen by a proxy leader.
+    pub const PROXIED: &str = "roles walk: a proxy leader chose a slot";
+    /// A slot chosen by a proxy leader after a proxy crashed.
+    pub const PROXY_CRASHED: &str = "roles walk: a slot chosen after a proxy leader crashed";
+    /// A read of a segment that no seal ended served a page.
+    pub const READ_OPEN: &str = "roles walk: a read of an open segment served a page";
+    /// A read met an acceptor that knows a later segment.
+    pub const READ_SUPERSEDED: &str = "roles walk: a read met a later segment";
+    /// A read of a sealed segment served its last records.
+    pub const READ_SEALED: &str = "roles walk: a read reached the end of a sealed segment";
+    /// A retired segment trimmed under the floor.
+    pub const SEGMENT_TRIMMED: &str = "roles walk: a floor over a retired segment trimmed it";
+    /// A read of an older segment refused below the floor of the segment
+    /// in force.
+    pub const FLOOR_REFUSED: &str = "roles walk: a read met the floor of the segment in force";
     /// A slot chosen in a grid of two columns (wide only).
     pub const COLUMNS: &str = "roles walk: a slot chosen in a grid of two columns";
 
     /// The sites of every roles walk.
     pub const ALL: &[&str] = &[
-        SEALED, SEAL_LOST, GAP_NOOP, REPROPOSED, THIRD, BOUNDARY, RETIRED, PULLED, NACKED, UNKNOWN,
-        BELOW, RESOLVED, DUPLICATE, TRIMMED, TO_MULTI, RESTARTED,
+        SEALED,
+        SEAL_LOST,
+        GAP_NOOP,
+        REPROPOSED,
+        THIRD,
+        BOUNDARY,
+        RETIRED,
+        PULLED,
+        NACKED,
+        UNKNOWN,
+        BELOW,
+        RESOLVED,
+        DUPLICATE,
+        TRIMMED,
+        TO_MULTI,
+        RESTARTED,
+        PROXIED,
+        PROXY_CRASHED,
+        READ_OPEN,
+        READ_SUPERSEDED,
+        READ_SEALED,
+        SEGMENT_TRIMMED,
+        FLOOR_REFUSED,
     ];
     /// The sites of the wide walk.
     pub const WIDE: &[&str] = &[COLUMNS, PAGED];
@@ -189,6 +250,23 @@ pub enum RolesMutant {
     /// "full", so the leader counts a replica that lags. [`RETIRE`] catches
     /// it.
     HoldsLie,
+    /// The driver gives a proxy leader each `Accepted` once from every
+    /// acceptor of the pool, so the proxy counts votes nobody cast.
+    /// [`PROXY`] catches it.
+    ForgedAccepted,
+    /// The driver gives a replica each `PreReadAck` with the fence of the
+    /// reader's own segment, so a read never meets a later segment.
+    /// [`READ`] catches it.
+    ReadNoFence,
+    /// The driver gives each acceptor an `Accept` whose write lost its
+    /// leader time. [`STAMPED`] catches it.
+    UnstampedAccept,
+    /// The driver trims a sealed segment on the intent to truncate: at the
+    /// proposal of a `Truncate`, before it is decided. [`TRIM`] catches it.
+    TrimIntent,
+    /// The reader of an older segment takes the floor of the holder, not
+    /// of the segment in force. [`FLOOR`] catches it.
+    FloorFromHolder,
 }
 
 /// One step of the roles walk that changes the state of
@@ -298,6 +376,19 @@ pub enum RolesEvent {
         /// The segment.
         p: u64,
     },
+    /// The register took the trim of segment `p` that replica `r` wrote
+    /// (`Trim`).
+    Trim {
+        /// The segment.
+        p: u64,
+        /// The replica.
+        r: u64,
+    },
+    /// Replica `r` dropped its copy of a trimmed segment (`Drop`).
+    Drop {
+        /// The replica.
+        r: u64,
+    },
     /// Replica `r` answered `res` to the `Resolve` of the write at `s`
     /// (`ResolveBelow`).
     Resolve {
@@ -345,6 +436,28 @@ pub enum RolesAction {
     Tick,
     /// A client resolves a `Below`.
     Resolve,
+    /// A client reads at a replica.
+    Read,
+    /// A replica learns the register value it missed.
+    Observe,
+}
+
+/// One open read of the walk's reader.
+#[derive(Clone, Copy, Debug)]
+struct OpenRead {
+    /// The replica asked.
+    node: NodeId,
+    /// The first position.
+    from: u64,
+    /// The most records.
+    limit: usize,
+    /// The length of the chosen prefix when the read started.
+    need: usize,
+    /// The floor of the whole log when the reader started.
+    floor: u64,
+    /// For a read of the floor: the replica of the older segment that the
+    /// reader asks next, with the first position and the limit.
+    then: Option<(NodeId, u64, usize)>,
 }
 
 /// A role with a disk, under the flight rule.
@@ -415,6 +528,8 @@ const POOL: u64 = 6;
 const RESEND_PAGE: usize = 4;
 /// The proposers.
 const PROPOSERS: [u64; 3] = [101, 102, 103];
+/// The proxy leaders: a campaign delegates to them on one seed in two.
+const PROXIES: [u64; 3] = [201, 202, 203];
 /// The writers.
 const WRITERS: usize = 3;
 /// The most segments of one walk.
@@ -430,6 +545,10 @@ pub struct RolesModel {
     acceptors: BTreeMap<NodeId, AcceptorNode>,
     replicas: BTreeMap<NodeId, ReplicaNode>,
     leaders: BTreeMap<NodeId, JournalLeader<u64>>,
+    /// The proxy leaders; `None` while one is down.
+    proxies: BTreeMap<NodeId, Option<JournalProxy>>,
+    /// Whether some proxy leader crashed.
+    proxy_crashed: bool,
     /// The segment each ballot is bound to.
     bound: BTreeMap<(u64, NodeId), SegmentId>,
     round: u64,
@@ -455,6 +574,25 @@ pub struct RolesModel {
     proposed: BTreeMap<(u64, Slot), Command>,
     /// The durable front each replica's `Apply` events reached.
     traced: BTreeMap<NodeId, Slot>,
+    /// The records of the whole log, by position.
+    records: BTreeMap<u64, Record>,
+    /// The open reads, by id.
+    reads: BTreeMap<u64, OpenRead>,
+    /// The replicas that dropped their copy.
+    dropped: BTreeSet<NodeId>,
+    /// The command of each proposal, as its client wrote it, by its time:
+    /// its call's token.
+    stamps: BTreeMap<u64, Command>,
+    /// The reads of an older segment whose floor read was not served, with
+    /// the floor when the reader started: the reader asks the floor again
+    /// later.
+    waiting: Vec<(NodeId, u64, usize, u64)>,
+    /// The read answers that wait on a batch of their replica.
+    held_reads: BTreeMap<NodeId, Vec<(PersistId, u64, ReadAnswer)>>,
+    /// The ids of the reads.
+    read_ids: u64,
+    /// The replica that hears the register late, if any.
+    slow: Option<NodeId>,
 }
 
 /// The walk of `shape` with `mutant` planted.
@@ -491,6 +629,8 @@ impl Model for RolesModel {
             RolesAction::Flush,
             RolesAction::Tick,
             RolesAction::Resolve,
+            RolesAction::Read,
+            RolesAction::Observe,
         ]
     }
 
@@ -501,14 +641,15 @@ impl Model for RolesModel {
                 | RolesAction::Register
                 | RolesAction::Flush
                 | RolesAction::Tick
-                | RolesAction::Resolve,
+                | RolesAction::Resolve
+                | RolesAction::Observe,
                 Phase::Settle,
             ) => 1,
             (_, Phase::Settle) => 0,
             (RolesAction::Flush, _) => 30,
             (RolesAction::Register, _) => 10,
             (RolesAction::Tick, _) => 6,
-            (RolesAction::Resolve, _) => 4,
+            (RolesAction::Resolve | RolesAction::Read | RolesAction::Observe, _) => 4,
             (_, Phase::Quiet) => match action {
                 RolesAction::Campaign => 1,
                 _ => 0,
@@ -534,6 +675,18 @@ impl Model for RolesModel {
             RolesAction::Flush => self.flush(cx),
             RolesAction::Tick => self.tick(cx),
             RolesAction::Resolve => self.resolve(cx),
+            RolesAction::Read => self.read(cx),
+            RolesAction::Observe => {
+                let nodes: Vec<NodeId> = self
+                    .replicas
+                    .keys()
+                    .copied()
+                    .filter(|node| self.slow != Some(*node))
+                    .collect();
+                if let Some(pick) = cx.rng().index(nodes.len()) {
+                    self.observe_replica(nodes[pick], cx);
+                }
+            }
         }
     }
 
@@ -544,6 +697,17 @@ impl Model for RolesModel {
             // that is not retired takes a step (`Active` of the model).
             if !self.active(to) {
                 return;
+            }
+            let mut message = message;
+            if let Message::Accept {
+                command: Command::Write(write),
+                ..
+            } = &mut message
+                && self.mutant == RolesMutant::UnstampedAccept
+            {
+                for record in &mut write.records {
+                    record.headers.leader_time = None;
+                }
             }
             let node = self.acceptors.get_mut(&to).expect("an acceptor");
             if let Some(role) = &mut node.role {
@@ -556,6 +720,12 @@ impl Model for RolesModel {
                 self.acceptor_effects(to, effects, cx);
             }
         } else if self.replicas.contains_key(&to) {
+            let mut message = message;
+            if let Message::PreReadAck { segment, bound, .. } = &mut message
+                && self.mutant == RolesMutant::ReadNoFence
+            {
+                *bound = *segment;
+            }
             let pulled =
                 matches!(message, Message::Commit { .. }) && self.replicas.contains_key(&from);
             let node = self.replicas.get_mut(&to).expect("a replica");
@@ -565,6 +735,18 @@ impl Model for RolesModel {
                 sometimes!(pulled && role.front() > before, reach::PULLED);
                 self.replica_effects(to, effects, cx);
             }
+        } else if let Some(Some(proxy)) = self.proxies.get_mut(&to) {
+            let forged = match message {
+                Message::Accepted { .. } if self.mutant == RolesMutant::ForgedAccepted => {
+                    (1..=POOL).map(NodeId).collect()
+                }
+                _ => Vec::new(),
+            };
+            let mut effects = proxy.step(from, message.clone());
+            for node in forged {
+                effects.extend(proxy.step(node, message.clone()));
+            }
+            self.proxy_effects(to, effects, cx);
         } else if let Some(leader) = self.leaders.get_mut(&to) {
             let nack = matches!(message, Message::Nack { .. });
             sometimes!(
@@ -603,6 +785,7 @@ impl Model for RolesModel {
             .chain(self.replicas.keys())
             .copied()
             .chain(PROPOSERS.iter().map(|p| NodeId(*p)))
+            .chain(PROXIES.iter().map(|p| NodeId(*p)))
             .collect()
     }
 
@@ -611,6 +794,8 @@ impl Model for RolesModel {
             acceptor.role.is_some()
         } else if let Some(replica) = self.replicas.get(node) {
             replica.role.is_some()
+        } else if let Some(proxy) = self.proxies.get(node) {
+            proxy.is_some()
         } else {
             true
         }
@@ -624,6 +809,13 @@ impl Model for RolesModel {
             acceptor.crash();
         } else if let Some(replica) = self.replicas.get_mut(node) {
             replica.crash();
+            // The reads of a replica that crashed get no answer: their
+            // client times out.
+            self.held_reads.remove(node);
+            self.reads.retain(|_, open| open.node != *node);
+        } else if let Some(proxy) = self.proxies.get_mut(node) {
+            self.proxy_crashed |= proxy.as_ref().is_some_and(|p| p.open() > 0);
+            *proxy = None;
         } else if let Some(leader) = self.leaders.remove(node) {
             // The callers of a crashed leader time out: the fate of each
             // call is unknown.
@@ -663,6 +855,10 @@ impl Model for RolesModel {
                 SegmentReplica::recover(*node, segment, set, self.initial, replica.disk.clone());
             self.replicas.get_mut(node).expect("a replica").role = Some(role);
             self.observe_replica(*node, cx);
+        } else if let Some(proxy) = self.proxies.get_mut(node)
+            && proxy.is_none()
+        {
+            *proxy = Some(JournalProxy::new(*node));
         }
     }
 
@@ -683,7 +879,7 @@ impl Model for RolesModel {
 
     fn converged(&self) -> Result<(), String> {
         if !self.queue.is_empty() {
-            return Err("register changes are queued".into());
+            return Err(format!("register changes are queued: {:?}", self.queue));
         }
         if self.acceptors.values().any(|a| !a.batches.is_empty())
             || self.replicas.values().any(|r| !r.batches.is_empty())
@@ -719,6 +915,11 @@ impl Model for RolesModel {
                     return Err(format!("replica {node:?} is not at {end:?}"));
                 }
             }
+        }
+        // Every call is answered: a deposed leader stops (a proxy tells it
+        // too) and answers what it holds `Unknown`.
+        if !self.calls.is_empty() {
+            return Err(format!("calls are not answered: {:?}", self.calls.keys()));
         }
         if !self.belows.is_empty() {
             return Err(format!(
@@ -782,6 +983,11 @@ impl RolesModel {
             acceptors,
             replicas: BTreeMap::new(),
             leaders: BTreeMap::new(),
+            proxies: PROXIES
+                .iter()
+                .map(|p| (NodeId(*p), Some(JournalProxy::new(NodeId(*p)))))
+                .collect(),
+            proxy_crashed: false,
             bound: BTreeMap::new(),
             round: 0,
             chosen: BTreeMap::new(),
@@ -797,6 +1003,14 @@ impl RolesModel {
             unknown: Vec::new(),
             proposed: BTreeMap::new(),
             traced: BTreeMap::new(),
+            records: BTreeMap::new(),
+            reads: BTreeMap::new(),
+            stamps: BTreeMap::new(),
+            dropped: BTreeSet::new(),
+            waiting: Vec::new(),
+            held_reads: BTreeMap::new(),
+            read_ids: 0,
+            slow: None,
         };
         model.register = model
             .register
@@ -873,6 +1087,19 @@ impl RolesModel {
             vec![pool[..3].to_vec()]
         };
         let grid = Grid::new(1, columns).expect("a v1 grid");
+        // On one reshape in two, one replica of the segment in force hears the
+        // register late: it learns a value only when it restarts or the
+        // faults stop, so a read there can meet the next segment before the
+        // replica knows the seal.
+        let in_force = self.register.in_force().map(SegmentRecord::id);
+        self.slow = if let Some(in_force) = in_force
+            && cx.rng().chance(1, 2)
+        {
+            let set = Self::set_of(in_force);
+            cx.rng().index(set.len()).map(|pick| set[pick])
+        } else {
+            None
+        };
         self.open_segment(grid, cx);
     }
 
@@ -913,7 +1140,7 @@ impl RolesModel {
         }
         let from = self.applied_from(&value, segment);
         self.bound.insert((ballot.round, ballot.node), segment);
-        let Some((leader, effects)) = JournalLeader::campaign(
+        let Some((mut leader, effects)) = JournalLeader::campaign(
             Campaign {
                 ballot,
                 segment,
@@ -923,6 +1150,9 @@ impl RolesModel {
         ) else {
             return;
         };
+        if cx.rng().chance(1, 2) {
+            leader.delegate_to(PROXIES.iter().map(|p| NodeId(*p)).collect());
+        }
         cx.record(RolesEvent::Register {
             b: ballot.round,
             from: from.0,
@@ -1055,6 +1285,12 @@ impl RolesModel {
                         ballot,
                         slot,
                         command,
+                    }
+                    | Message::Delegate {
+                        ballot,
+                        slot,
+                        command,
+                        ..
                     } = &message
                     {
                         match self.proposed.entry((ballot.round, *slot)) {
@@ -1091,6 +1327,73 @@ impl RolesModel {
                 LeaderEffect::Retired { .. } => {}
             }
         }
+    }
+
+    fn proxy_effects(&mut self, node: NodeId, effects: Vec<ProxyEffect>, cx: &mut Cx<'_, Self>) {
+        // The ballot of each slot this step chose, from the `Chosen` it
+        // tells the leader.
+        let chosen: BTreeMap<Slot, paros_journal::register::Ballot> = effects
+            .iter()
+            .filter_map(|effect| match effect.message {
+                Message::Chosen { ballot, slot } => Some((slot, ballot)),
+                _ => None,
+            })
+            .collect();
+        for ProxyEffect { to, message } in effects {
+            match &message {
+                Message::Accept {
+                    ballot,
+                    slot,
+                    command,
+                } => assert_eq!(
+                    self.proposed.get(&(ballot.round, *slot)),
+                    Some(command),
+                    "a proxy sends the command its leader delegated"
+                ),
+                Message::Commit { slot, command, .. } => {
+                    let ballot = chosen[slot];
+                    self.judge_proxy(*slot, ballot);
+                    sometimes!(true, reach::PROXIED);
+                    sometimes!(self.proxy_crashed, reach::PROXY_CRASHED);
+                    self.commit_seen(*slot, command, (ballot.round, ballot.node));
+                }
+                _ => {}
+            }
+            cx.send(Envelope {
+                from: node,
+                to,
+                message,
+            });
+        }
+    }
+
+    /// The oracle [`PROXY`]: `F + 1` acceptors of the column of `slot` in
+    /// the grid of `ballot`'s segment hold a vote at `ballot` or above on
+    /// their disk.
+    fn judge_proxy(&self, slot: Slot, ballot: paros_journal::register::Ballot) {
+        let segment = self.bound[&(ballot.round, ballot.node)];
+        let grid = self
+            .register
+            .segment(segment)
+            .expect("a bound segment is in the register")
+            .grid();
+        let columns = grid.columns();
+        let count = u64::try_from(columns.len()).expect("few columns");
+        let column = &columns[usize::try_from(slot.0 % count).expect("small")];
+        let voted = column
+            .iter()
+            .filter(|node| {
+                self.acceptors[node]
+                    .disk
+                    .votes
+                    .get(&slot)
+                    .is_some_and(|(b, _)| *b >= ballot)
+            })
+            .count();
+        assert!(
+            voted > column.len() / 2,
+            "{PROXY}: slot {slot:?} committed at {ballot:?} with {voted} votes on disk in {column:?}"
+        );
     }
 
     fn acceptor_effects(
@@ -1184,8 +1487,45 @@ impl RolesModel {
                         _ => self.queue.push((Origin::Replica(node), change)),
                     }
                 }
-                ReplicaEffect::Copied { .. } | ReplicaEffect::Drop => {
-                    unreachable!("the roles walk has no heal and no trim of a record: {node:?}")
+                ReplicaEffect::Read {
+                    read,
+                    answer,
+                    after,
+                } => {
+                    let replica = &self.replicas[&node];
+                    match after {
+                        Some(id) if replica.disk.durable.is_none_or(|d| d < id) => {
+                            self.held_reads
+                                .entry(node)
+                                .or_default()
+                                .push((id, read, answer));
+                        }
+                        _ => self.judge_read(read, &answer, cx),
+                    }
+                }
+                // A replica of a trimmed segment drops its copy: it answers
+                // no read and takes no step after it. Its batches in flight
+                // still reach the disk, as the driver keeps them for a
+                // dropped role (`Stop::Dropped`), and then the copy goes
+                // (`Drop` of the model).
+                ReplicaEffect::Drop => {
+                    assert!(
+                        self.register
+                            .segment(Self::segment_of_replica(node))
+                            .is_some_and(|r| r.state() == SegmentState::Trimmed),
+                        "the roles walk drops only the copies of a trimmed segment: {node:?}"
+                    );
+                    while !self.replicas[&node].batches.is_empty() {
+                        self.flush_replica(node, cx);
+                    }
+                    // A replica that restarts after its drop drops again:
+                    // the model's copy went once.
+                    if self.dropped.insert(node) {
+                        cx.record(RolesEvent::Drop { r: node.0 });
+                    }
+                }
+                ReplicaEffect::Copied { .. } => {
+                    unreachable!("the roles walk has no heal: {node:?}")
                 }
             }
         }
@@ -1194,6 +1534,15 @@ impl RolesModel {
     /// A leader saw `slot` chosen: the oracles [`AGREE`] and [`SEALED`],
     /// and the truth over the chosen prefix.
     fn commit_seen(&mut self, slot: Slot, command: &Command, ballot: (u64, NodeId)) {
+        if let Command::Write(write) = command {
+            let time = write.records.first().and_then(|r| r.headers.leader_time);
+            assert!(
+                time.and_then(|t| self.stamps.get(&t)) == Some(&as_written(command))
+                    && write.records.iter().all(|r| r.headers.leader_time == time),
+                "{STAMPED}: slot {slot:?} chose {write:?}, the proposal of its time was {:?}",
+                time.and_then(|t| self.stamps.get(&t))
+            );
+        }
         if let Some((held, ..)) = self.chosen.get(&slot) {
             assert!(
                 held == command,
@@ -1228,7 +1577,15 @@ impl RolesModel {
             u64::try_from(self.verdicts.len()).expect("few slots"),
         )) {
             let command = command.clone();
+            let next = self.truth.next;
             let verdict = self.truth.apply(&command);
+            if let Command::Write(write) = &command
+                && self.truth.next > next
+            {
+                for (at, record) in (next..).zip(&write.records) {
+                    self.records.insert(at, record.clone());
+                }
+            }
             self.verdicts.push(verdict);
             self.states
                 .push((self.truth.leader, self.truth.next, self.truth.first));
@@ -1303,6 +1660,25 @@ impl RolesModel {
                         cx.record(RolesEvent::Retire { p: segment.0 });
                         sometimes!(true, reach::RETIRED);
                     }
+                    (Change::Trim { segment, .. }, _) => {
+                        let last = self
+                            .register
+                            .segment(*segment)
+                            .and_then(SegmentRecord::boundary)
+                            .map(|b| b.next_seq.0);
+                        assert!(
+                            last.is_some_and(|last| self.truth.first >= last),
+                            "{TRIM}: {segment:?} trimmed with its last seq {last:?}, the decided floor is {}",
+                            self.truth.first
+                        );
+                        if let Origin::Replica(node) = origin {
+                            cx.record(RolesEvent::Trim {
+                                p: segment.0,
+                                r: node.0,
+                            });
+                        }
+                        sometimes!(true, reach::SEGMENT_TRIMMED);
+                    }
                     (Change::Seal { segment, end }, _) => {
                         for (slot, (_, round, node)) in &self.chosen {
                             assert!(
@@ -1353,9 +1729,15 @@ impl RolesModel {
             }
             self.leader_effects(node, effects, cx);
         }
+        // A replica may miss a value for a while: it learns it on a tick
+        // or an `Observe` move, so a read can meet a later segment before
+        // its replica knows the seal.
+        let all = cx.phase() == Phase::Settle;
         let replicas: Vec<NodeId> = self.replicas.keys().copied().collect();
         for node in replicas {
-            self.observe_replica(node, cx);
+            if all || (self.slow != Some(node) && cx.rng().chance(2, 3)) {
+                self.observe_replica(node, cx);
+            }
         }
     }
 
@@ -1482,7 +1864,10 @@ impl RolesModel {
                 .role
                 .as_ref()
                 .expect("a replica with batches runs");
+            // A replica that has not observed its base yet folds nothing:
+            // its slots on the disk wait for the base.
             let start = role.start().unwrap_or(Slot(0));
+            let front = front.min(role.front().unwrap_or(start));
             let from = self.traced.get(&node).copied().unwrap_or(start);
             for slot in from.0..front.0 {
                 let answer = role
@@ -1512,6 +1897,16 @@ impl RolesModel {
         for (_, change) in changes {
             self.queue.push((Origin::Replica(node), change));
         }
+        let (answers, wait): (Vec<_>, Vec<_>) = self
+            .held_reads
+            .remove(&node)
+            .unwrap_or_default()
+            .into_iter()
+            .partition(|(held, ..)| *held <= id);
+        self.held_reads.insert(node, wait);
+        for (_, read, answer) in answers {
+            self.judge_read(read, &answer, cx);
+        }
     }
 
     fn tick(&mut self, cx: &mut Cx<'_, Self>) {
@@ -1527,12 +1922,26 @@ impl RolesModel {
                 self.leader_effects(node, effects, cx);
             }
         }
+        let proxies: Vec<NodeId> = self.proxies.keys().copied().collect();
+        for node in proxies {
+            if !(all || cx.rng().chance(1, 3)) {
+                continue;
+            }
+            let Some(Some(proxy)) = self.proxies.get_mut(&node) else {
+                continue;
+            };
+            let effects = proxy.tick(RESEND_PAGE);
+            self.proxy_effects(node, effects, cx);
+        }
         let replicas: Vec<NodeId> = self.replicas.keys().copied().collect();
         for node in replicas {
             if !(all || cx.rng().chance(1, 3)) {
                 continue;
             }
-            let Some(role) = self.replicas[&node].role.as_ref() else {
+            if all || self.slow != Some(node) {
+                self.observe_replica(node, cx);
+            }
+            let Some(role) = self.replicas.get_mut(&node).and_then(|r| r.role.as_mut()) else {
                 continue;
             };
             let effects = role.tick();
@@ -1572,7 +1981,10 @@ impl RolesModel {
         let token = self.tokens;
         let leader = self.leaders.get_mut(&node).expect("a leader");
         let ballot = leader.ballot();
-        let (proposed, effects) = leader.propose(token, command.clone());
+        // The walk's clock is the count of its calls: each proposal has its
+        // own time.
+        self.stamps.insert(token, as_written(&command));
+        let (proposed, effects) = leader.propose(token, command.clone(), token);
         if let Proposed::Slot(slot) = proposed {
             self.calls.insert(
                 token,
@@ -1687,6 +2099,32 @@ impl RolesModel {
             .filter(|_| cx.rng().chance(1, 2));
         let up_to = Seq(cx.rng().below(self.truth.next + 2));
         self.propose(None, Command::Truncate { fence, up_to }, cx);
+        if self.mutant == RolesMutant::TrimIntent
+            && let Some(in_force) = self
+                .register
+                .segments()
+                .values()
+                .rev()
+                .find(|r| r.state() == SegmentState::InForce)
+        {
+            let node = Self::set_of(in_force.id())[0];
+            let covered: Vec<SegmentId> = self
+                .register
+                .segments()
+                .values()
+                .filter(|r| r.boundary().is_some_and(|b| b.next_seq <= up_to))
+                .map(SegmentRecord::id)
+                .collect();
+            for segment in covered {
+                self.queue.push((
+                    Origin::Replica(node),
+                    Change::Trim {
+                        segment,
+                        first_seq: up_to,
+                    },
+                ));
+            }
+        }
     }
 
     /// A reply to the caller of `token`.
@@ -1764,7 +2202,233 @@ impl RolesModel {
         }
     }
 
-    /// A client resolves a `Below` at a replica of an older segment.
+    /// A client reads at one replica that runs, from a position at most two
+    /// past the whole log's next.
+    fn read(&mut self, cx: &mut Cx<'_, Self>) {
+        let nodes: Vec<NodeId> = self
+            .replicas
+            .iter()
+            .filter(|(_, r)| r.role.is_some())
+            .map(|(n, _)| *n)
+            .collect();
+        let Some(pick) = cx.rng().index(nodes.len()) else {
+            return;
+        };
+        // Half of the reads go to the replica that hears the register late,
+        // where a read meets a later segment.
+        let node = match self.slow {
+            Some(slow) if nodes.contains(&slow) && cx.rng().chance(1, 2) => slow,
+            _ => nodes[pick],
+        };
+        // Half of the reads are at the tail, where a stale read shows.
+        let from = if cx.rng().chance(1, 2) {
+            self.truth.next
+        } else {
+            cx.rng().below(self.truth.next + 2)
+        };
+        let limit = usize::try_from(cx.rng().below(4) + 1).expect("small");
+        if !self.waiting.is_empty() && cx.rng().chance(1, 2) {
+            let (node, from, limit, floor) = self.waiting.remove(0);
+            self.route_read(node, from, limit, floor, cx);
+        } else {
+            let floor = self.truth.first;
+            self.route_read(node, from, limit, floor, cx);
+        }
+    }
+
+    /// A replica of a segment older than the one in force folds only up to
+    /// its seal: the reader first takes the floor from a replica of the
+    /// segment in force, with a read at its tail (§J3.2).
+    fn route_read(
+        &mut self,
+        node: NodeId,
+        from: u64,
+        limit: usize,
+        floor: u64,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        if self.replicas[&node].role.is_none() {
+            return;
+        }
+        let segment = Self::segment_of_replica(node);
+        let in_force = self
+            .register
+            .segments()
+            .values()
+            .rev()
+            .find(|r| r.state() == SegmentState::InForce)
+            .map(SegmentRecord::id)
+            .filter(|f| *f > segment && self.mutant != RolesMutant::FloorFromHolder);
+        let Some(in_force) = in_force else {
+            self.start_read(node, from, limit, floor, None, cx);
+            return;
+        };
+        let set: Vec<NodeId> = Self::set_of(in_force)
+            .into_iter()
+            .filter(|n| self.replicas[n].role.is_some())
+            .collect();
+        match cx.rng().index(set.len()) {
+            Some(i) => {
+                let next = self.truth.next;
+                self.start_read(set[i], next, 1, floor, Some((node, from, limit)), cx);
+            }
+            None => self.waiting.push((node, from, limit, floor)),
+        }
+    }
+
+    /// Send the read to `node`, and judge its answer when it comes.
+    fn start_read(
+        &mut self,
+        node: NodeId,
+        from: u64,
+        limit: usize,
+        floor: u64,
+        then: Option<(NodeId, u64, usize)>,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        self.read_ids += 1;
+        let read = self.read_ids;
+        let need = self.states.len() - 1;
+        self.reads.insert(
+            read,
+            OpenRead {
+                node,
+                from,
+                limit,
+                need,
+                floor,
+                then,
+            },
+        );
+        let role = self
+            .replicas
+            .get_mut(&node)
+            .and_then(|r| r.role.as_mut())
+            .expect("a replica that runs");
+        let effects = role.read(read, Seq(from), limit);
+        self.replica_effects(node, effects, cx);
+    }
+
+    /// The oracle [`READ`] on the answer of `read`.
+    fn judge_read(&mut self, read: u64, answer: &ReadAnswer, cx: &mut Cx<'_, Self>) {
+        let Some(OpenRead {
+            node,
+            from,
+            limit,
+            need,
+            floor,
+            then,
+        }) = self.reads.remove(&read)
+        else {
+            return;
+        };
+        self.judge_answer(read, node, (from, limit), (need, floor), answer);
+        // The floor read gave the floor of the segment in force: the reader
+        // asks the older segment only at or above it.
+        let Some((target, from, limit)) = then else {
+            return;
+        };
+        let view = match answer {
+            ReadAnswer::Page { view, .. }
+            | ReadAnswer::Below(view)
+            | ReadAnswer::Truncated(view) => *view,
+            ReadAnswer::Superseded(_) | ReadAnswer::Unserved => {
+                self.waiting.push((target, from, limit, floor));
+                return;
+            }
+        };
+        if from < view.first_seq.0 {
+            let answer = ReadAnswer::Truncated(view);
+            self.judge_answer(read, target, (from, limit), (need, floor), &answer);
+            sometimes!(true, reach::FLOOR_REFUSED);
+        } else if self.replicas[&target].role.is_some() {
+            self.start_read(target, from, limit, floor, None, cx);
+        }
+    }
+
+    /// The oracles [`READ`] and [`FLOOR`] on one answer.
+    /// The read asked `from` and `limit`; `need` is the length of the
+    /// chosen prefix when it started, and `floor` the floor of the whole
+    /// log when its reader started.
+    fn judge_answer(
+        &mut self,
+        read: u64,
+        node: NodeId,
+        (from, limit): (u64, usize),
+        (need, floor): (usize, u64),
+        answer: &ReadAnswer,
+    ) {
+        let segment = Self::segment_of_replica(node);
+        match answer {
+            ReadAnswer::Page {
+                records,
+                view,
+                sealed,
+            } => {
+                for (seq, record) in records {
+                    assert!(
+                        self.records.get(&seq.0) == Some(record),
+                        "{READ}: read {read} at {node:?} served {record:?} at {seq:?}, the whole log has {:?}",
+                        self.records.get(&seq.0)
+                    );
+                }
+                assert!(
+                    records.first().is_none_or(|(seq, _)| seq.0 >= floor),
+                    "{FLOOR}: read {read} at {node:?} served from {:?}, the floor was {floor} when its reader started",
+                    records.first().map(|(seq, _)| seq)
+                );
+                assert!(
+                    records.first().is_none_or(|(seq, _)| seq.0 == from),
+                    "{READ}: read {read} from {from} served from {:?}",
+                    records.first()
+                );
+                if !sealed && records.len() < limit {
+                    // The view of a page at the tail is the fold of the
+                    // whole log at a slot at or past the chosen prefix
+                    // when the read started.
+                    let fresh = self.states[need..].contains(&(
+                        view.leader,
+                        view.next_seq.0,
+                        view.first_seq.0,
+                    ));
+                    assert!(
+                        fresh,
+                        "{READ}: read {read} of {segment:?} at {node:?} served {view:?}, the whole log was at slot {need}, {:?}, when it started",
+                        self.states[need]
+                    );
+                    sometimes!(!records.is_empty(), reach::READ_OPEN);
+                }
+                sometimes!(*sealed, reach::READ_SEALED);
+            }
+            ReadAnswer::Truncated(_) => assert!(
+                from < self.truth.first,
+                "{READ}: read {read} from {from} answered Truncated, the floor is {}",
+                self.truth.first
+            ),
+            ReadAnswer::Below(view) => {
+                // The first position of the segment: the next of the
+                // boundary state of the segment before, 0 for the first.
+                let start = segment
+                    .0
+                    .checked_sub(1)
+                    .and_then(|before| self.register.segment(SegmentId(before)))
+                    .map_or(Some(0), |before| before.boundary().map(|b| b.next_seq.0));
+                assert!(
+                    start.is_some_and(|start| from < start),
+                    "{READ}: read {read} from {from} at {segment:?} answered Below with {view:?}, the segment starts at {start:?}"
+                );
+            }
+            ReadAnswer::Superseded(bound) => {
+                assert!(
+                    *bound > segment && self.register.segment(*bound).is_some(),
+                    "{READ}: read {read} of {segment:?} superseded by {bound:?}"
+                );
+                sometimes!(true, reach::READ_SUPERSEDED);
+            }
+            ReadAnswer::Unserved => {}
+        }
+    }
+
     fn resolve(&mut self, cx: &mut Cx<'_, Self>) {
         let Some(pick) = cx.rng().index(self.belows.len()) else {
             return;

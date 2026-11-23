@@ -135,22 +135,72 @@ fn placement(case: &Case, grid: &Grid) -> Option<Grid> {
     }
 }
 
+/// Whether a replica set admits the zone rule of one column: no member
+/// labeled, or every member labeled and each zone holds a minority of the
+/// set while the rest hold a majority.
+fn set_admits(case: &Case, set: &[NodeId]) -> bool {
+    let labeled = set.iter().filter(|m| case.zones.contains_key(m)).count();
+    if labeled == 0 {
+        return true;
+    }
+    if labeled < set.len() {
+        return false;
+    }
+    set.iter().all(|m| {
+        let inside = set
+            .iter()
+            .filter(|n| case.zones[*n] == case.zones[m])
+            .count();
+        2 * (set.len() - inside) > set.len() && 2 * inside <= set.len()
+    })
+}
+
+/// The first replica set in order: the holes take candidates in the host's
+/// order, the first assignment that admits the zone rule wins.
 fn replica_placement(case: &Case, set: &[NodeId]) -> Option<Vec<NodeId>> {
+    let holes: Vec<usize> = (0..set.len())
+        .filter(|i| is(case, set[*i], Liveness::Down))
+        .collect();
+    // No replica down: the set stays, whatever its zones.
+    if holes.is_empty() {
+        return Some(set.to_vec());
+    }
     let pool = usable(case, set);
-    let mut next = pool.into_iter();
-    set.iter()
-        .map(|m| {
-            if is(case, *m, Liveness::Down) {
-                next.next()
-            } else {
-                Some(*m)
+    if holes.len() > pool.len() {
+        return None;
+    }
+    let mut pick = vec![0usize; holes.len()];
+    loop {
+        let distinct = pick.iter().collect::<BTreeSet<_>>().len() == pick.len();
+        if distinct {
+            let mut healed = set.to_vec();
+            for (h, p) in holes.iter().zip(&pick) {
+                healed[*h] = pool[*p];
             }
-        })
-        .collect()
+            if set_admits(case, &healed) {
+                return Some(healed);
+            }
+        }
+        let mut i = pick.len();
+        loop {
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+            pick[i] += 1;
+            if pick[i] < pool.len() {
+                for later in &mut pick[i + 1..] {
+                    *later = 0;
+                }
+                break;
+            }
+        }
+    }
 }
 
 /// Whether a plan from `old` to `new` (and its replica sets) names no
-/// member that is down and admits the zone rule.
+/// member that is down and admits the zone rule (the replica set's rule only
+/// when the plan changes the set).
 #[must_use]
 pub fn plan_is_safe(
     case: &Case,
@@ -174,7 +224,10 @@ pub fn plan_is_safe(
     let fit = new.columns().iter().flatten().chain(new_replicas).all(|m| {
         !is(case, *m, Liveness::Down) && (before.contains(m) || is(case, *m, Liveness::Up))
     });
-    shape && fit && zones_admit(case, new)
+    shape
+        && fit
+        && zones_admit(case, new)
+        && (new_replicas == old_replicas || set_admits(case, new_replicas))
 }
 
 /// The decision of the reference.

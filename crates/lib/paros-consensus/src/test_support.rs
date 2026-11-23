@@ -24,15 +24,30 @@ impl MemStorage {
     }
 
     /// Snapshot a live node's durable state (scalars + accepted log + compaction
-    /// floor) into a fresh storage, the way a real driver's persisted disk would
-    /// look, for building the "restart from durable storage" path in tests.
+    /// floor + faulty entries) into a fresh storage, the way a real driver's
+    /// persisted disk would look, for building the "restart from durable
+    /// storage" path in tests. A slot is readable, faulty or absent, never
+    /// two of them: the faulty entries travel, or a reboot would read a
+    /// faulty slot as absent (the fatal mutation of CTRL §5.1.1).
     pub(crate) fn from_node(n: &ColocatedNode) -> Self {
+        let faulty: Vec<_> = n
+            .acceptor()
+            .faulty()
+            .iter()
+            .map(|(s, b)| (*s, *b))
+            .collect();
+        assert!(
+            faulty
+                .iter()
+                .all(|(slot, _)| n.acceptor().record(*slot).is_none()),
+            "a faulty slot holds no readable record"
+        );
         Self {
             hard_state: n.hard_state(),
             accepted: n.acceptor().records().clone(),
             config: n.config().clone(),
             first_slot: n.acceptor().first_slot(),
-            faulty: Vec::new(),
+            faulty,
             sealed: n.replica().journal_base(),
             registration_fence: n.registration_fence(),
             retire_mark: n.retire_mark(),

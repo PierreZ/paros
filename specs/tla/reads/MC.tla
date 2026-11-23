@@ -52,6 +52,26 @@ Q1Part == [c \in ConfigsPart |-> GridQ1(SeqPart(c), 2, 2, 0)]
 Q2Part == [c \in ConfigsPart |-> GridQ2(SeqPart(c), 2, 2)]
 TargetsPart == [c \in ConfigsPart |-> GridReadTargets(SeqPart(c), 2, 2)]
 
+\* A grid whose Phase-1 quorums need not meet (#1483): four rows, one column,
+\* acks = 3 (`QuorumSystem::grid(4, 1, 3)`). Phase 2 takes three acceptors,
+\* Phase 1 two, and two Phase-1 quorums can be disjoint. It is not a full
+\* grid, so a reader asks every member and the seal is a Phase-1 quorum.
+\* F over a1..a4, then K, where a5 replaces a1.
+SeqF == <<"a1", "a2", "a3", "a4">>
+SeqK == <<"a2", "a3", "a4", "a5">>
+CfgF == GridMembers(SeqF)
+CfgK == GridMembers(SeqK)
+ConfigsRows4 == {CfgF, CfgK}
+SeqRows4(c) == IF c = CfgF THEN SeqF ELSE SeqK
+Q1Rows4 == [c \in ConfigsRows4 |-> GridQ1(SeqRows4(c), 1, 3, 0)]
+Q2Rows4 == [c \in ConfigsRows4 |-> GridQ2(SeqRows4(c), 1, 3)]
+TargetsRows4 == [c \in ConfigsRows4 |-> GridReadTargets(SeqRows4(c), 1, 3)]
+\* The same layout with acks = 2: Phase 1 takes three, so two Phase-1 quorums
+\* meet (the admission rule that #1483 proposes).
+Q1Rows4Meet == [c \in ConfigsRows4 |-> GridQ1(SeqRows4(c), 1, 2, 0)]
+Q2Rows4Meet == [c \in ConfigsRows4 |-> GridQ2(SeqRows4(c), 1, 2)]
+TargetsRows4Meet == [c \in ConfigsRows4 |-> GridReadTargets(SeqRows4(c), 1, 2)]
+
 \* The reader of the grids: a1, the member that leaves. One reader keeps the
 \* checks small; the stale read of `grid_full` needs only this one.
 ReadersGrid == {"a1"}
@@ -65,6 +85,14 @@ ReadersLag == {"a1"}
 Q1Lag == [c \in ConfigsLag |-> MajorityQuorums(c)]
 TargetsLag == [c \in ConfigsLag |-> {c}]
 
+\* No read replica.
+NoReplicas == {}
+
+\* A read replica r1, the one reader (#1230 (rules no check tests)): it is in
+\* no configuration, and its basis can go stale (`ReplicaRestart`, a late
+\* beat).
+ReadersReplica == {"r1"}
+
 \* The learner checks: ballot 3 is only the abandoned campaign of a reader.
 OnlyOwn3 == status[3] \in {"matching", "abandoned"} /\ replied[3] = {}
 
@@ -72,5 +100,7 @@ Symmetry == Permutations(Values) \cup Permutations(Matchmakers)
 \* Each grid layout tiles its members (`QuorumSystem::admits`).
 ASSUME \A c \in ConfigsFull : GridAdmits(SeqOf(c), 2, 2)
 ASSUME \A c \in ConfigsPart : GridAdmits(SeqPart(c), 2, 2)
+ASSUME \A c \in ConfigsRows4 : GridAdmits(SeqRows4(c), 1, 3)
+ASSUME \A c \in ConfigsRows4 : GridAdmits(SeqRows4(c), 1, 2)
 
 =============================================================================

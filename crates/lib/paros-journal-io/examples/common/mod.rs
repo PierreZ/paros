@@ -84,6 +84,7 @@ pub fn replica(node: u64, id: u64) -> Assignment {
 pub fn leader(node: u64, round: u64, id: u64, from: Slot) -> Assignment {
     Assignment::Leader {
         address: at(node),
+        proxies: Vec::new(),
         campaign: Campaign {
             ballot: Ballot {
                 round,
@@ -296,7 +297,9 @@ impl Program {
                         .unwrap_or(ResolveAnswer::NotCovered);
                     self.client.answer(id, Response::Resolved(answer));
                 }
-                Request::Read { .. } => unreachable!("these examples do not read"),
+                Request::Floor { .. } | Request::Read { .. } => {
+                    unreachable!("these examples do not read")
+                }
             }
         }
         self.take();

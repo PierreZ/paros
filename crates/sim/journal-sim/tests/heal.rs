@@ -54,3 +54,8 @@ fn compared_catches_a_heal_compared_with_no_count_of_heals() {
 fn converges_catches_a_heal_never_sent_again() {
     caught(HealMutant::NoResend, CONVERGES);
 }
+
+#[test]
+fn converges_catches_an_orphan_copy_kept() {
+    caught(HealMutant::KeepOrphans, CONVERGES);
+}

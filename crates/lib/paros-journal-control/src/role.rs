@@ -395,8 +395,9 @@ impl Controller {
     }
 
     /// The heal in flight, on the view: it ends when its new replica is
-    /// down or its read is old; else the copy, or its compare-and-set, is
-    /// asked again.
+    /// down or its read is old, and, before its compare-and-set is sent,
+    /// when the view's term is not the heal's (the controller is deposed
+    /// and stops); else the copy, or its compare-and-set, is asked again.
     fn heal_step(&mut self, view: &View<'_>, heal: &Heal) -> Ask {
         let record = view.register.segment(heal.segment);
         let mut healed = heal.read.clone();
@@ -405,6 +406,14 @@ impl Controller {
             probe!(reachable, "role: a view shows the heal done");
             self.heal = None;
             return Ask::Nothing;
+        }
+        if !heal.complete && view.register.term().number != heal.copy.term {
+            // A deposed controller: its copy can never be written into the
+            // set, and the new replica refuses its asks. A sent heal waits
+            // for its answer, which is a refusal for the term.
+            probe!(reachable, "role: a heal of a term that is over ends");
+            self.standing = Standing::Idle;
+            return self.abandon();
         }
         if record != Some(&heal.read) {
             probe!(reachable, "role: a heal on an old read ends");
@@ -511,6 +520,7 @@ pub const PROBES: &[&str] = &[
     "role: a reshape has no answer and is sent again",
     "role: a heal starts a new copy",
     "role: a view shows the heal done",
+    "role: a heal of a term that is over ends",
     "role: a heal on an old read ends",
     "role: a heal whose new replica is down ends",
     "role: a sent heal outlives a down new replica",

@@ -52,8 +52,30 @@ sealed segment whether it holds the whole segment (`Holding`, `Holds`) and write
 segment joins for one copy of a heal, copies from the full members of the set and reports
 `Copied`; a replica that is in no set and runs no copy drops its copy (§J3.1, "As built").
 
-The proxy leader, the leaderless read, the truncate across segments with the compaction of the
-acceptors and the repair of a blocked slot (CTRL) are the next rule groups of #1326.
+The proxy leader, the leaderless read and the trim are built too (2026-11-22):
+
+- `JournalProxy` (`roles/proxy.rs`): the proxy leader of Compartmentalized Paxos. A leader
+  delegates a round (`Delegate`) to a proxy, which sends the `Accept`s, counts `F + 1` votes of
+  the round's column on the configuration that the round carries, and sends `Chosen` to the leader
+  and `Commit` to the replica set (`specs/tla/proxy-leader/`). The leader sends the same `Commit`
+  on `Chosen` and again until a replica applies it, because the proxy keeps nothing. A proxy
+  `Nack`s the leader of each round that a higher ballot dropped, and a delegation below its ballot.
+  The `Host` runs one role for each address (journal, node), so a proxy needs a node where the
+  journal runs no other role.
+- The leaderless read (`roles/replica/read.rs`, §J2.5, §J3.3): `SegmentReplica::read` asks `F + 1`
+  of each column of its segment's grid for their vote watermarks (`PreRead`, `PreReadAck`) and
+  answers once its fold covers the highest; an answer that names a later segment ends the read
+  (`Superseded`). A read of a sealed segment asks nobody. Each answer waits on the replica's last
+  batch.
+- The trim (§J3.2): a replica writes `Trim` for each retired segment below its own once its fold's
+  floor covers the segment's last `seq`, and every replica of a trimmed segment drops its copy.
+  The reader of `journal-sim`'s roles walk and the client (`paros_journal::client`) take the
+  floor from the segment in force before they read: the client sends `Request::Floor` first, ends
+  the read `Truncated` itself below that floor, and sends `Request::Read` only at or above it.
+- The leader stamps the leader time of each write at propose (§J2.8, #1299).
+
+The compaction of the acceptors per segment, the laggard's trim-point jump and the repair of a
+blocked slot (CTRL) are the last rule groups of #1326.
 
 **The default deployment** is three machines, each with every role in one process (Pierre, in
 the journal design); the `Host` also supports one process for each role (§J4.2, rule 3).
@@ -164,9 +186,13 @@ backends in memory (`mem`) and the contract suites (`contract`).
   and gives them back as `Input::Recovered`, and learns from them the role's highest durable
   batch. The driver gives the time (`Time`) with every input of the `Host`. The `Host` arms one
   timer (`Effect::SetTimer`); when it fires (`Input::TimerFired`), each leader and each replica
-  takes its periodic step. **Open**: `now`, timers and random draws inside each role (the roles
-  keep `tick(page)` and take no random value yet), and reads of a slot range as effects
-  (`ReadDone`), which wait for the leaderless reads and the offload of #1326.
+  takes its periodic step. The leader takes the time of each proposal from its caller
+  (`JournalLeader::propose`, the leader time of §J2.8). A client read is an input
+  (`Input::Read`) to a replica, answered by `Effect::ReadReply` once the replica's batch is
+  durable; the driver gives it back as `ReadReply` (`Driver::read`, `Driver::take_reads`).
+  **Open**: timers and random draws inside each role (the roles keep `tick(page)` and take no
+  random value yet), and reads of a slot range as effects (`ReadDone`), which wait for the
+  offload.
 - *Rule 3.* The `Host` maps each `Address` (a journal, a node, and the segment of a replica) to
   its role, routes each input, and turns the role's effects into `Effect`s that name their journal
   and their sender. A replica node serves one replica for each segment of its journal, so a heal

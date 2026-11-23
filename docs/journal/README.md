@@ -10,8 +10,9 @@ journal v1)). Every later step of the build (#1189 and #1324 to #1331) builds ag
 
 **It is the target, not all of it is code.** The pure journal core exists (`paros-journal` and
 `journal-sim`, #1324 (paros-journal)), and so does the matchmaker register (#1325), and so do the
-first journal roles (segments, the seal and writes, #1326); the other roles and the driver do not
-exist yet. `AGENTS.md` describes what paros
+journal roles (#1326: segments, the seal, writes, retire, re-replication, the proxy leader,
+leaderless reads and the trim), the driver (`paros-journal-io`, #1329) and the client (#1331);
+the compaction of the acceptors, the trim-point jump and CTRL repair are not built yet. `AGENTS.md` describes what paros
 is today. Where these files and `docs/architecture/` disagree on a journal rule, these files win.
 
 **One home for each rule.** A journal rule is written here once, with its decision, its issue

@@ -56,6 +56,7 @@ impl ColocatedNode {
     /// [`Ready::read_states`]: crate::Ready::read_states
     /// [`Replica::covers`]: crate::replica::Replica::covers
     pub fn quorum_read(&mut self, ctx: u64) -> ReadOpen {
+        self.assert_landed();
         self.quorum_read_in(ctx, None)
     }
 
@@ -77,6 +78,7 @@ impl ColocatedNode {
     /// [`AcceptorConfig::read_row`]: crate::membership::AcceptorConfig::read_row
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
     pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) -> ReadOpen {
+        self.assert_landed();
         let me = self.config.id;
         // A token still open is the driver's to wait on: nothing moves, not
         // even the gap fill below.

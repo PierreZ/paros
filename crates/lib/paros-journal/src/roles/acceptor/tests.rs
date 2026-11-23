@@ -1,5 +1,6 @@
 use super::*;
 use crate::command::{Fence, Record, Write};
+use crate::segment::SegmentId;
 use paros_consensus::journal::{LeaderUuid, Seq};
 
 const ME: NodeId = NodeId(1);
@@ -30,6 +31,7 @@ fn prepare(round: u64, from: u64) -> Message {
     Message::Prepare {
         ballot: ballot(round),
         from: Slot(from),
+        segment: SegmentId(1),
     }
 }
 
@@ -357,4 +359,98 @@ fn a_page_of_zero_is_refused() {
 #[should_panic(expected = "at most PROMISE_BATCH")]
 fn a_page_above_the_batch_is_refused() {
     let _ = JournalAcceptor::recover(ME, AcceptorDisk::default(), PROMISE_BATCH + 1);
+}
+
+fn prepare_in(round: u64, segment: u64) -> Message {
+    Message::Prepare {
+        ballot: ballot(round),
+        from: Slot(0),
+        segment: SegmentId(segment),
+    }
+}
+
+fn pre_read(read: u64) -> Message {
+    Message::PreRead {
+        segment: SegmentId(1),
+        read,
+    }
+}
+
+#[test]
+fn an_acceptor_with_no_belief_answers_no_read() {
+    let mut acceptor = fresh();
+    assert_eq!(acceptor.bound(), None);
+    assert_eq!(acceptor.step(LEADER, pre_read(1)), Vec::new());
+}
+
+#[test]
+fn a_read_gets_the_watermark_and_the_newest_segment_once_the_last_batch_is_durable() {
+    let mut acceptor = fresh();
+    acceptor.step(LEADER, prepare_in(2, 1));
+    acceptor.step(LEADER, accept(2, 4, write(1)));
+    assert_eq!(acceptor.bound(), Some(SegmentId(1)));
+    let (batches, sends, afters) = split(acceptor.step(LEADER, pre_read(9)));
+    assert!(batches.is_empty(), "a read writes nothing");
+    assert_eq!(
+        sends,
+        vec![Message::PreReadAck {
+            segment: SegmentId(1),
+            read: 9,
+            watermark: Some(Slot(4)),
+            bound: SegmentId(1),
+        }]
+    );
+    assert_eq!(afters, vec![Some(PersistId(1))], "the vote's batch");
+}
+
+#[test]
+fn a_prepare_of_a_later_segment_raises_the_belief_and_a_refused_one_does_not() {
+    let mut acceptor = fresh();
+    acceptor.step(LEADER, prepare_in(2, 1));
+    acceptor.step(LEADER, prepare_in(3, 2));
+    assert_eq!(acceptor.bound(), Some(SegmentId(2)));
+    // A Prepare at the promise of an older segment keeps the newest.
+    acceptor.step(LEADER, prepare_in(3, 1));
+    assert_eq!(acceptor.bound(), Some(SegmentId(2)));
+    // A refused Prepare teaches nothing.
+    acceptor.step(LEADER, prepare_in(1, 4));
+    assert_eq!(acceptor.bound(), Some(SegmentId(2)));
+    let (_, sends, _) = split(acceptor.step(LEADER, pre_read(1)));
+    assert!(matches!(
+        sends.as_slice(),
+        [Message::PreReadAck {
+            bound: SegmentId(2),
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn an_accept_that_raises_the_promise_clears_the_belief() {
+    let mut acceptor = fresh();
+    acceptor.step(LEADER, prepare_in(2, 1));
+    // An Accept at the promise keeps the belief.
+    acceptor.step(LEADER, accept(2, 0, write(1)));
+    assert_eq!(acceptor.bound(), Some(SegmentId(1)));
+    // An Accept above it names no segment: the acceptor answers no read
+    // until a Prepare tells it one.
+    acceptor.step(LEADER, accept(5, 1, write(2)));
+    assert_eq!(acceptor.bound(), None);
+    assert_eq!(acceptor.step(LEADER, pre_read(1)), Vec::new());
+    acceptor.step(LEADER, prepare_in(6, 3));
+    assert_eq!(acceptor.bound(), Some(SegmentId(3)));
+}
+
+#[test]
+fn an_acceptor_that_starts_again_has_no_belief() {
+    let mut acceptor = fresh();
+    acceptor.step(LEADER, prepare_in(2, 1));
+    let disk = AcceptorDisk {
+        promised: ballot(2),
+        durable: Some(PersistId(0)),
+        ..AcceptorDisk::default()
+    };
+    let restarted = JournalAcceptor::recover(ME, disk, PROMISE_BATCH);
+    assert_eq!(restarted.promised(), ballot(2));
+    assert_eq!(restarted.bound(), None, "the belief is in memory only");
 }

@@ -35,6 +35,16 @@ pub const APPLY_BATCH: usize = 64;
 // A walk that releases nothing per batch would never apply a slot.
 const _: () = assert!(APPLY_BATCH > 0);
 
+/// The most decided slots one `CatchUpResponse` carries. A lagging peer that
+/// needs more asks again on the next beat, so a large backlog drains over
+/// several pages, never one unbounded message. The server cuts each page at
+/// this bound, and a receiver ignores a longer page: a correct peer never
+/// sends one (decision 30, the trust rule).
+pub const CATCHUP_BATCH: usize = 64;
+
+// A replay page that carries nothing could never heal a laggard.
+const _: () = assert!(CATCHUP_BATCH > 0);
+
 /// Ticks a pending quorum read — waiting for its row to answer whole, or for
 /// the replica to cover the index it settled on — may wait before the node
 /// garbage-collects it (lost acks, an unreachable row). Dropped silently: a

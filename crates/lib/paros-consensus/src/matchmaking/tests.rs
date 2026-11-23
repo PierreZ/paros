@@ -202,3 +202,37 @@ fn a_configuration_named_at_the_ballot_is_not_abandonable() {
     );
     assert_eq!(m.abandonable(), vec![(z, vec![b(5)])]);
 }
+
+/// `MembershipProbe::fold` at the role (#907 (core unit tests)): each
+/// matchmaker counts once, the effective configuration is the one at the
+/// highest ballot heard and never moves back, and a matchmaker quorum of
+/// answers holds the probe.
+#[test]
+fn a_probe_folds_each_matchmaker_once_and_keeps_the_highest_fact() {
+    use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+    let set = MatchmakerSet::new(
+        MatchmakerGeneration(0),
+        vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(2)],
+    );
+    let mut probe = MembershipProbe::new(b(4), majority(&[0, 1, 2]));
+    assert_eq!(probe.ballot(), b(4));
+    assert!(probe.effective().is_none());
+    assert!(probe.fold(MatchmakerId(0), Some((b(3), majority(&[1, 2, 3])))));
+    assert!(
+        !probe.fold(MatchmakerId(0), Some((b(9), majority(&[3, 4, 5])))),
+        "a second answer of one matchmaker is ignored whole"
+    );
+    assert_eq!(probe.effective(), Some(&(b(3), majority(&[1, 2, 3]))));
+    assert!(!probe.quorum_held(&set), "one answer of three is no quorum");
+    assert!(probe.fold(MatchmakerId(1), Some((b(2), majority(&[0, 1, 2])))));
+    assert_eq!(
+        probe.effective(),
+        Some(&(b(3), majority(&[1, 2, 3]))),
+        "a lower fact never moves the probe back"
+    );
+    assert!(probe.quorum_held(&set));
+    assert_eq!(probe.answered_by(), 2);
+    assert_eq!(probe.unanswered(&set), vec![MatchmakerId(2)]);
+    assert!(probe.fold(MatchmakerId(2), None), "an empty answer counts");
+    assert_eq!(probe.answered_by(), 3);
+}

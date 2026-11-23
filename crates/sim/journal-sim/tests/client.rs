@@ -2,7 +2,9 @@
 //! every site, and each oracle catches its mutant.
 
 use journal_sim::campaign::{campaign, try_campaign};
-use journal_sim::client::{ClientMutant, LED, ONCE, PAGE, REFUSED, TAIL, WRITTEN, reach, walk};
+use journal_sim::client::{
+    ClientMutant, FLOOR, LED, ONCE, PAGE, REFUSED, TAIL, WRITTEN, reach, walk,
+};
 
 /// Two clients, a lossy network, seals, held and lost answers.
 #[test]
@@ -46,4 +48,9 @@ fn page_catches_a_late_read() {
 #[test]
 fn tail_catches_a_short_view() {
     caught(ClientMutant::ShortView, TAIL);
+}
+
+#[test]
+fn floor_catches_a_floor_asked_of_the_oldest_segment() {
+    caught(ClientMutant::FloorFromOldest, FLOOR);
 }

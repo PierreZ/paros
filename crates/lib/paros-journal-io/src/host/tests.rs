@@ -59,6 +59,7 @@ fn prepare(journal: JournalId, to: u64) -> Input {
                 node: NodeId(100),
             },
             from: Slot(0),
+            segment: SegmentId(1),
         },
     })
 }
@@ -152,6 +153,7 @@ fn an_acceptor_recovers_its_promise_from_its_records() {
             message: Message::Prepare {
                 ballot: promised,
                 from: Slot(0),
+                segment: SegmentId(1),
             },
         }),
     );
@@ -212,6 +214,7 @@ fn a_leader_needs_a_register_value_and_answers_calls() {
     };
     let assign = Input::Assign(Assignment::Leader {
         address: leader,
+        proxies: Vec::new(),
         campaign: campaign.clone(),
     });
     let mut host = Host::new(CONFIG);
@@ -645,6 +648,60 @@ fn a_node_goes_on_with_the_same_copy_on_its_disk() {
     );
 }
 
+/// `value` after one more controller election: copies of its term are
+/// orphans.
+fn next_term(value: &RegisterValue) -> RegisterValue {
+    value
+        .apply(&Change::Elect { holder: NodeId(30) })
+        .expect("an election")
+}
+
+#[test]
+fn a_join_of_a_term_that_is_over_is_refused() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(next_term(&retired())));
+    assert!(host.step(Time(0), join(5)).is_empty(), "an orphan ask");
+    assert!(!host.serves(NEW));
+}
+
+#[test]
+fn a_copy_ends_when_its_term_is_over() {
+    let mut host = joined(retired());
+    let effects = host.step(Time(1), observe(next_term(&retired())));
+    assert!(
+        writes_a_copy(&effects),
+        "the end is on the disk: {effects:?}"
+    );
+    assert!(
+        effects.contains(&Effect::Stopped {
+            address: NEW,
+            why: Stop::Dropped
+        }),
+        "an orphan copy is dropped with no abandon"
+    );
+    assert!(!host.serves(NEW));
+}
+
+#[test]
+fn a_join_read_after_the_term_changed_starts_no_copy() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(retired()));
+    host.step(Time(0), join(5));
+    host.step(Time(0), observe(next_term(&retired())));
+    let effects = host.step(Time(0), recovered(NEW));
+    assert!(
+        !writes_a_copy(&effects),
+        "no copy of a term that is over starts: {effects:?}"
+    );
+    assert!(
+        effects.contains(&Effect::Stopped {
+            address: NEW,
+            why: Stop::Dropped
+        }),
+        "a node that no set names drops the segment: {effects:?}"
+    );
+}
+
 #[test]
 fn a_join_read_after_the_commit_starts_a_member() {
     let mut host = Host::new(CONFIG);
@@ -837,4 +894,140 @@ fn a_join_whose_set_names_the_node_is_refused() {
     };
     assert_eq!(host.step(Time(0), ask), Vec::new());
     assert!(!host.serves(NEW));
+}
+
+#[test]
+fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
+    let mut host = Host::new(CONFIG);
+    let replica = Address::replica(J, NodeId(11), SegmentId(1));
+    let read = |from| Input::Read {
+        address: replica,
+        read: 7,
+        from: Seq(from),
+        limit: 4,
+    };
+    // A role that is not a replica that serves answers unserved.
+    assert_eq!(
+        host.step(Time(0), read(0)),
+        vec![Effect::ReadReply {
+            address: replica,
+            read: 7,
+            answer: ReadAnswer::Unserved,
+            after: None,
+        }]
+    );
+    host.step(
+        Time(0),
+        Input::Assign(Assignment::Replica {
+            address: at(J, 11),
+            segment: SegmentId(1),
+            set: vec![NodeId(11), NodeId(12), NodeId(13)],
+            initial: Leader::Unset,
+        }),
+    );
+    host.step(Time(0), recovered(replica));
+    host.step(
+        Time(0),
+        Input::Observe {
+            journal: J,
+            value: value(),
+        },
+    );
+    let asked: Vec<NodeId> = host
+        .step(Time(1), read(0))
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Send { envelope, .. } => {
+                assert!(matches!(envelope.message, Message::PreRead { read: 7, .. }));
+                assert_eq!(envelope.receiver(), at(J, envelope.to.0));
+                Some(envelope.to)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, vec![NodeId(1), NodeId(2), NodeId(3)]);
+    let ack = |from| Envelope {
+        journal: J,
+        from: NodeId(from),
+        to: NodeId(11),
+        message: Message::PreReadAck {
+            segment: SegmentId(1),
+            read: 7,
+            watermark: None,
+            bound: SegmentId(1),
+        },
+    };
+    assert_eq!(ack(1).receiver(), replica, "an ack names its replica");
+    assert_eq!(host.step(Time(2), Input::Message(ack(1))), Vec::new());
+    let effects = host.step(Time(2), Input::Message(ack(2)));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::ReadReply {
+                address,
+                read: 7,
+                answer: ReadAnswer::Page { sealed: false, .. },
+                ..
+            }] if *address == replica
+        ),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn a_proxy_sends_the_accepts_of_a_delegation_and_nacks_a_lower_one() {
+    let mut host = Host::new(CONFIG);
+    let proxy = at(J, 50);
+    host.step(Time(0), Input::Assign(Assignment::Proxy { address: proxy }));
+    assert!(host.serves(proxy), "a proxy needs no recovery");
+    let delegate = |round| {
+        Input::Message(Envelope {
+            journal: J,
+            from: NodeId(100 + round),
+            to: NodeId(50),
+            message: Message::Delegate {
+                ballot: Ballot {
+                    round,
+                    node: NodeId(100 + round),
+                },
+                slot: Slot(0),
+                command: Command::Noop,
+                column: vec![NodeId(1), NodeId(2), NodeId(3)],
+                segment: SegmentId(1),
+                replicas: vec![NodeId(11), NodeId(12), NodeId(13)],
+            },
+        })
+    };
+    let sends = |effects: Vec<Effect>| -> Vec<Envelope> {
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Send { envelope, .. } => Some(envelope),
+                _ => None,
+            })
+            .collect()
+    };
+    let accepts = sends(host.step(Time(1), delegate(2)));
+    assert_eq!(
+        accepts.iter().map(|e| e.to).collect::<Vec<_>>(),
+        vec![NodeId(1), NodeId(2), NodeId(3)]
+    );
+    assert!(
+        accepts.iter().all(|e| e.journal == J
+            && e.from == NodeId(50)
+            && matches!(e.message, Message::Accept { slot: Slot(0), .. })),
+        "{accepts:?}"
+    );
+    let nack = sends(host.step(Time(2), delegate(1)));
+    assert!(
+        matches!(
+            nack.as_slice(),
+            [Envelope {
+                to: NodeId(101),
+                message: Message::Nack { .. },
+                ..
+            }]
+        ),
+        "a delegation below the proxy's ballot is answered Nack: {nack:?}"
+    );
 }
