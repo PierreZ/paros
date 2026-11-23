@@ -74,7 +74,7 @@
 //! let set_leader = Control::SetLeader { new: writer, old: None };
 //! assert!(matches!(nodes[0].propose_control(set_leader), ProposeResult::Accepted(_)));
 //! run(&mut nodes, 0);
-//! let entry = Entry { leader: writer, seq: Seq(0), records: vec![Value(b"hello".to_vec())] };
+//! let entry = Entry { leader: writer, seq: Seq(0), records: vec![Value::from(b"hello".to_vec())] };
 //! assert!(matches!(nodes[0].propose(entry), ProposeResult::Accepted(_)));
 //! run(&mut nodes, 0);
 //!

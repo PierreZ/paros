@@ -35,7 +35,10 @@ fn flavors() -> Vec<(&'static str, Flavor)> {
         ("reads", Flavor::reads()),
         ("compartments", Flavor::compartments()),
         ("matchmakers", Flavor::matchmakers()),
-        ("reconfigured-compartments", Flavor::reconfigured_compartments()),
+        (
+            "reconfigured-compartments",
+            Flavor::reconfigured_compartments(),
+        ),
         ("reconfiguring", Flavor::reconfiguring()),
         ("disk-faults", Flavor::disk_faults()),
         ("disk-faults-3", Flavor::disk_faults_three()),

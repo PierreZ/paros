@@ -631,7 +631,7 @@ impl World {
             }
             _ => None,
         };
-        let value = Value(seq.to_le_bytes().to_vec());
+        let value = Value::from(seq.to_le_bytes().to_vec());
         let trace = self.trace;
         let node = self.site(leader).live.as_mut().expect("a leader is live");
         let result = node.propose_in(

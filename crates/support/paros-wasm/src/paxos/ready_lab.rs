@@ -270,7 +270,7 @@ impl ReadyLab {
                 let entry = Entry {
                     leader: CLIENT.uuid(),
                     seq: Seq(self.next_seq),
-                    records: vec![Value(text.trim().as_bytes().to_vec())],
+                    records: vec![Value::from(text.trim().as_bytes().to_vec())],
                 };
                 let answer = match self.nodes[n].propose(entry) {
                     ProposeResult::Accepted(slot) => {

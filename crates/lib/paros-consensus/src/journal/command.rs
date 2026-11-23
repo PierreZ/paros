@@ -129,8 +129,8 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             let mut hash = fnv1a(hash, &entry.seq.0.to_le_bytes());
             hash = fnv1a(hash, &entry.count().to_le_bytes());
             for record in &entry.records {
-                hash = fnv1a(hash, &(record.0.len() as u64).to_le_bytes());
-                hash = fnv1a(hash, &record.0);
+                hash = fnv1a(hash, &(record.len() as u64).to_le_bytes());
+                hash = fnv1a(hash, record.as_bytes());
             }
             hash
         }

@@ -830,7 +830,7 @@ impl Replica {
                 "a position below next_seq lies inside the write indexed below it"
             );
             for record in &entry.records[offset..] {
-                let size = record.0.len();
+                let size = record.len();
                 if page.records.len() >= limit
                     || (!page.records.is_empty() && bytes.saturating_add(size) > max_bytes)
                 {

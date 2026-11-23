@@ -15,7 +15,7 @@ fn cmd(seq: u64) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(1),
         seq: Seq(seq),
-        records: vec![Value(seq.to_le_bytes().to_vec())],
+        records: vec![Value::from(seq.to_le_bytes().to_vec())],
     })
 }
 

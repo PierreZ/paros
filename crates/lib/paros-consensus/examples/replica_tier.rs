@@ -215,7 +215,7 @@ fn main() {
             d.acceptors[0].propose(Entry {
                 leader: LeaderUuid(7),
                 seq: Seq(seq - 2),
-                records: vec![Value(format!("cmd-{seq}").into_bytes())],
+                records: vec![Value::from(format!("cmd-{seq}").into_bytes())],
             })
         };
         d.verbose = seq == 3;

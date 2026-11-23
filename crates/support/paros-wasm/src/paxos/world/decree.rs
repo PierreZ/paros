@@ -159,7 +159,7 @@ pub fn value(proposer: u64, round: u64, text: &str) -> Command {
         // equal (the unset uuid is never one).
         leader: LeaderUuid(((u128::from(proposer) << 64) | u128::from(round)) + 1),
         seq: Seq(0),
-        records: vec![Value(text.as_bytes().to_vec())],
+        records: vec![Value::from(text.as_bytes().to_vec())],
     })
 }
 

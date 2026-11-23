@@ -874,7 +874,7 @@ impl Run {
                 seq: Seq(0),
                 records: records
                     .iter()
-                    .map(|record| Value(record.as_bytes().to_vec()))
+                    .map(|record| Value::from(record.as_bytes().to_vec()))
                     .collect(),
             },
             None,
@@ -1050,7 +1050,7 @@ impl Run {
             command: Command::Write(Entry {
                 leader: paros_consensus::journal::LeaderUuid::UNSET,
                 seq: Seq(0),
-                records: vec![Value(value.as_bytes().to_vec())],
+                records: vec![Value::from(value.as_bytes().to_vec())],
             }),
         };
         let fan = self.next_id;
@@ -1629,7 +1629,7 @@ fn break_the_rule() -> Scenario {
         Entry {
             leader: paros_consensus::journal::LeaderUuid::UNSET,
             seq: Seq(0),
-            records: vec![Value(b"bravo".to_vec())],
+            records: vec![Value::from(b"bravo".to_vec())],
         },
         None,
         Delegation::Colocated,

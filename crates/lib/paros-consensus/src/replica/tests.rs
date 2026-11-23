@@ -9,7 +9,7 @@ fn write(seq: u64, records: &[&[u8]]) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(1),
         seq: Seq(seq),
-        records: records.iter().map(|r| Value(r.to_vec())).collect(),
+        records: records.iter().map(|r| Value::from(r.to_vec())).collect(),
     })
 }
 
@@ -89,7 +89,7 @@ fn a_jumped_fold_behind_its_truncation_does_not_hold_the_base_records() {
 }
 
 fn bytes(page: &super::LogPage) -> Vec<Vec<u8>> {
-    page.records.iter().map(|v| v.0.clone()).collect()
+    page.records.iter().map(|v| v.to_vec()).collect()
 }
 
 /// A floor keeps every record a retained slot's verdict read, not only
@@ -274,7 +274,7 @@ fn append(records: &[&[u8]]) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(0),
         seq: Seq(0),
-        records: records.iter().map(|r| Value(r.to_vec())).collect(),
+        records: records.iter().map(|r| Value::from(r.to_vec())).collect(),
     })
 }
 
@@ -366,7 +366,7 @@ fn a_multi_writer_floor_follows_the_first_record_only() {
     let (mut r, target) = walked(WriterMode::Multi, &commands);
     assert_eq!(
         r.accepted_at(Seq(1)).map(|e| e.records.clone()),
-        Some(vec![Value(b"b".to_vec())])
+        Some(vec![Value::from(b"b".to_vec())])
     );
     assert_eq!(target, Some(Slot(1)), "slots 0 and 1 hold dropped records");
     r.truncate(Slot(2));
@@ -459,7 +459,7 @@ fn a_refused_write_at_the_next_position_holds_no_floor() {
     let foreign = Command::Write(Entry {
         leader: LeaderUuid(2),
         seq: Seq(2),
-        records: vec![Value(b"x".to_vec())],
+        records: vec![Value::from(b"x".to_vec())],
     });
     let commands = [
         claim(),

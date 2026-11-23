@@ -30,7 +30,7 @@ pub fn command(text: &str, seq: u64) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(1),
         seq: Seq(seq),
-        records: vec![Value(text.as_bytes().to_vec())],
+        records: vec![Value::from(text.as_bytes().to_vec())],
     })
 }
 
@@ -43,7 +43,7 @@ pub fn noop() -> Command {
 /// A command as the trace prints it: the text of a write, or the control.
 pub fn show(command: &Command) -> String {
     match command {
-        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
+        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0])),
         Command::Control(control) => format!("{control:?}"),
     }
 }

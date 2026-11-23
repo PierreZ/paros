@@ -1073,16 +1073,7 @@ impl Cluster {
             let seen = Seen::of(node);
             let belief = node.acceptors_since();
             let ready = node.ready();
-            let digest = digest_of(&(
-                id,
-                ready.writes(),
-                ready.messages(),
-                ready.committed(),
-                ready.read_states(),
-                ready.recovery_batch(),
-                ready.match_requests(),
-                ready.gc_requests(),
-            ));
+            let digest = node_digest(id, &ready);
             let writes = ready.writes().to_vec();
             let mut batch: Vec<(Audience, Message)> = ready.messages().to_vec();
             plant(mutant, &mut batch);
@@ -1093,11 +1084,7 @@ impl Cluster {
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
             let more = ready.recovery_batch().is_some();
-            let matchmaking: Vec<MatchRequest> = ready
-                .match_requests()
-                .iter()
-                .map(|(_, request)| request.clone())
-                .collect();
+            let matchmaking = requests_of(ready.match_requests());
             let mut gc: Vec<(MatchmakerId, GcRequest)> = ready.gc_requests().to_vec();
             out.extend(to_matchmakers(ready.match_requests(), &gc));
             // The batch flies until its persist below (`Cluster::land`).
@@ -2189,7 +2176,7 @@ impl Client {
         Entry {
             leader,
             seq: Seq(seq),
-            records: vec![Value(seq.to_le_bytes().to_vec())],
+            records: vec![Value::from(seq.to_le_bytes().to_vec())],
         }
     }
 
@@ -2220,7 +2207,7 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
             *command = Command::Write(Entry {
                 leader: LeaderUuid(u128::MAX),
                 seq: Seq(0),
-                records: vec![Value(b"corrupt".to_vec())],
+                records: vec![Value::from(b"corrupt".to_vec())],
             });
         }
         (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
@@ -2336,7 +2323,32 @@ fn to_matchmakers<'a>(
 /// The FNV-1a digest of the `Debug` text of `batch`: every field of every
 /// value the core put in it, in order.
 fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
-    fnv1a(paros_consensus::types::FNV_OFFSET, format!("{batch:?}").as_bytes())
+    fnv1a(
+        paros_consensus::types::FNV_OFFSET,
+        format!("{batch:?}").as_bytes(),
+    )
+}
+
+/// The match requests of a batch, without their addressees.
+fn requests_of(requests: &[(MatchmakerId, MatchRequest)]) -> Vec<MatchRequest> {
+    requests
+        .iter()
+        .map(|(_, request)| request.clone())
+        .collect()
+}
+
+/// The digest of one batch of node `id` ([`digest_of`]).
+fn node_digest(id: NodeId, ready: &paros_consensus::Ready<'_>) -> u64 {
+    digest_of(&(
+        id,
+        ready.writes(),
+        ready.messages(),
+        ready.committed(),
+        ready.read_states(),
+        ready.recovery_batch(),
+        ready.match_requests(),
+        ready.gc_requests(),
+    ))
 }
 
 fn route(

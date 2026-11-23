@@ -49,7 +49,7 @@ impl World {
         let command = Command::Write(Entry {
             leader: LeaderUuid::UNSET,
             seq: Seq(0),
-            records: vec![Value(value.as_bytes().to_vec())],
+            records: vec![Value::from(value.as_bytes().to_vec())],
         });
         self.forged[index] = Some(ballot);
         for to in self.pool.clone().into_iter().filter(|to| *to != id) {

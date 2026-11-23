@@ -114,11 +114,7 @@ fn applied_text(world: &World, node: u64) -> Vec<String> {
         .iter()
         .map(|(slot, command)| match command {
             Command::Write(entry) => {
-                format!(
-                    "{}:{}",
-                    slot.0,
-                    String::from_utf8_lossy(&entry.records[0].0)
-                )
+                format!("{}:{}", slot.0, String::from_utf8_lossy(&entry.records[0]))
             }
             Command::Control(control) => format!("{}:{control:?}", slot.0),
         })

@@ -54,7 +54,7 @@ pub fn value_text(command: &Command) -> String {
         Command::Write(entry) => entry
             .records
             .iter()
-            .map(|record| String::from_utf8_lossy(&record.0).into_owned())
+            .map(|record| String::from_utf8_lossy(record).into_owned())
             .collect::<Vec<_>>()
             .join(", "),
         Command::Control(Control::Noop) => "Noop".to_string(),

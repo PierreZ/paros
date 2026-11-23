@@ -250,7 +250,7 @@ impl Cluster {
             Entry {
                 leader: LeaderUuid(7),
                 seq: Seq(seq),
-                records: vec![Value(text.as_bytes().to_vec())],
+                records: vec![Value::from(text.as_bytes().to_vec())],
             },
             None,
             delegation,
@@ -370,7 +370,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
         Entry {
             leader: LeaderUuid(7),
             seq: Seq(7),
-            records: vec![Value(b"golf".to_vec())],
+            records: vec![Value::from(b"golf".to_vec())],
         },
         None,
         Delegation::To(ProxyId(1)),
@@ -423,7 +423,7 @@ fn a_handoff_mid_round(cluster: &mut Cluster) {
         Entry {
             leader: LeaderUuid(7),
             seq: Seq(8),
-            records: vec![Value(b"hotel".to_vec())],
+            records: vec![Value::from(b"hotel".to_vec())],
         },
         None,
         Delegation::Auto,

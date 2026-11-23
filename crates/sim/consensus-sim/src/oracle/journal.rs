@@ -155,7 +155,7 @@ mod tests {
         Command::Write(Entry {
             leader: LeaderUuid(uuid),
             seq: Seq(seq),
-            records: bytes.iter().map(|b| Value(vec![*b])).collect(),
+            records: bytes.iter().map(|b| Value::from(vec![*b])).collect(),
         })
     }
 

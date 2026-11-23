@@ -33,7 +33,7 @@ fn cmd(seq: u64) -> Command {
     Command::Write(Entry {
         leader: LeaderUuid(1),
         seq: Seq(seq),
-        records: vec![Value(vec![u8::try_from(seq).expect("small seq")])],
+        records: vec![Value::from(vec![u8::try_from(seq).expect("small seq")])],
     })
 }
 
@@ -169,7 +169,7 @@ impl Tier {
         let _ = self.nodes[0].propose(Entry {
             leader: LeaderUuid(leader),
             seq: Seq(seq),
-            records: vec![Value(vec![u8::try_from(seq).expect("small seq")])],
+            records: vec![Value::from(vec![u8::try_from(seq).expect("small seq")])],
         });
         let q = self.drain_node(0);
         self.deliver(q, keep);
@@ -898,7 +898,7 @@ fn a_replica_serves_journal_reads_from_its_fold() {
     for seq in 0..=2 {
         tier.write(1, seq, |_, _| true);
     }
-    let value = |seq: u8| Value(vec![seq]);
+    let value = |seq: u8| Value::from(vec![seq]);
     let LogRead::Page(page) = tier.replicas[0].read_log(Seq(0), 10, usize::MAX) else {
         panic!("a read of a held position is a page");
     };
@@ -1034,7 +1034,7 @@ fn a_truncation_inside_the_first_write_keeps_that_write() {
         Command::Write(Entry {
             leader: LeaderUuid(0),
             seq: Seq(0),
-            records: vec![Value(vec![0]), Value(vec![1])],
+            records: vec![Value::from(vec![0]), Value::from(vec![1])],
         }),
     ));
     replica.step(commit(
@@ -1062,7 +1062,7 @@ fn a_truncation_inside_the_first_write_keeps_that_write() {
     let LogRead::Page(page) = replica.read_log(Seq(1), 10, usize::MAX) else {
         panic!("a read of a retained position is a page");
     };
-    assert_eq!(page.records, vec![Value(vec![1])]);
+    assert_eq!(page.records, vec![Value::from(vec![1])]);
 }
 
 /// A deployment that names no replica has no reply owner for a slot.

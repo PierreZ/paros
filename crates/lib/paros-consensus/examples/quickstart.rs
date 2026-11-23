@@ -180,7 +180,7 @@ fn redirect(cluster: &mut Cluster) {
     let entry = Entry {
         leader: WRITER,
         seq: Seq(2),
-        records: vec![Value(b"charlie".to_vec())],
+        records: vec![Value::from(b"charlie".to_vec())],
     };
     let result = cluster.node(N2).propose(entry);
     assert_eq!(result, ProposeResult::NotLeader(Some(N1)));

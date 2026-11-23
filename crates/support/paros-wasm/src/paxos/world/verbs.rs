@@ -429,7 +429,7 @@ impl World {
         let entry = Entry {
             leader: ClientId(client).uuid(),
             seq: Seq(self.clients[slot].next_position),
-            records: vec![Value(value.as_bytes().to_vec())],
+            records: vec![Value::from(value.as_bytes().to_vec())],
         };
         let mark = self.narration.len();
         let issued = self.take_event();

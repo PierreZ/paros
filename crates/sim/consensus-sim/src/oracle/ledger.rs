@@ -381,7 +381,7 @@ mod tests {
         Command::Write(Entry {
             leader: LeaderUuid(1),
             seq: Seq(0),
-            records: vec![Value(vec![byte])],
+            records: vec![Value::from(vec![byte])],
         })
     }
 

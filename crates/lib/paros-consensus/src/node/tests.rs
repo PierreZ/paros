@@ -166,7 +166,7 @@ fn cfg(members: &[u64]) -> AcceptorConfig {
 }
 
 fn val(b: u8) -> Value {
-    Value(vec![b])
+    Value::from(vec![b])
 }
 
 /// A one-record `Write` by `client` at position `seq` under generation zero:

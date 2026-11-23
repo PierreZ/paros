@@ -98,12 +98,12 @@ fn fresh(id: u64) -> ColocatedNode {
 
 fn command(text: &str, seq: u64) -> Value {
     let _ = seq;
-    Value(text.as_bytes().to_vec())
+    Value::from(text.as_bytes().to_vec())
 }
 
 fn show(command: &Command) -> String {
     match command {
-        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
+        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0])),
         Command::Control(control) => format!("{control:?}"),
     }
 }

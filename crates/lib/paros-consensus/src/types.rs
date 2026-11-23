@@ -1,6 +1,7 @@
 //! Core domain types for Multi-Paxos. Pure data, no logic.
 
 use core::cmp::Ordering;
+use std::sync::Arc;
 
 /// Stable identity of a node in the cluster. An id has no default: it is
 /// minted (random, at format, in a deployment) or named, never assumed.
@@ -29,9 +30,91 @@ impl core::fmt::Display for Slot {
 
 /// An opaque value proposed into / chosen for a slot. The core never interprets
 /// the bytes; the application owns their meaning.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Value(pub Vec<u8>);
+///
+/// The bytes are shared: a clone of a value costs one reference count, never
+/// a copy of the bytes. A command is cloned on each hop of a write (into the
+/// leader's round, the `Accept` of each acceptor, the acceptor's record, the
+/// `Commit`, the replica's apply), so a shared value keeps one copy of each
+/// record in memory, whatever the number of holders (#1101 (one copy of the
+/// retained log)). A value is never changed in place, so the sharing is
+/// invisible: two values are equal when their bytes are equal.
+#[derive(Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Value(Arc<[u8]>);
+
+impl Value {
+    /// A value that holds `bytes`.
+    #[must_use]
+    pub fn new(bytes: impl Into<Arc<[u8]>>) -> Self {
+        Self(bytes.into())
+    }
+
+    /// The bytes of the value.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Whether `self` and `other` share one copy of their bytes: a clone
+    /// does, a value built again from the same bytes does not.
+    #[must_use]
+    pub fn shares_bytes_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl core::ops::Deref for Value {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for Value {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes.into())
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.into())
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for Value {
+    fn from(bytes: &[u8; N]) -> Self {
+        Self(bytes.as_slice().into())
+    }
+}
+
+impl core::fmt::Debug for Value {
+    /// `Value([1, 2])`: the bytes as a list, as an owned vector prints them.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Value").field(&&*self.0).finish()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Value {
+    /// The bytes as a sequence, as an owned vector serializes them.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&*self.0, serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Value {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <Vec<u8> as serde::Deserialize>::deserialize(deserializer).map(Self::from)
+    }
+}
 
 /// A consensus value that can name itself in one word.
 ///
@@ -194,5 +277,32 @@ mod tests {
     fn zero_is_the_minimum_and_equals_default() {
         assert!(Ballot::zero() < ballot(0, 1));
         assert_eq!(Ballot::zero(), Ballot::default());
+    }
+
+    #[test]
+    fn a_cloned_value_shares_its_bytes() {
+        use super::Value;
+        let value = Value::from(b"abc");
+        let copy = value.clone();
+        assert!(copy.shares_bytes_with(&value), "a clone costs a count");
+        let again = Value::from(b"abc".to_vec());
+        assert_eq!(again, value, "equal bytes are an equal value");
+        assert!(
+            !again.shares_bytes_with(&value),
+            "a new value has its own bytes"
+        );
+        assert_eq!(value.as_bytes(), b"abc");
+        assert_eq!(value.len(), 3);
+    }
+
+    #[test]
+    fn a_value_prints_as_an_owned_vector_did() {
+        use super::Value;
+        assert_eq!(format!("{:?}", Value::from(vec![1, 2])), "Value([1, 2])");
+        assert_eq!(format!("{:?}", Value::default()), "Value([])");
+        assert!(
+            Value::from(b"a") < Value::from(b"b"),
+            "values order by bytes"
+        );
     }
 }
