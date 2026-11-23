@@ -331,6 +331,19 @@ mod tests {
         assert_eq!(from_slice, value, "the three builders agree");
     }
 
+    /// A value reads back from the wire with the bytes it was written with:
+    /// a sequence of bytes, as an owned vector deserializes.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_value_deserializes_from_its_bytes() {
+        use super::Value;
+        use serde::de::value::{Error, SeqDeserializer};
+        let wire = SeqDeserializer::<_, Error>::new(vec![1u8, 2, 3].into_iter());
+        let value: Value =
+            serde::Deserialize::deserialize(wire).expect("a byte sequence is a value");
+        assert_eq!(value, Value::from(vec![1, 2, 3]), "the bytes read back");
+    }
+
     #[test]
     fn a_value_prints_as_an_owned_vector_did() {
         use super::Value;

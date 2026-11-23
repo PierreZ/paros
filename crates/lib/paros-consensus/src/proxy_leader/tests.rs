@@ -343,8 +343,15 @@ fn a_delegation_with_no_configuration_the_proxy_can_run_is_ignored() {
     assert_eq!(proxy.acceptors(), &three);
     assert_eq!(proxy.counters().ignored, 2);
     // The pool grows, and the same configuration is now one it can run.
+    assert!(
+        !proxy.pool().contains(&NodeId(9)),
+        "node 9 is not admitted yet"
+    );
+    let before = proxy.pool().len();
     assert!(proxy.extend_pool(&[NodeId(9)]));
     assert!(!proxy.extend_pool(&[NodeId(9)]), "the pool grows once");
+    assert!(proxy.pool().contains(&NodeId(9)), "the pool holds node 9");
+    assert_eq!(proxy.pool().len(), before + 1, "the pool grows by one node");
     proxy.step(delegation_with(
         ballot(3, 0),
         0,
