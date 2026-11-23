@@ -53,13 +53,12 @@
 //! the client. A client that never won a `SetLeader` writes unfenced: the
 //! journal accepts that only while it is multi-writer.
 //!
-//! **A lost `SetLeader` of a uuid settles itself.** A resend of a
-//! `SetLeader(Some(uuid), old)` whose first copy applied is refused, because
-//! `uuid` already leads. Uuids are fresh, so a refusal whose view names
-//! `uuid` as the leader after a resend means that the first copy won: the
-//! client answers [`Outcome::LeaderSet`] with that view. `SetLeader(None, _)`
-//! has no such proof: another caller can make the journal multi-writer, so
-//! its refused resend is [`Outcome::LeaderRefused`].
+//! **A lost `SetLeader` settles itself.** A resend of a `SetLeader(new, old)`
+//! whose first copy applied is refused, because `new` already leads. Uuids
+//! and multi tags are fresh (§J2.3, §J2.4.1), so a refusal whose view names
+//! `new` as the leader after a resend means that the first copy won: the
+//! client answers [`Outcome::LeaderSet`] with that view. The same holds for
+//! a multi-writer mode, since its tag is the caller's own.
 //!
 //! **The client follows the tail.** Each view that names the client's own
 //! uuid as the leader moves its next position to the view's `next_seq`:
@@ -234,10 +233,7 @@ pub enum Mode {
 enum Call {
     Write(Vec<Record>),
     Truncate(Seq),
-    SetLeader {
-        new: Option<LeaderUuid>,
-        old: Leader,
-    },
+    SetLeader { new: Leader, old: Leader },
 }
 
 /// Where the call in flight is.
@@ -340,9 +336,11 @@ impl Client {
     }
 
     /// `SetLeader(new, old)`: a compare-and-set of the leader value.
-    /// `new = None` makes the journal multi-writer. `new` is a fresh uuid
-    /// that the program drew (§J2.3).
-    pub fn set_leader(&mut self, new: Option<LeaderUuid>, old: Leader) -> CallId {
+    /// `new` is a uuid leader ([`Leader::uuid`]) or a multi-writer mode
+    /// ([`Leader::multi`]), and its uuid or its tag is fresh: the program
+    /// drew it (§J2.3, §J2.4.1). `old` is the whole leader value the program
+    /// read, the tag of a multi-writer mode too.
+    pub fn set_leader(&mut self, new: Leader, old: Leader) -> CallId {
         self.ask(Call::SetLeader { new, old })
     }
 
@@ -637,21 +635,13 @@ impl Client {
         }
     }
 
-    fn answer_set_leader(
-        &mut self,
-        call: CallId,
-        new: Option<LeaderUuid>,
-        copies: u32,
-        answer: Answer,
-    ) {
+    fn answer_set_leader(&mut self, call: CallId, new: Leader, copies: u32, answer: Answer) {
         let won = match &answer {
             Answer::LeaderSet(view) => Some(*view),
-            // A resend whose first copy won: `new` leads, and uuids are
-            // fresh, so no other call installed it.
+            // A resend whose first copy won: `new` leads, and uuids and tags
+            // are fresh, so no other call installed it.
             Answer::LeaderRefused(view)
-                if copies > 1
-                    && new.is_some_and(LeaderUuid::is_set)
-                    && view.leader == Leader::from_new(new) =>
+                if copies > 1 && new.is_installable() && view.leader == new =>
             {
                 Some(*view)
             }
@@ -659,12 +649,15 @@ impl Client {
         };
         let outcome = match (won, answer) {
             (Some(view), _) => {
+                // The journal never installs `Unset` (the fold refuses it);
+                // the answer is the journal's, so the mode of the client
+                // follows `new` and never asserts on it.
                 self.mode = match new {
-                    Some(uuid) => Mode::Fenced {
+                    Leader::Uuid(uuid) => Mode::Fenced {
                         uuid,
                         next: view.next_seq,
                     },
-                    None => Mode::Open,
+                    Leader::Multi(_) | Leader::Unset => Mode::Open,
                 };
                 Outcome::LeaderSet(view)
             }
@@ -683,10 +676,10 @@ impl Client {
     ) {
         match *response {
             Response::Resolved(ResolveAnswer::Written { seq, count }) => {
-                self.follow(JournalView {
-                    next_seq: Seq(seq.0 + count),
-                    ..view
-                });
+                // The write is in a sealed segment, below the base of the
+                // segment in force: the tail is the one the `Below` named,
+                // never the end of the write.
+                self.follow(view);
                 self.end(call, Outcome::Written { seq, count });
             }
             Response::Resolved(ResolveAnswer::NotWritten) => {

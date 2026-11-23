@@ -74,10 +74,13 @@ pub mod reach {
     pub const TRUNCATED: &str = "fold walk: a write below the floor is truncated";
     /// A truncate raised the floor.
     pub const TRIMMED: &str = "fold walk: a truncate raised the floor";
-    /// `SetLeader(None)` applied.
-    pub const TO_MULTI: &str = "fold walk: SetLeader(None) made the journal multi-writer";
+    /// A `SetLeader` of a multi-writer mode applied.
+    pub const TO_MULTI: &str = "fold walk: a SetLeader made the journal multi-writer";
     /// A `SetLeader` from multi-writer applied.
     pub const TO_SINGLE: &str = "fold walk: a SetLeader made it single-writer again";
+    /// A `SetLeader` whose `old` names an earlier multi-writer mode, while
+    /// a later one is in force, is refused (§J2.4.1, #1495).
+    pub const OTHER_MODE: &str = "fold walk: a SetLeader of an older mode is refused";
     /// A write applied in the third segment.
     pub const THIRD: &str = "fold walk: a write applied in the third segment";
     /// A writer deposed in an earlier segment fenced in a later one.
@@ -106,6 +109,7 @@ pub mod reach {
         TRIMMED,
         TO_MULTI,
         TO_SINGLE,
+        OTHER_MODE,
         THIRD,
         MOVED,
         REFOLDED,
@@ -372,8 +376,9 @@ impl Model for FoldModel {
                 );
             }
             FoldAction::ToMulti => {
+                let new = Leader::multi(self.fresh_id());
                 let old = self.old_leader(cx);
-                self.choose(Command::SetLeader { new: None, old }, cx);
+                self.choose(Command::SetLeader { new, old }, cx);
             }
             FoldAction::Truncate => self.truncate(cx),
             FoldAction::Noop => {
@@ -493,11 +498,14 @@ impl FoldModel {
     /// The walk with `shape` and `mutant` planted. The fresh journal is
     /// unset, or multi-writer on one seed in four.
     pub fn build(shape: Shape, mutant: FoldMutant, cx: &mut Cx<'_, Self>) -> Self {
+        // A multi-writer fresh journal takes the tag of its configuration:
+        // the first id of the walk.
         let fresh = if cx.rng().chance(1, 4) {
-            Leader::Multi
+            Leader::multi(LeaderUuid(1))
         } else {
             Leader::Unset
         };
+        let uuids = u128::from(fresh.is_multi());
         Self {
             shape,
             port: None,
@@ -505,7 +513,7 @@ impl FoldModel {
             truth: Truth::new(fresh),
             segments: vec![Segment::new(BoundaryState::fresh(fresh))],
             writers: vec![Writer::default(); WRITERS],
-            uuids: 0,
+            uuids,
             seen: fresh,
             belows: Vec::new(),
             deposed: BTreeMap::new(),
@@ -595,7 +603,9 @@ impl FoldModel {
         } else {
             match cx.rng().below(3) {
                 0 => Leader::Unset,
-                1 => Leader::Multi,
+                // A mode named by the id drawn before the call: often an
+                // earlier mode, sometimes the one in force.
+                1 => Leader::multi(LeaderUuid(self.uuids.saturating_sub(1).max(1))),
                 _ => Leader::uuid(LeaderUuid(
                     1 + u128::from(
                         cx.rng()
@@ -604,6 +614,13 @@ impl FoldModel {
                 )),
             }
         }
+    }
+
+    /// A fresh id: a uuid or the tag of a multi-writer mode. The walk draws
+    /// both from one counter, so neither is ever drawn twice.
+    fn fresh_id(&mut self) -> LeaderUuid {
+        self.uuids += 1;
+        LeaderUuid(self.uuids)
     }
 
     /// The fence of a random writer that holds a uuid.
@@ -618,12 +635,11 @@ impl FoldModel {
 
     fn claim(&mut self, cx: &mut Cx<'_, Self>) {
         let index = cx.rng().index(WRITERS).expect("writers");
-        self.uuids += 1;
-        let uuid = LeaderUuid(self.uuids);
+        let uuid = self.fresh_id();
         let old = self.old_leader(cx);
         if let Some(Answer::LeaderSet(view)) = self.choose(
             Command::SetLeader {
-                new: Some(uuid),
+                new: Leader::uuid(uuid),
                 old,
             },
             cx,
@@ -785,9 +801,9 @@ impl FoldModel {
         let segments = self.segments.len();
         match answer {
             Answer::LeaderSet(view) => {
-                sometimes!(view.leader == Leader::Multi, reach::TO_MULTI);
+                sometimes!(view.leader.is_multi(), reach::TO_MULTI);
                 if let Command::SetLeader { old, .. } = command {
-                    sometimes!(*old == Leader::Multi, reach::TO_SINGLE);
+                    sometimes!(old.is_multi() && !view.leader.is_multi(), reach::TO_SINGLE);
                     if let Leader::Uuid(uuid) = old {
                         self.deposed.entry(uuid.0).or_insert(segments);
                     }
@@ -820,7 +836,15 @@ impl FoldModel {
             Answer::Below(_) => sometimes!(true, reach::BELOW),
             Answer::Empty(_) => sometimes!(true, reach::EMPTY),
             Answer::Reserved(_) => sometimes!(true, reach::RESERVED),
-            Answer::LeaderRefused(_) | Answer::Noop => {}
+            Answer::LeaderRefused(view) => {
+                if let Command::SetLeader { old, .. } = command {
+                    sometimes!(
+                        old.is_multi() && view.leader.is_multi() && *old != view.leader,
+                        reach::OTHER_MODE
+                    );
+                }
+            }
+            Answer::Noop => {}
         }
     }
 

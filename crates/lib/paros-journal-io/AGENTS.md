@@ -25,7 +25,7 @@ under faults.
 `examples/`: `in_memory` (a journal on three processes), `custom_storage` (a backend written
 by hand, checked by the contract suite), `single_writer` (the pure client of
 `paros_journal::client`: exactly-once across a lost reply and a seal, `Below` settled by
-`Resolve`, a deposed writer) and `multi_writer` (the client with `SetLeader(None)`, open writes
+`Resolve`, a deposed writer) and `multi_writer` (the client with a multi-writer mode and its fresh tag, open writes
 from two writers, a resend that lands twice, and back to one writer). `common::Program` is the
 glue a program writes around a client. Shared code is in `examples/common/mod.rs`. Each asserts
 its result and runs in the `checks` job of CI.

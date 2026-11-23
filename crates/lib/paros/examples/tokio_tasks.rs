@@ -270,7 +270,7 @@ async fn write(task: &Task, process: &mut Process) {
         .call(
             process,
             Command::SetLeader {
-                new: Some(A),
+                new: Leader::uuid(A),
                 old: Leader::Unset,
             },
         )

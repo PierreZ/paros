@@ -32,7 +32,7 @@ result, and each lands with the step that it needs:
 | `fold` | The journal fold alone (§J2): writes, resends, a seal, `Below` and `Resolve`, multi-writer | Step 3: done |
 | `in_memory` | A journal on three processes, on the traits and the driver of `paros-journal-io` with its backends in memory; a process crashes and starts again from its storage, and a second segment seals the first | Step 8: done (`paros-journal-io`) |
 | `custom_storage` | A storage backend of the user (an append-only log), checked by the contract suite of the storage trait, with a journal on it | Step 8: done (`paros-journal-io`) |
-| `single_writer`, `multi_writer` | The pure client: exactly-once with `expected_seq` across a lost reply and a seal (`Below` settled by `Resolve`); `SetLeader(None)`, a resend that lands twice, and back | Step 10: done (`paros_journal::client`, examples in `paros-journal-io`) |
+| `single_writer`, `multi_writer` | The pure client: exactly-once with `expected_seq` across a lost reply and a seal (`Below` settled by `Resolve`); `SetLeader` of a multi-writer mode with a fresh tag, a resend that lands twice, and back | Step 10: done (`paros_journal::client`, examples in `paros-journal-io`) |
 | `moonpool`, `simulation` | The same journal on the moonpool host, then under moonpool-sim with faults | #1417, after v1 (parosd) |
 
 **Rules for every step** (#1323):

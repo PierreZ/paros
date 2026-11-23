@@ -67,16 +67,25 @@ const RULES: &[Rule] = &[
     ("a write below the floor", |e| answered(e, "trunc")),
     ("a refused SetLeader", |e| answered(e, "refused")),
     ("a Noop", |e| answered(e, "noop")),
-    ("SetLeader(None)", |events| {
+    ("a SetLeader to a multi-writer mode", |events| {
         events.iter().any(|e| {
-            matches!(e, FoldEvent::Apply { command: Command::SetLeader { new: None, .. }, answer, .. } if *answer == "ok")
+            matches!(e, FoldEvent::Apply { command: Command::SetLeader { new: Leader::Multi(_), .. }, answer, .. } if *answer == "ok")
         })
     }),
     ("a SetLeader from multi-writer", |events| {
         events.iter().any(|e| {
-            matches!(e, FoldEvent::Apply { command: Command::SetLeader { old: Leader::Multi, .. }, answer, .. } if *answer == "ok")
+            matches!(e, FoldEvent::Apply { command: Command::SetLeader { old: Leader::Multi(_), .. }, answer, .. } if *answer == "ok")
         })
     }),
+    (
+        "a SetLeader that names another multi-writer mode, refused",
+        |events| {
+            events.iter().any(|e| {
+            matches!(e, FoldEvent::Apply { command: Command::SetLeader { old: old @ Leader::Multi(_), .. }, answer, state }
+                if *answer == "refused" && state.0.is_multi() && state.0 != *old)
+        })
+        },
+    ),
     ("a truncate that raised the floor", |events| {
         events.iter().any(|e| {
             matches!(e, FoldEvent::Apply { command: Command::Truncate { .. }, answer, state, .. } if *answer == "ok" && state.2 > 0)

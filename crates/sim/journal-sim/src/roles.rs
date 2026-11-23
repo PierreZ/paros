@@ -152,8 +152,8 @@ pub mod reach {
     pub const DUPLICATE: &str = "roles walk: a resend answered Duplicate";
     /// A truncate raised the floor.
     pub const TRIMMED: &str = "roles walk: a truncate raised the floor";
-    /// `SetLeader(None)` applied.
-    pub const TO_MULTI: &str = "roles walk: SetLeader(None) made the journal multi-writer";
+    /// A `SetLeader` of a multi-writer mode applied.
+    pub const TO_MULTI: &str = "roles walk: a SetLeader made the journal multi-writer";
     /// A Phase 1 took a promise in more than one page.
     pub const PAGED: &str = "roles walk: a promise came in more than one page";
     /// An acceptor restarted from its disk with a vote.
@@ -1069,8 +1069,10 @@ impl RolesModel {
     ///
     /// When the first segment cannot open.
     pub fn build(shape: Shape, mutant: RolesMutant, cx: &mut Cx<'_, Self>) -> Self {
+        // A multi-writer fresh journal takes the tag of its configuration:
+        // the first id of the walk. Uuids and tags come from one counter.
         let initial = if cx.rng().chance(1, 4) {
-            Leader::Multi
+            Leader::multi(LeaderUuid(1))
         } else {
             Leader::Unset
         };
@@ -1111,7 +1113,7 @@ impl RolesModel {
             seen: initial,
             calls: BTreeMap::new(),
             tokens: 0,
-            uuids: 0,
+            uuids: u128::from(initial.is_multi()),
             belows: Vec::new(),
             unknown: Vec::new(),
             proposed: BTreeMap::new(),
@@ -2301,7 +2303,7 @@ impl RolesModel {
             Leader::Unset
         };
         let command = Command::SetLeader {
-            new: Some(LeaderUuid(self.uuids)),
+            new: Leader::uuid(LeaderUuid(self.uuids)),
             old,
         };
         self.writers[index].claimed = Some(LeaderUuid(self.uuids));
@@ -2375,8 +2377,9 @@ impl RolesModel {
 
     fn multi(&mut self, cx: &mut Cx<'_, Self>) {
         let command = if cx.rng().chance(1, 2) {
+            self.uuids += 1;
             Command::SetLeader {
-                new: None,
+                new: Leader::multi(LeaderUuid(self.uuids)),
                 old: self.seen,
             }
         } else {
@@ -2415,7 +2418,7 @@ impl RolesModel {
                 // there and folds blind until it applies the `Truncate`.
                 let fence = match self.truth.leader {
                     Leader::Uuid(uuid) => Some(uuid),
-                    Leader::Unset | Leader::Multi => None,
+                    Leader::Unset | Leader::Multi(_) => None,
                 };
                 (fence, Seq(low + cx.rng().below(asked - low)), true)
             } else {
@@ -2491,7 +2494,7 @@ impl RolesModel {
         }
         match (&answer, &call.command) {
             (Answer::LeaderSet(view), Command::SetLeader { .. }) => {
-                sometimes!(view.leader == Leader::Multi, reach::TO_MULTI);
+                sometimes!(view.leader.is_multi(), reach::TO_MULTI);
             }
             (Answer::Trimmed(view), _) => sometimes!(view.first_seq.0 > 0, reach::TRIMMED),
             (Answer::Written { seq, count }, Command::Write(write)) => {

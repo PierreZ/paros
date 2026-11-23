@@ -12,6 +12,17 @@ fn the_client_walk() {
     campaign(&walk(ClientMutant::None, 300), reach::ALL);
 }
 
+/// The seeds of #1495 (a late copy of `SetLeader` reinstates a uuid): with one
+/// value for every multi-writer mode, a late copy of `SetLeader(u, mode)`
+/// brought `u` back, and a fenced write reported refused landed (100603);
+/// on 100033 the client's tail also went back below the tail of a `Below`.
+#[test]
+fn the_seeds_of_a_late_set_leader_copy() {
+    for seed in [100_603, 100_033] {
+        campaign(&walk(ClientMutant::None, 1).first_seed(seed), &[]);
+    }
+}
+
 fn caught(mutant: ClientMutant, oracle: &str) {
     let text = try_campaign(&walk(mutant, 300), &[]).expect_err("a seed of the mutant fails");
     assert!(

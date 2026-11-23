@@ -17,11 +17,12 @@
 //! - a byte string: `len: u32`, then the bytes.
 //! - a list: `count: u32`, then the items.
 //! - an option: `0` for none, or `1` then the value.
-//! - a leader value: `0` unset, `1` multi-writer, `2` then a set `u128`.
+//! - a leader value: `0` unset, `1` multi-writer then its set tag (`u128`),
+//!   `2` a uuid leader then its set `u128`.
 //! - a command: a tag, `0` `Noop`, `1` `Write` (the fence: `0` open, or `1`
 //!   then the uuid and `expected_seq`; then the list of records), `2`
-//!   `Truncate` (an optional uuid, `up_to`), `3` `SetLeader` (an optional
-//!   uuid `new`, the leader value `old`), `4` `Upgrade` (a release).
+//!   `Truncate` (an optional uuid, `up_to`), `3` `SetLeader` (the leader
+//!   value `new`, the leader value `old`), `4` `Upgrade` (a release).
 //! - a record (§J2.8): the paros headers, the client headers, the payload.
 //!   The paros headers are the **reserved key space** of paros: a list
 //!   (`count: u16`) of fields, each a key `u16` and a byte string. Key 1 is
@@ -239,7 +240,10 @@ impl Out {
         assert!(leader.is_valid(), "an encoded leader is valid");
         match leader {
             Leader::Unset => self.u8(0),
-            Leader::Multi => self.u8(1),
+            Leader::Multi(tag) => {
+                self.u8(1);
+                self.uuid(tag);
+            }
             Leader::Uuid(uuid) => {
                 self.u8(2);
                 self.uuid(uuid);
@@ -272,7 +276,7 @@ impl Out {
             }
             Command::SetLeader { new, old } => {
                 self.u8(3);
-                self.option(*new, Self::uuid);
+                self.leader(*new);
                 self.leader(*old);
             }
             Command::Upgrade { release } => {
@@ -448,7 +452,7 @@ impl<'a> In<'a> {
     fn leader(&mut self) -> Result<Leader, DecodeError> {
         match self.u8()? {
             0 => Ok(Leader::Unset),
-            1 => Ok(Leader::Multi),
+            1 => Ok(Leader::multi(self.uuid()?)),
             2 => Ok(Leader::uuid(self.uuid()?)),
             tag => Err(DecodeError::Tag {
                 what: "leader",
@@ -480,7 +484,7 @@ impl<'a> In<'a> {
                 up_to: Seq(self.u64()?),
             }),
             3 => Ok(Command::SetLeader {
-                new: self.option("new leader", Self::uuid)?,
+                new: self.leader()?,
                 old: self.leader()?,
             }),
             4 => Ok(Command::Upgrade {

@@ -42,16 +42,16 @@ fn commands() -> Vec<Command> {
             up_to: Seq(0),
         },
         Command::SetLeader {
-            new: None,
+            new: Leader::multi(LeaderUuid(4)),
             old: Leader::uuid(LeaderUuid(5)),
         },
         Command::SetLeader {
-            new: Some(LeaderUuid(6)),
+            new: Leader::uuid(LeaderUuid(6)),
             old: Leader::Unset,
         },
         Command::SetLeader {
-            new: Some(LeaderUuid(6)),
-            old: Leader::Multi,
+            new: Leader::uuid(LeaderUuid(6)),
+            old: Leader::multi(LeaderUuid(u128::MAX)),
         },
         Command::Upgrade {
             release: Release(2),
@@ -112,7 +112,7 @@ fn segment_records_and_boundaries_round_trip() {
         pending.is_err(),
         "the expected segment is below the new one"
     );
-    let boundary = BoundaryState::fresh(Leader::Multi);
+    let boundary = BoundaryState::fresh(Leader::multi(LeaderUuid(8)));
     assert_eq!(decode_boundary(&encode_boundary(&boundary)), Ok(boundary));
 }
 

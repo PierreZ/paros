@@ -25,7 +25,8 @@
 //!    boundary state. A resend of a write of the old segment answers
 //!    `Below`: the new fold does not hold the old positions. The writer
 //!    settles it with [`resolve`] at a replica of the old segment.
-//! 7. `SetLeader(None, B)` makes the journal multi-writer: writes carry no
+//! 7. `SetLeader(M, B)`, with `M` a multi-writer mode whose tag the caller
+//!    drew fresh, makes the journal multi-writer: writes carry no
 //!    fence and the journal gives each one its position.
 //!
 //! Each step asserts its answer, so CI runs this example as a test.
@@ -46,6 +47,9 @@ use common::{fenced, open, show, written};
 
 const A: LeaderUuid = LeaderUuid(0xA);
 const B: LeaderUuid = LeaderUuid(0xB);
+/// The multi-writer mode of step 7: its tag is fresh, drawn by the caller as
+/// a uuid is (§J2.4.1).
+const M: Leader = Leader::Multi(LeaderUuid(0x3A));
 
 /// One segment as a replica holds it: the fold, and the write that took
 /// each position. The fold asks for the second one to tell a resend
@@ -117,7 +121,7 @@ fn single_writer() -> Segment {
     let answer = first.apply(
         "SetLeader(new A, old Unset)",
         Command::SetLeader {
-            new: Some(A),
+            new: Leader::uuid(A),
             old: Leader::Unset,
         },
     );
@@ -156,7 +160,7 @@ fn new_writer(first: &mut Segment) {
     let answer = first.apply(
         "SetLeader(new B, old A)",
         Command::SetLeader {
-            new: Some(B),
+            new: Leader::uuid(B),
             old: Leader::Uuid(A),
         },
     );
@@ -232,19 +236,19 @@ fn seal(first: &Segment) -> Segment {
 
 /// Step 7: the move to multi-writer.
 fn multi_writer(second: &mut Segment) {
-    println!("7. Multi-writer: SetLeader(None, B), then unfenced writes.");
+    println!("7. Multi-writer: SetLeader(mode M, B), then unfenced writes.");
     let answer = second.apply(
-        "SetLeader(new None, old B)",
+        "SetLeader(new mode M, old B)",
         Command::SetLeader {
-            new: None,
+            new: M,
             old: Leader::Uuid(B),
         },
     );
-    assert_eq!(answer, Answer::LeaderSet(view(Leader::Multi, 5, 2)));
+    assert_eq!(answer, Answer::LeaderSet(view(M, 5, 2)));
     let answer = second.apply("Write(open, [m0, m1])", Command::Write(open(&["m0", "m1"])));
     assert_eq!(answer, written(5, 2));
     let answer = second.apply("Write(B, 7, [b7])", Command::Write(fenced(B, 7, &["b7"])));
-    assert_eq!(answer, Answer::Fenced(view(Leader::Multi, 7, 2)));
+    assert_eq!(answer, Answer::Fenced(view(M, 7, 2)));
 
-    assert_eq!(second.state.view(), view(Leader::Multi, 7, 2));
+    assert_eq!(second.state.view(), view(M, 7, 2));
 }

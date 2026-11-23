@@ -84,7 +84,7 @@ fn acceptor_batches_read_back_as_the_roles_disk() {
                 slot: Slot(7),
                 ballot: ballot(2),
                 value: Command::SetLeader {
-                    new: None,
+                    new: Leader::multi(paros_journal::LeaderUuid(0x3A)),
                     old: Leader::Unset,
                 },
             })],

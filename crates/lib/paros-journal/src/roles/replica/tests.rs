@@ -56,7 +56,7 @@ fn replica() -> SegmentReplica {
 
 fn claim(uuid: u128) -> Command {
     Command::SetLeader {
-        new: Some(LeaderUuid(uuid)),
+        new: Leader::uuid(LeaderUuid(uuid)),
         old: Leader::Unset,
     }
 }

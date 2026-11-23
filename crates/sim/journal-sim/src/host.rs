@@ -621,7 +621,7 @@ impl HostModel {
         } else if !self.claimed {
             (
                 Command::SetLeader {
-                    new: Some(A),
+                    new: Leader::uuid(A),
                     old: Leader::Unset,
                 },
                 false,

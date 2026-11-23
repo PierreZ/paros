@@ -27,8 +27,7 @@
 //!   unfenced write is at-least-once: a copy refused `WrongMode` says
 //!   nothing of an older copy still in flight, §J2.4.)
 //! - [`LED`]: a `SetLeader` reported set applied: a copy of that call won
-//!   (a uuid is drawn once, so one `SetLeader` names it; a client reports
-//!   no more `SetLeader(None)` wins than its copies won).
+//!   (a uuid or a multi tag is drawn once, so one `SetLeader` names it).
 //! - [`TAIL`]: the first copy of a fenced write of the uuid that leads
 //!   names the journal's tail: a sole writer's client follows the tail, so
 //!   it never writes below it or above it.
@@ -191,7 +190,7 @@ const OPEN_CALLS: usize = 4;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Asked {
     Write(Vec<u64>),
-    SetLeader(Option<LeaderUuid>),
+    SetLeader(Leader),
     Truncate,
     /// A read of `limit` records from `from`, asked when the floor of the
     /// journal was `floor`.
@@ -240,11 +239,9 @@ pub struct ClientModel {
     fenced: BTreeSet<u64>,
     /// The record ids of the fenced writes reported refused.
     refused: BTreeSet<u64>,
-    /// The uuids that a `SetLeader` installed.
+    /// The ids (uuids and multi tags, drawn from one counter) that a
+    /// `SetLeader` installed.
     installed: BTreeSet<u128>,
-    /// For each client, how many of its `SetLeader(None)` copies applied,
-    /// and how many such calls it reported set.
-    to_multi: Vec<(u32, u32)>,
     /// The requests whose answer a program still waits for, and whether
     /// each is a command.
     waiting: BTreeMap<(usize, RequestId), bool>,
@@ -262,8 +259,10 @@ pub struct ClientModel {
     /// For each client, whether the journal answered a write of the uuid
     /// that leads `Truncated` since its last new write.
     truncated: Vec<bool>,
-    /// The last uuid drawn.
+    /// The last id drawn: a uuid or a multi tag.
     uuids: u128,
+    /// The leader value of the last `SetLeader` asked for.
+    drawn: Leader,
     /// The last record id drawn.
     ids: u64,
 }
@@ -347,20 +346,20 @@ impl Model for ClientModel {
         let leader = self.current().fold.leader();
         let next = self.current().fold.next_seq().0;
         let (call, asked) = match action {
-            ClientAction::Claim => {
+            ClientAction::Claim | ClientAction::ToMulti => {
+                // A uuid or a multi tag, fresh: the program draws it (§J2.3,
+                // §J2.4.1).
                 self.uuids += 1;
-                let uuid = LeaderUuid(self.uuids);
+                let id = LeaderUuid(self.uuids);
+                let new = if action == ClientAction::Claim {
+                    Leader::uuid(id)
+                } else {
+                    Leader::multi(id)
+                };
+                self.drawn = new;
                 let old = self.old_leader(leader, cx);
                 let client = &mut self.programs[index].client;
-                (
-                    client.set_leader(Some(uuid), old),
-                    Asked::SetLeader(Some(uuid)),
-                )
-            }
-            ClientAction::ToMulti => {
-                let old = self.old_leader(leader, cx);
-                let client = &mut self.programs[index].client;
-                (client.set_leader(None, old), Asked::SetLeader(None))
+                (client.set_leader(new, old), Asked::SetLeader(new))
             }
             ClientAction::Write => {
                 let (ids, records) = self.records(cx);
@@ -441,11 +440,14 @@ impl ClientModel {
     /// The walk with `mutant` planted. The fresh journal is unset, or
     /// multi-writer on one seed in four.
     pub fn build(mutant: ClientMutant, cx: &mut Cx<'_, Self>) -> Self {
+        // A multi-writer fresh journal takes the tag of its configuration:
+        // the first id of the walk.
         let fresh = if cx.rng().chance(1, 4) {
-            Leader::Multi
+            Leader::multi(LeaderUuid(1))
         } else {
             Leader::Unset
         };
+        let uuids = u128::from(fresh.is_multi());
         Self {
             mutant,
             segments: vec![Segment::new(BoundaryState::fresh(fresh))],
@@ -461,7 +463,6 @@ impl ClientModel {
             fenced: BTreeSet::new(),
             refused: BTreeSet::new(),
             installed: BTreeSet::new(),
-            to_multi: vec![(0, 0); CLIENTS],
             sent: Vec::new(),
             replaying: false,
             truncated: vec![false; CLIENTS],
@@ -469,7 +470,8 @@ impl ClientModel {
             placed: BTreeSet::new(),
             belows: BTreeSet::new(),
             again: BTreeSet::new(),
-            uuids: 0,
+            uuids,
+            drawn: fresh,
             ids: 0,
         }
     }
@@ -490,7 +492,9 @@ impl ClientModel {
         } else {
             match cx.rng().below(3) {
                 0 => Leader::Unset,
-                1 => Leader::Multi,
+                // A mode named by the id drawn before the call: often an
+                // earlier mode, sometimes the one in force.
+                1 => Leader::multi(LeaderUuid(self.uuids.saturating_sub(1).max(1))),
                 _ => Leader::uuid(LeaderUuid(
                     1 + u128::from(cx.rng().below(u64::try_from(self.uuids).expect("few"))),
                 )),
@@ -658,15 +662,15 @@ impl ClientModel {
     }
 
     /// [`ClientMutant::ForgedRefusal`]: a refused `SetLeader` names the
-    /// last uuid drawn. [`ClientMutant::ShortView`]: a won `SetLeader` names
-    /// a tail one short.
+    /// last leader value drawn. [`ClientMutant::ShortView`]: a won
+    /// `SetLeader` names a tail one short.
     fn forge(&self, answer: Answer) -> Answer {
         match answer {
             Answer::LeaderRefused(view)
-                if self.mutant == ClientMutant::ForgedRefusal && self.uuids > 0 =>
+                if self.mutant == ClientMutant::ForgedRefusal && self.drawn != Leader::Unset =>
             {
                 Answer::LeaderRefused(JournalView {
-                    leader: Leader::uuid(LeaderUuid(self.uuids)),
+                    leader: self.drawn,
                     ..view
                 })
             }
@@ -731,12 +735,15 @@ impl ClientModel {
                 }
                 sometimes!(segments >= 3, reach::THIRD);
             }
-            (Answer::LeaderSet(_), Command::SetLeader { new, .. }) => match new {
-                Some(uuid) => {
-                    self.installed.insert(uuid.0);
-                }
-                None => self.to_multi[index].0 += 1,
-            },
+            (
+                Answer::LeaderSet(_),
+                Command::SetLeader {
+                    new: Leader::Uuid(id) | Leader::Multi(id),
+                    ..
+                },
+            ) => {
+                self.installed.insert(id.0);
+            }
             (
                 Answer::Fenced(_) | Answer::Taken(_) | Answer::WrongMode(_),
                 Command::Write(write),
@@ -757,7 +764,7 @@ impl ClientModel {
             (Answer::Duplicate { .. }, _) => sometimes!(true, reach::DUPLICATE),
             (Answer::LeaderRefused(view), Command::SetLeader { new, .. }) => {
                 sometimes!(
-                    new.is_some_and(LeaderUuid::is_set) && view.leader == Leader::from_new(*new),
+                    *new != Leader::Unset && view.leader == *new,
                     reach::LOST_WIN
                 );
             }
@@ -853,15 +860,14 @@ impl ClientModel {
             (Asked::Write(_), Outcome::Truncated(_)) => sometimes!(true, reach::TRUNCATED),
             (Asked::SetLeader(new), Outcome::LeaderSet(view)) => {
                 assert!(
-                    view.leader == Leader::from_new(*new),
+                    view.leader == *new,
                     "{LED}: SetLeader({new:?}) reported set with {view:?}"
                 );
-                let applied = if let Some(uuid) = new {
-                    self.installed.contains(&uuid.0)
-                } else {
-                    let counts = &mut self.to_multi[index];
-                    counts.1 += 1;
-                    counts.1 <= counts.0
+                // Ids are fresh, so a copy of this call applied iff its id
+                // was installed.
+                let applied = match new {
+                    Leader::Uuid(id) | Leader::Multi(id) => self.installed.contains(&id.0),
+                    Leader::Unset => false,
                 };
                 assert!(
                     applied,
