@@ -150,6 +150,7 @@ impl ColocatedNode {
             election_elapsed: 0,
             pull_index: None,
             pull_beats: 0,
+            catchup_asked: None,
             election_timeout: 0,
             needs_election_timeout: true,
             counters: Counters::default(),
@@ -172,6 +173,8 @@ impl ColocatedNode {
             leadership_origin: LeadershipOrigin::Elected,
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),
+            flight: None,
+            flights: 0,
         };
         if node.replica.fold_hole().is_some() {
             // A faulty record under the durable chosen index (#343): the fold

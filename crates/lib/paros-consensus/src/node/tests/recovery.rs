@@ -423,6 +423,14 @@ fn a_trim_point_jump_drops_a_faulty_record_below_it() {
     assert!(!n.acceptor().faulty().is_empty());
     let chosen = n.hard_state().chosen_index;
 
+    // A trim point is taken only as the answer to an open request: the node
+    // asks from the first slot it misses, its rotted record.
+    assert_eq!(
+        n.catch_up_need(),
+        Slot(1),
+        "the node misses its rotted slot"
+    );
+    let _ = n.catch_up_request(n.catch_up_need());
     n.step(Message::TrimmedTo {
         from: NodeId(0),
         point: Slot(2),
@@ -717,6 +725,8 @@ fn a_trim_point_jump_resolves_a_blocked_repair_below_it() {
     assert_eq!(n.blocked_repairs(), 1, "slot 0 waits for node 1");
     let promised = n.hard_state().max_promised_ballot;
 
+    // A trim point is taken only as the answer to a request.
+    let _ = n.catch_up_request(Slot(0));
     n.step(Message::TrimmedTo {
         from: NodeId(1),
         point: Slot(1),

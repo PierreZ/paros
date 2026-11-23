@@ -290,6 +290,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn resend_matchmaking(&mut self) {
+        self.assert_landed();
         let marks = self.durable_marks();
         let ballot = self.ballot;
         self.queue_match_requests(false);
@@ -708,6 +709,7 @@ impl ColocatedNode {
     /// condition.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn rejoin(&mut self) -> bool {
+        self.assert_landed();
         if !self.config.has_matchmakers() {
             assert!(self.rejoin.is_none(), "plain Multi-Paxos never rejoins");
             return false;
@@ -863,6 +865,7 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = reply.matchmaker.0, round = reply.ballot.round)))]
     pub fn on_match_reply(&mut self, reply: MatchReply) -> MatchStep {
+        self.assert_landed();
         let generation = reply.generation;
         // #190: a set answers for every journal of its tenant; only this
         // journal's registry answers this campaign.
@@ -1810,6 +1813,7 @@ impl ColocatedNode {
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, generation = set.generation.0)))]
     pub fn learn_matchmakers(&mut self, set: &MatchmakerSet) -> bool {
+        self.assert_landed();
         let Some(believed) = self.matchmakers.as_ref() else {
             return false;
         };

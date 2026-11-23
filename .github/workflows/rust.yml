@@ -66,7 +66,11 @@ jobs:
         run: scripts/check-module-style.sh
       # #730 (paros-consensus rework): foundations <- roles <- deployments.
       - name: Check the paros-consensus layers
-        run: scripts/check-core-layers.sh
+        run: scripts/check-core-layers.sh && scripts/check-core-layers.sh --self-test
+      # #248 (TigerStyle assertions): the assertions per function of paros-consensus only go up.
+      # The floor is the density of main, to four places; a pull request that raises the density raises it.
+      - name: Check the paros-consensus assertion density
+        run: scripts/count-assertions.py --min 1.6536
       # docs/journal/04-roles.md §J4.3: no runtime, I/O or storage dependency in the pure crates.
       - name: Check the pure crates' dependencies
         run: nix develop --command scripts/check-core-deps.sh

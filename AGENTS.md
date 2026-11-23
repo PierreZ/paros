@@ -290,7 +290,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
   `-p paros-journal`, `-p paros-journal-control` and `-p paros-journal-io`
-- `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` and `scripts/check-core-deps.sh`
+- `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` (and its `--self-test`),
+  `scripts/count-assertions.py --min <floor>` (#248 (TigerStyle assertions)) and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
 - `scripts/check-layers.sh` (the layers of the crates, from the table `scripts/layers.sh`;
   `docs/architecture/04-roles.md` §4.4, "How CI holds the layers"), and
@@ -741,7 +742,9 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   again where it is read back, e.g. at persist and at boot); assert the negative space as well as
   the positive; assert relationships between constants at compile time (`const _: () =
   assert!(..)`); split compound conditions into one assertion each. Every assertion is an
-  oracle for free in every test and every future simulation. The trust rule above still holds: what a correct peer or
+  oracle for free in every test and every future simulation. `scripts/count-assertions.py`
+  measures the density per module; the `checks` job fails when the density of the crate falls
+  below its floor (`--min`), and a pull request that raises the density raises the floor. The trust rule above still holds: what a correct peer or
   client can send is a result, never a panic. Reference: TigerBeetle's `TIGER_STYLE.md`.
 - **Coverage probes in `paros-consensus`** (decided on 2026-10-09, #317): a rare protocol branch a
   test or a simulation must reach is a `probe!(reachable, "..")` or `probe!(sometimes, cond, "..")` at the line
@@ -832,5 +835,5 @@ is the map), `docs/knowledge/`
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
-`check-core-layers.sh`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutants.sh` and `mutants-plan.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
+`check-core-layers.sh`, `count-assertions.py`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutants.sh` and `mutants-plan.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

@@ -244,3 +244,87 @@ fn a_learn_below_the_floor_is_a_programmer_error() {
     let mut writes: Vec<WriteOp> = Vec::new();
     let _ = acceptor.learn_chosen(Slot(1), ballot(1), &command(1), &mut writes);
 }
+
+/// `prepare` at the role (#907 (core unit tests)): a higher ballot raises
+/// the promise with one write, the same ballot re-affirms it with none, a
+/// lower ballot is refused, and a range below the floor is refused without
+/// a move of the promise, whatever the ballot.
+#[test]
+fn prepare_raises_reaffirms_refuses_and_guards_the_floor() {
+    let mut acceptor: Acceptor<Command> =
+        Acceptor::new(ballot(2), BTreeMap::new(), Slot(3), BTreeMap::new());
+    let mut writes: Vec<WriteOp> = Vec::new();
+    assert_eq!(
+        acceptor.prepare(ballot(5), Slot(1), &mut writes),
+        PrepareOutcome::BelowFloor
+    );
+    assert_eq!(acceptor.promised(), ballot(2), "a laggard never ratchets");
+    assert_eq!(writes.len(), 0);
+    assert_eq!(
+        acceptor.prepare(ballot(1), Slot(3), &mut writes),
+        PrepareOutcome::Refused
+    );
+    assert_eq!(writes.len(), 0);
+    assert_eq!(
+        acceptor.prepare(ballot(4), Slot(3), &mut writes),
+        PrepareOutcome::Promised { raised: true }
+    );
+    assert_eq!(acceptor.promised(), ballot(4));
+    assert_eq!(writes.len(), 1, "a raise writes the promise once");
+    assert_eq!(
+        acceptor.prepare(ballot(4), Slot(7), &mut writes),
+        PrepareOutcome::Promised { raised: false }
+    );
+    assert_eq!(writes.len(), 1, "a page continuation writes nothing");
+}
+
+/// `admit` at the role: an `Accept` below the floor is ignored, one below
+/// the promise is refused, one at or above the promise lands; `admit` moves
+/// nothing.
+#[test]
+fn admit_ignores_below_the_floor_and_refuses_below_the_promise() {
+    let acceptor: Acceptor<Command> =
+        Acceptor::new(ballot(3), BTreeMap::new(), Slot(2), BTreeMap::new());
+    assert_eq!(
+        acceptor.admit(ballot(9), Slot(1)),
+        AcceptOutcome::BelowFloor
+    );
+    assert_eq!(acceptor.admit(ballot(2), Slot(2)), AcceptOutcome::Refused);
+    assert_eq!(acceptor.admit(ballot(3), Slot(2)), AcceptOutcome::Admitted);
+    assert_eq!(acceptor.admit(ballot(4), Slot(9)), AcceptOutcome::Admitted);
+    assert_eq!(acceptor.promised(), ballot(3), "admit only answers");
+}
+
+/// `promise_page` at the role: the union of readable and faulty slots in
+/// slot order, cut at the limit with a cursor at the next slot held, and no
+/// cursor once the suffix is carried.
+#[test]
+fn promise_pages_walk_the_readable_and_faulty_union() {
+    let mut records = BTreeMap::new();
+    for s in [1u64, 2, 5] {
+        records.insert(Slot(s), (ballot(1), command(u8::try_from(s).unwrap())));
+    }
+    let mut faulty = BTreeMap::new();
+    faulty.insert(Slot(3), ballot(1));
+    let acceptor = Acceptor::new(ballot(1), records, Slot(1), faulty);
+    let first = acceptor.promise_page(Slot(0), 2);
+    assert_eq!(
+        first.accepted.keys().copied().collect::<Vec<_>>(),
+        [Slot(1), Slot(2)]
+    );
+    assert!(first.faulty.is_empty());
+    assert_eq!(first.next_from_slot, Some(Slot(3)));
+    let second = acceptor.promise_page(Slot(3), 2);
+    assert_eq!(second.faulty.keys().copied().collect::<Vec<_>>(), [Slot(3)]);
+    assert_eq!(
+        second.accepted.keys().copied().collect::<Vec<_>>(),
+        [Slot(5)]
+    );
+    assert_eq!(second.next_from_slot, None, "the suffix ends on this page");
+    let tail = acceptor.promise_page(Slot(6), 2);
+    assert!(tail.accepted.is_empty() && tail.faulty.is_empty());
+    assert_eq!(tail.next_from_slot, None, "an empty tail has no cursor");
+    let whole = acceptor.promise_page(Slot(0), 8);
+    assert_eq!(whole.accepted.len() + whole.faulty.len(), 4);
+    assert_eq!(whole.next_from_slot, None, "a page that fits has no cursor");
+}

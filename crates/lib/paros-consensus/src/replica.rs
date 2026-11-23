@@ -1221,6 +1221,11 @@ impl Replica {
             "the retention floor never moves backward"
         );
         assert!(first <= self.folded, "a prefix drop never passes the fold");
+        // The base comes from this node's own fold, or from a pooled peer's
+        // `TrimmedTo`. The trust rule (decision 30): a correct peer sends the
+        // state its own fold reached, which holds the journal's invariants,
+        // and the transport proves the bytes. A broken state is a detected
+        // corruption of a peer's fold.
         base.assert_invariants();
         self.base = base;
         self.floor = first;

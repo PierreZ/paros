@@ -377,6 +377,39 @@ impl QuorumSystem {
         intersects
     }
 
+    /// Whether every two Phase-1 quorums of one configuration meet. Paxos
+    /// safety does not need it (it needs [`QuorumSystem::cross_intersects`]),
+    /// but the read fence does: a read that asks a Phase-1 quorum sees a
+    /// campaign that ran over another one only when the two meet. A majority
+    /// meets itself. A grid meets itself when `2 * (rows - acks + 1) > rows`:
+    /// true of the partitions ([`QuorumSystem::partitions`]), false of a
+    /// full-column grid ([`QuorumSystem::grid`]), where two rows do not meet
+    /// and an election seals each row instead ([`QuorumSystem::is_phase1_seal`]).
+    /// `specs/tla/grid/` checks the formula (`Phase1Meets`, with its control
+    /// `grid_full_rows`).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn phase1_quorums_meet(self) -> bool {
+        match self {
+            QuorumSystem::Majority => true,
+            QuorumSystem::Grid { rows, .. } => {
+                let per_column = self
+                    .phase1_per_column()
+                    .expect("a grid has a Phase-1 count per column");
+                let meet = per_column.saturating_mul(2) > rows;
+                // A full-column grid asks one acceptor per column: with two
+                // rows or more, two rows do not meet.
+                if per_column == 1 && rows >= 2 {
+                    assert!(!meet, "two rows of a full-column grid do not meet");
+                }
+                meet
+            }
+        }
+    }
+
     /// Whether this quorum system can be run over a membership of `members`
     /// at all: each phase's quorum is at least one acceptor and at most the
     /// membership, and the two cross-intersect. This is the
@@ -388,7 +421,13 @@ impl QuorumSystem {
     /// admits `n` when `rows >= 1`, `cols >= 1`, `1 <= acks <= rows` and
     /// `rows * cols == n` — the layout must tile the membership exactly, or some row or column would
     /// be short and the set-membership predicates would answer for a member
-    /// that does not exist.
+    /// that does not exist. A grid that is not full-column (`acks < rows`)
+    /// must also have Phase-1 quorums that meet
+    /// ([`QuorumSystem::phase1_quorums_meet`]): an election seals each row
+    /// only on a full-column grid, so on any other grid a leaderless read
+    /// sees a campaign only through a common acceptor. `rows = 4, acks = 3`
+    /// is refused: TLC finds a stale read across a change of members there
+    /// (#1483 (read fence on a grid whose Phase-1 quorums do not meet)).
     ///
     /// # Panics
     ///
@@ -403,6 +442,7 @@ impl QuorumSystem {
                     && cols >= 1
                     && (1..=rows).contains(&acks)
                     && rows.checked_mul(cols) == Some(members)
+                    && (acks == rows || self.phase1_quorums_meet())
             }
         };
         // Admission is exactly what Paxos safety needs: every admitted system
@@ -413,6 +453,13 @@ impl QuorumSystem {
                 "an admitted system cross-intersects"
             );
             assert!(members >= 1, "an admitted system has a member");
+            // The read fence: Phase-1 quorums meet, or an election seals
+            // each row of a full-column grid.
+            assert!(
+                self.phase1_quorums_meet()
+                    || matches!(self, QuorumSystem::Grid { rows, acks, .. } if acks == rows),
+                "an admitted grid seals its rows or its Phase-1 quorums meet"
+            );
         }
         admits
     }

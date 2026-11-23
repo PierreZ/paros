@@ -19,8 +19,11 @@ The modules make three layers that point down only (#730 (paros-consensus rework
   one `Ready`. It never uses another deployment.
 
 `scripts/check-core-layers.sh` fails on a `crate::<module>` path that reaches up a layer (CI
-`checks` job). It reads only that form: a grouped `use crate::{..}` or a `super::` path escapes
-it, so the modules write each upward-looking import as `crate::<module>`. Test code (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt. A new module
+`checks` job). It maps each re-export of the crate root (`crate::ColocatedNode`) to its module,
+and fails on the two forms that hide a module: a grouped `use crate::{..}` and
+`super::super::`. So the modules write each upward-looking import as `crate::<module>::..`. Its
+`--self-test` runs it on `scripts/fixtures/core-layers/` (a good tree, and one bad tree per
+form); CI runs both. Test code (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt. A new module
 gets its layer in that script.
 
 ## Map
@@ -30,7 +33,7 @@ Foundations:
 - `probe.rs` → `probe!(reachable, "..")` / `probe!(sometimes, cond, "..")` → coverage probes
   (#317) behind `assertions` (first in `lib.rs`: a textual-scope macro).
 - `types.rs` → the Paxos scalars: `NodeId`, `Slot`, `Ballot`, `Value`, `Fingerprint`, and `fnv1a` with `FNV_OFFSET`, the one FNV-1a step every fingerprint and trace digest folds with.
-- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`, `shape_error.rs`) → `ShapeError` (why a membership from the wire or an operator is refused), `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, #215 (zones); it names no cell: cells are the upper stack's, #1264 (remove the cell)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`).
+- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`, `shape_error.rs`) → `ShapeError` (why a membership from the wire or an operator is refused), `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, #215 (zones); it names no cell: cells are the upper stack's, #1264 (remove the cell)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`); a grid with `acks < rows` is admitted only when its Phase-1 quorums meet (`phase1_quorums_meet`, #1483 (read fence on a grid whose Phase-1 quorums do not meet)).
 - `journal.rs` + `journal/` → what the log carries, judged at apply (not Paxos):
   - `ids.rs` → `TenantId`, `JournalId`, `JournalIdentifier` (the identifier, #235), `LeaderUuid`, `Seq`.
   - `command.rs` → `Command`, `Control`, `Entry`, `command_fingerprint`.
@@ -41,7 +44,7 @@ Foundations:
   - `storage.rs` → `Storage`, the read-only recovery port.
   - `mem_storage.rs` → `MemStorage`: the in-memory `Storage` a driver writes with `apply` (tests, examples); `rot` damages a record into a faulty entry, and a later write at its slot heals it.
   - `hard_state.rs` → `HardState` (two scalars, `#[non_exhaustive]`); `config.rs` → `Config` (`proxy_count`, `replica_count`, `reply_owner`).
-  - `limits.rs` → `Limits` (the page sizes, the read window and the proxy leader's retention a deployment takes at construction), the ceilings (`RECOVERY_BATCH`, `PROMISE_BATCH`, `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE`) and the read-window floor `READ_TTL_TICKS` (crate-private: `Limits::kept_read_window` raises the driver's window to it).
+  - `limits.rs` → `Limits` (the page sizes, the read window and the proxy leader's retention a deployment takes at construction), the ceilings (`RECOVERY_BATCH`, `PROMISE_BATCH`, `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE`, `CATCHUP_BATCH`) and the read-window floor `READ_TTL_TICKS` (crate-private: `Limits::kept_read_window` raises the driver's window to it).
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
 
 Roles (pure tallies, no deployment knowledge):
@@ -67,11 +70,11 @@ Roles (pure tallies, no deployment knowledge):
 Deployments (each wires roles and owns one `Ready`):
 
 - `node.rs` → `ColocatedNode`, `Delegation` → the protocol entry points (`new`, `step`, `tick`, `propose*`, `compact`, `repair_record`, `ready`). Its plain Multi-Paxos path (Phase 1 recovery, the allocator frontier, the `Noop` gap fill, commit and catch-up, restarts, the majority and the grid) has its TLA+ model in `specs/tla/multi-paxos/` (#1185 (rework 1.14)).
-- `node/ready.rs` → `Ready<'a>` (second `ready()` before `advance()` is a compile error).
+- `node/ready.rs` → `Ready<'a>` (second `ready()` before `advance()` is a compile error) and `Flight` (#1100): an async driver calls `Ready::release` to keep the batch's token across its fsync, and gives it back with `ColocatedNode::durable`; until then `step`, `tick` and `ready` panic.
 - `node/policy.rs` → the driver-policy methods (`resend_pending`, `take_back_delegated`, `move_round`, `step_down`, `campaign`, `campaign_above`, `advance_recovery`, `set_election_timeout`, `extend_pool`).
 - `node/view.rs` → the read-only accessors (`config`, `limits`, `pool`, `acceptors`, `read_basis`, `hard_state`, `role`, `leader`, `read_log`, …).
 - `node/counters.rs` → the private `Counters`, `RepairCounters`, `MembershipCounters` and the `NodeCounters` snapshot (`ColocatedNode::counters`).
-- `node/{election,phase2,learn,replication,catch_up}.rs` → campaign (a paging campaign re-sends its `Prepare` to the peers that answered on every tick, #428 (paging livelock), asked from one past the highest slot the tally merged (`Election::keep_alive_from`), so an answered peer re-affirms with an empty page, never its whole suffix again), Phase-2 open/delegate/decide (`record_own_round`), learner, catch-up + trim-point jump; a follower pulls a gap from the beat's sender, and from the whole pool once its pulls at one chosen index outlast an election timeout (`PULL_FALLBACK_BEATS` at least, #349: a dead lane to a renamed leader).
+- `node/{election,phase2,learn,replication,catch_up}.rs` → campaign (a paging campaign re-sends its `Prepare` to the peers that answered on every tick, #428 (paging livelock), asked from one past the highest slot the tally merged (`Election::keep_alive_from`), so an answered peer re-affirms with an empty page, never its whole suffix again), Phase-2 open/delegate/decide (`record_own_round`), learner, catch-up + trim-point jump (taken only as the answer to a `CatchUpRequest` the node sent below the point, `catchup_asked`; an unasked one makes the node ask); a follower pulls a gap from the beat's sender, and from the whole pool once its pulls at one chosen index outlast an election timeout (`PULL_FALLBACK_BEATS` at least, #349: a dead lane to a renamed leader).
 - `node/{authority,quorum_reads}.rs` → `CheckQuorum`; the read path (`PreRead` wiring, `serve_quorum_reads`/`tick_quorum_reads`).
 - `node/{handoff,gc,matchmaking,reconfigure}.rs` → `DPaxos` handoff, GC wiring, matchmaking wiring, online reconfiguration (`relinquish_to`, `reconfigure`, `quorum_read`).
 - `node/{boot,acceptor,helpers,invariants}.rs` → boot path, acceptor wiring, `adopt_configuration`, `assert_invariants`.

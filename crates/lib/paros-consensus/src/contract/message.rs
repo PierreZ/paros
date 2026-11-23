@@ -324,8 +324,12 @@ pub enum Message {
         from: NodeId,
         /// The rejected ballot, echoed from the `Prepare`/`Accept` that was
         /// refused (matches the proposer's in-flight campaign or accept round).
-        /// The winning promise deliberately does not travel with it: an
-        /// untrusted wire value must never select a future campaign round.
+        /// The winning promise does not travel with it: a `Nack` only ends
+        /// the refused campaign or round. The next campaign opens above the
+        /// highest ballot this node promised and above the round floor that
+        /// the matchmakers taught (`round_floor`). Both rules are the trust
+        /// rule (decision 30): a pooled peer is correct, so a ballot that it
+        /// names is a ballot it saw, and a candidate may open above it.
         ballot: Ballot,
         /// The contested slot: the `Accept`'s slot, or the `Prepare`'s
         /// `from_slot` when a `Prepare` is refused.

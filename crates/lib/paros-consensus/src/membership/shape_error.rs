@@ -19,7 +19,8 @@ pub enum ShapeError {
     /// The membership names no member: no quorum can form.
     NoMember,
     /// The quorum system does not admit the membership: a grid that does not
-    /// tile it, or quorums that do not cross-intersect.
+    /// tile it, quorums that do not cross-intersect, or a grid that is not
+    /// full-column and whose Phase-1 quorums do not meet.
     QuorumNotAdmitted,
     /// One member is named twice with two failure domains.
     TwoDomains,
