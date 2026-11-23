@@ -244,5 +244,5 @@ fn crash_the_leader(cluster: &mut Cluster) {
     for id in [N1, N2, N3] {
         assert_eq!(cluster.journal(id), ["alpha", "bravo", "charlie", "delta"]);
     }
-    assert!(cluster.node(N1).replica().chosen_at(Slot(0)).is_some());
+    assert!(cluster.node(N1).chosen_at(Slot(0)).is_some());
 }

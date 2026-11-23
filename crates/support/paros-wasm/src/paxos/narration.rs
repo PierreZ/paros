@@ -238,7 +238,10 @@ impl NodeSnapshot {
             alive: true,
             promised: node.acceptor().promised(),
             records: node.acceptor().records().clone(),
-            chosen: node.replica().chosen().clone(),
+            chosen: node
+                .chosen_commands()
+                .map(|(slot, command)| (slot, command.clone()))
+                .collect(),
             chosen_index: node.replica().chosen_index(),
             first_unchosen: node.replica().first_unchosen(),
             floor: node.acceptor().first_slot(),

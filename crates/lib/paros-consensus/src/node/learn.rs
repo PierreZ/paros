@@ -9,6 +9,25 @@
 //! deciding — is `node/phase2.rs`.
 
 use super::{Ballot, ColocatedNode, Command, NodeRole, Party, Slot};
+use crate::acceptor::Acceptor;
+use crate::replica::ChosenLog;
+
+/// The node's chosen log is its acceptor's records: every record of a slot
+/// known chosen carries the chosen command (`Acceptor::learn_chosen` writes
+/// it before the replica learns the slot, and the P2c chain keeps it), so
+/// the node holds one copy of each retained command (#1101 (one copy of
+/// the retained log)). The deployment wires the two roles; neither reads
+/// the other.
+impl ChosenLog for Acceptor<Command> {
+    fn record(&self, slot: Slot) -> Option<(Ballot, &Command)> {
+        let record = Acceptor::record(self, slot).map(|(ballot, command)| (*ballot, command));
+        assert!(
+            record.is_none() || slot >= self.first_slot(),
+            "the chosen log holds no record below its floor"
+        );
+        record
+    }
+}
 
 impl ColocatedNode {
     /// Learner: a command was chosen elsewhere — by another leader's tally,
@@ -68,7 +87,7 @@ impl ColocatedNode {
         if slot < self.acceptor.first_slot() {
             return;
         }
-        if let Some(known) = self.replica.chosen_at(slot) {
+        if let Some(known) = self.replica.chosen_at(&self.acceptor, slot) {
             // Agreement, locally: a slot is chosen once. Relearning it (a
             // duplicated `Commit`, a catch-up replay, a handoff's decided
             // tail) must bring the same value back; a different one is the
@@ -122,7 +141,7 @@ impl ColocatedNode {
             self.role != NodeRole::Candidate || self.acceptor.promised() == self.ballot,
             "a learned slot leaves a live campaign's promise at its ballot"
         );
-        self.replica.learn(slot, command);
+        self.replica.learn(&self.acceptor, slot, command);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).
         self.proposer.probe_resolved_elsewhere(slot);
@@ -161,20 +180,13 @@ impl ColocatedNode {
         // A faulty record inside the chosen prefix is a hole in the journal
         // fold: the replica holds the walk until it heals (catch-up pulled
         // by `tick_repair`, a trim-point jump, or this node's own election).
-        let acceptor = &self.acceptor;
-        let truncate_up_to = self.replica.advance(
-            |slot, command| {
-                acceptor
-                    .record(slot)
-                    .filter(|(_, recorded)| recorded == command)
-                    .map(|(ballot, _)| *ballot)
-            },
-            &mut self.pending_writes,
-        );
+        let truncate_up_to = self
+            .replica
+            .advance(&self.acceptor, &mut self.pending_writes);
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
-        self.replica.assert_compacted();
+        self.replica.assert_compacted(&self.acceptor);
         self.serve_quorum_reads();
         // The walk only advances the prefix, and never past what it holds.
         assert!(

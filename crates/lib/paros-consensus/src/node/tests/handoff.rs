@@ -1014,7 +1014,7 @@ fn a_handoff_leader_fills_to_its_own_orphan_vote() {
         "the leader filled its own orphan"
     );
     assert_eq!(
-        nodes[4].replica.chosen_at(orphan),
+        nodes[4].chosen_at(orphan),
         Some(&Command::Control(Control::Noop)),
         "a Noop is chosen over the orphan"
     );
@@ -1035,7 +1035,7 @@ fn a_handoff_leader_fills_its_orphan_when_it_answers_a_read() {
         "the leader filled as it answered"
     );
     assert_eq!(
-        nodes[4].replica.chosen_at(orphan),
+        nodes[4].chosen_at(orphan),
         Some(&Command::Control(Control::Noop)),
         "a Noop is chosen over the orphan"
     );

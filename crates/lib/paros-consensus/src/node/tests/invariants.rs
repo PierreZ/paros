@@ -243,7 +243,11 @@ fn a_fold_past_a_faulty_slot_fails_the_invariants() {
     storage.rot(Slot(1));
     let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
     assert_eq!(n.replica.fold_hole(), Some(Slot(1)));
-    n.replica.learn(Slot(1), &ucmd(1, 2, 20));
+    // A log that holds slot 1, unlike this node's acceptor: only a bug
+    // hands the replica a slot its own records cannot read.
+    let mut log = n.acceptor.records().clone();
+    log.insert(Slot(1), (ballot(1, 1), ucmd(1, 2, 20)));
+    n.replica.learn(&log, Slot(1), &ucmd(1, 2, 20));
     n.assert_invariants();
 }
 
@@ -440,10 +444,10 @@ fn the_view_reports_the_clock_and_the_matchmaker_pool() {
 #[test]
 fn a_read_basis_moves_to_a_new_fence_at_the_same_ballot() {
     let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
-    n.learn_read_basis(cfg(&[0, 1, 2]), ballot(3, 1), Some(Slot(1)));
-    n.learn_read_basis(cfg(&[0, 1, 2]), ballot(3, 1), Some(Slot(4)));
+    n.learn_read_basis(&cfg(&[0, 1, 2]), ballot(3, 1), Some(Slot(1)));
+    n.learn_read_basis(&cfg(&[0, 1, 2]), ballot(3, 1), Some(Slot(4)));
     assert_eq!(n.read_basis().and_then(|b| b.fence), Some(Slot(4)));
-    n.learn_read_basis(cfg(&[0, 1, 2]), ballot(2, 1), Some(Slot(9)));
+    n.learn_read_basis(&cfg(&[0, 1, 2]), ballot(2, 1), Some(Slot(9)));
     assert_eq!(n.read_basis().and_then(|b| b.fence), Some(Slot(4)));
 }
 
@@ -484,7 +488,7 @@ fn an_accept_for_a_chosen_slot_with_another_command_trips_the_node() {
 #[test]
 fn an_accept_for_a_chosen_slot_with_the_chosen_command_lands() {
     let mut nodes = cluster_with_three_chosen();
-    let chosen = nodes[1].replica.chosen_at(Slot(0)).cloned().unwrap();
+    let chosen = nodes[1].chosen_at(Slot(0)).cloned().unwrap();
     nodes[1].step(accept(2, ballot(9, 2), 0, chosen.clone()));
     assert_eq!(
         nodes[1].acceptor().record(Slot(0)),
@@ -492,18 +496,19 @@ fn an_accept_for_a_chosen_slot_with_the_chosen_command_lands() {
     );
 }
 
-/// The read side of the chosen/record pair: a chosen slot whose record
-/// carries another command breaks the check.
+/// The read side of the chosen/record pair: a chosen slot that lost its
+/// record breaks the check (the record is the node's one copy).
 #[test]
-#[should_panic(expected = "a chosen slot's record carries the chosen command")]
-fn a_chosen_slot_whose_record_differs_breaks_the_check() {
+#[should_panic(expected = "a chosen slot holds its authoritative accepted record")]
+fn a_chosen_slot_with_no_record_breaks_the_check() {
     let mut nodes = cluster_with_three_chosen();
-    let mut writes: Vec<WriteOp> = Vec::new();
-    nodes[1].acceptor.set_promise(ballot(9, 2), &mut writes);
-    nodes[1]
-        .acceptor
-        .record_accepted(Slot(2), ballot(9, 2), ucmd(1, 9, 99), &mut writes);
-    nodes[1].assert_invariants();
+    let n = &mut nodes[1];
+    // A log that holds slot 5, unlike this node's acceptor: only a bug
+    // hands the replica a slot its own records cannot read.
+    let mut log = n.acceptor.records().clone();
+    log.insert(Slot(5), (ballot(1, 1), ucmd(1, 9, 99)));
+    n.replica.learn(&log, Slot(5), &ucmd(1, 9, 99));
+    n.assert_invariants();
 }
 
 /// The `None` arm: a plain deployment hears no GC floor.

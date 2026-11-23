@@ -713,7 +713,7 @@ impl ColocatedNode {
         // ballot among them. Opened after the pump, a leader re-elected over
         // an earlier basis panicked there and left the run (#263's hunt,
         // witness 17670199652380691451: red, then green with this order).
-        self.learn_read_basis(self.belief.config().clone(), self.ballot, fence);
+        self.learn_read_basis(&self.belief.config().clone(), self.ballot, fence);
         // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
         //
         // Re-proposing `recovered` covers every slot the quorum saw accepted, and

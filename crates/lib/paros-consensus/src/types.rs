@@ -56,9 +56,19 @@ impl Value {
 
     /// Whether `self` and `other` share one copy of their bytes: a clone
     /// does, a value built again from the same bytes does not.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn shares_bytes_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        let shared = Arc::ptr_eq(&self.0, &other.0);
+        assert!(
+            !shared || self == other,
+            "values that share bytes are equal"
+        );
+        shared
     }
 }
 
@@ -78,19 +88,40 @@ impl AsRef<[u8]> for Value {
 
 impl From<Vec<u8>> for Value {
     fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes.into())
+        let len = bytes.len();
+        let value = Self(bytes.into());
+        assert_eq!(
+            value.len(),
+            len,
+            "a value holds every byte it was built from"
+        );
+        value
     }
 }
 
 impl From<&[u8]> for Value {
     fn from(bytes: &[u8]) -> Self {
-        Self(bytes.into())
+        let len = bytes.len();
+        let value = Self(bytes.into());
+        assert_eq!(
+            value.len(),
+            len,
+            "a value holds every byte it was built from"
+        );
+        value
     }
 }
 
 impl<const N: usize> From<&[u8; N]> for Value {
     fn from(bytes: &[u8; N]) -> Self {
-        Self(bytes.as_slice().into())
+        let value = Self(bytes.as_slice().into());
+        let len = N;
+        assert_eq!(
+            value.len(),
+            len,
+            "a value holds every byte it was built from"
+        );
+        value
     }
 }
 

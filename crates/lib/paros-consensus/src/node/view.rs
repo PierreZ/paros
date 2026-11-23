@@ -394,6 +394,51 @@ impl ColocatedNode {
         &self.acceptor
     }
 
+    /// Every slot this node knows chosen (contiguous or not) with its
+    /// command, in slot order, read from the acceptor's records: what a
+    /// driver or an oracle observes of the chosen log.
+    ///
+    /// # Panics
+    ///
+    /// If a chosen slot has no record: the node broke the coupling of a
+    /// chosen slot and its record, a programmer error.
+    pub fn chosen_commands(&self) -> impl Iterator<Item = (Slot, &Command)> + '_ {
+        self.replica.chosen().iter().map(|slot| {
+            let command = self
+                .replica
+                .chosen_at(&self.acceptor, *slot)
+                .expect("a slot known chosen is read from its record");
+            assert!(
+                *slot >= self.acceptor.first_slot(),
+                "a chosen command is read at or above the floor"
+            );
+            (*slot, command)
+        })
+    }
+
+    /// The command chosen at `slot`, if this node knows it chosen and holds
+    /// it: read from the acceptor's record, the node's one copy of the
+    /// retained log ([`Replica::chosen_at`] over the acceptor).
+    ///
+    /// # Panics
+    ///
+    /// If a slot known chosen has no record: a programmer error, never an
+    /// operating condition.
+    #[must_use]
+    pub fn chosen_at(&self, slot: Slot) -> Option<&Command> {
+        let command = self.replica.chosen_at(&self.acceptor, slot);
+        assert_eq!(
+            command.is_some(),
+            self.replica.is_chosen(slot),
+            "a node reads a command exactly at a slot it knows chosen"
+        );
+        assert!(
+            command.is_none() || slot >= self.acceptor.first_slot(),
+            "a node reads a chosen command at or above its floor"
+        );
+        command
+    }
+
     /// The node's **replica** role: the chosen log, the contiguous apply
     /// walk and the journal state it folds. A
     /// read view, like [`ColocatedNode::acceptor`].
@@ -424,7 +469,7 @@ impl ColocatedNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::replica::LogRead {
-        let read = self.replica.read(from, limit, max_bytes);
+        let read = self.replica.read(&self.acceptor, from, limit, max_bytes);
         // A read is served from the fold's head, as it stands.
         if let crate::replica::LogRead::Page(page) = &read {
             assert!(

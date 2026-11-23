@@ -2,7 +2,22 @@
 
 use super::{Belief, Judgement};
 use crate::membership::{AcceptorConfig, QuorumSystem};
+use crate::quorum_read::ReadBasis;
 use crate::types::{Ballot, NodeId, Slot};
+
+impl Belief {
+    /// The fields, for a test that breaks the invariants of a deployment
+    /// on purpose.
+    pub(crate) fn tamper(
+        &mut self,
+    ) -> (
+        &mut AcceptorConfig,
+        &mut Ballot,
+        &mut Option<ReadBasis<NodeId>>,
+    ) {
+        (&mut self.config, &mut self.since, &mut self.basis)
+    }
+}
 
 fn majority(members: &[u64]) -> AcceptorConfig {
     AcceptorConfig::new(
@@ -123,4 +138,66 @@ fn a_matchmaker_read_basis_moves_forward_only_and_from_the_pool_only() {
     assert_eq!(basis.since, ballot(2, 0));
     assert_eq!(basis.fence, Some(Slot(5)));
     assert_eq!(belief.stored_basis(), Some(&basis));
+}
+
+#[test]
+fn a_belief_kept_by_its_rules_holds_its_invariants() {
+    let pool = pool(&[0, 1, 2, 3]);
+    let mut belief = Belief::new(majority(&[0, 1, 2]), true);
+    belief.assert_invariants(&pool);
+    let _ = belief.learn(ballot(1, 0), Some(majority(&[1, 2, 3])), &pool);
+    assert!(belief.learn_read_basis(&majority(&[1, 2, 3]), ballot(1, 0), None, &pool));
+    belief.assert_invariants(&pool);
+    Belief::new(majority(&[0, 1, 2]), false).assert_invariants(&pool);
+}
+
+#[test]
+#[should_panic(expected = "a plain belief is bound to no ballot")]
+fn a_plain_belief_bound_to_a_ballot_breaks_the_invariants() {
+    let mut belief = Belief::new(majority(&[0, 1, 2]), false);
+    *belief.tamper().1 = ballot(1, 0);
+    belief.assert_invariants(&pool(&[0, 1, 2]));
+}
+
+#[test]
+#[should_panic(expected = "a plain belief stores no read basis")]
+fn a_plain_belief_with_a_basis_breaks_the_invariants() {
+    let mut belief = Belief::new(majority(&[0, 1, 2]), false);
+    *belief.tamper().2 = Some(ReadBasis {
+        config: majority(&[0, 1, 2]),
+        since: ballot(1, 0),
+        fence: None,
+    });
+    belief.assert_invariants(&pool(&[0, 1, 2]));
+}
+
+#[test]
+#[should_panic(expected = "a belief's configuration is drawn from the pool")]
+fn a_configuration_outside_the_pool_breaks_the_invariants() {
+    let belief = Belief::new(majority(&[0, 1, 2]), true);
+    belief.assert_invariants(&pool(&[0, 1]));
+}
+
+#[test]
+#[should_panic(expected = "a belief's read basis is drawn from the pool")]
+fn a_basis_outside_the_pool_breaks_the_invariants() {
+    let mut belief = Belief::new(majority(&[0, 1, 2]), true);
+    *belief.tamper().2 = Some(ReadBasis {
+        config: majority(&[0, 1, 9]),
+        since: ballot(1, 0),
+        fence: None,
+    });
+    belief.assert_invariants(&pool(&[0, 1, 2]));
+}
+
+#[test]
+#[should_panic(expected = "a read basis is a won ballot's, never the bootstrap's")]
+fn a_basis_at_the_zero_ballot_breaks_the_invariants() {
+    let mut belief = Belief::new(majority(&[0, 1, 2]), true);
+    *belief.tamper().2 = Some(ReadBasis {
+        config: majority(&[0, 1, 2]),
+        since: Ballot::zero(),
+        fence: None,
+    });
+    belief.assert_invariants(&pool(&[0, 1, 2]));
 }

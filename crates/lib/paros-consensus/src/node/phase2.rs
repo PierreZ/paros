@@ -408,7 +408,7 @@ impl ColocatedNode {
         // and compacted away — then `mark_chosen` is a no-op below the floor).
         if slot >= self.acceptor.first_slot() {
             assert!(
-                self.replica.chosen_at(slot) == Some(&command),
+                self.replica.chosen_at(&self.acceptor, slot) == Some(&command),
                 "a decided slot is chosen with the decided command"
             );
         }

@@ -558,12 +558,8 @@ impl Run {
             let learned = self
                 .nodes
                 .iter()
-                .map(|node| node.replica().chosen_at(slot))
-                .chain(
-                    self.replicas
-                        .iter()
-                        .map(|replica| replica.replica().chosen_at(slot)),
-                );
+                .map(|node| node.chosen_at(slot))
+                .chain(self.replicas.iter().map(|replica| replica.chosen_at(slot)));
             for command in learned.flatten() {
                 let text = cell(slot, command, true).value;
                 if !values.contains(&text) {
@@ -821,7 +817,7 @@ impl Run {
                         .records()
                         .iter()
                         .map(|(slot, (_, command))| {
-                            cell(*slot, command, node.replica().chosen_at(*slot).is_some())
+                            cell(*slot, command, node.chosen_at(*slot).is_some())
                         })
                         .collect()
                 }
@@ -833,7 +829,6 @@ impl Run {
                             .map(Slot)
                             .filter_map(|slot| {
                                 replica
-                                    .replica()
                                     .chosen_at(slot)
                                     .map(|command| cell(slot, command, true))
                             })
@@ -849,7 +844,7 @@ impl Run {
         let mut chosen: BTreeMap<Slot, String> = BTreeMap::new();
         for node in &self.nodes {
             for slot in (0..SLOTS).map(Slot) {
-                if let Some(command) = node.replica().chosen_at(slot) {
+                if let Some(command) = node.chosen_at(slot) {
                     chosen.insert(slot, value_text(command));
                 }
             }
@@ -1209,7 +1204,7 @@ fn waiting(replica: &ReplicaNode) -> Vec<Slot> {
     replica
         .replica()
         .chosen()
-        .keys()
+        .iter()
         .copied()
         .filter(|slot| prefix.is_none_or(|prefix| *slot > prefix))
         .collect()

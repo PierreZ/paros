@@ -567,16 +567,16 @@ impl Model for Cluster {
     fn check(&mut self) {
         for site in &self.nodes {
             let Some(node) = &site.live else { continue };
-            for (slot, command) in node.replica().chosen() {
+            for (slot, command) in node.chosen_commands() {
                 self.ledger
-                    .learned(&format!("node {}", site.id.0), *slot, command);
+                    .learned(&format!("node {}", site.id.0), slot, command);
             }
         }
         for site in &self.replicas {
             let Some(replica) = &site.live else { continue };
-            for (slot, command) in replica.replica().chosen() {
+            for (slot, command) in replica.chosen_commands() {
                 self.ledger
-                    .learned(&format!("replica {}", site.id.0), *slot, command);
+                    .learned(&format!("replica {}", site.id.0), slot, command);
             }
         }
     }
@@ -1283,12 +1283,12 @@ impl Cluster {
     ) {
         let site = self.node(id);
         let after = site.disk.hard_state().chosen_index;
-        let chosen = site.live.as_ref().map(|node| node.replica().chosen());
+        let node = site.live.as_ref();
         let first = before.map_or(0, |s| s.0 + 1);
         let last = after.map_or(0, |s| s.0 + 1);
         let learned = (first..last)
             .filter_map(|s| {
-                let command = chosen?.get(&Slot(s)).or_else(|| {
+                let command = node?.chosen_at(Slot(s)).or_else(|| {
                     traced
                         .committed
                         .iter()
@@ -2259,10 +2259,9 @@ impl Seen {
             (node.ballot(), Slot(frontier), handoff)
         });
         let known = leading.map_or_else(Vec::new, |(_, frontier, _)| {
-            node.replica()
-                .chosen()
-                .range(..frontier)
-                .map(|(s, command)| (*s, Cmd::of(command)))
+            node.chosen_commands()
+                .take_while(|(s, _)| *s < frontier)
+                .map(|(s, command)| (s, Cmd::of(command)))
                 .collect()
         });
         let prior = node.proposer().election().map_or_else(Vec::new, |e| {

@@ -885,7 +885,7 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, up_to = up_to.0)))]
     pub fn compact(&mut self, up_to: Slot) -> Slot {
         self.assert_landed();
-        let Some(target) = self.replica.compaction_target() else {
+        let Some(target) = self.replica.compaction_target(&self.acceptor) else {
             return self.acceptor.first_slot();
         };
         let highest_drop = up_to.min(target);
@@ -897,7 +897,7 @@ impl ColocatedNode {
         // A faulty entry below the floor is dropped with the prefix: only
         // chosen slots are dropped, and a trim is decided, so no peer will
         // ever need this node's copy of a slot below it.
-        let sealed = self.replica.truncate(first);
+        let sealed = self.replica.truncate(&self.acceptor, first);
         self.acceptor
             .truncate(first, sealed, &mut self.pending_writes);
         self.proposer.retain_rounds_from(first);

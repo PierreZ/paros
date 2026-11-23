@@ -168,9 +168,14 @@ pub struct ReplicaNode {
     /// unreadable (value lost, identity kept): pulled from the acceptors on
     /// the tick until a catch-up replay heals them.
     faulty: BTreeSet<Slot>,
-    /// The ballot of each learned record the walk has not applied yet: the
-    /// walk hands it on with the slot ([`ReplicaReady::committed`]).
-    unwalked: BTreeMap<Slot, Ballot>,
+    /// Every retained record this replica holds, with the ballot it was
+    /// learned at: the replica's one copy of the retained log. Its
+    /// [`Replica`] reads the commands through the
+    /// [`ChosenLog`](crate::replica::ChosenLog) port, and the walk hands
+    /// each ballot on with its slot ([`ReplicaReady::committed`]). Exactly
+    /// the slots the replica knows chosen (#1101 (one copy of the retained
+    /// log)).
+    records: BTreeMap<Slot, (Ballot, Command)>,
     /// The node whose beat this replica heard last — where it pulls from.
     leader: Option<NodeId>,
     /// The belief ([`Belief`]): the acceptor configuration this replica
@@ -281,7 +286,7 @@ impl ReplicaNode {
             replica,
             floor,
             faulty,
-            unwalked: BTreeMap::new(),
+            records: below,
             leader: None,
             belief,
             quorum_reads: QuorumReads::new(),
@@ -293,9 +298,10 @@ impl ReplicaNode {
             counters: ReplicaCounters::default(),
             catchup_asked: None,
         };
-        for (slot, (ballot, command)) in above {
-            node.unwalked.insert(slot, ballot);
-            node.replica.learn(slot, &command);
+        for (slot, record) in above {
+            let command = record.1.clone();
+            node.records.insert(slot, record);
+            node.replica.learn(&node.records, slot, &command);
         }
         node.advance();
         // The boot read-back of the learner's durable writes: the prefix
@@ -360,6 +366,10 @@ impl ReplicaNode {
             } => {
                 if self.is_party_addressable(from) {
                     self.learn(slot, ballot, &command);
+                    assert!(
+                        slot < self.floor || self.replica.is_chosen(slot),
+                        "a taught decision is held chosen or lies below the floor"
+                    );
                 } else {
                     self.counters.ignored += 1;
                 }
@@ -597,9 +607,19 @@ impl ReplicaNode {
     /// rule of the [`Belief`]: a matchmaker deployment only, forward only,
     /// drawn from the pool.
     fn learn_read_basis(&mut self, config: &AcceptorConfig, ballot: Ballot, fence: Option<Slot>) {
-        let _ = self
+        let before = self.belief.stored_basis().map(|b| b.since);
+        let moved = self
             .belief
             .learn_read_basis(config, ballot, fence, self.config.pool());
+        let after = self.belief.stored_basis().map(|b| b.since);
+        assert!(
+            !moved || after == Some(ballot),
+            "a learned read basis binds the beat's ballot"
+        );
+        assert!(
+            moved || after == before,
+            "a refused read basis leaves the stored one"
+        );
     }
 
     /// Adopt `config` by the follower rule of the [`Belief`] (a matchmaker
@@ -796,7 +816,7 @@ impl ReplicaNode {
         if slot < self.floor {
             return;
         }
-        if let Some(known) = self.replica.chosen_at(slot) {
+        if let Some(known) = self.replica.chosen_at(&self.records, slot) {
             assert!(
                 known == command,
                 "a slot already chosen at a replica is relearned with the same value"
@@ -813,15 +833,15 @@ impl ReplicaNode {
             ballot,
             command: command.clone(),
         });
-        self.unwalked.insert(slot, ballot);
-        self.replica.learn(slot, command);
+        self.records.insert(slot, (ballot, command.clone()));
+        self.replica.learn(&self.records, slot, command);
         self.faulty.remove(&slot);
         self.counters.learned += 1;
         self.advance();
         // A learned slot is held chosen, or folded away below a truncation.
         if slot >= self.floor {
             assert!(
-                self.replica.chosen_at(slot) == Some(command),
+                self.replica.chosen_at(&self.records, slot) == Some(command),
                 "a learned slot is chosen with its value"
             );
         }
@@ -839,27 +859,17 @@ impl ReplicaNode {
         // the walk until it heals, exactly as a node's does.
         // The coupling a node asserts per applied slot — "the authoritative
         // record carries the applied command" — holds here by construction:
-        // the record is `WriteOp::Learned` from the very command `learn`
-        // handed the replica, and the boot scan reads the prefix back from
-        // those records. Its ballot is the one `unwalked` kept for it.
+        // the walk reads the command from `records`, which `learn` filled
+        // with the very `WriteOp::Learned` it persisted, and the boot scan
+        // reads the prefix back from those records.
         let chosen = self.replica.chosen_index();
-        let unwalked = &self.unwalked;
-        let truncate_up_to = self.replica.advance(
-            |slot, _| unwalked.get(&slot).copied(),
-            &mut self.pending_writes,
-        );
-        // The walk applied every slot below the prefix: drop their ballots.
-        self.unwalked = self.unwalked.split_off(&self.replica.first_unchosen());
+        let truncate_up_to = self
+            .replica
+            .advance(&self.records, &mut self.pending_writes);
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
-        self.replica.assert_compacted();
-        assert!(
-            self.unwalked
-                .first_key_value()
-                .is_none_or(|(slot, _)| *slot >= self.replica.first_unchosen()),
-            "a replica keeps a ballot only for a slot the walk has not applied"
-        );
+        self.replica.assert_compacted(&self.records);
         assert!(
             self.replica.chosen_index() >= chosen,
             "a replica's walk never retreats"
@@ -870,7 +880,7 @@ impl ReplicaNode {
     /// `compact` does: clamped to what the journal fold lets go, sealing the
     /// state the dropped slots folded to.
     fn compact(&mut self, up_to: Slot) {
-        let Some(target) = self.replica.compaction_target() else {
+        let Some(target) = self.replica.compaction_target(&self.records) else {
             return;
         };
         let highest_drop = up_to.min(target);
@@ -879,7 +889,8 @@ impl ReplicaNode {
             return;
         }
         let writes = self.pending_writes.len();
-        let sealed = self.replica.truncate(first);
+        let sealed = self.replica.truncate(&self.records, first);
+        self.records = self.records.split_off(&first);
         self.pending_writes
             .push(WriteOp::Truncate { first, sealed });
         assert!(
@@ -904,7 +915,8 @@ impl ReplicaNode {
             return;
         }
         let old_chosen_index = self.replica.chosen_index();
-        let sealed = self.replica.trim_to(point, state);
+        self.records = self.records.split_off(&point);
+        let sealed = self.replica.trim_to(&self.records, point, state);
         self.floor = point;
         self.faulty = self.faulty.split_off(&point);
         self.pending_writes.push(WriteOp::TrimmedTo {
@@ -938,20 +950,30 @@ impl ReplicaNode {
     /// Panics when an invariant is broken: a programmer error, never an
     /// operating condition.
     pub(crate) fn assert_invariants(&self) {
+        self.belief.assert_invariants(self.config.pool());
         assert!(
             self.floor <= self.replica.first_unchosen(),
             "a replica's floor never outruns its chosen prefix"
         );
         self.replica.assert_invariants(self.floor);
+        // The records are exactly the slots the replica knows chosen: one
+        // copy of the retained log. Compared at both ends, so the check
+        // stays O(log n) at every entry point (#619 (O(n) invariants)).
         assert!(
-            self.unwalked
-                .first_key_value()
-                .is_none_or(|(s, _)| *s >= self.replica.first_unchosen()),
-            "an unwalked ballot sits at or above the chosen prefix"
+            self.records.keys().next() == self.replica.chosen().first(),
+            "a replica's lowest record is its lowest chosen slot"
         );
         assert!(
-            self.unwalked.keys().all(|s| self.replica.is_chosen(*s)),
-            "an unwalked ballot belongs to a slot this replica learned chosen"
+            self.records.keys().next_back() == self.replica.chosen().last(),
+            "a replica's highest record is its highest chosen slot"
+        );
+        assert!(
+            self.records.len() == self.replica.chosen().len(),
+            "a replica holds one record per chosen slot"
+        );
+        assert!(
+            self.records.keys().next().is_none_or(|s| *s >= self.floor),
+            "no record survives below a replica's floor"
         );
         assert!(
             self.faulty.first().is_none_or(|s| *s >= self.floor),
@@ -988,27 +1010,104 @@ impl ReplicaNode {
 
     /// The configuration in force: the boot configuration, with its pool
     /// grown by `extend_pool`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn config(&self) -> &Config {
+        assert!(
+            self.config.pool().windows(2).all(|w| w[0] < w[1]),
+            "a replica's pool is sorted with no duplicate, as `in_pool` searches it"
+        );
         &self.config
     }
 
     /// The replica role: the chosen prefix, the journal fold, the chosen gap.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn replica(&self) -> &Replica {
+        assert_eq!(
+            self.replica.chosen().len(),
+            self.records.len(),
+            "a replica holds one record per chosen slot"
+        );
         &self.replica
+    }
+
+    /// Every slot this replica knows chosen with its command, in slot
+    /// order, read from its records.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    pub fn chosen_commands(&self) -> impl Iterator<Item = (Slot, &Command)> + '_ {
+        self.records.iter().map(|(slot, (_, command))| {
+            assert!(
+                *slot >= self.floor,
+                "a replica holds no record below its floor"
+            );
+            (*slot, command)
+        })
+    }
+
+    /// The command chosen at `slot`, if this replica learned it and still
+    /// holds it: read from its records, its one copy of the retained log
+    /// ([`Replica::chosen_at`] over the records).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn chosen_at(&self, slot: Slot) -> Option<&Command> {
+        let command = self.replica.chosen_at(&self.records, slot);
+        assert_eq!(
+            command.is_some(),
+            self.replica.is_chosen(slot),
+            "a replica reads a command exactly at a slot it knows chosen"
+        );
+        assert!(
+            command.is_none() || slot >= self.floor,
+            "a replica reads a chosen command at or above its floor"
+        );
+        command
     }
 
     /// The acceptor configuration this replica believes in force — the one
     /// its quorum reads ask a row of.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn acceptors(&self) -> &AcceptorConfig {
+        assert!(
+            self.belief.config().is_drawn_from(self.config.pool()),
+            "a replica's configuration is drawn from the pool"
+        );
         self.belief.config()
     }
 
     /// The compaction floor: the first slot whose record is retained.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn first_slot(&self) -> Slot {
+        assert!(
+            self.records.keys().next().is_none_or(|s| *s >= self.floor),
+            "a replica holds no record below its floor"
+        );
         self.floor
     }
 
@@ -1021,7 +1120,7 @@ impl ReplicaNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::replica::LogRead {
-        let read = self.replica.read(from, limit, max_bytes);
+        let read = self.replica.read(&self.records, from, limit, max_bytes);
         if let crate::replica::LogRead::Page(page) = &read {
             assert!(
                 page.state == self.replica.journal().view(),

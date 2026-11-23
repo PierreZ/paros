@@ -82,6 +82,11 @@ pub struct Belief {
 
 impl Belief {
     /// The bootstrap belief: `config` bound to no ballot, and no read basis.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its postconditions fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn new(config: AcceptorConfig, matchmakers: bool) -> Self {
         let belief = Self {
@@ -120,6 +125,11 @@ impl Belief {
 
     /// Judge a configuration that `ballot` carried by the follower rule
     /// (see the module doc). Pure: it moves nothing.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its postconditions fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn judge(
         &self,
@@ -131,6 +141,10 @@ impl Belief {
             return Judgement::Absent;
         };
         if !self.matchmakers {
+            assert!(
+                self.since == Ballot::zero(),
+                "a plain belief is bound to no ballot"
+            );
             return Judgement::Plain;
         }
         if ballot <= self.since {
@@ -144,6 +158,11 @@ impl Belief {
             return Judgement::OutsidePool;
         }
         assert!(ballot > self.since, "a learned ballot is newer");
+        assert!(self.matchmakers, "only a matchmaker belief learns");
+        assert!(
+            config.is_drawn_from(pool),
+            "a learned configuration is drawn from the pool"
+        );
         Judgement::Learn
     }
 
@@ -161,11 +180,15 @@ impl Belief {
         config: Option<AcceptorConfig>,
         pool: &[NodeId],
     ) -> Judgement {
+        let since = self.since;
         let judgement = self.judge(ballot, config.as_ref(), pool);
         if judgement != Judgement::Learn {
+            assert!(
+                self.since == since,
+                "an unlearned configuration moves nothing"
+            );
             return judgement;
         }
-        let since = self.since;
         self.bind(config.expect("a learned configuration is present"), ballot);
         assert!(
             self.since == ballot,
@@ -189,9 +212,14 @@ impl Belief {
             self.matchmakers,
             "only a matchmaker deployment moves its configuration"
         );
+        let bound = config.clone();
         self.config = config;
         self.since = since;
         assert!(self.since == since, "the configuration binds its ballot");
+        assert!(
+            self.config == bound,
+            "the configuration bound is the one held"
+        );
     }
 
     /// Learn the read basis `(config, since, fence)` of a leadership that
@@ -274,17 +302,38 @@ impl Belief {
         self.basis.as_ref()
     }
 
-    /// The fields, for a test that breaks the invariants of a deployment
-    /// on purpose.
-    #[cfg(test)]
-    pub(crate) fn tamper(
-        &mut self,
-    ) -> (
-        &mut AcceptorConfig,
-        &mut Ballot,
-        &mut Option<ReadBasis<NodeId>>,
-    ) {
-        (&mut self.config, &mut self.since, &mut self.basis)
+    /// The role's own invariants, which each deployment checks with its
+    /// own after every mutating entry: a plain belief never moved and
+    /// stores no basis, and a matchmaker belief and its basis are drawn
+    /// from `pool` and bound to a won ballot.
+    ///
+    /// # Panics
+    ///
+    /// When an invariant is broken: a programmer error, never an operating
+    /// condition.
+    pub fn assert_invariants(&self, pool: &[NodeId]) {
+        assert!(
+            self.matchmakers || self.since == Ballot::zero(),
+            "a plain belief is bound to no ballot"
+        );
+        assert!(
+            self.matchmakers || self.basis.is_none(),
+            "a plain belief stores no read basis"
+        );
+        assert!(
+            self.config.is_drawn_from(pool),
+            "a belief's configuration is drawn from the pool"
+        );
+        if let Some(basis) = &self.basis {
+            assert!(
+                basis.config.is_drawn_from(pool),
+                "a belief's read basis is drawn from the pool"
+            );
+            assert!(
+                basis.since > Ballot::zero(),
+                "a read basis is a won ballot's, never the bootstrap's"
+            );
+        }
     }
 }
 

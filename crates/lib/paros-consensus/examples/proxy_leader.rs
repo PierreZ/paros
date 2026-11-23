@@ -241,9 +241,7 @@ impl Cluster {
     }
 
     fn chosen_everywhere(&self, slot: Slot) -> bool {
-        self.nodes
-            .iter()
-            .all(|n| n.replica().chosen_at(slot).is_some())
+        self.nodes.iter().all(|n| n.chosen_at(slot).is_some())
     }
 
     /// Propose one command at the leader under `delegation`, deliver to

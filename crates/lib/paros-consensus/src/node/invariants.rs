@@ -197,6 +197,7 @@ impl ColocatedNode {
         self.assert_pooled_configurations();
         self.assert_chosen_records();
         self.assert_pull_invariants();
+        self.belief.assert_invariants(&self.pool);
     }
 
     /// The `None` arm (root `AGENTS.md`, "Plain Multi-Paxos is a shape of
@@ -254,10 +255,10 @@ impl ColocatedNode {
 
     /// The read side of the pair that `mark_chosen` asserts at the write: a
     /// slot the replica holds chosen, at or above the floor, has its
-    /// authoritative accepted record, and the record carries the chosen
-    /// command. The two maps are one fact held twice (the boot rebuilds the
-    /// chosen map from the records). The check reads the lowest and the
-    /// highest chosen slot, so it stays O(log n) at every entry point.
+    /// authoritative accepted record, which is the node's one copy of the
+    /// chosen command (the replica reads it through its `ChosenLog` port).
+    /// The check reads the lowest and the highest chosen slot, so it stays
+    /// O(log n) at every entry point.
     fn assert_chosen_records(&self) {
         let floor = self.acceptor.first_slot();
         let chosen = self.replica.chosen();
@@ -265,15 +266,11 @@ impl ColocatedNode {
             chosen.range(floor..).next(),
             chosen.range(floor..).next_back(),
         ];
-        for (slot, command) in ends.into_iter().flatten() {
+        for slot in ends.into_iter().flatten() {
             let record = self.acceptor.record(*slot);
             assert!(
                 record.is_some(),
                 "a chosen slot holds its authoritative accepted record"
-            );
-            assert!(
-                record.is_some_and(|(_, recorded)| recorded == command),
-                "a chosen slot's record carries the chosen command"
             );
         }
     }
@@ -313,7 +310,7 @@ impl ColocatedNode {
                 "a fold hole lies below the first unchosen slot"
             );
             assert!(
-                !self.replica.chosen().contains_key(&h),
+                !self.replica.chosen().contains(&h),
                 "a fold hole is a slot not held"
             );
         }

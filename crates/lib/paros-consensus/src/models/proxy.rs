@@ -749,8 +749,8 @@ impl World {
         let mut seen = Vec::new();
         for (i, site) in self.sites.iter().enumerate() {
             if let Some(node) = &site.live {
-                for (slot, command) in node.replica().chosen() {
-                    seen.push((i, *slot, command_fingerprint(command)));
+                for (slot, command) in node.chosen_commands() {
+                    seen.push((i, slot, command_fingerprint(command)));
                 }
             }
         }

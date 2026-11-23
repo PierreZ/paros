@@ -199,13 +199,23 @@ impl ColocatedNode {
     /// drawn from the pool.
     pub(super) fn learn_read_basis(
         &mut self,
-        config: AcceptorConfig,
+        config: &AcceptorConfig,
         since: Ballot,
         fence: Option<Slot>,
     ) {
-        let _ = self
+        let before = self.belief.stored_basis().map(|b| b.since);
+        let moved = self
             .belief
-            .learn_read_basis(&config, since, fence, &self.pool);
+            .learn_read_basis(config, since, fence, &self.pool);
+        let after = self.belief.stored_basis().map(|b| b.since);
+        assert!(
+            !moved || after == Some(since),
+            "a learned read basis binds the won ballot"
+        );
+        assert!(
+            moved || after == before,
+            "a refused read basis leaves the stored one"
+        );
     }
 
     /// Follow a ballot this node accepted leader contact under — a
@@ -523,7 +533,12 @@ impl ColocatedNode {
 
     /// First slot not in the contiguous chosen prefix.
     pub(super) fn first_unchosen(&self) -> Slot {
-        self.replica.first_unchosen()
+        let first = self.replica.first_unchosen();
+        assert!(
+            self.acceptor.first_slot() <= first,
+            "the compaction floor never passes the first unchosen slot"
+        );
+        first
     }
 
     // ---- settledness --------------------------------------------------------

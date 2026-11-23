@@ -621,7 +621,7 @@ fn tier_with_a_rotted_replica() -> Tier {
 #[test]
 fn a_replica_with_a_faulty_record_pulls_from_every_acceptor_until_healed() {
     let mut tier = tier_with_a_rotted_replica();
-    let healed = tier.nodes[0].replica().chosen_at(Slot(1)).cloned();
+    let healed = tier.nodes[0].chosen_at(Slot(1)).cloned();
     assert_eq!(tier.replicas[0].leader(), None);
     tier.replicas[0].tick();
     let out = tier.drain_replica(0);
@@ -633,7 +633,7 @@ fn a_replica_with_a_faulty_record_pulls_from_every_acceptor_until_healed() {
     assert_eq!(tier.replicas[0].counters().catch_up_requests, 3);
     tier.deliver(out, |_, _| true);
     assert_eq!(
-        tier.replicas[0].replica().chosen_at(Slot(1)).cloned(),
+        tier.replicas[0].chosen_at(Slot(1)).cloned(),
         healed,
         "the reply heals the record"
     );
@@ -943,7 +943,6 @@ fn a_late_hole_fill_that_crosses_a_truncation_keeps_nothing_below_the_floor() {
         .into_iter()
         .map(|s| {
             let command = tier.nodes[0]
-                .replica()
                 .chosen_at(Slot(s))
                 .expect("the leader holds the slot")
                 .clone();

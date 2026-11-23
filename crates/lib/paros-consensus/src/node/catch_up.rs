@@ -74,7 +74,7 @@ impl ColocatedNode {
         );
         let mut entries: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut expected = from_slot;
-        for (slot, command) in self.replica.chosen().range(from_slot..=ci) {
+        for slot in self.replica.chosen().range(from_slot..=ci) {
             if entries.len() >= CATCHUP_BATCH {
                 break;
             }
@@ -93,21 +93,16 @@ impl ColocatedNode {
                 break;
             }
             expected = Slot(slot.0 + 1);
-            // The choosing ballot is the ballot recorded for this slot in the
-            // accepted log: a chosen slot always holds its authoritative
-            // record (`mark_chosen` asserts the coupling), and the receiver
-            // raises its durable promise to this ballot, so it is never
-            // invented.
-            let (ballot, recorded) = self
+            // The command and its choosing ballot are the record of this
+            // slot in the accepted log, the node's one copy: a chosen slot
+            // always holds its authoritative record (`mark_chosen` asserts
+            // the coupling), and the receiver raises its durable promise to
+            // this ballot, so it is never invented.
+            let (ballot, command) = self
                 .acceptor
                 .record(*slot)
                 .expect("a chosen slot holds its authoritative accepted record");
-            assert!(
-                recorded == command,
-                "a chosen slot's record carries the chosen command"
-            );
-            let ballot = *ballot;
-            entries.insert(*slot, (ballot, command.clone()));
+            entries.insert(*slot, (*ballot, command.clone()));
         }
         if entries.is_empty() {
             return;
@@ -137,7 +132,7 @@ impl ColocatedNode {
         assert!(
             entries.len() == CATCHUP_BATCH
                 || last == ci
-                || !self.replica.chosen().contains_key(&Slot(last.0 + 1)),
+                || !self.replica.chosen().contains(&Slot(last.0 + 1)),
             "a catch-up page stops only at its bound, the prefix's end or a hole"
         );
         self.send(to, Message::CatchUpResponse { from: me, entries });
@@ -209,7 +204,7 @@ impl ColocatedNode {
         let promised = self.acceptor.promised();
         let old_floor = self.acceptor.first_slot();
         let old_chosen_index = self.replica.chosen_index();
-        let sealed = self.replica.trim_to(point, state);
+        let sealed = self.replica.trim_to(&self.acceptor, point, state);
         self.acceptor
             .trim_to(point, sealed, &mut self.pending_writes);
         // The jump answers every request open below the point.

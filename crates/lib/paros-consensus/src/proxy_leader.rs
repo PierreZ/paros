@@ -492,6 +492,10 @@ impl ProxyLeader {
         self.pool.sort_unstable();
         self.pool.dedup();
         let grew = self.pool.len() > before;
+        assert!(
+            self.pool.windows(2).all(|w| w[0] < w[1]),
+            "an extended pool is sorted with no duplicate"
+        );
         assert!(self.pool.len() >= before, "the pool never shrinks");
         assert!(
             self.belief.config().is_drawn_from(&self.pool),
@@ -502,8 +506,17 @@ impl ProxyLeader {
     }
 
     /// The node pool this proxy runs configurations from.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn pool(&self) -> &[NodeId] {
+        assert!(
+            self.pool.windows(2).all(|w| w[0] < w[1]),
+            "a proxy's pool is sorted with no duplicate"
+        );
         &self.pool
     }
 
@@ -742,6 +755,7 @@ impl ProxyLeader {
     /// Panics when a proxy invariant is broken: a programmer error, never
     /// an operating condition.
     pub(crate) fn assert_invariants(&self) {
+        self.belief.assert_invariants(&self.pool);
         assert!(
             self.rounds
                 .by_slot()
@@ -778,8 +792,17 @@ impl ProxyLeader {
     }
 
     /// The configuration this proxy fans out to and judges over.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn acceptors(&self) -> &AcceptorConfig {
+        assert!(
+            self.belief.config().is_drawn_from(&self.pool),
+            "a proxy's configuration is drawn from its pool"
+        );
         self.belief.config()
     }
 
@@ -791,14 +814,33 @@ impl ProxyLeader {
 
     /// The highest ballot ever delegated to this proxy: the leadership it
     /// works for.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn ballot(&self) -> Ballot {
+        assert!(
+            self.belief.since() <= self.ballot,
+            "a proxy's configuration is bound at or below its ballot"
+        );
         self.ballot
     }
 
     /// The tally: every delegated round in flight, for drivers / oracles.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
     #[must_use]
     pub fn rounds(&self) -> &Rounds<NodeId, Command> {
+        assert_eq!(
+            self.rounds.by_slot().len(),
+            self.delegators.len(),
+            "a proxy names one delegator per open round"
+        );
         &self.rounds
     }
 
@@ -832,6 +874,10 @@ impl ProxyLeader {
 
     pub(crate) fn clear_pending(&mut self) {
         self.pending_messages.clear();
+        assert!(
+            self.pending_messages.is_empty(),
+            "an advanced proxy batch has no message left"
+        );
     }
 }
 

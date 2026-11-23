@@ -548,7 +548,7 @@ impl World {
                 let command = Command::Write(proposal.entry.clone());
                 if let (Some(node), Some(at)) = (self.nodes[index].as_ref(), proposal.slot)
                     && node.replica().outcome_at(at).is_some()
-                    && node.replica().chosen_at(at) == Some(&command)
+                    && node.chosen_at(at) == Some(&command)
                 {
                     proposal.acked = true;
                     proposal.acked_at = Some(stamp);

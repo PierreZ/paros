@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
-use super::{LogRead, Replica};
+use super::LogRead;
+
+mod held;
 use crate::journal::state::{JournalState, Outcome, WriterMode};
 use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
 use crate::types::{Ballot, NodeId, Slot, Value};
+use held::Held;
 
 fn write(seq: u64, records: &[&[u8]]) -> Command {
     Command::Write(Entry {
@@ -33,9 +36,9 @@ fn records(commands: &[Command]) -> BTreeMap<Slot, (Ballot, Command)> {
 }
 
 /// A replica whose chosen prefix is `commands` from slot 0.
-fn replica(commands: &[Command]) -> Replica {
+fn replica(commands: &[Command]) -> Held {
     let ci = commands.len().checked_sub(1).map(|i| Slot(i as u64));
-    Replica::from_boot(
+    Held::boot(
         WriterMode::Single,
         ci,
         Slot(0),
@@ -76,14 +79,14 @@ fn a_jumped_fold_behind_its_truncation_does_not_hold_the_base_records() {
     };
     assert_eq!(r.trim_to(Slot(2), base), base);
     r.learn(Slot(2), &commands[2]);
-    r.advance(|_, _| Some(Ballot::zero()), &mut Vec::new());
+    r.advance(&mut Vec::new());
     assert_eq!(r.journal().first_seq, Seq(0));
     assert_eq!(r.read(Seq(0), 8, 64), LogRead::NotHeld);
     assert_eq!(bytes(&page(r.read(Seq(1), 8, 64))), vec![b"b".to_vec()]);
     // Once the fold passes the truncation, the gap is `Truncated`.
     r.learn(Slot(3), &commands[3]);
     r.learn(Slot(4), &commands[4]);
-    r.advance(|_, _| Some(Ballot::zero()), &mut Vec::new());
+    r.advance(&mut Vec::new());
     assert_eq!(r.journal().first_seq, Seq(1));
     assert!(matches!(r.read(Seq(0), 8, 64), LogRead::Truncated(_)));
 }
@@ -119,7 +122,7 @@ fn a_floor_keeps_every_record_a_retained_slot_compares_against() {
     let sealed = r.truncate(first);
     let mut recs = records(&commands);
     recs.retain(|slot, _| *slot >= first);
-    let rebooted = Replica::from_boot(WriterMode::Single, Some(Slot(4)), first, sealed, &recs);
+    let rebooted = Held::boot(WriterMode::Single, Some(Slot(4)), first, sealed, &recs);
     assert!(matches!(
         rebooted.outcome_at(Slot(3)),
         Some(Outcome::Duplicate { .. })
@@ -149,7 +152,7 @@ fn a_truncation_below_a_jumped_floor_keeps_the_floor() {
     ];
     let mut recs = records(&commands);
     recs.retain(|slot, _| *slot >= Slot(2));
-    let r = Replica::from_boot(WriterMode::Single, Some(Slot(3)), Slot(2), base, &recs);
+    let r = Held::boot(WriterMode::Single, Some(Slot(3)), Slot(2), base, &recs);
     assert_eq!(r.journal().first_seq, Seq(1));
     assert_eq!(r.compaction_target(), Some(Slot(1)), "the floor stays");
 }
@@ -226,7 +229,7 @@ fn truncation_keeps_the_write_holding_the_first_record_and_seals_its_base() {
     let p = page(r.read(Seq(2), 64, 64));
     assert_eq!(bytes(&p), vec![b"c".to_vec()]);
     // A reboot from the sealed base folds to the same head.
-    let kept: Vec<Command> = r.chosen().values().cloned().collect();
+    let kept: Vec<Command> = r.chosen_commands();
     let mut recs = BTreeMap::new();
     for (i, c) in kept.iter().enumerate() {
         recs.insert(
@@ -240,7 +243,7 @@ fn truncation_keeps_the_write_holding_the_first_record_and_seals_its_base() {
             ),
         );
     }
-    let rebooted = Replica::from_boot(WriterMode::Single, Some(Slot(3)), Slot(2), base, &recs);
+    let rebooted = Held::boot(WriterMode::Single, Some(Slot(3)), Slot(2), base, &recs);
     assert_eq!(rebooted.journal(), r.journal());
 }
 
@@ -248,7 +251,7 @@ fn truncation_keeps_the_write_holding_the_first_record_and_seals_its_base() {
 fn a_hole_below_the_prefix_stops_the_fold_until_it_heals() {
     let mut recs = records(&[claim(), write(0, &[b"a"]), write(1, &[b"b"])]);
     let lost = recs.remove(&Slot(1)).expect("slot 1").1;
-    let mut r = Replica::from_boot(
+    let mut r = Held::boot(
         WriterMode::Single,
         Some(Slot(2)),
         Slot(0),
@@ -281,8 +284,8 @@ fn append(records: &[&[u8]]) -> Command {
 /// An empty replica under `mode` that learns `commands` from slot 0 and
 /// walks them, as a live node does. Returns the replica and the walk's
 /// compaction target.
-fn walked(mode: WriterMode, commands: &[Command]) -> (Replica, Option<Slot>) {
-    let mut r = Replica::from_boot(
+fn walked(mode: WriterMode, commands: &[Command]) -> (Held, Option<Slot>) {
+    let mut r = Held::boot(
         mode,
         None,
         Slot(0),
@@ -292,7 +295,7 @@ fn walked(mode: WriterMode, commands: &[Command]) -> (Replica, Option<Slot>) {
     for (i, c) in commands.iter().enumerate() {
         r.learn(Slot(i as u64), c);
     }
-    let target = r.advance(|_, _| Some(Ballot::zero()), &mut Vec::new());
+    let target = r.advance(&mut Vec::new());
     assert_eq!(r.committed().len(), commands.len(), "the walk applied all");
     (r, target)
 }
@@ -405,7 +408,7 @@ fn a_trim_point_below_the_fold_keeps_the_own_state() {
     assert_eq!(r.journal(), head, "the fold's head does not move");
     assert_eq!(r.folded(), Slot(4));
     assert_eq!(r.chosen_index(), Some(Slot(3)));
-    assert_eq!(r.chosen().keys().next(), Some(&Slot(2)));
+    assert_eq!(r.chosen().iter().next(), Some(&Slot(2)));
     assert_eq!(r.read(Seq(0), 8, 64), LogRead::NotHeld);
     assert_eq!(
         bytes(&page(r.read(Seq(1), 8, 64))),
@@ -486,4 +489,58 @@ fn a_fold_left_behind_fails_the_invariants() {
     let mut r = replica(&[claim(), write(0, &[b"a"]), write(1, &[b"b"])]);
     r.folded = Slot(1);
     r.assert_invariants(Slot(0));
+}
+
+/// The replica reads a chosen command from the records its deployment
+/// holds, and keeps no copy: a slot it does not know chosen reads as
+/// nothing, even when the records hold a command there.
+#[test]
+fn a_chosen_command_is_read_from_the_records_and_only_at_a_chosen_slot() {
+    let mut r = replica(&[claim(), write(0, &[b"a"])]);
+    assert_eq!(r.chosen_at(Slot(1)), Some(&write(0, &[b"a"])));
+    assert_eq!(r.chosen_at(Slot(2)), None, "slot 2 is not chosen");
+    let mut log = records(&[claim(), write(0, &[b"a"])]);
+    log.insert(Slot(2), (Ballot::zero(), write(1, &[b"b"])));
+    assert_eq!(
+        r.replica.chosen_at(&log, Slot(2)),
+        None,
+        "an accepted record that is not chosen is not read"
+    );
+    r.learn(Slot(2), &write(1, &[b"b"]));
+    let _ = r.advance(&mut Vec::new());
+    assert_eq!(r.chosen_at(Slot(2)), Some(&write(1, &[b"b"])));
+    assert_eq!(
+        r.accepted_at(Seq(1)).map(|e| e.records.clone()),
+        Some(vec![Value::from(b"b")])
+    );
+    assert_eq!(r.chosen_commands().len(), 3);
+}
+
+/// A learn whose record the deployment did not write first breaks the
+/// coupling of a chosen slot and its record.
+#[test]
+#[should_panic(expected = "a learned slot's record carries the learned command")]
+fn a_learn_with_no_record_is_refused() {
+    let mut r = replica(&[claim()]);
+    let log = records(&[claim()]);
+    r.replica.learn(&log, Slot(1), &write(0, &[b"a"]));
+}
+
+/// A learn whose record holds another command is refused the same way.
+#[test]
+#[should_panic(expected = "a learned slot's record carries the learned command")]
+fn a_learn_over_another_record_is_refused() {
+    let mut r = replica(&[claim()]);
+    let log = records(&[claim(), write(0, &[b"x"])]);
+    r.replica.learn(&log, Slot(1), &write(0, &[b"a"]));
+}
+
+/// A store that lost the record of a slot the replica knows chosen is a
+/// broken deployment, never a missing value.
+#[test]
+#[should_panic(expected = "a slot known chosen holds its record in the chosen log")]
+fn a_chosen_slot_with_no_record_fails_its_read() {
+    let r = replica(&[claim(), write(0, &[b"a"])]);
+    let log = records(&[claim()]);
+    let _ = r.replica.chosen_at(&log, Slot(1));
 }
