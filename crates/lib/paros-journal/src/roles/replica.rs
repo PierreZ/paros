@@ -1241,10 +1241,18 @@ impl Folded {
         );
         self.origin = trim;
         self.answers.retain(|slot, _| *slot >= trim.slot);
-        // A resend is looked up at or above `first_seq`, which is at or
-        // above the floor once the fold answers: a write below the floor is
-        // never looked up.
-        self.positions.retain(|seq, _| *seq >= trim.floor);
+        // A write that starts below the floor and ends above it stays: a
+        // read from the floor starts at the write that covers it
+        // (`read::records`). A write wholly below the floor is never read or
+        // looked up again.
+        self.positions
+            .retain(|seq, write| seq.0 + write.count() > trim.floor.0);
+        assert!(
+            self.positions
+                .iter()
+                .all(|(seq, write)| seq.0 + write.count() > trim.floor.0),
+            "a compaction keeps no write wholly below the floor"
+        );
         self.answered = self.answered.max(trim.slot);
     }
 

@@ -368,3 +368,55 @@ fn a_replica_that_drops_its_copy_unserves_its_reads() {
     assert!(effects.contains(&ReplicaEffect::Drop));
     assert_eq!(replica.reads(), 0);
 }
+
+#[test]
+fn a_compaction_keeps_the_records_of_a_write_that_spans_the_floor() {
+    let mut replica = served();
+    // Slot 3 writes three records at 2, 3 and 4; slot 4 truncates up to 3,
+    // so the floor lies inside the write of slot 3.
+    let three = Command::Write(Write {
+        fence: Fence::Leader {
+            uuid: LeaderUuid(7),
+            expected_seq: Seq(2),
+        },
+        records: vec![
+            Record::new(vec![3]),
+            Record::new(vec![4]),
+            Record::new(vec![5]),
+        ],
+    });
+    replica.step(LEADER, commit(3, three));
+    let truncate = Command::Truncate {
+        fence: Some(LeaderUuid(7)),
+        up_to: Seq(3),
+    };
+    replica.step(LEADER, commit(4, truncate));
+    let trims: Vec<Slot> = replica
+        .tick()
+        .iter()
+        .filter_map(|effect| match effect {
+            ReplicaEffect::Persist { ops, .. } => Some(ops),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|op| match op {
+            crate::roles::replica::ReplicaOp::Compact(trim) => Some(trim.slot),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        trims,
+        vec![Slot(3)],
+        "the point is the write that spans the floor"
+    );
+    replica.read(1, Seq(3), 10);
+    replica.step(NodeId(1), ack(1, Some(4), 1));
+    let effects = replica.step(NodeId(2), ack(1, Some(4), 1));
+    let (seqs, view, _) = page(&answers(&effects)[0].1);
+    assert_eq!(
+        seqs,
+        vec![3, 4],
+        "the records above the floor stay readable"
+    );
+    assert_eq!(view.first_seq, Seq(3));
+}
