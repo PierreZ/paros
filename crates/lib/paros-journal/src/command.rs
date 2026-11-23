@@ -87,8 +87,10 @@ pub struct Header {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Headers {
     /// The leader time, a hint (§J2.8): it promises no order across a leader
-    /// change or a seal and enters no safety rule. **Open** (#1299): who
-    /// stamps it and its unit.
+    /// change or a seal and enters no safety rule. The leader stamps it at
+    /// propose, one time for each write, from its host's clock, in
+    /// nanoseconds ([`Command::stamped`]); a time that the client gives is
+    /// replaced.
     pub leader_time: Option<u64>,
     /// The client's headers, in the order the client gave them.
     pub client: Vec<Header>,
@@ -218,6 +220,39 @@ impl Write {
             );
         }
         same
+    }
+}
+
+impl Command {
+    /// The command with the leader time `time` in every record of a write
+    /// (§J2.8): one time for each write, stamped by the leader at propose
+    /// and carried in the chosen value, so every replica stores the same
+    /// time and none stamps at apply. A time that the client gave is
+    /// replaced, since the paros headers are the reserved key space. A
+    /// command that is not a write holds no record and does not change.
+    ///
+    /// # Panics
+    ///
+    /// When an assertion on its own postconditions fails: a programmer error, never
+    /// an operating condition.
+    #[must_use]
+    pub fn stamped(self, time: u64) -> Self {
+        let Self::Write(mut write) = self else {
+            return self;
+        };
+        let count = write.records.len();
+        for record in &mut write.records {
+            record.headers.leader_time = Some(time);
+        }
+        assert_eq!(write.records.len(), count, "a stamp keeps every record");
+        assert!(
+            write
+                .records
+                .iter()
+                .all(|record| record.headers.leader_time == Some(time)),
+            "every record of a write carries the one time of the write"
+        );
+        Self::Write(write)
     }
 }
 

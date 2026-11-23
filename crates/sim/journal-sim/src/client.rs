@@ -740,14 +740,15 @@ impl ClientModel {
         let end = (from.0 + limit).min(fold.next_seq().0);
         let records = (start..end)
             .map(|seq| {
-                self.log
-                    .get(&seq)
-                    .expect("a position below next_seq")
-                    .1
-                    .clone()
+                let record = self.log.get(&seq).expect("a position below next_seq");
+                (Seq(seq), record.1.clone())
             })
             .collect();
-        ReadAnswer::Page { records, view }
+        ReadAnswer::Page {
+            records,
+            view,
+            sealed: false,
+        }
     }
 
     /// The oracles on one reported outcome.

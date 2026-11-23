@@ -67,7 +67,12 @@ use crate::command::{Command, Leader, Record, Write};
 use crate::fold::{Answer, BoundaryState, JournalState};
 use crate::register::{Change, RegisterValue};
 use crate::resolve::{ResolveAnswer, resolve};
-use crate::segment::{SegmentId, SegmentState};
+use crate::segment::{Grid, SegmentId, SegmentState};
+
+mod read;
+
+use read::PendingRead;
+pub use read::{MAX_READS, READ_PAGE, READ_TICKS, ReadAnswer};
 
 /// The most chosen slots one `Pull` answer carries.
 pub const PULL_PAGE: usize = 64;
@@ -146,6 +151,16 @@ pub enum ReplicaEffect {
         /// The copy.
         copy: CopyId,
         /// The batch the report waits on: the last slot of the copy.
+        after: Option<PersistId>,
+    },
+    /// Answer the read `read` once the batch `after` is durable: the fold
+    /// it reads may hold slots of batches still in flight.
+    Read {
+        /// The reader's id of the read.
+        read: u64,
+        /// The answer.
+        answer: ReadAnswer,
+        /// The batch the answer waits on.
         after: Option<PersistId>,
     },
     /// Drop the replica's copy of the segment and stop the replica: it is
@@ -232,6 +247,19 @@ pub struct SegmentReplica {
     sources: std::collections::BTreeSet<NodeId>,
     /// Whether the replica dropped its copy.
     dropped: bool,
+    /// The grid of the segment, from a done value: the acceptors a read
+    /// asks.
+    grid: Option<Grid>,
+    /// The open reads, by the reader's id.
+    reads: BTreeMap<u64, PendingRead>,
+    /// The retired segments below this one that are not trimmed, with the
+    /// last `seq` of each (the `next_seq` of its boundary state), from the
+    /// last value observed: the trims this replica's floor may write. The
+    /// register takes the trim of a sealed segment too, but a replica waits
+    /// for its retire: the controller opens the next segment only once
+    /// every older one is retired (`ReshapeGuard` of
+    /// `specs/tla/journal-state/`), and a trimmed record never retires.
+    older: BTreeMap<SegmentId, Seq>,
     flight: Flight,
 }
 
@@ -271,6 +299,9 @@ impl SegmentReplica {
             joining: disk.joining,
             sources: std::collections::BTreeSet::new(),
             dropped: false,
+            grid: None,
+            reads: BTreeMap::new(),
+            older: BTreeMap::new(),
             flight: Flight::after(disk.durable),
         };
         if let Some((boundary, start)) = disk.base {
@@ -462,6 +493,16 @@ impl SegmentReplica {
             } if segment == self.segment => self.commit(from, slot, command),
             Message::Pull { segment, from: at } if segment == self.segment => self.pull(from, at),
             Message::Holding { segment } if segment == self.segment => {
+                probe!(
+                    sometimes,
+                    self.full(),
+                    "replica: it holds the whole segment"
+                );
+                probe!(
+                    sometimes,
+                    !self.full(),
+                    "replica: it does not hold the whole segment yet"
+                );
                 vec![ReplicaEffect::Send {
                     to: from,
                     message: Message::Holds {
@@ -472,6 +513,12 @@ impl SegmentReplica {
                 }]
             }
             Message::Holds { segment, full } if segment == self.segment => self.holds(from, full),
+            Message::PreReadAck {
+                segment,
+                read,
+                watermark,
+                bound,
+            } if segment == self.segment => self.pre_read_ack(from, read, watermark, bound),
             _ => Vec::new(),
         };
         self.assert_invariants();
@@ -510,14 +557,20 @@ impl SegmentReplica {
             if record.state() == SegmentState::Trimmed
                 || (self.joining.is_none() && !record.replicas().contains(&self.id))
             {
+                probe!(
+                    reachable,
+                    "replica: a replica outside the set drops its copy"
+                );
                 effects.extend(self.drop_copy());
                 return effects;
             }
             if record.replicas().contains(&self.id) && self.joining.is_some() {
                 // The heal that added this replica is done: it is a member.
+                probe!(reachable, "replica: a new replica becomes a member");
                 effects.extend(self.set_joining(None));
             }
             self.set = record.replicas().to_vec();
+            self.grid = Some(record.grid().clone());
             if let Some(end) = record.end() {
                 assert!(
                     self.end.is_none_or(|known| known == end),
@@ -533,8 +586,21 @@ impl SegmentReplica {
                 effects.extend(self.take_base(boundary, start));
             }
         }
+        self.older = value
+            .segments()
+            .range(..self.segment)
+            .filter(|(_, record)| {
+                matches!(
+                    record.state(),
+                    SegmentState::Retired | SegmentState::Offloaded
+                )
+            })
+            .filter_map(|(id, record)| record.boundary().map(|b| (*id, b.next_seq)))
+            .collect();
         effects.extend(self.boundary());
         effects.extend(self.copied());
+        effects.extend(self.serve_reads());
+        effects.extend(self.trims());
         self.assert_invariants();
         effects
     }
@@ -542,9 +608,10 @@ impl SegmentReplica {
     /// The periodic step: ask the peers for the slots the replica misses,
     /// and ask again for the write of the boundary state. A new replica asks
     /// the members whether they hold the whole segment, pulls only from
-    /// those that do, and reports its complete copy again.
-    #[must_use]
-    pub fn tick(&self) -> Vec<ReplicaEffect> {
+    /// those that do, and reports its complete copy again. An open read
+    /// asks again the acceptors that did not answer, and a read open too
+    /// long is unserved.
+    pub fn tick(&mut self) -> Vec<ReplicaEffect> {
         if self.dropped {
             return Vec::new();
         }
@@ -577,6 +644,7 @@ impl SegmentReplica {
         }
         effects.extend(self.boundary());
         effects.extend(self.copied());
+        effects.extend(self.tick_reads());
         effects
     }
 
@@ -595,6 +663,10 @@ impl SegmentReplica {
     ) -> (ResolveAnswer, Option<PersistId>) {
         let after = self.flight.last();
         let Some(folded) = &self.folded else {
+            probe!(
+                reachable,
+                "replica: a Resolve before the base is not covered"
+            );
             return (ResolveAnswer::NotCovered, after);
         };
         let answer = resolve(&folded.state, uuid, expected_seq, records, |seq| {
@@ -655,9 +727,18 @@ impl SegmentReplica {
                 }],
             });
         } else {
+            probe!(
+                reachable,
+                "replica: a Commit outside its segment is dropped"
+            );
             return effects;
         }
         let mut applied = self.walk();
+        probe!(
+            sometimes,
+            applied.is_empty() && !self.full(),
+            "replica: a chosen slot waits behind a hole"
+        );
         if applied.iter().all(|(s, ..)| *s != slot)
             && let Some(folded) = &self.folded
             && let Some(answer) = folded.answers.get(&slot)
@@ -679,7 +760,48 @@ impl SegmentReplica {
         }
         effects.extend(self.boundary());
         effects.extend(self.copied());
+        effects.extend(self.serve_reads());
+        effects.extend(self.trims());
         effects
+    }
+
+    /// The trim of each retired segment below this one that the fold's
+    /// floor covers (§J3.2, `Trim` of `specs/tla/journal-state/`): the
+    /// floor is decided, since the fold applied the `Truncate`, and the
+    /// change waits on the batch of the slot that moved it. Each trim is
+    /// asked once for each value observed; the register refuses a record
+    /// that is trimmed already.
+    fn trims(&mut self) -> Vec<ReplicaEffect> {
+        let Some(folded) = &self.folded else {
+            return Vec::new();
+        };
+        let first_seq = folded.state.first_seq();
+        let covered: Vec<SegmentId> = self
+            .older
+            .iter()
+            .filter(|(_, last)| first_seq >= **last)
+            .map(|(segment, _)| *segment)
+            .collect();
+        let after = self.flight.last();
+        covered
+            .into_iter()
+            .map(|segment| {
+                probe!(
+                    reachable,
+                    "replica: a floor over a retired segment trims it"
+                );
+                let last = self.older.remove(&segment).expect("an older segment");
+                assert!(first_seq >= last, "a trim never cuts above the floor");
+                assert!(
+                    segment < self.segment,
+                    "a replica trims only an older segment"
+                );
+                ReplicaEffect::Register {
+                    change: Change::Trim { segment, first_seq },
+                    after,
+                }
+            })
+            .collect()
     }
 
     /// A member's answer to the new replica's `Holding`: a member that holds
@@ -693,6 +815,7 @@ impl SegmentReplica {
             return Vec::new();
         }
         self.sources.insert(from);
+        probe!(reachable, "replica: a new replica finds a full source");
         match self.front() {
             Some(front) if !self.full() => vec![ReplicaEffect::Send {
                 to: from,
@@ -709,11 +832,14 @@ impl SegmentReplica {
     /// The report of a complete copy, while the replica is a new replica.
     fn copied(&self) -> Vec<ReplicaEffect> {
         match self.joining {
-            Some(copy) if self.full() => vec![ReplicaEffect::Copied {
-                segment: self.segment,
-                copy,
-                after: self.flight.last(),
-            }],
+            Some(copy) if self.full() => {
+                probe!(reachable, "replica: a new replica reports its copy");
+                vec![ReplicaEffect::Copied {
+                    segment: self.segment,
+                    copy,
+                    after: self.flight.last(),
+                }]
+            }
             _ => Vec::new(),
         }
     }
@@ -722,12 +848,19 @@ impl SegmentReplica {
         self.dropped = true;
         self.joining = None;
         self.sources.clear();
-        assert!(self.dropped, "a dropped replica takes no step");
-        vec![ReplicaEffect::Drop]
+        let mut effects = self.unserve_reads();
+        assert!(self.reads.is_empty(), "a dropped replica holds no read");
+        effects.push(ReplicaEffect::Drop);
+        effects
     }
 
     fn pull(&self, from: NodeId, at: Slot) -> Vec<ReplicaEffect> {
         let after = self.flight.last();
+        probe!(
+            sometimes,
+            self.chosen.range(at..).next().is_some(),
+            "replica: a Pull is served from its slots"
+        );
         self.chosen
             .range(at..)
             .take(PULL_PAGE)
@@ -772,13 +905,19 @@ impl SegmentReplica {
     /// sealed segment and no done value showed it written.
     fn boundary(&self) -> Vec<ReplicaEffect> {
         match (&self.folded, self.full(), self.boundary_written) {
-            (Some(folded), true, false) => vec![ReplicaEffect::Register {
-                change: Change::Boundary {
-                    segment: self.segment,
-                    state: folded.state.boundary(),
-                },
-                after: self.flight.last(),
-            }],
+            (Some(folded), true, false) => {
+                probe!(
+                    reachable,
+                    "replica: a full replica writes the boundary state"
+                );
+                vec![ReplicaEffect::Register {
+                    change: Change::Boundary {
+                        segment: self.segment,
+                        state: folded.state.boundary(),
+                    },
+                    after: self.flight.last(),
+                }]
+            }
             _ => Vec::new(),
         }
     }
@@ -797,6 +936,14 @@ impl SegmentReplica {
         assert!(
             self.sources.iter().all(|source| *source != self.id),
             "a new replica copies from another replica"
+        );
+        assert!(
+            self.reads.len() <= MAX_READS,
+            "a replica holds at most MAX_READS reads"
+        );
+        assert!(
+            self.reads.is_empty() || self.folded.is_some(),
+            "a replica with no base holds no read"
         );
         if let Some(folded) = &self.folded {
             folded.state.assert_invariants();

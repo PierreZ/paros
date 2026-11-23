@@ -334,6 +334,7 @@ fn open_segment() -> MemRegister {
 fn leader() -> Assignment {
     Assignment::Leader {
         address: at(LEADER),
+        proxies: Vec::new(),
         campaign: Campaign {
             ballot: Ballot {
                 round: 1,

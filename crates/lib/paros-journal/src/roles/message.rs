@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use paros_consensus::{Ballot, Slot};
+use paros_consensus::{Ballot, NodeId, Slot};
 
 use crate::command::Command;
 use crate::fold::Answer;
@@ -33,6 +33,10 @@ pub enum Message {
         ballot: Ballot,
         /// The first slot the page reports.
         from: Slot,
+        /// The segment `ballot` is bound to. The acceptor keeps it as its
+        /// belief: a leaderless read of an older segment that meets it ends
+        /// (§J3.3, the belief half of the read fence).
+        segment: SegmentId,
     },
     /// Acceptor to leader: the promise at `ballot`, with one page.
     Promise {
@@ -58,6 +62,31 @@ pub enum Message {
         slot: Slot,
         /// The command proposed.
         command: Command,
+    },
+    /// Leader to proxy leader: run the Phase 2 of `slot` at `ballot` with
+    /// `command` on `column`, and commit it to `replicas`, the replica set
+    /// of `segment`.
+    Delegate {
+        /// The leader's ballot.
+        ballot: Ballot,
+        /// The slot.
+        slot: Slot,
+        /// The command proposed.
+        command: Command,
+        /// The acceptors of the column of the leader's grid that writes the
+        /// slot: `2F + 1`, a majority of them decides.
+        column: Vec<NodeId>,
+        /// The segment of the slot.
+        segment: SegmentId,
+        /// The replica set of the segment.
+        replicas: Vec<NodeId>,
+    },
+    /// Proxy leader to leader: `slot` is chosen at `ballot`.
+    Chosen {
+        /// The ballot.
+        ballot: Ballot,
+        /// The slot.
+        slot: Slot,
     },
     /// Acceptor to leader: the vote of `slot` at `ballot` is durable.
     Accepted {
@@ -94,6 +123,28 @@ pub enum Message {
         segment: SegmentId,
         /// The first slot the asker misses.
         from: Slot,
+    },
+    /// Replica to acceptor: the leaderless read `read` of `segment` asks for
+    /// the acceptor's vote watermark (§J2.5, §J3.3).
+    PreRead {
+        /// The segment of the reader.
+        segment: SegmentId,
+        /// The reader's id of the read.
+        read: u64,
+    },
+    /// Acceptor to replica: the answer to a `PreRead`. It waits on the
+    /// acceptor's last batch, so the votes it reports are durable.
+    PreReadAck {
+        /// The segment of the reader.
+        segment: SegmentId,
+        /// The reader's id of the read.
+        read: u64,
+        /// The highest slot the acceptor voted in, if any.
+        watermark: Option<Slot>,
+        /// The newest segment a ballot that the acceptor promised since its
+        /// start is bound to: the fence of the read. An acceptor that knows
+        /// none since its start does not answer.
+        bound: SegmentId,
     },
     /// Leader or new replica to a replica of `segment`: does it hold every
     /// slot of the sealed segment? The leader counts the holders for the

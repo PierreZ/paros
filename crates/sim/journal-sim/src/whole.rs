@@ -120,7 +120,7 @@ use paros_journal_io::{
 };
 
 use crate::backend::{Disk, Wire};
-use crate::oracle::{Truth, label};
+use crate::oracle::{Truth, as_written, label};
 
 /// Oracle: one command is chosen at each slot of a journal.
 pub const AGREE: &str = "whole journal: no two Commits name two commands at one slot";
@@ -1246,6 +1246,7 @@ impl WholeModel {
         let mut replies = driver.take_replies();
         driver.assign(Assignment::Leader {
             address: Address::new(id, node),
+            proxies: Vec::new(),
             campaign: Campaign {
                 ballot: Ballot {
                     round: self.journals[j].round,
@@ -1861,7 +1862,9 @@ impl WholeModel {
         let at: Vec<(u64, &'static str)> = states
             .iter()
             .enumerate()
-            .filter(|(slot, _)| journal.chosen[&Slot(*slot as u64)] == *command)
+            .filter(|(slot, _)| {
+                as_written(&journal.chosen[&Slot(*slot as u64)]) == as_written(command)
+            })
             .map(|(_, s)| *s)
             .collect();
         (!at.is_empty()).then_some(at)
@@ -1877,7 +1880,9 @@ impl WholeModel {
             let at: Vec<(u64, &str)> = states
                 .iter()
                 .enumerate()
-                .filter(|(slot, _)| journal.chosen[&Slot(*slot as u64)] == *command)
+                .filter(|(slot, _)| {
+                    as_written(&journal.chosen[&Slot(*slot as u64)]) == as_written(command)
+                })
                 .map(|(_, s)| *s)
                 .collect();
             if at.is_empty() {

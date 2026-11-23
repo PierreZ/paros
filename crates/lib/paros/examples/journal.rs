@@ -164,6 +164,7 @@ fn roles() -> Vec<Assignment> {
     });
     let leader = Assignment::Leader {
         address: at(LEADER),
+        proxies: Vec::new(),
         campaign: Campaign {
             ballot: Ballot {
                 round: 1,

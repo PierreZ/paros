@@ -18,6 +18,7 @@ fn nodes(ids: &[u64]) -> Vec<NodeId> {
     ids.iter().copied().map(NodeId).collect()
 }
 
+/// A write as a leader proposes it at time 0.
 fn write(byte: u8) -> Command {
     Command::Write(Write {
         fence: Fence::Leader {
@@ -26,6 +27,7 @@ fn write(byte: u8) -> Command {
         },
         records: vec![Record::new(vec![byte])],
     })
+    .stamped(0)
 }
 
 /// The register after the reshape that opens the next segment with
@@ -157,6 +159,7 @@ fn a_campaign_asks_every_acceptor_from_its_first_slot() {
                 Message::Prepare {
                     ballot: ballot(2),
                     from: Slot(3),
+                    segment: SegmentId(1),
                 }
             ))
             .collect::<Vec<_>>()
@@ -229,6 +232,7 @@ fn a_promise_in_pages_asks_for_the_next_page() {
             Message::Prepare {
                 ballot: ballot(2),
                 from: Slot(5),
+                segment: SegmentId(1),
             }
         )]
     );
@@ -280,7 +284,7 @@ fn an_open_leader_proposes_again_the_highest_vote_and_fills_the_gaps() {
             .iter()
             .all(|(_, m)| matches!(m, Message::Accept { ballot: b, .. } if *b == ballot(3)))
     );
-    let (proposed, effects) = leader.propose(7, write(9));
+    let (proposed, effects) = leader.propose(7, write(9), 0);
     assert_eq!(
         proposed,
         Proposed::Slot(Slot(4)),
@@ -292,8 +296,8 @@ fn an_open_leader_proposes_again_the_highest_vote_and_fills_the_gaps() {
 #[test]
 fn a_proposal_is_answered_once_a_replica_applies_it() {
     let mut leader = open_leader();
-    assert_eq!(leader.propose(7, write(1)).0, Proposed::Slot(Slot(0)));
-    assert_eq!(leader.propose(8, write(2)).0, Proposed::Slot(Slot(1)));
+    assert_eq!(leader.propose(7, write(1), 0).0, Proposed::Slot(Slot(0)));
+    assert_eq!(leader.propose(8, write(2), 0).0, Proposed::Slot(Slot(1)));
     let accepted = |slot| Message::Accepted {
         ballot: ballot(2),
         slot: Slot(slot),
@@ -355,7 +359,7 @@ fn a_proposal_is_answered_once_a_replica_applies_it() {
 #[test]
 fn a_slot_that_applied_another_command_answers_unknown() {
     let mut leader = open_leader();
-    leader.propose(7, write(1));
+    leader.propose(7, write(1), 0);
     let effects = leader.step(
         NodeId(11),
         Message::Applied {
@@ -372,7 +376,7 @@ fn a_slot_that_applied_another_command_answers_unknown() {
 fn a_tick_sends_at_most_a_page() {
     let mut leader = open_leader();
     for token in 0..5 {
-        leader.propose(token, write(1));
+        leader.propose(token, write(1), 0);
     }
     assert_eq!(accepts(&leader.tick(2)).len(), 2);
 }
@@ -392,8 +396,8 @@ fn a_page_above_the_batch_is_refused() {
 #[test]
 fn a_leader_stops_on_a_higher_promise_and_answers_unknown() {
     let mut leader = open_leader();
-    leader.propose(7, write(1));
-    leader.propose(8, write(2));
+    leader.propose(7, write(1), 0);
+    leader.propose(8, write(2), 0);
     // A refusal of another ballot, or that names a lower promise, is not
     // for this leader.
     assert_eq!(
@@ -421,7 +425,7 @@ fn a_leader_stops_on_a_higher_promise_and_answers_unknown() {
         vec![(7, Reply::Unknown), (8, Reply::Unknown)]
     );
     assert_eq!(
-        leader.propose(9, write(3)),
+        leader.propose(9, write(3), 0),
         (Proposed::NotLeader, Vec::new())
     );
     assert!(leader.tick(4).is_empty(), "a stopped leader sends nothing");
@@ -435,7 +439,7 @@ fn a_leader_stops_on_a_higher_promise_and_answers_unknown() {
 fn a_leader_in_phase_one_does_not_write() {
     let (mut leader, _) = campaign(&one_segment(), 2, 1, 0);
     assert_eq!(
-        leader.propose(1, write(1)),
+        leader.propose(1, write(1), 0),
         (Proposed::NotLeader, Vec::new())
     );
     assert!(leader.segment_of(Slot(0)).is_none());
@@ -469,7 +473,7 @@ fn a_first_leader_seals_the_segment_before_above_its_highest_vote() {
     };
     assert_eq!(effects, vec![LeaderEffect::Register(seal.clone())]);
     assert_eq!(leader.blocked(), &[Slot(4)]);
-    assert_eq!(leader.propose(1, write(9)).0, Proposed::NotLeader);
+    assert_eq!(leader.propose(1, write(9), 0).0, Proposed::NotLeader);
     assert_eq!(leader.tick(4), vec![LeaderEffect::Register(seal.clone())]);
     // A value with no end changes nothing.
     assert_eq!(leader.observe(&value).len(), 0);
@@ -510,7 +514,7 @@ fn a_first_leader_seals_the_segment_before_above_its_highest_vote() {
             .collect::<Vec<_>>(),
         nodes(&[11, 12, 13])
     );
-    assert_eq!(leader.propose(1, write(9)).0, Proposed::Slot(Slot(5)));
+    assert_eq!(leader.propose(1, write(9), 0).0, Proposed::Slot(Slot(5)));
     // A later done value changes nothing for an open leader.
     assert_eq!(leader.observe(&sealed).len(), 0);
 }
@@ -604,8 +608,8 @@ fn a_two_column_grid_writes_each_slot_in_its_column() {
     );
     leader.step(NodeId(5), promise(2, 0, page(&[], &[])));
     assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(0) });
-    let (_, even) = leader.propose(1, write(1));
-    let (_, odd) = leader.propose(2, write(2));
+    let (_, even) = leader.propose(1, write(1), 0);
+    let (_, odd) = leader.propose(2, write(2), 0);
     assert_eq!(
         sends(&even)
             .into_iter()
@@ -656,7 +660,7 @@ fn a_two_column_grid_writes_each_slot_in_its_column() {
 #[test]
 fn a_leader_stopped_by_its_driver_answers_unknown() {
     let mut leader = open_leader();
-    leader.propose(4, write(1));
+    leader.propose(4, write(1), 0);
     let effects = leader.stop();
     assert_eq!(replies(&effects), vec![(4, Reply::Unknown)]);
     assert_eq!(*leader.phase(), LeaderPhase::Stopped);
@@ -898,5 +902,213 @@ fn the_holders_a_retire_needs_are_f_plus_one_of_the_grid() {
         leader.segments()[0].acks(),
         3,
         "F = 2: three holders, a majority of five"
+    );
+}
+
+/// An open leader of segment 1 that delegates to proxies 201 and 202.
+fn delegating_leader() -> JournalLeader<u32> {
+    let value = one_segment();
+    let (mut leader, _) = campaign(&value, 2, 1, 0);
+    leader.delegate_to(nodes(&[201, 202]));
+    leader.step(NodeId(1), promise(2, 0, page(&[], &[])));
+    leader.step(NodeId(2), promise(2, 0, page(&[], &[])));
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(0) });
+    leader
+}
+
+#[test]
+fn a_delegating_leader_gives_each_round_to_a_proxy() {
+    let mut leader = delegating_leader();
+    let (_, first) = leader.propose(1, write(1), 0);
+    let (_, second) = leader.propose(2, write(2), 0);
+    let first = sends(&first);
+    assert_eq!(first.len(), 1, "one delegation, no Accept: {first:?}");
+    let (to, message) = &first[0];
+    assert_eq!(*to, NodeId(201), "slot 0 goes to the proxy at 0");
+    let Message::Delegate {
+        slot,
+        column,
+        segment,
+        replicas,
+        ..
+    } = message
+    else {
+        panic!("a delegation: {message:?}");
+    };
+    assert_eq!(*slot, Slot(0));
+    assert_eq!(*column, nodes(&[1, 2, 3]));
+    assert_eq!(*segment, SegmentId(1));
+    assert_eq!(*replicas, nodes(&[11, 12, 13]));
+    assert_eq!(sends(&second)[0].0, NodeId(202), "slot 1 goes to the next");
+    // An `Accepted` that reaches the leader for a delegated round is not
+    // counted: the votes are the proxy's.
+    for acceptor in [1, 2, 3] {
+        let effects = leader.step(
+            NodeId(acceptor),
+            Message::Accepted {
+                ballot: ballot(2),
+                slot: Slot(0),
+            },
+        );
+        assert_eq!(effects, Vec::new());
+    }
+}
+
+#[test]
+fn a_chosen_from_a_proxy_commits_the_slot_and_holds_the_answer() {
+    let mut leader = delegating_leader();
+    leader.propose(1, write(1), 0);
+    // A `Chosen` of another ballot changes nothing.
+    assert_eq!(
+        leader.step(
+            NodeId(201),
+            Message::Chosen {
+                ballot: ballot(1),
+                slot: Slot(0),
+            },
+        ),
+        Vec::new()
+    );
+    let effects = leader.step(
+        NodeId(201),
+        Message::Chosen {
+            ballot: ballot(2),
+            slot: Slot(0),
+        },
+    );
+    let commits: Vec<NodeId> = sends(&effects)
+        .into_iter()
+        .filter(|(_, m)| matches!(m, Message::Commit { slot: Slot(0), .. }))
+        .map(|(to, _)| to)
+        .collect();
+    assert_eq!(commits, nodes(&[11, 12, 13]));
+    assert!(
+        replies(&effects).is_empty(),
+        "the answer waits for a replica"
+    );
+    // A second `Chosen` finds no open round.
+    assert_eq!(
+        leader.step(
+            NodeId(202),
+            Message::Chosen {
+                ballot: ballot(2),
+                slot: Slot(0),
+            },
+        ),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_stalled_delegation_moves_to_the_next_proxy() {
+    let mut leader = delegating_leader();
+    leader.propose(1, write(1), 0);
+    let mut proxies = Vec::new();
+    for _ in 0..=MOVE_AFTER {
+        let effects = leader.tick(4);
+        proxies.extend(
+            sends(&effects)
+                .into_iter()
+                .filter_map(|(to, m)| matches!(m, Message::Delegate { .. }).then_some(to)),
+        );
+    }
+    assert_eq!(
+        proxies.first(),
+        Some(&NodeId(201)),
+        "the first re-sends go to the same proxy"
+    );
+    assert_eq!(
+        proxies.last(),
+        Some(&NodeId(202)),
+        "after MOVE_AFTER re-sends the round moves"
+    );
+}
+
+#[test]
+fn a_nack_that_a_proxy_relays_stops_the_leader() {
+    let mut leader = delegating_leader();
+    leader.propose(1, write(1), 0);
+    let effects = leader.step(
+        NodeId(201),
+        Message::Nack {
+            ballot: ballot(2),
+            promised: ballot(3),
+        },
+    );
+    assert_eq!(*leader.phase(), LeaderPhase::Stopped);
+    assert_eq!(replies(&effects), vec![(1, Reply::Unknown)]);
+}
+
+#[test]
+#[should_panic(expected = "the leader delegates before it opens a round")]
+fn a_leader_delegates_only_before_its_first_round() {
+    let mut leader = open_leader();
+    leader.propose(1, write(1), 0);
+    leader.delegate_to(nodes(&[201]));
+}
+
+#[test]
+fn a_retire_seen_in_phase_one_is_kept_once_the_leader_opens() {
+    let sealed = two_segments()
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(3),
+        })
+        .expect("the seal");
+    let (mut leader, _) = campaign(&sealed, 3, 2, 3);
+    let retired = sealed
+        .apply(&Change::Boundary {
+            segment: SegmentId(1),
+            state: crate::fold::BoundaryState::fresh(crate::command::Leader::Unset),
+        })
+        .and_then(|value| {
+            value.apply(&Change::Retire {
+                segment: SegmentId(1),
+                holders: 2,
+                unrepaired_damage: false,
+            })
+        })
+        .expect("another leader retired segment 1");
+    assert_eq!(leader.observe(&retired), Vec::new());
+    for node in [1, 2, 4, 5] {
+        leader.step(NodeId(node), promise(3, 3, page(&[], &[])));
+    }
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(3) });
+    let effects = leader.tick(4);
+    assert_eq!(holding(&effects), vec![], "the leader asks no holder");
+    assert_eq!(retires(&effects), vec![], "and writes no retire again");
+}
+
+#[test]
+fn a_proposal_carries_the_leader_time_of_its_write() {
+    let mut leader = open_leader();
+    let mut client = Record::new(vec![1, 2]);
+    client.headers.leader_time = Some(99);
+    let given = Command::Write(Write {
+        fence: Fence::Leader {
+            uuid: LeaderUuid(1),
+            expected_seq: Seq(0),
+        },
+        records: vec![client, Record::new(vec![3])],
+    });
+    let (_, effects) = leader.propose(7, given, 42);
+    let accepted = accepts(&effects);
+    let Some(Command::Write(write)) = accepted.values().next() else {
+        panic!("an Accept of the write: {accepted:?}");
+    };
+    assert_eq!(
+        write
+            .records
+            .iter()
+            .map(|r| r.headers.leader_time)
+            .collect::<Vec<_>>(),
+        vec![Some(42), Some(42)],
+        "one time for the write, and the client's time is replaced"
+    );
+    let (_, effects) = leader.propose(8, Command::Noop, 43);
+    assert_eq!(
+        accepts(&effects).values().next(),
+        Some(&Command::Noop),
+        "a command with no record is not stamped"
     );
 }
