@@ -257,12 +257,7 @@ impl ControlDriver {
     /// new holder may have given it back to.
     fn owns(&self, value: &RegisterValue) -> bool {
         let term = value.term();
-        let owns = term.holder == Some(self.controller.me())
-            && self.controller.term() == Some(term.number);
-        if !owns && self.controller.term().is_some() {
-            probe!(reachable, "driver: a deposed holder takes no token");
-        }
-        owns
+        term.holder == Some(self.controller.me()) && self.controller.term() == Some(term.number)
     }
 
     /// Move the driver's time to `now`.
@@ -411,6 +406,8 @@ impl ControlDriver {
                     if owns {
                         probe!(reachable, "driver: an expensive action takes the token");
                         cell.take_token();
+                    } else {
+                        probe!(reachable, "driver: a deposed holder takes no token");
                     }
                     let outcome = register.run(&change);
                     match &change {
@@ -433,6 +430,8 @@ impl ControlDriver {
                 Ask::Copy { .. } => {
                     if owns {
                         cell.take_token();
+                    } else {
+                        probe!(reachable, "driver: a deposed holder takes no token");
                     }
                     polled.sends.push(ask);
                     return;

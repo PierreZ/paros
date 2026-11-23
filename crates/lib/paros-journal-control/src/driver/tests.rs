@@ -770,3 +770,36 @@ fn a_segment_that_leaves_the_register_is_forgotten() {
         vec![SegmentId(1)]
     );
 }
+
+/// A copy that reports after another instance of this controller took a
+/// later term: the compare-and-set still goes (the register refuses it),
+/// but the token is not taken for it.
+#[test]
+fn a_copy_that_reports_after_a_later_term_takes_no_token() {
+    let mut register = Register::new(retired(ME));
+    let mut cell = TestCell::new();
+    let mut d = driver(0);
+    beat_all(&mut d, 0, &[12]);
+    d.poll(0, &mut register, &mut cell);
+    beat_all(&mut d, 40, &[12]);
+    let polled = d.poll(40, &mut register, &mut cell);
+    let [Ask::Copy { copy, .. }] = polled.sends.as_slice() else {
+        panic!("a copy ask: {polled:?}");
+    };
+    assert_eq!(cell.takes, 1);
+    // A restarted instance of this controller wins the next term, and the
+    // cell's token is free again.
+    register.value = Some(apply(
+        &register.read().expect("a register"),
+        &Change::Elect { holder: ME },
+    ));
+    cell.held = false;
+    d.copied(41, SegmentId(1), *copy, &mut register, &mut cell);
+    assert!(
+        matches!(register.ran.last(), Some(Change::Rereplicate { .. })),
+        "{:?}",
+        register.ran
+    );
+    assert_eq!(cell.takes, 1, "no token for a term this driver lost");
+    assert!(!cell.held);
+}
