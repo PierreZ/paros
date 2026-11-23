@@ -1,0 +1,109 @@
+# Mutation testing of the lines that main changed since the last green night
+# (Pierre, 2026-11-23: mutation testing moved off pull requests). A pull
+# request runs no mutant; this workflow runs, each night, the mutants of
+# the lines of paros-consensus, paros-journal, paros-journal-control and
+# paros-journal-io that main changed since the head of the last successful
+# run of this workflow (or since the last 24 hours, when there is none).
+# So a red night is judged again the next night until a fix lands.
+#
+# The jobs are those the `mutants` job of `rust.yml` had: one for each
+# shard of each changed crate (`scripts/mutants-plan.sh`), two passes for
+# paros-consensus and paros-journal (`scripts/mutants.sh`). A survivor fails
+# its shard and is a finding (AGENTS.md, the absolute rule): add the test
+# that sees it. The `Mutants` workflow (`mutants.yml`) still runs every
+# mutant of paros-consensus each week.
+name: Mutants nightly
+
+on:
+  schedule:
+    - cron: '41 1 * * *'
+  workflow_dispatch:
+    inputs:
+      base:
+        description: 'Commit to diff from (default: head of the last green night)'
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      any: ${{ steps.plan.outputs.any }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      base: ${{ steps.base.outputs.base }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_BASE: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          base=${INPUT_BASE:-}
+          if [ -z "$base" ]; then
+            base=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow mutants-nightly.yml \
+              --branch main --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base=$(git rev-list -1 --before='24 hours ago' HEAD)
+          fi
+          echo "base: $base"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - id: plan
+        run: scripts/mutants-plan.sh "${{ steps.base.outputs.base }}"
+
+  mutants:
+    needs: plan
+    if: ${{ needs.plan.outputs.any == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: mutants (${{ matrix.crate }} ${{ matrix.shard }}/${{ matrix.of }})
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/nix
+      # A mutant can make a test allocate without end (a decoder that reads
+      # no byte for each item of a list): the host then shuts the whole runner
+      # down. earlyoom sends SIGTERM to a test binary when less than 8 % of
+      # the memory is free, so the test fails and the mutant is caught, as in
+      # the `Mutants` workflow (`mutants.yml`). The build tools and the runner
+      # are never chosen.
+      - name: Start earlyoom
+        run: |
+          earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
+          sudo "$earlyoom" -m 8 -s 100 -r 0 \
+            --prefer '^(paros_consensu|consensus_sim|paros_journal|journal_sim|flavors|walks|mutants|traces|coverage|host)' \
+            --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
+            > earlyoom.log 2>&1 &
+      # `scripts/mutants.sh` (no flag) is paros-consensus; `--journal` adds the
+      # trace checks of journal-sim as a second pass; `--control` and
+      # `--journal-io` run one pass.
+      - name: Run the mutants of the lines main changed
+        env:
+          BASE: ${{ needs.plan.outputs.base }}
+          CRATE: ${{ matrix.crate }}
+          FLAG: ${{ matrix.flag }}
+          SHARD: ${{ matrix.shard }}/${{ matrix.of }}
+        run: |
+          set -euo pipefail
+          git diff "$BASE" HEAD -- "crates/lib/$CRATE/src" > crate.diff
+          # shellcheck disable=SC2086 # FLAG is empty or one word.
+          nix develop --command scripts/mutants.sh $FLAG --in-diff crate.diff \
+            --shard "$SHARD" --sharding round-robin
+      - name: Show the survivors
+        if: failure()
+        run: |
+          echo "== processes that earlyoom stopped"; grep -i 'sending SIG' earlyoom.log || true
+          cat survivors.txt 2>/dev/null || true

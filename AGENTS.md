@@ -320,9 +320,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the edits of recorded traces (#1308 (mutate recorded traces)), in release in the
   `trace-edits` job: `cargo nextest run --release -p consensus-sim --test traces -E
   'test(edited) | test(no_record)'`. The `test` job leaves them out.
-- the `mutants` job (pull requests only): cargo-mutants on the lines of
-  `crates/lib/paros-consensus/src` that the pull request changes (`scripts/mutants.sh --in-diff
-  pr.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
+- the `Mutants nightly` workflow (`mutants-nightly.yml`; a pull request runs no mutant since
+  2026-11-23): cargo-mutants on the lines of `crates/lib/paros-consensus/src` that main changed
+  since the head of the last green night (`scripts/mutants.sh --in-diff crate.diff`). Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). The
   same job runs the two passes on the changed lines of `crates/lib/paros-journal/src`
@@ -337,7 +337,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   runs in shards of its own, one job each (`--shard k/n --sharding round-robin`;
   `scripts/mutants-plan.sh` gives one shard for each 250 changed lines outside the tests, 125
   for `paros-consensus` with at least two shards, from the measures in its comment). A
-  surviving mutant fails the job: add the test that sees it in the same pull request. The
+  surviving mutant fails the night: add the test that sees it in a pull request; the next night
+  judges those lines again. Before a pull request, run `scripts/mutants.sh [--journal|--control|--journal-io] -f <file>` on the
+  lines you changed when they are in one of these crates. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
   earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit

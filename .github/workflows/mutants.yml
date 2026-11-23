@@ -5,8 +5,9 @@
 # The first pass judges each mutant with the fast tests: an incremental build,
 # then a few seconds of tests. The second pass judges only the survivors of the
 # first pass with the trace checks (TLC, about 90 s each). The run is cut into
-# 48 shards and runs each week and on demand. Each pull request runs the
-# mutants of the lines it changes (the `mutants` job of `rust.yml`).
+# 48 shards and runs each week and on demand. Each night, the `Mutants
+# nightly` workflow (`mutants-nightly.yml`) runs the mutants of the lines that
+# main changed; a pull request runs none.
 #
 # A survivor is a finding (AGENTS.md, the absolute rule): the `score` job
 # fails when any mutant survives, and lists them. Each one gets a test, or an
