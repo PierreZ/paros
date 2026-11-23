@@ -31,6 +31,17 @@
 (*             wipe its copy) only on a register value that it saw done    *)
 (*             after the controller sent that message. FALSE: on the last  *)
 (*             value it saw (control `stale_view`).                        *)
+(*   OrphanEnds "term": a node that reads a register term above the term  *)
+(*             of its copy ends the copy: no controller of that term can   *)
+(*             commit it, so a copy whose controller crashed or was        *)
+(*             deposed does not stay for ever (`Orphaned`). "same": it     *)
+(*             also ends a copy of the term it reads (control              *)
+(*             `orphan_same`, breaks `Held`). "none": it never ends one    *)
+(*             (control `orphan_kept`, breaks `Orphaned`). The read of the *)
+(*             term and the end are one step: a value that a node saw done *)
+(*             has a term at most the register's. Under "term" a node also *)
+(*             refuses an ask of such a term (else it would take the same  *)
+(*             orphan ask again after each end).                           *)
 (*                                                                         *)
 (* The segment has K slots, all chosen; a node's copy is the slots         *)
 (* [0, hi). A copy starts empty: an ask that a node takes wipes the copy   *)
@@ -46,13 +57,14 @@
 EXTENDS Integers, FiniteSets
 
 CONSTANTS Pool, Init0, Ctls, F, K, MaxCrash, MaxRestart, MaxTerm, MaxPlans,
-          None, Order, TermFence, HealCount, SentEnds, FreshRead
+          None, Order, TermFence, HealCount, SentEnds, FreshRead, OrphanEnds
 
 ASSUME Init0 \subseteq Pool /\ Cardinality(Init0) = 2 * F + 1
 ASSUME K \in Nat \ {0}
 ASSUME Order \in {"highest", "any"}
 ASSUME TermFence \in BOOLEAN /\ HealCount \in BOOLEAN /\ SentEnds \in BOOLEAN
 ASSUME FreshRead \in BOOLEAN
+ASSUME OrphanEnds \in {"term", "same", "none"}
 
 VARIABLES
   hi,       \* the slots [0, hi) that each node holds
@@ -121,9 +133,10 @@ Restart(r) ==
   /\ UNCHANGED <<hi, cid, seen, rec, w, Ctl, Net, crashes>>
 
 \* A node reads the register: a value done now. A value that names it ends
-\* the copy it runs: it is a member.
+\* the copy it runs: it is a member. A node that is down may read too: the
+\* model allows more than the code, whose nodes read only when up, and a read
+\* of the value it already saw changes nothing.
 Read(r) ==
-  /\ r \in Live /\ seen[r].at < w
   /\ seen' = [seen EXCEPT ![r] = [set |-> rec.set, at |-> w]]
   /\ cid' = [cid EXCEPT ![r] = IF r \in rec.set THEN NoCopy ELSE @]
   /\ UNCHANGED <<hi, down, rec, w, Ctl, Net, crashes, restarts>>
@@ -131,11 +144,23 @@ Read(r) ==
 \* The node's view is fresh enough for message a.
 Fresh(r, a) == FreshRead => seen[r].at >= a.at
 
-\* A node takes a copy ask: it starts that copy, empty.
+\* A copy of id that a node that reads term t ends (OrphanEnds).
+Orphan(t, id) ==
+  CASE OrphanEnds = "term" -> t > id[1]
+    [] OrphanEnds = "same" -> t >= id[1]
+    [] OrphanEnds = "none" -> FALSE
+
+\* A node takes a copy ask: it starts that copy, empty. Under "term", not
+\* an ask of a term that is over. The guard reads the register term itself,
+\* as `Ends` does: the code judges the ask on a register value it reads when
+\* the ask comes (`Driver::join` reads first), so a node never starts a copy of
+\* a term that a value it read had ended. A node that starts one on an older
+\* value ends it at its next read (`Ends`), which `Orphaned` covers.
 Join(r) ==
   \E a \in asks :
     /\ a.n = r /\ r \in Live /\ Fresh(r, a)
     /\ r \notin seen[r].set
+    /\ OrphanEnds = "term" => ~Orphan(rterm, a.id)
     /\ IF Order = "highest" THEN Above(a.id, cid[r]) ELSE a.id # cid[r]
     /\ cid' = [cid EXCEPT ![r] = a.id]
     /\ hi' = [hi EXCEPT ![r] = 0]
@@ -164,6 +189,14 @@ Abandon(r) ==
     /\ cid' = [cid EXCEPT ![r] = NoCopy]
     /\ UNCHANGED <<hi, seen, down, rec, w, Ctl, Net, crashes, restarts>>
 
+\* A node reads a register value that does not name it, with a term above
+\* its copy's, and ends the copy (`SegmentReplica::observe`). A value that
+\* names it would make it a member: then the copy is the member's.
+Ends(r) ==
+  /\ r \in Live /\ cid[r] # NoCopy /\ r \notin rec.set /\ Orphan(rterm, cid[r])
+  /\ cid' = [cid EXCEPT ![r] = NoCopy]
+  /\ UNCHANGED <<hi, seen, down, rec, w, Ctl, Net, crashes, restarts>>
+
 \* A node that its view leaves out of the set and that runs no copy drops
 \* its copy.
 Drop(r) ==
@@ -176,21 +209,24 @@ Drop(r) ==
 Eq(a, b) == a.set = b.set /\ (HealCount => a.heals = b.heals)
 After(m) == [set |-> (m.rd.set \ {m.d}) \cup {m.n}, heals |-> m.rd.heals + 1]
 
-\* The register applies a compare-and-set, as `Change::Rereplicate`: the same
-\* change again answers "ok"; then the term; then the record.
-Apply ==
-  /\ \E m \in cas :
-       IF Eq(rec, After(m))
-       THEN /\ ans' = ans \cup {[m |-> m, ok |-> TRUE]}
-            /\ UNCHANGED <<rec, w>>
-       ELSE IF (TermFence => m.term = rterm) /\ Eq(rec, m.rd)
-       THEN /\ rec' = [set |-> After(m).set, heals |-> rec.heals + 1]
-            /\ w' = w + 1
-            /\ ans' = ans \cup {[m |-> m, ok |-> TRUE]}
-       ELSE /\ ans' = ans \cup {[m |-> m, ok |-> FALSE]}
-            /\ UNCHANGED <<rec, w>>
+\* The register applies the compare-and-set m, as `Change::Rereplicate`: the
+\* same change again answers "ok"; then the term; then the record.
+Taken(m) == Eq(rec, After(m))
+Takes(m) == (TermFence => m.term = rterm) /\ Eq(rec, m.rd)
+\* The register's answer to m now.
+Ok(m) == Taken(m) \/ Takes(m)
+
+\* The register applies m, a compare-and-set of `cas` (each caller binds it).
+ApplyOn(m) ==
+  /\ ans' = ans \cup {[m |-> m, ok |-> Ok(m)]}
+  /\ IF ~Taken(m) /\ Takes(m)
+     THEN /\ rec' = [set |-> After(m).set, heals |-> rec.heals + 1]
+          /\ w' = w + 1
+     ELSE UNCHANGED <<rec, w>>
   /\ UNCHANGED <<hi, cid, seen, down, Ctl, asks, reports, cas, abandons, crashes,
                  restarts>>
+
+Apply == \E m \in cas : ApplyOn(m)
 
 (* Controllers ------------------------------------------------------------- *)
 
@@ -237,15 +273,25 @@ Send(c) ==
 
 Ending(c) == abandons \cup {[n |-> heal[c].n, id |-> heal[c].id, at |-> w]}
 
-\* An answer ends a sent heal; a refusal abandons its copy.
-Answer(c) ==
+\* The answer a ends a sent heal; a refusal abandons its copy.
+AnswerOn(c, a) ==
   /\ heal[c] # None /\ heal[c].sent
-  /\ \E a \in ans :
-       /\ a.m = Msg(c)
-       /\ abandons' = IF a.ok THEN abandons ELSE Ending(c)
+  /\ a \in ans /\ a.m = Msg(c)
+  /\ abandons' = IF a.ok THEN abandons ELSE Ending(c)
   /\ heal' = [heal EXCEPT ![c] = None]
   /\ UNCHANGED <<hi, cid, seen, down, rec, w, rterm, term, plans, asks, reports, cas, ans,
                  crashes, restarts>>
+
+Answer(c) == \E a \in ans : AnswerOn(c, a)
+
+\* The controller's view shows the heal's change done: the heal ends with no
+\* abandon (`role.rs`, "a view shows the heal done"). The answer of its own
+\* compare-and-set may be lost, or the change may be another heal's.
+Done(c) ==
+  /\ heal[c] # None /\ Eq(rec, After(Msg(c)))
+  /\ heal' = [heal EXCEPT ![c] = None]
+  /\ UNCHANGED <<hi, cid, seen, down, rec, w, rterm, term, plans, asks, reports, cas, ans,
+                 abandons, crashes, restarts>>
 
 \* A heal ends with no write and abandons its copy. A heal that sent
 \* nothing ends at any time (the code ends it when its new replica is down,
@@ -264,11 +310,16 @@ Abort(c) ==
 
 Next ==
   \/ \E r \in Pool : Crash(r) \/ Restart(r) \/ Read(r) \/ Join(r) \/ CopyStep(r)
-                     \/ Report(r) \/ Abandon(r) \/ Drop(r)
+                     \/ Report(r) \/ Abandon(r) \/ Ends(r) \/ Drop(r)
   \/ Apply
-  \/ \E c \in Ctls : Elect(c) \/ CtlCrash(c) \/ Plan(c) \/ Send(c) \/ Answer(c) \/ Abort(c)
+  \/ \E c \in Ctls : Elect(c) \/ CtlCrash(c) \/ Plan(c) \/ Send(c) \/ Answer(c) \/ Done(c)
+                     \/ Abort(c)
 
 Spec == Init /\ [][Next]_vars
+
+\* Each node in time reads the register's term and ends a copy of a term
+\* that is over.
+LiveSpec == Spec /\ \A r \in Pool : WF_vars(Ends(r))
 
 (***************************************************************************)
 (* Safety: every member of the set holds the whole segment (the walk's     *)
@@ -277,6 +328,14 @@ Spec == Init /\ [][Next]_vars
 Held == \A r \in rec.set : hi[r] = K
 
 SetSize == Cardinality(rec.set) = 2 * F + 1
+
+(***************************************************************************)
+(* Liveness: in time, no live node outside the set runs a copy of a term   *)
+(* that is over. A copy of the term in force may stay: its controller can  *)
+(* still commit it or abandon it.                                          *)
+(***************************************************************************)
+Orphaned == <>[](\A r \in Pool :
+  (r \in Live /\ r \notin rec.set /\ cid[r] # NoCopy) => cid[r][1] = rterm)
 
 (***************************************************************************)
 (* Reach: a check that must be violated, so that a passing check is not    *)
@@ -297,4 +356,7 @@ NoLowerAsk == ~\E r \in Pool, a \in asks :
 \* copy is sent.
 NoLateAbandon == ~\E r \in rec.set, a \in abandons :
   a.n = r /\ r \notin seen[r].set /\ a.id = cid[r]
+\* A node ends an orphan copy: the step `Ends` happens (an action property,
+\* so the reach is the step itself and not a state that other steps give).
+NoOrphanEnd == [][\A r \in Pool : ~Ends(r)]_vars
 =============================================================================

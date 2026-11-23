@@ -3572,14 +3572,31 @@ crashes and two restarts of nodes, two terms, three plans. The source of a copy 
 
 | Check | CI | Result |
 |---|---|---|
-| `safety` | ci | pass (642 thousand distinct states) |
-| `safety_wide` | ci | pass: three terms (4.0 million, about 2 minutes with 4 workers) |
+| `safety` | ci | pass (776 thousand distinct states) |
+| `safety_wide` | ci | pass: three terms (4.9 million, about 3 minutes with 4 workers) |
 | `reach_heal`, `reach_reuse`, `reach_come_back`, `reach_two_answers`, `reach_lower_ask`, `reach_late_abandon` | ci | violation: a heal, one node asked by two terms, a set that comes back to the first set, a compare-and-set applied twice, a lower ask that reaches a node that runs a higher copy, an abandon of a copy that a commit made a member before the node saw it |
 | `copy_any` | ci | violation of `Held`: a plan ends before it sends anything, the next plan's copy on the same node completes and is counted, the first plan's late ask wipes it, and the compare-and-set adds an empty member |
 | `version_only` | ci | violation of `Held`: the new controller's ask wipes the deposed controller's complete copy, and the deposed controller's compare-and-set, on an unchanged record, adds the empty node |
 | `no_heals` | ci | violation of `Held`: the set heals away and back to the record that a late compare-and-set read; the set alone cannot tell, and the late write adds a node whose copy is gone |
 | `sent_abort` | ci | violation of `Held`: a sent heal ends when its new replica is down, its abandon ends the copy, the late copy ask starts it again empty, and the late compare-and-set adds it |
 | `stale_view` | ci | violation of `Held`: a heal commits; a later heal moves the record on, so the first controller ends its sent heal on an old read although it committed; the new replica, on a value from before the commit that named it, takes the abandon and then the late copy ask again, which wipes a member |
+
+| `orphans` | ci | pass: liveness `Orphaned` under `LiveSpec` (weak fairness on `Ends`): once the faults stop, every copy that the record does not name ends; `Held` holds |
+| `orphan_kept` | ci | violation of `Orphaned`: with no end (`OrphanEnds = "none"`), a crashed controller's copy runs for ever |
+| `orphan_same` | ci | violation of `Held`: an end at the same term (`OrphanEnds = "same"`) ends a copy that the controller of that term still counts, and its compare-and-set adds the empty node |
+| `reach_orphan_end` | ci | violation of the action property `NoOrphanEnd`: the step `Ends` happens |
+
+Orphan copies (`OrphanEnds`, first value `term`): a node that is live, runs a copy, and is not in
+the record ends the copy when the register term is above the copy's term (`Ends`, which reads the
+term and the record in one step, as the code reads one register value). It is safe because
+`TermFence` refuses the compare-and-set of an old term. A node also refuses to join a copy ask of
+a term that is over; without that guard the same late ask starts the copy again after each end,
+and `Orphaned` fails. The action `Done` ends a heal whose result the record already shows.
+
+`HealTrace.tla` extends `MC.tla` (this model) and the shared `Trace` module and defines no step of
+its own: each event of `journal-sim`'s heal walk is one action of `HealReuse.tla` with the
+parameters that the code chose (`tests/heal_traces.rs`, 13 rules that the walks meet, the control
+`SameCopyAgain`, 27 edits).
 
 The answer: with node reuse, late requests and a node's own view, the heal is safe with the five
 rules, and each rule is needed. They are proposals for Pierre (PR #1470, rules that

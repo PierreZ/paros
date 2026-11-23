@@ -356,7 +356,12 @@ fn rereplicate(view: &View<'_>, alerts: &mut BTreeSet<Alert>) -> Option<Action> 
     let record = view.register.segments().values().find(|r| {
         r.state() == SegmentState::Retired && !down(r.replicas(), view.liveness).is_empty()
     })?;
-    let Some(to) = heal_replicas(record.replicas(), view.liveness, view.candidates) else {
+    let Some(to) = heal_replicas(
+        record.replicas(),
+        view.liveness,
+        view.candidates,
+        view.zones,
+    ) else {
         probe!(
             reachable,
             "decide: no candidate for a sealed segment's replica"
@@ -435,7 +440,12 @@ fn heal(
         alerts.insert(Alert::Unplaceable);
         return Action::Wait(Wait::NoGridPlacement);
     };
-    let Some(replicas) = heal_replicas(in_force.replicas(), view.liveness, view.candidates) else {
+    let Some(replicas) = heal_replicas(
+        in_force.replicas(),
+        view.liveness,
+        view.candidates,
+        view.zones,
+    ) else {
         probe!(reachable, "decide: no candidate for a replica of the heal");
         alerts.insert(Alert::ReplicasUnplaceable);
         return Action::Wait(Wait::NoReplicaPlacement);
