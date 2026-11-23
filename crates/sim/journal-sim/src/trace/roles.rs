@@ -60,7 +60,7 @@ struct Sizes {
 #[must_use]
 pub fn trace(fresh: Leader, events: &[RolesEvent]) -> Trace {
     let mut sizes = Sizes {
-        grids: vec![set(FIRST_GRID)],
+        grids: vec![Value::Seq(vec![set(FIRST_GRID)])],
         slots: 1,
         ballots: 1,
         crashes: 0,
@@ -107,10 +107,15 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
                 Some(sizes.grids.len() + 1),
                 "segments open in order"
             );
-            sizes.grids.push(set(grid.iter().copied()));
+            sizes.grids.push(Value::Seq(
+                grid.iter().map(|c| set(c.iter().copied())).collect(),
+            ));
             (
                 "reshape",
-                vec![("g", int(*g)), ("grid", set(grid.iter().copied()))],
+                vec![
+                    ("g", int(*g)),
+                    ("grid", set(grid.iter().flatten().copied())),
+                ],
             )
         }
         RolesEvent::Register { b, from } => {

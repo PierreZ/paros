@@ -118,7 +118,7 @@ enum Input {
 }
 
 enum Effect {
-    Persist { id: PersistId, ops: Vec<Op>, sync: bool },
+    Persist { id: PersistId, ops: Vec<Op> },
     Send { to: Address, msg: Message, after: PersistId },
     Read { read: ReadId, range: Range },
     SetTimer { timer: TimerId, at: Instant },

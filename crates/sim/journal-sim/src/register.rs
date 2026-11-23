@@ -516,6 +516,7 @@ pub fn walk(shape: Shape, mutant: RegisterMutant, seeds: u64, steps: u64) -> Wal
         .chaos_steps(steps)
         .max_down(1)
         .env_prefix(None)
+        .first_seed(crate::campaign::first_seed())
         .model(move |cx| RegisterModel::build(shape, mutant, cx))
 }
 

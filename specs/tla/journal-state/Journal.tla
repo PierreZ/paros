@@ -39,6 +39,8 @@
 (*                                                                         *)
 (* THE LOG. A slot holds a `Noop` (the election gap fill) or a command:    *)
 (*   [op "w", u, e, id]   a `Write` of one record. u is a uuid (a fenced   *)
+(*   [op "w", u, e, id, n] a `Write` of n records, at the positions e to   *)
+(*                        e + n - 1 (`RolesTrace.tla`, the wide walk).     *)
 (*                        write at the position e) or None (unfenced).     *)
 (*   [op "tr", u, up]     a `Truncate` to the position up, under u.        *)
 (*   [op "sl", new, old]  `SetLeader(new, old)`; new may be None.          *)
@@ -152,6 +154,17 @@ Ballots == 1..NB
 Replicas == UNION {RepOf[g] : g \in Gens}
 ASSUME \A g \in Gens : CfgOf[g] \subseteq Acceptors /\ QOf[g] \subseteq SUBSET CfgOf[g]
 ASSUME \A g \in Gens : \A Q1, Q2 \in QOf[g] : Q1 \cap Q2 # {}
+
+\* The Phase 2 quorums of slot s in configuration g. A grid of one column
+\* has one kind of quorum, `QOf[g]`; a grid of many columns chooses slot s
+\* in its column `s % columns`, and its Phase 1 needs a quorum of every
+\* column (section J5.1). `RolesTrace.tla` overrides this definition for the
+\* grids of two columns of the wide roles walk; every quorum of Phase 1
+\* meets every quorum of Phase 2 of each slot.
+Q2Of(g, s) == QOf[g]
+ASSUME \A g \in Gens : \A s \in 0..(NS - 1) :
+         /\ Q2Of(g, s) \subseteq SUBSET CfgOf[g]
+         /\ \A Q1 \in QOf[g] : \A Q2 \in Q2Of(g, s) : Q1 \cap Q2 # {}
 ASSUME \A g, h \in Gens : g # h => RepOf[g] \cap RepOf[h] = {}
 ASSUME \A g \in Gens : Cardinality(RepOf[g]) >= RetireAt
 ASSUME \A s \in Slots : Noop \notin Values[s]
@@ -228,7 +241,7 @@ Active == UNION {CfgOf[g] : g \in Live}
 (* Chosen values: a quorum of the ballot's grid sent its vote.             *)
 (***************************************************************************)
 ChosenAtBal(s, v, b) ==
-  bgen[b] # 0 /\ \E Q \in QOf[bgen[b]] : \A a \in Q : <<s, b, v, a>> \in sent2b
+  bgen[b] # 0 /\ \E Q \in Q2Of(bgen[b], s) : \A a \in Q : <<s, b, v, a>> \in sent2b
 Cmds == UNION {Values[s] : s \in Slots} \cup {Noop}
 Chosen(s, v) == \E b \in Ballots : ChosenAtBal(s, v, b)
 IsChosen(s) == \E v \in Cmds : Chosen(s, v)
@@ -245,6 +258,8 @@ Frontier == IF \A s \in Slots : IsChosen(s) THEN NS
 (***************************************************************************)
 Empty == [leader |-> L0, next |-> 0, first |-> 0, recs |-> {}]
 Fenced(v) == v.u # None
+\* The records of a write: n, or one when the write names no n.
+Size(v) == IF "n" \in DOMAIN v THEN v.n ELSE 1
 \* The journal is multi-writer: None, or a mode with its tag.
 IsMulti(l) == l = None \/ l \in Tags
 
@@ -270,7 +285,7 @@ Step(base, st, v) ==
   LET r == Res(base, st, v) IN
   IF r # "ok" THEN st
   ELSE CASE v.op = "w" ->
-              [st EXCEPT !.next = @ + 1,
+              [st EXCEPT !.next = @ + Size(v),
                          !.recs = @ \cup {<<st.next, v.u, v.id>>}]
          [] v.op = "tr" ->
               [st EXCEPT !.first = Max({@, Min({v.up, st.next})})]
@@ -638,7 +653,7 @@ Crash(a) ==
 \* A quorum of a grid that still runs holds a chosen vote of slot s on disk.
 \* (A later ballot can only vote the chosen value again, so a quorum may hold
 \* it at several ballots of its grid.)
-OnDisk(s) == IsChosen(s) /\ \E g \in Live : \E Q \in QOf[g] : \A a \in Q :
+OnDisk(s) == IsChosen(s) /\ \E g \in Live : \E Q \in Q2Of(g, s) : \A a \in Q :
   /\ dvote[a][s][1] > 0
   /\ bgen[dvote[a][s][1]] = g
   /\ dvote[a][s][2] = ChosenVal(s)

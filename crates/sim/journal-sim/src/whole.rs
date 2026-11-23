@@ -250,6 +250,9 @@ pub enum WholeMutant {
     WipeDisk,
     /// The client takes a `Taken` as written. [`ANSWER`] catches it.
     TakenAsWritten,
+    /// The client takes a `Taken` as `Below`, also for a position inside
+    /// the segment. [`ANSWER`] catches it.
+    BelowInSegment,
     /// The client sends an acked write again, at the next position.
     /// [`ONCE`] catches it.
     WriteTwice,
@@ -268,6 +271,11 @@ pub enum WholeMutant {
     /// The walk reports a new replica's copy complete as soon as it asks
     /// the copy. [`HEAL_HELD`] catches it.
     EarlyCopied,
+    /// The network changes the command of each `Commit` of a retired
+    /// segment, the copy a new replica pulls: a write loses its last
+    /// payload byte, another command becomes a `Noop`. [`HEAL_HELD`]
+    /// catches it.
+    CorruptCopy,
 }
 
 /// The weights of the walk's crash and restart steps: a machine comes
@@ -443,6 +451,7 @@ pub fn walk(mutant: WholeMutant, seeds: u64, steps: u64) -> Walk<WholeModel> {
         .seeds(seeds)
         .chaos_steps(steps)
         .env_prefix(None)
+        .first_seed(crate::campaign::first_seed())
         .crash_weights(CRASH.0, CRASH.1)
         .max_down(3)
         .deliveries_per_step(12, 12)
@@ -549,6 +558,10 @@ impl Model for WholeModel {
     }
 
     fn deliver(&mut self, envelope: Envelope, _cx: &mut Cx<'_, Self>) {
+        let mut envelope = envelope;
+        if self.mutant == WholeMutant::CorruptCopy {
+            self.corrupt_copy(&mut envelope);
+        }
         let machine = &self.machines[&machine_of(envelope.to)];
         if machine.driver.is_some() {
             machine.inbox.borrow_mut().push_back(envelope);
@@ -1146,6 +1159,32 @@ impl WholeModel {
         }
     }
 
+    /// The planted bug [`WholeMutant::CorruptCopy`].
+    fn corrupt_copy(&self, envelope: &mut Envelope) {
+        let j = self.journal_index(envelope.journal);
+        let Message::Commit {
+            segment, command, ..
+        } = &mut envelope.message
+        else {
+            return;
+        };
+        if self
+            .value(j)
+            .segment(*segment)
+            .is_none_or(|record| record.state() != SegmentState::Retired)
+        {
+            return;
+        }
+        match command {
+            Command::Write(write) => {
+                if let Some(record) = write.records.last_mut() {
+                    record.payload.pop();
+                }
+            }
+            other => *other = Command::Noop,
+        }
+    }
+
     fn journal_index(&self, id: JournalId) -> usize {
         self.journals
             .iter()
@@ -1223,6 +1262,7 @@ impl WholeModel {
                 seq: *expected_seq,
                 count: records.len() as u64,
             },
+            (WholeMutant::BelowInSegment, Answer::Taken(view), _) => Answer::Below(view),
             (_, answer, _) => answer,
         };
         match (&answer, &call.command) {
@@ -1705,6 +1745,15 @@ impl WholeModel {
                     missing.is_empty(),
                     "{HEAL_HELD}: {node:?} of {segment:?} misses the slots {missing:?}"
                 );
+                // Each slot it holds is the chosen command, byte for byte.
+                for (slot, command) in disk.chosen.range(below..end) {
+                    assert!(
+                        journal.chosen.get(slot) == Some(command),
+                        "{HEAL_HELD}: {node:?} of {segment:?} holds {command:?} at {slot:?}, the \
+                         chosen log has {:?}",
+                        journal.chosen.get(slot)
+                    );
+                }
                 let Some(trim) = disk.trim.as_ref().filter(|trim| trim.slot > start) else {
                     continue;
                 };
@@ -1982,25 +2031,47 @@ impl WholeModel {
         let journal = &self.journals[j];
         let mut judged = journal.judged;
         while let Some((command, answer)) = journal.answers.get(judged) {
-            let at: Vec<(u64, &str)> = states
+            let at: Vec<(usize, u64, &str)> = states
                 .iter()
                 .enumerate()
                 .filter(|(slot, _)| {
                     as_written(&journal.chosen[&Slot(*slot as u64)]) == as_written(command)
                 })
-                .map(|(_, s)| *s)
+                .map(|(slot, (before, verdict))| (slot, *before, *verdict))
                 .collect();
             if at.is_empty() {
                 break;
             }
             let name = label(answer);
-            let fits = at.iter().any(|(before, verdict)| {
+            // `Below` is the answer of a fenced write whose position lies
+            // below the first position of the segment that holds its slot:
+            // the whole log's next position at the segment's first slot.
+            let value = self.value_of(journal.id);
+            let below_base = |slot: usize| {
+                let Command::Write(Write {
+                    fence: Fence::Leader { expected_seq, .. },
+                    ..
+                }) = command
+                else {
+                    return false;
+                };
+                let slot = Slot(slot as u64);
+                let start = value
+                    .segments()
+                    .values()
+                    .rev()
+                    .find_map(|r| r.start().filter(|start| *start <= slot))
+                    .expect("a chosen slot lies in a segment with a start");
+                let at = usize::try_from(start.0).expect("a small slot");
+                expected_seq.0 < states[at].0
+            };
+            let fits = at.iter().any(|(slot, before, verdict)| {
                 (*verdict == name
                     && match answer {
                         Answer::Written { seq, .. } => seq.0 == *before,
                         _ => true,
                     })
-                    || (name == "below" && matches!(*verdict, "dup" | "taken"))
+                    || (name == "below" && matches!(*verdict, "dup" | "taken") && below_base(*slot))
             });
             assert!(
                 fits,

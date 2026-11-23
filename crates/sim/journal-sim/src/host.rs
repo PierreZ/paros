@@ -216,6 +216,7 @@ pub fn walk(mutant: HostMutant, seeds: u64, steps: u64) -> Walk<HostModel> {
         .seeds(seeds)
         .chaos_steps(steps)
         .env_prefix(None)
+        .first_seed(crate::campaign::first_seed())
         .model(move |cx| HostModel::build(mutant, cx))
 }
 

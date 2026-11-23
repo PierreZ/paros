@@ -8,7 +8,7 @@
 use journal_sim::campaign::try_campaign;
 use journal_sim::roles::{RolesEvent, RolesMutant, Shape, walk};
 use journal_sim::trace::roles::{EDITS, roles_spec, trace};
-use journal_sim::trace::{Trace, Verdict, require_tlc};
+use journal_sim::trace::{Trace, Verdict, mutate, require_tlc};
 use paros_journal::{Command, Leader};
 
 /// The value of the knob `name`, or `default`.
@@ -27,9 +27,31 @@ fn chaos() -> u64 {
     knob("TRACE_CHAOS", 800)
 }
 
+/// The chaos steps of a walk that the search for an edit's place replays:
+/// longer than a checked walk, so a rare step (a late answer that drops a
+/// blocked slot) has room to happen.
+fn place_chaos() -> u64 {
+    knob("TRACE_PLACE_CHAOS", 1500)
+}
+
 /// One traced walk: its trace and its events.
 fn replay(mutant: RolesMutant, seed: u64) -> (Trace, Vec<RolesEvent>) {
-    let run = walk(Shape::NARROW, mutant, 1, chaos())
+    replay_shape(Shape::NARROW, mutant, seed)
+}
+
+/// One traced walk of `shape`: its trace and its events.
+fn replay_shape(shape: Shape, mutant: RolesMutant, seed: u64) -> (Trace, Vec<RolesEvent>) {
+    replay_long(shape, mutant, seed, chaos())
+}
+
+/// One traced walk of `shape` with `chaos` steps: its trace and its events.
+fn replay_long(
+    shape: Shape,
+    mutant: RolesMutant,
+    seed: u64,
+    chaos: u64,
+) -> (Trace, Vec<RolesEvent>) {
+    let run = walk(shape, mutant, 1, chaos)
         .replay(seed)
         .unwrap_or_else(|failure| panic!("seed {seed}: {failure}"));
     let events: Vec<RolesEvent> = run.events().cloned().collect();
@@ -245,6 +267,38 @@ fn tlc_accepts_the_roles_walks() {
     assert!(unmet.is_empty(), "roles: no walk meets {unmet:?}");
 }
 
+/// The wide roles walks TLC checks.
+const WIDE_SEEDS: u64 = 4;
+
+/// TLC accepts the wide roles walks (grids of two columns, promises in
+/// pages of two), and one of them opens a grid of two columns.
+#[test]
+fn tlc_accepts_the_wide_roles_walks() {
+    let check = roles_spec();
+    require_tlc(&check);
+    let first = knob("TRACE_FROM", 1);
+    let mut columns = false;
+    for seed in first..first + WIDE_SEEDS {
+        let (traced, events) = replay_shape(Shape::WIDE, RolesMutant::None, seed);
+        eprintln!("wide roles seed {seed}: {} events", events.len());
+        columns |= has(
+            &events,
+            |e| matches!(e, RolesEvent::Reshape { grid, .. } if grid.len() >= 2),
+        );
+        match check.check(&traced).expect("TLC gives a verdict") {
+            Verdict::Accepted => {}
+            Verdict::Rejected(rejection) => panic!(
+                "wide roles seed {seed}: TLC refused event {} {:?}\n{}",
+                rejection.index, events[rejection.index], rejection.state
+            ),
+            other @ Verdict::InvariantViolated { .. } => {
+                panic!("wide roles seed {seed}: {other:?}")
+            }
+        }
+    }
+    assert!(columns, "no wide walk opens a grid of two columns");
+}
+
 /// The driver runs a boundary write before its batch is durable. The
 /// oracles pass it (`the_oracles_pass_an_early_boundary_write`); TLC
 /// refuses the write.
@@ -282,11 +336,8 @@ fn the_oracles_pass_an_early_boundary_write() {
     .expect("the oracles pass the trace control");
 }
 
-/// The least number of edits that find a place in the recorded traces.
-const MIN_EDITS: usize = 20;
-
-/// TLC refuses every edit of the recorded traces at or after the edited
-/// event (#1308 (mutate recorded traces)).
+/// Every edit finds a place in a walk, and TLC refuses it at or after the
+/// edited event (#1308 (mutate recorded traces)).
 #[test]
 fn tlc_refuses_the_edited_roles_traces() {
     let check = roles_spec();
@@ -296,26 +347,12 @@ fn tlc_refuses_the_edited_roles_traces() {
     // where it finds a place.
     walks.sort_by_key(|(_, events, _)| events.len());
     let recorded: Vec<&Trace> = walks.iter().map(|(_, _, traced)| traced).collect();
-    let mut placed = 0;
-    let mut wrong = Vec::new();
-    for edit in EDITS {
-        let Some(mutant) = recorded.iter().find_map(|traced| edit.apply(traced)) else {
-            eprintln!("edit {:?}: no place", edit.name);
-            continue;
-        };
-        placed += 1;
-        match check.check(&mutant.trace).expect("TLC gives a verdict") {
-            Verdict::Rejected(rejection) if rejection.index >= mutant.at => {}
-            Verdict::InvariantViolated { matched, .. } if matched >= mutant.at => {}
-            other => wrong.push(format!("{}: at {}, {other:?}", edit.name, mutant.at)),
-        }
-    }
-    assert!(
-        wrong.is_empty(),
-        "edits TLC did not refuse where it must: {wrong:#?}"
-    );
-    assert!(
-        placed >= MIN_EDITS,
-        "only {placed} edits found a place, {MIN_EDITS} must"
-    );
+    let from = walks
+        .iter()
+        .map(|(seed, ..)| seed + 1)
+        .max()
+        .expect("a checked walk");
+    mutate::judge(&check, EDITS, &recorded, from, |seed| {
+        replay_long(Shape::NARROW, RolesMutant::None, seed, place_chaos()).0
+    });
 }

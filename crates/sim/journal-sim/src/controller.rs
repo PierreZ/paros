@@ -413,6 +413,7 @@ pub fn walk(
         .crash_weights(1, 3)
         .max_down(shape.controllers.min(2))
         .env_prefix(None)
+        .first_seed(crate::campaign::first_seed())
         .model(move |cx| ControllerModel::build(shape, mutant, cx))
 }
 

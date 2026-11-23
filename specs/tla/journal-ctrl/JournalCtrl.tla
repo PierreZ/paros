@@ -52,7 +52,7 @@ Spare(a, s) ==
   \/ Learned(s)
   \/ IsChosen(s) /\ dvote[a][s][2] # ChosenVal(s)
   \/ /\ IsChosen(s)
-     /\ \E g \in Live : \E Q \in QOf[g] :
+     /\ \E g \in Live : \E Q \in Q2Of(g, s) :
           /\ a \notin Q
           /\ \A x \in Q :
                /\ dvote[x][s][1] > 0
