@@ -343,3 +343,33 @@ fn the_shared_state_is_what_every_start_reads() {
     );
     assert_eq!(effects.len(), 1, "a value at the floor starts");
 }
+
+#[test]
+fn a_draw_that_the_role_did_not_ask_for_is_lost() {
+    let mut host = host();
+    host.step(Time(0), watcher(2));
+    // The watcher stops before its draw comes, and a counter takes the
+    // address: the value is not the counter's.
+    host.step(Time(1), Input::Unassign(2));
+    host.step(Time(1), counter(2, vec![]));
+    host.step(
+        Time(1),
+        Input::Recovered {
+            address: 2,
+            records: Vec::new(),
+        },
+    );
+    let late = Input::Drawn {
+        address: 2,
+        value: 5,
+    };
+    assert_eq!(host.step(Time(2), late.clone()), Vec::new());
+    // A watcher gets one value for its one ask; a second is lost.
+    host.step(Time(3), watcher(4));
+    let first = Input::Drawn {
+        address: 4,
+        value: 5,
+    };
+    assert_eq!(host.step(Time(3), first.clone()).len(), 1);
+    assert_eq!(host.step(Time(4), first), Vec::new());
+}

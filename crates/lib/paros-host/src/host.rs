@@ -171,6 +171,8 @@ pub struct Host<R: Role> {
     roles: BTreeMap<Address<R>, Slot<R>>,
     /// The deadline of the timer of each role that set one.
     deadlines: BTreeMap<Address<R>, Time>,
+    /// The draws that each role asked for and has not got yet.
+    draws: BTreeMap<Address<R>, u32>,
 }
 
 impl<R> Clone for Host<R>
@@ -183,6 +185,7 @@ where
             shared: self.shared.clone(),
             roles: self.roles.clone(),
             deadlines: self.deadlines.clone(),
+            draws: self.draws.clone(),
         }
     }
 }
@@ -197,6 +200,7 @@ where
             .field("shared", &self.shared)
             .field("roles", &self.roles)
             .field("deadlines", &self.deadlines)
+            .field("draws", &self.draws)
             .finish()
     }
 }
@@ -209,6 +213,7 @@ impl<R: Role> Host<R> {
             shared,
             roles: BTreeMap::new(),
             deadlines: BTreeMap::new(),
+            draws: BTreeMap::new(),
         }
     }
 
@@ -402,8 +407,9 @@ impl<R: Role> Host<R> {
         true
     }
 
-    /// The random value that the role at `address` asked for. A role that
-    /// stopped since loses it.
+    /// The random value that the role at `address` asked for. A value that
+    /// the role did not ask for (it stopped since, and a new role took the
+    /// address) changes nothing.
     pub fn drawn(
         &mut self,
         now: Time,
@@ -411,8 +417,15 @@ impl<R: Role> Host<R> {
         value: u64,
         effects: &mut Vec<Effect<R::Family>>,
     ) {
-        let Some(Slot::Running(role)) = self.roles.get_mut(&address) else {
+        let Some(asked) = self.draws.get_mut(&address) else {
             return;
+        };
+        *asked -= 1;
+        if *asked == 0 {
+            self.draws.remove(&address);
+        }
+        let Some(Slot::Running(role)) = self.roles.get_mut(&address) else {
+            unreachable!("only a role that runs asks a draw");
         };
         let out = role.drawn(&self.shared, now, address, value);
         self.extend(address, out, effects);
@@ -438,6 +451,7 @@ impl<R: Role> Host<R> {
                 }
                 Effect::Draw { address: role } => {
                     assert!(*role == address, "a role asks its own draws");
+                    *self.draws.entry(address).or_insert(0) += 1;
                 }
                 _ => {}
             }
@@ -470,6 +484,7 @@ impl<R: Role> Host<R> {
             effects.extend(out);
         }
         self.deadlines.remove(&address);
+        self.draws.remove(&address);
         effects.push(Effect::Stopped { address, why });
         assert!(!self.roles.contains_key(&address), "a stopped role is gone");
         assert!(

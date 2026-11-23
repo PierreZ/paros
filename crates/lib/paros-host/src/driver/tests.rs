@@ -12,6 +12,8 @@ struct Kept {
     dropped: Vec<(u32, Out)>,
     /// Inputs that the next poll gives the host.
     next: Vec<Input<Toy>>,
+    /// Inputs that the next output gives the host.
+    on_output: Vec<Input<Toy>>,
 }
 
 impl Ports<Host<ToyRole>> for Kept {
@@ -21,7 +23,7 @@ impl Ports<Host<ToyRole>> for Kept {
 
     fn output(&mut self, address: u32, output: Out) -> Vec<Input<Toy>> {
         self.outputs.push((address, output));
-        Vec::new()
+        std::mem::take(&mut self.on_output)
     }
 
     fn dropped(&mut self, address: u32, output: Out) {
@@ -329,4 +331,35 @@ fn a_recorded_run_replays_to_the_same_effects() {
     }
     assert_eq!(again.role(1), driver.machine().role(1));
     assert_eq!(again.role(2), driver.machine().role(2));
+}
+
+#[test]
+fn a_timer_set_again_inside_the_round_of_fires_is_kept() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, _) = proc(&disk, &clock);
+    for address in [1, 3] {
+        driver.input(Input::Assign(Assignment::Counter {
+            address,
+            peers: Vec::new(),
+        }));
+    }
+    bump(&mut driver);
+    assert!(driver.poll());
+    // Both timers are due at TICK. The report of counter 1 restarts counter
+    // 3, which sets a new timer before its own old fire comes.
+    clock.0.set(TICK);
+    driver.ports_mut().on_output = vec![
+        Input::Unassign(3),
+        Input::Assign(Assignment::Counter {
+            address: 3,
+            peers: Vec::new(),
+        }),
+    ];
+    assert!(driver.poll());
+    assert_eq!(driver.machine().deadline(3), Some(Time(2 * TICK)));
+    assert_eq!(
+        driver.timers.get(&3),
+        Some(&Time(2 * TICK)),
+        "the driver keeps the timer that the host keeps"
+    );
 }

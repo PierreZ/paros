@@ -262,7 +262,12 @@ where
             .map(|(address, at)| (*at, *address))
             .collect();
         due.sort();
-        for (_, address) in due {
+        for (at, address) in due {
+            // A fire earlier in this loop can stop the role or set its timer
+            // again: only the deadline that is still the role's fires.
+            if self.timers.get(&address) != Some(&at) {
+                continue;
+            }
             busy = true;
             self.timers.remove(&address);
             self.input(M::timer_fired(address));
