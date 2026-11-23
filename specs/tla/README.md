@@ -3581,6 +3581,23 @@ crashes and two restarts of nodes, two terms, three plans. The source of a copy 
 | `sent_abort` | ci | violation of `Held`: a sent heal ends when its new replica is down, its abandon ends the copy, the late copy ask starts it again empty, and the late compare-and-set adds it |
 | `stale_view` | ci | violation of `Held`: a heal commits; a later heal moves the record on, so the first controller ends its sent heal on an old read although it committed; the new replica, on a value from before the commit that named it, takes the abandon and then the late copy ask again, which wipes a member |
 
+| `orphans` | ci | pass: liveness `Orphaned` under `LiveSpec` (weak fairness on `Ends`): once the faults stop, every copy that the record does not name ends; `Held` holds |
+| `orphan_kept` | ci | violation of `Orphaned`: with no end (`OrphanEnds = "none"`), a crashed controller's copy runs for ever |
+| `orphan_same` | ci | violation of `Held`: an end at the same term (`OrphanEnds = "same"`) ends a copy that the controller of that term still counts, and its compare-and-set adds the empty node |
+| `reach_orphan_end` | ci | violation: a node ends an orphan copy that no abandon reached |
+
+Orphan copies (`OrphanEnds`, first value `term`): a node that is live, runs a copy, and is not in
+the record ends the copy when the register term is above the copy's term (`Ends`, which reads the
+term and the record in one step, as the code reads one register value). It is safe because
+`TermFence` refuses the compare-and-set of an old term. A node also refuses to join a copy ask of
+a term that is over; without that guard the same late ask starts the copy again after each end,
+and `Orphaned` fails. The action `Done` ends a heal whose result the record already shows.
+
+`HealTrace.tla` extends `MC.tla` (this model) and the shared `Trace` module and defines no step of
+its own: each event of `journal-sim`'s heal walk is one action of `HealReuse.tla` with the
+parameters that the code chose (`tests/heal_traces.rs`, 13 rules that the walks meet, the control
+`SameCopyAgain`, 27 edits).
+
 The answer: with node reuse, late requests and a node's own view, the heal is safe with the five
 rules, and each rule is needed. They are proposals for Pierre (PR #1470, rules that
 `re-replication/` does not have).

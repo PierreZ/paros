@@ -23,3 +23,13 @@ version_only       violation  ci
 no_heals           violation  ci
 sent_abort         violation  ci
 stale_view         violation  ci
+# Orphan copies: a node ends a copy of a term below the register term it read.
+# Liveness: once the faults stop, every copy that the register does not hold
+# ends (`Orphaned`); `Held` stays true.
+orphans            pass       ci
+# Controls: no end breaks `Orphaned`; an end of the copy of the current term
+# breaks `Held`.
+orphan_kept        violation  ci
+orphan_same        violation  ci
+# Reach: a node ends an orphan copy that no abandon reached.
+reach_orphan_end   violation  ci

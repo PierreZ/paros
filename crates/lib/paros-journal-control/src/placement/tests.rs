@@ -84,16 +84,46 @@ fn a_heal_takes_no_candidate_that_is_not_up_or_already_a_member() {
 #[test]
 fn a_heal_of_a_replica_set_keeps_its_order_and_size() {
     let live = alive(&[11, 13, 20, 21], &[12]);
+    let none = BTreeMap::new();
     assert_eq!(
-        heal_replicas(&nodes(&[11, 12, 13]), &live, &nodes(&[11, 20, 21])),
+        heal_replicas(&nodes(&[11, 12, 13]), &live, &nodes(&[11, 20, 21]), &none),
         Some(nodes(&[11, 20, 13]))
     );
     assert_eq!(
-        heal_replicas(&nodes(&[11, 12, 13]), &live, &nodes(&[13])),
+        heal_replicas(&nodes(&[11, 12, 13]), &live, &nodes(&[13]), &none),
         None
     );
     assert_eq!(
-        heal_replicas(&nodes(&[11, 13]), &live, &[]),
+        heal_replicas(&nodes(&[11, 13]), &live, &[], &none),
         Some(nodes(&[11, 13]))
     );
+}
+
+#[test]
+fn a_heal_of_a_replica_set_meets_the_zone_rule() {
+    let live = alive(&[11, 13, 20, 21], &[12]);
+    let labels = zones(&[(11, "a"), (12, "b"), (13, "c"), (20, "a"), (21, "b")]);
+    assert_eq!(
+        heal_replicas(&nodes(&[11, 12, 13]), &live, &nodes(&[20, 21]), &labels),
+        Some(nodes(&[11, 21, 13])),
+        "the first candidate is in a zone that holds a replica already"
+    );
+    assert_eq!(
+        heal_replicas(&nodes(&[11, 12, 13]), &live, &nodes(&[20]), &labels),
+        None,
+        "no candidate keeps one replica in each zone: the heal waits"
+    );
+    assert!(
+        matches!(
+            set_zones(&nodes(&[11, 20, 13]), &labels),
+            GridZones::Breaks(_)
+        ),
+        "two replicas of three in one zone"
+    );
+    assert_eq!(set_zones(&nodes(&[11, 21, 13]), &labels), GridZones::Holds);
+    assert_eq!(
+        set_zones(&nodes(&[11, 22]), &labels),
+        GridZones::PartlyLabeled(NodeId(22))
+    );
+    assert_eq!(set_zones(&nodes(&[30, 31]), &labels), GridZones::Unlabeled);
 }

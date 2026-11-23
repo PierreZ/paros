@@ -645,6 +645,60 @@ fn a_node_goes_on_with_the_same_copy_on_its_disk() {
     );
 }
 
+/// `value` after one more controller election: copies of its term are
+/// orphans.
+fn next_term(value: &RegisterValue) -> RegisterValue {
+    value
+        .apply(&Change::Elect { holder: NodeId(30) })
+        .expect("an election")
+}
+
+#[test]
+fn a_join_of_a_term_that_is_over_is_refused() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(next_term(&retired())));
+    assert!(host.step(Time(0), join(5)).is_empty(), "an orphan ask");
+    assert!(!host.serves(NEW));
+}
+
+#[test]
+fn a_copy_ends_when_its_term_is_over() {
+    let mut host = joined(retired());
+    let effects = host.step(Time(1), observe(next_term(&retired())));
+    assert!(
+        writes_a_copy(&effects),
+        "the end is on the disk: {effects:?}"
+    );
+    assert!(
+        effects.contains(&Effect::Stopped {
+            address: NEW,
+            why: Stop::Dropped
+        }),
+        "an orphan copy is dropped with no abandon"
+    );
+    assert!(!host.serves(NEW));
+}
+
+#[test]
+fn a_join_read_after_the_term_changed_starts_no_copy() {
+    let mut host = Host::new(CONFIG);
+    host.step(Time(0), observe(retired()));
+    host.step(Time(0), join(5));
+    host.step(Time(0), observe(next_term(&retired())));
+    let effects = host.step(Time(0), recovered(NEW));
+    assert!(
+        !writes_a_copy(&effects),
+        "no copy of a term that is over starts: {effects:?}"
+    );
+    assert!(
+        effects.contains(&Effect::Stopped {
+            address: NEW,
+            why: Stop::Dropped
+        }),
+        "a node that no set names drops the segment: {effects:?}"
+    );
+}
+
 #[test]
 fn a_join_read_after_the_commit_starts_a_member() {
     let mut host = Host::new(CONFIG);

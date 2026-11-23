@@ -335,7 +335,8 @@ alert, in this order:
    replica of its set is down: it waits for the retire of every older segment, the minimum
    interval and a token. The new grid keeps every member that is not down in its place and puts
    a candidate in the place of each member that is down, the first placement in the host's
-   order that meets the zone rule; the replica set the same, with no zone rule.
+   order that meets the zone rule; the replica set the same, and it meets the zone rule of one
+   column (`set_zones`: with `2F + 1` zones or more, no two replicas in one zone).
 
 The tests as built: the unit tests of the crate; tests 1, 2, 5 (the oracles that one decision can
 judge: `NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`, `FENCED`, `NO_STALE_PLAN`, `NO_SUSPECT_REPLACED`,
@@ -354,7 +355,8 @@ term, makes it idle. The driver decides when to send a call again: after a timeo
 The role also holds the heal in flight of a retired segment (#1314, §J3.1 "As built"): it asks the
 new replica to copy (`Ask::Copy`), counts the copy on its report (`copied`), gives the
 compare-and-set `Change::Rereplicate` until it is answered (`rereplicated`), and ends the heal on
-a read that changed, a new replica that is down or a refusal (`Ask::Abandon`). `journal-sim`'s
+a read that changed, a new replica that is down or a refusal (`Ask::Abandon`); a view of another
+term ends a heal that sent no compare-and-set and makes the controller idle. `journal-sim`'s
 heal walk (`src/heal.rs`, `tests/heal.rs`) runs it with two controllers, replica machines lost
 for good or back with their disk, lost requests and replies, and a trim during the heal; with
 the controller walks it reaches every `probe!` of the role.
@@ -389,6 +391,11 @@ decision of Pierre):
   only copy).
 - **A heal does not move survivors**: a member that is down is replaced in its own place. The
   zone rule of a v1 grid is the rule of each column.
+- **A replica set meets the zone rule of one column** (#1314). A retired segment's replicas
+  hold its only copy in v1, so the set must survive a zone loss; and a replica heal into a zone
+  that already holds a replica can leave a later grid heal with no candidate. `heal_replicas`
+  places by backtracking, as `heal_grid` does, and the reference `decide` of `journal-sim`
+  requires the rule of each plan.
 - **The matchmakers at a majority with no spare alert**; the handover of the catalogue is not an
   action of v1's `decide` yet.
 

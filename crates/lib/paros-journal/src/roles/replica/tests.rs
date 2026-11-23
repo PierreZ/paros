@@ -844,6 +844,57 @@ fn a_new_replica_whose_plan_ended_drops_its_copy() {
     );
 }
 
+/// `value` after `times` controller elections.
+fn elected(value: &RegisterValue, times: u64) -> RegisterValue {
+    (0..times).fold(value.clone(), |value, holder| {
+        value
+            .apply(&Change::Elect {
+                holder: NodeId(30 + holder),
+            })
+            .expect("an election")
+    })
+}
+
+#[test]
+fn a_new_replica_ends_a_copy_of_a_term_that_is_over() {
+    let mut replica = joiner();
+    let current = retired_two();
+    assert_eq!(current.term().number, COPY.term);
+    replica.observe(&current);
+    assert_eq!(
+        replica.joining(),
+        Some(COPY),
+        "the copy of the term in force runs on"
+    );
+    let effects = replica.observe(&elected(&retired_two(), 1));
+    assert_eq!(
+        persists(&effects),
+        vec![(PersistId(2), vec![ReplicaOp::Joining(None)])],
+        "the end of the copy is on the disk"
+    );
+    assert!(effects.contains(&ReplicaEffect::Drop));
+    assert_eq!(replica.joining(), None);
+    assert!(
+        replica.dropped(),
+        "an orphan copy is dropped with no abandon"
+    );
+}
+
+#[test]
+fn a_new_replica_that_a_later_term_names_is_a_member() {
+    let mut replica = joiner();
+    let value = elected(&healed(&retired_two(), 11, 20), 1);
+    assert!(value.term().number > COPY.term);
+    let effects = replica.observe(&value);
+    assert_eq!(
+        persists(&effects).first(),
+        Some(&(PersistId(1), vec![ReplicaOp::Joining(None)])),
+        "the value that names it ends the copy: it is a member"
+    );
+    assert!(!replica.dropped(), "a member keeps its copy in every term");
+    assert!(replica.set().contains(&NEW));
+}
+
 #[test]
 fn an_abandon_after_the_commit_keeps_a_member() {
     let mut replica = joiner();

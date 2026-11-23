@@ -552,6 +552,35 @@ fn a_sent_heal_outlives_a_new_replica_that_goes_down() {
 }
 
 #[test]
+fn a_heal_of_a_term_that_is_over_ends_and_stops_the_controller() {
+    let register = retired();
+    let signals = Signals::with_down(&[12]);
+    let deposed = apply(
+        &register,
+        &Change::Elect {
+            holder: NodeId(901),
+        },
+    );
+    let mut sent = healing(&register, &signals);
+    let change = heal_change(&register);
+    assert_eq!(sent.copied(SegmentId(1), FIRST), Ask::Call(change.clone()));
+    assert_eq!(
+        sent.step(&signals.view(ME, 1, &deposed), &TUNABLES),
+        (Ask::Call(change), None),
+        "a sent heal waits for its answer"
+    );
+    assert_eq!(sent.term(), Some(1));
+    let mut controller = healing(&register, &signals);
+    assert_eq!(
+        controller.step(&signals.view(ME, 1, &deposed), &TUNABLES),
+        (abandon_ask(FIRST), None),
+        "no plan of an old term commits its copy"
+    );
+    assert_eq!(controller.heal(), None);
+    assert_eq!(controller.term(), None, "a deposed controller stops");
+}
+
+#[test]
 fn a_heal_on_an_old_read_ends() {
     let register = retired();
     let signals = Signals::with_down(&[12]);

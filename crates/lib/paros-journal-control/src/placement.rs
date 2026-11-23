@@ -8,6 +8,15 @@
 //! member that is not down in its column and puts a candidate in the place
 //! of each member that is down, so no survivor changes column.
 //!
+//! The replica set of a segment keeps the same rule as one column: the
+//! replicas outside one domain hold a majority, the replicas inside one
+//! domain hold none. A retired segment's replicas hold its only copy (v1 has
+//! no offload), and the leader retires it at `F + 1` holders, so a set with
+//! a majority in one zone loses the segment with that zone; and a heal into
+//! a zone that already holds a replica can leave no free machine there for
+//! a later heal of the grid (`journal-sim`'s whole walk, a machine lost for
+//! good).
+//!
 //! The zone rule of a v1 grid is the zone rule of each of its columns: a
 //! Phase-1 quorum of a v1 grid is a majority of every column and a Phase-2
 //! quorum a majority of one, so "the members outside one domain hold a
@@ -65,20 +74,44 @@ pub fn grid_zones(grid: &Grid, zones: &BTreeMap<NodeId, FailureDomain>) -> GridZ
         return GridZones::PartlyLabeled(*unlabeled);
     }
     for column in grid.columns() {
-        let config = AcceptorConfig::zoned(
-            column.iter().map(|m| (*m, zones[m].clone())).collect(),
-            QuorumSystem::Majority,
-        );
-        let rule = config.zone_rule();
-        assert!(
-            rule != ZoneRule::Unlabeled,
-            "a column of labeled members is labeled"
-        );
+        let rule = column_rule(column, zones);
         if !rule.holds() {
             return GridZones::Breaks(rule);
         }
     }
     GridZones::Holds
+}
+
+/// The zone rule of one group of labeled members, asked as a majority.
+fn column_rule(column: &[NodeId], zones: &BTreeMap<NodeId, FailureDomain>) -> ZoneRule {
+    let config = AcceptorConfig::zoned(
+        column.iter().map(|m| (*m, zones[m].clone())).collect(),
+        QuorumSystem::Majority,
+    );
+    let rule = config.zone_rule();
+    assert!(
+        rule != ZoneRule::Unlabeled,
+        "a column of labeled members is labeled"
+    );
+    rule
+}
+
+/// The zone rule over a replica set, as over one column.
+#[must_use]
+pub fn set_zones(set: &[NodeId], zones: &BTreeMap<NodeId, FailureDomain>) -> GridZones {
+    let labeled = set.iter().filter(|m| zones.contains_key(m)).count();
+    if labeled == 0 {
+        return GridZones::Unlabeled;
+    }
+    if let Some(unlabeled) = set.iter().find(|m| !zones.contains_key(m)) {
+        return GridZones::PartlyLabeled(*unlabeled);
+    }
+    let rule = column_rule(set, zones);
+    if rule.holds() {
+        GridZones::Holds
+    } else {
+        GridZones::Breaks(rule)
+    }
 }
 
 /// The members of `members` that are down.
@@ -186,9 +219,10 @@ fn fill(
 }
 
 /// The new replica set of a heal: each member of `replicas` that is down
-/// replaced by the first candidate that is up and not in the set. `None`:
-/// too few candidates. The replica set has no zone rule in v1 (§J3.1 names
-/// none).
+/// replaced by a candidate that is up and not in the set, such that the new
+/// set admits the zone rule of one column ([`set_zones`]). The search tries
+/// the candidates in the host's order and backtracks, as [`heal_grid`].
+/// `None`: no placement exists.
 ///
 /// # Panics
 ///
@@ -199,27 +233,55 @@ pub fn heal_replicas(
     replicas: &[NodeId],
     liveness: &BTreeMap<NodeId, Liveness>,
     candidates: &[NodeId],
+    zones: &BTreeMap<NodeId, FailureDomain>,
 ) -> Option<Vec<NodeId>> {
     let members: BTreeSet<NodeId> = replicas.iter().copied().collect();
-    let mut usable = usable(candidates, liveness, &members).into_iter();
-    let healed: Option<Vec<NodeId>> = replicas
-        .iter()
-        .map(|m| {
-            if liveness.get(m) == Some(&Liveness::Down) {
-                usable.next()
-            } else {
-                Some(*m)
-            }
-        })
+    let usable = usable(candidates, liveness, &members);
+    let holes: Vec<usize> = (0..replicas.len())
+        .filter(|i| liveness.get(&replicas[*i]) == Some(&Liveness::Down))
         .collect();
-    if let Some(set) = &healed {
-        assert!(set.len() == replicas.len(), "a heal keeps the set's size");
-        assert!(
-            set.iter().collect::<BTreeSet<_>>().len() == set.len(),
-            "a healed set names each replica once"
-        );
+    let mut set = replicas.to_vec();
+    let mut taken = vec![false; usable.len()];
+    let healed = fill_set(&mut set, &holes, &usable, &mut taken, zones)?;
+    assert!(
+        healed.len() == replicas.len(),
+        "a heal keeps the set's size"
+    );
+    assert!(
+        healed.iter().collect::<BTreeSet<_>>().len() == healed.len(),
+        "a healed set names each replica once"
+    );
+    assert!(
+        set_zones(&healed, zones).admits(),
+        "a heal of a replica set meets the zone rule"
+    );
+    Some(healed)
+}
+
+fn fill_set(
+    set: &mut Vec<NodeId>,
+    holes: &[usize],
+    usable: &[NodeId],
+    taken: &mut [bool],
+    zones: &BTreeMap<NodeId, FailureDomain>,
+) -> Option<Vec<NodeId>> {
+    let Some((hole, rest)) = holes.split_first() else {
+        return set_zones(set, zones).admits().then(|| set.clone());
+    };
+    let gone = set[*hole];
+    for (i, candidate) in usable.iter().enumerate() {
+        if taken[i] {
+            continue;
+        }
+        taken[i] = true;
+        set[*hole] = *candidate;
+        if let Some(found) = fill_set(set, rest, usable, taken, zones) {
+            return Some(found);
+        }
+        taken[i] = false;
     }
-    healed
+    set[*hole] = gone;
+    None
 }
 
 #[cfg(test)]
