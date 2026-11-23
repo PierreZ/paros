@@ -8,8 +8,8 @@ use std::rc::Rc;
 use paros_journal::register::{Ballot, RegisterValue};
 use paros_journal::roles::{Campaign, LeaderPhase, Message};
 use paros_journal::{
-    Answer, Fence, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, Reply,
-    SegmentId, SegmentRecord, Seq, Slot, Write,
+    Answer, Fence, Grid, JournalView, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record,
+    Reply, SegmentId, SegmentRecord, Seq, Slot, Write,
 };
 
 use super::*;
@@ -862,4 +862,41 @@ fn a_read_at_a_role_that_stops_is_unserved() {
         }],
         "a role that is not served answers at once"
     );
+}
+
+#[test]
+fn a_read_that_a_stop_drops_is_unserved_and_a_dropped_notice_is_lost() {
+    let mut ports = JournalPorts::new(MemRegister::new());
+    let replica = Address::replica(J, NodeId(11), SegmentId(1));
+    let view = JournalView {
+        leader: Leader::Unset,
+        next_seq: Seq(0),
+        first_seq: Seq(0),
+    };
+    // The page waited on a batch of its stopped replica: the fold it read
+    // may hold a batch that is lost, so the reader learns only `Unserved`.
+    ports.dropped(
+        replica,
+        Output::ReadReply {
+            read: 7,
+            answer: ReadAnswer::Truncated(view),
+        },
+    );
+    assert_eq!(
+        ports.reads,
+        vec![ReadReply {
+            address: replica,
+            read: 7,
+            answer: ReadAnswer::Unserved,
+        }]
+    );
+    ports.dropped(
+        replica,
+        Output::Retired {
+            segment: SegmentId(1),
+        },
+    );
+    assert_eq!(ports.reads.len(), 1);
+    assert_eq!(ports.replies, Vec::new());
+    assert_eq!(ports.notices, Vec::new());
 }

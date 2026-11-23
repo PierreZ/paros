@@ -366,6 +366,7 @@ impl Host {
     /// [`RESEND_BATCH`].
     #[must_use]
     pub fn new(config: HostConfig) -> Self {
+        assert!(config.tick > 0, "the timer moves time forward");
         assert!(
             config.resend_page > 0,
             "a re-send page carries at least one round"

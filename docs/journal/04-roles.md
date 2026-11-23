@@ -189,12 +189,10 @@ backends in memory (`mem`) and the contract suites (`contract`).
   disk format, an assignment, an input, an output and a stop. `paros-journal-io` keeps the journal
   roles behind the `Role` trait, their address, the register, the disk layout and the contract
   suites; a backend of the journal implements `Storage<Journal>` and `Transport<Journal>`. A send
-  waits on a batch as before, and so does an output (a register change, a read answer); a
-  periodic report (a heal's copy report) is dropped when its batch is not durable yet. The
-  prototype on the old `Host` found that one trait fits the four journal roles and a toy
-  coordinator with no loss (the result is in #1410); the example `coordinator` of `paros-host`
-  runs roles that are not journal roles. The split changes no rule of `specs/tla/flight-rule/`,
-  which stays the model of the host.
+  waits on a batch, and so does an output (a register change, a read answer); a periodic report
+  (a heal's copy report) is dropped when its batch is not durable yet. One trait fits the four
+  journal roles and a toy coordinator; the example `coordinator` of `paros-host` runs roles that
+  are not journal roles. `specs/tla/flight-rule/` is the model of the host.
 
 - *Rule 1.* The generic `Driver` steps the `Host` at once for each input and keeps every persist batch of
   a round in one group. At the end of `Driver::poll` it commits the group in one storage write
@@ -253,6 +251,14 @@ it in.
 *Why.* The effects of a step are then a function of the role's inputs alone. Any run, in
 simulation or in production, replays from its recorded inputs, and a failing run of the whole
 journal under moonpool-sim replays exactly.
+
+*Proof.* `specs/tla/recorded-inputs/` (#1413 (the time, the timers and the draws in each role)):
+roles that arm and fire timers whose deadline adds a random jitter. With the time and the draw in
+each input and one deadline for each role, every recorded run replays to the same effects at any
+clock and with any random source (`ReplayExact`), and a role gets a fire only at or after its own
+deadline (`OwnTimer`). Three controls break it: a role that reads the clock (`clock`), a role that
+draws its own jitter (`draw`), and one timer for every role whose fire goes to every role
+(`shared`).
 
 **Rule 3: a pure `Host`.** A process serves many roles of many journals. The `Host` is a pure
 state machine in the core: it maps (journal, role, instance) to a role, routes each input to it
