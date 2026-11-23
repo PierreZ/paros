@@ -29,11 +29,12 @@ impl Role for JournalRole {
     type Family = Journal;
     type Shared = Shared;
 
-    fn start(shared: &Shared, _now: Time, launch: Launch) -> Start<Self> {
+    fn start(shared: &Shared, now: Time, launch: Launch) -> Start<Self> {
         match launch {
-            Launch::Assign(Assignment::Proxy { address }) => {
-                Start::Running(Self::Proxy(JournalProxy::new(address.node)), Vec::new())
-            }
+            Launch::Assign(Assignment::Proxy { address }) => Start::Running(
+                Self::Proxy(JournalProxy::new(address.node)),
+                vec![shared.timer(address, now)],
+            ),
             Launch::Assign(Assignment::Leader {
                 address,
                 campaign,
@@ -47,6 +48,7 @@ impl Role for JournalRole {
                         leader.delegate_to(proxies);
                         let mut effects = Vec::new();
                         leader_effects(address, out, &mut effects);
+                        effects.push(shared.timer(address, now));
                         Start::Running(Self::Leader(leader), effects)
                     }
                     None => Start::Refused(Stop::NoCampaign),
@@ -60,7 +62,7 @@ impl Role for JournalRole {
 
     fn recover(
         shared: &Shared,
-        _now: Time,
+        now: Time,
         address: Address,
         launch: Launch,
         entries: &Vec<(Key, Entry)>,
@@ -93,6 +95,7 @@ impl Role for JournalRole {
         if let Some(value) = shared.value(address.journal) {
             replica_effects(address, replica.observe(value), &mut effects);
         }
+        effects.push(shared.timer(address, now));
         Ok((Self::Replica(replica), effects))
     }
 
@@ -165,7 +168,9 @@ impl Role for JournalRole {
         effects
     }
 
-    fn tick(&mut self, shared: &Shared, _now: Time, address: Address) -> Vec<Effect> {
+    /// The periodic step of a leader, a replica or a proxy, then its timer
+    /// again. An acceptor sets no timer.
+    fn fire(&mut self, shared: &Shared, now: Time, address: Address) -> Vec<Effect> {
         let mut effects = Vec::new();
         match self {
             Self::Leader(leader) => {
@@ -175,8 +180,9 @@ impl Role for JournalRole {
             Self::Proxy(proxy) => {
                 proxy_effects(address, proxy.tick(shared.resend_page()), &mut effects);
             }
-            Self::Acceptor(_) => {}
+            Self::Acceptor(_) => unreachable!("an acceptor sets no timer"),
         }
+        effects.push(shared.timer(address, now));
         effects
     }
 

@@ -2,7 +2,7 @@
 //!
 //! A machine is a pure step, `input` at `now` to effects, plus the inputs
 //! that the driver itself builds: a recovery, a failed read, a failed
-//! commit, a message and the timer. [`Host`] is a machine with the inputs of
+//! commit, a message, the timer of a role and a random draw. [`Host`] is a machine with the inputs of
 //! [`Input`]. A family that routes some inputs itself (the journal) wraps a
 //! `Host` in a machine of its own, with its own inputs.
 
@@ -39,8 +39,12 @@ pub trait Machine {
     /// The input of a message that arrived.
     fn message(envelope: <Self::Family as Family>::Envelope) -> Self::Input;
 
-    /// The input of the timer.
-    fn timer_fired() -> Self::Input;
+    /// The input that says the timer of the role at `address` is due.
+    fn timer_fired(address: <Self::Family as Family>::Address) -> Self::Input;
+
+    /// The input that gives the role at `address` the random value it asked
+    /// for.
+    fn drawn(address: <Self::Family as Family>::Address, value: u64) -> Self::Input;
 }
 
 impl<R: Role> Machine for Host<R> {
@@ -70,7 +74,11 @@ impl<R: Role> Machine for Host<R> {
         Input::Message(envelope)
     }
 
-    fn timer_fired() -> Self::Input {
-        Input::TimerFired
+    fn timer_fired(address: <R::Family as Family>::Address) -> Self::Input {
+        Input::TimerFired { address }
+    }
+
+    fn drawn(address: <R::Family as Family>::Address, value: u64) -> Self::Input {
+        Input::Drawn { address, value }
     }
 }
