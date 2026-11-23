@@ -114,7 +114,7 @@ drop never takes more than the sum). A consensus-sim oracle (`oracle/memory.rs`,
 `RETAINED_BYTES`) compares the counter of every live node and replica with a sum of the
 records' bytes made by hand, at each check of every walk. A planted mutant of the driver cannot
 make the two differ, so the oracle's controls are its own unit test and the mutants of the
-core, which the `mutants` job runs against the walks.
+core, which the `Mutants nightly` workflow runs against the walks.
 
 ## Later, if a deployment needs it: a window in memory
 

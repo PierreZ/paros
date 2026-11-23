@@ -3,7 +3,8 @@
 # request runs no mutant; this workflow runs, each night, the mutants of
 # the lines of paros-consensus, paros-journal, paros-journal-control and
 # paros-journal-io that main changed since the head of the last successful
-# run of this workflow (or since the last 24 hours, when there is none).
+# scheduled run of this workflow (before the first green night: since the
+# head of the first night; with no night at all: the last 24 hours).
 # So a red night is judged again the next night until a fix lands.
 #
 # The jobs are those the `mutants` job of `rust.yml` had: one for each
@@ -22,6 +23,11 @@ on:
       base:
         description: 'Commit to diff from (default: head of the last green night)'
         required: false
+
+# A night that runs long is never cancelled by the next one.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -45,15 +51,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_BASE: ${{ inputs.base }}
+        # Only scheduled nights count: a dispatch with its own `base` must not
+        # move the next night's base. With no green night yet, the head of
+        # the first night is the base, so a red night is judged again.
         run: |
           set -euo pipefail
-          base=${INPUT_BASE:-}
-          if [ -z "$base" ]; then
-            base=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow mutants-nightly.yml \
-              --branch main --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
-          fi
-          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            base=$(git rev-list -1 --before='24 hours ago' HEAD)
+          if [ -n "${INPUT_BASE:-}" ]; then
+            base=$(git rev-parse --verify "$INPUT_BASE^{commit}")
+          else
+            runs() {
+              gh run list --repo "$GITHUB_REPOSITORY" --workflow mutants-nightly.yml \
+                --branch main --event schedule --limit 200 --json headSha,conclusion,createdAt "$@"
+            }
+            base=$(runs --jq 'map(select(.conclusion == "success")) | .[0].headSha // ""')
+            if [ -z "$base" ]; then
+              base=$(runs --jq 'sort_by(.createdAt) | map(select(.headSha != env.GITHUB_SHA)) | .[0].headSha // ""')
+            fi
+            if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+              base=$(git rev-list -1 --first-parent --before='24 hours ago' HEAD)
+              echo "::warning::no earlier night to diff from; judging the last 24 hours from $base"
+            fi
           fi
           echo "base: $base"
           echo "base=$base" >> "$GITHUB_OUTPUT"

@@ -40,7 +40,7 @@ techniques, and each one covers a gap of another. Their rules are in §J7 of
 | [Edits of recorded traces](#edits) | a trace check that accepts a wrong trace | `traces` jobs or `test` job |
 | [The live trace check](#live) | a divergence deep in a long run | `test` job, and `Journal live` each night |
 | [A second `decide`](#decide) | a wrong decision of the controller | `test` job |
-| [cargo-mutants on the code](#mutants) | a line that no test checks | `mutants` job, on each pull request |
+| [cargo-mutants on the code](#mutants) | a line that no test checks | `Mutants nightly` workflow, each night |
 | [Hard assertions](#assertions) | a broken state, at the line that made it | every test, walk and mutant run |
 | [Contract suites of the backends](#contracts) | a backend that breaks the IO contract | `test` job |
 | [Layers, wasm and examples](#static) | a pure crate that does I/O, an API that does not compose | `checks` and `wasm` jobs |
@@ -193,11 +193,11 @@ oracles `NO_UNSAFE_PLAN`, `BOUNDED_RESHAPE_RATE`, `FENCED`, `NO_STALE_PLAN`, `NO
 
 <h2 id="mutants">cargo-mutants on the code</h2>
 
-A green suite does not say that the tests would see a bug. On each pull request, the `mutants`
-job makes one small edit at a time to the changed lines of `paros-journal`,
+A green suite does not say that the tests would see a bug. Each night, the `Mutants nightly`
+workflow makes one small edit at a time to the lines that main changed in `paros-journal`,
 `paros-journal-control` and `paros-journal-io`, and a test must fail for each edit. For the
 journal core, the judges are its unit tests and the walks, then the trace checks on the edits that
-the walks missed. A survivor fails the job, and gets the test that sees it in the same pull
+the walks missed. A survivor fails the night, and gets the test that sees it in the next pull
 request. More: [Mutants and assertions](../../engineering/mutants/).
 
 <h2 id="assertions">Hard assertions</h2>

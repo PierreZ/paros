@@ -17,10 +17,11 @@ bug. A test suite that passes with a line of the core changed does not test that
 returns a default, a `>` that becomes `>=`, a guard that becomes `true`. For each edit, a test
 must fail. An edit that every test passes is a **survivor**, and it gets the test that sees it.
 
-- **On each pull request**, the `mutants` job runs the edits of the lines that the pull request
-  changes, in `paros-consensus` and in `paros-journal`. It has two passes: the unit tests and the
-  walks, then the TLC trace checks on the edits that the first pass missed. A survivor fails the
-  job.
+- **Each night**, the `Mutants nightly` workflow runs the edits of the lines that main changed
+  since the last green night, in `paros-consensus` and in the journal crates. It has two passes:
+  the unit tests and the walks, then the TLC trace checks on the edits that the first pass
+  missed. A survivor fails the night, and the next night judges those lines again. A pull request
+  runs no edit.
 - **Each week**, the `Mutants` workflow runs every edit of the core in 48 shards and fails on any
   survivor.
 - A timeout counts as caught, and so does a test that the runner stops when it is short of memory.
