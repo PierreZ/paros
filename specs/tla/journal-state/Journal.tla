@@ -172,12 +172,13 @@ VARIABLES
   rbase,   \* replica -> the boundary state it started from, or None
   rstart,  \* replica -> the start slot of its segment when it started, or None
   acked,   \* slot -> the answer that a replica gave, or None
-  resolved \* slot -> the answer to the Resolve of a `Below`, or None
+  resolved, \* slot -> the answer to the Resolve of a `Below`, or None
+  rdrop    \* replica -> it dropped its copy (its segment is trimmed)
 
 reg == <<top, rend, rbound, rret, rtrim, bgen>>
 ldr == <<bst, bH, bE, bsafe, bend, blo, bstart, prop>>
 acc == <<mprom, mvote, pend, dprom, dvote, crashes, p1b, sent2b>>
-rep == <<rapp, rbase, rstart, acked, resolved>>
+rep == <<rapp, rbase, rstart, acked, resolved, rdrop>>
 vars == <<reg, ldr, acc, rep>>
 
 (***************************************************************************)
@@ -298,6 +299,7 @@ Init ==
   /\ rbase = [r \in Replicas |-> IF r \in RepOf[1] THEN Empty ELSE None]
   /\ rstart = [r \in Replicas |-> IF r \in RepOf[1] THEN 0 ELSE None]
   /\ acked = [s \in Slots |-> None]
+  /\ rdrop = [r \in Replicas |-> FALSE]
   /\ resolved = [s \in Slots |-> None]
 
 (***************************************************************************)
@@ -559,14 +561,17 @@ Apply(r) ==
   \* A slot past the last one is never chosen, so the sources below bound s.
   /\ rbase[r] # None
   /\ IF EndKnown(g) THEN s < rend[g].v ELSE TRUE
-  /\ ~rtrim[g]
+  \* A replica of a trimmed segment applies until it drops its copy: it
+  \* learns the trim from the register later (`Drop`). Nothing reads it:
+  \* `Covers` and `HeldBy` count no replica of a trimmed segment.
+  /\ ~rdrop[r]
   \* It learns the slot from a live source: a quorum of a grid that still
   \* runs holds the vote on its disk, or a peer of its set applied it.
   \* Both sources hold a chosen slot only (`OnDisk` and a peer's `Apply`).
   /\ OnDisk(s) \/ \E q \in RepOf[g] \ {r} : rbase[q] # None /\ Front(q) > s
   /\ rapp' = [rapp EXCEPT ![r] = @ + 1]
   /\ acked' = [acked EXCEPT ![s] = Res(rbase[r], StateOf(r), ChosenVal(s))]
-  /\ UNCHANGED <<reg, ldr, acc, rbase, rstart, resolved>>
+  /\ UNCHANGED <<reg, ldr, acc, rbase, rstart, resolved, rdrop>>
 
 \* A replica that applied every slot of its sealed segment writes the
 \* boundary state, by compare-and-set from "no boundary".
@@ -599,7 +604,7 @@ TakeBase(r) ==
   /\ StartKnown(g)
   /\ rbase' = [rbase EXCEPT ![r] = rbound[g - 1].v]
   /\ rstart' = [rstart EXCEPT ![r] = Start(g)]
-  /\ UNCHANGED <<reg, ldr, acc, rapp, acked, resolved>>
+  /\ UNCHANGED <<reg, ldr, acc, rapp, acked, resolved, rdrop>>
 
 (***************************************************************************)
 (* Resolve (section J2.2, #1320). A client whose fenced write got `Below`  *)
@@ -639,7 +644,7 @@ ResolveBelow(s, r) ==
   /\ resolved[s] = None
   /\ Covers(r, ChosenVal(s).e)
   /\ resolved' = [resolved EXCEPT ![s] = ResolveAt(r, ChosenVal(s))]
-  /\ UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked>>
+  /\ UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked, rdrop>>
 
 (***************************************************************************)
 (* Retire and trim (sections J3.1, J3.2, J3.4).                            *)
@@ -672,6 +677,14 @@ Trim(p, r) ==
   /\ rtrim' = [rtrim EXCEPT ![p] = TRUE]
   /\ UNCHANGED <<top, rend, rbound, rret, bgen, ldr, acc, rep>>
 
+\* A replica of a trimmed segment learns the trim and drops its copy
+\* (`SegmentReplica::observe`): it applies nothing after it.
+Drop(r) ==
+  /\ rtrim[GenOf(r)]
+  /\ ~rdrop[r]
+  /\ rdrop' = [rdrop EXCEPT ![r] = TRUE]
+  /\ UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked, resolved>>
+
 Next ==
   \/ Reshape
   \/ \E b \in Ballots : Register(b) \/ Phase1(b) \/ SealWrite(b) \/ Open(b)
@@ -680,7 +693,7 @@ Next ==
        \/ Flush(a) \/ Crash(a)
        \/ \E b \in Ballots : Promise(a, b) \/ \E s \in Slots : Accept(a, b, s)
   \/ \E p \in Gens : EndDone(p) \/ EndLost(p) \/ BoundDone(p) \/ BoundLost(p) \/ Retire(p)
-  \/ \E r \in Replicas : Apply(r) \/ BoundWrite(r) \/ TakeBase(r)
+  \/ \E r \in Replicas : Apply(r) \/ BoundWrite(r) \/ TakeBase(r) \/ Drop(r)
   \/ \E p \in Gens, r \in Replicas : Trim(p, r)
   \/ \E s \in Slots, r \in Replicas : ResolveBelow(s, r)
 
@@ -765,7 +778,7 @@ BoundOnce == [][\A p \in Gens : Done(rbound[p]) => rbound'[p] = rbound[p]]_vars
 \* the register (the seal end, the boundary state), not a vote, and not the
 \* log of a replica. The sealed segment stays as it was.
 ResolveReadOnly == [][(\E s \in Slots : resolved'[s] # resolved[s]) =>
-                        UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked>>]_vars
+                        UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked, rdrop>>]_vars
 
 \* A trimmed record stays trimmed.
 TrimStays == [][\A p \in Gens : rtrim[p] => rtrim'[p]]_vars

@@ -939,7 +939,8 @@ impl Run {
             Payload::Write { token, command } => {
                 let node = node_of(&to);
                 let leader = self.leaders.get_mut(&node).expect("a leader");
-                let (proposed, effects) = leader.propose(*token, command.clone());
+                // The lab has no clock: the id of the delivery is its time.
+                let (proposed, effects) = leader.propose(*token, command.clone(), flight.id);
                 match proposed {
                     Proposed::Slot(slot) => self.notes.push(format!(
                         "{} holds the write at slot {}.",
@@ -1236,9 +1237,10 @@ impl Run {
                 ReplicaEffect::Register { change, .. } => {
                     out.push(("m".to_string(), Payload::Change(change)));
                 }
-                // The story heals and trims nothing: no step shows a copy or
-                // a drop.
-                ReplicaEffect::Copied { .. } | ReplicaEffect::Drop => {}
+                // The story heals, trims and reads nothing: no step shows a
+                // copy, a drop or a read.
+                ReplicaEffect::Copied { .. } | ReplicaEffect::Drop | ReplicaEffect::Read { .. } => {
+                }
             }
         }
         self.send_all(&lane, out);
@@ -1307,6 +1309,25 @@ impl Run {
     }
 
     /// One short sentence on a delivery.
+    /// What a client call or a register call does at `to`.
+    fn call_says(&self, payload: &Payload, to: &str) -> String {
+        match payload {
+            Payload::Write { .. } => format!("{to} takes the write."),
+            Payload::Reply { reply, .. } => format!("The client hears: {}.", reply_text(reply)),
+            Payload::Change(change) => match self.notes.iter().find(|n| n.contains("refuse")) {
+                Some(_) => format!("The matchmakers refuse: {}.", change_text(change)),
+                None => format!("The matchmakers write: {}.", change_text(change)),
+            },
+            Payload::Done { refused: None, .. } => format!("{to} learns that its write is done."),
+            Payload::Done { .. } => format!("{to} learns that its write is refused."),
+            Payload::Resolve { .. } => format!("{to} checks the seq in its fold of its segment."),
+            Payload::Resolved { answer, .. } => {
+                format!("The client learns: {}.", resolved_text(*answer))
+            }
+            Payload::Role(_) => unreachable!("a client call or a register call"),
+        }
+    }
+
     fn says(&self, flight: &InFlight, before: &BTreeMap<NodeId, String>) -> String {
         let to = party(&flight.to);
         let from = party(&flight.from);
@@ -1322,7 +1343,9 @@ impl Run {
                     )
                 }
             }
-            Payload::Role(Message::Prepare { ballot, from: slot }) => format!(
+            Payload::Role(Message::Prepare {
+                ballot, from: slot, ..
+            }) => format!(
                 "{to} writes its promise for ballot {}, then sends its votes from slot {}.",
                 ballot_text(*ballot),
                 slot.0
@@ -1384,21 +1407,16 @@ impl Run {
                 answer_text(answer)
             ),
             Payload::Role(Message::Pull { .. }) => format!("{to} sends the slots it holds."),
+            Payload::Role(
+                message @ (Message::Delegate { .. }
+                | Message::Chosen { .. }
+                | Message::PreRead { .. }
+                | Message::PreReadAck { .. }),
+            ) => proxy_read_says(message, &to),
             Payload::Role(message @ (Message::Holding { .. } | Message::Holds { .. })) => {
                 holding_says(message, &to, &from)
             }
-            Payload::Write { .. } => format!("{to} takes the write."),
-            Payload::Reply { reply, .. } => format!("The client hears: {}.", reply_text(reply)),
-            Payload::Change(change) => match self.notes.iter().find(|n| n.contains("refuse")) {
-                Some(_) => format!("The matchmakers refuse: {}.", change_text(change)),
-                None => format!("The matchmakers write: {}.", change_text(change)),
-            },
-            Payload::Done { refused: None, .. } => format!("{to} learns that its write is done."),
-            Payload::Done { .. } => format!("{to} learns that its write is refused."),
-            Payload::Resolve { .. } => format!("{to} checks the seq in its fold of its segment."),
-            Payload::Resolved { answer, .. } => {
-                format!("The client learns: {}.", resolved_text(*answer))
-            }
+            payload => self.call_says(payload, &to),
         };
         // A leader whose phase moved says so.
         for (node, leader) in &self.leaders {
@@ -1567,8 +1585,8 @@ mod words;
 
 use words::{
     acceptor_write, answer_text, ballot_text, cell, change_text, content, holding_says, is_reply,
-    kind_of, label_of, lane_of, lower, node_of, party, phase_of, phase_text, replica_write,
-    reply_text, resolved_text, stage_of, state_text, value_name,
+    kind_of, label_of, lane_of, lower, node_of, party, phase_of, phase_text, proxy_read_says,
+    replica_write, reply_text, resolved_text, stage_of, state_text, value_name,
 };
 
 #[cfg(test)]

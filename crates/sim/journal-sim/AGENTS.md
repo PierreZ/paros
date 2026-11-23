@@ -17,6 +17,7 @@ Test only: `publish = false`.
 
 - `src/oracle.rs`: `Truth`, the fold of the whole log written again from
   `docs/journal/02-data-plane.md`, with no segment. It shares no code with `paros_journal::fold`.
+  `as_written` is a command as its client wrote it, with no leader time.
 - `src/fold.rs`: the walk (`FoldModel`), its shapes (`Shape::TRACED`, small enough for TLC;
   `Shape::WIDE`; `Shape::LONG`, the traced walk over 200 segments for the live check), its events
   port (`FoldModel::build_reported`, `Reported`), its oracles (`FOLD`, `VIEW`, `RESOLVE`, `REFOLD`), its reach sites and its
@@ -29,6 +30,11 @@ Test only: `publish = false`.
   `VIEW`, `BOUNDARY`, `RESOLVE`; the truth is `Truth` over the chosen log), its reach sites and
   its planted mutants (`RolesMutant`), its events (`RolesEvent`, one action of `Journal.tla`
   each), the leader's retire judged by `RETIRE` (mutant `HoldsLie`) and the trace control `BoundaryBeforeDurable`.
+  It also runs proxy leaders (`PROXY`, mutant `ForgedAccepted`); leaderless reads, half of them at
+  a replica that hears the register late (`READ`, mutant `ReadNoFence`); the trim of a retired
+  segment (`TRIM`, mutant `TrimIntent`, trace events `Trim` and `Drop`) and a reader that takes its floor from
+  the segment in force (`FLOOR`, mutant `FloorFromHolder`); and the leader time of each write
+  (`STAMPED`, mutant `UnstampedAccept`).
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
   controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
   `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each

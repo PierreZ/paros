@@ -94,3 +94,29 @@ fn the_fingerprint_tells_two_commands_apart() {
     assert_ne!(truncate(1).fingerprint(), truncate(2).fingerprint());
     assert_ne!(Command::Noop.fingerprint(), truncate(1).fingerprint());
 }
+
+#[test]
+fn a_stamp_gives_every_record_of_a_write_one_time() {
+    let write = Command::Write(fenced(
+        1,
+        0,
+        vec![record(b"a", Some(5)), record(b"b", None)],
+    ));
+    let Command::Write(stamped) = write.clone().stamped(9) else {
+        panic!("a write stays a write");
+    };
+    assert!(
+        stamped
+            .records
+            .iter()
+            .all(|r| r.headers.leader_time == Some(9))
+    );
+    let Command::Write(given) = write else {
+        unreachable!()
+    };
+    assert!(
+        stamped.same_write(&given),
+        "a stamp keeps the write's identity"
+    );
+    assert_eq!(Command::Noop.stamped(9), Command::Noop);
+}

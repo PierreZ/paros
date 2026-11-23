@@ -29,11 +29,11 @@ use std::collections::BTreeMap;
 use paros_consensus::journal::JournalId;
 use paros_journal::register::{Change, RegisterValue};
 use paros_journal::roles::{
-    AcceptorEffect, Campaign, CopyId, JournalAcceptor, JournalLeader, LeaderEffect, PersistId,
-    Proposed, RESEND_BATCH, ReplicaEffect, SegmentReplica,
+    AcceptorEffect, Campaign, CopyId, JournalAcceptor, JournalLeader, JournalProxy, LeaderEffect,
+    PersistId, Proposed, ProxyEffect, RESEND_BATCH, ReadAnswer, ReplicaEffect, SegmentReplica,
 };
 use paros_journal::segment::SegmentState;
-use paros_journal::{Command, Leader, NodeId, Reply, SegmentId};
+use paros_journal::{Command, Leader, NodeId, Reply, SegmentId, Seq};
 
 use crate::layout::{self, Damage, Entry, Key, Op};
 use crate::wire::{Address, Envelope, Time};
@@ -78,6 +78,14 @@ pub enum Assignment {
         address: Address,
         /// The ballot, its segment and the first slot it reads.
         campaign: Campaign,
+        /// The proxy leaders it delegates its rounds to; empty: it runs
+        /// Phase 2 itself.
+        proxies: Vec<NodeId>,
+    },
+    /// A proxy leader (§J4.1): no disk, no records to read.
+    Proxy {
+        /// The role.
+        address: Address,
     },
 }
 
@@ -88,7 +96,9 @@ impl Assignment {
     #[must_use]
     pub fn address(&self) -> Address {
         match self {
-            Self::Acceptor { address, .. } | Self::Leader { address, .. } => *address,
+            Self::Acceptor { address, .. }
+            | Self::Leader { address, .. }
+            | Self::Proxy { address } => *address,
             Self::Replica {
                 address, segment, ..
             } => Address::replica(address.journal, address.node, *segment),
@@ -181,6 +191,20 @@ pub enum Input {
         address: Address,
         /// The copy.
         copy: CopyId,
+    },
+    /// A client reads the records from `from`, at most `limit` of them, at
+    /// the replica at `address` (its segment named): the leaderless read of
+    /// §J2.5 ([`SegmentReplica::read`]). A role that is not a replica that
+    /// serves answers [`ReadAnswer::Unserved`].
+    Read {
+        /// The replica, with its segment.
+        address: Address,
+        /// The read's id, in its answer.
+        read: CallId,
+        /// The first position to read.
+        from: Seq,
+        /// The most records to read.
+        limit: usize,
     },
 }
 
@@ -287,6 +311,18 @@ pub enum Effect {
         /// The retired segment.
         segment: SegmentId,
     },
+    /// Answer the read `read` at the replica at `address` once batch
+    /// `after` of the replica is durable.
+    ReadReply {
+        /// The replica.
+        address: Address,
+        /// The read.
+        read: CallId,
+        /// The answer.
+        answer: ReadAnswer,
+        /// The batch of the replica it waits on; `None` waits on nothing.
+        after: Option<PersistId>,
+    },
     /// Fire [`Input::TimerFired`] at `at`.
     SetTimer {
         /// The time.
@@ -311,6 +347,7 @@ enum Role {
     Acceptor(JournalAcceptor),
     Replica(SegmentReplica),
     Leader(JournalLeader<CallId>),
+    Proxy(JournalProxy),
 }
 
 /// The ask of a new replica that reads its records first.
@@ -456,7 +493,7 @@ impl Host {
                 address,
                 call,
                 command,
-            } => self.call(address, call, command, &mut effects),
+            } => self.call(now, address, call, command, &mut effects),
             Input::TimerFired => self.tick(now, &mut effects),
             Input::Join {
                 address,
@@ -465,6 +502,24 @@ impl Host {
                 copy,
             } => self.join(now, address, JoinAsk { set, initial, copy }, &mut effects),
             Input::Abandon { address, copy } => self.abandon(address, copy, &mut effects),
+            Input::Read {
+                address,
+                read,
+                from,
+                limit,
+            } => {
+                if let Some(Role::Replica(replica)) = self.roles.get_mut(&address) {
+                    let out = replica.read(read, from, limit);
+                    replica_effects(address, out, &mut effects);
+                } else {
+                    effects.push(Effect::ReadReply {
+                        address,
+                        read,
+                        answer: ReadAnswer::Unserved,
+                        after: None,
+                    });
+                }
+            }
         }
         let dropped: Vec<Address> = self
             .roles
@@ -490,18 +545,28 @@ impl Host {
     fn assign(&mut self, now: Time, assignment: Assignment, effects: &mut Vec<Effect>) {
         let address = assignment.address();
         if self.roles.contains_key(&address) {
-            // Placement may say it again: the role already runs.
+            // Placement may say it again: the role already runs. The `Host`
+            // runs one role for each address, so an assignment of another
+            // role at an address that has one is not taken either: placement
+            // gives a proxy an address with no other role (§J4.1).
             return;
         }
         self.arm(now, effects);
         match assignment {
-            Assignment::Leader { campaign, .. } => {
+            Assignment::Proxy { .. } => {
+                self.roles
+                    .insert(address, Role::Proxy(JournalProxy::new(address.node)));
+            }
+            Assignment::Leader {
+                campaign, proxies, ..
+            } => {
                 let started = self
                     .values
                     .get(&address.journal)
                     .and_then(|value| JournalLeader::campaign(campaign, value));
                 match started {
-                    Some((leader, out)) => {
+                    Some((mut leader, out)) => {
+                        leader.delegate_to(proxies);
                         self.roles.insert(address, Role::Leader(leader));
                         leader_effects(address, out, effects);
                     }
@@ -683,7 +748,9 @@ impl Host {
                     disk,
                 ))
             }),
-            Assignment::Leader { .. } => unreachable!("a leader has no disk to recover"),
+            Assignment::Leader { .. } | Assignment::Proxy { .. } => {
+                unreachable!("a leader and a proxy have no disk to recover")
+            }
         };
         match started {
             Ok(role) => {
@@ -718,9 +785,18 @@ impl Host {
         let Some(role) = self.roles.remove(&address) else {
             return;
         };
-        if let Role::Leader(mut leader) = role {
-            let out = leader.stop();
-            leader_effects(address, out, effects);
+        match role {
+            Role::Leader(mut leader) => {
+                let out = leader.stop();
+                leader_effects(address, out, effects);
+            }
+            // The open reads of a replica that stops are unserved: their
+            // readers ask again.
+            Role::Replica(mut replica) => {
+                let out = replica.unserve_reads();
+                replica_effects(address, out, effects);
+            }
+            Role::Acceptor(_) | Role::Proxy(_) | Role::Recovering(_) | Role::Joining(_) => {}
         }
         effects.push(Effect::Stopped { address, why });
         assert!(!self.roles.contains_key(&address), "a stopped role is gone");
@@ -760,6 +836,10 @@ impl Host {
                 let out = leader.step(from, message);
                 leader_effects(address, out, effects);
             }
+            Some(Role::Proxy(proxy)) => {
+                let out = proxy.step(from, message);
+                proxy_effects(address, out, effects);
+            }
             // A role that recovers, or that the process does not serve,
             // loses the message, as a role that is down.
             Some(Role::Recovering(_) | Role::Joining(_)) | None => {}
@@ -780,13 +860,22 @@ impl Host {
                     let out = replica.observe(&value);
                     replica_effects(*address, out, effects);
                 }
-                Role::Acceptor(_) | Role::Recovering(_) | Role::Joining(_) => {}
+                Role::Acceptor(_) | Role::Proxy(_) | Role::Recovering(_) | Role::Joining(_) => {}
             }
         }
         self.values.insert(journal, value);
     }
 
-    fn call(&mut self, address: Address, call: CallId, command: Command, out: &mut Vec<Effect>) {
+    /// A client call to the leader at `address`, at `now`: the leader
+    /// stamps a write with its time (§J2.8).
+    fn call(
+        &mut self,
+        now: Time,
+        address: Address,
+        call: CallId,
+        command: Command,
+        out: &mut Vec<Effect>,
+    ) {
         let not_leader = Effect::Reply {
             address,
             call,
@@ -796,7 +885,7 @@ impl Host {
             out.push(not_leader);
             return;
         };
-        match leader.propose(call, command) {
+        match leader.propose(call, command, now.0) {
             (Proposed::Slot(_), effects) => leader_effects(address, effects, out),
             (Proposed::NotLeader, effects) => {
                 assert!(effects.is_empty(), "a refused call changes nothing");
@@ -816,6 +905,10 @@ impl Host {
                     let out = replica.tick();
                     replica_effects(*address, out, effects);
                 }
+                Role::Proxy(proxy) => {
+                    let out = proxy.tick(self.config.resend_page);
+                    proxy_effects(*address, out, effects);
+                }
                 Role::Acceptor(_) | Role::Recovering(_) | Role::Joining(_) => {}
             }
         }
@@ -832,6 +925,16 @@ fn envelope(address: Address, to: NodeId, message: paros_journal::roles::Message
         from: address.node,
         to,
         message,
+    }
+}
+
+fn proxy_effects(address: Address, out: Vec<ProxyEffect>, effects: &mut Vec<Effect>) {
+    for ProxyEffect { to, message } in out {
+        effects.push(Effect::Send {
+            sender: address,
+            envelope: envelope(address, to, message),
+            after: None,
+        });
     }
 }
 
@@ -878,6 +981,16 @@ fn replica_effects(address: Address, out: Vec<ReplicaEffect>, effects: &mut Vec<
                 address,
                 segment,
                 copy,
+                after,
+            },
+            ReplicaEffect::Read {
+                read,
+                answer,
+                after,
+            } => Effect::ReadReply {
+                address,
+                read,
+                answer,
                 after,
             },
             // The `Host` stops a replica that dropped its copy after the

@@ -192,6 +192,7 @@ fn assign(driver: &mut TestDriver, nodes: &[u64]) {
             },
             _ => Assignment::Leader {
                 address,
+                proxies: Vec::new(),
                 campaign: Campaign {
                     ballot: Ballot {
                         round: 1,
@@ -383,6 +384,7 @@ fn a_new_driver_serves_the_roles_again_from_their_records() {
     let next = Address::new(J, NodeId(101));
     drivers[0].assign(Assignment::Leader {
         address: next,
+        proxies: Vec::new(),
         campaign: Campaign {
             ballot: Ballot {
                 round: 2,
@@ -605,6 +607,7 @@ fn a_second_leader_seals_the_first_segment_through_the_register() {
         .expect("a front");
     drivers[0].assign(Assignment::Leader {
         address: next,
+        proxies: Vec::new(),
         campaign: Campaign {
             ballot: Ballot {
                 round: 2,
@@ -770,4 +773,121 @@ fn a_complete_copy_is_a_notice_once_its_batch_is_durable() {
     );
     assert_eq!(joining_on(&disk), Some(copy_of(2, 1)));
     assert!(driver.take_notices().is_empty(), "a take empties the port");
+}
+
+/// Run until the read has its answer, and return it.
+fn read_answer(world: &World, drivers: &mut [TestDriver], read: CallId) -> ReadAnswer {
+    for _ in 0..100 {
+        while drivers.iter_mut().fold(false, |busy, d| d.poll() | busy) {}
+        if let Some(reply) = drivers[0].take_reads().into_iter().find(|r| r.read == read) {
+            return reply.answer;
+        }
+        world.clock.advance(TICK);
+    }
+    panic!("read {read}: no answer in 100 ticks");
+}
+
+#[test]
+fn a_read_at_a_replica_serves_the_records_after_a_quorum_of_watermarks() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
+    world.run(&mut drivers, "the leader opens", open);
+    let set = drivers[0].call(LEADER, claim());
+    answer(&world, &mut drivers, 0, set);
+    let w0 = drivers[0].call(LEADER, write(0, "a0"));
+    // The read leaves beside the write: its answer may wait on the batch
+    // of the replica that holds the write.
+    let replica = Address::replica(J, NodeId(11), SegmentId(1));
+    let read = drivers[0].read(replica, Seq(0), 8);
+    assert!(read > w0, "reads and calls share one counter");
+    let answer_of_read = read_answer(&world, &mut drivers, read);
+    let ReadAnswer::Page {
+        records,
+        view,
+        sealed,
+    } = answer_of_read
+    else {
+        panic!("not a page: {answer_of_read:?}");
+    };
+    assert!(!sealed);
+    assert!(view.next_seq <= Seq(1));
+    assert!(
+        records
+            .iter()
+            .all(|(seq, record)| *seq == Seq(0) && record.payload == b"a0".to_vec())
+    );
+    assert_eq!(answer(&world, &mut drivers, 0, w0), written(0));
+    let again = drivers[0].read(replica, Seq(0), 8);
+    let ReadAnswer::Page { records, .. } = read_answer(&world, &mut drivers, again) else {
+        panic!("not a page");
+    };
+    assert_eq!(records.len(), 1, "the write is chosen before this read");
+}
+
+#[test]
+fn a_read_at_a_role_that_stops_is_unserved() {
+    let world = World::new();
+    let disk = Shared::default();
+    // The acceptors are not served: the read waits for its watermarks.
+    let mut drivers = [world.process(&disk, &[11])];
+    let replica = Address::replica(J, NodeId(11), SegmentId(1));
+    while drivers[0].poll() {}
+    let read = drivers[0].read(replica, Seq(0), 8);
+    while drivers[0].poll() {}
+    assert!(
+        drivers[0].take_reads().is_empty(),
+        "no quorum of watermarks"
+    );
+    drivers[0].unassign(Address::new(J, NodeId(11)));
+    while drivers[0].poll() {}
+    assert_eq!(
+        drivers[0].take_reads(),
+        vec![ReadReply {
+            address: replica,
+            read,
+            answer: ReadAnswer::Unserved,
+        }]
+    );
+    let unserved = drivers[0].read(replica, Seq(0), 8);
+    assert_eq!(
+        drivers[0].take_reads(),
+        vec![ReadReply {
+            address: replica,
+            read: unserved,
+            answer: ReadAnswer::Unserved,
+        }],
+        "a role that is not served answers at once"
+    );
+}
+
+#[test]
+fn a_stop_answers_only_the_held_reads_of_its_role() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[11, 12]);
+    let stopped = Address::replica(J, NodeId(11), SegmentId(1));
+    let kept = Address::replica(J, NodeId(12), SegmentId(1));
+    // Two reads that wait on a batch of their replica, as inside a round.
+    driver
+        .held_reads
+        .push((PersistId(1), stopped, 7, ReadAnswer::Unserved));
+    driver
+        .held_reads
+        .push((PersistId(1), kept, 8, ReadAnswer::Unserved));
+    driver.on_stopped(stopped, Stop::Unassigned);
+    assert_eq!(
+        driver.take_reads(),
+        vec![ReadReply {
+            address: stopped,
+            read: 7,
+            answer: ReadAnswer::Unserved,
+        }]
+    );
+    assert_eq!(
+        driver.held_reads,
+        vec![(PersistId(1), kept, 8, ReadAnswer::Unserved)],
+        "the read of a role that runs still waits on its batch"
+    );
+    driver.held_reads.clear();
 }

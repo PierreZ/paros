@@ -326,6 +326,14 @@ answers. No read goes through the Paxos leader, so reads scale with replicas and
 acceptors one watermark round per page (decided on 2026-10-04). The read-index path and
 `CheckTail` retire.
 
+**The journal roles build it** (#1326 (the journal roles over the core), 2026-11-22):
+`SegmentReplica::read` asks `F + 1` of each column of its segment's grid for their watermarks
+(`PreRead`), serves once its fold is past the highest, and answers `Below` below its segment,
+`Truncated` below its floor, `Superseded` when an acceptor knows a later segment, and
+`Unserved` when it has no base, holds 64 open reads, or waits more than 8 ticks. A page holds at
+most 256 records (§J2.7). The roles walk of `journal-sim` judges each answer (oracle `READ`, mutant
+`ReadNoFence`).
+
 A read costs one Phase-1 round of watermarks (decided on 2026-10-07, #253). In a multi-region cell
 `QuorumRead` asks three of five acceptors, so a page costs one cross-region round trip (the 2025
 Journal reconstruction says the same: reads are performed from at least two regions, architecture §10).
@@ -453,9 +461,29 @@ of the identity of a write**: the compare of `Duplicate` and of `Resolve` reads 
 client headers and the payload of each record, so a resend with a new leader time is the same
 write.
 
-**Open** (#1299 decides each one): who stamps the leader time (the leader at propose or the
-batcher) and its unit; the size limits of the headers (§J2.7); and whether the headers are inside
-the value checksum and the offload hash.
+**The leader stamps the leader time at propose** (#1299, built in #1326 (the journal roles over
+the core), 2026-11-22; these are the recommended answers to the last open points of #1299, which
+Pierre asked to take, and the PR lists them for his review):
+
+- **Who and when.** The leader stamps it in `JournalLeader::propose`, one time for each write,
+  in every record of the write (`Command::stamped`). The time is in the chosen value, so every
+  replica stores the same time and no replica stamps at apply. A time that the client gives is
+  replaced: the paros section is the reserved key space. The journal has no batcher in v1, so
+  the batcher stamps nothing.
+- **The unit.** Nanoseconds, from the clock of the leader's host: the `now` that the driver gives
+  with each input (`paros_journal_io::Time`, §J4.2, rule 2), so a recorded run replays.
+- **The size limits.** The bytes of the client headers (each key and each value) count in the
+  record bytes of the batch limit `max_batch_bytes` (§J2.7), with the payload. No other header
+  limit: a header is bounded by the batch that holds it. The leader time is paros's own and is
+  not counted. The edge check that answers `TooLarge` comes with the server that receives a
+  `Write` (#1417 (the moonpool adapter on the generic host)).
+- **The checksum.** A checksum covers the encoded record: both header sections and the payload.
+  Release 1 of the codec carries no checksum of its own; the storage that holds a record checks
+  its bytes (§J5.3), and the offload hash (after v1, #1256) covers the same encoded bytes.
+
+The roles walk of `journal-sim` judges the stamp with the oracle `STAMPED` (every record of a
+chosen write carries one leader time, the time of a proposal of that write), with the mutant
+`UnstampedAccept` (the driver strips the time from each `Accept`).
 
 ### J2.9 Underneath
 
