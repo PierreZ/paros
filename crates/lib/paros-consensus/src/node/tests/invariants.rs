@@ -300,6 +300,32 @@ fn a_candidate_with_no_campaign_fails_the_invariants() {
     n.assert_invariants();
 }
 
+/// A matchmaker campaign that names this node stays under the retirement
+/// fence: the node's `last_member_ballot` covers the ballot it campaigns at.
+/// The test lowers both fences, so only the campaign rule is broken.
+#[test]
+#[should_panic(expected = "a campaign that names this node is under its retirement fence")]
+fn a_campaign_above_the_retirement_fence_fails_the_invariants() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
+    campaign(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    n.assert_invariants();
+    n.last_member_ballot = Ballot::zero();
+    n.registration_fence = Ballot::zero();
+    n.assert_invariants();
+}
+
+/// A matchmaker deployment campaigns only on a belief it heard.
+#[test]
+#[should_panic(expected = "a matchmaker deployment campaigns only on a heard belief")]
+fn a_campaign_on_the_bootstrap_belief_fails_the_invariants() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
+    campaign(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    n.belief_source = BeliefSource::Bootstrap;
+    n.assert_invariants();
+}
+
 #[test]
 #[should_panic(expected = "a leader knows itself as leader")]
 fn a_leader_that_names_another_fails_the_invariants() {
