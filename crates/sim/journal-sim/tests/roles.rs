@@ -3,8 +3,8 @@
 
 use journal_sim::campaign::campaign;
 use journal_sim::roles::{
-    AGREE, BOUNDARY, FLOOR, FOLD, PROXY, READ, RESOLVE, RETIRE, RolesMutant, SEALED, STAMPED,
-    Shape, TRIM, VIEW, reach, walk,
+    AGREE, BOUNDARY, COMPACT, FLOOR, FOLD, PROXY, READ, RESOLVE, RETIRE, RolesMutant, SEALED,
+    STAMPED, Shape, TRIM, VIEW, reach, walk,
 };
 
 /// The seeds of each walk in CI.
@@ -103,6 +103,16 @@ fn trim_catches_a_trim_on_the_intent_to_truncate() {
 #[test]
 fn floor_catches_a_reader_that_takes_the_floor_of_the_holder() {
     caught(RolesMutant::FloorFromHolder, FLOOR);
+}
+
+#[test]
+fn compact_catches_a_leader_that_drops_votes_on_one_report() {
+    caught(RolesMutant::ForgedCompacted, COMPACT);
+}
+
+#[test]
+fn agree_catches_a_phase_one_that_hides_dropped_votes() {
+    caught(RolesMutant::DroppedHidden, AGREE);
 }
 
 #[test]

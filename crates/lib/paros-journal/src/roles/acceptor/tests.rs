@@ -73,7 +73,10 @@ fn a_prepare_that_raises_the_promise_writes_it_before_the_promise_leaves() {
     let (batches, sends, afters) = split(acceptor.step(LEADER, prepare(2, 0)));
     assert_eq!(
         batches,
-        vec![(PersistId(0), vec![AcceptorWrite::SetPromise(ballot(2))])]
+        vec![(
+            PersistId(0),
+            vec![AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(2)))]
+        )]
     );
     assert_eq!(
         sends,
@@ -84,6 +87,7 @@ fn a_prepare_that_raises_the_promise_writes_it_before_the_promise_leaves() {
                 votes: BTreeMap::new(),
                 faulty: BTreeMap::new(),
                 next: None,
+                dropped: BTreeMap::new(),
             },
         }]
     );
@@ -131,12 +135,12 @@ fn an_accept_that_raises_the_promise_writes_the_promise_and_the_vote_in_one_batc
         vec![(
             PersistId(0),
             vec![
-                AcceptorWrite::SetPromise(ballot(2)),
-                AcceptorWrite::AppendAccepted {
+                AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(2))),
+                AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                     slot: Slot(4),
                     ballot: ballot(2),
                     value: write(1),
-                },
+                }),
             ]
         )]
     );
@@ -161,11 +165,11 @@ fn an_accept_at_the_promise_writes_the_vote_alone() {
         batches,
         vec![(
             PersistId(1),
-            vec![AcceptorWrite::AppendAccepted {
+            vec![AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot: Slot(4),
                 ballot: ballot(2),
                 value: write(1),
-            }]
+            })]
         )]
     );
     assert_eq!(afters, vec![Some(PersistId(1))]);
@@ -306,11 +310,11 @@ fn a_faulty_vote_is_reported_and_a_new_vote_repairs_it() {
     let mut repaired = disk;
     repaired.apply(
         PersistId(0),
-        &[AcceptorWrite::AppendAccepted {
+        &[AcceptorOp::Write(AcceptorWrite::AppendAccepted {
             slot: Slot(4),
             ballot: ballot(2),
             value: write(1),
-        }],
+        })],
     );
     assert!(
         repaired.faulty.is_empty(),
@@ -333,11 +337,11 @@ fn a_disk_refuses_a_vote_above_its_promise() {
     let mut disk = AcceptorDisk::default();
     disk.apply(
         PersistId(0),
-        &[AcceptorWrite::AppendAccepted {
+        &[AcceptorOp::Write(AcceptorWrite::AppendAccepted {
             slot: Slot(0),
             ballot: ballot(2),
             value: write(1),
-        }],
+        })],
     );
 }
 
@@ -345,8 +349,14 @@ fn a_disk_refuses_a_vote_above_its_promise() {
 #[should_panic(expected = "never falls")]
 fn a_disk_refuses_a_lower_promise() {
     let mut disk = AcceptorDisk::default();
-    disk.apply(PersistId(0), &[AcceptorWrite::SetPromise(ballot(3))]);
-    disk.apply(PersistId(1), &[AcceptorWrite::SetPromise(ballot(2))]);
+    disk.apply(
+        PersistId(0),
+        &[AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(3)))],
+    );
+    disk.apply(
+        PersistId(1),
+        &[AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(2)))],
+    );
 }
 
 #[test]

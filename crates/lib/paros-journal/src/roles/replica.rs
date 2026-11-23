@@ -55,6 +55,24 @@
 //! it copies again. A trimmed record makes every replica drop its copy.
 //! The replica acts on register values in the register's order: each value
 //! that [`SegmentReplica::observe`] takes is at or after the last one.
+//!
+//! **The compaction** (§J3.2, `specs/tla/journal-compact/`). At each tick the
+//! replica drops the slots of its log below its compaction point: the first
+//! slot that holds a record at or above its trim floor (`first_seq`), or its
+//! front when it holds none. The same batch keeps the fold at that point
+//! and the floor that chose it ([`Trim`]). The replica reports the point to
+//! the leader (`CompactedTo`), which drops the acceptors' votes once `F + 1`
+//! replicas of the set reached it. A `Pull` below the point gets the trim
+//! instead of the slots (`TrimmedTo`), and the laggard takes it: its fold
+//! jumps to the point, with no bytes and no ballot.
+//!
+//! A fold that starts at a trim judges every slot as the whole log does,
+//! except the answer of a write that names a position below the trim
+//! floor: the writes held there are gone. So until the fold's own
+//! `first_seq` reaches the floor, the replica gives no answer for the slots
+//! it applies, serves no read and answers `Resolve` with `NotCovered`. The
+//! state of the fold never depends on those writes: a lookup only chooses
+//! between `Duplicate` and `Taken`, and neither moves the state.
 
 use std::collections::BTreeMap;
 
@@ -105,11 +123,27 @@ pub enum ReplicaOp {
         /// The command.
         command: Command,
     },
+    /// The replica dropped the slots of its log below `trim.slot`, and keeps
+    /// the fold there (its own compaction, or a jump to a peer's).
+    Compact(Trim),
     /// The copy of a heal that the replica runs as a new replica, or `None`
     /// once the plan ended or the replica is a member (#1314). It is on the
     /// disk, so a new replica that restarts during its plan keeps its copy:
     /// the plan may still write it into the set.
     Joining(Option<CopyId>),
+}
+
+/// The fold of a replica at its compaction point (§J3.2): the trim point
+/// that a laggard takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trim {
+    /// The compaction point: the log holds no slot below it.
+    pub slot: Slot,
+    /// The fold at the compaction point.
+    pub state: JournalState,
+    /// The trim floor that chose the point: every write that a slot below
+    /// the point holds lies below it.
+    pub floor: Seq,
 }
 
 /// What one step of the replica asks of its driver.
@@ -178,6 +212,8 @@ pub struct ReplicaDisk {
     pub chosen: BTreeMap<Slot, Command>,
     /// The copy of a heal that the replica runs as a new replica.
     pub joining: Option<CopyId>,
+    /// The fold at the compaction point, once the replica compacted.
+    pub trim: Option<Trim>,
     /// The highest batch the disk holds.
     pub durable: Option<PersistId>,
 }
@@ -208,6 +244,15 @@ impl ReplicaDisk {
                     );
                 }
                 ReplicaOp::Joining(copy) => self.joining = *copy,
+                ReplicaOp::Compact(trim) => {
+                    assert!(self.base.is_some(), "a replica compacts after its base");
+                    assert!(
+                        self.trim.is_none_or(|held| held.slot < trim.slot),
+                        "a compaction point only moves up"
+                    );
+                    self.chosen.retain(|slot, _| *slot >= trim.slot);
+                    self.trim = Some(*trim);
+                }
             }
         }
         self.durable = Some(id);
@@ -225,6 +270,11 @@ struct Folded {
     positions: BTreeMap<Seq, Write>,
     /// The answer of each applied slot.
     answers: BTreeMap<Slot, Answer>,
+    /// Where the log starts: the base, or the last compaction point.
+    origin: Trim,
+    /// The first slot whose answer the fold gives: the fold starts at a
+    /// trim, and answers again once its `first_seq` reaches the trim floor.
+    answered: Slot,
 }
 
 /// One replica of one segment.
@@ -305,7 +355,11 @@ impl SegmentReplica {
             flight: Flight::after(disk.durable),
         };
         if let Some((boundary, start)) = disk.base {
-            replica.folded = Some(Folded::new(boundary, start));
+            let mut folded = Folded::new(boundary, start);
+            if let Some(trim) = disk.trim {
+                folded.jump(trim);
+            }
+            replica.folded = Some(folded);
             // The answers of a refold go nowhere: the leader that held them
             // asks again with its `Commit`.
             replica.walk();
@@ -519,6 +573,15 @@ impl SegmentReplica {
                 watermark,
                 bound,
             } if segment == self.segment => self.pre_read_ack(from, read, watermark, bound),
+            Message::Compaction { segment } if segment == self.segment => self.report(from),
+            Message::TrimmedTo {
+                segment,
+                slot,
+                state,
+                floor,
+            } if segment == self.segment && self.set.contains(&from) => {
+                self.jump(Trim { slot, state, floor })
+            }
             _ => Vec::new(),
         };
         self.assert_invariants();
@@ -645,6 +708,118 @@ impl SegmentReplica {
         effects.extend(self.boundary());
         effects.extend(self.copied());
         effects.extend(self.tick_reads());
+        // Last: the answers above wait on no compaction batch.
+        effects.extend(self.compact());
+        effects
+    }
+
+    /// The compaction point of the fold and the fold there: the first slot
+    /// that holds a record at or above the trim floor (`first_seq`), or the
+    /// front when no slot does. The fold is replayed from the origin over
+    /// the slots the log holds: whether a write is a record never depends
+    /// on the writes below it. `None` with no base, and while the fold is
+    /// blind: a record below the origin may lie at or above `first_seq`,
+    /// so the point would not cover it.
+    ///
+    /// # Panics
+    ///
+    /// When the log misses an applied slot, or the replay does not give
+    /// the fold: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn compaction_point(&self) -> Option<Trim> {
+        let folded = self.folded.as_ref()?;
+        if folded.blind() {
+            return None;
+        }
+        let first_seq = folded.state.first_seq();
+        // Every write below the origin lies below the origin's floor, at
+        // or below `first_seq` since the fold is not blind.
+        let floor = first_seq;
+        let mut state = folded.origin.state;
+        for slot in (folded.origin.slot.0..folded.front.0).map(Slot) {
+            let command = self
+                .chosen
+                .get(&slot)
+                .expect("the log holds the applied slots");
+            let before = state;
+            if let Answer::Written { seq, count } = state.apply(command, |_| None)
+                && seq.0 + count > first_seq.0
+            {
+                return Some(Trim {
+                    slot,
+                    state: before,
+                    floor,
+                });
+            }
+        }
+        assert!(state == folded.state, "a replay gives the fold");
+        Some(Trim {
+            slot: folded.front,
+            state,
+            floor,
+        })
+    }
+
+    /// Drop the slots of the log below the compaction point, in one batch
+    /// that keeps the fold there.
+    fn compact(&mut self) -> Vec<ReplicaEffect> {
+        let Some(trim) = self.compaction_point() else {
+            return Vec::new();
+        };
+        let folded = self.folded.as_mut().expect("a compaction point has a fold");
+        if trim.slot <= folded.origin.slot {
+            return Vec::new();
+        }
+        probe!(reachable, "replica: it compacts its log");
+        folded.compact(trim);
+        self.chosen.retain(|slot, _| *slot >= trim.slot);
+        let id = self.flight.batch();
+        vec![ReplicaEffect::Persist {
+            id,
+            ops: vec![ReplicaOp::Compact(trim)],
+        }]
+    }
+
+    /// The answer to the leader's `Compaction`: the compaction point and
+    /// the first answered slot, once durable.
+    fn report(&self, from: NodeId) -> Vec<ReplicaEffect> {
+        let Some(folded) = &self.folded else {
+            return Vec::new();
+        };
+        vec![ReplicaEffect::Send {
+            to: from,
+            message: Message::CompactedTo {
+                segment: self.segment,
+                compacted: folded.origin.slot,
+                answers: folded.answered,
+            },
+            after: self.flight.last(),
+        }]
+    }
+
+    /// A peer's trim above the front: the fold jumps to it (§J3.2, the
+    /// trim-point jump). A trim at or below the front changes nothing.
+    fn jump(&mut self, trim: Trim) -> Vec<ReplicaEffect> {
+        let Some(folded) = &mut self.folded else {
+            return Vec::new();
+        };
+        if trim.slot <= folded.front || self.end.is_some_and(|end| trim.slot > end) {
+            return Vec::new();
+        }
+        probe!(reachable, "replica: a laggard jumps to a peer's trim");
+        folded.jump(trim);
+        self.chosen.retain(|slot, _| *slot >= trim.slot);
+        let id = self.flight.batch();
+        // The answers of the slots a jump applies go nowhere: the fold
+        // gives none until it reaches the floor.
+        self.walk();
+        let mut effects = vec![ReplicaEffect::Persist {
+            id,
+            ops: vec![ReplicaOp::Compact(trim)],
+        }];
+        effects.extend(self.boundary());
+        effects.extend(self.copied());
+        effects.extend(self.trims());
         effects
     }
 
@@ -669,6 +844,13 @@ impl SegmentReplica {
             );
             return (ResolveAnswer::NotCovered, after);
         };
+        if folded.blind() {
+            probe!(
+                reachable,
+                "replica: a Resolve below the trim floor is not covered"
+            );
+            return (ResolveAnswer::NotCovered, after);
+        }
         let answer = resolve(&folded.state, uuid, expected_seq, records, |seq| {
             folded.positions.get(&seq)
         });
@@ -709,6 +891,17 @@ impl SegmentReplica {
 
     fn commit(&mut self, from: NodeId, slot: Slot, command: Command) -> Vec<ReplicaEffect> {
         let mut effects = Vec::new();
+        if self
+            .folded
+            .as_ref()
+            .is_some_and(|folded| slot < folded.origin.slot)
+        {
+            probe!(
+                reachable,
+                "replica: a Commit below its compaction point is dropped"
+            );
+            return effects;
+        }
         if let Some(held) = self.chosen.get(&slot) {
             assert!(
                 *held == command,
@@ -856,24 +1049,46 @@ impl SegmentReplica {
 
     fn pull(&self, from: NodeId, at: Slot) -> Vec<ReplicaEffect> {
         let after = self.flight.last();
+        let mut effects = Vec::new();
+        if let Some(folded) = &self.folded
+            && at < folded.origin.slot
+        {
+            probe!(
+                reachable,
+                "replica: a Pull below its compaction point gets the trim"
+            );
+            let trim = folded.origin;
+            effects.push(ReplicaEffect::Send {
+                to: from,
+                message: Message::TrimmedTo {
+                    segment: self.segment,
+                    slot: trim.slot,
+                    state: trim.state,
+                    floor: trim.floor,
+                },
+                after,
+            });
+        }
         probe!(
             sometimes,
             self.chosen.range(at..).next().is_some(),
             "replica: a Pull is served from its slots"
         );
-        self.chosen
-            .range(at..)
-            .take(PULL_PAGE)
-            .map(|(slot, command)| ReplicaEffect::Send {
-                to: from,
-                message: Message::Commit {
-                    segment: self.segment,
-                    slot: *slot,
-                    command: command.clone(),
-                },
-                after,
-            })
-            .collect()
+        effects.extend(
+            self.chosen
+                .range(at..)
+                .take(PULL_PAGE)
+                .map(|(slot, command)| ReplicaEffect::Send {
+                    to: from,
+                    message: Message::Commit {
+                        segment: self.segment,
+                        slot: *slot,
+                        command: command.clone(),
+                    },
+                    after,
+                }),
+        );
+        effects
     }
 
     /// Apply every chosen slot from the front, in order, and stop at a
@@ -884,14 +1099,24 @@ impl SegmentReplica {
         };
         let mut applied = Vec::new();
         while let Some(command) = self.chosen.get(&folded.front) {
+            let blind = folded.blind();
             let answer = folded
                 .state
                 .apply(command, |seq| folded.positions.get(&seq));
             if let (Answer::Written { seq, .. }, Command::Write(write)) = (&answer, command) {
                 folded.positions.insert(*seq, write.clone());
             }
-            folded.answers.insert(folded.front, answer.clone());
-            applied.push((folded.front, command.clone(), answer));
+            probe!(
+                sometimes,
+                blind,
+                "replica: a slot below the trim floor applies with no answer"
+            );
+            if blind {
+                folded.answered = Slot(folded.front.0 + 1);
+            } else {
+                folded.answers.insert(folded.front, answer.clone());
+                applied.push((folded.front, command.clone(), answer));
+            }
             folded.front = Slot(folded.front.0 + 1);
         }
         assert!(
@@ -960,19 +1185,77 @@ impl SegmentReplica {
                 self.chosen.keys().next().is_none_or(|s| *s >= folded.start),
                 "the replica holds no slot of another segment"
             );
+            assert!(
+                self.chosen
+                    .keys()
+                    .next()
+                    .is_none_or(|s| *s >= folded.origin.slot),
+                "the log holds no slot below its compaction point"
+            );
+            assert!(
+                folded.origin.slot >= folded.start && folded.origin.slot <= folded.front,
+                "the compaction point is in the applied prefix"
+            );
+            assert!(
+                folded.answered >= folded.origin.slot,
+                "the fold answers from its origin at the earliest"
+            );
+            assert!(
+                folded.answered <= folded.front,
+                "the fold answers only what it applied"
+            );
         }
     }
 }
 
 impl Folded {
     fn new(boundary: BoundaryState, start: Slot) -> Self {
+        let state = JournalState::from_boundary(boundary);
         Self {
             start,
-            state: JournalState::from_boundary(boundary),
+            state,
             front: start,
             positions: BTreeMap::new(),
             answers: BTreeMap::new(),
+            origin: Trim {
+                slot: start,
+                state,
+                floor: state.first_seq(),
+            },
+            answered: start,
         }
+    }
+
+    /// Whether the fold gives no answer: it starts at a trim, and its
+    /// `first_seq` is below the trim floor.
+    fn blind(&self) -> bool {
+        self.state.first_seq() < self.origin.floor
+    }
+
+    /// Drop what the fold keeps below its own compaction point `trim`.
+    fn compact(&mut self, trim: Trim) {
+        assert!(trim.slot > self.origin.slot, "a compaction point moves up");
+        assert!(
+            trim.slot <= self.front,
+            "a replica compacts what it applied"
+        );
+        self.origin = trim;
+        self.answers.retain(|slot, _| *slot >= trim.slot);
+        self.positions
+            .retain(|seq, write| seq.0 + write.count() > trim.floor.0);
+        self.answered = self.answered.max(trim.slot);
+    }
+
+    /// Start the fold again at `trim`: a laggard's jump, or a restart after
+    /// a compaction. The answers start once the fold reaches the floor.
+    fn jump(&mut self, trim: Trim) {
+        assert!(trim.slot >= self.start, "a trim is in the segment");
+        self.origin = trim;
+        self.state = trim.state;
+        self.front = trim.slot;
+        self.positions.clear();
+        self.answers.clear();
+        self.answered = trim.slot;
     }
 }
 

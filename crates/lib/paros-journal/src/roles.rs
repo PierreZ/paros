@@ -59,7 +59,9 @@ pub use message::{Message, PromisePage};
 pub use paros_consensus::contract::limits::{PROMISE_BATCH, RESEND_BATCH};
 pub use paros_consensus::contract::write::AcceptorWrite;
 pub use proxy::{JournalProxy, ProxyEffect};
-pub use replica::{CopyId, ReadAnswer, ReplicaDisk, ReplicaEffect, ReplicaOp, SegmentReplica};
+pub use replica::{
+    CopyId, ReadAnswer, ReplicaDisk, ReplicaEffect, ReplicaOp, SegmentReplica, Trim,
+};
 
 /// The id of one persist batch of a role (§J4.2, rule 1). Ids grow for the
 /// whole life of the role, across its restarts.

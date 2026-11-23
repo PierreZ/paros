@@ -19,6 +19,20 @@
 //! the leader picks the acceptors of a slot from its own grid, and a Phase 1
 //! reads each segment that is not retired (§J3.1). The acceptor never reads
 //! the chosen prefix (`AGENTS.md`).
+//!
+//! **The compaction of a segment** (§J3.2, #1318,
+//! `specs/tla/journal-compact/`). The leader sends `Compact` once `F + 1`
+//! replicas of the segment's set dropped the slots below a point; the
+//! acceptor then drops its votes of the segment below that point, in one
+//! batch after the batches before it. A dropped slot is chosen and applied:
+//!
+//! - **a promise reports every dropped range**, so the leader proposes
+//!   nothing there and its seal end counts the range as votes;
+//! - **an `Accept` in a dropped range gets no answer**: the slot is chosen,
+//!   and only a leader that did not read the drop proposes there;
+//! - **the watermark of a leaderless read counts the dropped slots**: a slot
+//!   that a quorum chose and then dropped is still a slot the reader must
+//!   apply before it serves.
 
 use std::collections::BTreeMap;
 
@@ -33,7 +47,26 @@ use crate::command::Command;
 use crate::segment::SegmentId;
 
 /// One write of an acceptor's persist batch.
-pub type AcceptorOp = AcceptorWrite<Command>;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AcceptorOp {
+    /// A write of the core's acceptor: a promise or a vote.
+    Write(AcceptorWrite<Command>),
+    /// Drop the votes of the slots `start .. below` of `segment`.
+    Compact {
+        /// The segment.
+        segment: SegmentId,
+        /// The first slot of the segment.
+        start: Slot,
+        /// The slot below which the votes go.
+        below: Slot,
+    },
+}
+
+impl From<AcceptorWrite<Command>> for AcceptorOp {
+    fn from(write: AcceptorWrite<Command>) -> Self {
+        Self::Write(write)
+    }
+}
 
 /// What one step of the acceptor asks of its driver.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +99,9 @@ pub struct AcceptorDisk {
     pub votes: BTreeMap<Slot, (Ballot, Command)>,
     /// The votes whose value the disk lost (CTRL): the ballot is kept.
     pub faulty: BTreeMap<Slot, Ballot>,
+    /// The ranges whose votes the acceptor dropped, `start .. below` by
+    /// start, one for each segment.
+    pub dropped: BTreeMap<Slot, Slot>,
     /// The highest batch the disk holds.
     pub durable: Option<PersistId>,
 }
@@ -84,21 +120,32 @@ impl AcceptorDisk {
         );
         for op in ops {
             match op {
-                AcceptorWrite::SetPromise(ballot) => {
+                AcceptorOp::Write(AcceptorWrite::SetPromise(ballot)) => {
                     assert!(*ballot >= self.promised, "a promise never falls");
                     self.promised = *ballot;
                 }
-                AcceptorWrite::AppendAccepted {
+                AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                     slot,
                     ballot,
                     value,
-                } => {
+                }) => {
                     assert!(
                         *ballot <= self.promised,
                         "a vote is durable only under its promise"
                     );
+                    assert!(
+                        !dropped_at(&self.dropped, *slot),
+                        "a vote is never written in a dropped range"
+                    );
                     self.faulty.remove(slot);
                     self.votes.insert(*slot, (*ballot, value.clone()));
+                }
+                AcceptorOp::Compact { start, below, .. } => {
+                    assert!(start < below, "a compaction drops a slot");
+                    drop_range(&mut self.dropped, *start, *below);
+                    self.votes.retain(|slot, _| !(start..below).contains(&slot));
+                    self.faulty
+                        .retain(|slot, _| !(start..below).contains(&slot));
                 }
             }
         }
@@ -121,6 +168,8 @@ pub struct JournalAcceptor {
     /// older than one it forgot. An `Accept` that raises the promise names
     /// no segment, so it clears the belief.
     bound: Option<SegmentId>,
+    /// The ranges whose votes it dropped, `start .. below` by start.
+    dropped: BTreeMap<Slot, Slot>,
 }
 
 impl JournalAcceptor {
@@ -139,6 +188,13 @@ impl JournalAcceptor {
             page <= PROMISE_BATCH,
             "a promise page is at most PROMISE_BATCH"
         );
+        assert!(
+            disk.votes
+                .keys()
+                .chain(disk.faulty.keys())
+                .all(|slot| !dropped_at(&disk.dropped, *slot)),
+            "a disk keeps no vote in a dropped range"
+        );
         let acceptor = Acceptor::new(disk.promised, disk.votes, Slot(0), disk.faulty);
         let role = Self {
             id,
@@ -146,6 +202,7 @@ impl JournalAcceptor {
             flight: Flight::after(disk.durable),
             page,
             bound: None,
+            dropped: disk.dropped,
         };
         assert!(
             role.acceptor.promised() == disk.promised,
@@ -177,6 +234,13 @@ impl JournalAcceptor {
         self.bound
     }
 
+    /// The ranges whose votes the acceptor dropped, `start .. below` by
+    /// start.
+    #[must_use]
+    pub fn dropped(&self) -> &BTreeMap<Slot, Slot> {
+        &self.dropped
+    }
+
     /// The vote in memory at `slot`.
     #[must_use]
     pub fn vote(&self, slot: Slot) -> Option<&(Ballot, Command)> {
@@ -205,6 +269,11 @@ impl JournalAcceptor {
                 slot,
                 command,
             } => self.accept(from, ballot, slot, command),
+            Message::Compact {
+                segment,
+                start,
+                below,
+            } => self.compact(segment, start, below),
             _ => Vec::new(),
         };
         assert!(
@@ -251,6 +320,7 @@ impl JournalAcceptor {
                             votes: page.accepted,
                             faulty: page.faulty,
                             next: page.next_from_slot,
+                            dropped: self.dropped.clone(),
                         },
                     },
                     after: self.flight.last(),
@@ -275,6 +345,13 @@ impl JournalAcceptor {
         slot: Slot,
         command: Command,
     ) -> Vec<AcceptorEffect> {
+        if dropped_at(&self.dropped, slot) {
+            probe!(
+                reachable,
+                "acceptor: an Accept in a dropped range is not answered"
+            );
+            return Vec::new();
+        }
         match self.acceptor.admit(ballot, slot) {
             AcceptOutcome::Admitted => {}
             AcceptOutcome::Refused | AcceptOutcome::BelowFloor => {
@@ -310,7 +387,10 @@ impl JournalAcceptor {
             self.acceptor
                 .record_accepted(slot, ballot, command, &mut ops);
             assert!(
-                matches!(ops.last(), Some(AcceptorWrite::AppendAccepted { .. })),
+                matches!(
+                    ops.last(),
+                    Some(AcceptorOp::Write(AcceptorWrite::AppendAccepted { .. }))
+                ),
                 "the vote is the last write of its batch"
             );
             effects = self.persist(ops);
@@ -343,11 +423,65 @@ impl JournalAcceptor {
             message: Message::PreReadAck {
                 segment,
                 read,
-                watermark: self.acceptor.vote_watermark(),
+                watermark: self.watermark(),
                 bound,
             },
             after: self.flight.last(),
         }]
+    }
+
+    /// The highest slot the acceptor voted in, a dropped slot included.
+    fn watermark(&self) -> Option<Slot> {
+        let dropped = self.dropped.values().max().map(|below| Slot(below.0 - 1));
+        probe!(
+            sometimes,
+            dropped > self.acceptor.vote_watermark(),
+            "acceptor: a read watermark counts a dropped slot"
+        );
+        self.acceptor.vote_watermark().max(dropped)
+    }
+
+    /// Drop the votes of `start .. below`, in one batch after the batches
+    /// before it. A range that is dropped already writes nothing.
+    fn compact(&mut self, segment: SegmentId, start: Slot, below: Slot) -> Vec<AcceptorEffect> {
+        if start >= below || self.dropped.get(&start).is_some_and(|held| *held >= below) {
+            return Vec::new();
+        }
+        probe!(reachable, "acceptor: a compaction drops votes");
+        drop_range(&mut self.dropped, start, below);
+        let range = start..below;
+        let records = self
+            .acceptor
+            .records()
+            .iter()
+            .filter(|(slot, _)| !range.contains(slot))
+            .map(|(slot, vote)| (*slot, vote.clone()))
+            .collect();
+        let faulty = self
+            .acceptor
+            .faulty()
+            .iter()
+            .filter(|(slot, _)| !range.contains(slot))
+            .map(|(slot, ballot)| (*slot, *ballot))
+            .collect();
+        let promised = self.acceptor.promised();
+        self.acceptor = Acceptor::new(promised, records, Slot(0), faulty);
+        assert!(
+            self.acceptor.promised() == promised,
+            "a compaction keeps the promise"
+        );
+        assert!(
+            self.acceptor
+                .records()
+                .keys()
+                .all(|slot| !range.contains(slot)),
+            "a compaction keeps no vote in its range"
+        );
+        self.persist(vec![AcceptorOp::Compact {
+            segment,
+            start,
+            below,
+        }])
     }
 
     fn nack(&self, to: NodeId, ballot: Ballot) -> AcceptorEffect {
@@ -369,6 +503,21 @@ impl JournalAcceptor {
         let id = self.flight.batch();
         vec![AcceptorEffect::Persist { id, ops }]
     }
+}
+
+/// Whether `slot` is in one of the `dropped` ranges.
+fn dropped_at(dropped: &BTreeMap<Slot, Slot>, slot: Slot) -> bool {
+    dropped
+        .range(..=slot)
+        .next_back()
+        .is_some_and(|(_, below)| slot < *below)
+}
+
+/// Add the range `start .. below` to `dropped`: a range of one segment only
+/// grows.
+fn drop_range(dropped: &mut BTreeMap<Slot, Slot>, start: Slot, below: Slot) {
+    let held = dropped.entry(start).or_insert(below);
+    *held = (*held).max(below);
 }
 
 #[cfg(test)]

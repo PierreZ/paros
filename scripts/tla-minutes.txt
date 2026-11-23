@@ -36,6 +36,7 @@ handover-gc 1.5
 handover-scalars 2
 heal-reuse 5
 health 3.5
+journal-compact 4
 journal-ids 6
 journal-state 21
 leader-handoff 15

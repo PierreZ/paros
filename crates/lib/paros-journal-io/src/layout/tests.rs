@@ -3,7 +3,7 @@
 //! damaged record is reported.
 
 use paros_journal::fold::BoundaryState;
-use paros_journal::roles::{AcceptorDisk, AcceptorOp, ReplicaDisk, ReplicaOp};
+use paros_journal::roles::{AcceptorDisk, AcceptorOp, AcceptorWrite, ReplicaDisk, ReplicaOp};
 use paros_journal::{Command, Leader};
 
 use super::*;
@@ -63,28 +63,31 @@ fn commit(storage: &mut MemStorage, ops: &[Op]) {
 #[test]
 fn acceptor_batches_read_back_as_the_roles_disk() {
     let batches: Vec<(PersistId, Vec<AcceptorOp>)> = vec![
-        (PersistId(0), vec![AcceptorOp::SetPromise(ballot(1))]),
+        (
+            PersistId(0),
+            vec![AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(1)))],
+        ),
         (
             PersistId(1),
             vec![
-                AcceptorOp::SetPromise(ballot(2)),
-                AcceptorOp::AppendAccepted {
+                AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(2))),
+                AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                     slot: Slot(0),
                     ballot: ballot(2),
                     value: Command::Noop,
-                },
+                }),
             ],
         ),
         (
             PersistId(2),
-            vec![AcceptorOp::AppendAccepted {
+            vec![AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot: Slot(7),
                 ballot: ballot(2),
                 value: Command::SetLeader {
                     new: None,
                     old: Leader::Unset,
                 },
-            }],
+            })],
         ),
     ];
     let mut storage = MemStorage::new();
@@ -143,17 +146,17 @@ fn every_damaged_record_is_reported() {
         A,
         PersistId(0),
         &[
-            AcceptorOp::SetPromise(ballot(1)),
-            AcceptorOp::AppendAccepted {
+            AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(1))),
+            AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot: Slot(1),
                 ballot: ballot(1),
                 value: Command::Noop,
-            },
-            AcceptorOp::AppendAccepted {
+            }),
+            AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot: Slot(2),
                 ballot: ballot(1),
                 value: Command::Noop,
-            },
+            }),
         ],
     );
     commit(&mut storage, &ops);

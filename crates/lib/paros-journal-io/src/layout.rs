@@ -18,6 +18,15 @@
 //! | `Vote` | the slot | the ballot, then the command (the codec of `paros-journal`) | acceptor |
 //! | `Base` | 0 | the first slot of the segment, then the boundary state | replica |
 //! | `Chosen` | the slot | the command | replica |
+//! | `Joining` | 0 | empty, or the term and the number of the copy | replica |
+//! | `Trim` | 0 | the compaction point, the trim floor, the first position of the segment, then the boundary state of the fold there | replica |
+//! | `Dropped` | the first slot of the segment | the slot below which the votes go | acceptor |
+//!
+//! **The compaction** (§J3.2). The storage has no delete, so a compaction
+//! writes one record and keeps the records it drops: a replica's `Trim`
+//! hides every `Chosen` record below its point, and an acceptor's `Dropped`
+//! hides every `Vote` in its range. A hidden record that does not read is
+//! no damage: nothing reads it.
 //!
 //! Each persist batch of a role ends with its `Durable` record, and a
 //! batch is atomic (rule 4), so the role's highest durable id is on the
@@ -31,9 +40,13 @@
 use std::collections::BTreeMap;
 
 use paros_consensus::journal::JournalId;
+use paros_consensus::journal::Seq;
 use paros_journal::codec::{decode_boundary, decode_command, encode_boundary, encode_command};
+use paros_journal::fold::JournalState;
 use paros_journal::register::Ballot;
-use paros_journal::roles::{AcceptorDisk, AcceptorOp, CopyId, PersistId, ReplicaDisk, ReplicaOp};
+use paros_journal::roles::{
+    AcceptorDisk, AcceptorOp, AcceptorWrite, CopyId, PersistId, ReplicaDisk, ReplicaOp, Trim,
+};
 use paros_journal::{NodeId, SegmentId, Slot};
 
 use crate::wire::Address;
@@ -54,16 +67,22 @@ pub enum Kind {
     /// The copy of a heal that a new replica runs (#1314): empty for none,
     /// else the term and the number of the copy.
     Joining = 5,
+    /// The compaction point of a replica and its fold there.
+    Trim = 6,
+    /// A range of slots whose votes an acceptor dropped.
+    Dropped = 7,
 }
 
 impl Kind {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Durable,
         Self::Promise,
         Self::Vote,
         Self::Base,
         Self::Chosen,
         Self::Joining,
+        Self::Trim,
+        Self::Dropped,
     ];
 
     fn of(byte: u8) -> Option<Self> {
@@ -164,15 +183,19 @@ pub fn acceptor_ops(address: Address, id: PersistId, ops: &[AcceptorOp]) -> Vec<
     let mut out: Vec<Op> = ops
         .iter()
         .map(|op| match op {
-            AcceptorOp::SetPromise(ballot) => Op {
+            AcceptorOp::Write(AcceptorWrite::SetPromise(ballot)) => Op {
                 key: Key::new(address, Kind::Promise, 0),
                 value: ballot_bytes(*ballot).to_vec(),
             },
-            AcceptorOp::AppendAccepted {
+            AcceptorOp::Compact { start, below, .. } => Op {
+                key: Key::new(address, Kind::Dropped, start.0),
+                value: below.0.to_be_bytes().to_vec(),
+            },
+            AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot,
                 ballot,
                 value,
-            } => {
+            }) => {
                 let mut bytes = ballot_bytes(*ballot).to_vec();
                 bytes.extend(encode_command(value));
                 Op {
@@ -212,6 +235,16 @@ pub fn replica_ops(address: Address, id: PersistId, ops: &[ReplicaOp]) -> Vec<Op
                     bytes
                 }),
             },
+            ReplicaOp::Compact(trim) => {
+                let mut bytes = trim.slot.0.to_be_bytes().to_vec();
+                bytes.extend(trim.floor.0.to_be_bytes());
+                bytes.extend(trim.state.start_seq().0.to_be_bytes());
+                bytes.extend(encode_boundary(&trim.state.boundary()));
+                Op {
+                    key: Key::new(address, Kind::Trim, 0),
+                    value: bytes,
+                }
+            }
         })
         .collect();
     out.push(durable_op(address, id));
@@ -263,7 +296,25 @@ impl Damage {
 pub fn decode_acceptor(address: Address, entries: &[(Key, Entry)]) -> Result<AcceptorDisk, Damage> {
     let mut disk = AcceptorDisk::default();
     let mut damage = Damage::default();
+    // The dropped ranges first: they hide the votes in them.
     for (key, entry) in entries {
+        if let (true, Kind::Dropped, Entry::Value(bytes)) =
+            (key.address == address, key.kind, entry)
+            && let Some(below) = u64_of(bytes).filter(|below| *below > key.index)
+        {
+            disk.dropped.insert(Slot(key.index), Slot(below));
+        }
+    }
+    let hidden = |slot: u64| {
+        disk.dropped
+            .range(..=Slot(slot))
+            .next_back()
+            .is_some_and(|(_, below)| slot < below.0)
+    };
+    for (key, entry) in entries {
+        if key.address == address && key.kind == Kind::Vote && hidden(key.index) {
+            continue;
+        }
         let read = match (key.address == address, key.kind, entry) {
             (true, Kind::Durable, Entry::Value(bytes)) => {
                 u64_of(bytes).map(|id| disk.durable = Some(PersistId(id)))
@@ -279,6 +330,9 @@ pub fn decode_acceptor(address: Address, entries: &[(Key, Entry)]) -> Result<Acc
                 .map(|vote| {
                     disk.votes.insert(Slot(key.index), vote);
                 }),
+            (true, Kind::Dropped, Entry::Value(bytes)) => {
+                u64_of(bytes).filter(|below| *below > key.index).map(|_| ())
+            }
             _ => None,
         };
         if read.is_none() {
@@ -305,7 +359,18 @@ pub fn decode_replica(address: Address, entries: &[(Key, Entry)]) -> Result<Repl
     let mut joining = None;
     let mut chosen = BTreeMap::new();
     let mut damage = Damage::default();
+    // The trim first: it hides the slots below its point.
+    let mut trim = None;
     for (key, entry) in entries {
+        if let (true, Kind::Trim, Entry::Value(bytes)) = (key.address == address, key.kind, entry) {
+            trim = trim_of(bytes);
+        }
+    }
+    let below = trim.map_or(0, |t: Trim| t.slot.0);
+    for (key, entry) in entries {
+        if key.address == address && key.kind == Kind::Chosen && key.index < below {
+            continue;
+        }
         let read = match (key.address == address, key.kind, entry) {
             (true, Kind::Durable, Entry::Value(bytes)) => {
                 u64_of(bytes).map(|id| durable = Some(PersistId(id)))
@@ -329,6 +394,7 @@ pub fn decode_replica(address: Address, entries: &[(Key, Entry)]) -> Result<Repl
                     })
                 })
                 .map(|copy| joining = Some(copy)),
+            (true, Kind::Trim, Entry::Value(bytes)) => trim_of(bytes).map(|_| ()),
             _ => None,
         };
         if read.is_none() {
@@ -340,11 +406,24 @@ pub fn decode_replica(address: Address, entries: &[(Key, Entry)]) -> Result<Repl
             base,
             chosen,
             joining,
+            trim,
             durable,
         })
     } else {
         Err(damage)
     }
+}
+
+fn trim_of(bytes: &[u8]) -> Option<Trim> {
+    let (slot, rest) = bytes.split_at_checked(8)?;
+    let (floor, rest) = rest.split_at_checked(8)?;
+    let (start_seq, boundary) = rest.split_at_checked(8)?;
+    let state = JournalState::resume(decode_boundary(boundary).ok()?, Seq(u64_of(start_seq)?))?;
+    Some(Trim {
+        slot: Slot(u64_of(slot)?),
+        state,
+        floor: Seq(u64_of(floor)?),
+    })
 }
 
 fn ballot_bytes(ballot: Ballot) -> [u8; 16] {

@@ -46,6 +46,15 @@
 //!    leader asks again at its next tick. Only once a done value shows the
 //!    segment retired does the leader say that the old acceptors may stop
 //!    ([`LeaderEffect::Retired`], `RetireKept`).
+//! 8. **The compaction** (§J3.2, #1318, `specs/tla/journal-compact/`): an
+//!    open leader asks the replicas of each segment it reads for their
+//!    compaction points (`Compaction`), and sends `Compact` to every
+//!    acceptor it reads once `F + 1` replicas of the set compacted to a
+//!    point (control `compact_floor`: the floor alone drops votes that no
+//!    replica applied). A held command whose slot is below the answers of
+//!    `F + 1` replicas is answered `Unknown`: its answer is gone. The gap
+//!    fill skips every slot an acceptor dropped, and the next slot is above
+//!    them.
 
 pub mod phase1;
 
@@ -64,7 +73,7 @@ use crate::held::{Held, Reply};
 use crate::register::{Change, RegisterValue};
 use crate::segment::{Grid, SegmentId, SegmentRecord, SegmentState};
 
-use phase1::{Phase1, Phase1Close};
+use phase1::{Phase1, Phase1Close, in_ranges};
 
 /// The re-sends of a delegated round after which the leader gives it to the
 /// next proxy: a proxy that crashed or lost its messages costs a few ticks.
@@ -258,6 +267,11 @@ pub struct JournalLeader<T> {
     /// The proxy leaders the leader delegates its rounds to; empty: the
     /// leader runs Phase 2 itself.
     proxies: Vec<NodeId>,
+    /// The ranges that Phase 1 saw dropped: no proposal there.
+    dropped: BTreeMap<Slot, Slot>,
+    /// The compaction point and the first answered slot that each replica
+    /// of a segment reported, by segment.
+    compaction: BTreeMap<SegmentId, BTreeMap<NodeId, (Slot, Slot)>>,
 }
 
 impl<T> JournalLeader<T> {
@@ -313,6 +327,8 @@ impl<T> JournalLeader<T> {
             holders: BTreeSet::new(),
             retired: false,
             proxies: Vec::new(),
+            dropped: BTreeMap::new(),
+            compaction: BTreeMap::new(),
         };
         let effects = leader.prepares();
         leader.assert_invariants();
@@ -461,6 +477,11 @@ impl<T> JournalLeader<T> {
                 command,
                 answer,
             } => self.applied(segment, slot, &command, &answer),
+            Message::CompactedTo {
+                segment,
+                compacted,
+                answers,
+            } => self.compacted(from, segment, compacted, answers),
             Message::Holds { segment, full } => {
                 if full
                     && let Some(sealed) = self.sealed()
@@ -479,7 +500,11 @@ impl<T> JournalLeader<T> {
     }
 
     /// A register value that a done write gave. A sealing leader opens when
-    /// the value holds its own end, and stops when it holds another.
+    /// the value holds its own end, and stops when it holds another. An
+    /// open leader stops when the value holds an end of its own segment: a
+    /// later leader sealed it, so no round of its own above that end is
+    /// ever chosen, and the acceptors of the segment may stop once it
+    /// retires and never refuse the rounds that wait.
     ///
     /// # Panics
     ///
@@ -487,6 +512,19 @@ impl<T> JournalLeader<T> {
     /// error, never an operating condition.
     pub fn observe(&mut self, value: &RegisterValue) -> Vec<LeaderEffect<T>> {
         if let LeaderPhase::Open { .. } = self.phase {
+            if value
+                .segment(self.campaign.segment)
+                .and_then(SegmentRecord::end)
+                .is_some()
+            {
+                probe!(
+                    reachable,
+                    "leader: a seal of its own segment stops the leader"
+                );
+                let effects = self.stop();
+                self.assert_invariants();
+                return effects;
+            }
             let effects = self.observe_retire(value);
             self.assert_invariants();
             return effects;
@@ -551,6 +589,7 @@ impl<T> JournalLeader<T> {
         self.rounds.clear();
         self.unapplied.clear();
         self.holders.clear();
+        self.compaction.clear();
         probe!(
             sometimes,
             !self.held.is_empty(),
@@ -611,6 +650,7 @@ impl<T> JournalLeader<T> {
                     effects.extend(self.commits(segment, slot, &command));
                 }
                 effects.extend(self.retire());
+                effects.extend(self.compactions());
                 effects
             }
             LeaderPhase::Stopped => Vec::new(),
@@ -660,7 +700,11 @@ impl<T> JournalLeader<T> {
     }
 
     /// A done value that shows the sealed segment retired: the old
-    /// acceptors may stop.
+    /// acceptors may stop. The replicas of a retired segment drop their
+    /// copies and answer nothing, so a chosen slot of the segment that no
+    /// replica answered yet is answered `Unknown` now: its resend would
+    /// wait for ever, and the lowest unanswered slots fill the page of
+    /// every tick.
     fn observe_retire(&mut self, value: &RegisterValue) -> Vec<LeaderEffect<T>> {
         let Some(sealed) = self.sealed() else {
             return Vec::new();
@@ -673,7 +717,40 @@ impl<T> JournalLeader<T> {
             probe!(reachable, "leader: a done value shows the retire");
             self.retired = true;
             self.holders.clear();
-            return vec![LeaderEffect::Retired { segment }];
+            let mut gone: Vec<Slot> = self
+                .unapplied
+                .iter()
+                .filter(|(_, u)| u.segment == segment)
+                .map(|(slot, _)| *slot)
+                .collect();
+            // Every slot of a retired segment is chosen and held by `F + 1`
+            // replicas: a round there decides nothing new, and its commit
+            // would go to replicas that dropped their copies.
+            let rounds: Vec<Slot> = self
+                .rounds
+                .by_slot()
+                .keys()
+                .copied()
+                .filter(|slot| self.segment_of(*slot).is_some_and(|s| s.id == segment))
+                .collect();
+            for slot in rounds {
+                self.rounds.close(slot);
+                gone.push(slot);
+            }
+            let mut effects = vec![LeaderEffect::Retired { segment }];
+            for slot in gone {
+                probe!(
+                    reachable,
+                    "leader: a chosen slot of a retired segment is answered Unknown"
+                );
+                self.unapplied.remove(&slot);
+                effects.extend(
+                    self.held
+                        .release(slot)
+                        .map(|(token, reply)| LeaderEffect::Reply { token, reply }),
+                );
+            }
+            return effects;
         }
         Vec::new()
     }
@@ -704,11 +781,18 @@ impl<T> JournalLeader<T> {
     }
 
     fn after_promise(&mut self) -> Vec<LeaderEffect<T>> {
-        let Some(Phase1Close { safe, blocked, end }) = self.phase1.close(&self.segments) else {
+        let Some(Phase1Close {
+            safe,
+            blocked,
+            end,
+            dropped,
+        }) = self.phase1.close(&self.segments)
+        else {
             return Vec::new();
         };
         self.safe = safe;
         self.blocked = blocked;
+        self.dropped = dropped;
         match (
             self.before_own(),
             self.segments.last().and_then(|s| s.start),
@@ -731,13 +815,14 @@ impl<T> JournalLeader<T> {
     }
 
     /// The leader writes from the first slot it reads: the votes Phase 1
-    /// found, a `Noop` in each other slot below its next slot, then the
-    /// callers' commands.
+    /// found, a `Noop` in each other slot below its next slot that no
+    /// acceptor dropped, then the callers' commands.
     fn open(&mut self, start: Slot) -> Vec<LeaderEffect<T>> {
         self.phase = LeaderPhase::Open { start };
         let from = self.campaign.from;
         let top = self.safe.keys().next_back().map(|s| Slot(s.0 + 1));
-        let next = [Some(start), Some(from), top]
+        let dropped = self.dropped.values().max().copied();
+        let next = [Some(start), Some(from), top, dropped]
             .into_iter()
             .flatten()
             .max()
@@ -745,6 +830,10 @@ impl<T> JournalLeader<T> {
         self.next = next;
         let mut effects = Vec::new();
         for slot in (from.0..next.0).map(Slot) {
+            if in_ranges(&self.dropped, slot) {
+                probe!(reachable, "leader: a dropped slot is not proposed");
+                continue;
+            }
             if self.blocked.contains(&slot) {
                 probe!(reachable, "leader: a blocked slot is not proposed");
                 continue;
@@ -940,6 +1029,148 @@ impl<T> JournalLeader<T> {
             .collect()
     }
 
+    /// The compaction step of a tick: ask the replicas of each segment in
+    /// force for their compaction points, and send the floor of each
+    /// segment that `F + 1` of them reached to every acceptor read.
+    fn compactions(&self) -> Vec<LeaderEffect<T>> {
+        let mut effects = Vec::new();
+        for segment in self.segments.iter().filter(|s| s.start.is_some()) {
+            effects.extend(segment.replicas.iter().map(|replica| LeaderEffect::Send {
+                to: *replica,
+                message: Message::Compaction {
+                    segment: segment.id,
+                },
+            }));
+            effects.extend(self.compact(segment.id));
+        }
+        effects
+    }
+
+    /// The `F + 1`-th highest of `points` (the replicas that reported):
+    /// the slot below which `F + 1` replicas of the set reach.
+    fn quorum_point(&self, segment: SegmentId, points: impl Iterator<Item = Slot>) -> Option<Slot> {
+        let read = self.segments.iter().find(|s| s.id == segment)?;
+        let mut points: Vec<Slot> = points.collect();
+        points.sort_unstable_by(|a, b| b.cmp(a));
+        points.get(read.acks() - 1).copied()
+    }
+
+    /// The `Compact` of `segment` to every acceptor that the leader reads,
+    /// once `F + 1` replicas of its set compacted above its start.
+    fn compact(&self, segment: SegmentId) -> Vec<LeaderEffect<T>> {
+        let Some(start) = self
+            .segments
+            .iter()
+            .find(|s| s.id == segment)
+            .and_then(|s| s.start)
+        else {
+            return Vec::new();
+        };
+        let reports = self.compaction.get(&segment);
+        let Some(below) = self.quorum_point(
+            segment,
+            reports
+                .into_iter()
+                .flat_map(|r| r.values().map(|(c, _)| *c)),
+        ) else {
+            return Vec::new();
+        };
+        if below <= start {
+            return Vec::new();
+        }
+        probe!(reachable, "leader: F + 1 replicas compacted a segment");
+        let acceptors: BTreeSet<NodeId> = self
+            .segments
+            .iter()
+            .flat_map(ReadSegment::acceptors)
+            .collect();
+        acceptors
+            .into_iter()
+            .map(|to| LeaderEffect::Send {
+                to,
+                message: Message::Compact {
+                    segment,
+                    start,
+                    below,
+                },
+            })
+            .collect()
+    }
+
+    /// A replica of `segment` reported its compaction point and its first
+    /// answered slot. A held command below the answers of `F + 1` replicas
+    /// of the set is answered `Unknown`: no replica of the set gives its
+    /// answer now that a quorum of them dropped it. An open round below
+    /// the compaction point of `F + 1` replicas closes: its slot is chosen
+    /// and applied, and an acceptor that dropped it answers no `Accept`
+    /// (a Phase 1 that closed before the drop proposes it).
+    fn compacted(
+        &mut self,
+        from: NodeId,
+        segment: SegmentId,
+        compacted: Slot,
+        answers: Slot,
+    ) -> Vec<LeaderEffect<T>> {
+        if !matches!(self.phase, LeaderPhase::Open { .. })
+            || !self
+                .segments
+                .iter()
+                .any(|s| s.id == segment && s.replicas.contains(&from))
+        {
+            return Vec::new();
+        }
+        assert!(answers >= compacted, "a replica answers only what it keeps");
+        let report = self
+            .compaction
+            .entry(segment)
+            .or_default()
+            .entry(from)
+            .or_insert((compacted, answers));
+        *report = (report.0.max(compacted), report.1.max(answers));
+        let reports = &self.compaction[&segment];
+        let (Some(below), Some(answered)) = (
+            self.quorum_point(segment, reports.values().map(|(c, _)| *c)),
+            self.quorum_point(segment, reports.values().map(|(_, a)| *a)),
+        ) else {
+            return Vec::new();
+        };
+        assert!(answered >= below, "F + 1 replicas answer what they keep");
+        let in_segment = |slot: Slot| self.segment_of(slot).is_some_and(|s| s.id == segment);
+        let applied: Vec<Slot> = self
+            .rounds
+            .by_slot()
+            .keys()
+            .copied()
+            .filter(|slot| *slot < below && in_segment(*slot))
+            .collect();
+        let mut gone: Vec<Slot> = self
+            .unapplied
+            .range(..answered)
+            .filter(|(_, u)| u.segment == segment)
+            .map(|(slot, _)| *slot)
+            .collect();
+        for slot in applied {
+            probe!(reachable, "leader: an open round below a compaction closes");
+            self.rounds.close(slot);
+            gone.push(slot);
+        }
+        let mut effects = Vec::new();
+        for slot in gone {
+            probe!(
+                reachable,
+                "leader: a chosen slot whose answer is gone is answered Unknown"
+            );
+            self.unapplied.remove(&slot);
+            effects.extend(
+                self.held
+                    .release(slot)
+                    .map(|(token, reply)| LeaderEffect::Reply { token, reply }),
+            );
+        }
+        effects.extend(self.compact(segment));
+        effects
+    }
+
     /// The leader's own rules.
     ///
     /// # Panics
@@ -987,6 +1218,13 @@ impl<T> JournalLeader<T> {
                 .keys()
                 .all(|slot| !self.rounds.by_slot().contains_key(slot)),
             "a chosen slot has no open round"
+        );
+        assert!(
+            self.rounds
+                .by_slot()
+                .keys()
+                .all(|slot| !in_ranges(&self.dropped, *slot)),
+            "the leader proposes nothing in a dropped range"
         );
     }
 }

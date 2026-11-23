@@ -223,6 +223,35 @@ impl JournalState {
         state
     }
 
+    /// The fold of a segment that starts at `start_seq`, at the point where
+    /// its boundary state is `boundary`: a fold taken back from a disk or a
+    /// peer (the trim point of a compaction, §J3.2). `None` when the parts
+    /// do not make a fold: a boundary that is not valid, or a start above
+    /// `next_seq`.
+    ///
+    /// # Panics
+    ///
+    /// When the fold it builds breaks its own invariants: a programmer
+    /// error, never an operating condition.
+    #[must_use]
+    pub fn resume(boundary: BoundaryState, start_seq: Seq) -> Option<Self> {
+        if !boundary.is_valid() || start_seq > boundary.next_seq {
+            return None;
+        }
+        let state = Self {
+            leader: boundary.leader,
+            next_seq: boundary.next_seq,
+            first_seq: boundary.first_seq,
+            start_seq,
+        };
+        state.assert_invariants();
+        assert!(
+            state.boundary() == boundary,
+            "a fold resumes at its boundary"
+        );
+        Some(state)
+    }
+
     /// The leader value.
     #[must_use]
     pub fn leader(&self) -> Leader {

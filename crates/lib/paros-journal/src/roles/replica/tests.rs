@@ -259,7 +259,16 @@ fn a_full_replica_writes_the_boundary_state_until_a_done_value_shows_it() {
         change: boundary.clone(),
         after: *after,
     };
-    assert_eq!(replica.tick(), vec![register]);
+    // The tick also compacts the log: slot 0 holds no record.
+    let compact = ReplicaEffect::Persist {
+        id: PersistId(2),
+        ops: vec![ReplicaOp::Compact(Trim {
+            slot: Slot(1),
+            state: *replica.state().expect("a fold"),
+            floor: Seq(0),
+        })],
+    };
+    assert_eq!(replica.tick(), vec![register, compact]);
     let done = value.apply(&boundary).expect("the boundary");
     assert_eq!(replica.observe(&done).len(), 0);
     assert!(
@@ -792,7 +801,8 @@ fn a_new_replica_copies_from_a_full_member_and_reports_its_copy() {
     assert_eq!(copied(&effects), vec![]);
     assert_eq!(
         persists(&effects),
-        vec![(PersistId(4), vec![ReplicaOp::Joining(None)])],
+        // Batch 4 is the compaction of the full copy, at a tick.
+        vec![(PersistId(5), vec![ReplicaOp::Joining(None)])],
         "a member is no new replica, on its disk too"
     );
     assert_eq!(replica.joining(), None, "the heal is done: a member");

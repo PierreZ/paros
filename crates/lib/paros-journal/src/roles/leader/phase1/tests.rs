@@ -31,6 +31,7 @@ fn page(votes: &[(u64, u64, u8)], faulty: &[(u64, u64)], next: Option<u64>) -> P
             .collect(),
         faulty: faulty.iter().map(|(s, r)| (Slot(*s), ballot(*r))).collect(),
         next: next.map(Slot),
+        dropped: BTreeMap::new(),
     }
 }
 

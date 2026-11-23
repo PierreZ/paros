@@ -4,10 +4,11 @@
 
 use std::collections::BTreeMap;
 
+use paros_consensus::journal::Seq;
 use paros_consensus::{Ballot, NodeId, Slot};
 
 use crate::command::Command;
-use crate::fold::Answer;
+use crate::fold::{Answer, JournalState};
 use crate::segment::SegmentId;
 
 /// One page of an acceptor's promise: its votes and its faulty entries at or
@@ -22,6 +23,12 @@ pub struct PromisePage {
     pub faulty: BTreeMap<Slot, Ballot>,
     /// The first slot of the next page, when this one was full.
     pub next: Option<Slot>,
+    /// The slots whose votes the acceptor dropped (§J3.2): each range
+    /// `start .. below` of one segment, by its start. Every page carries
+    /// them all. A dropped slot is chosen and applied at `F + 1` replicas
+    /// of its set: the leader proposes nothing there, and the seal end
+    /// counts it as a vote.
+    pub dropped: BTreeMap<Slot, Slot>,
 }
 
 /// A message between two roles of the journal.
@@ -162,5 +169,53 @@ pub enum Message {
         segment: SegmentId,
         /// Whether the replica holds every slot of the sealed segment.
         full: bool,
+    },
+    /// Leader to replica: report the compaction point of `segment`
+    /// (§J3.2). The leader asks at each tick.
+    Compaction {
+        /// The segment.
+        segment: SegmentId,
+    },
+    /// Replica to leader: the replica dropped the slots of `segment` below
+    /// `compacted`, and keeps the answers of the slots from `answers`. It
+    /// waits on the replica's last batch, so the compaction is durable.
+    CompactedTo {
+        /// The segment.
+        segment: SegmentId,
+        /// The compaction point: the replica applied every slot below it
+        /// and dropped it from its log.
+        compacted: Slot,
+        /// The first slot whose answer the replica can give: at or above
+        /// `compacted`.
+        answers: Slot,
+    },
+    /// Leader to acceptor: drop the votes of the slots `start .. below` of
+    /// `segment` (§J3.2, #1318). The leader sends it once `F + 1` replicas
+    /// of the segment's set reported a compaction point at or above
+    /// `below`.
+    Compact {
+        /// The segment.
+        segment: SegmentId,
+        /// The first slot of the segment.
+        start: Slot,
+        /// The slot below which the votes go.
+        below: Slot,
+    },
+    /// Replica to a peer of its set: the answer to a `Pull` below the
+    /// replica's compaction point (the trim-point jump). It carries the
+    /// compaction point, the fold there and the trim floor of the fold that
+    /// chose the point: no bytes and no ballot.
+    TrimmedTo {
+        /// The segment.
+        segment: SegmentId,
+        /// The compaction point.
+        slot: Slot,
+        /// The fold at the compaction point.
+        state: JournalState,
+        /// The trim floor that chose the point. Every write that a slot
+        /// below the point holds lies below it, so the fold that starts at
+        /// the point judges a position at or above it as the whole log
+        /// does.
+        floor: Seq,
     },
 }

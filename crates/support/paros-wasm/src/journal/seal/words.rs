@@ -3,7 +3,7 @@
 //! read off a role's message, a register change or an answer of the fold.
 
 use paros_journal::register::{Ballot, Change};
-use paros_journal::roles::{AcceptorOp, LeaderPhase, Message, ReplicaOp};
+use paros_journal::roles::{AcceptorOp, AcceptorWrite, LeaderPhase, Message, ReplicaOp};
 use paros_journal::segment::SegmentState;
 use paros_journal::{Answer, Command, Fence, NodeId, Reply, ResolveAnswer, Write};
 
@@ -187,12 +187,17 @@ pub(super) fn change_text(change: &Change) -> String {
 
 pub(super) fn acceptor_write(op: &AcceptorOp) -> String {
     match op {
-        AcceptorOp::SetPromise(ballot) => format!("promise {}", ballot_text(*ballot)),
-        AcceptorOp::AppendAccepted {
+        AcceptorOp::Write(AcceptorWrite::SetPromise(ballot)) => {
+            format!("promise {}", ballot_text(*ballot))
+        }
+        AcceptorOp::Compact { start, below, .. } => {
+            format!("drop the votes of slots {} to {}", start.0, below.0 - 1)
+        }
+        AcceptorOp::Write(AcceptorWrite::AppendAccepted {
             slot,
             ballot,
             value,
-        } => format!(
+        }) => format!(
             "slot {}: vote {} at {}",
             slot.0,
             value_name(value),
@@ -214,6 +219,7 @@ pub(super) fn replica_write(op: &ReplicaOp) -> String {
             format!("copy {}.{} of a heal", copy.term, copy.number)
         }
         ReplicaOp::Joining(None) => "no copy of a heal".to_string(),
+        ReplicaOp::Compact(trim) => format!("drop the log below slot {}", trim.slot.0),
     }
 }
 
@@ -233,6 +239,10 @@ pub(super) fn kind_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::Chosen { .. }) => "Chosen",
         Payload::Role(Message::PreRead { .. }) => "PreRead",
         Payload::Role(Message::PreReadAck { .. }) => "PreReadAck",
+        Payload::Role(Message::Compaction { .. }) => "Compaction",
+        Payload::Role(Message::CompactedTo { .. }) => "CompactedTo",
+        Payload::Role(Message::Compact { .. }) => "Compact",
+        Payload::Role(Message::TrimmedTo { .. }) => "TrimmedTo",
         Payload::Write { .. } => "Write",
         Payload::Reply { .. } => "Reply",
         Payload::Change(Change::Reshape { .. }) => "Reshape",
@@ -254,9 +264,15 @@ pub(super) fn phase_of(payload: &Payload) -> &'static str {
         Payload::Role(Message::Accept { .. } | Message::Delegate { .. }) => "accept",
         Payload::Role(Message::Accepted { .. } | Message::Chosen { .. }) => "accepted",
         Payload::Role(Message::Commit { .. } | Message::Applied { .. }) => "commit",
-        Payload::Role(Message::Pull { .. } | Message::Holding { .. } | Message::Holds { .. }) => {
-            "catchup"
-        }
+        Payload::Role(
+            Message::Pull { .. }
+            | Message::Holding { .. }
+            | Message::Holds { .. }
+            | Message::Compaction { .. }
+            | Message::CompactedTo { .. }
+            | Message::Compact { .. }
+            | Message::TrimmedTo { .. },
+        ) => "catchup",
         Payload::Write { .. } | Payload::Reply { .. } => "other",
         Payload::Change(_) | Payload::Done { .. } => "reconfigure",
         Payload::Role(Message::PreRead { .. } | Message::PreReadAck { .. })
@@ -276,6 +292,8 @@ pub(super) fn is_reply(payload: &Payload) -> bool {
                 | Message::Holds { .. }
                 | Message::Chosen { .. }
                 | Message::PreReadAck { .. }
+                | Message::CompactedTo { .. }
+                | Message::TrimmedTo { .. }
         ) | Payload::Reply { .. }
             | Payload::Done { .. }
             | Payload::Resolved { .. }
@@ -338,6 +356,12 @@ pub(super) fn label_of(payload: &Payload) -> String {
             | Message::PreRead { .. }
             | Message::PreReadAck { .. }),
         ) => proxy_read_label(message),
+        Payload::Role(
+            message @ (Message::Compaction { .. }
+            | Message::CompactedTo { .. }
+            | Message::Compact { .. }
+            | Message::TrimmedTo { .. }),
+        ) => compaction_text(message),
         Payload::Role(Message::Holds { segment, full }) => {
             format!(
                 "Holds · segment {} · {}",
@@ -568,6 +592,10 @@ fn role_content(message: &Message) -> (Vec<Field>, String) {
             vec![field("segment", segment.0.to_string())],
             format!("Do you hold the whole of segment {}?", segment.0),
         ),
+        Message::Compaction { .. }
+        | Message::CompactedTo { .. }
+        | Message::Compact { .. }
+        | Message::TrimmedTo { .. } => (Vec::new(), compaction_text(message)),
         Message::Holds { segment, full } => (
             vec![
                 field("segment", segment.0.to_string()),
@@ -647,6 +675,24 @@ fn call_content(payload: &Payload) -> (Vec<Field>, String) {
                 other => format!("{}.", resolved_text(*other)),
             },
         ),
+    }
+}
+
+/// The words of a message of the compaction (§J3.2). The seal lab runs no
+/// compaction: a message of it gets its plain words.
+fn compaction_text(message: &Message) -> String {
+    match message {
+        Message::Compaction { segment } => format!("Compaction · segment {}", segment.0),
+        Message::CompactedTo {
+            segment, compacted, ..
+        } => format!("CompactedTo · segment {} · slot {}", segment.0, compacted.0),
+        Message::Compact { segment, below, .. } => {
+            format!("Compact · segment {} · below slot {}", segment.0, below.0)
+        }
+        Message::TrimmedTo { segment, slot, .. } => {
+            format!("TrimmedTo · segment {} · slot {}", segment.0, slot.0)
+        }
+        _ => unreachable!("a message of the compaction"),
     }
 }
 

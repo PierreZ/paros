@@ -321,8 +321,49 @@ at or above the floor), judged by the client walk's oracle `FLOOR` (mutant `Floo
 program asks the floor of the oldest segment); the client takes the floor only from an unsealed page,
 so a copy that a stale register value routes to a sealed segment asks again. The roles walk's oracles `TRIM` (mutant `TrimIntent`) and `FLOOR` (mutant
 `FloorFromHolder`) judge the two rules, and the trace check binds each trim to `Trim(p, r)`.
-**Open** (the last rule groups of #1326): the compaction of the acceptors to the floor of `F + 1`
-replicas of each segment's set, and the laggard's trim-point jump.
+
+**As built: the compaction** (#1326 (the journal roles over the core), 2026-11-23, model
+`specs/tla/journal-compact/`). The rules above, in the roles:
+
+- **The replica compacts its log.** On each tick a replica finds its compaction point: the first
+  slot that holds a write with a record at or above its fold's `first_seq`, else its front. It
+  writes one `Trim` record (the point, the fold there and the floor `first_seq`) and keeps no slot
+  below the point; storage deletes nothing, so the `Trim` hides the older records of the replica
+  log (`layout` kind `Trim`). The fold at the point may be **blind**: its `first_seq` is below the
+  `Trim`'s floor, because the `Truncate` that raised the floor lies above the point. A blind fold
+  gives no answer (no `Applied` answer, no `Resolve` but `NotCovered`, no read), and it does not
+  compact again until it applies that `Truncate`; every write below the floor is then below the
+  floor whatever its answer was. The model has the floor (`rfloor`) and `Blind`, and a check
+  that the walk reaches a blind fold (`reach_blind`).
+- **The leader counts the reports.** The leader asks each replica of each segment it reads for
+  its point (`Compaction`); a replica answers its point and the slot below which it holds no answer
+  (`CompactedTo`). The point that `F + 1` replicas of the set reached goes to every acceptor of
+  every segment the leader reads (`Compact`). The leader closes its open rounds below that point,
+  and answers `Unknown` for a held command whose slot is below the slot that `F + 1` replicas
+  answered: those answers are gone.
+- **The acceptor drops the votes.** An acceptor drops its votes in the range (`[start, below)` of
+  the segment) in a batch of its own, writes a `Dropped` record, and remembers the range. It answers
+  no `Accept` in a dropped range. Its promise pages carry the dropped ranges: Phase 1 takes no value
+  and fills no `Noop` in a range that any acceptor of the quorum dropped, the seal end counts each
+  dropped range as voted, and the next slot of the leader is above them. The read watermark of a
+  `PreReadAck` covers the dropped ranges too. A crash before the batch is durable brings the votes
+  back from the disk (`compact_g1`).
+- **A laggard jumps.** A replica asked for a slot below its point (`Pull`) answers `TrimmedTo`
+  (its `Trim`) and then the slots above. A replica whose front is below that point and inside its
+  segment takes it: it writes the `Trim`, and its fold starts there, blind until it applies the
+  `Truncate` again.
+- **A leader whose segment a later leader sealed stops**, and so does every round of a retired
+  segment: a leader answers `Unknown` for each held command in such a segment, since the acceptors
+  of a retired segment stop and its replicas drop their copies, and its resends would wait for
+  ever.
+
+`journal-sim`'s roles walk judges the compaction with the oracle `COMPACT` (each `Compact` is at or
+below the trims of `F + 1` replicas of the set, and every dropped slot is chosen; mutant
+`ForgedCompacted`), `AGREE` (mutant `DroppedHidden`: Phase 1 without the dropped ranges) and
+`PROXY`, which counts the votes that a compaction dropped. A walk move makes one replica lose its
+messages while a `Truncate` cuts a write in flight, so the walk reaches a jump into a blind fold;
+the trace check binds `compact`, `compact_replica`, `jump` and the blind `apply` to
+`specs/tla/journal-compact/RolesTrace.tla`.
 
 ### J3.3 A leaderless read of the tail across a reshape
 
