@@ -317,8 +317,9 @@ can still apply a slot of the segment before then, and the model has the drop as
 own (`Drop` in `Journal.tla`). The reader of `journal-sim`'s roles walk takes its floor from a
 leaderless read at the segment in force before it reads an older segment, and answers
 `Truncated` itself below it. The client does the same (`Request::Floor`, then `Request::Read`
-at or above the floor), judged by the client walk's oracle `FLOOR` (mutant `FloorFromHolder`: the
-program asks the floor of the oldest segment). The roles walk's oracles `TRIM` (mutant `TrimIntent`) and `FLOOR` (mutant
+at or above the floor), judged by the client walk's oracle `FLOOR` (mutant `FloorFromOldest`: the
+program asks the floor of the oldest segment); the client takes the floor only from an unsealed page,
+so a copy that a stale register value routes to a sealed segment asks again. The roles walk's oracles `TRIM` (mutant `TrimIntent`) and `FLOOR` (mutant
 `FloorFromHolder`) judge the two rules, and the trace check binds each trim to `Trim(p, r)`.
 **Open** (the last rule groups of #1326): the compaction of the acceptors to the floor of `F + 1`
 replicas of each segment's set, and the laggard's trim-point jump.

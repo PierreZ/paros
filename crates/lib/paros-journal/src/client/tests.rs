@@ -754,6 +754,12 @@ fn a_floor_from_a_sealed_segment_or_none_is_asked_again() {
     let read = client.read(Seq(1), 4);
     let mut current = one_floor(&mut client);
     for again in [
+        Response::Read(ReadAnswer::Page {
+            records: Vec::new(),
+            view: view(Leader::Multi, 5, 0),
+            sealed: true,
+        }),
+        Response::Read(ReadAnswer::Truncated(view(Leader::Multi, 9, 1))),
         Response::Read(ReadAnswer::Below(view(Leader::Multi, 5, 0))),
         Response::Read(ReadAnswer::Superseded(crate::segment::SegmentId(2))),
         Response::Read(ReadAnswer::Unserved),
@@ -765,10 +771,7 @@ fn a_floor_from_a_sealed_segment_or_none_is_asked_again() {
         assert_ne!(id, current, "a new copy of the floor request");
         current = id;
     }
-    client.answer(
-        current,
-        Response::Read(ReadAnswer::Truncated(view(Leader::Multi, 9, 1))),
-    );
+    client.answer(current, floor_page(9, 1));
     let Request::Read { id, from, limit } = client.take_requests()[0].clone() else {
         panic!("the read leaves at its floor")
     };

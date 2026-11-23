@@ -146,7 +146,7 @@ pub enum ClientMutant {
     ShortView,
     /// The program asks the floor of the oldest segment, not of the segment
     /// in force. [`FLOOR`] catches it.
-    FloorFromHolder,
+    FloorFromOldest,
 }
 
 /// A message in the walk's mailbox.
@@ -308,12 +308,18 @@ impl Model for ClientModel {
             return;
         }
         if action == ClientAction::Replay {
-            // On one move in two, the last truncate sent.
+            // On one move in two, the last truncate sent under the leader
+            // value of the journal: a late copy of it applies, and can cut a
+            // write that the leader resends.
+            let leader = match self.current().fold.leader() {
+                Leader::Uuid(uuid) => Some(uuid),
+                _ => None,
+            };
             let last_truncate = self
                 .sent
                 .iter()
                 .rev()
-                .find(|(_, c)| matches!(c, Command::Truncate { .. }))
+                .find(|(_, c)| matches!(c, Command::Truncate { fence, .. } if *fence == leader))
                 .cloned();
             let late = if cx.rng().chance(1, 2) && last_truncate.is_some() {
                 last_truncate
@@ -612,17 +618,29 @@ impl ClientModel {
                 cx.send(ClientMsg::Response(index, id, Response::Resolved(answer)));
             }
             Request::Floor { id } => {
+                let sealed = self.segments.len() - 1;
                 let answer = if chaos && cx.rng().chance(1, 6) {
                     ReadAnswer::Unserved
-                } else {
-                    let segment = if self.mutant == ClientMutant::FloorFromHolder {
-                        &self.segments[0]
-                    } else {
-                        self.current()
-                    };
+                } else if self.mutant == ClientMutant::FloorFromOldest {
                     ReadAnswer::Page {
                         records: Vec::new(),
-                        view: segment.fold.view(),
+                        view: self.segments[0].fold.view(),
+                        sealed: false,
+                    }
+                } else if let Some(stale) = cx.rng().index(sealed).filter(|_| cx.rng().chance(1, 4))
+                {
+                    // The program routed the copy on a register value that a
+                    // seal made stale: a replica of a sealed segment answers
+                    // at its tail.
+                    ReadAnswer::Page {
+                        records: Vec::new(),
+                        view: self.segments[stale].fold.view(),
+                        sealed: true,
+                    }
+                } else {
+                    ReadAnswer::Page {
+                        records: Vec::new(),
+                        view: self.current().fold.view(),
                         sealed: false,
                     }
                 };

@@ -117,9 +117,11 @@ pub enum Request {
         /// The records of the write.
         records: Vec<Record>,
     },
-    /// Send a read of the tail to a replica of the segment in force: the
-    /// view of its answer gives the trim floor at the basis of its
-    /// leaderless read (§J3.2). Answer it with [`Response::Read`].
+    /// Send `Read(`[`Request::FLOOR_FROM`]`, 1)`, a read of the tail, to a
+    /// replica of the segment in force. Its leaderless read is fenced by the
+    /// acceptors (§J3.3), so an unsealed page gives the trim floor of the
+    /// segment in force at the basis of the read (§J3.2). Answer it with
+    /// [`Response::Read`].
     Floor {
         /// The id of this copy.
         id: RequestId,
@@ -138,6 +140,11 @@ pub enum Request {
 }
 
 impl Request {
+    /// The position that the program reads for a [`Request::Floor`]: above
+    /// every record, so a replica answers an empty page at its tail, sealed
+    /// when its segment is sealed.
+    pub const FLOOR_FROM: Seq = Seq(u64::MAX);
+
     /// The id of this copy.
     #[must_use]
     pub fn id(&self) -> RequestId {
@@ -750,17 +757,26 @@ impl Client {
         }
     }
 
-    /// The answer to the [`Request::Floor`] of `reading`. Only a replica of
-    /// the segment in force gives the floor: a page or `Truncated` at the
-    /// tail. `Below` comes from a replica of a sealed segment, whose floor
-    /// misses the later `Truncate`s, so the client asks again, as for a
-    /// lost or unserved copy.
+    /// The answer to the [`Request::Floor`] of `reading`. Only an unsealed
+    /// page at the tail gives the floor: it comes from a replica of the
+    /// segment in force. A sealed page comes from a replica of a sealed
+    /// segment (the program routed the copy on a register value that a seal
+    /// made stale), whose floor misses the later `Truncate`s; so the client
+    /// asks again, as for any other answer.
     fn answer_floor(&mut self, mut reading: Reading, response: &Response) {
         assert!(reading.floor.is_none(), "the floor is asked once per read");
         let view = match response {
-            Response::Read(ReadAnswer::Page { view, .. } | ReadAnswer::Truncated(view)) => *view,
+            Response::Read(ReadAnswer::Page {
+                view,
+                sealed: false,
+                ..
+            }) => *view,
             Response::Read(
-                ReadAnswer::Unserved | ReadAnswer::Below(_) | ReadAnswer::Superseded(_),
+                ReadAnswer::Page { sealed: true, .. }
+                | ReadAnswer::Truncated(_)
+                | ReadAnswer::Unserved
+                | ReadAnswer::Below(_)
+                | ReadAnswer::Superseded(_),
             )
             | Response::NotLeader
             | Response::Lost => {

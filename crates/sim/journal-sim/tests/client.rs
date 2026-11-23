@@ -52,5 +52,5 @@ fn tail_catches_a_short_view() {
 
 #[test]
 fn floor_catches_a_floor_asked_of_the_oldest_segment() {
-    caught(ClientMutant::FloorFromHolder, FLOOR);
+    caught(ClientMutant::FloorFromOldest, FLOOR);
 }
