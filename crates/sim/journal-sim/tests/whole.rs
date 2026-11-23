@@ -1,7 +1,7 @@
 //! The whole journal walks (#1445): every seed passes every oracle, the
 //! campaign reaches every site, and each oracle catches its mutant.
 
-use journal_sim::campaign::{campaign, try_campaign, try_sites};
+use journal_sim::campaign::{campaign, try_sites};
 use journal_sim::whole::{
     ACKED, AGREE, ALERTS, ANSWER, BOUNDED_IN_FLIGHT, FLIGHT, HEAL_HELD, ONCE, SEALED, WholeMutant,
     reach, walk,
@@ -16,12 +16,26 @@ fn the_whole_journal_walk() {
     campaign(&walk(WholeMutant::None, 150, 6000), reach::ALL);
 }
 
+/// A seed of `mutant` fails on `oracle`. A mutant breaks the contract of
+/// the code, so a seed may fail first on another check: a disk wiped on
+/// every replica of a segment loses a slot for good, so the retire stalls
+/// before a false agreement forms. The claim is that the oracle sees the
+/// planted bug, so the walk replays seeds 1 to 200 in order until one fails
+/// on it (Pierre, 2026-11-23).
 fn caught(mutant: WholeMutant, oracle: &str) {
-    let text = try_campaign(&walk(mutant, 200, 1500), &[]).expect_err("a seed of the mutant fails");
-    assert!(
-        text.contains(oracle),
-        "{mutant:?} failed on another check:\n{text}"
-    );
+    let walk = walk(mutant, 1, 1500);
+    let mut others = Vec::new();
+    for seed in 1..=200 {
+        let Err(failure) = walk.replay(seed) else {
+            continue;
+        };
+        let text = failure.to_string();
+        if text.contains(oracle) {
+            return;
+        }
+        others.push(text);
+    }
+    panic!("no seed of {mutant:?} fails on {oracle}; other failures: {others:#?}");
 }
 
 #[test]
