@@ -2,8 +2,8 @@ use super::{
     Audience, Ballot, BeliefSource, ColocatedNode, Command, LeadershipOrigin, Message, NodeId,
     NodeRole, Party, Slot,
 };
+use crate::belief::Judgement;
 use crate::membership::{AcceptorConfig, MAX_ROLE_COUNT};
-use crate::quorum_read::ReadBasis;
 
 impl ColocatedNode {
     // ---- helpers ----------------------------------------------------------
@@ -35,7 +35,7 @@ impl ColocatedNode {
     pub(super) fn in_pool(&self, node: NodeId) -> bool {
         let pooled = self.pool.binary_search(&node).is_ok();
         // Every configuration this node runs is drawn from the pool.
-        if self.acceptors.contains(node) {
+        if self.belief.config().contains(node) {
             assert!(pooled, "a member of the configuration in force is pooled");
         }
         pooled
@@ -67,7 +67,7 @@ impl ColocatedNode {
     /// leader's delegated `Accept` and a handoff carry
     /// ([`ColocatedNode::wire_config_of`] over `acceptors`).
     pub(super) fn wire_config(&self) -> Option<AcceptorConfig> {
-        self.wire_config_of(&self.acceptors)
+        self.wire_config_of(self.belief.config())
     }
 
     /// The read fence on the wire: what a `PreReadAck` carries on a
@@ -86,7 +86,7 @@ impl ColocatedNode {
         let fence = self
             .config
             .has_matchmakers()
-            .then(|| self.acceptor.promised().max(self.acceptors_since));
+            .then(|| self.acceptor.promised().max(self.belief.since()));
         assert!(
             fence.is_some() == self.config.has_matchmakers(),
             "only a matchmaker deployment carries a read fence"
@@ -97,7 +97,7 @@ impl ColocatedNode {
                 "the read fence covers the promise"
             );
             assert!(
-                fence >= self.acceptors_since,
+                fence >= self.belief.since(),
                 "the read fence covers the belief ballot"
             );
         }
@@ -138,10 +138,10 @@ impl ColocatedNode {
         let fence = self.wire_read_fence()?;
         if self.promise_is_own_unprepared() && !config.contains(self.config.id) {
             assert!(
-                self.acceptors_since <= fence,
+                self.belief.since() <= fence,
                 "the exception only lowers the fence"
             );
-            return Some(self.acceptors_since);
+            return Some(self.belief.since());
         }
         Some(fence)
     }
@@ -160,7 +160,7 @@ impl ColocatedNode {
             .proposer
             .election()
             .map(|e| e.config().clone())
-            .or_else(|| Some(self.acceptors.clone()));
+            .or_else(|| Some(self.belief.config().clone()));
         assert!(
             config.is_some(),
             "a matchmaker deployment's Prepare carries C_b"
@@ -168,77 +168,44 @@ impl ColocatedNode {
         config
     }
 
-    /// Adopt `config` as the latest known configuration when `ballot` is
-    /// above the ballot the current belief was registered under. Only a
-    /// deployment with matchmakers ever learns a configuration off the wire;
-    /// a plain node ignores the field (a mixed deployment is a
+    /// Adopt `config` as the latest known configuration when the follower
+    /// rule of the [`Belief`] holds: a matchmaker deployment, a ballot above
+    /// the one the belief is bound to, and a configuration drawn from the
+    /// pool. A plain node ignores the field (a mixed deployment is a
     /// misconfiguration, never a reason to move a static membership).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, round = ballot.round)))]
     pub(super) fn learn_config(&mut self, ballot: Ballot, config: Option<AcceptorConfig>) {
-        let Some(config) = config else {
-            return;
-        };
-        if !self.config.has_matchmakers() || ballot <= self.acceptors_since {
+        if self.belief.judge(ballot, config.as_ref(), &self.pool) != Judgement::Learn {
             return;
         }
-        // Wire hygiene: a configuration naming a node outside the pool is not
-        // one this deployment can run; ignore it whole.
-        if !config.is_drawn_from(&self.pool) {
-            probe!(
-                reachable,
-                "learning: a configuration outside the pool is ignored"
-            );
-            return;
-        }
-        let since = self.acceptors_since;
-        self.adopt_configuration(config, ballot);
+        let since = self.belief.since();
+        self.adopt_configuration(config.expect("a learned configuration is present"), ballot);
         // A learned configuration is strictly newer than the belief it
         // replaces: the binding only moves forward off the wire.
         assert!(
-            self.acceptors_since == ballot,
+            self.belief.since() == ballot,
             "a learned configuration binds its ballot"
         );
         assert!(
-            self.acceptors_since > since,
+            self.belief.since() > since,
             "a learned configuration is newer"
         );
     }
 
     /// Learn the read basis `(config, since, fence)` of a leadership that
     /// **won** `since` (#260): this node's own election or handoff install,
-    /// or a beat at or above its promise. Only a matchmaker deployment keeps
-    /// one; the basis only moves forward, and a configuration naming a node
-    /// outside the pool is ignored whole, as [`ColocatedNode::learn_config`]
-    /// ignores it.
+    /// or a beat at or above its promise. The rule is the [`Belief`]'s: a
+    /// matchmaker deployment only, forward only, and a configuration
+    /// drawn from the pool.
     pub(super) fn learn_read_basis(
         &mut self,
         config: AcceptorConfig,
         since: Ballot,
         fence: Option<Slot>,
     ) {
-        if !self.config.has_matchmakers()
-            || self.read_basis.as_ref().is_some_and(|b| b.since > since)
-            || !config.is_drawn_from(&self.pool)
-        {
-            return;
-        }
-        let before = self.read_basis.as_ref().map(|b| b.since);
-        self.read_basis = Some(ReadBasis {
-            config,
-            since,
-            fence,
-        });
-        // The basis only moves forward, and lands exactly on what was learned.
-        assert!(
-            before.is_none_or(|b| b <= since),
-            "a read basis never moves back"
-        );
-        assert!(
-            self.read_basis
-                .as_ref()
-                .is_some_and(|b| b.since == since && b.fence == fence),
-            "a learned read basis binds its ballot and fence"
-        );
+        let _ = self
+            .belief
+            .learn_read_basis(&config, since, fence, &self.pool);
     }
 
     /// Follow a ballot this node accepted leader contact under — a
@@ -278,18 +245,17 @@ impl ColocatedNode {
         );
         // A binding below the fact cannot carry it either: the fact is
         // always at most the ballot the belief is bound to.
-        if config != self.acceptors || since < self.belief_fact {
+        if config != *self.belief.config() || since < self.belief_fact {
             self.belief_fact = Ballot::zero();
         }
-        self.acceptors = config;
-        self.acceptors_since = since;
+        self.belief.bind(config, since);
         self.belief_source = BeliefSource::Heard;
         self.probe = None;
         self.closed_probe = None;
         self.retire_check = None;
         self.record_membership();
         assert!(
-            self.acceptors_since == since,
+            self.belief.since() == since,
             "the configuration binds its ballot"
         );
         assert!(
@@ -312,7 +278,7 @@ impl ColocatedNode {
             "a reconfiguration fact is registered under a ballot"
         );
         assert!(
-            fact <= self.acceptors_since,
+            fact <= self.belief.since(),
             "a belief is bound at or above the fact it matches"
         );
         self.belief_fact = fact;
@@ -331,9 +297,9 @@ impl ColocatedNode {
     fn record_membership(&mut self) {
         let fence = self.last_member_ballot;
         if self.is_acceptor() {
-            self.last_member_ballot = self.last_member_ballot.max(self.acceptors_since);
+            self.last_member_ballot = self.last_member_ballot.max(self.belief.since());
             assert!(
-                self.last_member_ballot >= self.acceptors_since,
+                self.last_member_ballot >= self.belief.since(),
                 "a member's fence covers its configuration's ballot"
             );
         }
@@ -346,7 +312,7 @@ impl ColocatedNode {
         // need not intersect the successor's columns, so it may never
         // complete — the driver times it out and the client retries under
         // the configuration now believed.
-        self.quorum_reads.abandon_superseded(self.acceptors_since);
+        self.quorum_reads.abandon_superseded(self.belief.since());
     }
 
     /// Queue `msg` to every node of the pool except this one — the learner
@@ -482,8 +448,8 @@ impl ColocatedNode {
     /// (its id is outside the pool by construction; the driver routes it
     /// through the deployment map and drops an address it does not know).
     pub(super) fn is_reply_addressable(&self, node: NodeId) -> bool {
-        let addressable = self.in_pool(node) || self.acceptors.has_replicas();
-        if !self.acceptors.has_replicas() {
+        let addressable = self.in_pool(node) || self.belief.config().has_replicas();
+        if !self.belief.config().has_replicas() {
             assert!(
                 addressable == self.in_pool(node),
                 "without a replica tier only the pool is answered"

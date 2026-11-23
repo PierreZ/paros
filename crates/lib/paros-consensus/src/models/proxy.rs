@@ -330,12 +330,12 @@ impl World {
     }
 
     fn boot_proxy(&mut self, id: ProxyId) {
-        let config = self.config.clone();
+        let config = self.node_config(NodeId(0));
         let limits = Limits {
             proxy_retention: self.expire_after,
             ..Limits::DEFAULT
         };
-        self.proxy(id).live = Some(ProxyLeader::new(id, config, limits));
+        self.proxy(id).live = Some(ProxyLeader::new(id, &config, limits));
     }
 
     fn send(&mut self, envelope: Envelope) {

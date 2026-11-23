@@ -251,7 +251,7 @@ fn a_fold_past_a_faulty_slot_fails_the_invariants() {
 #[should_panic(expected = "a plain deployment stores no read basis")]
 fn a_plain_read_basis_fails_the_invariants() {
     let mut n = node(0, &[0, 1, 2]);
-    n.read_basis = Some(crate::quorum_read::ReadBasis {
+    *n.belief.tamper().2 = Some(crate::quorum_read::ReadBasis {
         config: cfg(&[0, 1, 2]),
         since: Ballot::zero(),
         fence: None,
@@ -271,7 +271,7 @@ fn a_registration_fence_above_the_membership_fence_fails_the_invariants() {
 #[should_panic(expected = "a plain deployment's configuration is bound to no ballot")]
 fn a_plain_configuration_bound_to_a_ballot_fails_the_invariants() {
     let mut n = node(0, &[0, 1, 2]);
-    n.acceptors_since = ballot(3, 0);
+    *n.belief.tamper().1 = ballot(3, 0);
     n.belief_fact = Ballot::zero();
     n.assert_invariants();
 }
@@ -288,7 +288,7 @@ fn a_plain_reconfiguration_fact_fails_the_invariants() {
 #[should_panic(expected = "the active configuration is drawn from the node pool")]
 fn a_configuration_outside_the_pool_fails_the_invariants() {
     let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
-    n.acceptors = cfg(&[0, 1, 9]);
+    *n.belief.tamper().0 = cfg(&[0, 1, 9]);
     n.assert_invariants();
 }
 

@@ -46,7 +46,7 @@ impl ColocatedNode {
         // here, so nothing below runs for one (`Rounds::fold_accepted_in`).
         if !self
             .proposer
-            .fold_accepted_in(&self.acceptors, from, ballot, slot, vhash)
+            .fold_accepted_in(self.belief.config(), from, ballot, slot, vhash)
         {
             return;
         }
@@ -58,7 +58,7 @@ impl ColocatedNode {
         // `HeartbeatAck` alone.
         // The fold's addressee guard, restated: a counted vote is a member's.
         assert!(
-            self.acceptors.contains(from),
+            self.belief.config().contains(from),
             "a counted Accepted comes from a member"
         );
         // A counted vote is one of this leader's own open rounds: rounds
@@ -85,7 +85,7 @@ impl ColocatedNode {
     ///
     /// If an explicit proxy is not one of the deployment's `proxy_count`.
     fn proxy_for(&self, slot: Slot, delegation: Delegation) -> Option<ProxyId> {
-        let count = self.acceptors.proxy_count();
+        let count = self.belief.config().proxy_count();
         match delegation {
             Delegation::Colocated => None,
             Delegation::Auto => {
@@ -130,10 +130,14 @@ impl ColocatedNode {
         // nothing under a majority), so a handoff
         // successor re-proposing this slot and a restarted leader's re-send
         // derive the same column without carrying it.
-        let column = self.acceptors.column_of(slot);
+        let column = self.belief.config().column_of(slot);
         // A grid addresses every slot to one column; a majority to the whole membership (#269).
         assert!(
-            column.is_some() == matches!(self.acceptors.quorum_system(), QuorumSystem::Grid { .. }),
+            column.is_some()
+                == matches!(
+                    self.belief.config().quorum_system(),
+                    QuorumSystem::Grid { .. }
+                ),
             "a slot names a column exactly under a grid"
         );
         self.start_accept_round_in(slot, command, column, delegation);
@@ -181,7 +185,7 @@ impl ColocatedNode {
         // membership boundary, and a driver's override is checked against
         // the same boundary — a stray column is a programmer error.
         assert!(
-            match self.acceptors.quorum_system() {
+            match self.belief.config().quorum_system() {
                 QuorumSystem::Grid { cols, .. } => column.is_none_or(|c| c < cols),
                 QuorumSystem::Majority => column.is_none(),
             },
@@ -298,14 +302,14 @@ impl ColocatedNode {
     /// stray copy and its vote does not count.
     fn own_vote(&self, recorded: bool, column: Option<usize>) -> Option<NodeId> {
         let me = self.config.id;
-        let vote = (recorded && self.acceptors.is_phase2_addressee(me, column)).then_some(me);
+        let vote = (recorded && self.belief.config().is_phase2_addressee(me, column)).then_some(me);
         // A vote counts only where this node's own record backs it.
         if vote.is_some() {
             assert!(recorded, "an own vote is backed by an own record");
             assert!(self.is_acceptor(), "an own vote is a member's");
             // Read from the addressee list, apart from the predicate above.
             assert!(
-                self.acceptors.phase2_addressees(column).contains(&me),
+                self.belief.config().phase2_addressees(column).contains(&me),
                 "an own vote is in the round's column"
             );
         }
@@ -344,7 +348,7 @@ impl ColocatedNode {
         );
         if let Some(proxy) = proxy {
             assert!(
-                proxy.is_in(self.acceptors.proxy_count()),
+                proxy.is_in(self.belief.config().proxy_count()),
                 "a delegated Accept names a deployed proxy"
             );
         }
@@ -356,7 +360,7 @@ impl ColocatedNode {
             ),
             None => (
                 Audience::AcceptorsOf {
-                    config: self.acceptors.clone(),
+                    config: self.belief.config().clone(),
                     column,
                 },
                 Party::Node(me),
@@ -385,7 +389,7 @@ impl ColocatedNode {
         // configuration's quorum system; every vote in it came from a
         // configured acceptor (`on_accepted` refuses any other sender, and
         // the component restates it). A delegated round never decides here.
-        let Some((ballot, command)) = self.proposer.decided(slot, &self.acceptors) else {
+        let Some((ballot, command)) = self.proposer.decided(slot, self.belief.config()) else {
             return;
         };
         // Decision provenance: only this leadership's own tally decides, at
@@ -490,7 +494,7 @@ impl ColocatedNode {
         let own_vote = self.own_vote(recorded, Some(column));
         if !self
             .proposer
-            .move_round(&self.acceptors, slot, Some(column), own_vote)
+            .move_round(self.belief.config(), slot, Some(column), own_vote)
         {
             return false;
         }

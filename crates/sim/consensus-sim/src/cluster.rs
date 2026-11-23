@@ -515,11 +515,11 @@ impl Model for Cluster {
                 }
             }
             Party::Proxy(id) => {
-                let config = self.config.clone();
+                let config = self.proxy_config();
                 let limits = self.proxy_limits();
                 let site = self.proxy_mut(id);
                 if site.live.is_none() && !site.dead_for_good {
-                    site.live = Some(ProxyLeader::new(id, config, limits));
+                    site.live = Some(ProxyLeader::new(id, &config, limits));
                 }
             }
             Party::Replica(id) => {
@@ -742,7 +742,7 @@ impl Cluster {
             cluster.register_sibling();
         }
         cluster.proxies = (0..cluster.flavor.proxies)
-            .map(|i| ProxySite::new(ProxyId(i), cluster.config.clone(), cluster.proxy_limits()))
+            .map(|i| ProxySite::new(ProxyId(i), &cluster.proxy_config(), cluster.proxy_limits()))
             .collect();
         for id in cluster.pool.clone() {
             cluster.boot_node(id, false, cx);
@@ -921,6 +921,20 @@ impl Cluster {
             replica_count: usize::try_from(self.flavor.replicas).expect("a few replicas"),
             ..Config::new(id, paros_consensus::journal::JournalIdentifier::UNSET)
         }
+    }
+
+    /// The deployment a proxy leader reads: the bootstrap configuration
+    /// with no counts (a proxy never names a reply owner), and the whole
+    /// pool, late nodes too. A proxy has no registry fold of its own here:
+    /// it runs any configuration a leader of the deployment registered.
+    fn proxy_config(&self) -> Config {
+        let mut config = self.party_config(NodeId(0));
+        config.proxy_count = 0;
+        config.replica_count = 0;
+        if !config.matchmakers.is_empty() {
+            config.nodes.clone_from(&self.pool);
+        }
+        config
     }
 
     fn replica_ids(&self) -> Vec<NodeId> {

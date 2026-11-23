@@ -260,7 +260,7 @@ impl ColocatedNode {
         // a beat reaches the whole pool, but only a member's ack may count
         // toward the `CheckQuorum` window (a joining acceptor
         // never inflates a quorum it is not in, #122).
-        if !self.acceptors.contains(from) {
+        if !self.belief.config().contains(from) {
             return;
         }
         if self.role != NodeRole::Leader || ballot != self.ballot {

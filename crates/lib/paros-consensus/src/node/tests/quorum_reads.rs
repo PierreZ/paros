@@ -961,7 +961,10 @@ fn a_rebooted_learner_keeps_the_strict_rule() {
     );
     n.step(beat(lead, &[0, 1, 2]));
     let _ = drain(&mut n);
-    assert!(n.read_basis.is_none(), "the rebooted node takes no basis");
+    assert!(
+        n.belief.stored_basis().is_none(),
+        "the rebooted node takes no basis"
+    );
     assert!(n.read_basis().is_none());
 }
 
@@ -1003,7 +1006,10 @@ fn a_member_above_the_leader_takes_no_basis() {
     let (mut n, _, lead) = stranded_learner(&[2, 3]);
     n.step(beat(lead, &[2, 3]));
     let _ = drain(&mut n);
-    assert!(n.read_basis.is_none(), "the beat is not stored as a basis");
+    assert!(
+        n.belief.stored_basis().is_none(),
+        "the beat is not stored as a basis"
+    );
     assert!(n.read_basis().is_none());
     n.quorum_read(1);
     assert!(n.quorum_reads().is_empty());

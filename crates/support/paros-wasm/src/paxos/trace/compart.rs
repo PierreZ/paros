@@ -18,7 +18,7 @@ use paros_consensus::contract::{Audience, MemStorage};
 use paros_consensus::journal::{
     Command, Control, Entry, JournalIdentifier, Outcome, Seq, WriterMode,
 };
-use paros_consensus::membership::{AcceptorConfig, ProxyId, QuorumSystem};
+use paros_consensus::membership::{ProxyId, QuorumSystem};
 use paros_consensus::node::{Delegation, ProposeResult};
 use paros_consensus::{
     ColocatedNode, Config, Limits, Message, NodeId, ProxyLeader, ReplicaNode, Slot, Value,
@@ -209,10 +209,14 @@ impl Run {
     /// Paxos page's, so it is not recorded here.
     fn new(layout: Layout) -> Self {
         let split = layout == Layout::Compartmentalized;
-        let acceptors = AcceptorConfig::new(
-            NODES.iter().copied().map(NodeId).collect(),
-            QuorumSystem::Majority,
-        );
+        // A proxy leader reads the deployment's bootstrap configuration and
+        // pool. The counts name the reply owner of a slot, which a proxy
+        // never names, so its configuration carries none.
+        let proxy_deployment = Config {
+            proxy_count: 0,
+            replica_count: 0,
+            ..config(NODES[0], layout)
+        };
         let mut run = Self {
             layout,
             nodes: NODES
@@ -226,7 +230,7 @@ impl Run {
                     .map(|p| {
                         Some(ProxyLeader::new(
                             ProxyId(p),
-                            acceptors.clone(),
+                            &proxy_deployment,
                             paros_consensus::Limits::DEFAULT,
                         ))
                     })

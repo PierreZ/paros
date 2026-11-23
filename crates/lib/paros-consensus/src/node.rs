@@ -39,6 +39,7 @@ pub use self::ready::{Flight, Ready};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
+use crate::belief::Belief;
 use crate::collector::Collector;
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
@@ -223,29 +224,26 @@ pub struct ColocatedNode {
     /// This node's static identity, bootstrap membership, pool and matchmaker
     /// set.
     config: Config,
-    /// The acceptor configuration bound to the highest ballot this node has
-    /// seen registered — on a leader, the configuration its own ballot was
+    /// The **belief** ([`Belief`]): the acceptor configuration bound to the
+    /// highest ballot this node has seen registered, and the read basis.
+    /// On a leader, the configuration is the one its own ballot was
     /// registered with (what Phase 2 quorums are counted over); on a
     /// follower, its belief about the latest configuration (what its next
     /// campaign registers). Learned from `Prepare`/`Heartbeat` on a
     /// deployment with matchmakers; on plain Multi-Paxos it is the bootstrap
     /// configuration for the node's whole life. Never edited underneath a
     /// live ballot: a configuration is bound to a ballot, and a change is a
-    /// round change ([`ColocatedNode::reconfigure`]).
-    acceptors: AcceptorConfig,
-    /// The ballot `acceptors` was registered under (`Ballot::zero()` for the
-    /// bootstrap configuration).
-    acceptors_since: Ballot,
-    /// The **read basis** (#260, [`ReadBasis`]): the configuration this
-    /// node's quorum reads are judged over, learned only from a leadership
-    /// that won its ballot — this node's own election or handoff install, or
-    /// a leader's beat — with that leadership's fence. Never a `Prepare`'s
-    /// configuration: a campaign may never finish, and the configurations it
-    /// must cover hold slots its own quorums never voted. Volatile (`None`
-    /// at boot, until the first beat), and only ever set on a matchmaker
-    /// deployment: plain Multi-Paxos reads over its static configuration.
-    read_basis: Option<ReadBasis<NodeId>>,
-    /// Where `acceptors` came from: the bootstrap default every incarnation
+    /// round change ([`ColocatedNode::reconfigure`]). The **read basis**
+    /// (#260, [`ReadBasis`]) is the configuration this node's quorum reads
+    /// are judged over, learned only from a leadership that won its ballot
+    /// (this node's own election or handoff install, or a leader's beat)
+    /// with that leadership's fence. Never a `Prepare`'s configuration: a
+    /// campaign may never finish, and the configurations it must cover hold
+    /// slots its own quorums never voted. Volatile (`None` at boot, until
+    /// the first beat), and only ever stored on a matchmaker deployment:
+    /// plain Multi-Paxos reads over its static configuration.
+    belief: Belief,
+    /// Where the belief's configuration came from: the bootstrap default every incarnation
     /// boots with, or something this incarnation **heard** — a leader's
     /// wire, its own election or handoff, an adopted effective configuration,
     /// or a membership probe's answer. Volatile, like the belief itself. A
@@ -762,7 +760,7 @@ impl ColocatedNode {
             slot >= self.acceptor.first_slot(),
             "a proposal never lands below the floor"
         );
-        let column = column.or_else(|| self.acceptors.column_of(slot));
+        let column = column.or_else(|| self.belief.config().column_of(slot));
         let delegation = self.settled_delegation(delegation);
         self.start_accept_round_in(slot, command, column, delegation);
         assert!(

@@ -289,7 +289,7 @@ impl ColocatedNode {
     pub fn can_relinquish(&self) -> bool {
         let can = self.role == NodeRole::Leader
             && matches!(self.leadership_origin, LeadershipOrigin::Elected)
-            && self.acceptors.members().len() > 1
+            && self.belief.config().members().len() > 1
             && self.proposer.election().is_none()
             && self.matchmaking.is_none()
             && self.leadership_settled()
@@ -330,7 +330,8 @@ impl ColocatedNode {
     #[must_use]
     pub fn handoff_candidates(&self) -> Vec<NodeId> {
         let candidates: Vec<NodeId> = self
-            .acceptors
+            .belief
+            .config()
             .members()
             .iter()
             .copied()
@@ -397,7 +398,10 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, target = target.0)))]
     pub fn relinquish_to(&mut self, target: NodeId) -> Option<Handoff> {
         self.assert_landed();
-        if !self.can_relinquish() || target == self.config.id || !self.acceptors.contains(target) {
+        if !self.can_relinquish()
+            || target == self.config.id
+            || !self.belief.config().contains(target)
+        {
             return None;
         }
         let ballot = self.ballot;
@@ -658,7 +662,7 @@ impl ColocatedNode {
             .open_authority(fence, self.is_acceptor().then_some(me));
         // An installed authority is a won ballot too (#260): the inherited
         // fence covers whatever the predecessor's own fence did.
-        self.learn_read_basis(self.acceptors.clone(), self.ballot, fence);
+        self.learn_read_basis(self.belief.config().clone(), self.ballot, fence);
         self.handoff.installed = self.handoff.installed.saturating_add(1);
 
         // Learn the decided part of the tail. Trusting the predecessor here is

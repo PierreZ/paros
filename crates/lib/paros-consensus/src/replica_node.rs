@@ -114,6 +114,7 @@ pub mod ready;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::belief::{Belief, Judgement};
 use crate::contract::config::Config;
 use crate::contract::limits::Limits;
 use crate::contract::limits::{CATCHUP_BATCH, READ_TTL_TICKS};
@@ -172,16 +173,14 @@ pub struct ReplicaNode {
     unwalked: BTreeMap<Slot, Ballot>,
     /// The node whose beat this replica heard last — where it pulls from.
     leader: Option<NodeId>,
-    /// The acceptor configuration this replica believes in force — the one
-    /// a quorum read asks a row of. The bootstrap membership, then whatever
-    /// a beat carries on a matchmaker deployment (the follower's rule).
-    acceptors: AcceptorConfig,
-    /// The ballot `acceptors` is bound to here.
-    acceptors_since: Ballot,
-    /// The read basis (#260, [`ReadBasis`]): the configuration, ballot and
-    /// fence of the last won leadership whose beat this replica heard. Only
-    /// a matchmaker deployment keeps one, and reads none before it.
-    read_basis: Option<ReadBasis<NodeId>>,
+    /// The belief ([`Belief`]): the acceptor configuration this replica
+    /// believes in force (the one a quorum read asks a row of), the
+    /// bootstrap membership, then whatever a beat carries on a matchmaker
+    /// deployment by the follower's rule; and the read basis (#260,
+    /// [`ReadBasis`]), the configuration, ballot and fence of the last won
+    /// leadership whose beat this replica heard. Only a matchmaker
+    /// deployment keeps a basis, and reads none before it.
+    belief: Belief,
     /// The open quorum reads (§3.4): a row's watermarks, then this
     /// replica's own applied prefix.
     quorum_reads: QuorumReads<NodeId>,
@@ -276,7 +275,7 @@ impl ReplicaNode {
             &below,
         );
         replica.set_apply_page(limits.apply_page);
-        let acceptors = config.bootstrap();
+        let belief = Belief::new(config.bootstrap(), config.has_matchmakers());
         let mut node = Self {
             config,
             replica,
@@ -284,9 +283,7 @@ impl ReplicaNode {
             faulty,
             unwalked: BTreeMap::new(),
             leader: None,
-            acceptors,
-            acceptors_since: Ballot::zero(),
-            read_basis: None,
+            belief,
             quorum_reads: QuorumReads::new(),
             limits,
             tick_count: 0,
@@ -586,79 +583,42 @@ impl ReplicaNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_basis(&self) -> Option<ReadBasis<NodeId>> {
+        let basis = self.belief.read_basis(self.config.pool());
         if !self.config.has_matchmakers() {
             assert!(
-                self.read_basis.is_none(),
-                "a plain replica stores no read basis"
-            );
-            return Some(ReadBasis {
-                config: self.acceptors.clone(),
-                since: self.acceptors_since,
-                fence: None,
-            });
-        }
-        if let Some(basis) = &self.read_basis {
-            assert!(
-                basis.config.is_drawn_from(self.config.pool()),
-                "a replica's read basis is drawn from the pool"
+                basis.as_ref().is_some_and(|b| b.fence.is_none()),
+                "a plain replica reads over its static configuration with no fence"
             );
         }
-        self.read_basis.clone()
+        basis
     }
 
-    /// Learn the read basis a won leadership's beat carries (#260): on a
-    /// matchmaker deployment only, forward only, drawn from the pool.
+    /// Learn the read basis a won leadership's beat carries (#260), by the
+    /// rule of the [`Belief`]: a matchmaker deployment only, forward only,
+    /// drawn from the pool.
     fn learn_read_basis(&mut self, config: &AcceptorConfig, ballot: Ballot, fence: Option<Slot>) {
-        if !self.config.has_matchmakers()
-            || self.read_basis.as_ref().is_some_and(|b| b.since > ballot)
-            || !config.is_drawn_from(self.config.pool())
-        {
-            return;
-        }
-        let before = self.read_basis.as_ref().map(|b| b.since);
-        self.read_basis = Some(ReadBasis {
-            config: config.clone(),
-            since: ballot,
-            fence,
-        });
-        assert!(
-            before.is_none_or(|b| b <= ballot),
-            "a read basis never moves back"
-        );
-        assert!(
-            self.read_basis.as_ref().is_some_and(|b| b.since == ballot),
-            "a learned read basis binds its ballot"
-        );
-        assert!(
-            self.read_basis.as_ref().is_some_and(|b| b.fence == fence),
-            "a learned read basis binds its fence"
-        );
+        let _ = self
+            .belief
+            .learn_read_basis(config, ballot, fence, self.config.pool());
     }
 
-    /// Adopt `config` when `ballot` is above the one the current belief is
-    /// bound to, on a matchmaker deployment only (a plain beat carries none),
-    /// and abandon every read opened against the superseded one — the row
-    /// asked need not intersect the successor's columns.
+    /// Adopt `config` by the follower rule of the [`Belief`] (a matchmaker
+    /// deployment, a ballot above the belief's, a configuration drawn from
+    /// the pool; a plain beat carries none), and abandon every read opened
+    /// against the superseded one: the row asked need not intersect the
+    /// successor's columns.
     fn learn_config(&mut self, ballot: Ballot, config: Option<AcceptorConfig>) {
-        let Some(config) = config else {
-            return;
-        };
-        if !self.config.has_matchmakers() || ballot <= self.acceptors_since {
+        let since = self.belief.since();
+        if self.belief.learn(ballot, config, self.config.pool()) != Judgement::Learn {
             return;
         }
-        if !config.is_drawn_from(self.config.pool()) {
-            return;
-        }
-        let since = self.acceptors_since;
-        self.acceptors = config;
-        self.acceptors_since = ballot;
         self.quorum_reads.abandon_superseded(ballot);
         assert!(
-            self.acceptors_since > since,
+            self.belief.since() > since,
             "a learned configuration is strictly newer"
         );
         assert!(
-            self.acceptors.is_drawn_from(self.config.pool()),
+            self.belief.config().is_drawn_from(self.config.pool()),
             "a replica's configuration is drawn from the pool"
         );
     }
@@ -1043,7 +1003,7 @@ impl ReplicaNode {
     /// its quorum reads ask a row of.
     #[must_use]
     pub fn acceptors(&self) -> &AcceptorConfig {
-        &self.acceptors
+        self.belief.config()
     }
 
     /// The compaction floor: the first slot whose record is retained.
@@ -1096,10 +1056,10 @@ impl ReplicaNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reply_owner(&self, slot: Slot) -> Option<ReplicaId> {
-        let owner = self.acceptors.reply_owner(slot);
+        let owner = self.belief.config().reply_owner(slot);
         if let Some(owner) = owner {
             assert!(
-                owner.is_in(self.acceptors.replica_count()),
+                owner.is_in(self.belief.config().replica_count()),
                 "a reply owner is a deployed replica"
             );
         }

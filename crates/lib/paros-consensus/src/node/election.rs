@@ -56,7 +56,7 @@ impl ColocatedNode {
             self.probe_membership();
             return;
         }
-        if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
+        if self.config.has_matchmakers() && !self.belief.config().contains(self.config.id) {
             probe!(
                 reachable,
                 "reconfiguration: a node outside the acceptor set declines to campaign"
@@ -87,7 +87,7 @@ impl ColocatedNode {
             self.probe_membership();
             return;
         }
-        self.open_campaign(RegistrationKind::Belief, self.acceptors.clone());
+        self.open_campaign(RegistrationKind::Belief, self.belief.config().clone());
         // A campaign only ever ratchets forward: a fresh ballot above
         // everything this node promised or led — or, with the round space
         // exhausted, nothing at all.
@@ -670,7 +670,7 @@ impl ColocatedNode {
             self.adopt_configuration(outcome.config.clone(), outcome.ballot);
         } else {
             assert!(
-                self.acceptors == outcome.config,
+                *self.belief.config() == outcome.config,
                 "a plain campaign runs Phase 1 for its static configuration"
             );
         }
@@ -713,7 +713,7 @@ impl ColocatedNode {
         // ballot among them. Opened after the pump, a leader re-elected over
         // an earlier basis panicked there and left the run (#263's hunt,
         // witness 17670199652380691451: red, then green with this order).
-        self.learn_read_basis(self.acceptors.clone(), self.ballot, fence);
+        self.learn_read_basis(self.belief.config().clone(), self.ballot, fence);
         // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
         //
         // Re-proposing `recovered` covers every slot the quorum saw accepted, and

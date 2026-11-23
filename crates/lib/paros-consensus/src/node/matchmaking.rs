@@ -467,7 +467,7 @@ impl ColocatedNode {
         );
         if self.belief_source == BeliefSource::Heard {
             assert!(
-                !self.acceptors.contains(me),
+                !self.belief.config().contains(me),
                 "a node re-probes a heard belief only from outside it"
             );
         }
@@ -498,7 +498,7 @@ impl ColocatedNode {
         self.closed_probe = None;
         self.probe = Some(Box::new(MembershipProbe::new(
             Ballot { round, node: me },
-            self.acceptors.clone(),
+            self.belief.config().clone(),
         )));
         // An open retirement check moves to the fresh tag: the matchmakers
         // that agreed hold the node as retired already and agree again.
@@ -596,7 +596,7 @@ impl ColocatedNode {
             self.config.journal.journal,
             self.config.id,
             check.tag(),
-            self.acceptors.clone(),
+            self.belief.config().clone(),
             matchmakers.generation,
         )
         .retiring(check.watermark(), check.incarnation());
@@ -636,7 +636,7 @@ impl ColocatedNode {
             self.config.journal.journal,
             self.config.id,
             rejoin.tag(),
-            self.acceptors.clone(),
+            self.belief.config().clone(),
             matchmakers.generation,
         )
         .rejoining(rejoin.incarnation());
@@ -1046,7 +1046,7 @@ impl ColocatedNode {
         // the reconfiguration of round 37, then heard a round-45 campaign's
         // older belief and ran round 46 under it).
         let floor = self.probe_floor();
-        let honored = self.read_basis.as_ref().map(|basis| basis.config.clone());
+        let honored = self.belief.stored_basis().map(|basis| basis.config.clone());
         let m = self.matchmaking.as_mut().expect("the phase is still open");
         if !m.quorum_held(matchmakers) {
             MatchStep::Registered {
@@ -1187,12 +1187,12 @@ impl ColocatedNode {
         // on, the bootstrap default or a heard one leaving this node outside.
         if self.belief_source == BeliefSource::Heard {
             assert!(
-                !self.acceptors.contains(me),
+                !self.belief.config().contains(me),
                 "a probe closes on a heard belief only from outside it"
             );
         } else {
             assert!(
-                self.acceptors_since == Ballot::zero(),
+                self.belief.since() == Ballot::zero(),
                 "a probe closes on a bootstrap belief bound to no ballot"
             );
         }
@@ -1259,11 +1259,11 @@ impl ColocatedNode {
         // node outside, and every belief adopted since drops it
         // (`adopt_configuration`): the node is still outside on that floor.
         assert!(
-            self.acceptors_since == watermark,
+            self.belief.since() == watermark,
             "an open check runs under the belief bound to its floor"
         );
         assert!(
-            !self.acceptors.contains(me),
+            !self.belief.config().contains(me),
             "an open check runs with the node outside"
         );
         probe!(reachable, "gc: every matchmaker agreed the node may retire");
@@ -1282,7 +1282,7 @@ impl ColocatedNode {
         self.retire_check = None;
         assert!(
             self.registrations_checked
-                .is_none_or(|checked| checked <= self.acceptors_since),
+                .is_none_or(|checked| checked <= self.belief.since()),
             "a retirement is checked under a belief the node holds"
         );
     }
@@ -1435,10 +1435,10 @@ impl ColocatedNode {
         if !newer || !drawn {
             return MatchStep::Ignored;
         }
-        let since = self.acceptors_since;
+        let since = self.belief.since();
         let (adopted, member) = self.adopt_probed(effective);
         assert!(
-            self.acceptors_since >= since,
+            self.belief.since() >= since,
             "a late probe answer never moves a belief backwards"
         );
         if !member {
@@ -1476,7 +1476,7 @@ impl ColocatedNode {
         effective: Option<(Ballot, AcceptorConfig)>,
     ) -> (Option<Ballot>, bool) {
         let me = self.config.id;
-        let since = self.acceptors_since;
+        let since = self.belief.since();
         let fact = self.belief_fact;
         let floor = self.probe_floor();
         assert!(floor >= fact, "the probe floor covers the matched fact");
@@ -1493,17 +1493,17 @@ impl ColocatedNode {
         // this node heard so.
         self.belief_source = BeliefSource::Heard;
         assert!(
-            self.acceptors_since >= since,
+            self.belief.since() >= since,
             "a probe never moves a belief backwards"
         );
         assert!(
             self.belief_fact >= fact,
             "a probe never moves the matched fact backwards"
         );
-        let adopted = (self.acceptors_since != Ballot::zero()).then_some(self.acceptors_since);
-        let member = self.acceptors.contains(me);
+        let adopted = (self.belief.since() != Ballot::zero()).then_some(self.belief.since());
+        let member = self.belief.config().contains(me);
         if member {
-            self.open_campaign(RegistrationKind::Belief, self.acceptors.clone());
+            self.open_campaign(RegistrationKind::Belief, self.belief.config().clone());
         }
         if self.next_campaign_round().is_some() {
             assert!(
@@ -1523,7 +1523,10 @@ impl ColocatedNode {
     /// finish a rotation nobody was told of. A campaign this node only
     /// promised counts for nothing here: it may never have won.
     pub(super) fn probe_floor(&self) -> Ballot {
-        let won = self.read_basis.as_ref().map_or(Ballot::zero(), |b| b.since);
+        let won = self
+            .belief
+            .stored_basis()
+            .map_or(Ballot::zero(), |b| b.since);
         let floor = self.belief_fact.max(won);
         assert!(
             floor >= self.belief_fact,

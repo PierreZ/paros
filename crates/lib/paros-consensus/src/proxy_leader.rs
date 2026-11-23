@@ -114,12 +114,17 @@
 //! refusing a round only stops this proxy folding it.
 //!
 //! The safety argument is single-configuration, as a round's is: a round
-//! is judged over the configuration it was opened against. The proxy holds
-//! the configuration of the highest ballot it has been handed and adopts a
-//! newer one exactly as a follower does (`learn_config`: a higher ballot
-//! wins). On plain Multi-Paxos the bootstrap configuration is the
-//! configuration for the proxy's whole life and every delegation carries
-//! `None`.
+//! is judged over the configuration its `Accept` carried, the `C_b` its
+//! ballot registered (`specs/tla/proxy-leader/`). The proxy holds the
+//! configuration of the highest ballot it has been handed in a
+//! [`Belief`], and adopts a newer one by the follower rule that a node and
+//! a replica follow too (a matchmaker deployment, a higher ballot, a
+//! configuration drawn from the pool). A delegation whose configuration
+//! the proxy cannot run (none above the belief, or one that names a node
+//! outside the pool) is ignored, never run over the old configuration; the
+//! leader takes the round back. On plain Multi-Paxos the bootstrap
+//! configuration is the configuration for the proxy's whole life and every
+//! delegation carries `None`.
 //!
 //! Proven by the sans-IO model checker beside it (`models/proxy.rs`): real
 //! [`ColocatedNode`](crate::ColocatedNode)s and real `ProxyLeader`s over a
@@ -133,6 +138,8 @@ pub mod ready;
 
 use std::collections::BTreeMap;
 
+use crate::belief::{Belief, Judgement};
+use crate::contract::config::Config;
 use crate::contract::limits::Limits;
 use crate::contract::message::{Audience, Message, Party};
 use crate::journal::{Command, command_fingerprint};
@@ -181,16 +188,18 @@ pub struct ProxyCounters {
 pub struct ProxyLeader {
     /// This proxy's identity, in its own namespace.
     id: ProxyId,
-    /// The configuration of the highest ballot handed to this proxy: what
-    /// its fan-outs address and its decisions are judged over. The
-    /// bootstrap configuration on plain Multi-Paxos, for good.
-    acceptors: AcceptorConfig,
+    /// The belief ([`Belief`]): the configuration of the highest ballot
+    /// handed to this proxy, what its fan-outs address and its decisions
+    /// are judged over. The bootstrap configuration on plain Multi-Paxos,
+    /// for good. Every open round runs at the ballot it is bound to.
+    belief: Belief,
+    /// The node pool of the deployment (#189: the registry is the pool): a
+    /// delegation whose configuration names a node outside it is ignored.
+    /// Grow-only ([`ProxyLeader::extend_pool`]).
+    pool: Vec<NodeId>,
     /// The re-send page and the retention budget, fixed for the
     /// incarnation, as every deployment takes them.
     limits: Limits,
-    /// The ballot `acceptors` was bound to (`Ballot::zero()` for the
-    /// bootstrap configuration).
-    acceptors_since: Ballot,
     /// The highest ballot ever delegated to this proxy: the leadership it
     /// works for. Every open round runs at it.
     ballot: Ballot,
@@ -211,21 +220,32 @@ pub struct ProxyLeader {
 }
 
 impl ProxyLeader {
-    /// A proxy `id` over the deployment's bootstrap configuration
-    /// `acceptors`, with nothing in flight, under `limits` (it reads
-    /// [`Limits::resend_page`] and [`Limits::proxy_retention`]).
+    /// A proxy `id` of the deployment that `config` describes, with nothing
+    /// in flight, under `limits` (it reads [`Limits::resend_page`] and
+    /// [`Limits::proxy_retention`]). The proxy reads three things of
+    /// `config`, as any node of the deployment holds it: the bootstrap
+    /// configuration ([`Config::bootstrap`]), the node pool
+    /// ([`Config::pool`]) and whether the deployment has matchmakers. It
+    /// ignores `config.id`: a proxy is not a node.
     ///
     /// # Panics
     ///
-    /// If `limits` breaks [`Limits::assert_valid`].
+    /// If `limits` breaks [`Limits::assert_valid`], or the bootstrap
+    /// configuration names a node outside the pool.
     #[must_use]
-    pub fn new(id: ProxyId, acceptors: AcceptorConfig, limits: Limits) -> Self {
+    pub fn new(id: ProxyId, config: &Config, limits: Limits) -> Self {
         limits.assert_valid();
+        let pool = config.pool().to_vec();
+        let bootstrap = config.bootstrap();
+        assert!(
+            bootstrap.is_drawn_from(&pool),
+            "a proxy's bootstrap configuration is drawn from the pool"
+        );
         let proxy = Self {
             id,
-            acceptors,
+            belief: Belief::new(bootstrap, config.has_matchmakers()),
+            pool,
             limits,
-            acceptors_since: Ballot::zero(),
             ballot: Ballot::zero(),
             rounds: Rounds::new(),
             delegators: BTreeMap::new(),
@@ -249,7 +269,7 @@ impl ProxyLeader {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(proxy = self.id.0)))]
     pub fn step(&mut self, msg: Message) {
         let ballot = self.ballot;
-        let since = self.acceptors_since;
+        let since = self.belief.since();
         match msg {
             Message::Accept {
                 reply_to,
@@ -272,7 +292,7 @@ impl ProxyLeader {
         // configuration only moves forward.
         assert!(self.ballot >= ballot, "a proxy's ballot never falls");
         assert!(
-            self.acceptors_since >= since,
+            self.belief.since() >= since,
             "a proxy's configuration never moves back"
         );
         self.assert_invariants();
@@ -305,6 +325,17 @@ impl ProxyLeader {
             self.counters.ignored += 1;
             return;
         }
+        // A delegated round runs over the configuration its `Accept`
+        // carried, and over no other: a delegation whose configuration this
+        // proxy cannot run is not folded (see `admits`).
+        if !self.admits(ballot, config.as_ref()) {
+            probe!(
+                reachable,
+                "proxy: a delegation with no configuration it can run is ignored"
+            );
+            self.counters.ignored += 1;
+            return;
+        }
         // The state `close_below` exists for (#341): a new leadership's
         // delegation meets rounds the old one left. At the ballot this proxy
         // works for, every open round is already at it, and nothing closes.
@@ -315,7 +346,13 @@ impl ProxyLeader {
         );
         self.ballot = ballot;
         self.close_below(ballot);
-        self.learn_config(ballot, config);
+        let _ = self.belief.learn(ballot, config, &self.pool);
+        if self.belief.has_matchmakers() {
+            assert!(
+                self.belief.since() == ballot,
+                "a delegated round runs over the configuration its Accept carried"
+            );
+        }
         if self.done.get(&slot) == Some(&ballot) {
             // A round this proxy already decided at this ballot: the
             // leader's `Commit` is on its way or was lost, and liveness is
@@ -327,7 +364,7 @@ impl ProxyLeader {
             self.counters.ignored += 1;
             return;
         }
-        let column = self.acceptors.column_of(slot);
+        let column = self.belief.config().column_of(slot);
         if let Some(round) = self.rounds.by_slot().get(&slot) {
             // Every open round runs at the ballot this proxy works for,
             // and this delegation is at that ballot.
@@ -382,7 +419,7 @@ impl ProxyLeader {
         let queued = self.pending_messages.len();
         self.pending_messages.push((
             Audience::AcceptorsOf {
-                config: self.acceptors.clone(),
+                config: self.belief.config().clone(),
                 column,
             },
             Message::Accept {
@@ -400,22 +437,74 @@ impl ProxyLeader {
         );
     }
 
-    /// Adopt `config` as the configuration in force when `ballot` is above
-    /// the one the current belief was bound to — the follower's rule.
-    fn learn_config(&mut self, ballot: Ballot, config: Option<AcceptorConfig>) {
-        let Some(config) = config else {
-            return;
-        };
-        if ballot <= self.acceptors_since {
-            return;
+    /// Whether this proxy can run a delegation at `ballot` (at or above
+    /// the ballot it works for) over the configuration `config` that its
+    /// `Accept` carried. On plain Multi-Paxos it always can: the bootstrap
+    /// configuration is the configuration for good, and a correct leader
+    /// carries none. On a matchmaker deployment the configuration is the
+    /// one the [`Belief`] learns by the follower rule, or, at the ballot the
+    /// belief is already bound to, the belief's own: one ballot has one
+    /// configuration. A delegation that carries none above the belief, or
+    /// one outside the pool, is refused: its round would be judged over a
+    /// configuration its ballot never registered. The leader takes the
+    /// round back.
+    ///
+    /// # Panics
+    ///
+    /// If a delegation at the belief's ballot carries another configuration:
+    /// two configurations at one ballot break the matchmaking rule (one
+    /// registration per ballot), a detected safety violation.
+    fn admits(&self, ballot: Ballot, config: Option<&AcceptorConfig>) -> bool {
+        if !self.belief.has_matchmakers() {
+            return true;
         }
-        let since = self.acceptors_since;
-        self.acceptors = config;
-        self.acceptors_since = ballot;
         assert!(
-            self.acceptors_since > since,
-            "a learned configuration is strictly newer"
+            ballot >= self.belief.since(),
+            "a proxy's ballot covers its belief"
         );
+        match self.belief.judge(ballot, config, &self.pool) {
+            Judgement::Learn => true,
+            Judgement::NotNewer => {
+                assert!(
+                    config == Some(self.belief.config()),
+                    "one ballot carries one configuration"
+                );
+                true
+            }
+            Judgement::Absent => ballot == self.belief.since() && ballot != Ballot::zero(),
+            Judgement::OutsidePool => false,
+            Judgement::Plain => unreachable!("a matchmaker belief is not plain"),
+        }
+    }
+
+    /// Admit `nodes` to the pool this proxy runs configurations from (#189:
+    /// the registry is the pool), as [`crate::ColocatedNode::extend_pool`]
+    /// admits them on a node. **Grow-only.** Pure hygiene: it emits
+    /// nothing. Returns whether the pool grew.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its postconditions fails: a programmer error,
+    /// never an operating condition.
+    pub fn extend_pool(&mut self, nodes: &[NodeId]) -> bool {
+        let before = self.pool.len();
+        self.pool.extend_from_slice(nodes);
+        self.pool.sort_unstable();
+        self.pool.dedup();
+        let grew = self.pool.len() > before;
+        assert!(self.pool.len() >= before, "the pool never shrinks");
+        assert!(
+            self.belief.config().is_drawn_from(&self.pool),
+            "the pool still holds the configuration in force"
+        );
+        self.assert_invariants();
+        grew
+    }
+
+    /// The node pool this proxy runs configurations from.
+    #[must_use]
+    pub fn pool(&self) -> &[NodeId] {
+        &self.pool
     }
 
     /// Close every round below `ballot`: a superseded leadership's, which
@@ -440,11 +529,11 @@ impl ProxyLeader {
         // the column's.
         if !self
             .rounds
-            .fold_accepted_in(&self.acceptors, from, ballot, slot, vhash)
+            .fold_accepted_in(self.belief.config(), from, ballot, slot, vhash)
         {
             return;
         }
-        let Some((ballot, command)) = self.rounds.decided(slot, &self.acceptors) else {
+        let Some((ballot, command)) = self.rounds.decided(slot, self.belief.config()) else {
             return;
         };
         // Decision provenance, restated: the tally decided at the round's
@@ -484,7 +573,7 @@ impl ProxyLeader {
     fn on_nack(&mut self, from: NodeId, ballot: Ballot, slot: Slot) {
         // Wire hygiene: only a member of the configuration in force can have
         // been asked, so only a member's refusal is relayed.
-        if !self.acceptors.contains(from) || !self.rounds.is_open_at(slot, ballot) {
+        if !self.belief.config().contains(from) || !self.rounds.is_open_at(slot, ballot) {
             return;
         }
         self.rounds.close(slot);
@@ -617,6 +706,23 @@ impl ProxyLeader {
             self.done.len() <= DONE_MEMORY,
             "a proxy's closed-round memory is bounded"
         );
+        assert!(
+            self.belief.since() <= self.ballot,
+            "a proxy's belief is bound at or below the ballot it works for"
+        );
+        assert!(
+            self.belief.config().is_drawn_from(&self.pool),
+            "a proxy's configuration is drawn from its pool"
+        );
+        // A delegated round runs over the configuration its `Accept`
+        // carried: on a matchmaker deployment, the belief bound to the
+        // round's ballot.
+        if self.belief.has_matchmakers() && !self.rounds.is_empty() {
+            assert!(
+                self.belief.since() == self.ballot,
+                "an open proxy round runs over the configuration its ballot carried"
+            );
+        }
     }
 
     /// Borrow the proxy to drain one batch of messages. The returned
@@ -674,7 +780,7 @@ impl ProxyLeader {
     /// The configuration this proxy fans out to and judges over.
     #[must_use]
     pub fn acceptors(&self) -> &AcceptorConfig {
-        &self.acceptors
+        self.belief.config()
     }
 
     /// The limits this proxy was built with.

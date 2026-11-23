@@ -166,7 +166,7 @@ impl ColocatedNode {
         let own = self
             .is_acceptor()
             .then(|| (self.config.id, self.replica.chosen_index()));
-        gc.covered(&self.acceptors, own)
+        gc.covered(self.belief.config(), own)
     }
 
     /// Queue the GC requests once the condition holds. Idempotent; a no-op
@@ -378,7 +378,7 @@ impl ColocatedNode {
         // names it.
         if may {
             assert!(
-                !self.acceptors.contains(self.config.id),
+                !self.belief.config().contains(self.config.id),
                 "a retirable node is no member"
             );
             assert!(self.role != NodeRole::Leader, "a leader is never retirable");
@@ -397,7 +397,7 @@ impl ColocatedNode {
             && !self.is_acceptor()
             && self.role != NodeRole::Leader
             && watermark > self.last_member_ballot
-            && self.acceptors_since == watermark
+            && self.belief.since() == watermark
     }
 
     /// Whether [`ColocatedNode::may_retire`] at `watermark` waits only for
@@ -693,7 +693,7 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return None;
         }
-        let current = &self.acceptors;
+        let current = self.belief.config();
         let prior: Vec<&AcceptorConfig> = match self.gc.as_ref() {
             Some(gc) if gc.effective().is_none() => {
                 gc.prior().iter().filter(|c| *c != current).collect()
@@ -784,7 +784,7 @@ impl ColocatedNode {
             return GcStep::Ignored;
         };
         let me = self.config.id;
-        let acceptors = self.acceptors.clone();
+        let acceptors = self.belief.config().clone();
         let ballot = self.ballot;
         let Some(gc) = self.gc.as_mut() else {
             return GcStep::Ignored;

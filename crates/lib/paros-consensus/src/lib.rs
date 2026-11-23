@@ -181,6 +181,7 @@ mod probe;
 
 pub mod acceptor;
 pub mod batcher;
+pub mod belief;
 pub mod collector;
 pub mod contract;
 pub mod decree;
