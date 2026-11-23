@@ -91,16 +91,25 @@
 (*             ballot that chose it is covered: a leader sends no `Commit`   *)
 (*             of a bypass ballot before its fence Phase 1.                  *)
 (*                                                                           *)
+(* Replicas : the readers that are read replicas (`replica_node.rs`), not   *)
+(*         acceptors. A replica has no promise: it learns its read basis     *)
+(*         only from the beat of a leadership that won, it may hear a late   *)
+(*         beat of an older one, and nothing of its own gates its read. A    *)
+(*         replica restart forgets its basis and its open read, and its next *)
+(*         basis can be the late beat of an old leadership: a stale basis.   *)
+(*         Only the answers of the acceptors end a read on a stale basis.    *)
+(*                                                                           *)
 (* LiveLeader : TRUE = `LiveSpec` makes the campaign of the last ballot     *)
 (*         fair. FALSE = a control: no leader finishes the slots.            *)
 (*                                                                           *)
-(* Not in the model: GC watermarks, matchmaker generations, the replica      *)
-(* tier, a read that expires, an acceptor that loses its disk.               *)
+(* Not in the model: GC watermarks, matchmaker generations, the replicas    *)
+(* that only apply (the read replica is `Replicas`), a read that expires, an *)
+(* acceptor that loses its disk.                                             *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Acceptors, Matchmakers, Configs, Values, Slots, NB, Owner, Check, Mode,
           Readers, Basis, Fence, Laggers, Restarters, Refuse, Hold, Learner, Q1s, Q2s,
-          Targets, Seal, ReaderGate, ReadAgain, ReadHold, LiveLeader
+          Targets, Seal, ReaderGate, ReadAgain, ReadHold, LiveLeader, Replicas
 
 ASSUME Seal \in {"quorum", "reads", "others"}
 ASSUME ReaderGate \in {"promise", "belief"}
@@ -110,6 +119,11 @@ ASSUME Refuse \in BOOLEAN
 ASSUME ReadAgain \in BOOLEAN
 ASSUME ReadHold \in {"off", "basis", "serve", "prefix"}
 ASSUME LiveLeader \in BOOLEAN
+\* A read replica is a reader and no acceptor, and learns its basis from a beat.
+ASSUME Replicas \subseteq Readers /\ Replicas \cap Acceptors = {}
+ASSUME Replicas # {} => Basis = "won"
+\* A read replica never campaigns: the learner options are for acceptors.
+ASSUME Replicas # {} => Learner = "off"
 \* Paxos safety rests on this: every Phase-1 quorum meets every Phase-2 quorum.
 ASSUME \A c \in Configs : \A P \in Q1s[c], C \in Q2s[c] : P \cap C # {}
 \* A reader asks a set that can hold a Phase-1 quorum.
@@ -315,10 +329,12 @@ OwnCampaign(n, b) ==
                    basis, rd, since, heard, returned>>
 
 \* The promise of reader n does not stop a read basis at ballot b.
+\* A read replica has no promise.
 Below(n, b) ==
-    \/ promised[n] <= b
-    \/ Learner = "any"
-    \/ Learner = "own" /\ promised[n] = own[n] /\ n \notin cfgOf[b]
+    IF n \in Replicas THEN TRUE
+    ELSE \/ promised[n] <= b
+         \/ Learner = "any"
+         \/ Learner = "own" /\ promised[n] = own[n] /\ n \notin cfgOf[b]
 
 \* The leader of b tells a client that slot s is decided.
 Ack(b, s) ==
@@ -347,7 +363,9 @@ LearnBasis(n, b) ==
                    proposals, acked, rd, own, since, heard, returned>>
 
 \* The gate of reader n to open, keep and serve a read on a basis at b.
-ReadGate(n, b) == IF ReaderGate = "promise" THEN Below(n, b) ELSE since[n] <= b
+ReadGate(n, b) ==
+    IF n \in Replicas THEN TRUE
+    ELSE IF ReaderGate = "promise" THEN Below(n, b) ELSE since[n] <= b
 
 BasisOf(n) == IF Basis = "won" THEN basis[n] ELSE <<promised[n], 0>>
 
@@ -422,6 +440,13 @@ Restart(a) ==
     /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
                    proposals, acked, own, returned>>
 
+\* Read replica n restarts: its read basis and its open read are volatile.
+ReplicaRestart(n) ==
+    /\ basis' = [basis EXCEPT ![n] = <<0, 0>>]
+    /\ rd' = IF rd.state # "none" /\ rd.node = n THEN NoRead ELSE rd
+    /\ UNCHANGED <<status, cfgOf, reg, replied, hist, promised, votes, promises, safe,
+                   proposals, acked, own, since, heard, returned>>
+
 \* The membership probe of a node that did not hear: a matchmaker majority
 \* answers, and the node adopts the configuration of the highest ballot that
 \* the answers hold. Each ballot that an acceptor promised or accepted was
@@ -457,6 +482,7 @@ Next ==
     \/ \E b \in Ballots, s \in Slots : Ack(b, s)
     \/ \E n \in Readers, b \in Ballots : LearnBasis(n, b)
     \/ \E n \in Readers : ReadStart(n)
+    \/ \E n \in Replicas : ReplicaRestart(n)
     \/ \E n \in Readers, b \in Ballots : OwnCampaign(n, b)
     \/ \E a \in Acceptors : PreReadAck(a)
     \/ \E a \in Acceptors : Restart(a) \/ Probe(a)
@@ -508,4 +534,10 @@ NoStranded ==
 \* Not a real invariant. TLC must find a served read of a reader whose promise
 \* is above its basis: this shows that the option serves the read of #890.
 NoReadAbove == ~ (rd.state = "done" /\ rd.snap # {} /\ promised[rd.node] > rd.b)
+
+\* Not a real invariant. TLC must find a read replica that opens a read on a
+\* stale basis: a later leadership won and a client heard an ack of it.
+NoStaleReplicaRead ==
+    ~ (/\ rd.state # "none" /\ rd.node \in Replicas /\ rd.snap # {}
+       /\ \E b \in Ballots : b > rd.b /\ status[b] \in {"leading", "switched"})
 =============================================================================

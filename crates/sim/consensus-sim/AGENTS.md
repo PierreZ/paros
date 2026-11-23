@@ -148,7 +148,9 @@ Test only: `publish = false`, never a dependency of another crate.
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs`, `matchmaker.rs`, `reads.rs`,
   `truncation.rs`, `compartments.rs`, `faults.rs` and `handover.rs` each say which events their
-  spec keeps (`Spec::keeps`, a list of the model's own steps). `node.rs` defines the constants of
+  spec keeps (`Spec::keeps`, a list of the model's own steps). Every spec of `node/` keeps the floor steps
+  (`Fold`, `Compact`, `Trim`): a node that jumps to a trim point learns from it on, so a spec
+  that dropped the jump refuses a correct learn after it. `node.rs` defines the constants of
   the ten trace specs of `specs/tla/node/`; `handover.rs` defines those of its own model. A
   proxy round that ends with no decision (a relayed `Nack`, or an eviction of `ProxyLeader::tick`) is a `Close`. In a batch, the tracer writes the votes that
   are not the leader's own round and each trim jump before the learns, and each compaction

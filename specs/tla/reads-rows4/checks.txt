@@ -1,0 +1,17 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# #1483 (read fence on a grid whose Phase-1 quorums do not meet): the
+# leaderless reads of `reads/` (the model is `reads/Reads.tla`, linked here so
+# that the `reads` job stays inside its minutes) on a grid of four rows and
+# one column, across a change of members. With acks = 3, two Phase-1 quorums
+# can be disjoint and a read is stale (the shape that `QuorumSystem::admits`
+# lets in today). With acks = 2 they meet, and the reads are safe: the rule
+# that a grid must have Phase-1 quorums that meet, or be a full grid.
+grid_rows4        violation  ci
+grid_rows4_meet   pass       ci
+# Reach: under acks = 2 a read that started after an ack is served.
+grid_rows4_reach  violation  ci

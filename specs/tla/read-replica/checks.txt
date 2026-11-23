@@ -1,0 +1,16 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# The read replica of `reads/` (the model is `reads/Reads.tla`, linked here so
+# that the `reads` job stays inside its minutes): a reader that is no
+# acceptor, learns its basis from a beat, and can restart and take the late
+# beat of an older leadership (#1230 (rules no check tests)).
+replica_stale        pass       ci
+replica_again        pass       ci
+reach_replica_stale  violation  ci
+replica_no_fence     violation  ci
+# The same on the full grid of 2 x 2, with the seal rule of the code.
+replica_grid         pass       long
