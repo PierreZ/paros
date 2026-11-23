@@ -173,6 +173,9 @@ pub mod reach {
     pub const READ_SUPERSEDED: &str = "roles walk: a read met a later segment";
     /// A read of a sealed segment served its last records.
     pub const READ_SEALED: &str = "roles walk: a read reached the end of a sealed segment";
+    /// An answer to a read of an earlier incarnation of a replica reached
+    /// the replica after its restart.
+    pub const READ_STALE_ACK: &str = "roles walk: a stale read answer reached a restarted replica";
     /// A retired segment trimmed under the floor.
     pub const SEGMENT_TRIMMED: &str = "roles walk: a floor over a retired segment trimmed it";
     /// A read of an older segment refused below the floor of the segment
@@ -227,6 +230,7 @@ pub mod reach {
         READ_OPEN,
         READ_SUPERSEDED,
         READ_SEALED,
+        READ_STALE_ACK,
         SEGMENT_TRIMMED,
         FLOOR_REFUSED,
         COMPACTED,
@@ -720,8 +724,8 @@ pub struct RolesModel {
     applied: BTreeMap<NodeId, BTreeMap<Slot, Option<Answer>>>,
     /// The records of the whole log, by position.
     records: BTreeMap<u64, Record>,
-    /// The open reads, by id.
-    reads: BTreeMap<u64, OpenRead>,
+    /// The open reads, by replica and the reader's id.
+    reads: BTreeMap<(NodeId, u64), OpenRead>,
     /// The replicas that dropped their copy.
     dropped: BTreeSet<NodeId>,
     /// The command of each proposal, as its client wrote it, by its time:
@@ -733,8 +737,13 @@ pub struct RolesModel {
     waiting: Vec<(NodeId, u64, usize, u64)>,
     /// The read answers that wait on a batch of their replica.
     held_reads: BTreeMap<NodeId, Vec<(PersistId, u64, ReadAnswer)>>,
-    /// The ids of the reads.
-    read_ids: u64,
+    /// The last read id of each replica's reader. A crash of the replica
+    /// starts its reader again at 1, as a program that restarts with it:
+    /// the ids of the reads repeat across the incarnations of a replica.
+    read_ids: BTreeMap<NodeId, u64>,
+    /// The boot of the reads of each replica's incarnation, from its
+    /// `PreRead`s; a crash forgets it.
+    read_boots: BTreeMap<NodeId, PersistId>,
     /// The replica that hears the register late, if any.
     slow: Option<NodeId>,
     /// The replica that loses every message until a peer compacts to a
@@ -923,6 +932,14 @@ impl Model for RolesModel {
             {
                 *bound = *segment;
             }
+            if let Message::PreReadAck { read, .. } = &message {
+                sometimes!(
+                    self.read_boots
+                        .get(&to)
+                        .is_some_and(|boot| read.boot < *boot),
+                    reach::READ_STALE_ACK
+                );
+            }
             let pulled =
                 matches!(message, Message::Commit { .. }) && self.replicas.contains_key(&from);
             let node = self.replicas.get_mut(&to).expect("a replica");
@@ -983,7 +1000,9 @@ impl Model for RolesModel {
             // The reads of a replica that crashed get no answer: their
             // client times out.
             self.held_reads.remove(node);
-            self.reads.retain(|_, open| open.node != *node);
+            self.reads.retain(|(asked, _), _| asked != node);
+            self.read_ids.remove(node);
+            self.read_boots.remove(node);
         } else if let Some(proxy) = self.proxies.get_mut(node) {
             self.proxy_crashed |= proxy.as_ref().is_some_and(|p| p.open() > 0);
             *proxy = None;
@@ -1271,7 +1290,8 @@ impl RolesModel {
             dropped: BTreeSet::new(),
             waiting: Vec::new(),
             held_reads: BTreeMap::new(),
-            read_ids: 0,
+            read_ids: BTreeMap::new(),
+            read_boots: BTreeMap::new(),
             slow: None,
             deaf: None,
         };
@@ -1766,6 +1786,9 @@ impl RolesModel {
                     mut message,
                     after,
                 } => {
+                    if let Message::PreRead { read, .. } = &message {
+                        self.read_boots.insert(node, read.boot);
+                    }
                     if let Message::Holds { full, .. } = &mut message
                         && self.mutant == RolesMutant::HoldsLie
                     {
@@ -1823,7 +1846,7 @@ impl RolesModel {
                                 .or_default()
                                 .push((id, read, answer));
                         }
-                        _ => self.judge_read(read, &answer, cx),
+                        _ => self.judge_read(node, read, &answer, cx),
                     }
                 }
                 // A replica of a trimmed segment drops its copy: it answers
@@ -2431,7 +2454,7 @@ impl RolesModel {
             .partition(|(held, ..)| *held <= id);
         self.held_reads.insert(node, wait);
         for (_, read, answer) in answers {
-            self.judge_read(read, &answer, cx);
+            self.judge_read(node, read, &answer, cx);
         }
     }
 
@@ -2881,11 +2904,12 @@ impl RolesModel {
         then: Option<(NodeId, u64, usize)>,
         cx: &mut Cx<'_, Self>,
     ) {
-        self.read_ids += 1;
-        let read = self.read_ids;
+        let ids = self.read_ids.entry(node).or_default();
+        *ids += 1;
+        let read = *ids;
         let need = self.states.len() - 1;
         self.reads.insert(
-            read,
+            (node, read),
             OpenRead {
                 node,
                 from,
@@ -2905,7 +2929,7 @@ impl RolesModel {
     }
 
     /// The oracle [`READ`] on the answer of `read`.
-    fn judge_read(&mut self, read: u64, answer: &ReadAnswer, cx: &mut Cx<'_, Self>) {
+    fn judge_read(&mut self, at: NodeId, read: u64, answer: &ReadAnswer, cx: &mut Cx<'_, Self>) {
         let Some(OpenRead {
             node,
             from,
@@ -2913,7 +2937,7 @@ impl RolesModel {
             need,
             floor,
             then,
-        }) = self.reads.remove(&read)
+        }) = self.reads.remove(&(at, read))
         else {
             return;
         };

@@ -1,5 +1,6 @@
 use super::*;
 use crate::command::{Fence, Record, Write};
+use crate::roles::message::ReadTag;
 use crate::segment::SegmentId;
 use paros_consensus::journal::{LeaderUuid, Seq};
 
@@ -379,10 +380,17 @@ fn prepare_in(round: u64, segment: u64) -> Message {
     }
 }
 
-fn pre_read(read: u64) -> Message {
+fn tag(number: u64) -> ReadTag {
+    ReadTag {
+        boot: PersistId(0),
+        number,
+    }
+}
+
+fn pre_read(number: u64) -> Message {
     Message::PreRead {
         segment: SegmentId(1),
-        read,
+        read: tag(number),
     }
 }
 
@@ -405,7 +413,7 @@ fn a_read_gets_the_watermark_and_the_newest_segment_once_the_last_batch_is_durab
         sends,
         vec![Message::PreReadAck {
             segment: SegmentId(1),
-            read: 9,
+            read: tag(9),
             watermark: Some(Slot(4)),
             bound: SegmentId(1),
         }]
@@ -559,7 +567,7 @@ fn the_read_watermark_counts_the_last_slot_of_a_dropped_range() {
         LEADER,
         Message::PreRead {
             segment: SegmentId(1),
-            read: 1,
+            read: tag(1),
         },
     ));
     assert!(

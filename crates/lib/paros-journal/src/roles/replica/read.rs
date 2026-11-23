@@ -36,7 +36,7 @@ use super::{Folded, ReplicaEffect, SegmentReplica};
 use crate::command::Record;
 pub use crate::read::ReadAnswer;
 use crate::roles::leader::ReadSegment;
-use crate::roles::message::Message;
+use crate::roles::message::{Message, ReadTag};
 use crate::segment::SegmentId;
 
 /// The most reads one replica holds open; a read above it is
@@ -54,6 +54,9 @@ pub const READ_PAGE: usize = 256;
 /// One open read.
 #[derive(Clone, Debug)]
 pub(super) struct PendingRead {
+    /// The tag that its `PreRead` carries; none for a read of a sealed
+    /// segment, which asks nobody.
+    tag: Option<ReadTag>,
     from: Seq,
     limit: usize,
     /// The acceptors that answered under the fence.
@@ -81,24 +84,29 @@ impl SegmentReplica {
             return vec![self.read_answer(read, ReadAnswer::Unserved)];
         }
         let mut effects = Vec::new();
+        let mut tag = None;
         if self.end.is_none() {
-            let Some(grid) = &self.grid else {
+            if self.grid.is_none() {
                 return vec![self.read_answer(read, ReadAnswer::Unserved)];
-            };
+            }
+            let new = self.read_tag(&mut effects);
+            let grid = self.grid.as_ref().expect("a grid");
             for acceptor in grid.columns().iter().flatten() {
                 effects.push(ReplicaEffect::Send {
                     to: *acceptor,
                     message: Message::PreRead {
                         segment: self.segment,
-                        read,
+                        read: new,
                     },
-                    after: None,
+                    after: Some(new.boot),
                 });
             }
+            tag = Some(new);
         }
         self.reads.insert(
             read,
             PendingRead {
+                tag,
                 from,
                 limit: limit.clamp(1, READ_PAGE),
                 answered: BTreeSet::new(),
@@ -121,11 +129,39 @@ impl SegmentReplica {
         self.reads.len()
     }
 
-    /// An acceptor's answer to the read `read`.
+    /// A new tag for a read that asks the grid. Its `boot` is the first
+    /// batch of the incarnation; when the incarnation has written none yet,
+    /// this writes it, empty. Every `PreRead` waits on it, so no `PreRead`
+    /// leaves under a `boot` that a later incarnation can draw again: a
+    /// later incarnation starts above every durable batch ([`ReadTag`]).
+    fn read_tag(&mut self, effects: &mut Vec<ReplicaEffect>) -> ReadTag {
+        let boot = self.read_boot;
+        if self.flight.last().is_none_or(|last| last < boot) {
+            let id = self.flight.batch();
+            assert!(id == boot, "the first batch of the incarnation is its boot");
+            effects.push(ReplicaEffect::Persist {
+                id,
+                ops: Vec::new(),
+            });
+        }
+        self.read_count += 1;
+        let tag = ReadTag {
+            boot,
+            number: self.read_count,
+        };
+        assert!(tag.number > 0, "the reads of an incarnation count from 1");
+        assert!(
+            self.flight.last().is_some_and(|last| last >= boot),
+            "the boot batch is a batch of this incarnation"
+        );
+        tag
+    }
+
+    /// An acceptor's answer to the read that `tag` names.
     pub(super) fn pre_read_ack(
         &mut self,
         from: NodeId,
-        read: u64,
+        tag: ReadTag,
         watermark: Option<Slot>,
         bound: SegmentId,
     ) -> Vec<ReplicaEffect> {
@@ -136,7 +172,16 @@ impl SegmentReplica {
         if !in_grid || self.end.is_some() {
             return Vec::new();
         }
-        let Some(pending) = self.reads.get_mut(&read) else {
+        let Some((&read, pending)) = self
+            .reads
+            .iter_mut()
+            .find(|(_, pending)| pending.tag == Some(tag))
+        else {
+            probe!(
+                sometimes,
+                self.read_boot != tag.boot,
+                "replica: an answer to an earlier incarnation's read"
+            );
             return Vec::new();
         };
         if bound > self.segment {
@@ -165,15 +210,16 @@ impl SegmentReplica {
                 continue;
             }
             let Some(grid) = &self.grid else { continue };
+            let Some(tag) = pending.tag else { continue };
             for acceptor in grid.columns().iter().flatten() {
                 if !pending.answered.contains(acceptor) {
                     effects.push(ReplicaEffect::Send {
                         to: *acceptor,
                         message: Message::PreRead {
                             segment: self.segment,
-                            read: *read,
+                            read: tag,
                         },
-                        after: None,
+                        after: Some(tag.boot),
                     });
                 }
             }

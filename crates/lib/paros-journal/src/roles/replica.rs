@@ -302,6 +302,12 @@ pub struct SegmentReplica {
     grid: Option<Grid>,
     /// The open reads, by the reader's id.
     reads: BTreeMap<u64, PendingRead>,
+    /// The first batch id of this incarnation: every id that it emits is at
+    /// or above it, and the boot of its reads
+    /// ([`ReadTag::boot`](super::message::ReadTag)).
+    read_boot: PersistId,
+    /// The reads of this incarnation that asked the grid.
+    read_count: u64,
     /// The retired segments below this one that are not trimmed, with the
     /// last `seq` of each (the `next_seq` of its boundary state), from the
     /// last value observed: the trims this replica's floor may write. The
@@ -351,6 +357,8 @@ impl SegmentReplica {
             dropped: false,
             grid: None,
             reads: BTreeMap::new(),
+            read_boot: PersistId(disk.durable.map_or(0, |PersistId(id)| id + 1)),
+            read_count: 0,
             older: BTreeMap::new(),
             flight: Flight::after(disk.durable),
         };
