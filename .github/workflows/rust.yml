@@ -139,6 +139,8 @@ jobs:
         run: nix develop --command cargo run -p paros-journal-control --example controller
       - name: Run the grid controller example driver
         run: nix develop --command cargo run -p paros-journal-control --example driver
+      - name: Run the election example three_actors
+        run: nix develop --command cargo run -p paros-election --example three_actors
       - name: Run the facade example journal
         run: nix develop --command cargo run -p paros --example journal
       - name: Run the facade example tokio_tasks

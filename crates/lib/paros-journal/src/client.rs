@@ -322,6 +322,38 @@ impl Client {
         self.flight.is_none() && self.waiting.is_empty() && self.reads.is_empty()
     }
 
+    /// Whether no write, truncate or `SetLeader` is in flight or waits.
+    /// Reads do not count: they do not depend on the mode.
+    #[must_use]
+    pub fn calls_idle(&self) -> bool {
+        self.flight.is_none() && self.waiting.is_empty()
+    }
+
+    /// Write from now on under `uuid`, which another client's `SetLeader`
+    /// installed for this one (a hand on), with the next write at `next`:
+    /// the tail that the answer of that `SetLeader` named. Only the holder of
+    /// `uuid` writes under it, so that tail is still the journal's when this
+    /// client writes first. The uuid is fresh (§J2.3): the client that drew
+    /// it handed it to this one alone.
+    ///
+    /// # Panics
+    ///
+    /// When `uuid` is the unset uuid, or when a call is in flight or waits:
+    /// the mode would change under a call that was asked before it.
+    pub fn adopt(&mut self, uuid: LeaderUuid, next: Seq) {
+        assert!(uuid.is_set(), "the unset uuid never leads");
+        assert!(
+            self.calls_idle(),
+            "a client adopts a uuid only with no call in flight"
+        );
+        self.mode = Mode::Fenced { uuid, next };
+        assert!(
+            self.mode == Mode::Fenced { uuid, next },
+            "the client writes under the adopted uuid"
+        );
+        self.assert_invariants();
+    }
+
     /// Write `records` as one write: fenced at the client's next position
     /// in [`Mode::Fenced`], unfenced in [`Mode::Open`]. The mode is the one
     /// when the write leaves, after the calls asked before it.

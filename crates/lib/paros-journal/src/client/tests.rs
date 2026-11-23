@@ -901,3 +901,59 @@ fn a_call_waiting_with_nothing_in_flight_breaks_an_invariant() {
         .push_back((CallId(0), Call::Truncate(Seq(0))));
     client.assert_invariants();
 }
+
+#[test]
+fn an_adopted_uuid_fences_the_next_write_at_the_handed_tail() {
+    let mut client = Client::new();
+    assert!(client.calls_idle());
+    client.adopt(B, Seq(7));
+    assert_eq!(
+        client.mode(),
+        Mode::Fenced {
+            uuid: B,
+            next: Seq(7)
+        }
+    );
+    let call = client.write(records("x"));
+    assert!(!client.calls_idle(), "the write is in flight");
+    let (id, command) = one_command(&mut client);
+    assert_eq!(command, fenced(B, 7, "x"));
+    client.answer(
+        id,
+        reply(Answer::Written {
+            seq: Seq(7),
+            count: 1,
+        }),
+    );
+    assert_eq!(
+        one_outcome(&mut client),
+        (
+            call,
+            Outcome::Written {
+                seq: Seq(7),
+                count: 1
+            }
+        )
+    );
+    assert!(client.calls_idle());
+}
+
+#[test]
+fn a_read_in_flight_does_not_stop_an_adoption() {
+    let mut client = Client::new();
+    let _ = client.read(Seq(0), 1);
+    assert!(
+        client.calls_idle(),
+        "a read is not a call that the mode fences"
+    );
+    client.adopt(A, Seq(0));
+    assert!(matches!(client.mode(), Mode::Fenced { uuid, .. } if uuid == A));
+}
+
+#[test]
+#[should_panic(expected = "no call in flight")]
+fn an_adoption_under_a_call_in_flight_panics() {
+    let mut client = Client::new();
+    let _ = client.write(records("x"));
+    client.adopt(A, Seq(0));
+}

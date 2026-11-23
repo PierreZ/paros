@@ -21,9 +21,13 @@
 (*              winner from the refusal. A candidate with no answer sends  *)
 (*              the same call again: a refusal that names its own uuid     *)
 (*              means that it won.                                         *)
-(*   Number     the term number is the count of the `SetLeader` records of *)
-(*              the fold that name a uuid. The winner computes it as the   *)
-(*              number of the term of `old`, plus one.                     *)
+(*   Number     the term number is the count of the terms in the fold:     *)
+(*              each term record names its number, and a `SetLeader` is    *)
+(*              not a record a reader sees (it takes no position). The     *)
+(*              winner reads the journal up to the tail that the answer of *)
+(*              its `SetLeader` names, and takes the number of the last    *)
+(*              term record there, plus one. A term that never wrote its   *)
+(*              term record takes no number: the next winner reuses it.    *)
 (*   Hold       each write under the uuid is a renewal. The first write of *)
 (*              a term is the term record: it names the holder's interface *)
 (*              (the actor and its incarnation).                           *)
@@ -35,7 +39,9 @@
 (*              compare-and-set. With Eager, it may challenge at any time: *)
 (*              a challenge that is too early costs availability, never    *)
 (*              safety.                                                    *)
-(*   Fence      an order that leaves the journal carries the term number.  *)
+(*   Fence      an order that leaves the journal carries the term number;  *)
+(*              a holder sends one only once its term record is in the     *)
+(*              journal, so a number is never sent by two holders.         *)
 (*              The receiver keeps the highest term it saw on disk and     *)
 (*              refuses a lower one.                                       *)
 (*   Mode       the election refuses a journal in multi-writer mode: it    *)
@@ -49,7 +55,11 @@
 (* FALSE and must break a property:                                        *)
 (*   Fence = FALSE        the receiver takes an order of any term.         *)
 (*   Cas = FALSE          the journal takes a `SetLeader` whatever its     *)
-(*                        `old`: a late challenge for a taken term wins.   *)
+(*                        `old`: a challenge from a view before a switch   *)
+(*                        to multi-writer mode takes the journal back.     *)
+(*                        (One holder for each number does not rest on     *)
+(*                        it: the winner reads to its tail, and the        *)
+(*                        journal fences each write by its uuid.)          *)
 (*   ClearIface = FALSE   the fold keeps the interface across a            *)
 (*                        `SetLeader`: a published interface outlives its  *)
 (*                        term.                                            *)
@@ -87,6 +97,7 @@ VARIABLES inc,       \* the incarnation of each actor
           net,       \* calls to the journal, their answers and hand-on messages
           onet,      \* the orders in flight to the receiver: their terms
           seen,      \* the receiver: the highest term it saw, on disk
+          orders,    \* every order sent: <<term, actor, incarnation>>
           nuuid,     \* the uuids drawn so far
           owner,     \* owner[u]: <<actor, incarnation>> that took a term with u
           crashes, lost, hands, users,
@@ -97,20 +108,19 @@ VARIABLES inc,       \* the incarnation of each actor
 
 actor == <<inc, st, mine, base, term, pub, wfly>>
 journal == <<jleader, jlog>>
-receiver == <<onet, seen>>
+receiver == <<onet, seen, orders>>
 budget == <<crashes, lost, hands, users>>
 ghost == <<stale, regress, userSet, reached>>
 vars == <<actor, journal, net, receiver, nuuid, owner, budget, ghost>>
 
 -----------------------------------------------------------------------------
 \* The fold of the election over a prefix of the log: the leader value, the
-\* term number and the published interface.
+\* number of the last term record and the published interface.
 Step(f, r) ==
   IF r.k = "set"
-  THEN [leader |-> r.u,
-        term |-> IF r.u = None THEN f.term ELSE f.term + 1,
+  THEN [leader |-> r.u, term |-> f.term,
         iface |-> IF ClearIface THEN NoIface ELSE f.iface]
-  ELSE [f EXCEPT !.iface = r.iface]
+  ELSE [f EXCEPT !.term = r.t, !.iface = r.iface]
 
 FoldOf(s) ==
   LET F[i \in 0..Len(s)] ==
@@ -125,12 +135,12 @@ FoldOf(s) ==
 Prefixes == IF Lag THEN {SubSeq(jlog, 1, p) : p \in 0..Len(jlog)} ELSE {jlog}
 JTerm == FoldOf(jlog).term
 
-\* The term number of u in the journal: the fold up to the last record that
-\* set u, or 0 when no record set u.
+\* The term number of u in the journal: the number of the last term record
+\* of u, or 0 when u wrote none.
 TermOfUuid(u) ==
-  LET at == {i \in 1..Len(jlog) : jlog[i].k = "set" /\ jlog[i].u = u} IN
+  LET at == {i \in 1..Len(jlog) : jlog[i].k = "term" /\ jlog[i].u = u} IN
   IF at = {} THEN 0
-  ELSE FoldOf(SubSeq(jlog, 1, CHOOSE i \in at : \A j \in at : j <= i)).term
+  ELSE jlog[CHOOSE i \in at : \A j \in at : j <= i].t
 
 Hit(e) == reached' = (reached \/ e = Ev)
 
@@ -145,7 +155,7 @@ LiveHolder ==
 \* Every message has one shape, so that TLC can compare any two.
 Blank == [k |-> "", from |-> NoActor, to |-> NoActor, inc |-> 0, u |-> 0, old |-> 0,
           next |-> NoActor, t |-> 0, ok |-> FALSE, leader |-> 0, rec |-> "",
-          iface |-> NoIface]
+          iface |-> NoIface, len |-> 0]
 SL(a, u, old, nxt) == [Blank EXCEPT !.k = "sl", !.from = a, !.inc = inc[a], !.u = u,
                                     !.old = old, !.next = nxt]
 TermRecord(a, u, t) ==
@@ -162,7 +172,7 @@ Init ==
   /\ base = [a \in Actors |-> <<Unset, 0, a>>] /\ term = [a \in Actors |-> 0]
   /\ pub = [a \in Actors |-> FALSE] /\ wfly = [a \in Actors |-> FALSE]
   /\ jleader = Unset /\ jlog = <<>>
-  /\ net = {} /\ onet = {} /\ seen = 0
+  /\ net = {} /\ onet = {} /\ seen = 0 /\ orders = {}
   /\ nuuid = 0 /\ owner = [u \in Uuids |-> <<>>]
   /\ crashes = 0 /\ lost = 0 /\ hands = 0 /\ users = 0
   /\ stale = FALSE /\ regress = FALSE /\ userSet = FALSE /\ reached = FALSE
@@ -213,11 +223,15 @@ Take(a, u, t) ==
 
 \* The answer to the `SetLeader` of a campaign. A refusal that names the
 \* candidate's own uuid is a win: an earlier copy of its call was applied.
+\* The winner reads the log up to the length the answer names (the tail of
+\* its view): its number is the number of the last term record there, plus
+\* one. No term record lands between its win and that answer, since only
+\* its uuid may write then.
 CampaignAnswer(a) ==
   \E m \in net :
     /\ m.k = "slans" /\ m.to = a /\ st[a] = "campaign"
     /\ IF m.leader = mine[a]
-       THEN LET t == base[a][2] + 1 IN
+       THEN LET t == FoldOf(SubSeq(jlog, 1, m.len)).term + 1 IN
             /\ Take(a, mine[a], t)
             /\ net' = (net \ {m}) \cup {TermRecord(a, mine[a], t)}
             /\ Hit(IF m.ok THEN "won" ELSE "won_by_refusal")
@@ -270,9 +284,13 @@ WriteAnswer(a) ==
                    regress, userSet>>
 
 \* A holder sends an order out of the journal; the order carries the term.
+\* It sends one only once its term record is in the journal: a holder that
+\* has not published may share its number with the next winner.
 Order(a) ==
   /\ st[a] = "lead"
+  /\ pub[a]
   /\ onet' = onet \cup {term[a]}
+  /\ orders' = orders \cup {<<term[a], a, inc[a]>>}
   /\ UNCHANGED <<actor, journal, net, seen, nuuid, owner, budget, ghost>>
 
 \* A clean stop: `SetLeader(next, me)`, with a fresh uuid for the next actor.
@@ -333,11 +351,13 @@ ApplySetLeader ==
     /\ LET ok == (Cas => m.old = jleader) /\ m.u # jleader IN
        LET nl == IF ok THEN m.u ELSE jleader IN
        /\ jleader' = nl
-       /\ jlog' = IF ok THEN Append(jlog, [k |-> "set", u |-> m.u, iface |-> NoIface])
+       /\ jlog' = IF ok THEN Append(jlog, [k |-> "set", u |-> m.u, iface |-> NoIface,
+                                           t |-> 0])
                   ELSE jlog
        /\ net' = (net \ {m}) \cup
                  Reply(m, [Blank EXCEPT !.k = "slans", !.to = m.from, !.ok = ok,
-                                        !.leader = nl, !.next = m.next])
+                                        !.leader = nl, !.next = m.next,
+                                        !.len = Len(jlog')])
        /\ Hit(IF ~ok /\ m.old \in Uuids /\ m.old # jleader THEN "late_cas_refused"
               ELSE "")
     /\ UNCHANGED <<actor, receiver, nuuid, owner, budget, stale, regress, userSet>>
@@ -348,9 +368,9 @@ ApplyWrite ==
     /\ m.k = "w"
     /\ LET ok == m.u = jleader IN
        /\ jlog' = IF ok /\ m.rec = "term"
-                  THEN Append(jlog, [k |-> "term", u |-> m.u, iface |-> m.iface])
+                  THEN Append(jlog, [k |-> "term", u |-> m.u, iface |-> m.iface, t |-> m.t])
                   ELSE jlog
-       /\ stale' = (stale \/ (ok /\ m.t # JTerm))
+       /\ stale' = (stale \/ (ok /\ m.t < JTerm))
        /\ net' = (net \ {m}) \cup
                  Reply(m, [Blank EXCEPT !.k = "wans", !.to = m.from, !.ok = ok, !.u = m.u,
                                         !.t = m.t, !.rec = m.rec, !.leader = jleader])
@@ -367,7 +387,7 @@ Deliver ==
        ELSE /\ seen' = IF t > seen THEN t ELSE seen
             /\ regress' = (regress \/ t < seen)
             /\ UNCHANGED reached
-    /\ UNCHANGED <<actor, journal, net, nuuid, owner, budget, stale, userSet>>
+    /\ UNCHANGED <<actor, journal, net, orders, nuuid, owner, budget, stale, userSet>>
 
 -----------------------------------------------------------------------------
 \* The faults.
@@ -397,7 +417,7 @@ UserMulti ==
   /\ users < MaxUser
   /\ users' = users + 1
   /\ jleader' = None
-  /\ jlog' = Append(jlog, [k |-> "set", u |-> None, iface |-> NoIface])
+  /\ jlog' = Append(jlog, [k |-> "set", u |-> None, iface |-> NoIface, t |-> 0])
   /\ userSet' = TRUE
   /\ UNCHANGED <<actor, net, receiver, nuuid, owner, crashes, lost, hands, stale,
                  regress, reached>>
@@ -426,11 +446,24 @@ LiveSpec == Spec /\ Fairness
 -----------------------------------------------------------------------------
 \* The properties.
 
-\* A holder's term is the term of its uuid in the journal. So one term has
-\* one holder, and a late challenge never takes a term that is taken.
-TermTrue == \A a \in Actors : st[a] = "lead" => TermOfUuid(mine[a]) = term[a]
+\* A holder that published holds the number of its term record.
+TermTrue ==
+  \A a \in Actors : st[a] = "lead" /\ pub[a] => TermOfUuid(mine[a]) = term[a]
 
-\* A write is taken only in the term it was sent in.
+\* The numbers of the term records grow along the log: a later term never
+\* takes a number that is taken. Two term records of one uuid are copies of
+\* one write (a resend whose answer was lost).
+TermsGrow ==
+  \A i, j \in 1..Len(jlog) :
+    /\ i < j /\ jlog[i].k = "term" /\ jlog[j].k = "term" /\ jlog[i].u # jlog[j].u
+    => jlog[i].t < jlog[j].t
+
+\* One holder sends the orders of one term.
+OneOrderer ==
+  \A x, y \in orders : x[1] = y[1] => x = y
+
+\* A write is taken only in the term it was sent in: never below the last
+\* term record.
 WriteInTerm == ~stale
 
 \* The receiver never applies an order below one it applied.

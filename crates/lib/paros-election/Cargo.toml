@@ -1,0 +1,22 @@
+[package]
+name = "paros-election"
+description = "The election over a paros journal: a term won by one compare-and-set of the leader, held by fenced writes, a thin layer on the pure journal client. Sans-IO, no clock, no randomness"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude = ["AGENTS.md", "CLAUDE.md"]
+
+# A pure crate of layer 3 (scripts/layers.sh, docs/architecture/04-roles.md
+# §4.4): it depends on the journal client only, with no feature on, and
+# builds for wasm32-unknown-unknown.
+[dependencies]
+paros-journal = { workspace = true }
+
+[lints]
+workspace = true

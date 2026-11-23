@@ -21,6 +21,7 @@ LAYER_TABLE='
 1 paros-journal
 2 paros-journal-control
 2 paros-journal-io
+3 paros-election
 6 paros-authz-biscuit
 7 paros
 8 consensus-sim

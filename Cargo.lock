@@ -536,6 +536,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "paros-election"
+version = "0.2.0"
+dependencies = [
+ "paros-journal",
+]
+
+[[package]]
 name = "paros-journal"
 version = "0.2.0"
 dependencies = [
