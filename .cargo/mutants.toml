@@ -8,9 +8,9 @@
 # test passes is a survivor: a change of behaviour that no test sees.
 #
 # Runs: the `Mutants` workflow (`.github/workflows/mutants.yml`) runs every
-# mutant, in shards, each week and on demand; the `mutants` job of
-# `.github/workflows/rust.yml` runs the mutants of the lines a pull request
-# changes. Both run `scripts/mutants.sh`, which runs the two passes below.
+# mutant, in shards, each week and on demand; the `Mutants nightly` workflow
+# (`.github/workflows/mutants-nightly.yml`) runs each night the mutants of the
+# lines main changed. A pull request runs none. Both run `scripts/mutants.sh`, which runs the two passes below.
 # Locally, in the nix dev shell: `scripts/mutants.sh` (add `--in-diff <diff>`
 # or `-f <file>` to cut the set).
 #

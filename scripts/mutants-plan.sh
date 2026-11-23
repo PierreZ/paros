@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The jobs of the `mutants` job of `.github/workflows/rust.yml`: one job for
-# each shard of each crate whose `src/` the pull request changes.
+# The jobs of the `mutants` job of `.github/workflows/mutants-nightly.yml`: one
+# job for each shard of each crate whose `src/` main changed since <base>.
 #
 #   scripts/mutants-plan.sh <base>
 #

@@ -282,12 +282,12 @@ Property tests, a second `decide` with no shared code, and the controller walks 
 
 ### J7.6 Mutants
 
-The `mutants` job of CI runs cargo-mutants on the changed lines of `paros-consensus` and of
-`paros-journal` (`AGENTS.md`, "Build, test, gates"; #1324 (paros-journal)). For the journal core
+The `Mutants nightly` workflow runs cargo-mutants each night on the lines that main changed in
+`paros-consensus` and `paros-journal` (`AGENTS.md`, "Build, test, gates"; #1324 (paros-journal)). For the journal core
 the judge is its unit tests and the walks of `journal-sim`, then the trace checks of
 `journal-sim` on the mutants that they miss (`scripts/mutants.sh --journal`). A surviving mutant
-fails the job, as for the core. Each later journal crate joins the job in the pull request that
-creates it.
+fails the night, as for the core. Each later journal crate joins `scripts/mutants-plan.sh` in the
+pull request that creates it.
 
 ### J7.7 The absolute rule
 
