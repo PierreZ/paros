@@ -31,6 +31,8 @@ pub mod trace;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use paros_consensus::types::fnv1a;
+
 use moonpool_walk::{Cx, Model, Phase, sometimes};
 use paros_consensus::Limits;
 use paros_consensus::contract::message::Audience;
@@ -304,6 +306,9 @@ pub struct Cluster {
     /// The late nodes each node admitted to its pool. The deployment's
     /// registry is durable: a node that boots admits them again.
     admitted: BTreeMap<NodeId, BTreeSet<NodeId>>,
+    /// The FNV-1a fold of every batch a party of the core handed this
+    /// driver ([`Cluster::ready_digest`]).
+    ready_digest: u64,
 }
 
 impl Model for Cluster {
@@ -706,6 +711,7 @@ impl Cluster {
             asked: Vec::new(),
             checking: None,
             admitted: BTreeMap::new(),
+            ready_digest: paros_consensus::types::FNV_OFFSET,
             pool,
             flavor,
         };
@@ -1033,6 +1039,22 @@ impl Cluster {
 
     // ---- draining ---------------------------------------------------------
 
+    /// The FNV-1a fold of every batch that a node, a proxy leader or a
+    /// replica of the core handed this driver, in order: what each party
+    /// sent, wrote, learned and served. Two builds of the core that give
+    /// the same digest on the same seed behave the same on it, which is
+    /// how `tests/differential.rs` checks a change that says it changes no
+    /// behaviour.
+    #[must_use]
+    pub fn ready_digest(&self) -> u64 {
+        self.ready_digest
+    }
+
+    /// Fold the digest of one batch into [`Cluster::ready_digest`].
+    fn fold_digest(&mut self, batch: u64) {
+        self.ready_digest = fnv1a(self.ready_digest, &batch.to_le_bytes());
+    }
+
     /// Run the driver loop of node `id` until its batches are empty.
     fn drain_node(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
         let replicas = self.replica_ids();
@@ -1051,6 +1073,16 @@ impl Cluster {
             let seen = Seen::of(node);
             let belief = node.acceptors_since();
             let ready = node.ready();
+            let digest = digest_of(&(
+                id,
+                ready.writes(),
+                ready.messages(),
+                ready.committed(),
+                ready.read_states(),
+                ready.recovery_batch(),
+                ready.match_requests(),
+                ready.gc_requests(),
+            ));
             let writes = ready.writes().to_vec();
             let mut batch: Vec<(Audience, Message)> = ready.messages().to_vec();
             plant(mutant, &mut batch);
@@ -1070,6 +1102,7 @@ impl Cluster {
             out.extend(to_matchmakers(ready.match_requests(), &gc));
             // The batch flies until its persist below (`Cluster::land`).
             let flight = ready.release();
+            self.fold_digest(digest);
             if mutant == Some(Mutant::EarlyGc) {
                 self.early_gc(id, &seen, &mut gc, &mut out);
             }
@@ -1457,6 +1490,7 @@ impl Cluster {
         let ready = proxy.ready();
         let messages = ready.messages().to_vec();
         ready.advance();
+        self.fold_digest(digest_of(&(id, &messages)));
         let out = route(&messages, &pool, None, &replicas);
         let events = self.tracer.proxy_batch(id, &messages);
         for event in events {
@@ -1483,6 +1517,13 @@ impl Cluster {
                 return;
             };
             let ready = replica.ready();
+            let digest = digest_of(&(
+                id,
+                ready.writes(),
+                ready.messages(),
+                ready.committed(),
+                ready.read_states(),
+            ));
             let writes = ready.writes().to_vec();
             let out = route(ready.messages(), &pool, Some(id), &[]);
             let committed = ready.committed().to_vec();
@@ -1490,6 +1531,7 @@ impl Cluster {
             ready.advance();
             if writes.is_empty() && out.is_empty() && committed.is_empty() && read_states.is_empty()
             {
+                self.fold_digest(digest);
                 return;
             }
             for op in &writes {
@@ -1503,6 +1545,7 @@ impl Cluster {
                 cx.record(event);
             }
             let index = site.disk.hard_state().chosen_index;
+            self.fold_digest(digest);
             self.ledger.disk_chosen(&who, index);
             for envelope in out {
                 cx.send(envelope);
@@ -2290,6 +2333,12 @@ fn to_matchmakers<'a>(
 /// The envelopes of one batch: each audience resolved to parties. A
 /// `Learners` audience reaches the replicas too, as a deployment map
 /// routes it.
+/// The FNV-1a digest of the `Debug` text of `batch`: every field of every
+/// value the core put in it, in order.
+fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
+    fnv1a(paros_consensus::types::FNV_OFFSET, format!("{batch:?}").as_bytes())
+}
+
 fn route(
     messages: &[(Audience, Message)],
     pool: &[NodeId],
