@@ -25,7 +25,7 @@ assertions = ["dep:moonpool-assertions"]
 paros-consensus = { workspace = true }
 paros-journal = { workspace = true }
 # The rev of every other moonpool line of the workspace: one assertion table.
-moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "cf24c75f38b945a2b306c3ee0125a37dfd26e1e6", version = "0.8", optional = true }
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "c698161bf4dea4ffbf43253254ce0fdf8204a905", version = "0.8", optional = true }
 
 [lints]
 workspace = true

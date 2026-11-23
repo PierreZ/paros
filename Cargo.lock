@@ -432,17 +432,17 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 [[package]]
 name = "moonpool-assertions"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=cf24c75f38b945a2b306c3ee0125a37dfd26e1e6#cf24c75f38b945a2b306c3ee0125a37dfd26e1e6"
+source = "git+https://github.com/PierreZ/moonpool?rev=c698161bf4dea4ffbf43253254ce0fdf8204a905#c698161bf4dea4ffbf43253254ce0fdf8204a905"
 
 [[package]]
 name = "moonpool-buggify"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=cf24c75f38b945a2b306c3ee0125a37dfd26e1e6#cf24c75f38b945a2b306c3ee0125a37dfd26e1e6"
+source = "git+https://github.com/PierreZ/moonpool?rev=c698161bf4dea4ffbf43253254ce0fdf8204a905#c698161bf4dea4ffbf43253254ce0fdf8204a905"
 
 [[package]]
 name = "moonpool-explorer"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=cf24c75f38b945a2b306c3ee0125a37dfd26e1e6#cf24c75f38b945a2b306c3ee0125a37dfd26e1e6"
+source = "git+https://github.com/PierreZ/moonpool?rev=c698161bf4dea4ffbf43253254ce0fdf8204a905#c698161bf4dea4ffbf43253254ce0fdf8204a905"
 dependencies = [
  "libc",
  "moonpool-assertions",
@@ -451,12 +451,12 @@ dependencies = [
 [[package]]
 name = "moonpool-tla"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=cf24c75f38b945a2b306c3ee0125a37dfd26e1e6#cf24c75f38b945a2b306c3ee0125a37dfd26e1e6"
+source = "git+https://github.com/PierreZ/moonpool?rev=c698161bf4dea4ffbf43253254ce0fdf8204a905#c698161bf4dea4ffbf43253254ce0fdf8204a905"
 
 [[package]]
 name = "moonpool-walk"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=cf24c75f38b945a2b306c3ee0125a37dfd26e1e6#cf24c75f38b945a2b306c3ee0125a37dfd26e1e6"
+source = "git+https://github.com/PierreZ/moonpool?rev=c698161bf4dea4ffbf43253254ce0fdf8204a905#c698161bf4dea4ffbf43253254ce0fdf8204a905"
 dependencies = [
  "moonpool-assertions",
  "moonpool-buggify",
