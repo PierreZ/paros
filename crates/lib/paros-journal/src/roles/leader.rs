@@ -797,19 +797,22 @@ impl<T> JournalLeader<T> {
     /// at `slot % proxies`, moved to the next one every [`MOVE_AFTER`]
     /// re-sends of the round.
     fn delegate(&self, slot: Slot, command: &Command) -> Vec<LeaderEffect<T>> {
-        let resends = self
+        let round = self
             .rounds
             .by_slot()
             .get(&slot)
-            .map_or(0, paros_consensus::proposer::Round::resends);
+            .expect("a delegation is of an open round");
         let count = u64::try_from(self.proxies.len()).expect("few proxies");
-        let moves = resends / MOVE_AFTER;
+        let first = round.proxy().expect("a round with proxies is delegated").0;
+        assert!(first < count, "a proxy id is an index of the proxies");
+        assert_eq!(first, slot.0 % count, "a round starts at its slot's proxy");
+        let moves = round.resends() / MOVE_AFTER;
         probe!(
             sometimes,
             moves > 0,
             "leader: a stalled round moves to another proxy"
         );
-        let index = usize::try_from((slot.0 + moves) % count).expect("a proxy index");
+        let index = usize::try_from((first + moves) % count).expect("a proxy index");
         let own = self
             .segments
             .last()

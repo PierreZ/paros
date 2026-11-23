@@ -228,13 +228,17 @@ impl JournalProxy {
         }
         self.ballot = Some(ballot);
         match self.rounds.by_slot().get(&slot) {
-            Some(round) if round.ballot() == ballot => {
+            Some(round) => {
+                assert_eq!(
+                    round.ballot(),
+                    ballot,
+                    "the rounds below the ballot are dropped"
+                );
                 probe!(
                     reachable,
                     "proxy: a delegation of an open round sends it again"
                 );
             }
-            Some(_) => unreachable!("the rounds below the ballot are dropped"),
             None => self.rounds.open(slot, ballot, command, None, None),
         }
         self.delegations.insert(
