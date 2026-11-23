@@ -20,6 +20,7 @@ exclude = ["AGENTS.md", "CLAUDE.md"]
 [dependencies]
 paros-consensus = { workspace = true, features = ["tracing", "assertions", "serde"] }
 paros-journal = { workspace = true }
+paros-host = { workspace = true }
 paros-journal-io = { workspace = true }
 
 # The examples only. A program brings its own runtime; the example

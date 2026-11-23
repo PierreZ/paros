@@ -295,7 +295,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
-  `-p paros-journal`, `-p paros-journal-control` and `-p paros-journal-io`
+  `-p paros-journal`, `-p paros-journal-control`, `-p paros-host` and `-p paros-journal-io`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` (and its `--self-test`),
   `scripts/count-assertions.py --min <floor>` (#248 (TigerStyle assertions)) and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
@@ -306,7 +306,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
   the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
   `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
-  `single_writer`, `multi_writer`; #1370 (journal examples)), the grid controller's example:
+  `single_writer`, `multi_writer`; #1370 (journal examples)), the host's example:
+  `cargo run -p paros-host --example coordinator` (#1410), the grid controller's example:
   `cargo run -p paros-journal-control --example <name>` (`controller`, `driver`), and the facade examples:
   `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
@@ -337,14 +338,16 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `journal-sim`'s sweep of the controller's decisions and its controller walks;
   `.cargo/mutants-control.toml`), and one pass on the changed lines of
   `crates/lib/paros-journal-io/src` (`scripts/mutants.sh --journal-io`: its tests and the driver
-  walk of `journal-sim`; `.cargo/mutants-journal-io.toml`). Each crate whose `src/` changed
+  walk of `journal-sim`; `.cargo/mutants-journal-io.toml`), and one pass on the changed lines of
+  `crates/lib/paros-host/src` (`scripts/mutants.sh --host`: its tests, the tests of
+  `paros-journal-io` and the driver walk of `journal-sim`; `.cargo/mutants-host.toml`). Each crate whose `src/` changed
   runs in shards of its own, one job each (`--shard k/n --sharding round-robin`;
   `scripts/mutants-plan.sh` gives one shard for each 250 changed lines outside the tests, 125
   for `paros-consensus` with at least two shards, from the measures in its comment). A
   surviving mutant fails the night: add the test that sees it in a pull request; the next night
   judges those lines again. Before a pull request that changes one of these crates, run
   `git diff origin/main -- crates/lib/<crate>/src > my.diff` and
-  `scripts/mutants.sh [--journal|--control|--journal-io] --in-diff my.diff`. The
+  `scripts/mutants.sh [--journal|--control|--journal-io|--host] --in-diff my.diff`. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
   earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit
@@ -798,13 +801,19 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   the host. Not published yet, and not in the facade. Its example `controller` drives the role
   over a register written by hand: an election, a heal, a lost reply and a takeover; its example
   `driver` runs two `ControlDriver`s: a campaign, a heal after a process goes silent, a takeover.
+- `crates/lib/paros-host` — the pure host of actors (#1410 (split the generic host of actors)):
+  the `Family` of a host's roles, the `Role` trait, the `Host` of many roles over an opaque
+  address, the generic `Driver` under the flight rule (group commit, held sends and outputs,
+  recovery reads, the timer), the `Storage`, `Transport` and `Clock` traits and the `Events` and
+  output ports. It depends on no crate and knows no journal (layer 0). Its example `coordinator`
+  runs a toy coordinator and two workers on it.
 - `crates/lib/paros-journal-io` — the journal's IO side, pure (#1329): the four traits a backend
-  implements (`Storage`, `Transport`, `Clock`, `Register`), the on-disk format (`layout`), the
-  pure `Host` that serves many roles of many journals in one process, the generic `Driver` under
-  the flight rule (group commit, held sends), the `Events` port, backends in memory (`mem`) and
+  implements (`Storage<Journal>`, `Transport<Journal>` and `Clock`, the host's, and `Register`),
+  the on-disk format (`layout`), the journal `Host` that serves many roles of many journals in one
+  process and its `Driver`, both on `paros-host`, the `Events` port, backends in memory (`mem`) and
   the contract suites (`contract`). Its examples `in_memory`, `custom_storage` and `multi_writer`
   run the roles on it.
-- `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
+- `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`, `paros::host`,
   `paros::journal`, `paros::journal_io`). A program depends on `paros` alone. Wasm-safe and provider-free
   with its default features; it is where moonpool's storage and network get bundled, behind a
   feature, once the adapter exists (#1417 (the moonpool adapter on the generic host), in the layered parosd). Its examples (`examples/`) run a journal through

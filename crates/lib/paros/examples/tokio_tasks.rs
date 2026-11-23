@@ -48,8 +48,8 @@ use paros::journal::{
 };
 use paros::journal_io::mem::{MemRegister, MemStorage};
 use paros::journal_io::{
-    Address, Assignment, CallOutcome, Clock, Driver, Envelope, HostConfig, JournalId, Register,
-    Time, Transport,
+    Address, Assignment, CallOutcome, Clock, Driver, Envelope, HostConfig, Journal, JournalId,
+    Register, Time, Transport,
 };
 
 const JOURNAL: JournalId = JournalId(1);
@@ -79,7 +79,7 @@ struct Channels {
     receiver: UnboundedReceiver<Envelope>,
 }
 
-impl Transport for Channels {
+impl Transport<Journal> for Channels {
     fn send(&mut self, envelope: Envelope) {
         if let Some(inbox) = self.routes.borrow().get(&envelope.receiver()) {
             // A send to a task that stopped is a lost message: the roles

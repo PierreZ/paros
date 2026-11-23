@@ -1,8 +1,8 @@
 # Mutation testing of the lines that main changed since the last green night
 # (Pierre, 2026-11-23: mutation testing moved off pull requests). A pull
 # request runs no mutant; this workflow runs, each night, the mutants of
-# the lines of paros-consensus, paros-journal, paros-journal-control and
-# paros-journal-io that main changed since the head of the last successful
+# the lines of paros-consensus, paros-journal, paros-journal-control,
+# paros-journal-io and paros-host that main changed since the head of the last successful
 # scheduled run of this workflow (before the first green night: since the
 # head of the first night; with no night at all: the last 24 hours).
 # So a red night is judged again the next night until a fix lands.
@@ -101,12 +101,12 @@ jobs:
         run: |
           earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
           sudo "$earlyoom" -m 8 -s 100 -r 0 \
-            --prefer '^(paros_consensu|consensus_sim|paros_journal|journal_sim|flavors|walks|mutants|traces|coverage|host)' \
+            --prefer '^(paros_consensu|consensus_sim|paros_journal|paros_host|journal_sim|flavors|walks|mutants|traces|coverage|host)' \
             --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
             > earlyoom.log 2>&1 &
       # `scripts/mutants.sh` (no flag) is paros-consensus; `--journal` adds the
-      # trace checks of journal-sim as a second pass; `--control` and
-      # `--journal-io` run one pass.
+      # trace checks of journal-sim as a second pass; `--control`,
+      # `--journal-io` and `--host` run one pass.
       - name: Run the mutants of the lines main changed
         env:
           BASE: ${{ needs.plan.outputs.base }}

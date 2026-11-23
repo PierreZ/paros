@@ -21,6 +21,7 @@ use paros_journal::roles::{Message, PersistId};
 use paros_journal::{NodeId, SegmentId, Slot};
 
 use crate::clock::Clock;
+use crate::family::Journal;
 use crate::layout::{Entry, Key, Kind, Op};
 use crate::storage::Storage;
 use crate::transport::Transport;
@@ -43,7 +44,7 @@ fn values(entries: &[(Key, Entry)]) -> Vec<(Kind, u64, Vec<u8>)> {
         .collect()
 }
 
-fn scan<S: Storage>(storage: &mut S, address: Address) -> Vec<(Key, Entry)> {
+fn scan<S: Storage<Journal>>(storage: &mut S, address: Address) -> Vec<(Key, Entry)> {
     let entries = storage
         .scan(address)
         .unwrap_or_else(|error| panic!("storage: a scan of a healthy disk fails: {error}"));
@@ -60,7 +61,7 @@ fn scan<S: Storage>(storage: &mut S, address: Address) -> Vec<(Key, Entry)> {
     entries
 }
 
-fn commit<S: Storage>(storage: &mut S, ops: &[Op], sync: bool) {
+fn commit<S: Storage<Journal>>(storage: &mut S, ops: &[Op], sync: bool) {
     storage
         .commit(ops, sync)
         .unwrap_or_else(|error| panic!("storage: a commit on a healthy disk fails: {error}"));
@@ -74,7 +75,7 @@ fn commit<S: Storage>(storage: &mut S, ops: &[Op], sync: bool) {
 /// # Panics
 ///
 /// On the first rule that the backend breaks.
-pub fn storage<S: Storage>(mut fresh: impl FnMut() -> S) {
+pub fn storage<S: Storage<Journal>>(mut fresh: impl FnMut() -> S) {
     let a = Address::new(JournalId(1), NodeId(1));
     // A node whose bytes share a prefix with `a`'s node, in another journal.
     let b = Address::new(JournalId(256), NodeId(1));
@@ -176,7 +177,10 @@ pub fn storage<S: Storage>(mut fresh: impl FnMut() -> S) {
 /// # Panics
 ///
 /// On the first rule that the backend breaks.
-pub fn storage_reopen<S: Storage>(mut fresh: impl FnMut() -> S, mut reopen: impl FnMut(S) -> S) {
+pub fn storage_reopen<S: Storage<Journal>>(
+    mut fresh: impl FnMut() -> S,
+    mut reopen: impl FnMut(S) -> S,
+) {
     let a = Address::new(JournalId(7), NodeId(3));
     let mut disk = fresh();
     commit(
@@ -211,7 +215,7 @@ pub fn storage_reopen<S: Storage>(mut fresh: impl FnMut() -> S, mut reopen: impl
 /// # Panics
 ///
 /// On the first rule that the backend breaks.
-pub fn transport<T: Transport>(
+pub fn transport<T: Transport<Journal>>(
     sender: &mut T,
     receiver: &mut T,
     to: Address,

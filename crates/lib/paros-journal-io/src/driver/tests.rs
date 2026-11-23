@@ -13,10 +13,13 @@ use paros_journal::{
 };
 
 use super::*;
-use crate::layout::{Entry, Key, Kind};
+use crate::events::Event;
+use crate::host::Effect;
+use crate::layout::{self, Entry, Key, Kind, Op};
 use crate::mem::{Endpoint, ManualClock, MemNetwork, MemRegister, MemStorage};
 use crate::register::Register;
 use crate::storage::StorageError;
+use crate::wire::Envelope;
 
 const J: JournalId = JournalId(1);
 const TICK: u64 = 1_000;
@@ -37,7 +40,7 @@ const A: LeaderUuid = LeaderUuid(0xA);
 #[derive(Clone, Default)]
 struct Shared(Rc<RefCell<MemStorage>>);
 
-impl Storage for Shared {
+impl Storage<Journal> for Shared {
     fn commit(&mut self, ops: &[Op], sync: bool) -> Result<(), StorageError> {
         self.0.borrow_mut().commit(ops, sync)
     }
@@ -73,7 +76,7 @@ fn ballot_bytes(ballot: Ballot) -> Vec<u8> {
     bytes
 }
 
-impl Transport for Checked {
+impl Transport<Journal> for Checked {
     fn send(&mut self, envelope: Envelope) {
         match &envelope.message {
             Message::Accepted { ballot, slot } => {
@@ -859,35 +862,4 @@ fn a_read_at_a_role_that_stops_is_unserved() {
         }],
         "a role that is not served answers at once"
     );
-}
-
-#[test]
-fn a_stop_answers_only_the_held_reads_of_its_role() {
-    let world = World::new();
-    let disk = Shared::default();
-    let mut driver = world.process(&disk, &[11, 12]);
-    let stopped = Address::replica(J, NodeId(11), SegmentId(1));
-    let kept = Address::replica(J, NodeId(12), SegmentId(1));
-    // Two reads that wait on a batch of their replica, as inside a round.
-    driver
-        .held_reads
-        .push((PersistId(1), stopped, 7, ReadAnswer::Unserved));
-    driver
-        .held_reads
-        .push((PersistId(1), kept, 8, ReadAnswer::Unserved));
-    driver.on_stopped(stopped, Stop::Unassigned);
-    assert_eq!(
-        driver.take_reads(),
-        vec![ReadReply {
-            address: stopped,
-            read: 7,
-            answer: ReadAnswer::Unserved,
-        }]
-    );
-    assert_eq!(
-        driver.held_reads,
-        vec![(PersistId(1), kept, 8, ReadAnswer::Unserved)],
-        "the read of a role that runs still waits on its batch"
-    );
-    driver.held_reads.clear();
 }

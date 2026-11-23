@@ -2,11 +2,11 @@
 //! journal, the flight rule on the effects, calls and the timer.
 
 use paros_journal::register::Ballot;
-use paros_journal::roles::{LeaderPhase, Message};
+use paros_journal::roles::{LeaderPhase, Message, PersistId};
 use paros_journal::{Grid, OpeningCall, RELEASE, Slot};
 
 use super::*;
-use crate::layout::{Kind, acceptor_ops};
+use crate::layout::{self, Kind, acceptor_ops};
 
 const J: JournalId = JournalId(1);
 const K: JournalId = JournalId(2);
@@ -257,10 +257,13 @@ fn a_leader_needs_a_register_value_and_answers_calls() {
     for (address, id) in [(leader, 1), (at(J, 1), 2)] {
         assert_eq!(
             host.step(Time(1), call(address, id)),
-            vec![Effect::Reply {
+            vec![Effect::Output {
                 address,
-                call: id,
-                outcome: CallOutcome::NotLeader,
+                output: Output::Reply {
+                    call: id,
+                    outcome: CallOutcome::NotLeader,
+                },
+                after: None,
             }]
         );
     }
@@ -911,10 +914,12 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
     // A role that is not a replica that serves answers unserved.
     assert_eq!(
         host.step(Time(0), read(0)),
-        vec![Effect::ReadReply {
+        vec![Effect::Output {
             address: replica,
-            read: 7,
-            answer: ReadAnswer::Unserved,
+            output: Output::ReadReply {
+                read: 7,
+                answer: ReadAnswer::Unserved,
+            },
             after: None,
         }]
     );
@@ -965,10 +970,12 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::ReadReply {
+            [Effect::Output {
                 address,
-                read: 7,
-                answer: ReadAnswer::Page { sealed: false, .. },
+                output: Output::ReadReply {
+                    read: 7,
+                    answer: ReadAnswer::Page { sealed: false, .. },
+                },
                 ..
             }] if *address == replica
         ),

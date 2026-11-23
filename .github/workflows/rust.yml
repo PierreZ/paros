@@ -89,6 +89,8 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal --no-deps
       - name: Check the grid controller's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal-control --no-deps
+      - name: Check the host of actors' rustdoc links
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-host --no-deps
       - name: Check the journal IO crate's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal-io --no-deps
       # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
@@ -98,7 +100,9 @@ jobs:
       # `paros-journal-io` (#1329) do the same for the journal fold and for the journal roles on
       # the traits and the driver, with backends in memory and a storage written by hand. The
       # examples of the facade `paros` run a journal through `paros::` paths alone, in one process
-      # (`journal`) and on three tokio tasks (`tokio_tasks`; tokio is a dev-dependency of the facade). Every composing
+      # (`journal`) and on three tokio tasks (`tokio_tasks`; tokio is a dev-dependency of the facade). The example of
+      # `paros-host` (#1410 (split the generic host of actors)) runs roles that are not journal roles on the
+      # generic host and driver. Every composing
       # crate has examples (`scripts/check-examples.sh`). They are linted under the
       # same pedantic clippy as the crate by the clippy step's `--all-targets` above.
       - name: Run single_decree
@@ -127,6 +131,8 @@ jobs:
         run: nix develop --command cargo run -p paros-journal --example fold
       - name: Run the journal example register
         run: nix develop --command cargo run -p paros-journal --example register
+      - name: Run the host example coordinator
+        run: nix develop --command cargo run -p paros-host --example coordinator
       - name: Run the journal example in_memory
         run: nix develop --command cargo run -p paros-journal-io --example in_memory
       - name: Run the journal example custom_storage
