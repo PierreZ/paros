@@ -46,6 +46,15 @@
 (* positions written in this segment, with their write. Every command is   *)
 (* judged at apply (section J2.2, J2.4.1).                                 *)
 (*                                                                         *)
+(* COMPACTION. `JournalCompact.tla` adds the compaction of section J3.2:   *)
+(* a replica drops its log below a point, the acceptors drop the votes of  *)
+(* a segment (`adrop`), a laggard jumps (`rcomp`). This module holds what  *)
+(* the other steps do with it, so that its own checks keep the state space *)
+(* they had: a promise reports the slots dropped, a leader proposes        *)
+(* nothing there (`bskip`) and its seal end counts them as votes, an       *)
+(* acceptor refuses an `Accept` there, and a replica serves a peer only    *)
+(* the slots that it keeps.                                                *)
+(*                                                                         *)
 (* Constants select the rules. The first value of each is the design; each *)
 (* other value is a control that TLC must break.                          *)
 (*   Reply1b  "disk": a promise is sent once it is durable. "mem": it is   *)
@@ -162,8 +171,11 @@ VARIABLES
   blo,     \* ballot -> the first slot that it writes, fixed at Register
   bstart,  \* ballot -> the start of its segment when it opened, or None
   prop,    \* ballot -> slot -> its proposal, or None
+  bskip,   \* ballot -> the slots that its Phase 1 saw dropped
   \* Acceptors: memory, the queue of writes, disk.
   mprom, mvote, pend, dprom, dvote,
+  adrop,   \* acceptor -> the slots whose votes it dropped, in memory
+  dadrop,  \* acceptor -> the slots whose votes it dropped, on disk
   crashes, \* the crashes so far
   p1b,     \* the promises sent: [a, b, votes]
   sent2b,  \* the votes sent: <<s, b, v, a>>
@@ -173,12 +185,15 @@ VARIABLES
   rstart,  \* replica -> the start slot of its segment when it started, or None
   acked,   \* slot -> the answer that a replica gave, or None
   resolved, \* slot -> the answer to the Resolve of a `Below`, or None
-  rdrop    \* replica -> it dropped its copy (its segment is trimmed)
+  rdrop,   \* replica -> it dropped its copy (its segment is trimmed)
+  rcomp,   \* replica -> the slot below which it dropped its log
+  rfloor,  \* replica -> the trim floor of its compaction point
+  trims    \* the compaction points on a disk: <<segment, slot, floor>>
 
 reg == <<top, rend, rbound, rret, rtrim, bgen>>
-ldr == <<bst, bH, bE, bsafe, bend, blo, bstart, prop>>
-acc == <<mprom, mvote, pend, dprom, dvote, crashes, p1b, sent2b>>
-rep == <<rapp, rbase, rstart, acked, resolved, rdrop>>
+ldr == <<bst, bH, bE, bsafe, bend, blo, bstart, prop, bskip>>
+acc == <<mprom, mvote, pend, dprom, dvote, crashes, p1b, sent2b, adrop, dadrop>>
+rep == <<rapp, rbase, rstart, acked, resolved, rdrop, rcomp, rfloor, trims>>
 vars == <<reg, ldr, acc, rep>>
 
 (***************************************************************************)
@@ -255,6 +270,9 @@ TrueRes(s) == Res(Empty, Truth(s), ChosenVal(s))
 \* The boundary state: the fold with the records left out.
 Bound(st) == [st EXCEPT !.recs = {}]
 
+\* Slot s holds a record of the journal: a `Write` that applied.
+Record(s) == IsChosen(s) /\ ChosenVal(s) # Noop /\ ChosenVal(s).op = "w" /\ TrueRes(s) = "ok"
+
 (***************************************************************************)
 (* Replicas.                                                               *)
 (***************************************************************************)
@@ -263,6 +281,12 @@ Front(r) == rstart[r] + rapp[r]
 StateOf(r) == FoldFrom(rbase[r], rbase[r], rstart[r], Front(r))
 \* The replica applied every slot of its sealed segment.
 Full(r) == LET g == GenOf(r) IN EndKnown(g) /\ Front(r) = rend[g].v
+\* Replica q holds slot s in its log: it applied it and did not compact it.
+Holds(q, s) == rbase[q] # None /\ rstart[q] <= s /\ s < Front(q) /\ s >= rcomp[q]
+\* A fold that starts at a compaction point holds no write below the trim
+\* floor of the point: until its own first_seq reaches the floor, it gives
+\* no answer (`SegmentReplica`, a blind fold).
+Blind(r) == StateOf(r).first < rfloor[r]
 
 TypeOK ==
   /\ top \in Gens
@@ -300,6 +324,12 @@ Init ==
   /\ rstart = [r \in Replicas |-> IF r \in RepOf[1] THEN 0 ELSE None]
   /\ acked = [s \in Slots |-> None]
   /\ rdrop = [r \in Replicas |-> FALSE]
+  /\ rcomp = [r \in Replicas |-> 0]
+  /\ rfloor = [r \in Replicas |-> 0]
+  /\ trims = {}
+  /\ bskip = [b \in Ballots |-> {}]
+  /\ adrop = [a \in Acceptors |-> {}]
+  /\ dadrop = [a \in Acceptors |-> {}]
   /\ resolved = [s \in Slots |-> None]
 
 (***************************************************************************)
@@ -323,6 +353,13 @@ Reshape ==
 \* The configurations that the Phase 1 of a ballot of g reads.
 H(g) == {h \in Live : h <= g}
 
+\* The lowest slot that a campaign may write from: the start of the oldest
+\* configuration of its history.
+LowFrom == Start(Min(H(top)))
+\* The highest: the front of a replica of that configuration with a base.
+HighFrom == Max({LowFrom} \cup
+                {Front(r) : r \in {r \in RepOf[Min(H(top))] : rbase[r] # None}})
+
 \* Ballot b registers the newest configuration, in ballot order. The
 \* leader takes what its Phase 1 reads from the register value of its
 \* campaign, and keeps it (`JournalLeader::campaign`): the configurations
@@ -333,16 +370,20 @@ H(g) == {h \in Live : h <= g}
 \* acceptors waits, and a seal by another first leader stops this one.
 \* A ballot registers once, above every registered ballot: the second guard
 \* also refuses b itself once it registered.
-Register(b) ==
-  LET m == Min(H(top)) IN
+\* The leader writes from `lo`, from `LowFrom` to `HighFrom`. Phase 1 reads
+\* every slot from `lo`, so a lower `lo` reads more. `Register` takes the
+\* highest; `JournalCompact.tla` also takes the lowest, so that a Phase 1
+\* reads the slots the acceptors dropped.
+RegisterFrom(b, lo) ==
   /\ \A c \in Ballots : bgen[c] # 0 => c < b
   /\ <<b, top>> \in GenOK
   /\ bgen' = [bgen EXCEPT ![b] = top]
   /\ bH' = [bH EXCEPT ![b] = H(top)]
   /\ bE' = [bE EXCEPT ![b] = [h \in Gens |-> IF Done(rend[h]) THEN rend[h].v ELSE None]]
-  /\ blo' = [blo EXCEPT ![b] =
-       Max({Start(m)} \cup {Front(r) : r \in {r \in RepOf[m] : rbase[r] # None}})]
-  /\ UNCHANGED <<top, rend, rbound, rret, rtrim, bst, bsafe, bend, bstart, prop, acc, rep>>
+  /\ blo' = [blo EXCEPT ![b] = lo]
+  /\ UNCHANGED <<top, rend, rbound, rret, rtrim, bst, bsafe, bend, bstart, prop, bskip, acc, rep>>
+
+Register(b) == RegisterFrom(b, HighFrom)
 
 \* The slots of h that the Phase 1 of b reads: below the end, once the end
 \* was done at its Register.
@@ -353,8 +394,8 @@ ReadSet(b, h) == IF bE[b][h] # None THEN 0..(bE[b][h] - 1) ELSE Slots
 \* the acceptors in one step (as `experiments/segments/a/`); else from the
 \* promises that the acceptors sent.
 Reports(b, Q) ==
-  IF Direct THEN {<<a, mvote[a]>> : a \in Q}
-  ELSE {<<m.a, m.votes>> : m \in {m \in p1b : m.b = b /\ m.a \in Q}}
+  IF Direct THEN {<<a, mvote[a], adrop[a]>> : a \in Q}
+  ELSE {<<m.a, m.votes, m.drop>> : m \in {m \in p1b : m.b = b /\ m.a \in Q}}
 Promised(b, Q) ==
   IF Direct THEN \A a \in Q : a \in Active /\ mprom[a] < b
   ELSE \A a \in Q : \E m \in p1b : m.a = a /\ m.b = b
@@ -371,13 +412,19 @@ Phase1On(b, Qs) ==
           seen(s) == {x[2][s] : x \in UNION {Reports(b, Qs[h]) : h \in {h \in bH[b] : s \in ReadSet(b, h)}}}
           voted(s) == {x \in seen(s) : x[1] > 0}
           top1(s) == CHOOSE x \in voted(s) : \A y \in voted(s) : y[1] <= x[1]
-          \* The slots with a vote in the old grid.
+          \* The slots with a vote in the old grid: a dropped vote counts.
           old == IF g >= 2 /\ g - 1 \in bH[b]
-                 THEN {s \in Slots : \E x \in Reports(b, Qs[g - 1]) : x[2][s][1] > 0}
+                 THEN {s \in Slots : \E x \in Reports(b, Qs[g - 1]) :
+                         x[2][s][1] > 0 \/ s \in x[3]}
                  ELSE {}
           all == UNION {Qs[h] : h \in bH[b]}
+          \* A slot that one acceptor dropped is chosen and applied at
+          \* F + 1 replicas (`JournalCompact.tla`): the leader proposes
+          \* nothing there.
+          skip == UNION {x[3] : x \in UNION {Reports(b, Qs[h]) : h \in bH[b]}}
       IN /\ bsafe' = [bsafe EXCEPT ![b] =
-              [s \in Slots |-> IF voted(s) # {} THEN top1(s)[2] ELSE None]]
+              [s \in Slots |-> IF voted(s) # {} /\ s \notin skip THEN top1(s)[2] ELSE None]]
+         /\ bskip' = [bskip EXCEPT ![b] = skip]
          \* A first leader of g: the end of g - 1 was not written at its
          \* Register. The end is at or above the first slot it writes.
          /\ bend' = [bend EXCEPT ![b] =
@@ -392,7 +439,7 @@ Phase1On(b, Qs) ==
                  /\ dprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE dprom[a]]
             ELSE UNCHANGED <<mprom, dprom>>
   /\ bst' = [bst EXCEPT ![b] = "p1"]
-  /\ UNCHANGED <<reg, bH, bE, blo, prop, bstart, mvote, pend, dvote, crashes, p1b, sent2b, rep>>
+  /\ UNCHANGED <<reg, bH, bE, blo, prop, bstart, mvote, pend, dvote, crashes, p1b, sent2b, adrop, dadrop, rep>>
 
 Phase1(b) == \E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : Phase1On(b, Qs)
 
@@ -437,7 +484,7 @@ Open(b) ==
   /\ IF g >= 2 /\ bend[b] # None THEN rend[g - 1].v = bend[b] ELSE TRUE
   /\ bst' = [bst EXCEPT ![b] = "w"]
   /\ bstart' = [bstart EXCEPT ![b] = Start(g)]
-  /\ UNCHANGED <<reg, bH, bE, bsafe, bend, blo, prop, acc, rep>>
+  /\ UNCHANGED <<reg, bH, bE, bsafe, bend, blo, prop, bskip, acc, rep>>
 
 (***************************************************************************)
 (* Phase 2. The leader of b writes every slot of its segment, and below    *)
@@ -446,6 +493,7 @@ Open(b) ==
 (***************************************************************************)
 Writable(b) ==
   {s \in Slots : /\ s >= blo[b]
+                 /\ s \notin bskip[b]
                  /\ \/ s >= bstart[b]
                     \/ bsafe[b][s] # None
                     \/ GapFill}
@@ -464,12 +512,14 @@ Propose(b, s, v) ==
            ELSE IF s < bstart[b] \/ s < TopSeen(b) THEN {Noop}
            ELSE Values[s]
   /\ prop' = [prop EXCEPT ![b][s] = v]
-  /\ UNCHANGED <<reg, bst, bH, bE, bsafe, bend, blo, bstart, acc, rep>>
+  /\ UNCHANGED <<reg, bst, bH, bE, bsafe, bend, blo, bstart, bskip, acc, rep>>
 
 (***************************************************************************)
 (* Acceptors: a step changes memory and queues its writes. A write is      *)
 (* <<kind, s, b, v, send>>: kind "p" (promise b), "v" (vote <<b, v>> at s) *)
 (* or "pv" (both). send tells whether the write's flush sends the reply.   *)
+(* Kind "d" is the compaction of `JournalCompact.tla`: <<"d", s, x, ..>>   *)
+(* drops the votes of the slots s .. x - 1.                                *)
 (***************************************************************************)
 \* `bH[b]` is empty until b registers, so only a registered ballot is promised.
 Promise(a, b) ==
@@ -479,13 +529,13 @@ Promise(a, b) ==
   /\ mprom[a] < b
   /\ mprom' = [mprom EXCEPT ![a] = b]
   /\ CASE Reply1b = "mem" ->
-          /\ p1b' = p1b \cup {[a |-> a, b |-> b, votes |-> mvote[a]]}
+          /\ p1b' = p1b \cup {[a |-> a, b |-> b, votes |-> mvote[a], drop |-> adrop[a]]}
           /\ pend' = [pend EXCEPT ![a] = Append(@, <<"p", 0, b, None, FALSE>>)]
           /\ UNCHANGED dprom
        [] OTHER ->
           /\ pend' = [pend EXCEPT ![a] = Append(@, <<"p", 0, b, None, TRUE>>)]
           /\ UNCHANGED <<p1b, dprom>>
-  /\ UNCHANGED <<reg, ldr, mvote, dvote, crashes, sent2b, rep>>
+  /\ UNCHANGED <<reg, ldr, mvote, dvote, crashes, sent2b, adrop, dadrop, rep>>
 
 Accept(a, b, s) ==
   LET v == prop[b][s]
@@ -500,6 +550,8 @@ Accept(a, b, s) ==
   /\ a \in CfgOf[bgen[b]]
   /\ a \in Active
   /\ v # None
+  \* A dropped slot is chosen: the acceptor refuses it.
+  /\ s \notin adrop[a]
   /\ mprom[a] <= b
   /\ mvote[a][s] # <<b, v>>
   /\ mprom' = [mprom EXCEPT ![a] = b]
@@ -512,22 +564,26 @@ Accept(a, b, s) ==
      ELSE /\ pend' = [pend EXCEPT ![a] = @ \o ws]
           /\ sent2b' = IF Reply2b = "mem" THEN sent2b \cup {<<s, b, v, a>>} ELSE sent2b
           /\ UNCHANGED <<dprom, dvote>>
-  /\ UNCHANGED <<reg, ldr, crashes, p1b, rep>>
+  /\ UNCHANGED <<reg, ldr, crashes, p1b, adrop, dadrop, rep>>
 
 \* The driver makes the first queued write durable, and sends its reply.
 Flush(a) ==
   LET w == Head(pend[a])
       k == w[1]
       dp == IF k \in {"p", "pv"} THEN w[3] ELSE dprom[a]
-      dv == IF k \in {"v", "pv"} THEN [dvote[a] EXCEPT ![w[2]] = <<w[3], w[4]>>] ELSE dvote[a]
+      dv == CASE k \in {"v", "pv"} -> [dvote[a] EXCEPT ![w[2]] = <<w[3], w[4]>>]
+              [] k = "d" -> [s \in Slots |-> IF s \in w[2]..(w[3] - 1) THEN NoVote ELSE dvote[a][s]]
+              [] OTHER -> dvote[a]
+      dd == IF k = "d" THEN dadrop[a] \cup w[2]..(w[3] - 1) ELSE dadrop[a]
   IN
   /\ pend[a] # <<>>
   /\ dprom' = [dprom EXCEPT ![a] = dp]
   /\ dvote' = [dvote EXCEPT ![a] = dv]
   /\ pend' = [pend EXCEPT ![a] = Tail(@)]
-  /\ p1b' = IF k = "p" /\ w[5] THEN p1b \cup {[a |-> a, b |-> w[3], votes |-> dv]} ELSE p1b
+  /\ dadrop' = [dadrop EXCEPT ![a] = dd]
+  /\ p1b' = IF k = "p" /\ w[5] THEN p1b \cup {[a |-> a, b |-> w[3], votes |-> dv, drop |-> dd]} ELSE p1b
   /\ sent2b' = IF k \in {"v", "pv"} /\ w[5] THEN sent2b \cup {<<w[2], w[3], w[4], a>>} ELSE sent2b
-  /\ UNCHANGED <<reg, ldr, mprom, mvote, crashes, rep>>
+  /\ UNCHANGED <<reg, ldr, mprom, mvote, crashes, adrop, rep>>
 
 \* A crash between two writes: the queue is lost, and the role starts again
 \* from its disk.
@@ -536,8 +592,9 @@ Crash(a) ==
   /\ crashes' = crashes + 1
   /\ mprom' = [mprom EXCEPT ![a] = dprom[a]]
   /\ mvote' = [mvote EXCEPT ![a] = dvote[a]]
+  /\ adrop' = [adrop EXCEPT ![a] = dadrop[a]]
   /\ pend' = [pend EXCEPT ![a] = <<>>]
-  /\ UNCHANGED <<reg, ldr, dprom, dvote, p1b, sent2b, rep>>
+  /\ UNCHANGED <<reg, ldr, dprom, dvote, p1b, sent2b, dadrop, rep>>
 
 \* A quorum of a grid that still runs holds a chosen vote of slot s on disk.
 \* (A later ballot can only vote the chosen value again, so a quorum may hold
@@ -552,7 +609,10 @@ OnDisk(s) == IsChosen(s) /\ \E g \in Live : \E Q \in QOf[g] : \A a \in Q :
 (***************************************************************************)
 \* A replica applies the next chosen slot of its segment and answers its
 \* writer. It stops at the end of its segment, once the end is known.
-Apply(r) ==
+\* With commit, the replica may also learn a chosen slot from a `Commit` of
+\* a leader that saw it chosen: the message can arrive after every live
+\* source dropped the slot (`JournalCompact.tla`).
+ApplyIf(r, commit) ==
   LET g == GenOf(r)
       s == Front(r)
   IN
@@ -568,10 +628,15 @@ Apply(r) ==
   \* It learns the slot from a live source: a quorum of a grid that still
   \* runs holds the vote on its disk, or a peer of its set applied it.
   \* Both sources hold a chosen slot only (`OnDisk` and a peer's `Apply`).
-  /\ OnDisk(s) \/ \E q \in RepOf[g] \ {r} : rbase[q] # None /\ Front(q) > s
+  /\ \/ OnDisk(s)
+     \/ \E q \in RepOf[g] \ {r} : Holds(q, s)
+     \/ commit /\ IsChosen(s)
   /\ rapp' = [rapp EXCEPT ![r] = @ + 1]
-  /\ acked' = [acked EXCEPT ![s] = Res(rbase[r], StateOf(r), ChosenVal(s))]
-  /\ UNCHANGED <<reg, ldr, acc, rbase, rstart, resolved, rdrop>>
+  /\ acked' = IF Blind(r) THEN acked
+              ELSE [acked EXCEPT ![s] = Res(rbase[r], StateOf(r), ChosenVal(s))]
+  /\ UNCHANGED <<reg, ldr, acc, rbase, rstart, resolved, rdrop, rcomp, rfloor, trims>>
+
+Apply(r) == ApplyIf(r, FALSE)
 
 \* A replica that applied every slot of its sealed segment writes the
 \* boundary state, by compare-and-set from "no boundary".
@@ -604,7 +669,8 @@ TakeBase(r) ==
   /\ StartKnown(g)
   /\ rbase' = [rbase EXCEPT ![r] = rbound[g - 1].v]
   /\ rstart' = [rstart EXCEPT ![r] = Start(g)]
-  /\ UNCHANGED <<reg, ldr, acc, rapp, acked, resolved, rdrop>>
+  /\ rcomp' = [rcomp EXCEPT ![r] = Start(g)]
+  /\ UNCHANGED <<reg, ldr, acc, rapp, acked, resolved, rdrop, rfloor, trims>>
 
 (***************************************************************************)
 (* Resolve (section J2.2, #1320). A client whose fenced write got `Below`  *)
@@ -637,6 +703,7 @@ Covers(r, e) ==
   /\ rbase[r] # None
   /\ StartKnown(GenOf(r))
   /\ ~rtrim[GenOf(r)]
+  /\ ~Blind(r)
   /\ CoversOn(rbase[r], StateOf(r), e)
 
 ResolveBelow(s, r) ==
@@ -644,7 +711,7 @@ ResolveBelow(s, r) ==
   /\ resolved[s] = None
   /\ Covers(r, ChosenVal(s).e)
   /\ resolved' = [resolved EXCEPT ![s] = ResolveAt(r, ChosenVal(s))]
-  /\ UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked, rdrop>>
+  /\ UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked, rdrop, rcomp, rfloor, trims>>
 
 (***************************************************************************)
 (* Retire and trim (sections J3.1, J3.2, J3.4).                            *)
@@ -683,7 +750,7 @@ Drop(r) ==
   /\ rtrim[GenOf(r)]
   /\ ~rdrop[r]
   /\ rdrop' = [rdrop EXCEPT ![r] = TRUE]
-  /\ UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked, resolved>>
+  /\ UNCHANGED <<reg, ldr, acc, rapp, rbase, rstart, acked, resolved, rcomp, rfloor, trims>>
 
 Next ==
   \/ Reshape
@@ -749,11 +816,9 @@ OneUnretired == Cardinality({g \in 1..top : ~rret[g]}) <= 2
 \* that still runs holds its vote on disk, or a replica of its segment
 \* applied it and the segment is not trimmed.
 HeldBy(s) == \E r \in Replicas :
-  /\ rbase[r] # None
   /\ ~rtrim[GenOf(r)]
   /\ StartKnown(GenOf(r))
-  /\ rstart[r] <= s /\ s < Front(r)
-Record(s) == IsChosen(s) /\ ChosenVal(s) # Noop /\ ChosenVal(s).op = "w" /\ TrueRes(s) = "ok"
+  /\ Holds(r, s)
 Readable == \A s \in Slots :
   s < Frontier /\ Record(s) /\ Truth(s).next >= Truth(Frontier).first =>
     OnDisk(s) \/ HeldBy(s)

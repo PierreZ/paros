@@ -67,7 +67,8 @@
 //!   they are, not as the view says.
 //! - [`HEAL_HELD`]: each node that a done heal added to the set of a
 //!   retired segment holds every slot of it on its disk while the set
-//!   names it.
+//!   names it, but the slots below its compaction point, each of which
+//!   wrote only records below the trim floor that the log decided.
 //!
 //! **The liveness claim** (goal 2, the heal bound: the settle budget of the
 //! walk): once the faults stop, every machine is up again; each journal has
@@ -177,6 +178,8 @@ pub mod reach {
     pub const RETIRED: &str = "whole journal: a sealed segment retired";
     /// A write was chosen in a segment that a heal opened.
     pub const HEALED_WRITE: &str = "whole journal: a write chosen in a segment a heal opened";
+    /// A node that a heal added holds a compacted copy of its segment.
+    pub const HEALED_TRIM: &str = "whole journal: a healed replica holds a compacted copy";
     /// The controller held a heal and alerted that no placement exists.
     pub const UNPLACEABLE: &str = "whole journal: the controller alerted no placement";
     /// A controller that runs read that another took its term, and stopped.
@@ -211,6 +214,7 @@ pub mod reach {
         SEALED,
         RETIRED,
         HEALED_WRITE,
+        HEALED_TRIM,
         UNPLACEABLE,
         NO_TOKEN,
         REREPLICATE,
@@ -1648,9 +1652,12 @@ impl WholeModel {
 
     /// [`HEAL_HELD`]: each node that a done heal added to the set of a
     /// retired segment holds every slot of the segment on its disk while
-    /// the set names it.
+    /// the set names it, but the slots below its `Trim`: the compaction
+    /// drops a slot only when every record it wrote is below the trim
+    /// floor, the floor is one that the chosen log decided, and the fold of
+    /// the `Trim` is the fold of the chosen log at its slot.
     fn judge_heals(&self) {
-        for journal in &self.journals {
+        for (j, journal) in self.journals.iter().enumerate() {
             let value = self.value_of(journal.id);
             for (segment, node) in &journal.added {
                 let Some(record) = value.segment(*segment) else {
@@ -1668,19 +1675,66 @@ impl WholeModel {
                     .borrow_mut()
                     .scan(address)
                     .expect("a scan of memory");
-                let held: BTreeSet<u64> = entries
-                    .iter()
-                    .filter(|(key, entry)| {
-                        key.kind == paros_journal_io::layout::Kind::Chosen
-                            && matches!(entry, paros_journal_io::layout::Entry::Value(_))
-                    })
-                    .map(|(key, _)| key.index)
+                let disk = paros_journal_io::layout::decode_replica(address, &entries)
+                    .expect("a replica disk the walk never damages here");
+                let below = disk
+                    .trim
+                    .as_ref()
+                    .map_or(start, |trim| trim.slot.max(start));
+                let missing: Vec<u64> = (below.0..end.0)
+                    .filter(|s| !disk.chosen.contains_key(&Slot(*s)))
                     .collect();
-                let missing: Vec<u64> = (start.0..end.0).filter(|s| !held.contains(s)).collect();
                 assert!(
                     missing.is_empty(),
                     "{HEAL_HELD}: {node:?} of {segment:?} misses the slots {missing:?}"
                 );
+                let Some(trim) = disk.trim.as_ref().filter(|trim| trim.slot > start) else {
+                    continue;
+                };
+                sometimes!(true, reach::HEALED_TRIM);
+                let (states, _, truth) = self.truth(j);
+                // The fold that the healed node starts from at its trim is
+                // the fold of the chosen log before the trim's slot.
+                let mut before = Truth::new(Leader::Unset);
+                for slot in 0..trim.slot.0 {
+                    before.apply(&journal.chosen[&Slot(slot)]);
+                }
+                assert!(
+                    (
+                        trim.state.leader(),
+                        trim.state.next_seq().0,
+                        trim.state.first_seq().0
+                    ) == (before.leader, before.next, before.first),
+                    "{HEAL_HELD}: {node:?} of {segment:?} trims at {:?} with the fold {:?}, \
+                     the chosen log has {:?} there",
+                    trim.slot,
+                    trim.state.view(),
+                    (before.leader, before.next, before.first)
+                );
+                assert!(
+                    trim.floor.0 <= truth.first,
+                    "{HEAL_HELD}: {node:?} of {segment:?} trims at the floor {:?}, above the \
+                     decided floor {}",
+                    trim.floor,
+                    truth.first
+                );
+                let dropped = (0u64..)
+                    .zip(&states)
+                    .filter(|(slot, _)| (start.0..trim.slot.0).contains(slot));
+                for (slot, (before, verdict)) in dropped {
+                    let reaches = match (journal.chosen.get(&Slot(slot)), *verdict) {
+                        (Some(Command::Write(write)), "ok") => {
+                            before + write.records.len() as u64 > trim.floor.0
+                        }
+                        _ => false,
+                    };
+                    assert!(
+                        !reaches,
+                        "{HEAL_HELD}: {node:?} of {segment:?} dropped slot {slot}, which wrote \
+                         a record at or above its trim floor {:?}",
+                        trim.floor
+                    );
+                }
             }
         }
     }

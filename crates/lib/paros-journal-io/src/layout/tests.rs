@@ -3,7 +3,7 @@
 //! damaged record is reported.
 
 use paros_journal::fold::BoundaryState;
-use paros_journal::roles::{AcceptorDisk, AcceptorOp, ReplicaDisk, ReplicaOp};
+use paros_journal::roles::{AcceptorDisk, AcceptorOp, AcceptorWrite, ReplicaDisk, ReplicaOp};
 use paros_journal::{Command, Leader};
 
 use super::*;
@@ -63,27 +63,38 @@ fn commit(storage: &mut MemStorage, ops: &[Op]) {
 #[test]
 fn acceptor_batches_read_back_as_the_roles_disk() {
     let batches: Vec<(PersistId, Vec<AcceptorOp>)> = vec![
-        (PersistId(0), vec![AcceptorOp::SetPromise(ballot(1))]),
+        (
+            PersistId(0),
+            vec![AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(1)))],
+        ),
         (
             PersistId(1),
             vec![
-                AcceptorOp::SetPromise(ballot(2)),
-                AcceptorOp::AppendAccepted {
+                AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(2))),
+                AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                     slot: Slot(0),
                     ballot: ballot(2),
                     value: Command::Noop,
-                },
+                }),
             ],
         ),
         (
             PersistId(2),
-            vec![AcceptorOp::AppendAccepted {
+            vec![AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot: Slot(7),
                 ballot: ballot(2),
                 value: Command::SetLeader {
                     new: None,
                     old: Leader::Unset,
                 },
+            })],
+        ),
+        (
+            PersistId(3),
+            vec![AcceptorOp::Compact {
+                segment: SegmentId(1),
+                start: Slot(0),
+                below: Slot(7),
             }],
         ),
     ];
@@ -95,6 +106,12 @@ fn acceptor_batches_read_back_as_the_roles_disk() {
         let read = decode_acceptor(A, &storage.scan(A).expect("a scan"));
         assert_eq!(read, Ok(expected.clone()), "after batch {id:?}");
     }
+    // The dropped range hides the vote at slot 0 and keeps the one at 7.
+    assert_eq!(
+        expected.votes.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(7)]
+    );
+    assert_eq!(expected.dropped.get(&Slot(0)), Some(&Slot(7)));
 }
 
 #[test]
@@ -125,6 +142,14 @@ fn replica_batches_read_back_as_the_roles_disk() {
             ],
         ),
         (PersistId(6), vec![ReplicaOp::Joining(None)]),
+        (
+            PersistId(7),
+            vec![ReplicaOp::Compact(paros_journal::roles::Trim {
+                slot: Slot(4),
+                state: paros_journal::fold::JournalState::resume(boundary, Seq(0)).expect("a fold"),
+                floor: Seq(0),
+            })],
+        ),
     ];
     let mut storage = MemStorage::new();
     let mut expected = ReplicaDisk::default();
@@ -134,6 +159,12 @@ fn replica_batches_read_back_as_the_roles_disk() {
         let read = decode_replica(A, &storage.scan(A).expect("a scan"));
         assert_eq!(read, Ok(expected.clone()), "after batch {id:?}");
     }
+    // The trim hides the slot below its point and keeps the one at it.
+    assert_eq!(
+        expected.chosen.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(4)]
+    );
+    assert_eq!(expected.trim.map(|t| t.slot), Some(Slot(4)));
 }
 
 #[test]
@@ -143,23 +174,24 @@ fn every_damaged_record_is_reported() {
         A,
         PersistId(0),
         &[
-            AcceptorOp::SetPromise(ballot(1)),
-            AcceptorOp::AppendAccepted {
+            AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(1))),
+            AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot: Slot(1),
                 ballot: ballot(1),
                 value: Command::Noop,
-            },
-            AcceptorOp::AppendAccepted {
+            }),
+            AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot: Slot(2),
                 ballot: ballot(1),
                 value: Command::Noop,
-            },
+            }),
         ],
     );
     commit(&mut storage, &ops);
     let corrupt = Key::new(A, Kind::Vote, 1);
     let garbled = Key::new(A, Kind::Vote, 2);
     let foreign = Key::new(A, Kind::Chosen, 5);
+    let empty = Key::new(A, Kind::Dropped, 4);
     storage.corrupt(corrupt);
     commit(
         &mut storage,
@@ -172,14 +204,19 @@ fn every_damaged_record_is_reported() {
                 key: foreign,
                 value: Vec::new(),
             },
+            Op {
+                key: empty,
+                value: 4u64.to_be_bytes().to_vec(),
+            },
         ],
     );
     let entries = storage.scan(A).expect("a scan");
     assert_eq!(
         decode_acceptor(A, &entries),
         Err(Damage {
-            keys: vec![corrupt, garbled, foreign]
-        })
+            keys: vec![corrupt, garbled, foreign, empty]
+        }),
+        "a dropped range that holds no slot is damage"
     );
     let replica = decode_replica(A, &entries).expect_err("an acceptor's records");
     assert!(replica.keys.contains(&Key::new(A, Kind::Promise, 0)));

@@ -1,6 +1,7 @@
 ------------------------------ MODULE RolesTrace ------------------------------
 (***************************************************************************)
-(* The trace spec of the journal roles: the actions of `Journal.tla`,      *)
+(* The trace spec of the journal roles: the actions of `Journal.tla` and   *)
+(* of the compaction in `JournalCompact.tla`,                              *)
 (* forced to follow the events that one roles walk of `journal-sim`        *)
 (* recorded (#1326 (the journal roles over the core),                      *)
 (* `crates/sim/journal-sim/src/roles.rs`). `l` is the index of the next    *)
@@ -9,7 +10,7 @@
 (* no rule of its own (#1306 (trace specs extend the checked model)).      *)
 (*                                                                         *)
 (*   "reshape"  `Reshape`: the controller opened segment g.               *)
-(*   "register" `Register(b)`: a campaign; its leader writes from `from`. *)
+(*   "register" `RegisterFrom(b, from)`: a campaign from `from`.           *)
 (*   "promise"  `Promise(a, b)`: an acceptor queued a raised promise.      *)
 (*   "accept"   `Accept(a, b, s)`: an acceptor queued a vote.              *)
 (*   "flush"    `Flush(a)`: the acceptor's first queued batch is durable,  *)
@@ -19,18 +20,23 @@
 (*              the acceptors q; a first leader computed `end`.            *)
 (*   "seal"     `SealWrite(b)`; "open" `Open(b)` from `start`.             *)
 (*   "propose"  `Propose(b, s, v)`.                                        *)
-(*   "base"     `TakeBase(r)`; "apply" `Apply(r)` at slot s, answered res; *)
+(*   "base"     `TakeBase(r)`; "apply" `Apply(r)` at slot s, answered      *)
+(*              res, with no res when the fold was blind (a `Commit` of    *)
+(*              the leader is a source too once an acceptor dropped s);    *)
 (*   "boundary" `BoundWrite(r)`; "retire" `Retire(p)`;                     *)
 (*   "trim"     `Trim(p, r)`: the register took the trim of replica r.     *)
 (*   "drop"     `Drop(r)`: replica r dropped its copy of a trimmed segment.*)
 (*   "resolve"  `ResolveBelow(s, r)`, answered res.                        *)
+(*   "compact"  `AccCompact(a, p, x)`: an acceptor queued its compaction.  *)
+(*   "compact_replica" `RepCompact(r)`: replica r compacted to slot.       *)
+(*   "jump"     `JumpFrom(r, m)`: replica r took the point slot, floor.    *)
 (*                                                                         *)
 (* The trace defines the sizes and the grids: `TraceGrids` (the acceptors  *)
 (* of each segment, from 1), `TraceSlots`, `TraceBallots`, `TraceCrashes`, *)
 (* `TraceFresh` (the leader of the fresh journal) and `TraceValues` (the   *)
 (* commands proposed at each slot, from slot 0).                           *)
 (***************************************************************************)
-EXTENDS Journal, Trace, TLC
+EXTENDS JournalCompact, Trace, TLC
 
 VARIABLES l
 
@@ -74,8 +80,8 @@ TraceStep ==
      /\ top' = e.g
      /\ CfgOf[e.g] = e.grid
   \/ /\ e.event = "register"
-     /\ Register(e.b)
-     /\ blo'[e.b] = e.from
+     /\ e.from \in LowFrom..HighFrom
+     /\ RegisterFrom(e.b, e.from)
   \/ e.event = "promise" /\ Promise(e.a, e.b)
   \/ e.event = "accept" /\ Accept(e.a, e.b, e.s)
   \/ e.event = "flush" /\ Flush(e.a)
@@ -90,14 +96,24 @@ TraceStep ==
   \/ e.event = "propose" /\ Propose(e.b, e.s, Cmd(e))
   \/ e.event = "base" /\ TakeBase(e.r)
   \/ /\ e.event = "apply"
-     /\ Apply(e.r)
+     \* A leader's `Commit` is a source only once an acceptor dropped the
+     \* slot: before, the slot has a source of `Apply`.
+     /\ \/ Apply(e.r)
+        \/ /\ \E a \in Acceptors : e.s \in adrop[a] \cup dadrop[a]
+           /\ ApplyIf(e.r, TRUE)
      /\ Front(e.r) = e.s
      /\ ChosenVal(e.s) = Cmd(e)
-     /\ acked'[e.s] = e.res
+     /\ IF Has("res") THEN ~Blind(e.r) /\ acked'[e.s] = e.res ELSE Blind(e.r)
   \/ e.event = "boundary" /\ BoundWrite(e.r)
   \/ e.event = "retire" /\ Retire(e.p)
   \/ e.event = "trim" /\ Trim(e.p, e.r)
   \/ e.event = "drop" /\ Drop(e.r)
+  \/ e.event = "compact" /\ AccCompact(e.a, e.p, e.x)
+  \/ /\ e.event = "compact_replica"
+     /\ RepCompact(e.r)
+     /\ rcomp'[e.r] = e.slot
+  \/ /\ e.event = "jump"
+     /\ \E m \in trims : m[2] = e.slot /\ m[3] = e.floor /\ JumpFrom(e.r, m)
   \/ /\ e.event = "resolve"
      /\ ResolveBelow(e.s, e.r)
      /\ resolved'[e.s] = e.res

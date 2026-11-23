@@ -34,7 +34,12 @@ Test only: `publish = false`.
   a replica that hears the register late (`READ`, mutant `ReadNoFence`); the trim of a retired
   segment (`TRIM`, mutant `TrimIntent`, trace events `Trim` and `Drop`) and a reader that takes its floor from
   the segment in force (`FLOOR`, mutant `FloorFromHolder`); and the leader time of each write
-  (`STAMPED`, mutant `UnstampedAccept`).
+  (`STAMPED`, mutant `UnstampedAccept`). The compaction of the acceptors and the replicas on
+  `F + 1` reports (`COMPACT`, mutant `ForgedCompacted`; a Phase 1 that hides the dropped votes,
+  mutant `DroppedHidden`, is caught by `AGREE`), the trim-point jump of a laggard and the blind
+  fold that follows it (trace events `Compact`, `CompactReplica` and `Jump`): a deaf replica misses
+  its segment while a truncate in flight cuts it, and one campaign in three writes from the start
+  of its oldest segment, so its Phase 1 reads the dropped slots.
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
   controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
   `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each
@@ -87,7 +92,7 @@ Test only: `publish = false`.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/roles.rs`: the events of a roles walk as a trace of
-  `specs/tla/journal-state/RolesTrace.tla`, and the named edits of its recorded traces.
+  `specs/tla/journal-compact/RolesTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/register.rs`: the events of a register walk as a trace of
   `specs/tla/segment-records/RegisterTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/controller.rs`: the events of a controller walk as a trace of
@@ -124,7 +129,7 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
   model, with its check, in the same PR.
 - **`RegisterTrace` extends `SegmentRecords.tla`**, **`ControllerTrace` extends
   `GridController.tla`** and **`HealTrace` extends `HealReuse.tla`**, in the same way: each event is an action of the model. **`RolesTrace`
-  extends `Journal.tla`**: each event of the roles walk is one action of the model, with the
+  extends `JournalCompact.tla`**, the compaction over `Journal.tla`: each event of the roles walk is one action of the model, with the
   parameters that the code chose.
 - **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register;
   `BoundaryBeforeDurable` for the roles; `ElectNoCas` for the controller; `SameCopyAgain` for the

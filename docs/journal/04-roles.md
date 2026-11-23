@@ -74,8 +74,12 @@ The proxy leader, the leaderless read and the trim are built too (2026-11-22):
   the read `Truncated` itself below that floor, and sends `Request::Read` only at or above it.
 - The leader stamps the leader time of each write at propose (§J2.8, #1299).
 
-The compaction of the acceptors per segment, the laggard's trim-point jump and the repair of a
-blocked slot (CTRL) are the last rule groups of #1326.
+- The compaction (§J3.2, "As built: the compaction"): each replica compacts its log to a `Trim`,
+  the leader sends each acceptor the point that `F + 1` replicas of the set reached
+  (`Compaction`, `CompactedTo`, `Compact`), the acceptor drops the votes below it and names the
+  dropped ranges in its promises, and a laggard jumps to a peer's `Trim` (`TrimmedTo`).
+
+The repair of a blocked slot (CTRL) is the last rule group of #1326.
 
 **The default deployment** is three machines, each with every role in one process (Pierre, in
 the journal design); the `Host` also supports one process for each role (§J4.2, rule 3).
@@ -302,7 +306,7 @@ creates these crates, each in its own step. `paros-journal` and `journal-sim` ex
 | `paros-journal-control` (`crates/lib/`) | The pure `decide` of the v1 controller and the controller role | #1328 (paros-journal-control) |
 | `paros-journal-io` (`crates/lib/`) | The traits that a backend implements (one storage trait, the transport, the clock, the register), the on-disk format, the pure `Host` (many journals in one process), the generic driver under the flight rule, the `Events` port, backends in memory and the contract suites. Its examples `in_memory` and `custom_storage` run the roles on it. Its traits are not stable until the moonpool adapter of #1417 runs on them (2026-11-22) | #1329 (paros-journal-io) |
 | `paros-journal-moonpool` (`crates/lib/`) | Not in v1: the adapter of the `paros-journal-io` traits on moonpool providers (compio through moonpool's `CompioProviders`, no trait requires `Send`; Pierre, 2026-11-19), with moonpool RPC and protobuf as its transport ("The wire" below). It is built by the layered parosd (Pierre, 2026-11-22) | #1417 (the moonpool adapter on the generic host), with #1330 |
-| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla`; the walk of the roles, its trace check against `journal-state/RolesTrace.tla` | #1327 (journal-sim) |
+| `journal-sim` (`crates/sim/`) | The seeded walks over the journal's pure roles, the oracles, the trace check against #1189 and the coverage gate (section J7). Today: the walk of the fold over a chain of segments, its trace check against `journal-state/FoldTrace.tla`; the walk of the register across handovers, its trace check against `segment-records/RegisterTrace.tla`; the walk of the roles, its trace check against `journal-compact/RolesTrace.tla` | #1327 (journal-sim) |
 
 The journal roles that compose the core (segments, seal, reads, retire, truncate,
 re-replication) are #1326 (the journal roles). They live in `paros-journal`, module `roles`

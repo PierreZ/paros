@@ -61,9 +61,9 @@ use paros_journal::resolve::ResolveAnswer;
 use paros_journal::roles::acceptor::AcceptorDisk;
 use paros_journal::roles::replica::ReplicaDisk;
 use paros_journal::roles::{
-    AcceptorEffect, AcceptorWrite, Campaign, JournalAcceptor, JournalLeader, JournalProxy,
-    LeaderEffect, LeaderPhase, Message, PROMISE_BATCH, PersistId, Proposed, ProxyEffect,
-    ReadAnswer, ReplicaEffect, ReplicaOp, SegmentReplica,
+    AcceptorEffect, AcceptorOp, AcceptorWrite, Campaign, JournalAcceptor, JournalLeader,
+    JournalProxy, LeaderEffect, LeaderPhase, Message, PROMISE_BATCH, PersistId, Proposed,
+    ProxyEffect, ReadAnswer, ReplicaEffect, ReplicaOp, SegmentReplica,
 };
 use paros_journal::segment::{OpeningCall, SegmentId, SegmentRecord, SegmentState};
 use paros_journal::{
@@ -114,6 +114,13 @@ pub const STAMPED: &str =
 /// disk (`specs/tla/proxy-leader/`).
 pub const PROXY: &str =
     "a proxy commits a slot only once F + 1 acceptors of its column voted it on disk";
+
+/// An acceptor drops the votes of a segment's slots only below a point
+/// that `F + 1` replicas of the segment's set compacted to on their disk,
+/// and every slot it drops is chosen (§J3.2, `AccCompact` and `DropChosen`
+/// of `specs/tla/journal-compact/`).
+pub const COMPACT: &str =
+    "an acceptor drops a vote only below the compaction point of F + 1 replicas of its set";
 
 /// The coverage sites of the roles walk.
 pub mod reach {
@@ -168,6 +175,16 @@ pub mod reach {
     pub const FLOOR_REFUSED: &str = "roles walk: a read met the floor of the segment in force";
     /// A slot chosen in a grid of two columns (wide only).
     pub const COLUMNS: &str = "roles walk: a slot chosen in a grid of two columns";
+    /// A replica dropped its log below its compaction point (§J3.2).
+    pub const COMPACTED: &str = "roles walk: a replica compacted its log";
+    /// An acceptor dropped the votes of a segment that `F + 1` replicas
+    /// compacted.
+    pub const DROPPED: &str = "roles walk: an acceptor dropped votes";
+    /// A laggard jumped to a peer's compaction point.
+    pub const JUMPED: &str = "roles walk: a laggard jumped to a peer's trim";
+    /// A fold that jumped applied a slot below its trim floor, with no
+    /// answer.
+    pub const BLIND: &str = "roles walk: a blind fold applied a slot";
 
     /// The sites of every roles walk.
     pub const ALL: &[&str] = &[
@@ -194,6 +211,10 @@ pub mod reach {
         READ_SEALED,
         SEGMENT_TRIMMED,
         FLOOR_REFUSED,
+        COMPACTED,
+        DROPPED,
+        JUMPED,
+        BLIND,
     ];
     /// The sites of the wide walk.
     pub const WIDE: &[&str] = &[COLUMNS, PAGED];
@@ -267,6 +288,14 @@ pub enum RolesMutant {
     /// The reader of an older segment takes the floor of the holder, not
     /// of the segment in force. [`FLOOR`] catches it.
     FloorFromHolder,
+    /// The driver gives a leader each `CompactedTo` once from every replica
+    /// of its segment, so the leader drops votes on one report.
+    /// [`COMPACT`] catches it.
+    ForgedCompacted,
+    /// The driver gives a leader each promise page without its dropped
+    /// ranges, so Phase 1 takes a slot whose votes were dropped for an
+    /// empty one. [`AGREE`] catches it.
+    DroppedHidden,
 }
 
 /// One step of the roles walk that changes the state of
@@ -355,7 +384,7 @@ pub enum RolesEvent {
         r: u64,
     },
     /// Replica `r` applied `command` at slot `s`, durably, and answered
-    /// `res` (`Apply`).
+    /// `res`, or `None` when its fold was blind (`Apply`).
     Apply {
         /// The replica.
         r: u64,
@@ -363,8 +392,8 @@ pub enum RolesEvent {
         s: u64,
         /// The command.
         command: Command,
-        /// The answer, by its name in the model.
-        res: &'static str,
+        /// The answer, by its name in the model; `None` for a blind fold.
+        res: Option<&'static str>,
     },
     /// The register took the boundary state of replica `r` (`BoundWrite`).
     Boundary {
@@ -388,6 +417,33 @@ pub enum RolesEvent {
     Drop {
         /// The replica.
         r: u64,
+    },
+    /// Acceptor `a` dropped the votes of segment `p` below `x` and queued
+    /// the write (`AccCompact`).
+    Compact {
+        /// The acceptor.
+        a: u64,
+        /// The segment.
+        p: u64,
+        /// The slot below which the votes go.
+        x: u64,
+    },
+    /// Replica `r` dropped its log below `slot`, durably (`RepCompact`).
+    CompactReplica {
+        /// The replica.
+        r: u64,
+        /// The compaction point.
+        slot: u64,
+    },
+    /// Replica `r` jumped to the compaction point `slot` of a peer, whose
+    /// trim floor is `floor`, durably (`JumpFrom`).
+    Jump {
+        /// The replica.
+        r: u64,
+        /// The compaction point.
+        slot: u64,
+        /// Its trim floor.
+        floor: u64,
     },
     /// Replica `r` answered `res` to the `Resolve` of the write at `s`
     /// (`ResolveBelow`).
@@ -490,7 +546,7 @@ impl<Role, Disk, Op> Durable<Role, Disk, Op> {
     }
 }
 
-type AcceptorNode = Durable<JournalAcceptor, AcceptorDisk, paros_journal::roles::AcceptorOp>;
+type AcceptorNode = Durable<JournalAcceptor, AcceptorDisk, AcceptorOp>;
 type ReplicaNode = Durable<SegmentReplica, ReplicaDisk, ReplicaOp>;
 
 /// Who queued a register change.
@@ -574,6 +630,13 @@ pub struct RolesModel {
     proposed: BTreeMap<(u64, Slot), Command>,
     /// The durable front each replica's `Apply` events reached.
     traced: BTreeMap<NodeId, Slot>,
+    /// The highest vote that a compaction dropped from each acceptor's disk,
+    /// by acceptor and slot: the oracle [`PROXY`] counts it as on the disk.
+    dropped_votes: BTreeMap<(NodeId, Slot), paros_journal::register::Ballot>,
+    /// The answer of each slot a replica applied in memory and that is not
+    /// traced yet, taken after each step: a later compaction drops it from
+    /// the replica. `None` for a slot its blind fold applied.
+    applied: BTreeMap<NodeId, BTreeMap<Slot, Option<Answer>>>,
     /// The records of the whole log, by position.
     records: BTreeMap<u64, Record>,
     /// The open reads, by id.
@@ -593,6 +656,12 @@ pub struct RolesModel {
     read_ids: u64,
     /// The replica that hears the register late, if any.
     slow: Option<NodeId>,
+    /// The replica that loses every message until a peer compacts to a
+    /// point whose fold is blind, or its segment is no longer in force, if
+    /// any: it
+    /// lags behind that point, so its next pull meets a `TrimmedTo` and its
+    /// fold from there is blind.
+    deaf: Option<NodeId>,
 }
 
 /// The walk of `shape` with `mutant` planted.
@@ -656,8 +725,14 @@ impl Model for RolesModel {
             },
             (RolesAction::Write, _) => 12,
             (RolesAction::Resend, _) => 5,
-            (RolesAction::Claim | RolesAction::Reshape | RolesAction::Stale, _) => 2,
-            (RolesAction::Campaign | RolesAction::Multi | RolesAction::Truncate, _) => 1,
+            (
+                RolesAction::Claim
+                | RolesAction::Reshape
+                | RolesAction::Stale
+                | RolesAction::Truncate,
+                _,
+            ) => 2,
+            (RolesAction::Campaign | RolesAction::Multi, _) => 1,
         }
     }
 
@@ -692,6 +767,16 @@ impl Model for RolesModel {
 
     fn deliver(&mut self, envelope: Envelope, cx: &mut Cx<'_, Self>) {
         let Envelope { from, to, message } = envelope;
+        // A deaf replica hears again once its segment is no longer the
+        // segment in force.
+        if self.deaf.is_some_and(|deaf| {
+            self.register.in_force().map(SegmentRecord::id) != Some(Self::segment_of_replica(deaf))
+        }) {
+            self.deaf = None;
+        }
+        if self.deaf == Some(to) && cx.phase() != Phase::Settle {
+            return;
+        }
         if self.acceptors.contains_key(&to) {
             // A retired grid's acceptors stop: only an acceptor of a grid
             // that is not retired takes a step (`Active` of the model).
@@ -747,35 +832,8 @@ impl Model for RolesModel {
                 effects.extend(proxy.step(node, message.clone()));
             }
             self.proxy_effects(to, effects, cx);
-        } else if let Some(leader) = self.leaders.get_mut(&to) {
-            let nack = matches!(message, Message::Nack { .. });
-            sometimes!(
-                matches!(&message, Message::Promise { page, .. } if page.next.is_some()),
-                reach::PAGED
-            );
-            let before = leader.phase().clone();
-            let effects = leader.step(from, message);
-            sometimes!(
-                nack && *leader.phase() == LeaderPhase::Stopped,
-                reach::NACKED
-            );
-            if before == LeaderPhase::Phase1 {
-                let b = leader.ballot().round;
-                let q = leader.phase1().complete().iter().map(|n| n.0).collect();
-                match *leader.phase() {
-                    LeaderPhase::Sealing { end } => cx.record(RolesEvent::Phase1 {
-                        b,
-                        q,
-                        end: Some(end.0),
-                    }),
-                    LeaderPhase::Open { start } => {
-                        cx.record(RolesEvent::Phase1 { b, q, end: None });
-                        cx.record(RolesEvent::Open { b, start: start.0 });
-                    }
-                    LeaderPhase::Phase1 | LeaderPhase::Stopped => {}
-                }
-            }
-            self.leader_effects(to, effects, cx);
+        } else if self.leaders.contains_key(&to) {
+            self.deliver_to_leader(from, to, message, cx);
         }
     }
 
@@ -809,6 +867,7 @@ impl Model for RolesModel {
             acceptor.crash();
         } else if let Some(replica) = self.replicas.get_mut(node) {
             replica.crash();
+            self.applied.remove(node);
             // The reads of a replica that crashed get no answer: their
             // client times out.
             self.held_reads.remove(node);
@@ -949,6 +1008,60 @@ impl Model for RolesModel {
 }
 
 impl RolesModel {
+    /// A message to the leader of proposer `to`.
+    fn deliver_to_leader(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        message: Message,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        let leader = self.leaders.get_mut(&to).expect("a leader");
+        let mut message = message;
+        if let Message::Promise { page, .. } = &mut message
+            && self.mutant == RolesMutant::DroppedHidden
+        {
+            page.dropped.clear();
+        }
+        let forged = match &message {
+            Message::CompactedTo { segment, .. } if self.mutant == RolesMutant::ForgedCompacted => {
+                Self::set_of(*segment)
+            }
+            _ => Vec::new(),
+        };
+        let nack = matches!(message, Message::Nack { .. });
+        sometimes!(
+            matches!(&message, Message::Promise { page, .. } if page.next.is_some()),
+            reach::PAGED
+        );
+        let before = leader.phase().clone();
+        let mut effects = leader.step(from, message.clone());
+        for node in forged {
+            effects.extend(leader.step(node, message.clone()));
+        }
+        sometimes!(
+            nack && *leader.phase() == LeaderPhase::Stopped,
+            reach::NACKED
+        );
+        if before == LeaderPhase::Phase1 {
+            let b = leader.ballot().round;
+            let q = leader.phase1().complete().iter().map(|n| n.0).collect();
+            match *leader.phase() {
+                LeaderPhase::Sealing { end } => cx.record(RolesEvent::Phase1 {
+                    b,
+                    q,
+                    end: Some(end.0),
+                }),
+                LeaderPhase::Open { start } => {
+                    cx.record(RolesEvent::Phase1 { b, q, end: None });
+                    cx.record(RolesEvent::Open { b, start: start.0 });
+                }
+                LeaderPhase::Phase1 | LeaderPhase::Stopped => {}
+            }
+        }
+        self.leader_effects(to, effects, cx);
+    }
+
     /// The walk of `shape` with `mutant` planted. The fresh journal is
     /// unset, or multi-writer on one seed in four.
     ///
@@ -1003,6 +1116,8 @@ impl RolesModel {
             unknown: Vec::new(),
             proposed: BTreeMap::new(),
             traced: BTreeMap::new(),
+            applied: BTreeMap::new(),
+            dropped_votes: BTreeMap::new(),
             records: BTreeMap::new(),
             reads: BTreeMap::new(),
             stamps: BTreeMap::new(),
@@ -1011,6 +1126,7 @@ impl RolesModel {
             held_reads: BTreeMap::new(),
             read_ids: 0,
             slow: None,
+            deaf: None,
         };
         model.register = model
             .register
@@ -1138,7 +1254,16 @@ impl RolesModel {
             value = stale;
             segment = SegmentId(newest.0 - 1);
         }
-        let from = self.applied_from(&value, segment);
+        // One campaign in three reads from the start of the oldest segment
+        // that is not retired, below the slots its acceptors may have
+        // dropped: their promises name the dropped ranges.
+        let from = if cx.rng().chance(1, 3) {
+            Self::oldest_read(&value, segment)
+                .start()
+                .unwrap_or(Slot(0))
+        } else {
+            self.applied_from(&value, segment)
+        };
         self.bound.insert((ballot.round, ballot.node), segment);
         let Some((mut leader, effects)) = JournalLeader::campaign(
             Campaign {
@@ -1196,14 +1321,20 @@ impl RolesModel {
         Some(RegisterValue::from_parts(self.register.term(), segments))
     }
 
-    /// The first slot a leader of `segment` reads: the applied prefix of the
-    /// oldest segment that is not retired, on the disks of its replicas.
-    fn applied_from(&self, value: &RegisterValue, segment: SegmentId) -> Slot {
-        let oldest = value
+    /// The oldest segment that a leader of `segment` reads: the oldest that
+    /// is not retired.
+    fn oldest_read(value: &RegisterValue, segment: SegmentId) -> &SegmentRecord {
+        value
             .segments()
             .values()
             .find(|r| r.state() < SegmentState::Retired && r.id() <= segment)
-            .expect("a segment is read");
+            .expect("a segment is read")
+    }
+
+    /// The first slot a leader of `segment` reads: the applied prefix of the
+    /// oldest segment that is not retired, on the disks of its replicas.
+    fn applied_from(&self, value: &RegisterValue, segment: SegmentId) -> Slot {
+        let oldest = Self::oldest_read(value, segment);
         let start = oldest.start().unwrap_or(Slot(0));
         oldest
             .replicas()
@@ -1225,7 +1356,7 @@ impl RolesModel {
             None if Self::segment_of_replica(node) == SegmentId(1) => Slot(0),
             None => return None,
         };
-        let mut front = start;
+        let mut front = disk.trim.map_or(start, |trim| trim.slot);
         while disk.chosen.contains_key(&front) {
             front = Slot(front.0 + 1);
         }
@@ -1242,12 +1373,24 @@ impl RolesModel {
     }
 
     /// The event of an acceptor's queued batch: a vote, or a promise alone.
-    fn queued(node: NodeId, ops: &[paros_journal::roles::AcceptorOp]) -> RolesEvent {
+    fn queued(node: NodeId, ops: &[AcceptorOp]) -> RolesEvent {
+        if let [AcceptorOp::Compact { segment, below, .. }] = ops {
+            return RolesEvent::Compact {
+                a: node.0,
+                p: segment.0,
+                x: below.0,
+            };
+        }
         let votes: Vec<_> = ops
             .iter()
             .filter_map(|op| match op {
-                AcceptorWrite::AppendAccepted { slot, ballot, .. } => Some((*slot, *ballot)),
-                AcceptorWrite::SetPromise(_) => None,
+                AcceptorOp::Write(AcceptorWrite::AppendAccepted { slot, ballot, .. }) => {
+                    Some((*slot, *ballot))
+                }
+                AcceptorOp::Write(AcceptorWrite::SetPromise(_)) => None,
+                AcceptorOp::Compact { .. } => {
+                    unreachable!("a compaction is a batch of its own: {ops:?}")
+                }
             })
             .collect();
         // The model's `Accept` queues one vote: a batch with two would trace
@@ -1260,7 +1403,7 @@ impl RolesModel {
                 b: ballot.round,
                 s: slot.0,
             },
-            (None, [AcceptorWrite::SetPromise(ballot)]) => RolesEvent::Promise {
+            (None, [AcceptorOp::Write(AcceptorWrite::SetPromise(ballot))]) => RolesEvent::Promise {
                 a: node.0,
                 b: ballot.round,
             },
@@ -1380,6 +1523,7 @@ impl RolesModel {
         let columns = grid.columns();
         let count = u64::try_from(columns.len()).expect("few columns");
         let column = &columns[usize::try_from(slot.0 % count).expect("small")];
+        // A vote that a compaction dropped from the disk was on it.
         let voted = column
             .iter()
             .filter(|node| {
@@ -1387,7 +1531,9 @@ impl RolesModel {
                     .disk
                     .votes
                     .get(&slot)
-                    .is_some_and(|(b, _)| *b >= ballot)
+                    .map(|(b, _)| *b)
+                    .max(self.dropped_votes.get(&(**node, slot)).copied())
+                    .is_some_and(|b| b >= ballot)
             })
             .count();
         assert!(
@@ -1402,6 +1548,20 @@ impl RolesModel {
         effects: Vec<AcceptorEffect>,
         cx: &mut Cx<'_, Self>,
     ) {
+        for effect in &effects {
+            if let AcceptorEffect::Persist { ops, .. } = effect {
+                for op in ops {
+                    if let AcceptorOp::Compact {
+                        segment,
+                        start,
+                        below,
+                    } = op
+                    {
+                        self.judge_compact(*segment, *start, *below);
+                    }
+                }
+            }
+        }
         let acceptor = self.acceptors.get_mut(&node).expect("an acceptor");
         for effect in effects {
             match effect {
@@ -1429,6 +1589,7 @@ impl RolesModel {
         effects: Vec<ReplicaEffect>,
         cx: &mut Cx<'_, Self>,
     ) {
+        self.take_answers(node);
         for effect in effects {
             match effect {
                 ReplicaEffect::Persist { id, ops } => {
@@ -1528,6 +1689,52 @@ impl RolesModel {
                     unreachable!("the roles walk has no heal: {node:?}")
                 }
             }
+        }
+    }
+
+    /// The oracle [`COMPACT`] on a compaction of `segment` from `start` to
+    /// `below`.
+    fn judge_compact(&self, segment: SegmentId, start: Slot, below: Slot) {
+        sometimes!(true, reach::DROPPED);
+        let compacted = Self::set_of(segment)
+            .iter()
+            .filter(|node| {
+                self.replicas
+                    .get(node)
+                    .and_then(|r| r.disk.trim)
+                    .is_some_and(|trim| trim.slot >= below)
+            })
+            .count();
+        assert!(
+            compacted >= 2,
+            "{COMPACT}: segment {segment:?} dropped below {below:?} with {compacted} replicas compacted there"
+        );
+        for slot in (start.0..below.0).map(Slot) {
+            assert!(
+                self.chosen.contains_key(&slot),
+                "{COMPACT}: slot {slot:?} of segment {segment:?} dropped and not chosen"
+            );
+        }
+    }
+
+    /// The answers of the slots replica `node` applied in memory since the
+    /// last step, before a compaction drops them.
+    fn take_answers(&mut self, node: NodeId) {
+        let Some(role) = self.replicas[&node].role.as_ref() else {
+            return;
+        };
+        let (Some(start), Some(front)) = (role.start(), role.front()) else {
+            return;
+        };
+        let applied = self.applied.entry(node).or_default();
+        let traced = self.traced.get(&node).copied().unwrap_or(start);
+        let from = applied
+            .keys()
+            .next_back()
+            .map_or(traced, |last| Slot(last.0 + 1))
+            .max(traced);
+        for slot in (from.0..front.0).map(Slot) {
+            applied.insert(slot, role.answer(slot).cloned());
         }
     }
 
@@ -1838,6 +2045,14 @@ impl RolesModel {
     fn flush_acceptor(&mut self, node: NodeId, cx: &mut Cx<'_, Self>) {
         let acceptor = self.acceptors.get_mut(&node).expect("an acceptor");
         let (id, ops) = acceptor.batches.pop_front().expect("a batch");
+        for op in &ops {
+            if let AcceptorOp::Compact { start, below, .. } = op {
+                for (slot, (ballot, _)) in acceptor.disk.votes.range(*start..*below) {
+                    let held = self.dropped_votes.entry((node, *slot)).or_insert(*ballot);
+                    *held = (*held).max(*ballot);
+                }
+            }
+        }
         acceptor.disk.apply(id, &ops);
         cx.record(RolesEvent::Flush { a: node.0 });
         let (go, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut acceptor.held)
@@ -1857,6 +2072,43 @@ impl RolesModel {
         if segment.0 >= 2 && ops.iter().any(|op| matches!(op, ReplicaOp::Base { .. })) {
             cx.record(RolesEvent::Base { r: node.0 });
         }
+        for op in &ops {
+            let ReplicaOp::Compact(trim) = op else {
+                continue;
+            };
+            if trim.state.first_seq() < trim.floor
+                && self
+                    .deaf
+                    .is_some_and(|deaf| deaf != node && Self::segment_of_replica(deaf) == segment)
+            {
+                self.deaf = None;
+            }
+            let start = self.replicas[&node]
+                .role
+                .as_ref()
+                .and_then(SegmentReplica::start)
+                .expect("a replica compacts after its base");
+            let traced = self.traced.get(&node).copied().unwrap_or(start);
+            if trim.slot > traced {
+                // Above the durable front: a jump to a peer's point.
+                sometimes!(true, reach::JUMPED);
+                cx.record(RolesEvent::Jump {
+                    r: node.0,
+                    slot: trim.slot.0,
+                    floor: trim.floor.0,
+                });
+                self.traced.insert(node, trim.slot);
+                if let Some(applied) = self.applied.get_mut(&node) {
+                    applied.retain(|slot, _| *slot >= trim.slot);
+                }
+            } else {
+                sometimes!(true, reach::COMPACTED);
+                cx.record(RolesEvent::CompactReplica {
+                    r: node.0,
+                    slot: trim.slot.0,
+                });
+            }
+        }
         // Each slot the fold on the disk passed: one `Apply`, with the
         // answer of the fold.
         if let Some(front) = self.disk_front(node) {
@@ -1869,15 +2121,17 @@ impl RolesModel {
             let start = role.start().unwrap_or(Slot(0));
             let front = front.min(role.front().unwrap_or(start));
             let from = self.traced.get(&node).copied().unwrap_or(start);
+            let applied = self.applied.entry(node).or_default();
             for slot in from.0..front.0 {
-                let answer = role
-                    .answer(Slot(slot))
-                    .expect("the fold in memory holds every slot of the disk");
+                let answer = applied
+                    .remove(&Slot(slot))
+                    .expect("the walk took the answer of every slot the replica applied");
+                sometimes!(answer.is_none(), reach::BLIND);
                 cx.record(RolesEvent::Apply {
                     r: node.0,
                     s: slot,
-                    command: role.chosen()[&Slot(slot)].clone(),
-                    res: label(answer),
+                    command: self.replicas[&node].disk.chosen[&Slot(slot)].clone(),
+                    res: answer.as_ref().map(label),
                 });
             }
             self.traced.insert(node, front.max(from));
@@ -2070,7 +2324,21 @@ impl RolesModel {
             return;
         }
         let index = cx.rng().index(WRITERS).expect("writers");
-        let Some(write) = cx.rng().pick(&self.writers[index].sent).cloned() else {
+        // Half of the resends take a write at or above the floor, which a
+        // `Truncate` did not cut: its resend answers `Duplicate`.
+        let first = self.truth.first;
+        let kept: Vec<Write> = self.writers[index]
+            .sent
+            .iter()
+            .filter(|w| matches!(w.fence, Fence::Leader { expected_seq, .. } if expected_seq.0 >= first))
+            .cloned()
+            .collect();
+        let from = if !kept.is_empty() && cx.rng().chance(1, 2) {
+            &kept
+        } else {
+            &self.writers[index].sent
+        };
+        let Some(write) = cx.rng().pick(from).cloned() else {
             return;
         };
         self.propose(Some(index), Command::Write(write), cx);
@@ -2092,13 +2360,58 @@ impl RolesModel {
     }
 
     fn truncate(&mut self, cx: &mut Cx<'_, Self>) {
-        let fence = cx
-            .rng()
-            .index(WRITERS)
-            .and_then(|i| self.writers[i].uuid)
-            .filter(|_| cx.rng().chance(1, 2));
-        let up_to = Seq(cx.rng().below(self.truth.next + 2));
+        let (first, next) = (self.truth.first, self.truth.next);
+        // The positions the writers asked for, the writes in flight too:
+        // their slots lie below the slot of a `Truncate` proposed now.
+        let asked = self
+            .calls
+            .values()
+            .filter_map(|call| match &call.command {
+                Command::Write(Write {
+                    fence: Fence::Leader { expected_seq, .. },
+                    records,
+                }) => Some(expected_seq.0 + u64::try_from(records.len()).expect("few records")),
+                _ => None,
+            })
+            .fold(next, u64::max);
+        let low = next.max(first + 1);
+        let (fence, up_to, deafen) =
+            if asked > low && self.truth.leader != Leader::Unset && cx.rng().chance(1, 2) {
+                // The writer in force truncates at or below the position of
+                // a write in flight, and one replica of the segment in force
+                // loses its messages from now on. Once the write is chosen
+                // below the `Truncate`, its record is at or above the floor,
+                // so the peers compact to its slot, below the `Truncate`, with a
+                // blind fold; the deaf replica never got the write, so it jumps
+                // there and folds blind until it applies the `Truncate`.
+                let fence = match self.truth.leader {
+                    Leader::Uuid(uuid) => Some(uuid),
+                    Leader::Unset | Leader::Multi => None,
+                };
+                (fence, Seq(low + cx.rng().below(asked - low)), true)
+            } else {
+                let fence = cx
+                    .rng()
+                    .index(WRITERS)
+                    .and_then(|i| self.writers[i].uuid)
+                    .filter(|_| cx.rng().chance(1, 2));
+                (fence, Seq(cx.rng().below(next + 2)), false)
+            };
+        let tokens = self.tokens;
         self.propose(None, Command::Truncate { fence, up_to }, cx);
+        if deafen
+            && self.tokens > tokens
+            && self.deaf.is_none()
+            && let Some(in_force) = self.register.in_force().map(SegmentRecord::id)
+        {
+            // Never the replica that hears the register late: its reads
+            // are how a read meets a later segment.
+            let set: Vec<NodeId> = Self::set_of(in_force)
+                .into_iter()
+                .filter(|node| self.slow != Some(*node))
+                .collect();
+            self.deaf = cx.rng().pick(&set).copied();
+        }
         if self.mutant == RolesMutant::TrimIntent
             && let Some(in_force) = self
                 .register
@@ -2215,9 +2528,18 @@ impl RolesModel {
             return;
         };
         // Half of the reads go to the replica that hears the register late,
-        // where a read meets a later segment.
-        let node = match self.slow {
-            Some(slow) if nodes.contains(&slow) && cx.rng().chance(1, 2) => slow,
+        // where a read meets a later segment; three in four once its
+        // segment is sealed, where a stale read shows.
+        let late = self.slow.filter(|slow| nodes.contains(slow)).map(|slow| {
+            let sealed = self
+                .register
+                .segment(Self::segment_of_replica(slow))
+                .and_then(SegmentRecord::end)
+                .is_some();
+            (slow, if sealed { 3 } else { 2 })
+        });
+        let node = match late {
+            Some((slow, odds)) if cx.rng().chance(odds, 4) => slow,
             _ => nodes[pick],
         };
         // Half of the reads are at the tail, where a stale read shows.

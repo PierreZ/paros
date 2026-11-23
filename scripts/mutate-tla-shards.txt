@@ -29,8 +29,9 @@ handover-gc 1
 handover-scalars 2
 heal-reuse 2
 health 0
+journal-compact 1
 journal-ids 3
-journal-state 24
+journal-state 29
 leader-handoff 12
 matchmaker 3
 multi-paxos 14

@@ -119,7 +119,7 @@ force. The narrow shape is the default grid (one column of three); the wide shap
 two columns and promises in pages of two. Each campaign reaches its named sites (a seal lost, a
 `Noop` below the start, an old vote chosen again in a new grid, a third segment, a retire, a
 pull from a peer, a leader stopped on a higher promise, `Unknown`, `Below`, `Resolve`, and
-more). TLC checks the walks of the narrow shape against `journal-state/RolesTrace.tla`, which
+more). TLC checks the walks of the narrow shape against `journal-compact/RolesTrace.tla`, which
 extends `Journal.tla` and binds each event to an action of the model with the parameters the
 code chose (`Register`, `Promise`, `Accept`, `Flush`, `Crash`, `Phase1On`, `SealWrite`, `Open`,
 `Propose`, `TakeBase`, `Apply`, `BoundWrite`, `Retire`, `ResolveBelow`). The checked walks meet

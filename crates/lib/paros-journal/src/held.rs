@@ -123,6 +123,23 @@ impl<T> Held<T> {
         Some((token, reply))
     }
 
+    /// Let the command held at `slot` go, answered `Unknown`: no replica
+    /// of the slot's segment can give its answer any more (its replicas
+    /// dropped the slot's answer at a compaction, §J3.2).
+    ///
+    /// # Panics
+    ///
+    /// When an assertion on its own postconditions fails: a programmer error, never
+    /// an operating condition.
+    pub fn release(&mut self, slot: Slot) -> Option<(T, Reply)> {
+        let (token, _) = self.slots.remove(&slot)?;
+        assert!(
+            !self.slots.contains_key(&slot),
+            "a released slot holds nothing after it"
+        );
+        Some((token, Reply::Unknown))
+    }
+
     /// Let every held command go, each answered `Unknown`: the leader steps
     /// down or stops. In slot order.
     ///

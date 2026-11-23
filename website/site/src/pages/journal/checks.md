@@ -155,7 +155,7 @@ trace is a run of the TLA+ model (moonpool-tla). Four trace specs:
 | Walk | Trace spec |
 |---|---|
 | fold | `journal-state/FoldTrace.tla` |
-| roles (the default grid) | `journal-state/RolesTrace.tla` |
+| roles (the default grid) | `journal-compact/RolesTrace.tla` |
 | register | `segment-records/RegisterTrace.tla` |
 | controller | `grid-controller/ControllerTrace.tla` |
 

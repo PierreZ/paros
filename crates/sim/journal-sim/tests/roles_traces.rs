@@ -1,6 +1,7 @@
 //! Model-based trace checking of the roles walk: TLC checks that each
-//! checked walk is a behaviour of `specs/tla/journal-state/RolesTrace.tla`
-//! (the actions of `Journal.tla`), refuses the trace control, and refuses
+//! checked walk is a behaviour of `specs/tla/journal-compact/RolesTrace.tla`
+//! (the actions of `Journal.tla` and `JournalCompact.tla`), refuses the
+//! trace control, and refuses
 //! every edit of the recorded walks at or after the edited event.
 
 use journal_sim::campaign::try_campaign;
@@ -61,7 +62,7 @@ fn below_start(events: &[RolesEvent], pick: fn(&Command) -> bool) -> bool {
 fn applied(events: &[RolesEvent], pick: impl Fn(&Command, &str) -> bool) -> bool {
     has(
         events,
-        |e| matches!(e, RolesEvent::Apply { command, res, .. } if pick(command, res)),
+        |e| matches!(e, RolesEvent::Apply { command, res: Some(res), .. } if pick(command, res)),
     )
 }
 
@@ -152,6 +153,32 @@ const RULES: &[Rule] = &[
         applied(e, |c, res| {
             matches!(c, Command::Truncate { .. }) && res == "ok"
         })
+    }),
+    ("a replica compacted", |e| {
+        has(e, |e| matches!(e, RolesEvent::CompactReplica { .. }))
+    }),
+    (
+        "an acceptor dropped votes, then flushed the drop",
+        |events| {
+            events.iter().enumerate().any(|(at, e)| {
+            matches!(e, RolesEvent::Compact { a, .. }
+                if events[at..].iter().any(|later| matches!(later, RolesEvent::Flush { a: f } if f == a)))
+        })
+        },
+    ),
+    ("a Phase 1 after an acceptor dropped votes", |events| {
+        events.iter().enumerate().any(|(at, e)| {
+            matches!(e, RolesEvent::Compact { .. })
+                && events[at..]
+                    .iter()
+                    .any(|later| matches!(later, RolesEvent::Phase1 { .. }))
+        })
+    }),
+    ("a laggard jumped", |e| {
+        has(e, |e| matches!(e, RolesEvent::Jump { .. }))
+    }),
+    ("a blind fold applied a slot", |e| {
+        has(e, |e| matches!(e, RolesEvent::Apply { res: None, .. }))
     }),
 ];
 

@@ -515,3 +515,34 @@ fn the_transition_check_sees_next_seq_go_back() {
     after.next_seq = Seq(2);
     after.assert_transition(&before, &Answer::Noop);
 }
+
+#[test]
+fn a_fold_resumes_from_a_valid_boundary_at_or_below_its_next_position() {
+    let boundary = BoundaryState {
+        next_seq: Seq(4),
+        first_seq: Seq(2),
+        leader: Leader::Uuid(U1),
+    };
+    let state = JournalState::resume(boundary, Seq(3)).expect("a start below next_seq");
+    assert_eq!(state.next_seq(), Seq(4));
+    assert_eq!(state.first_seq(), Seq(2));
+    assert_eq!(state.leader(), Leader::Uuid(U1));
+    assert!(
+        JournalState::resume(boundary, Seq(4)).is_some(),
+        "a start at next_seq"
+    );
+    assert!(
+        JournalState::resume(boundary, Seq(5)).is_none(),
+        "a start above next_seq makes no fold"
+    );
+    let invalid = BoundaryState {
+        next_seq: Seq(1),
+        first_seq: Seq(2),
+        leader: Leader::Uuid(U1),
+    };
+    assert!(!invalid.is_valid());
+    assert!(
+        JournalState::resume(invalid, Seq(0)).is_none(),
+        "a boundary that is not valid makes no fold"
+    );
+}

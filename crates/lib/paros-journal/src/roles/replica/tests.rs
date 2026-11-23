@@ -259,7 +259,16 @@ fn a_full_replica_writes_the_boundary_state_until_a_done_value_shows_it() {
         change: boundary.clone(),
         after: *after,
     };
-    assert_eq!(replica.tick(), vec![register]);
+    // The tick also compacts the log: slot 0 holds no record.
+    let compact = ReplicaEffect::Persist {
+        id: PersistId(2),
+        ops: vec![ReplicaOp::Compact(Trim {
+            slot: Slot(1),
+            state: *replica.state().expect("a fold"),
+            floor: Seq(0),
+        })],
+    };
+    assert_eq!(replica.tick(), vec![register, compact]);
     let done = value.apply(&boundary).expect("the boundary");
     assert_eq!(replica.observe(&done).len(), 0);
     assert!(
@@ -792,7 +801,8 @@ fn a_new_replica_copies_from_a_full_member_and_reports_its_copy() {
     assert_eq!(copied(&effects), vec![]);
     assert_eq!(
         persists(&effects),
-        vec![(PersistId(4), vec![ReplicaOp::Joining(None)])],
+        // Batch 4 is the compaction of the full copy, at a tick.
+        vec![(PersistId(5), vec![ReplicaOp::Joining(None)])],
         "a member is no new replica, on its disk too"
     );
     assert_eq!(replica.joining(), None, "the heal is done: a member");
@@ -1079,4 +1089,177 @@ fn a_floor_inside_a_retired_segment_does_not_trim_it() {
     let effects = second.step(LEADER, commit(2, 2, truncate(0)));
     assert_eq!(trims(&effects), vec![], "the floor is below the last seq");
     assert_eq!(trims(&second.observe(&value)), vec![]);
+}
+
+#[test]
+fn a_laggard_jumps_into_a_blind_fold_that_answers_nothing_until_the_truncate() {
+    let mut replica = based();
+    replica.step(LEADER, commit(1, 0, claim(7)));
+    // A peer compacted to slot 2: the fold there has the claim and one
+    // write, and the floor 1 that the `Truncate` at slot 3 raises.
+    let state = JournalState::resume(
+        BoundaryState {
+            next_seq: Seq(1),
+            first_seq: Seq(0),
+            leader: Leader::Uuid(LeaderUuid(7)),
+        },
+        Seq(0),
+    )
+    .expect("a fold");
+    let effects = replica.step(
+        NodeId(12),
+        Message::TrimmedTo {
+            segment: SegmentId(1),
+            slot: Slot(2),
+            state,
+            floor: Seq(1),
+        },
+    );
+    let trims: Vec<ReplicaOp> = persists(&effects)
+        .into_iter()
+        .flat_map(|(_, ops)| ops)
+        .collect();
+    assert!(
+        matches!(trims.as_slice(), [ReplicaOp::Compact(trim)] if trim.slot == Slot(2) && trim.floor == Seq(1)),
+        "the jump writes the peer's trim: {trims:?}"
+    );
+    assert_eq!(replica.front(), Some(Slot(2)));
+    // The write at slot 2 applies blind: no answer leaves.
+    let effects = replica.step(LEADER, commit(1, 2, write(7, 1, 2)));
+    assert!(applied(&effects).is_empty(), "a blind fold answers nothing");
+    assert_eq!(replica.front(), Some(Slot(3)));
+    let report = |replica: &mut SegmentReplica| {
+        replica
+            .step(
+                LEADER,
+                Message::Compaction {
+                    segment: SegmentId(1),
+                },
+            )
+            .into_iter()
+            .find_map(|effect| match effect {
+                ReplicaEffect::Send {
+                    message:
+                        Message::CompactedTo {
+                            compacted, answers, ..
+                        },
+                    ..
+                } => Some((compacted, answers)),
+                _ => None,
+            })
+            .expect("a report")
+    };
+    assert_eq!(
+        report(&mut replica),
+        (Slot(2), Slot(3)),
+        "no answer below the slot after the blind apply"
+    );
+    // The `Truncate` applies blind too, and makes the fold whole again:
+    // the next slot answers.
+    let truncate = Command::Truncate {
+        fence: Some(LeaderUuid(7)),
+        up_to: Seq(1),
+    };
+    let effects = replica.step(LEADER, commit(1, 3, truncate));
+    assert!(applied(&effects).is_empty(), "the Truncate applies blind");
+    assert_eq!(report(&mut replica), (Slot(2), Slot(4)));
+    let effects = replica.step(LEADER, commit(1, 4, write(7, 2, 3)));
+    assert_eq!(
+        applied(&effects).len(),
+        1,
+        "the fold reached the floor: it answers"
+    );
+    assert_eq!(report(&mut replica).1, Slot(4), "the answers start at 4");
+}
+
+#[test]
+fn a_trim_from_outside_the_set_or_of_another_segment_is_not_taken() {
+    let mut replica = based();
+    let state = JournalState::resume(BoundaryState::fresh(Leader::Unset), Seq(0)).expect("a fold");
+    let trimmed = |segment: u64| Message::TrimmedTo {
+        segment: SegmentId(segment),
+        slot: Slot(2),
+        state,
+        floor: Seq(0),
+    };
+    assert!(
+        persists(&replica.step(NodeId(99), trimmed(1))).is_empty(),
+        "not a peer"
+    );
+    assert!(
+        persists(&replica.step(NodeId(12), trimmed(2))).is_empty(),
+        "another segment"
+    );
+    assert_eq!(replica.front(), Some(Slot(0)));
+    assert_eq!(
+        persists(&replica.step(NodeId(12), trimmed(1))).len(),
+        1,
+        "a peer's trim"
+    );
+    assert_eq!(replica.front(), Some(Slot(2)));
+}
+
+#[test]
+fn a_compaction_keeps_the_position_of_a_write_at_the_floor() {
+    let mut replica = based();
+    replica.step(LEADER, commit(1, 0, claim(7)));
+    replica.step(LEADER, commit(1, 1, write(7, 0, 1)));
+    replica.step(LEADER, commit(1, 2, write(7, 1, 2)));
+    let truncate = Command::Truncate {
+        fence: Some(LeaderUuid(7)),
+        up_to: Seq(1),
+    };
+    replica.step(LEADER, commit(1, 3, truncate));
+    let trims: Vec<ReplicaOp> = persists(&replica.tick())
+        .into_iter()
+        .flat_map(|(_, ops)| ops)
+        .filter(|op| matches!(op, ReplicaOp::Compact(_)))
+        .collect();
+    assert!(
+        matches!(trims.as_slice(), [ReplicaOp::Compact(trim)] if trim.slot == Slot(2) && trim.floor == Seq(1)),
+        "the point is the write at the floor: {trims:?}"
+    );
+    // The resend of the write at the floor still finds its position.
+    let effects = replica.step(LEADER, commit(1, 4, write(7, 1, 2)));
+    let answers: Vec<Answer> = effects
+        .into_iter()
+        .filter_map(|effect| match effect {
+            ReplicaEffect::Send {
+                message: Message::Applied { answer, .. },
+                ..
+            } => Some(answer),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(answers.as_slice(), [Answer::Duplicate { .. }]),
+        "a resend at the floor is a Duplicate: {answers:?}"
+    );
+}
+
+#[test]
+fn a_compaction_ask_of_another_segment_is_not_answered() {
+    let mut replica = based();
+    let asked = |replica: &mut SegmentReplica, segment: u64| {
+        replica
+            .step(
+                LEADER,
+                Message::Compaction {
+                    segment: SegmentId(segment),
+                },
+            )
+            .into_iter()
+            .filter(|effect| {
+                matches!(
+                    effect,
+                    ReplicaEffect::Send {
+                        message: Message::CompactedTo { .. },
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    assert_eq!(asked(&mut replica, 2), 0, "another segment");
+    assert_eq!(asked(&mut replica, 1), 1, "its own segment");
 }

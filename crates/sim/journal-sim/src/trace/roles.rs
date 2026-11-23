@@ -1,5 +1,6 @@
 //! Model-based trace checking of the roles walk: its events as a trace of
-//! `specs/tla/journal-state/RolesTrace.tla` (the actions of `Journal.tla`),
+//! `specs/tla/journal-compact/RolesTrace.tla` (the actions of `Journal.tla`
+//! and of the compaction in `JournalCompact.tla`),
 //! and the named edits of recorded roles traces (#1308 (mutate recorded
 //! traces)).
 //!
@@ -20,10 +21,10 @@ use super::mutate::{Edit, change_first, fields, is, num, text, with};
 use super::{Trace, TraceCheck, command_fields, int, leader, specs_dir};
 use crate::roles::RolesEvent;
 
-/// The check of `RolesTrace` in `specs/tla/journal-state/`.
+/// The check of `RolesTrace` in `specs/tla/journal-compact/`.
 #[must_use]
 pub fn roles_spec() -> TraceCheck {
-    TraceCheck::new(specs_dir().join("journal-state"), "RolesTrace")
+    TraceCheck::new(specs_dir().join("journal-compact"), "RolesTrace")
 }
 
 /// The grid of the first segment of every roles walk.
@@ -151,19 +152,34 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
             sizes.slots = sizes.slots.max(*s + 1);
             let mut fields = vec![("r", int(*r)), ("s", int(*s))];
             command_fields(&mut fields, c);
-            // The model has one refusal for a truncate.
-            let res = if matches!(c, Command::Truncate { .. }) && *res == "wrong" {
-                "fenced"
-            } else {
-                res
-            };
-            fields.push(("res", Value::from(res)));
+            // The model has one refusal for a truncate. A blind fold gives
+            // no answer: the event has no `res`.
+            if let Some(res) = res {
+                let res = if matches!(c, Command::Truncate { .. }) && *res == "wrong" {
+                    "fenced"
+                } else {
+                    res
+                };
+                fields.push(("res", Value::from(res)));
+            }
             ("apply", fields)
         }
         RolesEvent::Boundary { r } => ("boundary", vec![("r", int(*r))]),
         RolesEvent::Retire { p } => ("retire", vec![("p", int(*p))]),
         RolesEvent::Trim { p, r } => ("trim", vec![("p", int(*p)), ("r", int(*r))]),
         RolesEvent::Drop { r } => ("drop", vec![("r", int(*r))]),
+        RolesEvent::Compact { a, p, x } => (
+            "compact",
+            vec![("a", int(*a)), ("p", int(*p)), ("x", int(*x))],
+        ),
+        RolesEvent::CompactReplica { r, slot } => (
+            "compact_replica",
+            vec![("r", int(*r)), ("slot", int(*slot))],
+        ),
+        RolesEvent::Jump { r, slot, floor } => (
+            "jump",
+            vec![("r", int(*r)), ("slot", int(*slot)), ("floor", int(*floor))],
+        ),
         RolesEvent::Resolve { s, r, res } => (
             "resolve",
             vec![("s", int(*s)), ("r", int(*r)), ("res", Value::from(*res))],
@@ -183,6 +199,11 @@ fn promise_flush(events: &[Value]) -> Option<usize> {
             let a = a.expect("an acceptor");
             let b = num(event, "b").expect("a ballot");
             queues.entry(a).or_default().push((is(event, "promise"), b));
+        } else if is(event, "compact") {
+            queues
+                .entry(a.expect("an acceptor"))
+                .or_default()
+                .push((false, 0));
         } else if is(event, "crash") {
             queues.remove(&a.expect("an acceptor"));
         } else if is(event, "flush") {
@@ -429,6 +450,29 @@ pub const EDITS: &[Edit] = &[
         Some((at, edited))
     }),
     repeat_edit!("a reshape repeated", "reshape"),
+    Edit::new("an acceptor compaction one slot higher", |events| {
+        change_first(events, |e, i| is(&e[i], "compact"), |e| plus(e, "x", 1))
+    }),
+    Edit::new("a replica compaction one slot higher", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "compact_replica"),
+            |e| plus(e, "slot", 1),
+        )
+    }),
+    Edit::new("a jump one slot higher", |events| {
+        change_first(events, |e, i| is(&e[i], "jump"), |e| plus(e, "slot", 1))
+    }),
+    Edit::new("a jump with a floor one higher", |events| {
+        change_first(events, |e, i| is(&e[i], "jump"), |e| plus(e, "floor", 1))
+    }),
+    Edit::new("a blind fold that answers", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "apply") && !fields(&e[i]).contains_key("res"),
+            |e| with(e, "res", Value::from("ok")),
+        )
+    }),
     Edit::new("a written Resolve called not written", |events| {
         change_first(
             events,

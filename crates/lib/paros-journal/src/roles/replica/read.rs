@@ -202,6 +202,16 @@ impl SegmentReplica {
         let Some(folded) = &self.folded else {
             return Vec::new();
         };
+        if folded.blind() {
+            // The fold holds no write below the trim floor: it serves once
+            // its own floor reaches it, or the read ends unserved.
+            probe!(
+                sometimes,
+                !self.reads.is_empty(),
+                "replica: a read waits for the fold to reach the trim floor"
+            );
+            return Vec::new();
+        }
         let columns = self.grid.as_ref().map(ReadSegment::columns_of);
         let ready: Vec<u64> = self
             .reads

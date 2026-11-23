@@ -16,7 +16,12 @@
 //!   the highest slot where an acceptor of the segment before reported a
 //!   vote, a faulty one included (#1313), and at least the start of that
 //!   segment and the first slot the leader reads (every slot below it is
-//!   applied, so chosen in that grid).
+//!   applied, so chosen in that grid);
+//! - **a slot that an acceptor dropped is skipped** (§J3.2,
+//!   `specs/tla/journal-compact/`): it is chosen and applied at `F + 1`
+//!   replicas of its set, so the leader proposes nothing there, and the
+//!   seal end counts a dropped slot of the segment before as a vote (a
+//!   compaction can drop the only votes a quorum held).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,6 +36,8 @@ use crate::roles::message::PromisePage;
 struct Report {
     votes: BTreeMap<Slot, (Ballot, Command)>,
     faulty: BTreeMap<Slot, Ballot>,
+    /// The dropped ranges, `start .. below` by start.
+    dropped: BTreeMap<Slot, Slot>,
     /// The slot the next page starts at.
     cursor: Slot,
     complete: bool,
@@ -45,6 +52,9 @@ pub struct Phase1Close {
     pub blocked: Vec<Slot>,
     /// The seal end, when the leader's segment is pending.
     pub end: Option<Slot>,
+    /// The ranges that an acceptor dropped, `start .. below` by start: no
+    /// proposal there.
+    pub dropped: BTreeMap<Slot, Slot>,
 }
 
 /// The Phase 1 of one ballot.
@@ -125,6 +135,10 @@ impl Phase1 {
         );
         report.votes.extend(page.votes);
         report.faulty.extend(page.faulty);
+        for (start, below) in page.dropped {
+            let held = report.dropped.entry(start).or_insert(below);
+            *held = (*held).max(below);
+        }
         if let Some(next) = page.next {
             assert!(next > at, "a cursor moves forward");
             report.cursor = next;
@@ -167,6 +181,12 @@ impl Phase1 {
         }
         let mut top: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut rotted: BTreeMap<Slot, Ballot> = BTreeMap::new();
+        let mut dropped: BTreeMap<Slot, Slot> = BTreeMap::new();
+        for (start, below) in complete.iter().flat_map(|node| &self.reports[node].dropped) {
+            let held = dropped.entry(*start).or_insert(*below);
+            *held = (*held).max(*below);
+        }
+        let skip = |slot: Slot| in_ranges(&dropped, slot);
         for node in &complete {
             let report = &self.reports[node];
             let reads = |slot: Slot| {
@@ -190,14 +210,20 @@ impl Phase1 {
                     .or_insert(*ballot);
             }
         }
+        probe!(
+            sometimes,
+            top.keys().chain(rotted.keys()).any(|slot| skip(*slot)),
+            "leader: Phase 1 skips a vote in a dropped range"
+        );
         let blocked: Vec<Slot> = rotted
             .iter()
+            .filter(|(slot, _)| !skip(**slot))
             .filter(|(slot, ballot)| top.get(slot).is_none_or(|(b, _)| *ballot > b))
             .map(|(slot, _)| *slot)
             .collect();
         let safe: BTreeMap<Slot, Command> = top
             .into_iter()
-            .filter(|(slot, _)| !blocked.contains(slot))
+            .filter(|(slot, _)| !blocked.contains(slot) && !skip(*slot))
             .map(|(slot, (_, command))| (slot, command))
             .collect();
         let end = self.end(segments, &complete);
@@ -205,7 +231,16 @@ impl Phase1 {
             safe.keys().chain(blocked.iter()).all(|s| *s >= self.from),
             "Phase 1 reports only from its first slot"
         );
-        Some(Phase1Close { safe, blocked, end })
+        assert!(
+            safe.keys().chain(blocked.iter()).all(|s| !skip(*s)),
+            "Phase 1 proposes nothing in a dropped range"
+        );
+        Some(Phase1Close {
+            safe,
+            blocked,
+            end,
+            dropped,
+        })
     }
 
     /// The seal end of the segment before the leader's, when the leader's
@@ -224,7 +259,13 @@ impl Phase1 {
             .filter(|node| complete.contains(node))
             .flat_map(|node| {
                 let report = &self.reports[&node];
-                report.votes.keys().chain(report.faulty.keys()).copied()
+                let dropped = report.dropped.values().map(|below| Slot(below.0 - 1));
+                report
+                    .votes
+                    .keys()
+                    .chain(report.faulty.keys())
+                    .copied()
+                    .chain(dropped)
             })
             .max()
             .map(|slot| Slot(slot.0 + 1));
@@ -236,6 +277,15 @@ impl Phase1 {
         assert!(end >= start, "the end is at or above the start");
         Some(end)
     }
+}
+
+/// Whether `slot` is in one of the `ranges`, `start .. below` by start.
+#[must_use]
+pub fn in_ranges(ranges: &BTreeMap<Slot, Slot>, slot: Slot) -> bool {
+    ranges
+        .range(..=slot)
+        .next_back()
+        .is_some_and(|(_, below)| slot < *below)
 }
 
 #[cfg(test)]

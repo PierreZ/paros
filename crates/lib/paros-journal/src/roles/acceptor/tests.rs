@@ -73,7 +73,10 @@ fn a_prepare_that_raises_the_promise_writes_it_before_the_promise_leaves() {
     let (batches, sends, afters) = split(acceptor.step(LEADER, prepare(2, 0)));
     assert_eq!(
         batches,
-        vec![(PersistId(0), vec![AcceptorWrite::SetPromise(ballot(2))])]
+        vec![(
+            PersistId(0),
+            vec![AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(2)))]
+        )]
     );
     assert_eq!(
         sends,
@@ -84,6 +87,7 @@ fn a_prepare_that_raises_the_promise_writes_it_before_the_promise_leaves() {
                 votes: BTreeMap::new(),
                 faulty: BTreeMap::new(),
                 next: None,
+                dropped: BTreeMap::new(),
             },
         }]
     );
@@ -131,12 +135,12 @@ fn an_accept_that_raises_the_promise_writes_the_promise_and_the_vote_in_one_batc
         vec![(
             PersistId(0),
             vec![
-                AcceptorWrite::SetPromise(ballot(2)),
-                AcceptorWrite::AppendAccepted {
+                AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(2))),
+                AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                     slot: Slot(4),
                     ballot: ballot(2),
                     value: write(1),
-                },
+                }),
             ]
         )]
     );
@@ -161,11 +165,11 @@ fn an_accept_at_the_promise_writes_the_vote_alone() {
         batches,
         vec![(
             PersistId(1),
-            vec![AcceptorWrite::AppendAccepted {
+            vec![AcceptorOp::Write(AcceptorWrite::AppendAccepted {
                 slot: Slot(4),
                 ballot: ballot(2),
                 value: write(1),
-            }]
+            })]
         )]
     );
     assert_eq!(afters, vec![Some(PersistId(1))]);
@@ -306,11 +310,11 @@ fn a_faulty_vote_is_reported_and_a_new_vote_repairs_it() {
     let mut repaired = disk;
     repaired.apply(
         PersistId(0),
-        &[AcceptorWrite::AppendAccepted {
+        &[AcceptorOp::Write(AcceptorWrite::AppendAccepted {
             slot: Slot(4),
             ballot: ballot(2),
             value: write(1),
-        }],
+        })],
     );
     assert!(
         repaired.faulty.is_empty(),
@@ -333,11 +337,11 @@ fn a_disk_refuses_a_vote_above_its_promise() {
     let mut disk = AcceptorDisk::default();
     disk.apply(
         PersistId(0),
-        &[AcceptorWrite::AppendAccepted {
+        &[AcceptorOp::Write(AcceptorWrite::AppendAccepted {
             slot: Slot(0),
             ballot: ballot(2),
             value: write(1),
-        }],
+        })],
     );
 }
 
@@ -345,8 +349,14 @@ fn a_disk_refuses_a_vote_above_its_promise() {
 #[should_panic(expected = "never falls")]
 fn a_disk_refuses_a_lower_promise() {
     let mut disk = AcceptorDisk::default();
-    disk.apply(PersistId(0), &[AcceptorWrite::SetPromise(ballot(3))]);
-    disk.apply(PersistId(1), &[AcceptorWrite::SetPromise(ballot(2))]);
+    disk.apply(
+        PersistId(0),
+        &[AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(3)))],
+    );
+    disk.apply(
+        PersistId(1),
+        &[AcceptorOp::Write(AcceptorWrite::SetPromise(ballot(2)))],
+    );
 }
 
 #[test]
@@ -453,4 +463,113 @@ fn an_acceptor_that_starts_again_has_no_belief() {
     let restarted = JournalAcceptor::recover(ME, disk, PROMISE_BATCH);
     assert_eq!(restarted.promised(), ballot(2));
     assert_eq!(restarted.bound(), None, "the belief is in memory only");
+}
+
+#[test]
+fn a_compact_drops_the_votes_of_its_range_and_keeps_the_range() {
+    let mut acceptor = fresh();
+    let mut disk = AcceptorDisk::default();
+    for slot in 0..3 {
+        for (id, ops) in split(acceptor.step(LEADER, accept(1, slot, write(1)))).0 {
+            disk.apply(id, &ops);
+        }
+    }
+    let (batches, sends, _) = split(acceptor.step(
+        LEADER,
+        Message::Compact {
+            segment: SegmentId(1),
+            start: Slot(0),
+            below: Slot(2),
+        },
+    ));
+    assert_eq!(batches.len(), 1, "the drop is a batch of its own");
+    assert_eq!(sends, Vec::new(), "a compaction sends nothing");
+    assert_eq!(
+        acceptor.dropped(),
+        &BTreeMap::from([(Slot(0), Slot(2))]),
+        "the acceptor keeps the range it dropped"
+    );
+    assert!(acceptor.vote(Slot(0)).is_none());
+    assert!(acceptor.vote(Slot(1)).is_none());
+    assert!(
+        acceptor.vote(Slot(2)).is_some(),
+        "the slot at `below` stays"
+    );
+    for (id, ops) in &batches {
+        disk.apply(*id, ops);
+    }
+    assert_eq!(
+        disk.votes.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(2)],
+        "the disk drops the votes of the range and keeps the slot at `below`"
+    );
+    assert_eq!(disk.dropped, BTreeMap::from([(Slot(0), Slot(2))]));
+}
+
+#[test]
+fn a_compact_drops_the_faulty_entries_of_its_range() {
+    let disk = AcceptorDisk {
+        promised: ballot(1),
+        faulty: BTreeMap::from([(Slot(1), ballot(1)), (Slot(5), ballot(1))]),
+        ..AcceptorDisk::default()
+    };
+    let mut acceptor = JournalAcceptor::recover(ME, disk.clone(), PROMISE_BATCH);
+    let (batches, _, _) = split(acceptor.step(
+        LEADER,
+        Message::Compact {
+            segment: SegmentId(1),
+            start: Slot(0),
+            below: Slot(3),
+        },
+    ));
+    let mut disk = disk;
+    for (id, ops) in &batches {
+        disk.apply(*id, ops);
+    }
+    assert_eq!(
+        disk.faulty.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(5)],
+        "the disk drops the faulty entry in the range and keeps the one above"
+    );
+    let (_, sends, _) = split(acceptor.step(LEADER, prepare(2, 0)));
+    let [Message::Promise { page, .. }] = &sends[..] else {
+        panic!("a promise: {sends:?}");
+    };
+    assert_eq!(
+        page.faulty.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(5)],
+        "the faulty entry in the range goes, the one above stays"
+    );
+    assert_eq!(page.dropped, BTreeMap::from([(Slot(0), Slot(3))]));
+}
+
+#[test]
+fn the_read_watermark_counts_the_last_slot_of_a_dropped_range() {
+    let mut acceptor = fresh();
+    acceptor.step(LEADER, prepare(1, 0));
+    acceptor.step(
+        LEADER,
+        Message::Compact {
+            segment: SegmentId(1),
+            start: Slot(0),
+            below: Slot(3),
+        },
+    );
+    let (_, sends, _) = split(acceptor.step(
+        LEADER,
+        Message::PreRead {
+            segment: SegmentId(1),
+            read: 1,
+        },
+    ));
+    assert!(
+        matches!(
+            sends[..],
+            [Message::PreReadAck {
+                watermark: Some(Slot(2)),
+                ..
+            }]
+        ),
+        "the last dropped slot is the watermark: {sends:?}"
+    );
 }

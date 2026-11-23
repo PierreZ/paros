@@ -1,0 +1,16 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# The compaction of the journal v1 in the composed model (`JournalCompact.tla`
+# over `Journal.tla`, section J3.2, #1326 (the journal roles over the core)).
+#
+compact             pass       ci
+compact_g1          pass       ci
+jump_g2             pass       ci
+compact_floor       violation  ci
+reach_jump          violation  ci
+reach_skip          violation  ci
+reach_blind         violation  ci

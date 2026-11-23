@@ -5756,7 +5756,7 @@
             "title": "The seal",
             "about": "The first leader of the new segment writes the end of the old one, once, by compare-and-set."
           },
-          "says": "The matchmakers write: segment 1 ends at slot 4, and segment 2 is in force from slot 4.",
+          "says": "The matchmakers write: segment 1 ends at slot 4, and segment 2 is in force from slot 4. Proposer 5 stopped.",
           "notes": [
             "The matchmakers write: segment 1 ends at slot 4, and segment 2 is in force from slot 4."
           ],
@@ -5782,7 +5782,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -5942,6 +5942,14 @@
               "phase": "reconfigure",
               "label": "Done",
               "fan": 55
+            },
+            {
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
             }
           ],
           "nodes": [
@@ -5959,7 +5967,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -6026,7 +6034,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -6181,27 +6189,35 @@
             },
             {
               "id": 56,
-              "from": "p6",
-              "to": "a1",
-              "phase": "accept",
-              "label": "Accept 2.6 · slot 3 · w2",
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
               "fan": 56
             },
             {
               "id": 57,
               "from": "p6",
-              "to": "a2",
+              "to": "a1",
               "phase": "accept",
               "label": "Accept 2.6 · slot 3 · w2",
-              "fan": 56
+              "fan": 57
             },
             {
               "id": 58,
               "from": "p6",
+              "to": "a2",
+              "phase": "accept",
+              "label": "Accept 2.6 · slot 3 · w2",
+              "fan": 57
+            },
+            {
+              "id": 59,
+              "from": "p6",
               "to": "a4",
               "phase": "accept",
               "label": "Accept 2.6 · slot 3 · w2",
-              "fan": 56
+              "fan": 57
             }
           ],
           "nodes": [
@@ -6216,7 +6232,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -6291,7 +6307,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -6368,279 +6384,6 @@
               {
                 "slot": 2,
                 "value": "w1",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              }
-            ],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "chosen",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "chosen"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "chosen"
-              }
-            ],
-            []
-          ],
-          "message": 56,
-          "wire": [
-            {
-              "id": 41,
-              "from": "p5",
-              "to": "a2",
-              "phase": "accept",
-              "label": "Accept 1.5 · slot 3 · w2",
-              "fan": 40
-            },
-            {
-              "id": 42,
-              "from": "p5",
-              "to": "a3",
-              "phase": "accept",
-              "label": "Accept 1.5 · slot 3 · w2",
-              "fan": 40
-            },
-            {
-              "id": 52,
-              "from": "a3",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · no vote",
-              "fan": 52
-            },
-            {
-              "id": 53,
-              "from": "a4",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · no vote",
-              "fan": 53
-            },
-            {
-              "id": 57,
-              "from": "p6",
-              "to": "a2",
-              "phase": "accept",
-              "label": "Accept 2.6 · slot 3 · w2",
-              "fan": 56
-            },
-            {
-              "id": 58,
-              "from": "p6",
-              "to": "a4",
-              "phase": "accept",
-              "label": "Accept 2.6 · slot 3 · w2",
-              "fan": 56
-            },
-            {
-              "id": 59,
-              "from": "a1",
-              "to": "p6",
-              "phase": "accepted",
-              "label": "Accepted 2.6 · slot 3",
-              "fan": 59
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "2.6"
-            },
-            {
-              "alive": true,
-              "promise": "2.6",
-              "writes": [
-                "slot 3: vote w2 at 2.6"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "2.6"
-            },
-            {
-              "alive": true,
-              "promise": "2.6"
-            },
-            {
-              "alive": true,
-              "promise": "2.6"
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "p6",
-          "to": "a2",
-          "label": "Accept 2.6 · slot 3 · w2",
-          "phase": "accept",
-          "reply": false,
-          "stage": {
-            "title": "The boundary state",
-            "about": "The replica that applied every slot of the sealed segment writes the journal state at the end into its record."
-          },
-          "says": "Acceptor 2 writes its vote for w2 at slot 3, then answers.",
-          "notes": [],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "2.6"
-            },
-            {
-              "name": "slot",
-              "value": "3"
-            },
-            {
-              "name": "value",
-              "value": "w2"
-            }
-          ],
-          "voice": "Vote for w2 at slot 3, ballot 2.6.",
-          "state": [
-            [
-              "leader A",
-              "w0: Written at seq 0",
-              "w1: Written at seq 1"
-            ],
-            [
-              "term 1"
-            ],
-            [
-              "segment 1: sealed · from slot 0 · end 4",
-              "segment 2: in force · from slot 4"
-            ],
-            [
-              "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
-            ],
-            [
-              "ballot 2.6 · segment 2",
-              "writes, its segment from slot 4"
-            ],
-            [
-              "promise 2.6"
-            ],
-            [
-              "promise 2.6"
-            ],
-            [
-              "promise 2.6"
-            ],
-            [
-              "promise 2.6"
-            ],
-            [
-              "segment 1",
-              "next_seq 2",
-              "end 4"
-            ],
-            [
-              "segment 2",
-              "no base yet"
-            ]
-          ],
-          "chosen": [
-            "slot 0 = set leader A",
-            "slot 1 = w0",
-            "slot 2 = w1"
-          ],
-          "logs": [
-            [],
-            [],
-            [],
-            [],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
                 "state": "accepted"
               }
             ],
@@ -6718,24 +6461,32 @@
               "fan": 53
             },
             {
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
               "id": 58,
+              "from": "p6",
+              "to": "a2",
+              "phase": "accept",
+              "label": "Accept 2.6 · slot 3 · w2",
+              "fan": 57
+            },
+            {
+              "id": 59,
               "from": "p6",
               "to": "a4",
               "phase": "accept",
               "label": "Accept 2.6 · slot 3 · w2",
-              "fan": 56
-            },
-            {
-              "id": 59,
-              "from": "a1",
-              "to": "p6",
-              "phase": "accepted",
-              "label": "Accepted 2.6 · slot 3",
-              "fan": 59
+              "fan": 57
             },
             {
               "id": 60,
-              "from": "a2",
+              "from": "a1",
               "to": "p6",
               "phase": "accepted",
               "label": "Accepted 2.6 · slot 3",
@@ -6754,7 +6505,288 @@
             },
             {
               "alive": true,
+              "role": "follower",
+              "ballot": "1.5"
+            },
+            {
+              "alive": true,
               "role": "leader",
+              "ballot": "2.6"
+            },
+            {
+              "alive": true,
+              "promise": "2.6",
+              "writes": [
+                "slot 3: vote w2 at 2.6"
+              ]
+            },
+            {
+              "alive": true,
+              "promise": "2.6"
+            },
+            {
+              "alive": true,
+              "promise": "2.6"
+            },
+            {
+              "alive": true,
+              "promise": "2.6"
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "p6",
+          "to": "a2",
+          "label": "Accept 2.6 · slot 3 · w2",
+          "phase": "accept",
+          "reply": false,
+          "stage": {
+            "title": "The boundary state",
+            "about": "The replica that applied every slot of the sealed segment writes the journal state at the end into its record."
+          },
+          "says": "Acceptor 2 writes its vote for w2 at slot 3, then answers.",
+          "notes": [],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "2.6"
+            },
+            {
+              "name": "slot",
+              "value": "3"
+            },
+            {
+              "name": "value",
+              "value": "w2"
+            }
+          ],
+          "voice": "Vote for w2 at slot 3, ballot 2.6.",
+          "state": [
+            [
+              "leader A",
+              "w0: Written at seq 0",
+              "w1: Written at seq 1"
+            ],
+            [
+              "term 1"
+            ],
+            [
+              "segment 1: sealed · from slot 0 · end 4",
+              "segment 2: in force · from slot 4"
+            ],
+            [
+              "ballot 1.5 · segment 1",
+              "stopped"
+            ],
+            [
+              "ballot 2.6 · segment 2",
+              "writes, its segment from slot 4"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "segment 1",
+              "next_seq 2",
+              "end 4"
+            ],
+            [
+              "segment 2",
+              "no base yet"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = set leader A",
+            "slot 1 = w0",
+            "slot 2 = w1"
+          ],
+          "logs": [
+            [],
+            [],
+            [],
+            [],
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              }
+            ],
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "chosen",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "chosen"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "chosen"
+              }
+            ],
+            []
+          ],
+          "message": 58,
+          "wire": [
+            {
+              "id": 41,
+              "from": "p5",
+              "to": "a2",
+              "phase": "accept",
+              "label": "Accept 1.5 · slot 3 · w2",
+              "fan": 40
+            },
+            {
+              "id": 42,
+              "from": "p5",
+              "to": "a3",
+              "phase": "accept",
+              "label": "Accept 1.5 · slot 3 · w2",
+              "fan": 40
+            },
+            {
+              "id": 52,
+              "from": "a3",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · no vote",
+              "fan": 52
+            },
+            {
+              "id": 53,
+              "from": "a4",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · no vote",
+              "fan": 53
+            },
+            {
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
+              "id": 59,
+              "from": "p6",
+              "to": "a4",
+              "phase": "accept",
+              "label": "Accept 2.6 · slot 3 · w2",
+              "fan": 57
+            },
+            {
+              "id": 60,
+              "from": "a1",
+              "to": "p6",
+              "phase": "accepted",
+              "label": "Accepted 2.6 · slot 3",
+              "fan": 60
+            },
+            {
+              "id": 61,
+              "from": "a2",
+              "to": "p6",
+              "phase": "accepted",
+              "label": "Accepted 2.6 · slot 3",
+              "fan": 61
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true,
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -6832,7 +6864,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -6962,7 +6994,7 @@
             ],
             []
           ],
-          "message": 58,
+          "message": 59,
           "wire": [
             {
               "id": 41,
@@ -6997,16 +7029,16 @@
               "fan": 53
             },
             {
-              "id": 59,
-              "from": "a1",
-              "to": "p6",
-              "phase": "accepted",
-              "label": "Accepted 2.6 · slot 3",
-              "fan": 59
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
             },
             {
               "id": 60,
-              "from": "a2",
+              "from": "a1",
               "to": "p6",
               "phase": "accepted",
               "label": "Accepted 2.6 · slot 3",
@@ -7014,11 +7046,19 @@
             },
             {
               "id": 61,
-              "from": "a4",
+              "from": "a2",
               "to": "p6",
               "phase": "accepted",
               "label": "Accepted 2.6 · slot 3",
               "fan": 61
+            },
+            {
+              "id": 62,
+              "from": "a4",
+              "to": "p6",
+              "phase": "accepted",
+              "label": "Accepted 2.6 · slot 3",
+              "fan": 62
             }
           ],
           "nodes": [
@@ -7033,7 +7073,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -7107,7 +7147,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -7248,7 +7288,7 @@
             ],
             []
           ],
-          "message": 59,
+          "message": 60,
           "wire": [
             {
               "id": 41,
@@ -7283,20 +7323,28 @@
               "fan": 53
             },
             {
-              "id": 60,
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
+              "id": 61,
               "from": "a2",
               "to": "p6",
               "phase": "accepted",
               "label": "Accepted 2.6 · slot 3",
-              "fan": 60
+              "fan": 61
             },
             {
-              "id": 61,
+              "id": 62,
               "from": "a4",
               "to": "p6",
               "phase": "accepted",
               "label": "Accepted 2.6 · slot 3",
-              "fan": 61
+              "fan": 62
             }
           ],
           "nodes": [
@@ -7311,7 +7359,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -7382,7 +7430,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -7525,7 +7573,7 @@
             ],
             []
           ],
-          "message": 60,
+          "message": 61,
           "wire": [
             {
               "id": 41,
@@ -7560,20 +7608,28 @@
               "fan": 53
             },
             {
-              "id": 61,
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
+              "id": 62,
               "from": "a4",
               "to": "p6",
               "phase": "accepted",
               "label": "Accepted 2.6 · slot 3",
-              "fan": 61
+              "fan": 62
             },
             {
-              "id": 62,
+              "id": 63,
               "from": "p6",
               "to": "r7",
               "phase": "commit",
               "label": "Commit · segment 1 · slot 3 · w2",
-              "fan": 62
+              "fan": 63
             }
           ],
           "nodes": [
@@ -7588,7 +7644,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -7659,7 +7715,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -7803,7 +7859,7 @@
             ],
             []
           ],
-          "message": 61,
+          "message": 62,
           "wire": [
             {
               "id": 41,
@@ -7838,12 +7894,20 @@
               "fan": 53
             },
             {
-              "id": 62,
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
+              "id": 63,
               "from": "p6",
               "to": "r7",
               "phase": "commit",
               "label": "Commit · segment 1 · slot 3 · w2",
-              "fan": 62
+              "fan": 63
             }
           ],
           "nodes": [
@@ -7858,7 +7922,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -7933,280 +7997,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
-            ],
-            [
-              "ballot 2.6 · segment 2",
-              "writes, its segment from slot 4"
-            ],
-            [
-              "promise 2.6"
-            ],
-            [
-              "promise 2.6"
-            ],
-            [
-              "promise 2.6"
-            ],
-            [
-              "promise 2.6"
-            ],
-            [
-              "segment 1",
-              "next_seq 3",
-              "end 4"
-            ],
-            [
-              "segment 2",
-              "no base yet"
-            ]
-          ],
-          "chosen": [
-            "slot 0 = set leader A",
-            "slot 1 = w0",
-            "slot 2 = w1",
-            "slot 3 = w2"
-          ],
-          "logs": [
-            [],
-            [],
-            [],
-            [],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "chosen",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "chosen"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "chosen"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "chosen"
-              }
-            ],
-            []
-          ],
-          "message": 62,
-          "wire": [
-            {
-              "id": 41,
-              "from": "p5",
-              "to": "a2",
-              "phase": "accept",
-              "label": "Accept 1.5 · slot 3 · w2",
-              "fan": 40
-            },
-            {
-              "id": 42,
-              "from": "p5",
-              "to": "a3",
-              "phase": "accept",
-              "label": "Accept 1.5 · slot 3 · w2",
-              "fan": 40
-            },
-            {
-              "id": 52,
-              "from": "a3",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · no vote",
-              "fan": 52
-            },
-            {
-              "id": 53,
-              "from": "a4",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · no vote",
-              "fan": 53
-            },
-            {
-              "id": 63,
-              "from": "r7",
-              "to": "p6",
-              "phase": "commit",
-              "label": "Applied · slot 3 · written at seq 2",
-              "fan": 63
-            },
-            {
-              "id": 64,
-              "from": "r7",
-              "to": "m",
-              "phase": "reconfigure",
-              "label": "Boundary · segment 1 · next_seq 3",
-              "fan": 64
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "2.6"
-            },
-            {
-              "alive": true,
-              "promise": "2.6"
-            },
-            {
-              "alive": true,
-              "promise": "2.6"
-            },
-            {
-              "alive": true,
-              "promise": "2.6"
-            },
-            {
-              "alive": true,
-              "promise": "2.6"
-            },
-            {
-              "alive": true,
-              "writes": [
-                "slot 3: chosen w2"
-              ]
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "r7",
-          "to": "p6",
-          "label": "Applied · slot 3 · written at seq 2",
-          "phase": "commit",
-          "reply": true,
-          "stage": {
-            "title": "The boundary state",
-            "about": "The replica that applied every slot of the sealed segment writes the journal state at the end into its record."
-          },
-          "says": "Proposer 6 learns that slot 3 applied: written at seq 2.",
-          "notes": [],
-          "fields": [
-            {
-              "name": "slot",
-              "value": "3"
-            },
-            {
-              "name": "answer",
-              "value": "written at seq 2"
-            }
-          ],
-          "voice": "I applied slot 3: written at seq 2.",
-          "state": [
-            [
-              "leader A",
-              "w0: Written at seq 0",
-              "w1: Written at seq 1"
-            ],
-            [
-              "term 1"
-            ],
-            [
-              "segment 1: sealed · from slot 0 · end 4",
-              "segment 2: in force · from slot 4"
-            ],
-            [
-              "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -8377,12 +8168,28 @@
               "fan": 53
             },
             {
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
               "id": 64,
+              "from": "r7",
+              "to": "p6",
+              "phase": "commit",
+              "label": "Applied · slot 3 · written at seq 2",
+              "fan": 64
+            },
+            {
+              "id": 65,
               "from": "r7",
               "to": "m",
               "phase": "reconfigure",
               "label": "Boundary · segment 1 · next_seq 3",
-              "fan": 64
+              "fan": 65
             }
           ],
           "nodes": [
@@ -8397,7 +8204,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -8422,7 +8229,10 @@
               "promise": "2.6"
             },
             {
-              "alive": true
+              "alive": true,
+              "writes": [
+                "slot 3: chosen w2"
+              ]
             },
             {
               "alive": true
@@ -8432,25 +8242,27 @@
         {
           "kind": "deliver",
           "from": "r7",
-          "to": "m",
-          "label": "Boundary · segment 1 · next_seq 3",
-          "phase": "reconfigure",
-          "reply": false,
+          "to": "p6",
+          "label": "Applied · slot 3 · written at seq 2",
+          "phase": "commit",
+          "reply": true,
           "stage": {
             "title": "The boundary state",
             "about": "The replica that applied every slot of the sealed segment writes the journal state at the end into its record."
           },
-          "says": "The matchmakers write: the boundary state of segment 1: next_seq 3.",
-          "notes": [
-            "The matchmakers write: the boundary state of segment 1: next_seq 3."
-          ],
+          "says": "Proposer 6 learns that slot 3 applied: written at seq 2.",
+          "notes": [],
           "fields": [
             {
-              "name": "change",
-              "value": "the boundary state of segment 1: next_seq 3"
+              "name": "slot",
+              "value": "3"
+            },
+            {
+              "name": "answer",
+              "value": "written at seq 2"
             }
           ],
-          "voice": "Write this, if the guard holds: the boundary state of segment 1: next_seq 3.",
+          "voice": "I applied slot 3: written at seq 2.",
           "state": [
             [
               "leader A",
@@ -8461,12 +8273,12 @@
               "term 1"
             ],
             [
-              "segment 1: sealed · from slot 0 · end 4 · next_seq 3",
+              "segment 1: sealed · from slot 0 · end 4",
               "segment 2: in force · from slot 4"
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -8491,7 +8303,7 @@
             ],
             [
               "segment 2",
-              "next_seq 3"
+              "no base yet"
             ]
           ],
           "chosen": [
@@ -8637,11 +8449,19 @@
               "fan": 53
             },
             {
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
               "id": 65,
-              "from": "m",
-              "to": "r7",
+              "from": "r7",
+              "to": "m",
               "phase": "reconfigure",
-              "label": "Done",
+              "label": "Boundary · segment 1 · next_seq 3",
               "fan": 65
             }
           ],
@@ -8653,14 +8473,11 @@
               "alive": true
             },
             {
-              "alive": true,
-              "writes": [
-                "the boundary state of segment 1: next_seq 3"
-              ]
+              "alive": true
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -8688,33 +8505,32 @@
               "alive": true
             },
             {
-              "alive": true,
-              "writes": [
-                "base: next_seq 3 from slot 4"
-              ]
+              "alive": true
             }
           ]
         },
         {
           "kind": "deliver",
-          "from": "m",
-          "to": "r7",
-          "label": "Done",
+          "from": "r7",
+          "to": "m",
+          "label": "Boundary · segment 1 · next_seq 3",
           "phase": "reconfigure",
-          "reply": true,
+          "reply": false,
           "stage": {
-            "title": "Write w2",
-            "about": "The leader puts the write in a slot, two of the three acceptors of its column vote, and the replica of the slot's segment applies it."
+            "title": "The boundary state",
+            "about": "The replica that applied every slot of the sealed segment writes the journal state at the end into its record."
           },
-          "says": "Replica 7 learns that its write is done.",
-          "notes": [],
+          "says": "The matchmakers write: the boundary state of segment 1: next_seq 3.",
+          "notes": [
+            "The matchmakers write: the boundary state of segment 1: next_seq 3."
+          ],
           "fields": [
             {
-              "name": "done",
+              "name": "change",
               "value": "the boundary state of segment 1: next_seq 3"
             }
           ],
-          "voice": "Done: the boundary state of segment 1: next_seq 3.",
+          "voice": "Write this, if the guard holds: the boundary state of segment 1: next_seq 3.",
           "state": [
             [
               "leader A",
@@ -8730,7 +8546,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -8899,6 +8715,286 @@
               "phase": "promise",
               "label": "Promise 2.6 · no vote",
               "fan": 53
+            },
+            {
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
+              "id": 66,
+              "from": "m",
+              "to": "r7",
+              "phase": "reconfigure",
+              "label": "Done",
+              "fan": 66
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true,
+              "writes": [
+                "the boundary state of segment 1: next_seq 3"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.5"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.6"
+            },
+            {
+              "alive": true,
+              "promise": "2.6"
+            },
+            {
+              "alive": true,
+              "promise": "2.6"
+            },
+            {
+              "alive": true,
+              "promise": "2.6"
+            },
+            {
+              "alive": true,
+              "promise": "2.6"
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true,
+              "writes": [
+                "base: next_seq 3 from slot 4"
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "m",
+          "to": "r7",
+          "label": "Done",
+          "phase": "reconfigure",
+          "reply": true,
+          "stage": {
+            "title": "Write w2",
+            "about": "The leader puts the write in a slot, two of the three acceptors of its column vote, and the replica of the slot's segment applies it."
+          },
+          "says": "Replica 7 learns that its write is done.",
+          "notes": [],
+          "fields": [
+            {
+              "name": "done",
+              "value": "the boundary state of segment 1: next_seq 3"
+            }
+          ],
+          "voice": "Done: the boundary state of segment 1: next_seq 3.",
+          "state": [
+            [
+              "leader A",
+              "w0: Written at seq 0",
+              "w1: Written at seq 1"
+            ],
+            [
+              "term 1"
+            ],
+            [
+              "segment 1: sealed · from slot 0 · end 4 · next_seq 3",
+              "segment 2: in force · from slot 4"
+            ],
+            [
+              "ballot 1.5 · segment 1",
+              "stopped"
+            ],
+            [
+              "ballot 2.6 · segment 2",
+              "writes, its segment from slot 4"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "segment 1",
+              "next_seq 3",
+              "end 4"
+            ],
+            [
+              "segment 2",
+              "next_seq 3"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = set leader A",
+            "slot 1 = w0",
+            "slot 2 = w1",
+            "slot 3 = w2"
+          ],
+          "logs": [
+            [],
+            [],
+            [],
+            [],
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "chosen",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "chosen"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "chosen"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "chosen"
+              }
+            ],
+            []
+          ],
+          "message": 66,
+          "wire": [
+            {
+              "id": 41,
+              "from": "p5",
+              "to": "a2",
+              "phase": "accept",
+              "label": "Accept 1.5 · slot 3 · w2",
+              "fan": 40
+            },
+            {
+              "id": 42,
+              "from": "p5",
+              "to": "a3",
+              "phase": "accept",
+              "label": "Accept 1.5 · slot 3 · w2",
+              "fan": 40
+            },
+            {
+              "id": 52,
+              "from": "a3",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · no vote",
+              "fan": 52
+            },
+            {
+              "id": 53,
+              "from": "a4",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · no vote",
+              "fan": 53
+            },
+            {
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
             }
           ],
           "nodes": [
@@ -8913,7 +9009,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -8988,7 +9084,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -9151,12 +9247,20 @@
               "fan": 53
             },
             {
-              "id": 66,
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
+              "id": 67,
               "from": "a2",
               "to": "p5",
               "phase": "nack",
               "label": "Nack · promised 2.6",
-              "fan": 66
+              "fan": 67
             }
           ],
           "nodes": [
@@ -9171,7 +9275,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -9246,7 +9350,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -9401,20 +9505,28 @@
               "fan": 53
             },
             {
-              "id": 66,
+              "id": 56,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
+              "id": 67,
               "from": "a2",
               "to": "p5",
               "phase": "nack",
               "label": "Nack · promised 2.6",
-              "fan": 66
+              "fan": 67
             },
             {
-              "id": 67,
+              "id": 68,
               "from": "a3",
               "to": "p5",
               "phase": "nack",
               "label": "Nack · promised 2.6",
-              "fan": 67
+              "fan": 68
             }
           ],
           "nodes": [
@@ -9429,7 +9541,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -9472,7 +9584,7 @@
             "title": "Write w2",
             "about": "The leader puts the write in a slot, two of the three acceptors of its column vote, and the replica of the slot's segment applies it."
           },
-          "says": "Proposer 5 learns that a higher ballot, 2.6, holds the promise. Proposer 5 stopped.",
+          "says": "Proposer 5 learns that a higher ballot, 2.6, holds the promise.",
           "notes": [],
           "fields": [
             {
@@ -9636,7 +9748,7 @@
             ],
             []
           ],
-          "message": 66,
+          "message": 67,
           "wire": [
             {
               "id": 52,
@@ -9655,19 +9767,19 @@
               "fan": 53
             },
             {
-              "id": 67,
-              "from": "a3",
-              "to": "p5",
-              "phase": "nack",
-              "label": "Nack · promised 2.6",
-              "fan": 67
-            },
-            {
-              "id": 68,
+              "id": 56,
               "from": "p5",
               "to": "c",
               "phase": "other",
               "label": "Reply · Unknown",
+              "fan": 56
+            },
+            {
+              "id": 68,
+              "from": "a3",
+              "to": "p5",
+              "phase": "nack",
+              "label": "Nack · promised 2.6",
               "fan": 68
             }
           ],
@@ -9890,7 +10002,7 @@
             ],
             []
           ],
-          "message": 67,
+          "message": 68,
           "wire": [
             {
               "id": 52,
@@ -9909,12 +10021,12 @@
               "fan": 53
             },
             {
-              "id": 68,
+              "id": 56,
               "from": "p5",
               "to": "c",
               "phase": "other",
               "label": "Reply · Unknown",
-              "fan": 68
+              "fan": 56
             }
           ],
           "nodes": [
@@ -10133,7 +10245,7 @@
             ],
             []
           ],
-          "message": 68,
+          "message": 56,
           "wire": [
             {
               "id": 52,
@@ -20030,7 +20142,7 @@
             "title": "The seal",
             "about": "The first leader of the new segment writes the end of the old one, once, by compare-and-set."
           },
-          "says": "The matchmakers write: segment 1 ends at slot 3, and segment 2 is in force from slot 3.",
+          "says": "The matchmakers write: segment 1 ends at slot 3, and segment 2 is in force from slot 3. Proposer 5 stopped.",
           "notes": [
             "The matchmakers write: segment 1 ends at slot 3, and segment 2 is in force from slot 3."
           ],
@@ -20056,7 +20168,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -20216,6 +20328,14 @@
               "phase": "reconfigure",
               "label": "Boundary · segment 1 · next_seq 2",
               "fan": 56
+            },
+            {
+              "id": 57,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 57
             }
           ],
           "nodes": [
@@ -20233,7 +20353,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -20300,7 +20420,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -20452,6 +20572,14 @@
               "phase": "reconfigure",
               "label": "Boundary · segment 1 · next_seq 2",
               "fan": 56
+            },
+            {
+              "id": 57,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 57
             }
           ],
           "nodes": [
@@ -20466,7 +20594,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -20535,7 +20663,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -20682,11 +20810,19 @@
             },
             {
               "id": 57,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 57
+            },
+            {
+              "id": 58,
               "from": "m",
               "to": "r7",
               "phase": "reconfigure",
               "label": "Done",
-              "fan": 57
+              "fan": 58
             }
           ],
           "nodes": [
@@ -20704,7 +20840,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -20774,7 +20910,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -20893,7 +21029,7 @@
             ],
             []
           ],
-          "message": 57,
+          "message": 58,
           "wire": [
             {
               "id": 41,
@@ -20918,6 +21054,14 @@
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
               "fan": 50
+            },
+            {
+              "id": 57,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 57
             }
           ],
           "nodes": [
@@ -20932,7 +21076,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -21003,7 +21147,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -21152,6 +21296,14 @@
               "phase": "accept",
               "label": "Accept 1.5 · slot 3 · w2",
               "fan": 40
+            },
+            {
+              "id": 57,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 57
             }
           ],
           "nodes": [
@@ -21166,7 +21318,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -21241,7 +21393,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -21371,12 +21523,20 @@
               "fan": 40
             },
             {
-              "id": 58,
+              "id": 57,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 57
+            },
+            {
+              "id": 59,
               "from": "a2",
               "to": "p5",
               "phase": "nack",
               "label": "Nack · promised 2.6",
-              "fan": 58
+              "fan": 59
             }
           ],
           "nodes": [
@@ -21391,7 +21551,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -21466,7 +21626,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -21588,20 +21748,28 @@
           "message": 42,
           "wire": [
             {
-              "id": 58,
+              "id": 57,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 57
+            },
+            {
+              "id": 59,
               "from": "a2",
               "to": "p5",
               "phase": "nack",
               "label": "Nack · promised 2.6",
-              "fan": 58
+              "fan": 59
             },
             {
-              "id": 59,
+              "id": 60,
               "from": "a3",
               "to": "p5",
               "phase": "nack",
               "label": "Nack · promised 2.6",
-              "fan": 59
+              "fan": 60
             }
           ],
           "nodes": [
@@ -21616,7 +21784,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -21659,7 +21827,7 @@
             "title": "Write w2",
             "about": "The leader puts the write in a slot, two of the three acceptors of its column vote, and the replica of the slot's segment applies it."
           },
-          "says": "Proposer 5 learns that a higher ballot, 2.6, holds the promise. Proposer 5 stopped.",
+          "says": "Proposer 5 learns that a higher ballot, 2.6, holds the promise.",
           "notes": [],
           "fields": [
             {
@@ -21806,22 +21974,22 @@
             ],
             []
           ],
-          "message": 58,
+          "message": 59,
           "wire": [
             {
-              "id": 59,
-              "from": "a3",
-              "to": "p5",
-              "phase": "nack",
-              "label": "Nack · promised 2.6",
-              "fan": 59
-            },
-            {
-              "id": 60,
+              "id": 57,
               "from": "p5",
               "to": "c",
               "phase": "other",
               "label": "Reply · Unknown",
+              "fan": 57
+            },
+            {
+              "id": 60,
+              "from": "a3",
+              "to": "p5",
+              "phase": "nack",
+              "label": "Nack · promised 2.6",
               "fan": 60
             }
           ],
@@ -22027,15 +22195,15 @@
             ],
             []
           ],
-          "message": 59,
+          "message": 60,
           "wire": [
             {
-              "id": 60,
+              "id": 57,
               "from": "p5",
               "to": "c",
               "phase": "other",
               "label": "Reply · Unknown",
-              "fan": 60
+              "fan": 57
             }
           ],
           "nodes": [
@@ -22237,7 +22405,7 @@
             ],
             []
           ],
-          "message": 60,
+          "message": 57,
           "nodes": [
             {
               "alive": true
@@ -29772,7 +29940,7 @@
             "title": "The seal",
             "about": "The first leader of the new segment writes the end of the old one, once, by compare-and-set."
           },
-          "says": "The matchmakers write: segment 1 ends at slot 3, and segment 2 is in force from slot 3.",
+          "says": "The matchmakers write: segment 1 ends at slot 3, and segment 2 is in force from slot 3. Proposer 5 stopped.",
           "notes": [
             "The matchmakers write: segment 1 ends at slot 3, and segment 2 is in force from slot 3."
           ],
@@ -29798,7 +29966,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "not started"
@@ -29947,6 +30115,14 @@
               "phase": "reconfigure",
               "label": "Boundary · segment 1 · next_seq 2",
               "fan": 50
+            },
+            {
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
             }
           ],
           "nodes": [
@@ -29964,7 +30140,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -30029,7 +30205,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "not started"
@@ -30170,6 +30346,14 @@
               "phase": "reconfigure",
               "label": "Boundary · segment 1 · next_seq 2",
               "fan": 50
+            },
+            {
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
             }
           ],
           "nodes": [
@@ -30184,7 +30368,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -30251,7 +30435,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "not started"
@@ -30387,11 +30571,19 @@
             },
             {
               "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
+              "id": 52,
               "from": "m",
               "to": "r7",
               "phase": "reconfigure",
               "label": "Done",
-              "fan": 51
+              "fan": 52
             }
           ],
           "nodes": [
@@ -30409,7 +30601,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -30477,471 +30669,13 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "not started"
             ],
             [
               "promise 1.5"
-            ],
-            [
-              "promise 1.5"
-            ],
-            [
-              "promise 1.5"
-            ],
-            [
-              "promise 0.0"
-            ],
-            [
-              "segment 1",
-              "next_seq 2",
-              "end 3"
-            ],
-            [
-              "segment 2",
-              "next_seq 2"
-            ]
-          ],
-          "chosen": [
-            "slot 0 = set leader A",
-            "slot 1 = w0",
-            "slot 2 = w1",
-            "slot 3 = w2"
-          ],
-          "logs": [
-            [],
-            [],
-            [],
-            [],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "accepted"
-              }
-            ],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "chosen",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "chosen"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "chosen"
-              }
-            ],
-            []
-          ],
-          "message": 51,
-          "wire": [
-            {
-              "id": 40,
-              "from": "p5",
-              "to": "a1",
-              "phase": "accept",
-              "label": "Accept 1.5 · slot 3 · w2",
-              "fan": 40
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "0.0"
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "event",
-          "from": null,
-          "to": null,
-          "label": "proposer 6 campaigns",
-          "phase": null,
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 2.6",
-            "about": "The new leader asks every acceptor of every segment it reads for a promise and for its votes."
-          },
-          "says": "Proposer 6 starts Phase 1 at ballot 2.6, bound to segment 2, from slot 3.",
-          "notes": [],
-          "fields": [],
-          "voice": "",
-          "state": [
-            [
-              "leader A",
-              "w0: Written at seq 0",
-              "w1: Written at seq 1"
-            ],
-            [
-              "term 1"
-            ],
-            [
-              "segment 1: sealed · from slot 0 · end 3 · next_seq 2",
-              "segment 2: in force · from slot 3"
-            ],
-            [
-              "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
-            ],
-            [
-              "ballot 2.6 · segment 2",
-              "runs Phase 1"
-            ],
-            [
-              "promise 1.5"
-            ],
-            [
-              "promise 1.5"
-            ],
-            [
-              "promise 1.5"
-            ],
-            [
-              "promise 0.0"
-            ],
-            [
-              "segment 1",
-              "next_seq 2",
-              "end 3"
-            ],
-            [
-              "segment 2",
-              "next_seq 2"
-            ]
-          ],
-          "chosen": [
-            "slot 0 = set leader A",
-            "slot 1 = w0",
-            "slot 2 = w1",
-            "slot 3 = w2"
-          ],
-          "logs": [
-            [],
-            [],
-            [],
-            [],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "accepted",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "accepted"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "accepted"
-              },
-              {
-                "slot": 3,
-                "value": "w2",
-                "state": "accepted"
-              }
-            ],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "set leader A",
-                "state": "chosen",
-                "control": true
-              },
-              {
-                "slot": 1,
-                "value": "w0",
-                "state": "chosen"
-              },
-              {
-                "slot": 2,
-                "value": "w1",
-                "state": "chosen"
-              }
-            ],
-            []
-          ],
-          "wire": [
-            {
-              "id": 40,
-              "from": "p5",
-              "to": "a1",
-              "phase": "accept",
-              "label": "Accept 1.5 · slot 3 · w2",
-              "fan": 40
-            },
-            {
-              "id": 52,
-              "from": "p6",
-              "to": "a1",
-              "phase": "prepare",
-              "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
-            },
-            {
-              "id": 53,
-              "from": "p6",
-              "to": "a2",
-              "phase": "prepare",
-              "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
-            },
-            {
-              "id": 54,
-              "from": "p6",
-              "to": "a3",
-              "phase": "prepare",
-              "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
-            },
-            {
-              "id": 55,
-              "from": "p6",
-              "to": "a4",
-              "phase": "prepare",
-              "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "candidate",
-              "ballot": "2.6"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "0.0"
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "p6",
-          "to": "a1",
-          "label": "Prepare 2.6 · from slot 3",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 2.6",
-            "about": "The new leader asks every acceptor of every segment it reads for a promise and for its votes."
-          },
-          "says": "Acceptor 1 writes its promise for ballot 2.6, then sends its votes from slot 3.",
-          "notes": [],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "2.6"
-            },
-            {
-              "name": "from slot",
-              "value": "3"
-            }
-          ],
-          "voice": "I lead with ballot 2.6. Promise me, and send me your votes from slot 3.",
-          "state": [
-            [
-              "leader A",
-              "w0: Written at seq 0",
-              "w1: Written at seq 1"
-            ],
-            [
-              "term 1"
-            ],
-            [
-              "segment 1: sealed · from slot 0 · end 3 · next_seq 2",
-              "segment 2: in force · from slot 3"
-            ],
-            [
-              "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
-            ],
-            [
-              "ballot 2.6 · segment 2",
-              "runs Phase 1"
-            ],
-            [
-              "promise 2.6"
             ],
             [
               "promise 1.5"
@@ -31070,36 +30804,12 @@
               "fan": 40
             },
             {
-              "id": 53,
-              "from": "p6",
-              "to": "a2",
-              "phase": "prepare",
-              "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
-            },
-            {
-              "id": 54,
-              "from": "p6",
-              "to": "a3",
-              "phase": "prepare",
-              "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
-            },
-            {
-              "id": 55,
-              "from": "p6",
-              "to": "a4",
-              "phase": "prepare",
-              "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
-            },
-            {
-              "id": 56,
-              "from": "a1",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · no vote",
-              "fan": 56
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
             }
           ],
           "nodes": [
@@ -31114,7 +30824,254 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
+              "ballot": "1.5"
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true,
+              "promise": "1.5"
+            },
+            {
+              "alive": true,
+              "promise": "1.5"
+            },
+            {
+              "alive": true,
+              "promise": "1.5"
+            },
+            {
+              "alive": true,
+              "promise": "0.0"
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            }
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
+          "label": "proposer 6 campaigns",
+          "phase": null,
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 2.6",
+            "about": "The new leader asks every acceptor of every segment it reads for a promise and for its votes."
+          },
+          "says": "Proposer 6 starts Phase 1 at ballot 2.6, bound to segment 2, from slot 3.",
+          "notes": [],
+          "fields": [],
+          "voice": "",
+          "state": [
+            [
+              "leader A",
+              "w0: Written at seq 0",
+              "w1: Written at seq 1"
+            ],
+            [
+              "term 1"
+            ],
+            [
+              "segment 1: sealed · from slot 0 · end 3 · next_seq 2",
+              "segment 2: in force · from slot 3"
+            ],
+            [
+              "ballot 1.5 · segment 1",
+              "stopped"
+            ],
+            [
+              "ballot 2.6 · segment 2",
+              "runs Phase 1"
+            ],
+            [
+              "promise 1.5"
+            ],
+            [
+              "promise 1.5"
+            ],
+            [
+              "promise 1.5"
+            ],
+            [
+              "promise 0.0"
+            ],
+            [
+              "segment 1",
+              "next_seq 2",
+              "end 3"
+            ],
+            [
+              "segment 2",
+              "next_seq 2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = set leader A",
+            "slot 1 = w0",
+            "slot 2 = w1",
+            "slot 3 = w2"
+          ],
+          "logs": [
+            [],
+            [],
+            [],
+            [],
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "chosen",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "chosen"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "chosen"
+              }
+            ],
+            []
+          ],
+          "wire": [
+            {
+              "id": 40,
+              "from": "p5",
+              "to": "a1",
+              "phase": "accept",
+              "label": "Accept 1.5 · slot 3 · w2",
+              "fan": 40
+            },
+            {
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
+              "id": 53,
+              "from": "p6",
+              "to": "a1",
+              "phase": "prepare",
+              "label": "Prepare 2.6 · from slot 3",
+              "fan": 53
+            },
+            {
+              "id": 54,
+              "from": "p6",
+              "to": "a2",
+              "phase": "prepare",
+              "label": "Prepare 2.6 · from slot 3",
+              "fan": 53
+            },
+            {
+              "id": 55,
+              "from": "p6",
+              "to": "a3",
+              "phase": "prepare",
+              "label": "Prepare 2.6 · from slot 3",
+              "fan": 53
+            },
+            {
+              "id": 56,
+              "from": "p6",
+              "to": "a4",
+              "phase": "prepare",
+              "label": "Prepare 2.6 · from slot 3",
+              "fan": 53
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true,
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -31124,10 +31081,7 @@
             },
             {
               "alive": true,
-              "promise": "2.6",
-              "writes": [
-                "promise 2.6"
-              ]
+              "promise": "1.5"
             },
             {
               "alive": true,
@@ -31152,7 +31106,7 @@
         {
           "kind": "deliver",
           "from": "p6",
-          "to": "a2",
+          "to": "a1",
           "label": "Prepare 2.6 · from slot 3",
           "phase": "prepare",
           "reply": false,
@@ -31160,7 +31114,7 @@
             "title": "Phase 1 · ballot 2.6",
             "about": "The new leader asks every acceptor of every segment it reads for a promise and for its votes."
           },
-          "says": "Acceptor 2 writes its promise for ballot 2.6, then sends its votes from slot 3.",
+          "says": "Acceptor 1 writes its promise for ballot 2.6, then sends its votes from slot 3.",
           "notes": [],
           "fields": [
             {
@@ -31188,7 +31142,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -31198,7 +31152,7 @@
               "promise 2.6"
             ],
             [
-              "promise 2.6"
+              "promise 1.5"
             ],
             [
               "promise 1.5"
@@ -31324,35 +31278,43 @@
               "fan": 40
             },
             {
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
               "id": 54,
               "from": "p6",
-              "to": "a3",
+              "to": "a2",
               "phase": "prepare",
               "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
+              "fan": 53
             },
             {
               "id": 55,
               "from": "p6",
-              "to": "a4",
+              "to": "a3",
               "phase": "prepare",
               "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
+              "fan": 53
             },
             {
               "id": 56,
+              "from": "p6",
+              "to": "a4",
+              "phase": "prepare",
+              "label": "Prepare 2.6 · from slot 3",
+              "fan": 53
+            },
+            {
+              "id": 57,
               "from": "a1",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · no vote",
-              "fan": 56
-            },
-            {
-              "id": 57,
-              "from": "a2",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · w2 at 3",
               "fan": 57
             }
           ],
@@ -31368,7 +31330,269 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
+              "ballot": "1.5"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.6"
+            },
+            {
+              "alive": true,
+              "promise": "2.6",
+              "writes": [
+                "promise 2.6"
+              ]
+            },
+            {
+              "alive": true,
+              "promise": "1.5"
+            },
+            {
+              "alive": true,
+              "promise": "1.5"
+            },
+            {
+              "alive": true,
+              "promise": "0.0"
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            }
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "p6",
+          "to": "a2",
+          "label": "Prepare 2.6 · from slot 3",
+          "phase": "prepare",
+          "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 2.6",
+            "about": "The new leader asks every acceptor of every segment it reads for a promise and for its votes."
+          },
+          "says": "Acceptor 2 writes its promise for ballot 2.6, then sends its votes from slot 3.",
+          "notes": [],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "2.6"
+            },
+            {
+              "name": "from slot",
+              "value": "3"
+            }
+          ],
+          "voice": "I lead with ballot 2.6. Promise me, and send me your votes from slot 3.",
+          "state": [
+            [
+              "leader A",
+              "w0: Written at seq 0",
+              "w1: Written at seq 1"
+            ],
+            [
+              "term 1"
+            ],
+            [
+              "segment 1: sealed · from slot 0 · end 3 · next_seq 2",
+              "segment 2: in force · from slot 3"
+            ],
+            [
+              "ballot 1.5 · segment 1",
+              "stopped"
+            ],
+            [
+              "ballot 2.6 · segment 2",
+              "runs Phase 1"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "promise 2.6"
+            ],
+            [
+              "promise 1.5"
+            ],
+            [
+              "promise 0.0"
+            ],
+            [
+              "segment 1",
+              "next_seq 2",
+              "end 3"
+            ],
+            [
+              "segment 2",
+              "next_seq 2"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = set leader A",
+            "slot 1 = w0",
+            "slot 2 = w1",
+            "slot 3 = w2"
+          ],
+          "logs": [
+            [],
+            [],
+            [],
+            [],
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "accepted",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "accepted"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "accepted"
+              },
+              {
+                "slot": 3,
+                "value": "w2",
+                "state": "accepted"
+              }
+            ],
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "set leader A",
+                "state": "chosen",
+                "control": true
+              },
+              {
+                "slot": 1,
+                "value": "w0",
+                "state": "chosen"
+              },
+              {
+                "slot": 2,
+                "value": "w1",
+                "state": "chosen"
+              }
+            ],
+            []
+          ],
+          "message": 54,
+          "wire": [
+            {
+              "id": 40,
+              "from": "p5",
+              "to": "a1",
+              "phase": "accept",
+              "label": "Accept 1.5 · slot 3 · w2",
+              "fan": 40
+            },
+            {
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
+              "id": 55,
+              "from": "p6",
+              "to": "a3",
+              "phase": "prepare",
+              "label": "Prepare 2.6 · from slot 3",
+              "fan": 53
+            },
+            {
+              "id": 56,
+              "from": "p6",
+              "to": "a4",
+              "phase": "prepare",
+              "label": "Prepare 2.6 · from slot 3",
+              "fan": 53
+            },
+            {
+              "id": 57,
+              "from": "a1",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · no vote",
+              "fan": 57
+            },
+            {
+              "id": 58,
+              "from": "a2",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · w2 at 3",
+              "fan": 58
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true
+            },
+            {
+              "alive": true,
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -31442,7 +31666,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -31567,7 +31791,7 @@
             ],
             []
           ],
-          "message": 54,
+          "message": 55,
           "wire": [
             {
               "id": 40,
@@ -31578,36 +31802,44 @@
               "fan": 40
             },
             {
-              "id": 55,
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
+              "id": 56,
               "from": "p6",
               "to": "a4",
               "phase": "prepare",
               "label": "Prepare 2.6 · from slot 3",
-              "fan": 52
+              "fan": 53
             },
             {
-              "id": 56,
+              "id": 57,
               "from": "a1",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · no vote",
-              "fan": 56
-            },
-            {
-              "id": 57,
-              "from": "a2",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · w2 at 3",
               "fan": 57
             },
             {
               "id": 58,
-              "from": "a3",
+              "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
               "fan": 58
+            },
+            {
+              "id": 59,
+              "from": "a3",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · w2 at 3",
+              "fan": 59
             }
           ],
           "nodes": [
@@ -31622,7 +31854,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -31696,7 +31928,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -31821,7 +32053,7 @@
             ],
             []
           ],
-          "message": 55,
+          "message": 56,
           "wire": [
             {
               "id": 40,
@@ -31832,24 +32064,24 @@
               "fan": 40
             },
             {
-              "id": 56,
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
+              "id": 57,
               "from": "a1",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · no vote",
-              "fan": 56
-            },
-            {
-              "id": 57,
-              "from": "a2",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · w2 at 3",
               "fan": 57
             },
             {
               "id": 58,
-              "from": "a3",
+              "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
@@ -31857,11 +32089,19 @@
             },
             {
               "id": 59,
+              "from": "a3",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · w2 at 3",
+              "fan": 59
+            },
+            {
+              "id": 60,
               "from": "a4",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · no vote",
-              "fan": 59
+              "fan": 60
             }
           ],
           "nodes": [
@@ -31876,7 +32116,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -31950,7 +32190,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -32085,7 +32325,7 @@
             ],
             []
           ],
-          "message": 56,
+          "message": 57,
           "wire": [
             {
               "id": 40,
@@ -32096,16 +32336,16 @@
               "fan": 40
             },
             {
-              "id": 57,
-              "from": "a2",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
             },
             {
               "id": 58,
-              "from": "a3",
+              "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
@@ -32113,11 +32353,19 @@
             },
             {
               "id": 59,
+              "from": "a3",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · w2 at 3",
+              "fan": 59
+            },
+            {
+              "id": 60,
               "from": "a4",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · no vote",
-              "fan": 59
+              "fan": 60
             }
           ],
           "nodes": [
@@ -32132,7 +32380,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -32203,7 +32451,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -32339,7 +32587,7 @@
             ],
             []
           ],
-          "message": 58,
+          "message": 59,
           "wire": [
             {
               "id": 40,
@@ -32350,20 +32598,28 @@
               "fan": 40
             },
             {
-              "id": 57,
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             },
             {
-              "id": 59,
+              "id": 60,
               "from": "a4",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · no vote",
-              "fan": 59
+              "fan": 60
             }
           ],
           "nodes": [
@@ -32378,7 +32634,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -32449,7 +32705,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -32586,7 +32842,7 @@
             ],
             []
           ],
-          "message": 59,
+          "message": 60,
           "wire": [
             {
               "id": 40,
@@ -32597,12 +32853,20 @@
               "fan": 40
             },
             {
-              "id": 57,
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             }
           ],
           "nodes": [
@@ -32617,7 +32881,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -32692,7 +32956,7 @@
             ],
             [
               "ballot 1.5 · segment 1",
-              "writes, its segment from slot 0"
+              "stopped"
             ],
             [
               "ballot 2.6 · segment 2",
@@ -32820,20 +33084,28 @@
           "message": 40,
           "wire": [
             {
-              "id": 57,
+              "id": 51,
+              "from": "p5",
+              "to": "c",
+              "phase": "other",
+              "label": "Reply · Unknown",
+              "fan": 51
+            },
+            {
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             },
             {
-              "id": 60,
+              "id": 61,
               "from": "a1",
               "to": "p5",
               "phase": "nack",
               "label": "Nack · promised 2.6",
-              "fan": 60
+              "fan": 61
             }
           ],
           "nodes": [
@@ -32848,7 +33120,7 @@
             },
             {
               "alive": true,
-              "role": "leader",
+              "role": "follower",
               "ballot": "1.5"
             },
             {
@@ -32891,7 +33163,7 @@
             "title": "Write w3",
             "about": "The leader puts the write in a slot, two of the three acceptors of its column vote, and the replica of the slot's segment applies it."
           },
-          "says": "Proposer 5 learns that a higher ballot, 2.6, holds the promise. Proposer 5 stopped.",
+          "says": "Proposer 5 learns that a higher ballot, 2.6, holds the promise.",
           "notes": [],
           "fields": [
             {
@@ -33044,23 +33316,23 @@
             ],
             []
           ],
-          "message": 60,
+          "message": 61,
           "wire": [
             {
-              "id": 57,
-              "from": "a2",
-              "to": "p6",
-              "phase": "promise",
-              "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
-            },
-            {
-              "id": 61,
+              "id": 51,
               "from": "p5",
               "to": "c",
               "phase": "other",
               "label": "Reply · Unknown",
-              "fan": 61
+              "fan": 51
+            },
+            {
+              "id": 58,
+              "from": "a2",
+              "to": "p6",
+              "phase": "promise",
+              "label": "Promise 2.6 · w2 at 3",
+              "fan": 58
             }
           ],
           "nodes": [
@@ -33268,15 +33540,15 @@
             ],
             []
           ],
-          "message": 61,
+          "message": 51,
           "wire": [
             {
-              "id": 57,
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             }
           ],
           "nodes": [
@@ -33481,12 +33753,12 @@
           ],
           "wire": [
             {
-              "id": 57,
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             },
             {
               "id": 62,
@@ -33715,12 +33987,12 @@
           "message": 62,
           "wire": [
             {
-              "id": 57,
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             },
             {
               "id": 63,
@@ -33968,12 +34240,12 @@
           "message": 63,
           "wire": [
             {
-              "id": 57,
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             },
             {
               "id": 64,
@@ -34230,12 +34502,12 @@
           "message": 65,
           "wire": [
             {
-              "id": 57,
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             },
             {
               "id": 64,
@@ -34499,12 +34771,12 @@
           "message": 66,
           "wire": [
             {
-              "id": 57,
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             },
             {
               "id": 64,
@@ -34759,12 +35031,12 @@
           "message": 67,
           "wire": [
             {
-              "id": 57,
+              "id": 58,
               "from": "a2",
               "to": "p6",
               "phase": "promise",
               "label": "Promise 2.6 · w2 at 3",
-              "fan": 57
+              "fan": 58
             },
             {
               "id": 64,

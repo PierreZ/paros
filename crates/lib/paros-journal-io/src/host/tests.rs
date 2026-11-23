@@ -129,7 +129,9 @@ fn an_acceptor_recovers_its_promise_from_its_records() {
     let ops = acceptor_ops(
         address,
         PersistId(6),
-        &[paros_journal::roles::AcceptorOp::SetPromise(promised)],
+        &[paros_journal::roles::AcceptorOp::Write(
+            paros_journal::roles::AcceptorWrite::SetPromise(promised),
+        )],
     );
     let entries = ops
         .into_iter()

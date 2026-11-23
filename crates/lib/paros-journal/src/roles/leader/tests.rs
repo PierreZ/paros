@@ -90,6 +90,7 @@ fn page(votes: &[(u64, u64, Command)], faulty: &[(u64, u64)]) -> PromisePage {
             .map(|(slot, round)| (Slot(*slot), ballot(*round)))
             .collect(),
         next: None,
+        dropped: BTreeMap::new(),
     }
 }
 
@@ -433,6 +434,31 @@ fn a_leader_stops_on_a_higher_promise_and_answers_unknown() {
         leader.step(NodeId(2), promise(2, 0, page(&[], &[]))).len(),
         0
     );
+}
+
+#[test]
+fn an_open_leader_whose_segment_a_later_leader_sealed_stops_and_answers_unknown() {
+    let mut leader = open_leader();
+    leader.propose(7, write(1), 0);
+    leader.propose(8, write(2), 0);
+    // A value with segment 1 still open changes nothing.
+    assert_eq!(replies(&leader.observe(&two_segments())), vec![]);
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(0) });
+    // A later leader sealed segment 1 at slot 1: the rounds above wait on
+    // acceptors that may retire and never refuse them.
+    let sealed = two_segments()
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(1),
+        })
+        .expect("a seal");
+    let effects = leader.observe(&sealed);
+    assert_eq!(*leader.phase(), LeaderPhase::Stopped);
+    assert_eq!(
+        replies(&effects),
+        vec![(7, Reply::Unknown), (8, Reply::Unknown)]
+    );
+    assert!(leader.tick(4).is_empty(), "a stopped leader sends nothing");
 }
 
 #[test]
@@ -841,6 +867,71 @@ fn an_open_leader_retires_the_sealed_segment_at_f_plus_one_holders() {
 }
 
 #[test]
+fn a_retire_ends_the_rounds_and_the_commits_of_the_retired_segment() {
+    // Segment 1 sealed at 3, with votes at slots 1 and 2 that the leader
+    // proposes again in segment 1.
+    let sealed = two_segments()
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(3),
+        })
+        .expect("the seal");
+    let (mut leader, _) = campaign(&sealed, 3, 2, 1);
+    let votes = page(&[(1, 2, write(1)), (2, 2, write(2))], &[]);
+    for node in [1, 2] {
+        leader.step(NodeId(node), promise(3, 1, votes.clone()));
+    }
+    for node in [4, 5] {
+        leader.step(NodeId(node), promise(3, 1, page(&[], &[])));
+    }
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(3) });
+    // Phase 2 runs on the leader's own grid. Slot 1 is chosen and
+    // committed to the replicas of segment 1; slot 2 waits on its round.
+    for node in [4, 5] {
+        leader.step(
+            NodeId(node),
+            Message::Accepted {
+                ballot: ballot(3),
+                slot: Slot(1),
+            },
+        );
+    }
+    let tick = leader.tick(4);
+    let commit = Message::Commit {
+        segment: SegmentId(1),
+        slot: Slot(1),
+        command: write(1),
+    };
+    assert!(sends(&tick).contains(&(NodeId(11), commit.clone())));
+    assert_eq!(accepts(&tick), BTreeMap::from([(Slot(2), write(2))]));
+    let retired = sealed
+        .apply(&Change::Boundary {
+            segment: SegmentId(1),
+            state: crate::fold::BoundaryState::fresh(crate::command::Leader::Unset),
+        })
+        .and_then(|value| {
+            value.apply(&Change::Retire {
+                segment: SegmentId(1),
+                holders: 2,
+                unrepaired_damage: false,
+            })
+        })
+        .expect("the retire");
+    assert_eq!(
+        leader.observe(&retired),
+        vec![LeaderEffect::Retired {
+            segment: SegmentId(1)
+        }]
+    );
+    // The replicas of a retired segment answer nothing and its acceptors
+    // stop: the leader sends neither the commit nor the accept again.
+    let tick = leader.tick(4);
+    assert!(!sends(&tick).contains(&(NodeId(11), commit)));
+    assert!(accepts(&tick).is_empty());
+    leader.assert_invariants();
+}
+
+#[test]
 fn a_leader_with_no_sealed_segment_retires_nothing() {
     let mut leader = open_leader();
     leader.step(NodeId(11), holds(1, true));
@@ -1111,4 +1202,47 @@ fn a_proposal_carries_the_leader_time_of_its_write() {
         Some(&Command::Noop),
         "a command with no record is not stamped"
     );
+}
+
+#[test]
+fn only_the_replicas_of_a_segment_count_toward_its_compaction() {
+    let mut leader = open_leader();
+    let report = |segment: u64| Message::CompactedTo {
+        segment: SegmentId(segment),
+        compacted: Slot(2),
+        answers: Slot(2),
+    };
+    let compacts = |effects: &[LeaderEffect<u32>]| {
+        sends(effects)
+            .into_iter()
+            .filter(|(_, m)| matches!(m, Message::Compact { .. }))
+            .count()
+    };
+    // Two nodes outside the set of segment 1, and a replica of segment 1
+    // that reports for another segment: none counts.
+    let mut effects = leader.step(NodeId(21), report(1));
+    effects.extend(leader.step(NodeId(22), report(1)));
+    effects.extend(leader.step(NodeId(11), report(9)));
+    effects.extend(leader.tick(4));
+    assert_eq!(compacts(&effects), 0, "no report of the set: no compaction");
+    // Two replicas of the set are F + 1: the acceptors drop the votes.
+    let mut effects = leader.step(NodeId(11), report(1));
+    effects.extend(leader.step(NodeId(12), report(1)));
+    effects.extend(leader.tick(4));
+    assert!(compacts(&effects) > 0, "F + 1 replicas compacted");
+}
+
+#[test]
+fn a_first_leader_seals_above_a_dropped_range() {
+    let value = two_segments();
+    let (mut leader, _) = campaign(&value, 2, 2, 0);
+    for node in [4, 5] {
+        leader.step(NodeId(node), promise(2, 0, page(&[], &[])));
+    }
+    let mut dropped = page(&[], &[]);
+    dropped.dropped = BTreeMap::from([(Slot(0), Slot(3))]);
+    leader.step(NodeId(1), promise(2, 0, dropped));
+    leader.step(NodeId(2), promise(2, 0, page(&[], &[])));
+    // A dropped range counts as voted: the end is one above its last slot.
+    assert_eq!(*leader.phase(), LeaderPhase::Sealing { end: Slot(3) });
 }
