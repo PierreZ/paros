@@ -252,6 +252,25 @@ fn replicas_apply_in_order_and_heal_a_dropped_commit_through_catch_up() {
     tier.beat(|_, _| true);
     assert_eq!(tier.applied_slots(0), vec![0, 1, 2]);
     assert_eq!(tier.applied[0], tier.applied[1], "one order, every replica");
+    // The healed replica reads the chosen log from its learned records: the
+    // same slots and commands as the leader's.
+    let replica_log: Vec<(Slot, Command)> = tier.replicas[0]
+        .chosen_commands()
+        .map(|(slot, command)| (slot, command.clone()))
+        .collect();
+    let leader_log: Vec<(Slot, Command)> = tier.nodes[0]
+        .chosen_commands()
+        .map(|(slot, command)| (slot, command.clone()))
+        .collect();
+    assert_eq!(
+        replica_log
+            .iter()
+            .map(|(slot, _)| *slot)
+            .collect::<Vec<_>>(),
+        vec![Slot(0), Slot(1), Slot(2)],
+        "the replica lists every chosen slot, in order"
+    );
+    assert_eq!(replica_log, leader_log, "one chosen log, every party");
     assert!(tier.replicas[0].counters().catch_up_requests >= 1);
     assert_eq!(tier.replicas[0].leader(), Some(NodeId(0)));
     // Every acceptor holds the chosen prefix: the replicas never voted, so the
