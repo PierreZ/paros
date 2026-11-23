@@ -148,7 +148,7 @@ impl Fingerprint for Vec<MatchmakerId> {
 }
 
 impl Weigh for Vec<MatchmakerId> {
-    /// The bytes of the member ids.
+    /// The payload of a matchmaker set: the bytes of its member ids.
     fn weight(&self) -> u64 {
         u64::try_from(core::mem::size_of_val(self.as_slice()))
             .expect("a matchmaker set fits in u64")

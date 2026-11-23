@@ -1201,18 +1201,15 @@ impl ReplicaNode {
         self.retained_bytes
     }
 
-    /// Hold the record learned at `slot`, and count its bytes.
+    /// Hold the record learned at `slot`, and count its bytes. A replica
+    /// holds a slot once: `learn` returns early on a slot already chosen,
+    /// and the boot's records below and above the prefix are disjoint.
     fn hold(&mut self, slot: Slot, record: (Ballot, Command)) {
         let added = record.1.weight();
-        let replaced = self
-            .records
-            .insert(slot, record)
-            .map_or(0, |(_, old)| old.weight());
-        assert!(
-            replaced <= self.retained_bytes,
-            "the retained bytes hold the weight of the record they replace"
-        );
-        self.retained_bytes = self.retained_bytes - replaced + added;
+        let before = self.retained_bytes;
+        let replaced = self.records.insert(slot, record);
+        assert!(replaced.is_none(), "a replica never holds a slot twice");
+        self.retained_bytes = before + added;
         assert!(
             self.retained_bytes >= added,
             "the retained bytes hold the record just learned"

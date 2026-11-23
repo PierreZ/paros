@@ -388,10 +388,10 @@ fn a_replica_executes_a_decided_truncate_and_seals_its_journal_state() {
     for seq in 0..=2 {
         tier.write(1, seq, |_, _| true);
     }
-    for r in 0..REPLICAS.len() {
+    for replica in &tier.replicas {
         assert_eq!(
-            tier.replicas[r].retained_bytes(),
-            held_bytes(&tier.replicas[r]),
+            replica.retained_bytes(),
+            held_bytes(replica),
             "the retained bytes are the held records' bytes"
         );
     }

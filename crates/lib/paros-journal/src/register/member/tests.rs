@@ -357,3 +357,11 @@ fn the_fingerprint_of_a_successor_sees_its_set_and_its_write() {
     }
     assert_eq!(base.fingerprint(), base.clone().fingerprint());
 }
+
+/// A successor weighs the bytes of its members' ids.
+#[test]
+fn a_successor_weighs_its_member_ids() {
+    use paros_consensus::types::Weigh;
+    assert_eq!(successor(1, &[1, 2, 3], 1).weight(), 24);
+    assert_eq!(successor(1, &[4, 5], 1).weight(), 16);
+}

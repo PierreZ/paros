@@ -290,9 +290,18 @@ pub enum Command {
 }
 
 impl paros_consensus::types::Weigh for Command {
-    /// The bytes of the command's encoding ([`crate::codec`]).
+    /// The payload bytes of a write's records, as the core's command
+    /// weighs them; every other command carries no payload and weighs
+    /// nothing.
     fn weight(&self) -> u64 {
-        u64::try_from(crate::codec::encode_command(self).len()).expect("a command fits in u64")
+        match self {
+            Self::Write(write) => write
+                .records
+                .iter()
+                .map(|record| u64::try_from(record.payload.len()).expect("a payload fits in u64"))
+                .sum(),
+            _ => 0,
+        }
     }
 }
 

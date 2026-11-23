@@ -167,9 +167,12 @@ pub trait Fingerprint {
 /// (`Acceptor::retained_bytes`), so a driver can bound the memory of the
 /// retained log (#1153 (retained log memory)).
 ///
-/// The measure is the value's payload, not its exact heap footprint: a
-/// client write counts its records' bytes, the same measure as the
-/// `max_bytes` of a journal read. Two equal values weigh the same.
+/// The measure is the value's payload bytes, not its exact heap footprint:
+/// a client write counts its records' bytes, the same measure as the
+/// `max_bytes` of a journal read, and a value with no payload (a control
+/// command) weighs nothing. Two equal values weigh the same. A driver that
+/// must also bound a log of empty or control commands bounds the number of
+/// records too (`Acceptor::records`).
 pub trait Weigh {
     /// The bytes this value holds.
     fn weight(&self) -> u64;

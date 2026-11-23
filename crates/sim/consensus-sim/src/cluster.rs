@@ -582,6 +582,14 @@ impl Model for Cluster {
                 self.ledger
                     .learned(&format!("node {}", site.id.0), slot, command);
             }
+            crate::oracle::memory::retained(
+                &format!("node {}", site.id.0),
+                node.retained_bytes(),
+                node.acceptor()
+                    .records()
+                    .values()
+                    .map(|(_, command)| command),
+            );
         }
         for site in &self.replicas {
             let Some(replica) = &site.live else { continue };
@@ -589,6 +597,11 @@ impl Model for Cluster {
                 self.ledger
                     .learned(&format!("replica {}", site.id.0), slot, command);
             }
+            crate::oracle::memory::retained(
+                &format!("replica {}", site.id.0),
+                replica.retained_bytes(),
+                replica.chosen_commands().map(|(_, command)| command),
+            );
         }
     }
 

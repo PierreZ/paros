@@ -108,11 +108,13 @@ The simplest bound changes no protocol rule. The core counts, and the driver dec
 
 How it is checked: unit tests pair the counter with the records (it rises on each record,
 swaps the bytes of a record it replaces, falls on a compaction and a trim-point jump, and
-reads back the same after a reboot, on a node and on a replica node), and paired assertions
-in the core hold it in every walk of consensus-sim (no record, no byte; the sum bounds each
-end record's weight; a drop never takes more than the sum). A consensus-sim oracle would
-compare two outputs of the core, which no planted mutant of the driver can make differ, so
-the core's own tests and its mutants judge it.
+reads back the same after a reboot, on a node and on a replica node). Paired assertions in the
+core hold it in every walk (no record, no byte; the sum bounds each end record's weight; a
+drop never takes more than the sum). A consensus-sim oracle (`oracle/memory.rs`,
+`RETAINED_BYTES`) compares the counter of every live node and replica with a sum of the
+records' bytes made by hand, at each check of every walk. A planted mutant of the driver cannot
+make the two differ, so the oracle's controls are its own unit test and the mutants of the
+core, which the `mutants` job runs against the walks.
 
 ## Later, if a deployment needs it: a window in memory
 

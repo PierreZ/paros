@@ -120,3 +120,18 @@ fn a_stamp_gives_every_record_of_a_write_one_time() {
     );
     assert_eq!(Command::Noop.stamped(9), Command::Noop);
 }
+
+/// A write weighs its records' payload bytes, the measure the core's
+/// retained bytes sum; every other command weighs nothing.
+#[test]
+fn a_write_weighs_its_payload_bytes_and_a_control_command_nothing() {
+    use paros_consensus::types::Weigh;
+    let write = Command::Write(fenced(
+        1,
+        0,
+        vec![record(b"abc", None), record(b"de", Some(4))],
+    ));
+    assert_eq!(write.weight(), 5, "the headers do not count");
+    assert_eq!(Command::Noop.weight(), 0);
+    assert_eq!(Command::Write(fenced(1, 0, Vec::new())).weight(), 0);
+}

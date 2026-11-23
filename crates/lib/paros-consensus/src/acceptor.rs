@@ -249,7 +249,7 @@ impl<V: Clone + PartialEq + Weigh> Acceptor<V> {
                 .flatten()
                 .filter_map(|slot| self.records.get(slot))
                 .all(|(_, value)| value.weight() <= self.retained_bytes),
-            "the retained bytes bound every record's weight"
+            "the retained bytes bound each end record's weight"
         );
     }
 

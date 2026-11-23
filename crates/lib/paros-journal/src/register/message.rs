@@ -36,10 +36,9 @@ pub struct Successor {
 }
 
 impl Weigh for Successor {
-    /// The bytes of the successor's scalars and of its members' ids.
+    /// The payload of a successor: the bytes of its members' ids.
     fn weight(&self) -> u64 {
-        let members = core::mem::size_of_val(self.set.members());
-        u64::try_from(core::mem::size_of::<Self>() + members).expect("a successor fits in u64")
+        u64::try_from(core::mem::size_of_val(self.set.members())).expect("a successor fits in u64")
     }
 }
 
