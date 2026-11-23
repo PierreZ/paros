@@ -3,8 +3,8 @@
 
 use journal_sim::campaign::campaign;
 use journal_sim::roles::{
-    AGREE, BOUNDARY, COMPACT, FLOOR, FOLD, PROXY, READ, RESOLVE, RETIRE, RolesMutant, SEALED,
-    STAMPED, Shape, TRIM, VIEW, reach, walk,
+    AGREE, BOUNDARY, COMPACT, FLOOR, FOLD, PROXY, READ, REPAIRED, RESOLVE, RETIRE, RolesMutant,
+    SEALED, STAMPED, Shape, TRIM, VIEW, reach, walk,
 };
 
 /// The seeds of each walk in CI.
@@ -118,4 +118,9 @@ fn agree_catches_a_phase_one_that_hides_dropped_votes() {
 #[test]
 fn stamped_catches_an_accept_that_lost_its_leader_time() {
     caught(RolesMutant::UnstampedAccept, STAMPED);
+}
+
+#[test]
+fn repaired_catches_a_repair_that_writes_another_command() {
+    caught(RolesMutant::RepairForged, REPAIRED);
 }

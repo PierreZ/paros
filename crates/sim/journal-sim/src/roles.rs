@@ -122,6 +122,11 @@ pub const PROXY: &str =
 pub const COMPACT: &str =
     "an acceptor drops a vote only below the compaction point of F + 1 replicas of its set";
 
+/// Oracle: a CTRL repair writes the command that the slot chose (§J5.3,
+/// `AccRepair` of `specs/tla/journal-ctrl/`): the repaired vote is the
+/// chosen command, at or above the ballot of the leader that chose it.
+pub const REPAIRED: &str = "a repaired vote holds the chosen command at or above its ballot";
+
 /// The coverage sites of the roles walk.
 pub mod reach {
     /// A leader sealed a segment.
@@ -186,6 +191,19 @@ pub mod reach {
     /// answer.
     pub const BLIND: &str = "roles walk: a blind fold applied a slot";
 
+    /// An acceptor booted with a damaged vote.
+    pub const ROTTED: &str = "roles walk: an acceptor booted with a damaged vote";
+    /// A leader's Phase 1 left a slot blocked by a faulty vote.
+    pub const BLOCKED: &str = "roles walk: a faulty vote blocked a slot";
+    /// A late answer decided a blocked slot.
+    pub const PROBED: &str = "roles walk: a late answer decided a blocked slot";
+    /// A late answer dropped a blocked slot, and the leader skipped it.
+    pub const SKIPPED: &str = "roles walk: a late answer dropped a blocked slot";
+    /// A replica gave a blocked slot its chosen command.
+    pub const LEARNED: &str = "roles walk: a replica gave a blocked slot its command";
+    /// An acceptor repaired its faulty vote.
+    pub const REPAIRED: &str = "roles walk: an acceptor repaired its faulty vote";
+
     /// The sites of every roles walk.
     pub const ALL: &[&str] = &[
         SEALED,
@@ -215,6 +233,12 @@ pub mod reach {
         DROPPED,
         JUMPED,
         BLIND,
+        ROTTED,
+        BLOCKED,
+        PROBED,
+        SKIPPED,
+        LEARNED,
+        REPAIRED,
     ];
     /// The sites of the wide walk.
     pub const WIDE: &[&str] = &[COLUMNS, PAGED];
@@ -296,6 +320,9 @@ pub enum RolesMutant {
     /// ranges, so Phase 1 takes a slot whose votes were dropped for an
     /// empty one. [`AGREE`] catches it.
     DroppedHidden,
+    /// The driver gives each acceptor a `Repair` that carries a `Noop` in
+    /// place of the chosen command. [`REPAIRED`] catches it.
+    RepairForged,
 }
 
 /// One step of the roles walk that changes the state of
@@ -445,6 +472,56 @@ pub enum RolesEvent {
         /// Its trim floor.
         floor: u64,
     },
+    /// Acceptor `a` booted with its vote at `s` damaged: the value is lost,
+    /// the ballot stays (`Rot`).
+    Rot {
+        /// The acceptor.
+        a: u64,
+        /// The slot.
+        s: u64,
+    },
+    /// A late answer decided the blocked slot `s` of the leader of `b` on
+    /// the qualifying answers `q` (`ProbeDecide`).
+    Probe {
+        /// The ballot.
+        b: u64,
+        /// The slot.
+        s: u64,
+        /// The qualifying answers.
+        q: Vec<u64>,
+    },
+    /// The complete answer of acceptor `a` dropped the blocked slot `s` of
+    /// the leader of `b`, which proposes nothing there (`ProbeSkip`).
+    Skip {
+        /// The ballot.
+        b: u64,
+        /// The slot.
+        s: u64,
+        /// The acceptor whose answer dropped the slot.
+        a: u64,
+    },
+    /// A replica gave the blocked slot `s` of the leader of `b` its chosen
+    /// command (`LearnChosen`).
+    Learn {
+        /// The ballot.
+        b: u64,
+        /// The slot.
+        s: u64,
+        /// The chosen command.
+        command: Command,
+    },
+    /// Acceptor `a` queued the repair of its faulty vote at `s` with
+    /// `command`, chosen at ballot `c` (`AccRepair`).
+    Repair {
+        /// The acceptor.
+        a: u64,
+        /// The slot.
+        s: u64,
+        /// The chosen command.
+        command: Command,
+        /// The ballot that chose it.
+        c: u64,
+    },
     /// Replica `r` answered `res` to the `Resolve` of the write at `s`
     /// (`ResolveBelow`).
     Resolve {
@@ -496,6 +573,8 @@ pub enum RolesAction {
     Read,
     /// A replica learns the register value it missed.
     Observe,
+    /// An acceptor boots and finds one of its votes damaged.
+    Rot,
 }
 
 /// One open read of the walk's reader.
@@ -631,7 +710,9 @@ pub struct RolesModel {
     /// The durable front each replica's `Apply` events reached.
     traced: BTreeMap<NodeId, Slot>,
     /// The highest vote that a compaction dropped from each acceptor's disk,
-    /// by acceptor and slot: the oracle [`PROXY`] counts it as on the disk.
+    /// or whose value a rot damaged, by acceptor and slot: the oracle
+    /// [`PROXY`] counts it as on the disk (a damaged vote keeps its ballot,
+    /// §J5.3).
     dropped_votes: BTreeMap<(NodeId, Slot), paros_journal::register::Ballot>,
     /// The answer of each slot a replica applied in memory and that is not
     /// traced yet, taken after each step: a later compaction drops it from
@@ -700,6 +781,7 @@ impl Model for RolesModel {
             RolesAction::Resolve,
             RolesAction::Read,
             RolesAction::Observe,
+            RolesAction::Rot,
         ]
     }
 
@@ -732,7 +814,7 @@ impl Model for RolesModel {
                 | RolesAction::Truncate,
                 _,
             ) => 2,
-            (RolesAction::Campaign | RolesAction::Multi, _) => 1,
+            (RolesAction::Campaign | RolesAction::Multi | RolesAction::Rot, _) => 1,
         }
     }
 
@@ -751,6 +833,7 @@ impl Model for RolesModel {
             RolesAction::Tick => self.tick(cx),
             RolesAction::Resolve => self.resolve(cx),
             RolesAction::Read => self.read(cx),
+            RolesAction::Rot => self.rot(cx),
             RolesAction::Observe => {
                 let nodes: Vec<NodeId> = self
                     .replicas
@@ -794,13 +877,42 @@ impl Model for RolesModel {
                     record.headers.leader_time = None;
                 }
             }
+            if let Message::Repair { command, .. } = &mut message
+                && self.mutant == RolesMutant::RepairForged
+            {
+                *command = Command::Noop;
+            }
+            let repair = match &message {
+                Message::Repair {
+                    ballot,
+                    slot,
+                    command,
+                } => Some((*slot, command.clone(), ballot.round)),
+                _ => None,
+            };
             let node = self.acceptors.get_mut(&to).expect("an acceptor");
             if let Some(role) = &mut node.role {
                 let effects = role.step(from, message);
                 for effect in &effects {
                     if let AcceptorEffect::Persist { ops, .. } = effect {
-                        cx.record(Self::queued(to, ops));
+                        match &repair {
+                            Some((slot, command, c)) => cx.record(RolesEvent::Repair {
+                                a: to.0,
+                                s: slot.0,
+                                command: command.clone(),
+                                c: *c,
+                            }),
+                            None => cx.record(Self::queued(to, ops)),
+                        }
                     }
+                }
+                let wrote = effects
+                    .iter()
+                    .any(|e| matches!(e, AcceptorEffect::Persist { .. }));
+                if let (Some((slot, ..)), true) = (&repair, wrote) {
+                    sometimes!(true, reach::REPAIRED);
+                    let vote = role.vote(*slot).cloned();
+                    self.judge_repair(to, *slot, vote.as_ref());
                 }
                 self.acceptor_effects(to, effects, cx);
             }
@@ -1035,6 +1147,8 @@ impl RolesModel {
             reach::PAGED
         );
         let before = leader.phase().clone();
+        let blocked: Vec<Slot> = leader.blocked().to_vec();
+        let learned = matches!(message, Message::Learned { .. });
         let mut effects = leader.step(from, message.clone());
         for node in forged {
             effects.extend(leader.step(node, message.clone()));
@@ -1057,6 +1171,37 @@ impl RolesModel {
                     cx.record(RolesEvent::Open { b, start: start.0 });
                 }
                 LeaderPhase::Phase1 | LeaderPhase::Stopped => {}
+            }
+            sometimes!(!leader.blocked().is_empty(), reach::BLOCKED);
+        }
+        let b = leader.ballot().round;
+        for slot in blocked.iter().filter(|s| !leader.blocked().contains(s)) {
+            if learned {
+                sometimes!(true, reach::LEARNED);
+                let Message::Learned { command, .. } = &message else {
+                    unreachable!("a learn")
+                };
+                cx.record(RolesEvent::Learn {
+                    b,
+                    s: slot.0,
+                    command: command.clone(),
+                });
+            } else if let Some(a) = leader.phase1().dropped_by(*slot) {
+                sometimes!(true, reach::SKIPPED);
+                cx.record(RolesEvent::Skip {
+                    b,
+                    s: slot.0,
+                    a: a.0,
+                });
+            } else {
+                sometimes!(true, reach::PROBED);
+                let q = leader
+                    .phase1()
+                    .qualifying(leader.segments(), *slot)
+                    .iter()
+                    .map(|n| n.0)
+                    .collect();
+                cx.record(RolesEvent::Probe { b, s: slot.0, q });
             }
         }
         self.leader_effects(to, effects, cx);
@@ -1199,25 +1344,40 @@ impl RolesModel {
                 .expect("small");
             pool.swap(i, j);
         }
+        // On three reshapes in four, the new grid leaves out the acceptors of
+        // the grid in force where it can: their vote watermarks stay at the
+        // seal, so a read at the replica that hears the register late is
+        // served, and only the fence of the later segment refuses it.
+        if cx.rng().chance(3, 4)
+            && let Some(in_force) = self.register.in_force()
+        {
+            let old: BTreeSet<NodeId> = in_force
+                .grid()
+                .columns()
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            pool.sort_by_key(|node| old.contains(node));
+        }
         let columns = if self.shape.wide && cx.rng().chance(1, 2) {
             vec![pool[..3].to_vec(), pool[3..].to_vec()]
         } else {
             vec![pool[..3].to_vec()]
         };
         let grid = Grid::new(1, columns).expect("a v1 grid");
-        // On one reshape in two, one replica of the segment in force hears the
+        // At each reshape, one replica of the segment in force hears the
         // register late: it learns a value only when it restarts or the
         // faults stop, so a read there can meet the next segment before the
         // replica knows the seal.
-        let in_force = self.register.in_force().map(SegmentRecord::id);
-        self.slow = if let Some(in_force) = in_force
-            && cx.rng().chance(1, 2)
-        {
-            let set = Self::set_of(in_force);
-            cx.rng().index(set.len()).map(|pick| set[pick])
-        } else {
-            None
-        };
+        self.slow = self
+            .register
+            .in_force()
+            .map(SegmentRecord::id)
+            .and_then(|in_force| {
+                let set = Self::set_of(in_force);
+                cx.rng().index(set.len()).map(|pick| set[pick])
+            });
         self.open_segment(grid, cx);
     }
 
@@ -1799,6 +1959,87 @@ impl RolesModel {
             self.states
                 .push((self.truth.leader, self.truth.next, self.truth.first));
         }
+    }
+
+    /// The oracle [`REPAIRED`] on the vote that acceptor `node` holds at
+    /// `slot` after a repair.
+    fn judge_repair(
+        &self,
+        node: NodeId,
+        slot: Slot,
+        vote: Option<&(paros_journal::register::Ballot, Command)>,
+    ) {
+        let chosen = self.chosen.get(&slot);
+        assert!(
+            chosen.is_some_and(|(command, round, _)| {
+                vote.is_some_and(|(ballot, held)| held == command && ballot.round >= *round)
+            }),
+            "{REPAIRED}: acceptor {node:?} holds {vote:?} at {slot:?}, the slot chose {chosen:?}"
+        );
+    }
+
+    /// Whether a replica applied `slot` on its disk and still holds it
+    /// (`Holds` of `specs/tla/journal-state/`).
+    fn learned(&self, slot: Slot) -> bool {
+        self.replicas.iter().any(|(node, replica)| {
+            let start = match replica.disk.base {
+                Some((_, start)) => start,
+                None if Self::segment_of_replica(*node) == SegmentId(1) => Slot(0),
+                None => return false,
+            };
+            let compacted = replica.disk.trim.map_or(Slot(0), |trim| trim.slot);
+            !self.dropped.contains(node)
+                && start <= slot
+                && compacted <= slot
+                && self.traced.get(node).is_some_and(|front| slot < *front)
+        })
+    }
+
+    /// An up acceptor boots and finds a vote of its disk damaged (CTRL,
+    /// §J5.3): the value is lost and the ballot stays. The walk damages a
+    /// vote only inside the contract (`Spare` of `specs/tla/journal-ctrl/`):
+    /// a replica applied the slot, or the slot chose another command, so
+    /// the value is not lost for good.
+    fn rot(&mut self, cx: &mut Cx<'_, Self>) {
+        let candidates: Vec<(NodeId, Slot)> = self
+            .acceptors
+            .iter()
+            .filter(|(_, acceptor)| acceptor.role.is_some())
+            .flat_map(|(node, acceptor)| {
+                acceptor
+                    .disk
+                    .votes
+                    .iter()
+                    .map(move |(slot, vote)| (*node, *slot, vote.1.clone()))
+            })
+            .filter(|(_, slot, command)| {
+                self.learned(*slot)
+                    || self
+                        .chosen
+                        .get(slot)
+                        .is_some_and(|(chosen, ..)| chosen != command)
+            })
+            .map(|(node, slot, _)| (node, slot))
+            .collect();
+        let Some(&(node, slot)) = cx.rng().pick(&candidates) else {
+            return;
+        };
+        let acceptor = self.acceptors.get_mut(&node).expect("an acceptor");
+        acceptor.crash();
+        let (ballot, _) = acceptor.disk.votes.remove(&slot).expect("a vote");
+        acceptor.disk.faulty.insert(slot, ballot);
+        let held = self.dropped_votes.entry((node, slot)).or_insert(ballot);
+        *held = (*held).max(ballot);
+        acceptor.role = Some(JournalAcceptor::recover(
+            node,
+            acceptor.disk.clone(),
+            self.shape.promise_page(),
+        ));
+        sometimes!(true, reach::ROTTED);
+        cx.record(RolesEvent::Rot {
+            a: node.0,
+            s: slot.0,
+        });
     }
 
     /// The oracle [`FOLD`] on a replica's answer at `slot`.

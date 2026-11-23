@@ -118,7 +118,8 @@ record)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state tally on a 
 configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen
 value in one write; `specs/tla/ctrl-segments/`: the copies of a sealed segment across retire and
 offload, the repair of a replica log and of an object, the data-loss report; #1263 (CTRL recovery
-in the journal)), the journal v1 composed (`specs/tla/journal-state/`: three segments, the seal,
+in the journal); `specs/tla/journal-ctrl/`: CTRL in the composed roles model, a damaged vote at a
+boot, the leader's probe and learn of a blocked slot, the repair at the higher ballot; #1326), the journal v1 composed (`specs/tla/journal-state/`: three segments, the seal,
 register writes that are partial or done, the boundary state, a replica set per segment, the fold
 with `Below` and its `Resolve` call (#1320), retire, trim; the acceptors' state is a memory, a queue of writes and a disk, with a
 crash between two writes, and an `Accept` that raises the promise writes the promise first or in
@@ -164,14 +165,16 @@ change), walked and traced against `specs/tla/segment-records/RegisterTrace.tla`
 matchmaker register as an optional role)). The first journal roles are `paros_journal::roles`
 (the acceptor, the leader with its Phase 1 over the segments and the seal, the segment replica;
 #1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk
-and traced against `specs/tla/journal-compact/RolesTrace.tla`;
+and traced against `specs/tla/journal-ctrl/RolesTrace.tla`;
 the leader's retire at `F + 1` holders and the heal of a retired segment's replica set (the new
 replica's copy, the register's `Rereplicate`, the controller's heal) are built; the controller's
 heal and the register are walked by `journal-sim`'s heal walk, which plays the replicas itself and is traced against `specs/tla/heal-reuse/HealTrace.tla` (#1314 (re-replication of a sealed segment's replica set)); the proxy
 leader, the leaderless reads, the trim of a retired segment with the reader's floor, and the
 leader time of each write (#1299) are built and walked too; so are the compaction of the acceptors
 and the replicas on `F + 1` reports and the trim-point jump of a laggard (traced against
-`specs/tla/journal-compact/RolesTrace.tla`); CTRL repair (the last rule group of #1326) is not built yet. The roles run on the traits of `crates/lib/paros-journal-io`
+`specs/tla/journal-ctrl/RolesTrace.tla`), and CTRL repair: the leader's tri-state tally, the
+learn of a blocked slot from a replica and the acceptor's repair at the higher ballot
+(`specs/tla/journal-ctrl/`, a damaged vote inside the contract in the roles walk). The roles run on the traits of `crates/lib/paros-journal-io`
 (storage, transport, clock, register), the pure `Host` that serves many journals in one process,
 and the generic driver under the flight rule (#1329 (paros-journal-io)), judged by
 `journal-sim`'s driver walk. The pure journal client is `paros_journal::client` (the four calls,
@@ -815,7 +818,7 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`control`, #1261) and the walk of the controller role (`controller`), with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
   `specs/tla/journal-state/FoldTrace.tla`, `specs/tla/segment-records/RegisterTrace.tla` and
-  `specs/tla/journal-compact/RolesTrace.tla` (and of the controller walk against `specs/tla/grid-controller/ControllerTrace.tla`, and of the heal walk against `specs/tla/heal-reuse/HealTrace.tla`), and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
+  `specs/tla/journal-ctrl/RolesTrace.tla` (and of the controller walk against `specs/tla/grid-controller/ControllerTrace.tla`, and of the heal walk against `specs/tla/heal-reuse/HealTrace.tla`), and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
   (check long runs live); four hours each night in the `Journal live` workflow).
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with

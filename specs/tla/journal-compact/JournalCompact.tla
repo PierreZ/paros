@@ -84,7 +84,7 @@ AccCompact(a, p, x) ==
           /\ UNCHANGED pend
      ELSE /\ pend' = [pend EXCEPT ![a] = Append(@, <<"d", Start(p), x, None, FALSE>>)]
           /\ UNCHANGED <<dadrop, dvote>>
-  /\ UNCHANGED <<reg, ldr, mprom, dprom, crashes, p1b, sent2b, rep>>
+  /\ UNCHANGED <<reg, ldr, mprom, dprom, crashes, rots, p1b, sent2b, rep>>
 
 \* Replica r takes a compaction point m of its set, on the disk of a peer:
 \* the peer's answer to a `Pull` below it (`TrimmedTo`) carries the point,

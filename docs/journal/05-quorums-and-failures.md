@@ -121,6 +121,32 @@ hold the data read them back with their checksums. Each rule has a control that 
 `specs/tla/seal-ctrl/`): the end is the frontier of the sealer's Phase 1 over the old grid, and the
 seal does not wait for the repair probe (§J3.1).
 
+**CTRL in the journal roles** (#1326 (the journal roles over the core), `specs/tla/journal-ctrl/`,
+on 2026-11-23). The composed model of the roles (`JournalCtrl.tla` over `JournalCompact.tla`) adds
+a boot that finds a vote damaged (`Rot`), the leader's probe, its learn and the acceptor's repair:
+
+- **The leader's Phase 1 takes the tri-state tally.** A slot whose top report is a faulty vote is
+  decided when the qualifying answers hold a Phase-1 quorum of every grid that reads it; else it is
+  blocked, and no proposal, a client's included, takes it. A late answer folds into the tally and
+  can decide the slot (`ProbeDecide`). An answer that dropped the slot never enters that tally:
+  the slot is then chosen and applied at `F + 1` replicas, and the other answers may predate the
+  compaction, so the tally would read a stale vote. The leader skips the slot and proposes
+  nothing there (`ProbeSkip`; the control `ctrl_probe_drop` tallies it and chooses a `Noop` over
+  the chosen write).
+- **A replica that applied a blocked slot gives its chosen command** (`Learn`, `Learned`;
+  `LearnChosen`). The leader then proposes that command at its own ballot.
+- **The leader repairs once its own round chose the command.** It sends `Repair` with its ballot to
+  each acceptor that reported the slot faulty. The acceptor writes the command at the higher of
+  that ballot and the faulty ballot, with the promise raised to it, in one write (the core's
+  `Acceptor::learn_chosen`). A vote above the choosing ballot carries the chosen command, so the
+  write gives back the lost vote; a vote below gives way to the vote at the choosing ballot. A
+  repair from a peer's vote breaks one value at one ballot (`ctrl_peer`), and a damage that drops
+  the vote breaks agreement (`ctrl_drop`).
+- **A damage stays inside the contract.** A damaged copy is one of the `F` failed copies: the model
+  damages a vote only when a replica applied the slot, the slot chose another value, or a quorum of
+  a live grid holds the chosen value on disk at or above the ballot that chose it (`Spare`). A rot
+  of the last copy is data loss, outside the survive promise (`Readable`).
+
 ### J5.4 Zones
 
 The zone rule of the service (`AcceptorConfig::zone_rule`) is architecture §5. For a journal, a zone loss on three zones takes one acceptor from every

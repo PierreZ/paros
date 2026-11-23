@@ -363,7 +363,7 @@ below the trims of `F + 1` replicas of the set, and every dropped slot is chosen
 `PROXY`, which counts the votes that a compaction dropped. A walk move makes one replica lose its
 messages while a `Truncate` cuts a write in flight, so the walk reaches a jump into a blind fold;
 the trace check binds `compact`, `compact_replica`, `jump` and the blind `apply` to
-`specs/tla/journal-compact/RolesTrace.tla`.
+`specs/tla/journal-ctrl/RolesTrace.tla`.
 
 ### J3.3 A leaderless read of the tail across a reshape
 

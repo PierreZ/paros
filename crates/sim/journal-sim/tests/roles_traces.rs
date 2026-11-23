@@ -1,6 +1,7 @@
 //! Model-based trace checking of the roles walk: TLC checks that each
-//! checked walk is a behaviour of `specs/tla/journal-compact/RolesTrace.tla`
-//! (the actions of `Journal.tla` and `JournalCompact.tla`), refuses the
+//! checked walk is a behaviour of `specs/tla/journal-ctrl/RolesTrace.tla`
+//! (the actions of `Journal.tla`, `JournalCompact.tla` and
+//! `JournalCtrl.tla`), refuses the
 //! trace control, and refuses
 //! every edit of the recorded walks at or after the edited event.
 
@@ -185,6 +186,18 @@ const RULES: &[Rule] = &[
     }),
     ("a blind fold applied a slot", |e| {
         has(e, |e| matches!(e, RolesEvent::Apply { res: None, .. }))
+    }),
+    ("an acceptor booted with a damaged vote", |e| {
+        has(e, |e| matches!(e, RolesEvent::Rot { .. }))
+    }),
+    ("a late answer decided a blocked slot", |e| {
+        has(e, |e| matches!(e, RolesEvent::Probe { .. }))
+    }),
+    ("a replica gave a blocked slot its command", |e| {
+        has(e, |e| matches!(e, RolesEvent::Learn { .. }))
+    }),
+    ("an acceptor repaired its faulty vote", |e| {
+        has(e, |e| matches!(e, RolesEvent::Repair { .. }))
     }),
 ];
 

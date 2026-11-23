@@ -201,6 +201,37 @@ pub enum Message {
         /// The slot below which the votes go.
         below: Slot,
     },
+    /// Leader to replica: send the command that `slot` of `segment` chose,
+    /// if the replica applied it (CTRL, §J5.3). The leader asks for each
+    /// slot that its Phase 1 left blocked.
+    Learn {
+        /// The segment of the slot.
+        segment: SegmentId,
+        /// The blocked slot.
+        slot: Slot,
+    },
+    /// Replica to the asker of `Learn`: `slot` of `segment` chose
+    /// `command`.
+    Learned {
+        /// The segment of the slot.
+        segment: SegmentId,
+        /// The slot.
+        slot: Slot,
+        /// The chosen command.
+        command: Command,
+    },
+    /// Leader to acceptor: `slot` chose `command` at `ballot` (CTRL repair,
+    /// §J5.3). An acceptor whose vote at `slot` is faulty writes `command`
+    /// at the higher of `ballot` and the ballot of the faulty vote, in one
+    /// write; any other acceptor ignores it.
+    Repair {
+        /// The ballot whose Phase 2 chose the command.
+        ballot: Ballot,
+        /// The slot.
+        slot: Slot,
+        /// The chosen command.
+        command: Command,
+    },
     /// Replica to a peer of its set: the answer to a `Pull` below the
     /// replica's compaction point (the trim-point jump). It carries the
     /// compaction point, the fold there and the trim floor of the fold that

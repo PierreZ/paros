@@ -7,7 +7,7 @@
 //! configuration (the matchmakers bind it, §J3.4).
 //!
 //! The steps, each from the model (`Phase1`, `SealWrite`, `Open`,
-//! `Propose`):
+//! `Propose`, and CTRL's `ProbeDecide`, `LearnChosen` and `AccRepair`):
 //!
 //! 1. **Phase 1** ([`phase1`]) asks every acceptor of every segment that is
 //!    not retired, from the first slot it writes, and needs a Phase-1 quorum
@@ -24,8 +24,9 @@
 //!    writes up to its next slot: the vote that its Phase 1 saw, or a `Noop`
 //!    (#1233). Without the `Noop`, a slot below the end with no vote is a hole
 //!    that no ballot writes, because the old grid is sealed (control
-//!    `gap_off`). A slot whose top report is a faulty vote is blocked: the
-//!    leader proposes nothing there (CTRL, §J5.3).
+//!    `gap_off`). A slot whose top report is a faulty vote, and that the
+//!    tri-state tally does not decide, is blocked: the leader proposes
+//!    nothing there, and no new command takes it (CTRL, §J5.3).
 //! 4. **Phase 2**: every slot is written in the leader's own grid, in one
 //!    column (`slot % columns`), and is chosen at `F + 1` acceptors of that
 //!    column (#1257). The tally is the core's [`Rounds`].
@@ -55,6 +56,19 @@
 //!    `F + 1` replicas is answered `Unknown`: its answer is gone. The gap
 //!    fill skips every slot an acceptor dropped, and the next slot is above
 //!    them.
+//! 9. **CTRL repair** (§J5.3, `specs/tla/journal-ctrl/`): at each tick an
+//!    open leader with a blocked slot asks a `Prepare` again of each
+//!    acceptor that has not answered completely, and a `Learn` of each
+//!    replica of the slot's segment. A late answer folds into the tally,
+//!    which then decides the slot (`ProbeDecide`); a replica's `Learned`
+//!    gives it the chosen command (`LearnChosen`). Either way the leader
+//!    proposes that command at its ballot. A late answer that dropped the
+//!    slot never enters the tally: the slot is chosen and applied at
+//!    `F + 1` replicas, and the leader skips it (`ProbeSkip`). Once its round chooses it, the
+//!    leader sends a `Repair` to each acceptor that reported the slot
+//!    faulty, which writes the command at the higher of the two ballots in
+//!    one write (`AccRepair`; control `ctrl_peer`: a value from a peer's
+//!    vote that is not known chosen loses a chosen value).
 
 pub mod phase1;
 
@@ -252,8 +266,12 @@ pub struct JournalLeader<T> {
     phase1: Phase1,
     /// The votes Phase 1 found: the leader proposes each again.
     safe: BTreeMap<Slot, Command>,
-    /// The slots whose top report is a faulty vote: no proposal.
+    /// The slots whose top report is a faulty vote: no proposal until the
+    /// tally decides them or a replica gives their chosen command.
     blocked: Vec<Slot>,
+    /// The slots that were blocked and are proposed now: once one is
+    /// chosen, the leader sends a CTRL repair to its faulty acceptors.
+    repairs: BTreeSet<Slot>,
     rounds: Rounds<NodeId, Command>,
     /// The next slot a proposal takes.
     next: Slot,
@@ -320,6 +338,7 @@ impl<T> JournalLeader<T> {
             phase1,
             safe: BTreeMap::new(),
             blocked: Vec::new(),
+            repairs: BTreeSet::new(),
             rounds: Rounds::new(),
             next: Slot(0),
             held: Held::new(),
@@ -460,6 +479,49 @@ impl<T> JournalLeader<T> {
                     }
                     None => self.after_promise(),
                 }
+            }
+            Message::Promise {
+                ballot,
+                from: at,
+                page,
+            } if ballot == self.campaign.ballot && !self.blocked.is_empty() => {
+                // A late answer folds into the tally of the blocked slots
+                // (CTRL's repair probe). A slot that a complete answer
+                // dropped is skipped first.
+                let next = self.phase1.fold(from, at, page);
+                let dropped: Vec<Slot> = self
+                    .blocked
+                    .iter()
+                    .copied()
+                    .filter(|slot| self.phase1.dropped_by(*slot).is_some())
+                    .collect();
+                self.skip_blocked(&dropped);
+                match next {
+                    Some(next) => vec![LeaderEffect::Send {
+                        to: from,
+                        message: Message::Prepare {
+                            ballot: self.campaign.ballot,
+                            from: next,
+                            segment: self.campaign.segment,
+                        },
+                    }],
+                    None => self.probe_blocked(),
+                }
+            }
+            Message::Learned {
+                segment,
+                slot,
+                command,
+            } if self.blocked.contains(&slot)
+                && self
+                    .segment_of(slot)
+                    .is_some_and(|s| s.id == segment && s.replicas.contains(&from)) =>
+            {
+                probe!(
+                    reachable,
+                    "leader: a replica gives a blocked slot its command"
+                );
+                self.unblock(slot, command)
             }
             Message::Nack { ballot, promised }
                 if ballot == self.campaign.ballot && promised > ballot =>
@@ -651,6 +713,7 @@ impl<T> JournalLeader<T> {
                 }
                 effects.extend(self.retire());
                 effects.extend(self.compactions());
+                effects.extend(self.asks(page));
                 effects
             }
             LeaderPhase::Stopped => Vec::new(),
@@ -814,13 +877,119 @@ impl<T> JournalLeader<T> {
         }
     }
 
+    /// The tally of each blocked slot again, after a late answer: each slot
+    /// it decides is proposed (CTRL, §J5.3).
+    fn probe_blocked(&mut self) -> Vec<LeaderEffect<T>> {
+        let decided: Vec<(Slot, Command)> = self
+            .blocked
+            .iter()
+            .filter_map(|slot| {
+                self.phase1
+                    .decide(&self.segments, *slot)
+                    .map(|command| (*slot, command))
+            })
+            .collect();
+        probe!(
+            sometimes,
+            !decided.is_empty(),
+            "leader: a late answer decides a blocked slot"
+        );
+        let mut effects = Vec::new();
+        for (slot, command) in decided {
+            effects.extend(self.unblock(slot, command));
+        }
+        effects
+    }
+
+    /// Each slot of `slots` leaves the blocked slots with no proposal: a
+    /// complete answer dropped it, so it is chosen and applied at `F + 1`
+    /// replicas (§J3.2), and no proposal and no repair is needed. The tally
+    /// must not decide it: the answer that dropped it reports no vote
+    /// there, and the other answers may predate the compaction
+    /// (`specs/tla/journal-ctrl/`, `ProbeSkip`, and `ProbeDecide` with its
+    /// control `ctrl_probe_drop`).
+    fn skip_blocked(&mut self, slots: &[Slot]) {
+        for slot in slots {
+            probe!(
+                reachable,
+                "leader: a blocked slot that an answer dropped is skipped"
+            );
+            self.blocked.retain(|s| s != slot);
+            // A range that starts at the slot already holds it.
+            self.dropped.entry(*slot).or_insert(Slot(slot.0 + 1));
+        }
+        assert!(
+            slots.iter().all(|slot| !self.blocked.contains(slot)),
+            "a skipped slot is no longer blocked"
+        );
+    }
+
+    /// `slot` leaves the blocked slots with `command`, the command that is
+    /// safe there: an open leader proposes it now, a sealing leader when it
+    /// opens.
+    fn unblock(&mut self, slot: Slot, command: Command) -> Vec<LeaderEffect<T>> {
+        let before = self.blocked.len();
+        self.blocked.retain(|s| *s != slot);
+        assert!(
+            self.blocked.len() + 1 == before,
+            "an unblocked slot was blocked"
+        );
+        self.repairs.insert(slot);
+        match self.phase {
+            LeaderPhase::Open { .. } => {
+                assert!(slot < self.next, "a blocked slot is below the next slot");
+                self.open_round(slot, command)
+            }
+            LeaderPhase::Sealing { .. } => {
+                self.safe.insert(slot, command);
+                Vec::new()
+            }
+            LeaderPhase::Phase1 | LeaderPhase::Stopped => {
+                unreachable!("only a leader past Phase 1 holds blocked slots")
+            }
+        }
+    }
+
+    /// The asks of the blocked slots, at each tick of an open leader: a
+    /// `Prepare` to each acceptor that has not answered completely, and a
+    /// `Learn` to each replica of the segment of each blocked slot, at most
+    /// `page` slots.
+    fn asks(&self, page: usize) -> Vec<LeaderEffect<T>> {
+        if self.blocked.is_empty() {
+            return Vec::new();
+        }
+        probe!(reachable, "leader: a tick asks for a blocked slot");
+        let mut effects = self.prepares();
+        for slot in self.blocked.iter().take(page) {
+            let segment = self
+                .segment_of(*slot)
+                .expect("a blocked slot is in a segment the leader reads");
+            effects.extend(segment.replicas.iter().map(|to| LeaderEffect::Send {
+                to: *to,
+                message: Message::Learn {
+                    segment: segment.id,
+                    slot: *slot,
+                },
+            }));
+        }
+        effects
+    }
+
     /// The leader writes from the first slot it reads: the votes Phase 1
     /// found, a `Noop` in each other slot below its next slot that no
-    /// acceptor dropped, then the callers' commands.
+    /// acceptor dropped and Phase 1 did not block, then the callers'
+    /// commands, above every vote and every blocked slot.
     fn open(&mut self, start: Slot) -> Vec<LeaderEffect<T>> {
         self.phase = LeaderPhase::Open { start };
         let from = self.campaign.from;
-        let top = self.safe.keys().next_back().map(|s| Slot(s.0 + 1));
+        // A blocked slot counts: its faulty vote may be the chosen value, so
+        // no new command takes it.
+        let top = self
+            .safe
+            .keys()
+            .chain(self.blocked.iter())
+            .max()
+            .map(|s| Slot(s.0 + 1));
         let dropped = self.dropped.values().max().copied();
         let next = [Some(start), Some(from), top, dropped]
             .into_iter()
@@ -982,9 +1151,25 @@ impl<T> JournalLeader<T> {
             .segment_of(slot)
             .expect("a slot the leader writes is in a segment it reads")
             .id;
-        let commits = self.commits(segment, slot, &command);
+        let mut effects = self.commits(segment, slot, &command);
+        if self.repairs.remove(&slot) {
+            probe!(reachable, "leader: a chosen blocked slot is repaired");
+            effects.extend(
+                self.phase1
+                    .faulty_at(&self.segments, slot)
+                    .into_iter()
+                    .map(|to| LeaderEffect::Send {
+                        to,
+                        message: Message::Repair {
+                            ballot: self.campaign.ballot,
+                            slot,
+                            command: command.clone(),
+                        },
+                    }),
+            );
+        }
         self.unapplied.insert(slot, Unapplied { segment, command });
-        commits
+        effects
     }
 
     /// The `Commit`s of `slot`: to every replica of its segment.

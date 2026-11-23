@@ -1,6 +1,7 @@
 //! Model-based trace checking of the roles walk: its events as a trace of
-//! `specs/tla/journal-compact/RolesTrace.tla` (the actions of `Journal.tla`
-//! and of the compaction in `JournalCompact.tla`),
+//! `specs/tla/journal-ctrl/RolesTrace.tla` (the actions of `Journal.tla`,
+//! of the compaction in `JournalCompact.tla` and of CTRL in
+//! `JournalCtrl.tla`),
 //! and the named edits of recorded roles traces (#1308 (mutate recorded
 //! traces)).
 //!
@@ -9,7 +10,7 @@
 //! `FoldTrace.tla` (`op`, then its fields); an answer is its name in the
 //! model. The trace defines the model's sizes: `TraceGrids` (the acceptors
 //! of each segment), `TraceSlots`, `TraceBallots`, `TraceCrashes`,
-//! `TraceFresh` and `TraceValues` (the commands other than `Noop` that a
+//! `TraceRots`, `TraceFresh` and `TraceValues` (the commands other than `Noop` that a
 //! leader proposed at each slot).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,10 +22,10 @@ use super::mutate::{Edit, change_first, fields, is, num, text, with};
 use super::{Trace, TraceCheck, command_fields, int, leader, specs_dir};
 use crate::roles::RolesEvent;
 
-/// The check of `RolesTrace` in `specs/tla/journal-compact/`.
+/// The check of `RolesTrace` in `specs/tla/journal-ctrl/`.
 #[must_use]
 pub fn roles_spec() -> TraceCheck {
-    TraceCheck::new(specs_dir().join("journal-compact"), "RolesTrace")
+    TraceCheck::new(specs_dir().join("journal-ctrl"), "RolesTrace")
 }
 
 /// The grid of the first segment of every roles walk.
@@ -46,6 +47,7 @@ struct Sizes {
     slots: u64,
     ballots: u64,
     crashes: u64,
+    rots: u64,
     values: BTreeMap<u64, BTreeSet<Value>>,
 }
 
@@ -62,6 +64,7 @@ pub fn trace(fresh: Leader, events: &[RolesEvent]) -> Trace {
         slots: 1,
         ballots: 1,
         crashes: 0,
+        rots: 0,
         values: BTreeMap::new(),
     };
     let encoded: Vec<_> = events.iter().map(|e| encode(e, &mut sizes)).collect();
@@ -70,6 +73,7 @@ pub fn trace(fresh: Leader, events: &[RolesEvent]) -> Trace {
     trace.define("TraceSlots", int(sizes.slots));
     trace.define("TraceBallots", int(sizes.ballots));
     trace.define("TraceCrashes", int(sizes.crashes));
+    trace.define("TraceRots", int(sizes.rots));
     trace.define("TraceFresh", leader(fresh));
     trace.define(
         "TraceValues",
@@ -180,10 +184,55 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
             "jump",
             vec![("r", int(*r)), ("slot", int(*slot)), ("floor", int(*floor))],
         ),
+        RolesEvent::Rot { .. }
+        | RolesEvent::Probe { .. }
+        | RolesEvent::Skip { .. }
+        | RolesEvent::Learn { .. }
+        | RolesEvent::Repair { .. } => encode_ctrl(event, sizes),
         RolesEvent::Resolve { s, r, res } => (
             "resolve",
             vec![("s", int(*s)), ("r", int(*r)), ("res", Value::from(*res))],
         ),
+    }
+}
+
+/// One event of CTRL (`JournalCtrl.tla`) as an event of `RolesTrace.tla`.
+fn encode_ctrl(
+    event: &RolesEvent,
+    sizes: &mut Sizes,
+) -> (&'static str, Vec<(&'static str, Value)>) {
+    match event {
+        RolesEvent::Rot { a, s } => {
+            sizes.rots += 1;
+            ("rot", vec![("a", int(*a)), ("s", int(*s))])
+        }
+        RolesEvent::Probe { b, s, q } => (
+            "probe",
+            vec![
+                ("b", int(*b)),
+                ("s", int(*s)),
+                ("q", set(q.iter().copied())),
+            ],
+        ),
+        RolesEvent::Skip { b, s, a } => {
+            ("skip", vec![("b", int(*b)), ("s", int(*s)), ("a", int(*a))])
+        }
+        RolesEvent::Learn { b, s, command: c } => {
+            let mut fields = vec![("b", int(*b)), ("s", int(*s))];
+            command_fields(&mut fields, c);
+            ("learn", fields)
+        }
+        RolesEvent::Repair {
+            a,
+            s,
+            command: c,
+            c: ballot,
+        } => {
+            let mut fields = vec![("a", int(*a)), ("s", int(*s)), ("c", int(*ballot))];
+            command_fields(&mut fields, c);
+            ("repair", fields)
+        }
+        _ => unreachable!("an event of CTRL"),
     }
 }
 
@@ -199,12 +248,12 @@ fn promise_flush(events: &[Value]) -> Option<usize> {
             let a = a.expect("an acceptor");
             let b = num(event, "b").expect("a ballot");
             queues.entry(a).or_default().push((is(event, "promise"), b));
-        } else if is(event, "compact") {
+        } else if is(event, "compact") || is(event, "repair") {
             queues
                 .entry(a.expect("an acceptor"))
                 .or_default()
                 .push((false, 0));
-        } else if is(event, "crash") {
+        } else if is(event, "crash") || is(event, "rot") {
             queues.remove(&a.expect("an acceptor"));
         } else if is(event, "flush") {
             let a = a.expect("an acceptor");
@@ -472,6 +521,53 @@ pub const EDITS: &[Edit] = &[
             |e, i| is(&e[i], "apply") && !fields(&e[i]).contains_key("res"),
             |e| with(e, "res", Value::from("ok")),
         )
+    }),
+    repeat_edit!("a rot repeated", "rot"),
+    Edit::new("a rot of the next slot", |events| {
+        change_first(events, |e, i| is(&e[i], "rot"), |e| plus(e, "s", 1))
+    }),
+    repeat_edit!("a probe repeated", "probe"),
+    Edit::new("a probe on one answer", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "probe"),
+            |e| {
+                let Some(Value::Set(q)) = fields(e).get("q") else {
+                    panic!("a probe names its answers");
+                };
+                with(e, "q", Value::Set(q[..1].to_vec()))
+            },
+        )
+    }),
+    repeat_edit!("a skip repeated", "skip"),
+    Edit::new("a skip by an acceptor that did not answer", |events| {
+        change_first(events, |e, i| is(&e[i], "skip"), |e| with(e, "a", int(99)))
+    }),
+    repeat_edit!("a learn repeated", "learn"),
+    Edit::new("a learn of another command", |events| {
+        change_first(
+            events,
+            |e, i| is(&e[i], "learn"),
+            |e| {
+                if text(e, "op") == "w" {
+                    plus(e, "id", 100)
+                } else {
+                    Value::record([
+                        ("event", Value::from("learn")),
+                        ("b", fields(e)["b"].clone()),
+                        ("s", fields(e)["s"].clone()),
+                        ("op", Value::from("w")),
+                        ("u", Value::from("none")),
+                        ("e", Value::Int(0)),
+                        ("id", Value::Int(100)),
+                    ])
+                }
+            },
+        )
+    }),
+    repeat_edit!("a repair repeated", "repair"),
+    Edit::new("a repair at a ballot one higher", |events| {
+        change_first(events, |e, i| is(&e[i], "repair"), |e| plus(e, "c", 1))
     }),
     Edit::new("a written Resolve called not written", |events| {
         change_first(

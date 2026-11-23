@@ -1,7 +1,7 @@
 ------------------------------ MODULE RolesTrace ------------------------------
 (***************************************************************************)
-(* The trace spec of the journal roles: the actions of `Journal.tla` and   *)
-(* of the compaction in `JournalCompact.tla`,                              *)
+(* The trace spec of the journal roles: the actions of `Journal.tla`, of   *)
+(* the compaction in `JournalCompact.tla` and of CTRL in `JournalCtrl.tla`,*)
 (* forced to follow the events that one roles walk of `journal-sim`        *)
 (* recorded (#1326 (the journal roles over the core),                      *)
 (* `crates/sim/journal-sim/src/roles.rs`). `l` is the index of the next    *)
@@ -30,13 +30,22 @@
 (*   "compact"  `AccCompact(a, p, x)`: an acceptor queued its compaction.  *)
 (*   "compact_replica" `RepCompact(r)`: replica r compacted to slot.       *)
 (*   "jump"     `JumpFrom(r, m)`: replica r took the point slot, floor.    *)
+(*   "rot"      `Rot(a, s)`: acceptor a booted with its vote at s damaged. *)
+(*   "probe"    `ProbeDecide(b, s, Qs)`: a late answer decided the blocked *)
+(*              slot s on the qualifying answers q.                        *)
+(*   "skip"     `ProbeSkip(b, s, a)`: the late answer of acceptor a      *)
+(*              dropped the blocked slot s, so the leader skips it.        *)
+(*   "learn"    `LearnChosen(b, s)`: a replica gave the blocked slot s its *)
+(*              chosen command.                                            *)
+(*   "repair"   `AccRepair(a, s, v, c)`: acceptor a queued the repair of   *)
+(*              its faulty vote at s with v, chosen at ballot c.           *)
 (*                                                                         *)
 (* The trace defines the sizes and the grids: `TraceGrids` (the acceptors  *)
 (* of each segment, from 1), `TraceSlots`, `TraceBallots`, `TraceCrashes`, *)
-(* `TraceFresh` (the leader of the fresh journal) and `TraceValues` (the   *)
-(* commands proposed at each slot, from slot 0).                           *)
+(* `TraceFresh` (the leader of the fresh journal), `TraceRots` (the rots)  *)
+(* and `TraceValues` (the commands proposed at each slot, from slot 0).    *)
 (***************************************************************************)
-EXTENDS JournalCompact, Trace, TLC
+EXTENDS JournalCtrl, Trace, TLC
 
 VARIABLES l
 
@@ -69,6 +78,7 @@ TraceG == Len(TraceGrids)
 \* A run with no crash still queues its writes: the bound is one above the
 \* crashes, so the model never takes the `Direct` shortcut.
 TraceMaxCrash == TraceCrashes + 1
+TraceMaxRot == TraceRots
 
 \* The quorum of each configuration that the leader of b read.
 QsOf(b, q) == [h \in bH[b] |-> q \cap CfgOf[h]]
@@ -115,6 +125,17 @@ TraceStep ==
      /\ rcomp'[e.r] = e.slot
   \/ /\ e.event = "jump"
      /\ \E m \in trims : m[2] = e.slot /\ m[3] = e.floor /\ JumpFrom(e.r, m)
+  \* The walk damages a readable vote, and repairs a faulty one.
+  \/ e.event = "rot" /\ dvote[e.a][e.s][2] # None /\ Rot(e.a, e.s)
+  \/ e.event = "probe" /\ ProbeDecide(e.b, e.s, QsOf(e.b, e.q))
+  \/ e.event = "skip" /\ ProbeSkip(e.b, e.s, e.a)
+  \/ /\ e.event = "learn"
+     /\ LearnChosen(e.b, e.s)
+     /\ IsChosen(e.s)
+     /\ ChosenVal(e.s) = Cmd(e)
+  \/ /\ e.event = "repair"
+     /\ e.c \in Ballots
+     /\ AccRepair(e.a, e.s, Cmd(e), e.c)
   \/ /\ e.event = "resolve"
      /\ ResolveBelow(e.s, e.r)
      /\ resolved'[e.s] = e.res

@@ -164,7 +164,7 @@ const JOURNAL: Claim[] = [
   {
     claim: "Each answer to a write is the answer of the whole log, or Below for a resend across a seal.",
     models: [{ dir: "journal-state", inv: ["AckTrue", "OneFold"] }, { dir: "seal-chain", inv: ["AckTrue", "OneFold"] }],
-    trace: ["journal-state/FoldTrace.tla", "journal-compact/RolesTrace.tla"],
+    trace: ["journal-state/FoldTrace.tla", "journal-ctrl/RolesTrace.tla"],
     walk: "fold walk, roles walk · FOLD, VIEW",
     controls: ["gap_off", "lookup_local"],
     mutants: ["LostLog", "StaleBoundary", "roles: DuplicateAsTaken, StaleBase"],
@@ -209,7 +209,7 @@ const JOURNAL: Claim[] = [
   {
     claim: "A seal ends where the boundary state says: a sealed grid chooses nothing at or above its end, and next_seq never moves back.",
     models: [{ dir: "journal-state", inv: ["SealedFrozen", "RecordTrue", "NoMoveBack"] }, { dir: "seal-chain", inv: ["RecordTrue"] }, { dir: "seal-ctrl", inv: [] }],
-    trace: ["journal-compact/RolesTrace.tla"],
+    trace: ["journal-ctrl/RolesTrace.tla"],
     walk: "roles walk, whole journal · SEALED, BOUNDARY",
     controls: ["end_read", "end_applied", "record_latest"],
     mutants: ["StaleBinding", "StaleBoundary", "BoundaryBeforeDurable (trace)"],
@@ -218,7 +218,7 @@ const JOURNAL: Claim[] = [
   {
     claim: "An acceptor sends a promise or a vote only once it is durable, and writes a raised promise before or with the vote.",
     models: [{ dir: "journal-state", inv: ["Agreement"] }, { dir: "flight-rule", inv: ["SentIsDurable"] }],
-    trace: ["journal-compact/RolesTrace.tla"],
+    trace: ["journal-ctrl/RolesTrace.tla"],
     walk: "roles walk, driver walk, whole journal · AGREE, FLIGHT",
     controls: ["reply_mem1b", "reply_mem2b", "order_vote_first", "send_early"],
     mutants: ["WipeDisk", "driver: LyingDisk"],
