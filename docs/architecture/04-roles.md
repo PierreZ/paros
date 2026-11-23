@@ -221,6 +221,18 @@ These points are decided:
 - **The frontend is a role like the others.** It has no layer and no crate of its own.
 - **The election over a journal is its own crate.** It is the `SetLeader` compare-and-set of
   section 3.3, and a user can elect a leader with it as the coordinators do.
+- **The election is a thin layer on the journal client, not an actor on the host** (Pierre,
+  2026-11-23, #1420 (paros-election)). The election keeps nothing on disk: its state is the
+  journal (the uuid that leads, the term record, the renewals), and a holder that restarts draws
+  a new uuid. So it needs no persist batch and no host. It owns one pure client
+  (`paros_journal::client`), and it has the shape of that client: calls in, requests out, answers
+  in. The program gives it the time and each draw (a fresh uuid, a jitter) as values. It makes no
+  message of its own: its network is the network of the client, in memory or through the adapter.
+  It reads the silence of the holder with a read of the tail, with no watch. A coordinator is an
+  actor on the host; it holds an election inside its state and passes it the time. The fence of a
+  term is not in the election: each receiver of an order checks the term in the same write as
+  the effect (the rules of the takeover, below). So the election crate depends only on
+  `paros-journal`, and a program that has only the journal client can elect.
 - **One crate for each control level** (universe, cell, tenant), and each coordinator is a pure
   state machine as the journal roles are.
 - **The core has no tenant.** `paros-consensus` and `paros-journal` know no tenant. A crate that
