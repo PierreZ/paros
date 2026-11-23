@@ -1,8 +1,8 @@
 # A bound on the memory of the retained log (#1153)
 
 Status: **proposal**. This note is the design that #1153 (a bound on the memory of the
-retained log) asks for before code. Pierre decides the open points. No code of the bound is
-in the tree yet.
+retained log) asks for before code. Pierre asked for the simplest bound (2026-11-23), and this note proposes it: a measure
+in the core and a refusal in the driver. No code of the bound is in the tree yet.
 
 ## Where paros is after #1101
 
@@ -84,56 +84,56 @@ Each reader decides what the window must hold:
 The hot readers read the newest slots. The cold readers read a page from a slot and go
 forward, as a FoundationDB peek does.
 
-## Proposal
+## Proposal: a measure, and the driver refuses
 
-1. **The measure.** The retained bytes in memory: the sum of the record sizes that the
-   acceptor holds in memory (the size of the command bytes, the same measure as `max_bytes` of
-   a read). The acceptor keeps the sum as it writes and drops records, so the measure costs
-   nothing per step.
-2. **A window in memory, the rest on disk.** The acceptor keeps in memory every record at or
-   above `max(first_slot, applied - window)` and every record that is not yet chosen. A record
-   below the window is evicted from memory. It stays on the disk, where the driver already
-   wrote it. The soft limit is a number of bytes in `Limits` (`retained_bytes`), as
-   `TLOG_SPILL_THRESHOLD` is for FoundationDB.
-3. **A read of an evicted record is a request to the driver.** The core does no I/O in a step.
-   A cold reader that needs an evicted range puts a `ReadRecords { from, limit, max_bytes }` in
-   its `Ready`. The driver reads its storage and steps the records back in. The reader then
-   goes on, as a paged promise or a paged catch-up goes on today. The read has the same bounds
-   as a FoundationDB peek: one page per request, in the existing page sizes of `Limits`.
-4. **At the hard limit, refuse.** When the measure is at or above a hard limit
-   (`retained_hard_bytes` in `Limits`, larger than the soft limit), the records that cannot be
-   evicted are the ones not yet chosen. Then `propose` answers with a refusal (a new
-   `Outcome`, such as `Busy`) and opens no round. A client retries later. This is the paros
-   form of the commit wait of `tLogCommit` at `TLOG_HARD_LIMIT_BYTES`: the core cannot wait, so
-   it refuses as data, and the driver or the client owns the wait.
-5. **The plain arm is unchanged.** With no limit set (the default), no record is evicted and
-   no request is sent: a deployment that sets no limit behaves as today. The digests of
-   `consensus-sim/tests/differential.txt` hold for it.
+The simplest bound changes no protocol rule. The core counts, and the driver decides.
 
-## How it is checked
+1. **The measure.** The retained bytes: the sum of the command bytes of the records that the
+   acceptor holds, from the compaction floor up (the same measure as `max_bytes` of a read).
+   The acceptor keeps the sum as it writes and drops records, so the measure costs nothing
+   per step. `NodeCounters` reports it as `retained_bytes`.
+2. **The driver refuses above its limit.** The driver reads the counter and turns a client
+   away before it calls `propose` when the measure is above a limit that the host sets. The
+   refusal is the driver's answer to its client, as FoundationDB's Ratekeeper throttles the
+   clients before a TLog reaches its hard limit. The core gets no new message, no new
+   `Outcome` and no new step, so this needs no TLA+ model.
+3. **The client brings the measure down.** A `Truncate` raises the compaction floor, as today.
+   In the journal v1 the seal and the offload of a segment, and the acceptors' compaction at
+   `F + 1` replicas, bound the retained log too.
+4. **The plain arm is unchanged.** A driver that reads no counter behaves as today. The
+   digests of `consensus-sim/tests/differential.txt` hold.
 
-- A TLA+ model before the code (root `AGENTS.md`, "No code before its model"): the window,
-  the eviction, the read request and its answer, a crash between the two, and the refusal at
-  the hard limit, with a control that evicts a record that is not yet chosen and a control
-  that answers a read with a record of another ballot.
-- consensus-sim: a flavor with a small window and small pages, so the cold readers run on
-  evicted ranges; the oracles of the ledger stay as they are; a probe on each new branch (an
-  eviction, a read request, a refusal at the hard limit).
-- The differential test: every flavor with no limit keeps its digest.
+How it is checked: unit tests pair the counter with the acceptor's records (it rises on each
+accepted record, falls on a compaction and a trim-point jump, and reads back the same after a
+reboot), and a consensus-sim oracle compares it with a sum over the records at each step.
+
+## Later, if a deployment needs it: a window in memory
+
+If a deployment cannot ask its clients to truncate, the core can keep only a window in memory.
+This is the shape of FoundationDB's spill. It is not proposed now.
+
+- **A window.** The acceptor keeps in memory every record at or above
+  `max(first_slot, applied - window)` and every record that is not yet chosen. A record below
+  the window is evicted from memory. It stays on the disk, where the driver already wrote it.
+- **A read of an evicted record is a request to the driver.** A cold reader that needs an
+  evicted range puts a `ReadRecords { from, limit, max_bytes }` in its `Ready`. The driver
+  reads its storage and steps the records back in, one page per request, in the page sizes of
+  `Limits`.
+- **A refusal in the core at a hard limit.** `propose` answers a new `Outcome` (such as
+  `Busy`) and opens no round.
+- **Checks.** A TLA+ model first (the window, the eviction, the read request and its answer, a
+  crash between the two, the refusal), with a control that evicts a record that is not yet
+  chosen and a control that answers a read with a record of another ballot; a consensus-sim
+  flavor with a small window, so the cold readers run on evicted ranges.
 
 ## Open points
 
-- **Open: a sync read or a request.** Point 3 adds a request to the driver. The other choice
-  is a synchronous read of the `Storage` port inside a step: simpler, but a step then does I/O,
-  which the sans-IO contract forbids today. Pierre decides; the TLA+ model of the step above
-  checks the chosen form.
-- **Open: refuse or hold.** Point 4 refuses at the hard limit. FoundationDB holds the commit.
-  A hold in paros means a queue of proposals in memory, which the limit is there to stop. The
-  recommendation is the refusal; Pierre decides.
-- **Open: the numbers.** FoundationDB uses 1.5 GB and 3 GB per TLog. paros sets no number in
-  the core: the soft and the hard limits come from the host, as the other `Limits` do, and the
-  default is no limit (point 5).
+- **Open: the numbers.** paros sets no limit in the core: the driver's limit comes from the
+  host. FoundationDB uses 1.5 GB (spill) and 3 GB (hard limit) per TLog.
+- **Open: the window.** Built only when a deployment shows that a `Truncate` cannot bound its
+  memory. Then its two choices are Pierre's: a request to the driver or a synchronous read of
+  `Storage` inside a step (which the sans-IO contract forbids today), and a refusal or a hold
+  at the hard limit.
 - **Open: the journal v1.** The journal roles of `paros-journal` keep their own records
-  (`docs/journal/04-roles.md`). Whether they take the same window, or a segment replica's
-  offload covers it (`specs/tla/offload/`), is a question for #1323 (build the paros journal
-  v1).
+  (`docs/journal/04-roles.md`). Whether they report the same measure is a question for #1323
+  (build the paros journal v1).
