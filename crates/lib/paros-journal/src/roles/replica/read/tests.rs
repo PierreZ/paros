@@ -197,6 +197,25 @@ fn an_answer_from_outside_the_grid_is_not_counted() {
 }
 
 #[test]
+fn an_answer_for_another_segment_is_not_counted() {
+    let mut replica = served();
+    replica.read(1, Seq(0), 10);
+    replica.step(NodeId(1), ack(1, Some(0), 1));
+    let other = Message::PreReadAck {
+        segment: SegmentId(2),
+        read: 1,
+        watermark: Some(Slot(0)),
+        bound: SegmentId(2),
+    };
+    let effects = replica.step(NodeId(2), other);
+    assert!(
+        answers(&effects).is_empty(),
+        "the answer of a read of segment 2 is no vote for segment 1"
+    );
+    assert_eq!(replica.reads(), 1);
+}
+
+#[test]
 fn a_page_holds_at_most_its_limit_and_starts_at_the_position() {
     let mut replica = served();
     replica.read(1, Seq(1), 1);

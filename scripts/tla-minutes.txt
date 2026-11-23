@@ -36,7 +36,7 @@ handover-gc 1.5
 heal-reuse 4
 health 3.5
 journal-ids 6
-journal-state 17
+journal-state 21
 leader-handoff 15
 matchmaker 6.5
 multi-paxos 20
