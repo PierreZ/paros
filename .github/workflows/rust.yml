@@ -23,10 +23,12 @@ env:
   CARGO_TERM_COLOR: always
   # The sets of tests that the jobs below split (nextest filter expressions).
   # Every test of the workspace runs in exactly one job: `test` runs the
-  # complement of COVERAGE, ROLES_COVERAGE and TRACES, `trace-edits` runs EDITS, which is
-  # inside TRACES, and the two shards of `traces` run the rest of TRACES, cut
-  # in two by REFUSALS. `coverage-shard` runs COVERAGE (`--test coverage`),
-  # and `trace-edits` also runs ROLES_COVERAGE, the gate of the journal roles.
+  # complement of COVERAGE, ROLES_COVERAGE and TRACES, the two shards of
+  # `trace-edits` run EDITS, which is inside TRACES, cut in two by count, and
+  # the two shards of `traces` run the rest of TRACES, cut in two by
+  # REFUSALS. `coverage-shard` runs COVERAGE (`--test coverage`), and the
+  # first shard of `trace-edits` also runs ROLES_COVERAGE, the gate of the
+  # journal roles.
   COVERAGE: package(consensus-sim) & binary(coverage)
   ROLES_COVERAGE: package(journal-sim) & binary(roles_coverage)
   TRACES: >-
