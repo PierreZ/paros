@@ -79,9 +79,9 @@ pub fn replica(node: u64, id: u64) -> Assignment {
     }
 }
 
-/// The assignment of a leader at `round`, bound to segment `id`, that
-/// reads from `from`.
-pub fn leader(node: u64, round: u64, id: u64, from: Slot) -> Assignment {
+/// The assignment of a leader at `round` that reads from `from`. The leader
+/// binds its ballot to the newest segment of the register first.
+pub fn leader(node: u64, round: u64, from: Slot) -> Assignment {
     Assignment::Leader {
         address: at(node),
         proxies: Vec::new(),
@@ -90,7 +90,6 @@ pub fn leader(node: u64, round: u64, id: u64, from: Slot) -> Assignment {
                 round,
                 node: NodeId(node),
             },
-            segment: SegmentId(id),
             from,
         },
     }
@@ -187,7 +186,7 @@ impl OneProcess {
             journal.assign(acceptor(node));
             journal.assign(replica(10 + node, 1));
         }
-        journal.assign(leader(leader_node, 1, 1, Slot(0)));
+        journal.assign(leader(leader_node, 1, Slot(0)));
         journal
     }
 
@@ -219,7 +218,7 @@ impl OneProcess {
             .filter_map(|node| self.process.host().replica(at(node.0))?.front())
             .max()
             .expect("a replica of the segment before");
-        self.assign(leader(new, id, id, from));
+        self.assign(leader(new, id, from));
     }
 
     /// Poll until the process has no work: the answers of the calls.

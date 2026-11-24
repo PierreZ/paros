@@ -111,7 +111,7 @@ first, then the screen asks what went wrong in it, and an answer marks the right
 second play. Every page has one: single decree (an acceptor loses its disk), quorums (two
 quorums that do not meet), Multi-Paxos (a node skips Phase 1), compartmentalized (a proxy
 leader commits after one vote), matchmaker (skip the matchmakers) and the Journal's segments
-(a seal below a chosen vote). A page with no beats
+(a ballot bound from a stale register value). A page with no beats
 keeps the step-through alone. The story draws the recorded trace only; the step-through
 switches to the live wasm run.
 

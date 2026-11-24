@@ -55,8 +55,10 @@ conflicting chain needs a seal"), and readers route a position to the segment th
 
 1. **Open.** The grid controller's `reshape` call writes a new record in state `Pending`, by
    compare-and-set on the register (§J3.4).
-2. **Phase 1 over the old grid.** A candidate in the new configuration runs Phase 1 in the new
-   grid and in the old one (`JournalLeader`, `roles/leader/phase1.rs`).
+2. **Bind, then Phase 1 over the old grid.** A candidate binds its ballot to the newest segment
+   by compare-and-set on the register (`Change::Bind`, the registration of Matchmaker Paxos
+   [MM §3.2]) and takes its configuration from that done write. Then it runs Phase 1 in the new
+   grid and in every slot of the old one (`JournalLeader`, `roles/leader/phase1.rs`).
 3. **Seal.** The first leader that wins writes the end of the old segment once: **one above the
    highest slot where its Phase 1 saw a vote in the old grid**, a CTRL faulty vote included
    (`SegmentRecord::seal`, §J3.1). The new segment is then in force.
@@ -92,12 +94,13 @@ sequenceDiagram
   carries a `RecordRefusal`), and it stops (tests `a_first_leader_whose_end_lost_stops` and
   `a_refused_seal_stops_the_leader`). Delos has the same race on its MetaStore: "If many clients
   race, at most one wins" ([Delos §3.2]).
-- **A leader stops after the seal.** The next leader reads the record, finds the end written, and
-  reads the old grid only below it. Delos instead "rolls forward" a half-done reconfiguration
+- **A leader stops after the seal.** The next leader binds its ballot, finds the end written, and
+  reads every slot of the old grid until it retires. Delos instead "rolls forward" a half-done reconfiguration
   with a default chain ([Delos §3.2]); in paros the end and the new segment are already in the
   register, so nothing is half done.
-- **A vote lands in the old grid after the seal.** It is above the end, so it is not part of the
-  journal. Delos calls these "zombie appends" and makes the same argument: "the chain fixes the
+- **A vote lands in the old grid after the seal.** It is above the end, so no replica applies it.
+  A later Phase 1 still reads it, but the sealer already wrote that slot in its own grid at a
+  higher ballot, or a later leader writes it there first, so the higher vote wins. Delos calls these "zombie appends" and makes the same argument: "the chain fixes the
   segment boundary" ([Delos §3.4]).
 - **A replica of a sealed segment is lost.** The controller re-replicates it from a holder to a
   new member, by compare-and-set on the version of the register (§J3.1, #1314
@@ -109,12 +112,15 @@ sequenceDiagram
 ## 6. Why it is safe
 
 The end is one above the highest vote that a Phase-1 quorum of the old grid reported, so every
-slot that the old grid could have chosen lies below the end. Every later Phase 1 reads the old
-grid **only below the end**, and the sealing leader has already proposed again, in its own grid,
-each value below the end; so no ballot can choose a second value at a slot of the old grid. A
-CTRL faulty vote counts for the end: an end of readable votes only can land at or below a
-chosen slot whose top copy rotted, and a later leader that reads below that end chooses a
-second value there (control `end_readable` of `specs/tla/seal-ctrl/`, #1313 (the seal end
+slot that the old grid could have chosen lies below the end. Every later Phase 1 reads **every
+slot of every grid that is not retired**, so one value for each slot rests on the promises
+alone, as in Matchmaker Paxos, which reads every configuration of the history [MM §3.2]
+(`specs/tla/journal-read/`, `end_applied_safe`; the control `end_applied_end` reads a sealed
+grid only below its end and chooses two values). The end decides where the replicas stop and
+when the old grid may retire, and the retire is safe because every slot the old grid could
+have chosen is below the end and written again in the new grid. A CTRL faulty vote counts for
+the end: an end of readable votes only can land at or below a chosen slot whose top copy
+rotted, the new grid writes a second value there, and the retire loses the chosen copy (control `end_readable` of `specs/tla/seal-ctrl/`, #1313 (the seal end
 against a CTRL faulty record)). The end is written once (`SegmentRecord::seal` refuses a
 segment that is not `InForce`), so all readers of the register agree on it.
 
@@ -198,8 +204,13 @@ segment, never from the newest record written: a deposed writer can write the ne
 
 ## 10. Pitfalls
 
-- **The end is not the first uncommitted slot.** With that end, a Phase 1 that reads the old
-  grid only below the end chooses two values for one slot (#1213 experiment, §J3.1).
+- **The end is not the first uncommitted slot.** With that end, the new grid writes a second
+  value at a chosen slot above the end, and the retire loses the chosen vote (#1213 experiment,
+  §J3.1).
+- **A ballot bound from a stale value.** A leader that takes its configuration from a register
+  value read before a seal, with no bind of its own, reads only the sealed grid as its own and
+  chooses a second value at a slot that the new grid chose (`specs/tla/journal-read/`,
+  control `bind_stale`; the walk mutant `StaleBinding`, caught by `SEALED`).
 - **A faulty vote is a vote** for the end (#1313); see §6.
 - **Two seals in a row and an empty segment.** The first form put the writer uuid in the
   journal's matchmaker record and a `Fence` at the first slot of the next segment; it needed two
@@ -229,9 +240,14 @@ segment, never from the newest record written: a deposed writer can write the ne
   chain), §3.2 (seal, `checkTail`, conditional write; only a conflicting chain needs a seal),
   §3.3 (the MetaStore), §3.4 (the Loglet; zombie appends), §4 and §4.1 (the MetaStore on
   single-slot Paxos; the NativeLoglet; leader election is a reconfiguration).
+- [MM] Whittaker et al., *Matchmaker Paxos: A Reconfigurable Consensus Protocol*:
+  `docs/references/papers/matchmaker-paxos/transcript.md` §3.2 (a proposer registers its
+  configuration with the matchmakers, then runs Phase 1 against a quorum of every configuration
+  of `H_i`).
 - The journal's own rules (the subject of this card, never its only source):
   `docs/journal/03-segments-and-records.md` §J3.1, §J3.4; `docs/journal/10-sources.md`.
 
+[MM §3.2]: ../../references/papers/matchmaker-paxos/transcript.md
 [Delos §3.1]: ../../references/papers/delos-virtual-consensus/transcript.md
 [Delos §3.1–§3.3]: ../../references/papers/delos-virtual-consensus/transcript.md
 [Delos §3.2]: ../../references/papers/delos-virtual-consensus/transcript.md

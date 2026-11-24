@@ -35,24 +35,19 @@ impl Role for JournalRole {
                 Self::Proxy(JournalProxy::new(address.node)),
                 vec![shared.timer(address, now)],
             ),
+            // A leader starts with the bind of its ballot: the done value
+            // comes back as an `Observe`, the refusal as a `Refused`.
             Launch::Assign(Assignment::Leader {
                 address,
                 campaign,
                 proxies,
             }) => {
-                let started = shared
-                    .value(address.journal)
-                    .and_then(|value| JournalLeader::campaign(campaign, value));
-                match started {
-                    Some((mut leader, out)) => {
-                        leader.delegate_to(proxies);
-                        let mut effects = Vec::new();
-                        leader_effects(address, out, &mut effects);
-                        effects.push(shared.timer(address, now));
-                        Start::Running(Self::Leader(leader), effects)
-                    }
-                    None => Start::Refused(Stop::NoCampaign),
-                }
+                let (mut leader, out) = JournalLeader::campaign(campaign);
+                leader.delegate_to(proxies);
+                let mut effects = Vec::new();
+                leader_effects(address, out, &mut effects);
+                effects.push(shared.timer(address, now));
+                Start::Running(Self::Leader(leader), effects)
             }
             // A role with a disk reads its records first.
             Launch::Assign(Assignment::Acceptor { .. } | Assignment::Replica { .. })

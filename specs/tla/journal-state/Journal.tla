@@ -91,7 +91,9 @@
 (*            where it saw one.                                            *)
 (*   RetireRule "full": retire once the boundary state is done and         *)
 (*            RetireAt replicas of the set hold every slot. "early": at    *)
-(*            the seal.                                                    *)
+(*            the seal. "off": no retire, to check Phase 1 alone (a wrong  *)
+(*            end breaks only the retire: `end_applied_safe` of            *)
+(*            `journal-read/`).                                            *)
 (*   ReshapeGuard TRUE: a reshape needs every older configuration retired  *)
 (*            (`RetireGuard` of `grid-controller/`). FALSE: no guard.      *)
 (*   Lookup   "below": the fold answers `Below` for a fenced write whose   *)
@@ -106,6 +108,18 @@
 (*   TrimRule "sealed": a segment is trimmed once its end is done and a    *)
 (*            fold has `first_seq` at or above its last `seq`. "open": the *)
 (*            open segment can be trimmed too, on its range so far.        *)
+(*   ReadRule "all": Phase 1 reads every slot of every configuration that  *)
+(*            is not retired, sealed or not (plain Matchmaker Paxos), so   *)
+(*            one value for each slot does not rest on the seal end. "end":*)
+(*            a sealed configuration is read only below its end, as it was *)
+(*            done at the ballot's `Register` (the old rule: with a wrong  *)
+(*            end, `end_applied_end` of journal-read/ chooses two values). *)
+(*   Bind     "cas": a ballot binds to the newest configuration, above     *)
+(*            every bound ballot, in one compare-and-set on the register   *)
+(*            (`Change::Bind`). "stale": a ballot above every bound ballot *)
+(*            binds to any configuration that is not retired, from a stale *)
+(*            register value that showed it in force and not sealed (a     *)
+(*            host that skips the compare-and-set).                        *)
 (*                                                                         *)
 (* Constants that size a check, with no rule in them:                      *)
 (*   Values   slot -> the commands that a leader may propose there (a      *)
@@ -133,7 +147,7 @@ CONSTANTS
   Partial,                \* TRUE: a register write can be partial and lost
   GenOK,                  \* the pairs <<ballot, configuration>> that may register
   Reply1b, Reply2b, WriteOrder, EndRule, EndAct, BoundAct, GapFill,
-  RetireRule, ReshapeGuard, Lookup, Resolve, TrimRule
+  RetireRule, ReshapeGuard, Lookup, Resolve, TrimRule, ReadRule, Bind
 
 ASSUME G \in Nat /\ G >= 1 /\ NS \in Nat /\ NS >= 1 /\ NB \in Nat /\ NB >= 1
 ASSUME MaxCrash \in Nat /\ RetireAt \in Nat /\ RetireAt >= 1
@@ -143,10 +157,11 @@ ASSUME WriteOrder \in {"atomic", "prom_first", "vote_first"}
 ASSUME EndRule \in {"voted", "applied"}
 ASSUME EndAct \in {"done", "read"} /\ BoundAct \in {"done", "read"}
 ASSUME GapFill \in BOOLEAN /\ ReshapeGuard \in BOOLEAN
-ASSUME RetireRule \in {"full", "early"}
+ASSUME RetireRule \in {"full", "early", "off"}
 ASSUME Lookup \in {"below", "local"}
 ASSUME Resolve \in {"write", "uuid", "early"}
 ASSUME TrimRule \in {"sealed", "open"}
+ASSUME ReadRule \in {"all", "end"} /\ Bind \in {"cas", "stale"}
 
 Gens == 1..G
 Slots == 0..(NS - 1)
@@ -403,25 +418,64 @@ HighFrom == Max({LowFrom} \cup
 \* campaign does not change them: the leader of a retired configuration's
 \* acceptors waits, and a seal by another first leader stops this one.
 \* A ballot registers once, above every registered ballot: the second guard
-\* also refuses b itself once it registered.
+\* also refuses b itself once it registered. The code's register is
+\* `Change::Bind`; its "ok" again for the bound ballot on the same newest
+\* configuration changes nothing, so the model has no step for it.
 \* The leader writes from `lo`, from `LowFrom` to `HighFrom`. Phase 1 reads
 \* every slot from `lo`, so a lower `lo` reads more. `Register` takes the
 \* highest; `JournalCompact.tla` also takes the lowest, so that a Phase 1
 \* reads the slots the acceptors dropped.
-RegisterFrom(b, lo) ==
+\* Ballot b binds to configuration g and writes from lo. Above every bound
+\* ballot. Bound to the newest configuration, it keeps the done end of each
+\* configuration; bound to an older one, it saw no end.
+RegisterIn(b, g, lo) ==
   /\ \A c \in Ballots : bgen[c] # 0 => c < b
-  /\ <<b, top>> \in GenOK
-  /\ bgen' = [bgen EXCEPT ![b] = top]
-  /\ bH' = [bH EXCEPT ![b] = H(top)]
-  /\ bE' = [bE EXCEPT ![b] = [h \in Gens |-> IF Done(rend[h]) THEN rend[h].v ELSE None]]
+  /\ <<b, g>> \in GenOK
+  /\ bgen' = [bgen EXCEPT ![b] = g]
+  /\ bH' = [bH EXCEPT ![b] = H(g)]
+  /\ bE' = [bE EXCEPT ![b] = [h \in Gens |->
+                IF g = top /\ Done(rend[h]) THEN rend[h].v ELSE None]]
   /\ blo' = [blo EXCEPT ![b] = lo]
   /\ UNCHANGED <<top, rend, rbound, rret, rtrim, bst, bsafe, bend, bstart, prop, bskip, bblock, acc, rep>>
 
+RegisterFrom(b, lo) == RegisterIn(b, top, lo)
+
 Register(b) == RegisterFrom(b, HighFrom)
 
-\* The slots of h that the Phase 1 of b reads: below the end, once the end
-\* was done at its Register.
-ReadSet(b, h) == IF bE[b][h] # None THEN 0..(bE[b][h] - 1) ELSE Slots
+\* The control of `Bind`: ballot b binds to g, a configuration that is not
+\* retired, from a stale register value. That value showed g as the newest
+\* configuration with no end, so the leader reads the configurations up to
+\* g and writes from the start of the oldest one: a leader that takes its
+\* configuration from a value it read, not from the value of its own done
+\* `Change::Bind`.
+StaleRegister(b, g) ==
+  /\ Bind = "stale"
+  /\ RegisterIn(b, g, Start(Min(H(g))))
+
+\* Ballot b, bound and before its Phase 1, takes a later register value
+\* than the one of its own done `Bind`: a value that another write gave
+\* (a seal, a retire, a reshape) or the "ok" again of a `Bind` that it sent
+\* again after a lost reply (`JournalLeader::observe` takes every value
+\* that names its ballot as bound). It reads the configurations of its
+\* binding that are not retired in that value, the end of each one that is
+\* done there, and writes from the start of the oldest one or above. A value
+\* where every configuration of the binding is retired gives a Phase 1 that
+\* asks nobody and never closes, so the model has no step for it; an
+\* unbound ballot reads nothing (`H(0)` is empty).
+Reread(b) ==
+  /\ bst[b] = "new"
+  /\ H(bgen[b]) # {}
+  /\ bH' = [bH EXCEPT ![b] = H(bgen[b])]
+  /\ bE' = [bE EXCEPT ![b] = [h \in Gens |->
+                IF Done(rend[h]) THEN rend[h].v ELSE None]]
+  /\ blo' = [blo EXCEPT ![b] = Max({blo[b], Start(Min(H(bgen[b])))})]
+  /\ UNCHANGED <<reg, bst, bsafe, bend, bstart, prop, bskip, bblock, acc, rep>>
+
+\* The slots of h that the Phase 1 of b reads. With "all", every slot: the
+\* end of a sealed configuration bounds nothing in Phase 1, and one value
+\* for each slot rests on the promises alone. With "end", the slots below
+\* the end, once the end was done at its Register.
+ReadSet(b, h) == IF ReadRule = "end" /\ bE[b][h] # None THEN 0..(bE[b][h] - 1) ELSE Slots
 
 \* The reports of Phase 1 of b from the acceptors of Q: <<a, votes>>. With
 \* `Direct`, the promises are durable in the step, so Phase 1 takes them from
@@ -790,6 +844,7 @@ Holders(p) == {r \in RepOf[p] : rbase[r] # None /\ Done(rend[p]) /\ Front(r) = r
 Retire(p) ==
   /\ ~rret[p]
   /\ Done(rend[p])
+  /\ RetireRule # "off"
   /\ IF RetireRule = "full"
      THEN Done(rbound[p]) /\ Cardinality(Holders(p)) >= RetireAt
      ELSE TRUE
@@ -822,6 +877,7 @@ Drop(r) ==
 Next ==
   \/ Reshape
   \/ \E b \in Ballots : Register(b) \/ Phase1(b) \/ SealWrite(b) \/ Open(b)
+  \/ \E b \in Ballots, g \in Live : StaleRegister(b, g)
   \/ \E b \in Ballots, s \in Slots, v \in Cmds : Propose(b, s, v)
   \/ \E a \in Acceptors :
        \/ Flush(a) \/ Crash(a)
@@ -832,6 +888,13 @@ Next ==
   \/ \E s \in Slots, r \in Replicas : ResolveBelow(s, r)
 
 Spec == Init /\ [][Next]_vars
+
+\* `Next` with a leader that takes a later register value before its
+\* Phase 1 (`Reread`).
+NextLate == Next \/ \E b \in Ballots : Reread(b)
+SpecLate == Init /\ [][NextLate]_vars
+\* Reach: a ballot can take a later value that changes the ends it reads.
+NoLateRead == \A b \in Ballots : ~ENABLED (Reread(b) /\ bE' # bE)
 
 \* `Next` with the answers that acceptors send again (`Repromise`).
 NextRe == Next \/ \E a \in Acceptors, b \in Ballots : Repromise(a, b)

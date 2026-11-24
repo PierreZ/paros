@@ -114,14 +114,14 @@ fn a_faulty_vote_at_the_top_ballot_does_not_block_a_readable_one() {
 }
 
 #[test]
-fn a_sealed_segment_is_read_below_its_end_only() {
+fn an_acceptor_of_two_grids_is_read_once_at_every_slot() {
     let segments = [
         segment(1, &[1, 2, 3], Some(0), Some(3)),
         segment(2, &[1, 2, 3], Some(3), None),
     ];
     let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
-    // One acceptor of both grids: its vote at 2 is read in segment 1 and
-    // its vote at 4 in segment 2.
+    // One acceptor of both grids: its votes at 2 and at 4 are both read,
+    // whatever the end.
     phase1.fold(NodeId(1), Slot(0), page(&[(2, 1, 1), (4, 1, 2)], &[], None));
     phase1.fold(NodeId(2), Slot(0), page(&[], &[], None));
     let close = phase1.close(&segments).expect("a quorum");
@@ -132,10 +132,12 @@ fn a_sealed_segment_is_read_below_its_end_only() {
 }
 
 #[test]
-fn an_old_grid_is_read_below_its_end_and_the_new_grid_everywhere() {
+fn an_old_grid_is_read_at_every_slot_and_the_higher_ballot_wins() {
     // A leader of segment 2 writes the slots below its start in its own
     // grid (the gap fill), so a later leader reads the new grid below the
-    // start too; the old grid holds nothing of segment 1 at or above its end.
+    // start too. Phase 1 reads the old grid at every slot, its end too: at
+    // slot 3 the vote of the new grid has the higher ballot and wins; at
+    // slot 4 the old vote is the only one and is proposed again.
     let segments = [
         segment(1, &[1, 2, 3], Some(0), Some(3)),
         segment(2, &[4, 5, 6], Some(3), None),
@@ -143,9 +145,7 @@ fn an_old_grid_is_read_below_its_end_and_the_new_grid_everywhere() {
     let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
     for node in [1, 2, 4, 5] {
         let votes: &[(u64, u64, u8)] = match node {
-            // A stray vote of the old grid at the end itself, at a higher
-            // ballot, is not a vote of segment 1 either.
-            1 => &[(3, 9, 1), (4, 1, 1)],
+            1 => &[(3, 1, 1), (4, 1, 1)],
             4 => &[(1, 2, 2), (3, 2, 3)],
             _ => &[],
         };
@@ -154,7 +154,11 @@ fn an_old_grid_is_read_below_its_end_and_the_new_grid_everywhere() {
     let close = phase1.close(&segments).expect("a quorum");
     assert_eq!(
         close.safe,
-        BTreeMap::from([(Slot(1), noop_or(2)), (Slot(3), noop_or(3))])
+        BTreeMap::from([
+            (Slot(1), noop_or(2)),
+            (Slot(3), noop_or(3)),
+            (Slot(4), noop_or(1))
+        ])
     );
 }
 
@@ -227,9 +231,11 @@ fn a_cursor_that_does_not_move_is_refused() {
 }
 
 #[test]
-#[should_panic(expected = "at least one segment")]
-fn phase_one_reads_a_segment() {
-    let _ = Phase1::new(ballot(5), Slot(0), &[]);
+fn a_phase_one_with_no_segment_asks_nobody_and_never_closes() {
+    // The Phase 1 of a leader whose bind runs.
+    let phase1 = Phase1::new(ballot(5), Slot(0), &[]);
+    assert!(phase1.wanted().is_empty(), "no segment, no acceptor to ask");
+    assert_eq!(phase1.close(&[]), None);
 }
 
 #[test]
@@ -250,15 +256,12 @@ fn the_highest_faulty_ballot_of_the_quorum_blocks() {
         None,
         "one answer qualifies"
     );
-    assert_eq!(phase1.faulty_at(&segments, Slot(1)), vec![NodeId(2)]);
+    assert_eq!(phase1.faulty_at(Slot(1)), vec![NodeId(2)]);
     // A late answer with a faulty vote at or below the threshold qualifies:
     // the tally decides the readable vote.
     phase1.fold(NodeId(3), Slot(0), page(&[], &[(1, 3)], None));
     assert_eq!(phase1.decide(&segments, Slot(1)), Some(noop_or(1)));
-    assert_eq!(
-        phase1.faulty_at(&segments, Slot(1)),
-        vec![NodeId(2), NodeId(3)]
-    );
+    assert_eq!(phase1.faulty_at(Slot(1)), vec![NodeId(2), NodeId(3)]);
 }
 
 #[test]
@@ -283,7 +286,11 @@ fn the_tally_decides_a_faulty_top_when_a_quorum_qualifies_without_it() {
 }
 
 #[test]
-fn a_faulty_entry_the_segment_does_not_read_blocks_nothing() {
+fn a_faulty_entry_above_the_seal_end_goes_to_the_tally() {
+    // Phase 1 reads every slot of a sealed grid: a faulty entry of the old
+    // grid at or above its end is a report like any other. It blocks its
+    // slot until the qualifying answers hold a quorum of every column of
+    // every segment read, as the core's tally asks.
     let segments = [
         segment(1, &[1, 2, 3], Some(0), Some(3)),
         segment(2, &[4, 5, 6], Some(3), None),
@@ -294,9 +301,30 @@ fn a_faulty_entry_the_segment_does_not_read_blocks_nothing() {
         phase1.fold(NodeId(node), Slot(0), page(&[], &[], None));
     }
     let close = phase1.close(&segments).expect("a quorum");
-    assert_eq!(close.blocked, Vec::<Slot>::new());
-    // Node 1 is not an acceptor of segment 2, the one segment that reads
-    // slots 3 and 5: a repair there does not write to it.
-    assert_eq!(phase1.faulty_at(&segments, Slot(3)), Vec::<NodeId>::new());
-    assert_eq!(phase1.faulty_at(&segments, Slot(5)), Vec::<NodeId>::new());
+    assert_eq!(close.blocked, vec![Slot(3), Slot(5)]);
+    assert_eq!(phase1.faulty_at(Slot(3)), vec![NodeId(1)]);
+    assert_eq!(phase1.decide(&segments, Slot(3)), None);
+    // A late answer of the old grid decides both slots: no readable vote,
+    // so a `Noop`.
+    phase1.fold(NodeId(3), Slot(0), page(&[], &[], None));
+    assert_eq!(phase1.decide(&segments, Slot(3)), Some(Command::Noop));
+    assert_eq!(phase1.decide(&segments, Slot(5)), Some(Command::Noop));
+}
+
+#[test]
+fn a_vote_above_the_seal_end_is_proposed_again() {
+    // A vote of the sealed grid at or above its end is not hidden: with no
+    // vote of the next grid there, it is safe to propose it again
+    // (`end_applied_safe` of `specs/tla/journal-read/`).
+    let segments = [
+        segment(1, &[1, 2, 3], Some(0), Some(3)),
+        segment(2, &[4, 5, 6], Some(3), None),
+    ];
+    let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
+    phase1.fold(NodeId(1), Slot(0), page(&[(4, 1, 7)], &[], None));
+    for node in [2, 4, 5] {
+        phase1.fold(NodeId(node), Slot(0), page(&[], &[], None));
+    }
+    let close = phase1.close(&segments).expect("a quorum");
+    assert_eq!(close.safe.get(&Slot(4)), Some(&noop_or(7)));
 }

@@ -331,7 +331,8 @@ fn open_segment() -> MemRegister {
     register
 }
 
-/// The leader of round 1, bound to segment 1.
+/// The leader of round 1: its bind on the register binds it to segment 1,
+/// the newest.
 fn leader() -> Assignment {
     Assignment::Leader {
         address: at(LEADER),
@@ -341,7 +342,6 @@ fn leader() -> Assignment {
                 round: 1,
                 node: NodeId(LEADER),
             },
-            segment: SegmentId(1),
             from: Slot(0),
         },
     }

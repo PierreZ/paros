@@ -758,7 +758,6 @@ impl HostModel {
                     round: self.round,
                     node: address.node,
                 },
-                segment: SegmentId(1),
                 from: Slot(0),
             },
         });

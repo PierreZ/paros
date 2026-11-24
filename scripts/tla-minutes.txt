@@ -39,6 +39,7 @@ health 3.5
 journal-compact 2.5
 journal-ctrl 19.2
 journal-ids 6
+journal-read 6.5
 journal-repromise 1.2
 journal-state 21
 leader-handoff 15

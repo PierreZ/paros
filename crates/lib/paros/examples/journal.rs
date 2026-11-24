@@ -171,7 +171,6 @@ fn roles() -> Vec<Assignment> {
                 round: 1,
                 node: NodeId(LEADER),
             },
-            segment: SegmentId(1),
             from: Slot(0),
         },
     };

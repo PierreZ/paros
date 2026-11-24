@@ -59,17 +59,29 @@ v1). Offloaded is a state of the record, prepared for later: in v1 nothing sets 
 
 ## Where the seal ends
 
+A leader first **binds its ballot** to the newest segment, by compare-and-set on the register.
+The register takes a bind only above every bound ballot, so a higher ballot is bound to the same
+segment or a later one. The leader takes its configuration from the value of that write, never
+from a value it read before. A ballot bound from a stale value reads only the old grid, and a
+second value is chosen at a slot that the new grid chose (control `bind_stale` of `journal-read/`). The
+run "Break the rule" shows it.
+
 The end is **one above the highest slot where the sealer's Phase 1 saw a vote in the old
 grid**, not the first slot that is not committed. Then the sealer writes each slot below the end
-in its own grid: the vote that Phase 1 saw, or a `Noop` where it saw none. A later Phase 1 reads
-the old grid only below the end.
+in its own grid: the vote that Phase 1 saw, or a `Noop` where it saw none.
 
-Why not the first slot that is not committed? A slot above it can be chosen with no leader
-knowing it yet. A Phase 1 that reads the old grid only below that end misses the vote, and a
-second value is chosen at that slot. TLC finds it in the segments experiment
-(`specs/tla/experiments/segments/a/`). A CTRL faulty record, a vote that kept its ballot and lost
-its value, counts as a vote for the end too
+A later Phase 1 reads **every slot of every grid that is not retired**, below the end and above
+it. The end routes a slot to its replica set; it never hides a vote. So one value for each slot
+rests on the promises alone (`end_applied_safe` of
+[`journal-read/`](https://github.com/PierreZ/paros/tree/main/specs/tla/journal-read); the control
+`end_applied_end` reads the old grid only below the end, and TLC finds two values). A CTRL faulty
+record, a vote that kept its ballot and lost its value, counts as a vote for the end too
 ([`seal-ctrl/`](https://github.com/PierreZ/paros/tree/main/specs/tla/seal-ctrl)).
+
+Why not end at the first slot that is not committed? A slot above it can be chosen with no
+leader knowing it yet. The new grid then writes a second value there, and the retire, which
+stops the old acceptors, would lose the vote (the segments experiment,
+`specs/tla/experiments/segments/a/`).
 
 ## The boundary state
 

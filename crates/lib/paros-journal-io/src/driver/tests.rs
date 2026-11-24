@@ -202,7 +202,6 @@ fn assign(driver: &mut TestDriver, nodes: &[u64]) {
                         round: 1,
                         node: address.node,
                     },
-                    segment: SegmentId(1),
                     from: Slot(0),
                 },
             },
@@ -394,7 +393,6 @@ fn a_new_driver_serves_the_roles_again_from_their_records() {
                 round: 2,
                 node: next.node,
             },
-            segment: SegmentId(1),
             from: Slot(0),
         },
     });
@@ -623,7 +621,6 @@ fn second_leader(
                 round: 2,
                 node: next.node,
             },
-            segment: SegmentId(2),
             from,
         },
     });

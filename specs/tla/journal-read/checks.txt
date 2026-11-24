@@ -1,0 +1,26 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# The journal leader's Phase 1 and its bind, in the composed model
+# (`Journal.tla` of `journal-state/`, section J3.1; the review of segments in
+# Paxos, findings 2 and 3). A folder of its own, so that `journal-state/`
+# stays inside the time of one CI job.
+#
+# Phase 1 reads every slot of every grid that is not retired: with no
+# retire, a wrong end (the applied prefix) keeps one value for each slot.
+end_applied_safe    pass       ci
+# A leader that takes a later register value than the one of its own done
+# `Bind` before its Phase 1 (a value of another write, or the "ok" again of
+# a resent `Bind`): it reads the newer ends and retires, and keeps one value.
+bind_late           pass       ci
+# Reach: the step of `bind_late` happens and changes the ends a leader reads.
+reach_late          violation  ci
+# Controls: each one breaks the property of its file.
+# A Phase 1 that reads a sealed grid only below that end chooses two values.
+end_applied_end     violation  ci
+# A ballot bound from a stale register value, not by its own `Bind`,
+# reads only the sealed grid as its own and chooses two values.
+bind_stale          violation  ci

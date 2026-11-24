@@ -282,8 +282,10 @@ pub enum RolesMutant {
     None,
     /// An acceptor restarts with an empty disk. [`AGREE`] catches it.
     WipeDisk,
-    /// A campaign binds its ballot to the segment before a sealed one, as
-    /// if it were still in force. [`SEALED`] catches it.
+    /// The driver hands a leader, as the done value of its bind, the
+    /// register before the seal of the newest segment's predecessor: the
+    /// ballot is bound to the sealed segment as if it were still in force.
+    /// [`SEALED`] catches it.
     StaleBinding,
     /// The driver turns a replica's `Duplicate` into a taken position.
     /// [`FOLD`] catches it.
@@ -717,7 +719,8 @@ pub struct RolesModel {
     proxies: BTreeMap<NodeId, Option<JournalProxy>>,
     /// Whether some proxy leader crashed.
     proxy_crashed: bool,
-    /// The segment each ballot is bound to.
+    /// The segment each ballot is bound to: the newest segment of the
+    /// register when its bind was done.
     bound: BTreeMap<(u64, NodeId), SegmentId>,
     round: u64,
     /// Every slot some leader saw chosen: its command and the ballot.
@@ -734,6 +737,10 @@ pub struct RolesModel {
     uuids: u128,
     /// Writes answered `Below`, with their slot.
     belows: Vec<(Write, Slot)>,
+    /// The writer whose last call was answered `Written`: a client that
+    /// lost that answer resends the write at once, to the leader that
+    /// applied it, and the fold answers `Duplicate`.
+    echo: Option<usize>,
     /// The calls answered `Unknown`, which their client sends again.
     unknown: Vec<(Option<usize>, Command)>,
     /// The command each ballot proposed at each slot, by round. A ballot
@@ -1114,7 +1121,8 @@ impl Model for RolesModel {
         }
         let newest = self.register.newest().expect("a segment");
         if !self.leaders.values().any(|leader| {
-            leader.segment() == newest.id() && matches!(leader.phase(), LeaderPhase::Open { .. })
+            leader.segment() == Some(newest.id())
+                && matches!(leader.phase(), LeaderPhase::Open { .. })
         }) {
             return Err(format!("no leader writes in {:?}", newest.id()));
         }
@@ -1339,7 +1347,7 @@ impl RolesModel {
                     cx.record(RolesEvent::Phase1 { b, q, end: None });
                     cx.record(RolesEvent::Open { b, start: start.0 });
                 }
-                LeaderPhase::Phase1 | LeaderPhase::Stopped => {}
+                LeaderPhase::Binding | LeaderPhase::Phase1 | LeaderPhase::Stopped => {}
             }
             sometimes!(!leader.blocked().is_empty(), reach::BLOCKED);
         }
@@ -1366,7 +1374,7 @@ impl RolesModel {
                 sometimes!(true, reach::PROBED);
                 let q = leader
                     .phase1()
-                    .qualifying(leader.segments(), *slot)
+                    .qualifying(*slot)
                     .iter()
                     .map(|n| n.0)
                     .collect();
@@ -1429,6 +1437,7 @@ impl RolesModel {
             tokens: 0,
             uuids: u128::from(initial.is_multi()),
             belows: Vec::new(),
+            echo: None,
             unknown: Vec::new(),
             proposed: BTreeMap::new(),
             traced: BTreeMap::new(),
@@ -1570,7 +1579,7 @@ impl RolesModel {
         // A Phase 1 that reads a segment retired since its campaign waits
         // for acceptors that stopped: the election timeout gives up on it.
         let live = self.leaders.values().any(|l| {
-            l.segment() == newest
+            l.segment().is_none_or(|segment| segment == newest)
                 && *l.phase() != LeaderPhase::Stopped
                 && !(*l.phase() == LeaderPhase::Phase1
                     && l.segments().iter().any(|read| {
@@ -1592,17 +1601,12 @@ impl RolesModel {
             round: self.round,
             node: proposer,
         };
-        let mut value = self.register.clone();
-        let mut segment = newest;
-        if self.mutant == RolesMutant::StaleBinding
-            && let Some(stale) = self.unseal(newest)
-        {
-            value = stale;
-            segment = SegmentId(newest.0 - 1);
-        }
+        let value = self.register.clone();
         // One campaign in three reads from the start of the oldest segment
         // that is not retired, below the slots its acceptors may have
-        // dropped: their promises name the dropped ranges.
+        // dropped: their promises name the dropped ranges. The applied
+        // prefix only grows, so a first slot read now stays valid at the
+        // bind, which may see a later segment.
         // An acceptor that dropped a slot under another's faulty vote
         // answers this campaign late, on one campaign in two; the campaign
         // reads the oldest segment, so its Phase 1 reads the slot.
@@ -1614,30 +1618,14 @@ impl RolesModel {
             .copied()
             .filter(|_| cx.rng().chance(1, 2));
         let from = if late.is_some() || cx.rng().chance(1, 3) {
-            Self::oldest_read(&value, segment)
-                .start()
-                .unwrap_or(Slot(0))
+            Self::oldest_read(&value, newest).start().unwrap_or(Slot(0))
         } else {
-            self.applied_from(&value, segment)
+            self.applied_from(&value, newest)
         };
-        self.bound.insert((ballot.round, ballot.node), segment);
-        let Some((mut leader, effects)) = JournalLeader::campaign(
-            Campaign {
-                ballot,
-                segment,
-                from,
-            },
-            &value,
-        ) else {
-            return;
-        };
+        let (mut leader, effects) = JournalLeader::campaign(Campaign { ballot, from });
         if cx.rng().chance(1, 2) {
             leader.delegate_to(PROXIES.iter().map(|p| NodeId(*p)).collect());
         }
-        cx.record(RolesEvent::Register {
-            b: ballot.round,
-            from: from.0,
-        });
         // A proposer runs one leader: its earlier one stops, and answers
         // its callers `Unknown`.
         if let Some(mut old) = self.leaders.insert(proposer, leader) {
@@ -1649,6 +1637,53 @@ impl RolesModel {
             self.late = Some((acceptor, proposer));
         }
         self.leader_effects(proposer, effects, cx);
+    }
+
+    /// The done bind of `ballot`, the leader at `node`: the walk records the
+    /// segment it is bound to, the newest of `value`, and the leader takes
+    /// `value` and starts Phase 1. With the mutant `StaleBinding` the leader
+    /// is given the value before the seal of the newest segment's
+    /// predecessor instead, with its bind: a driver that hands a leader a
+    /// stale value, which binds it to the sealed segment.
+    fn bind(
+        &mut self,
+        node: NodeId,
+        ballot: paros_journal::register::Ballot,
+        value: &RegisterValue,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        let newest = value.newest().expect("a segment").id();
+        let mut given = value.clone();
+        let mut segment = newest;
+        if self.mutant == RolesMutant::StaleBinding
+            && let Some(stale) = self.unseal(newest)
+        {
+            given = stale
+                .apply(&Change::Bind { ballot })
+                .expect("a stale value has no bind");
+            segment = SegmentId(newest.0 - 1);
+        }
+        self.bound.insert((ballot.round, ballot.node), segment);
+        let Some(leader) = self.leaders.get_mut(&node) else {
+            return;
+        };
+        if leader.ballot() != ballot || *leader.phase() != LeaderPhase::Binding {
+            return;
+        }
+        let effects = leader.observe(&given);
+        assert_eq!(
+            leader.segment(),
+            Some(segment),
+            "a done bind binds the leader to the newest segment"
+        );
+        // The leader reads from the first slot of its campaign, raised to
+        // the start of its oldest segment when a retire landed before the
+        // bind.
+        cx.record(RolesEvent::Register {
+            b: ballot.round,
+            from: leader.from().0,
+        });
+        self.leader_effects(node, effects, cx);
     }
 
     /// The mutant `StaleBinding`: the register as it was before the seal
@@ -1849,6 +1884,12 @@ impl RolesModel {
                 // own: the walk asks no step of them after the retire.
                 LeaderEffect::Retired { .. } => {}
             }
+        }
+        // A writer whose call was just answered `Written` lost the answer on
+        // one call in two, and resends the write to the leader that applied
+        // it.
+        if self.echo.is_some() && cx.rng().chance(1, 2) {
+            self.echo(cx);
         }
     }
 
@@ -2441,6 +2482,9 @@ impl RolesModel {
                         }
                         sometimes!(true, reach::SEGMENT_TRIMMED);
                     }
+                    (Change::Bind { ballot }, Origin::Leader(node, _)) => {
+                        self.bind(node, *ballot, &value, cx);
+                    }
                     (Change::Seal { segment, end }, _) => {
                         for (slot, (_, round, node)) in &self.chosen {
                             assert!(
@@ -2946,9 +2990,31 @@ impl RolesModel {
         self.propose(Some(index), Command::Write(write), cx);
     }
 
+    /// The resend of [`Self::echo`]'s write, once its writer is free and a
+    /// leader writes. Returns whether it sent it.
+    fn echo(&mut self, cx: &mut Cx<'_, Self>) -> bool {
+        let Some(index) = self.echo else {
+            return false;
+        };
+        if self.calls.values().any(|call| call.writer == Some(index))
+            || self.writer_leader().is_none()
+        {
+            return false;
+        }
+        self.echo = None;
+        let Some(write) = self.writers[index].sent.last().cloned() else {
+            return false;
+        };
+        self.propose(Some(index), Command::Write(write), cx);
+        true
+    }
+
     /// A client sends again a call whose fate is unknown, or a write it
     /// knows was written.
     fn resend(&mut self, cx: &mut Cx<'_, Self>) {
+        if self.echo(cx) {
+            return;
+        }
         if let Some(pick) = cx.rng().index(self.unknown.len())
             && cx.rng().chance(2, 3)
         {
@@ -3218,6 +3284,7 @@ impl RolesModel {
                     let writer = &mut self.writers[index];
                     writer.next = writer.next.max(seq.0 + count);
                     writer.sent.push(write.clone());
+                    self.echo = Some(index);
                     if writer.sent.len() > 4 {
                         writer.sent.remove(0);
                     }
