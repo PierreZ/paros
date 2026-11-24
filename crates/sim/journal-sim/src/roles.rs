@@ -1576,7 +1576,7 @@ impl RolesModel {
         // A live leader of the newest segment is deposed only in the chaos
         // phase, on one campaign in eight: a walk that deposes every leader
         // soon answers most calls `Unknown`.
-        // A Phase 1 that reads a segment retired since its campaign waits
+        // A Phase 1 that reads a segment retired since its bind waits
         // for acceptors that stopped: the election timeout gives up on it.
         let live = self.leaders.values().any(|l| {
             l.segment().is_none_or(|segment| segment == newest)

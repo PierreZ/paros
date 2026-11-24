@@ -49,7 +49,7 @@ use paros_consensus::contract::write::AcceptorWrite;
 use paros_consensus::{Ballot, NodeId, Slot};
 
 use super::message::{Message, PromisePage, ReadTag};
-use super::{Flight, PersistId};
+use super::{Flight, PersistId, ranges};
 use crate::command::Command;
 use crate::segment::SegmentId;
 
@@ -141,7 +141,7 @@ impl AcceptorDisk {
                         "a vote is durable only under its promise"
                     );
                     assert!(
-                        !dropped_at(&self.dropped, *slot),
+                        !ranges::contains(&self.dropped, *slot),
                         "a vote is never written in a dropped range"
                     );
                     self.faulty.remove(slot);
@@ -149,7 +149,7 @@ impl AcceptorDisk {
                 }
                 AcceptorOp::Compact { start, below, .. } => {
                     assert!(start < below, "a compaction drops a slot");
-                    drop_range(&mut self.dropped, *start, *below);
+                    ranges::add(&mut self.dropped, *start, *below);
                     self.votes.retain(|slot, _| !(start..below).contains(&slot));
                     self.faulty
                         .retain(|slot, _| !(start..below).contains(&slot));
@@ -199,7 +199,7 @@ impl JournalAcceptor {
             disk.votes
                 .keys()
                 .chain(disk.faulty.keys())
-                .all(|slot| !dropped_at(&disk.dropped, *slot)),
+                .all(|slot| !ranges::contains(&disk.dropped, *slot)),
             "a disk keeps no vote in a dropped range"
         );
         let acceptor = Acceptor::new(disk.promised, disk.votes, Slot(0), disk.faulty);
@@ -357,7 +357,7 @@ impl JournalAcceptor {
         slot: Slot,
         command: Command,
     ) -> Vec<AcceptorEffect> {
-        if dropped_at(&self.dropped, slot) {
+        if ranges::contains(&self.dropped, slot) {
             probe!(
                 reachable,
                 "acceptor: an Accept in a dropped range is not answered"
@@ -460,7 +460,7 @@ impl JournalAcceptor {
             return Vec::new();
         }
         probe!(reachable, "acceptor: a compaction drops votes");
-        drop_range(&mut self.dropped, start, below);
+        ranges::add(&mut self.dropped, start, below);
         let range = start..below;
         let records = self
             .acceptor
@@ -513,7 +513,7 @@ impl JournalAcceptor {
             return Vec::new();
         };
         assert!(
-            !dropped_at(&self.dropped, slot),
+            !ranges::contains(&self.dropped, slot),
             "a compaction keeps no faulty vote in its range"
         );
         probe!(
@@ -567,21 +567,6 @@ impl JournalAcceptor {
         let id = self.flight.batch();
         vec![AcceptorEffect::Persist { id, ops }]
     }
-}
-
-/// Whether `slot` is in one of the `dropped` ranges.
-fn dropped_at(dropped: &BTreeMap<Slot, Slot>, slot: Slot) -> bool {
-    dropped
-        .range(..=slot)
-        .next_back()
-        .is_some_and(|(_, below)| slot < *below)
-}
-
-/// Add the range `start .. below` to `dropped`: a range of one segment only
-/// grows.
-fn drop_range(dropped: &mut BTreeMap<Slot, Slot>, start: Slot, below: Slot) {
-    let held = dropped.entry(start).or_insert(below);
-    *held = (*held).max(below);
 }
 
 #[cfg(test)]

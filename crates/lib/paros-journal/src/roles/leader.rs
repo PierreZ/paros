@@ -94,13 +94,14 @@ use paros_consensus::types::Fingerprint;
 use paros_consensus::{Ballot, NodeId, Slot};
 
 use super::message::Message;
+use super::ranges;
 use crate::command::Command;
 use crate::fold::Answer;
 use crate::held::{Held, Reply};
 use crate::register::{Change, RegisterValue};
 use crate::segment::{Grid, SegmentId, SegmentRecord, SegmentState};
 
-use phase1::{Phase1, Phase1Close, in_ranges};
+use phase1::{Phase1, Phase1Close};
 
 /// The re-sends of a delegated round after which the leader gives it to the
 /// next proxy: a proxy that crashed or lost its messages costs a few ticks.
@@ -1116,7 +1117,7 @@ impl<T> JournalLeader<T> {
         self.next = next;
         let mut effects = Vec::new();
         for slot in (from.0..next.0).map(Slot) {
-            if in_ranges(&self.dropped, slot) {
+            if ranges::contains(&self.dropped, slot) {
                 probe!(reachable, "leader: a dropped slot is not proposed");
                 continue;
             }
@@ -1532,7 +1533,7 @@ impl<T> JournalLeader<T> {
             self.rounds
                 .by_slot()
                 .keys()
-                .all(|slot| !in_ranges(&self.dropped, *slot)),
+                .all(|slot| !ranges::contains(&self.dropped, *slot)),
             "the leader proposes nothing in a dropped range"
         );
     }

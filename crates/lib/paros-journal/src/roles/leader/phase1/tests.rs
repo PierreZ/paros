@@ -328,3 +328,100 @@ fn a_vote_above_the_seal_end_is_proposed_again() {
     let close = phase1.close(&segments).expect("a quorum");
     assert_eq!(close.safe.get(&Slot(4)), Some(&noop_or(7)));
 }
+
+/// `page` with the ranges that the acceptor dropped.
+fn page_dropped(dropped: &[(u64, u64)], next: Option<u64>) -> PromisePage {
+    PromisePage {
+        dropped: dropped.iter().map(|(s, b)| (Slot(*s), Slot(*b))).collect(),
+        ..page(&[], &[], next)
+    }
+}
+
+#[test]
+fn a_vote_of_an_answer_that_never_completes_is_neither_proposed_nor_a_threshold() {
+    // Phase 1 merges complete answers only (`Phase1On` of
+    // `specs/tla/journal-ctrl/`): a higher vote on the first page of an
+    // acceptor that never sends its last page does not count. Here it would
+    // raise the threshold of the tally to 9 and let node 3 qualify.
+    let segments = [segment(1, &[1, 2, 3], Some(0), None)];
+    let mut phase1 = Phase1::new(ballot(10), Slot(0), &segments);
+    assert_eq!(
+        phase1.fold(NodeId(1), Slot(0), page(&[(0, 9, 3)], &[], Some(1))),
+        Some(Slot(1))
+    );
+    phase1.fold(NodeId(2), Slot(0), page(&[(0, 2, 1)], &[], None));
+    phase1.fold(NodeId(3), Slot(0), page(&[], &[(0, 5)], None));
+    let close = phase1
+        .close(&segments)
+        .expect("a quorum of complete answers");
+    assert_eq!(
+        close.safe,
+        BTreeMap::new(),
+        "the partial vote is not proposed"
+    );
+    assert_eq!(close.blocked, vec![Slot(0)]);
+    assert_eq!(phase1.qualifying(Slot(0)), BTreeSet::from([NodeId(2)]));
+    assert_eq!(phase1.decide(&segments, Slot(0)), None);
+}
+
+#[test]
+fn the_seal_end_counts_only_the_segment_before() {
+    // The end of the segment in force counts the votes, the faulty votes
+    // and the dropped ranges of its own acceptors, never a vote that only
+    // an acceptor of an older unretired grid holds.
+    let segments = [
+        segment(1, &[1, 2, 3], Some(0), Some(2)),
+        segment(2, &[4, 5, 6], Some(2), None),
+        segment(3, &[7, 8, 9], None, None),
+    ];
+    let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
+    phase1.fold(NodeId(1), Slot(0), page(&[(10, 1, 1)], &[], None));
+    phase1.fold(NodeId(2), Slot(0), page(&[], &[], None));
+    phase1.fold(NodeId(4), Slot(0), page(&[(3, 1, 1)], &[(5, 1)], None));
+    phase1.fold(NodeId(5), Slot(0), page_dropped(&[(2, 7)], None));
+    phase1.fold(NodeId(7), Slot(0), page(&[], &[], None));
+    phase1.fold(NodeId(8), Slot(0), page(&[], &[], None));
+    let close = phase1.close(&segments).expect("a quorum of every grid");
+    assert_eq!(
+        close.end,
+        Some(Slot(7)),
+        "the dropped range 2..7 is the highest fact of the segment before"
+    );
+}
+
+#[test]
+fn two_segments_that_share_a_column_close_on_a_quorum_of_it() {
+    let segments = [
+        segment(1, &[1, 2, 3], Some(0), Some(3)),
+        segment(2, &[1, 2, 3], Some(3), None),
+    ];
+    let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
+    phase1.fold(NodeId(1), Slot(0), page(&[], &[], None));
+    assert!(phase1.close(&segments).is_none(), "one of three");
+    phase1.fold(NodeId(3), Slot(0), page(&[], &[], None));
+    assert!(
+        phase1.close(&segments).is_some(),
+        "F + 1 of the shared column"
+    );
+}
+
+#[test]
+fn a_late_answer_that_dropped_a_blocked_slot_counts_once_complete() {
+    // The leader skips a blocked slot that a complete answer dropped
+    // (`dropped_by`), before the tally: the other answers may predate the
+    // compaction (control `ctrl_probe_drop`). A partial answer changes
+    // nothing yet.
+    let segments = [segment(1, &[1, 2, 3], Some(0), None)];
+    let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
+    phase1.fold(NodeId(1), Slot(0), page(&[(1, 3, 1)], &[], None));
+    phase1.fold(NodeId(2), Slot(0), page(&[], &[(1, 4)], None));
+    assert_eq!(
+        phase1.close(&segments).expect("a quorum").blocked,
+        vec![Slot(1)]
+    );
+    phase1.fold(NodeId(3), Slot(0), page_dropped(&[(0, 2)], Some(2)));
+    assert_eq!(phase1.dropped_by(Slot(1)), None, "a partial answer");
+    phase1.fold(NodeId(3), Slot(2), page(&[], &[], None));
+    assert_eq!(phase1.dropped_by(Slot(1)), Some(NodeId(3)));
+    assert_eq!(phase1.dropped_by(Slot(2)), None);
+}
