@@ -13,14 +13,16 @@
 //! role. A send, or an output, that names a batch waits until that batch is
 //! durable; one that names a durable batch, or none, goes at once.
 //!
-//! **Storage faults** (rule 4). Each [`StorageError`] has one [`Verdict`],
-//! whatever the call. `Full`: the roles of the call stop
-//! ([`Machine::failed`] for a commit, [`Machine::unreadable`] for a scan)
-//! and placement may start them again. `Lost`: they stop for good
-//! ([`Machine::lost`]). `Unknown`: the driver halts ([`Driver::halted`]),
-//! as in a crash: it drops what was not committed and what waited on it,
-//! and steps nothing more. In every case what waited on the failed batch
-//! never goes.
+//! **Storage faults** (rule 4). Each [`StorageError`] has one [`Verdict`].
+//! `Full`: the roles of the call stop ([`Machine::failed`] for a commit,
+//! [`Machine::unreadable`] for a scan) and placement may start them again.
+//! `Lost`: the role of a scan stops for good ([`Machine::lost`]). `Unknown`:
+//! the driver halts ([`Driver::halted`]), as in a crash: it reports the
+//! steps that are settled, drops what was not committed and what waited on
+//! it, and does nothing more. In every case what waited on the failed batch
+//! never goes. A commit holds the batches of many roles and cannot name the
+//! one that lost a record, so a `Lost` commit halts the driver too: the scans
+//! of the next process name the role, and no other role stops for good.
 //!
 //! **Recovery** (rule 2). A role with a disk starts with a read of its
 //! records ([`Effect::Read`]). The driver gives them to the machine as an
@@ -257,8 +259,10 @@ where
     ///
     /// # Errors
     ///
-    /// The storage cannot list its disk, so the process cannot boot: the
-    /// driver halts. A halted driver reads nothing and answers `Unknown`.
+    /// The storage cannot list its disk, and the process cannot boot. A
+    /// `Full` list read nothing: the program may ask again. A `Lost` or an
+    /// `Unknown` list halts the driver: what the disk lists can no longer be
+    /// trusted. A halted driver reads nothing and answers `Unknown`.
     ///
     /// # Panics
     ///
@@ -273,7 +277,10 @@ where
                 addresses.windows(2).all(|w| w[0] < w[1]),
                 "a storage lists each role once, in address order"
             ),
-            Err(_) => self.halt(),
+            Err(fault) => match fault.verdict() {
+                Verdict::Again => {}
+                Verdict::ForGood | Verdict::Halt => self.halt(),
+            },
         }
         listed
     }
@@ -309,7 +316,11 @@ where
             return false;
         }
         let mut busy = false;
-        while let Some(envelope) = self.transport.receive() {
+        // A step of this round can halt the driver: it then receives and
+        // steps nothing more.
+        while !self.halted
+            && let Some(envelope) = self.transport.receive()
+        {
             busy = true;
             self.input(M::message(envelope));
         }
@@ -324,16 +335,18 @@ where
         for (at, address) in due {
             // A fire earlier in this loop can stop the role or set its timer
             // again: only the deadline that is still the role's fires.
-            if self.timers.get(&address) != Some(&at) {
+            if self.halted || self.timers.get(&address) != Some(&at) {
                 continue;
             }
             busy = true;
             self.timers.remove(&address);
             self.input(M::timer_fired(address));
         }
-        for input in self.ports.poll(&self.machine) {
-            busy = true;
-            self.input(input);
+        if !self.halted {
+            for input in self.ports.poll(&self.machine) {
+                busy = true;
+                self.input(input);
+            }
         }
         // A release can step new batches (an input that a held output gave):
         // commit until the round leaves none.
@@ -478,11 +491,18 @@ where
         for (address, id, _) in &group {
             tops.insert(*address, *id);
         }
+        let ended = std::mem::take(&mut self.ended);
+        let result = self.storage.commit(&ops);
+        if result.is_err_and(|fault| fault.verdict() != Verdict::Again) {
+            // The group may or may not be durable: it is not settled, and no
+            // step that waited on it is reported.
+            self.halt();
+            return true;
+        }
         for (address, id) in &tops {
             self.settled.insert(*address, *id);
         }
-        let ended = std::mem::take(&mut self.ended);
-        match self.storage.commit(&ops) {
+        match result {
             Ok(()) => {
                 // A role that ended since its batch joined the group is gone:
                 // a role at its address later starts from its own read of the
@@ -493,31 +513,26 @@ where
                 );
                 self.release();
             }
-            // Each role of the group stops, and its stop drops what waited
-            // on the group.
-            Err(fault) => match fault.verdict() {
-                Verdict::Again => {
-                    for address in tops.into_keys() {
-                        self.input(M::failed(address));
-                    }
+            // The commit wrote nothing: each role of the group stops, and
+            // its stop drops what waited on the group.
+            Err(_) => {
+                for address in tops.into_keys() {
+                    self.input(M::failed(address));
                 }
-                Verdict::ForGood => {
-                    for address in tops.into_keys() {
-                        self.input(M::lost(address));
-                    }
-                }
-                Verdict::Halt => self.halt(),
-            },
+            }
         }
         true
     }
 
-    /// A storage call reported `Unknown`: the process stops, as in a crash.
-    /// What was not committed is lost, and so is every send, output and
-    /// input that waited; a held output goes to [`Ports::dropped`]. No step
-    /// that waited for its batches is reported: the next process reads the
+    /// A storage call reported `Unknown` (or a commit `Lost`): the process
+    /// stops, as in a crash. Each step whose batches are all settled is
+    /// reported first, in order, as its effects may have gone out. What was
+    /// not committed is lost, and so is every send, output and input that
+    /// waited; a held output goes to [`Ports::dropped`]. A step that waits on
+    /// a batch of unknown fate is not reported: the next process reads the
     /// disk to learn what it holds.
     fn halt(&mut self) {
+        self.report();
         self.halted = true;
         self.inputs.clear();
         self.group.clear();

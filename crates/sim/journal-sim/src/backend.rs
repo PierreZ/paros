@@ -42,6 +42,8 @@ pub struct Disk {
     pub store: Rc<RefCell<MemStorage>>,
     /// The faults armed for the next commit.
     pub faults: Rc<RefCell<Faults>>,
+    /// The ops of the last commit that failed `Unknown` after its write.
+    unknown: Rc<RefCell<Vec<Op>>>,
     seen: fn(&[Op]),
 }
 
@@ -52,6 +54,7 @@ impl Disk {
         Self {
             store: Rc::default(),
             faults: Rc::default(),
+            unknown: Rc::default(),
             seen,
         }
     }
@@ -74,6 +77,16 @@ impl Disk {
             Entry::Value(bytes) if k == key => Some(bytes),
             _ => None,
         })
+    }
+
+    /// Whether the disk holds the last op of the last commit that failed
+    /// `Unknown`: that commit wrote its batch, and only a new scan can tell.
+    #[must_use]
+    pub fn wrote_unknown(&self) -> bool {
+        self.unknown
+            .borrow()
+            .last()
+            .is_some_and(|op| self.record(op.key).as_ref() == Some(&op.value))
     }
 
     /// Lose every record: a planted bug, never a fault of the contract.
@@ -117,6 +130,7 @@ impl Storage<Journal> for Disk {
         }
         self.store.borrow_mut().commit(ops)?;
         if faults.fail_after {
+            *self.unknown.borrow_mut() = ops.to_vec();
             return Err(StorageError::Unknown);
         }
         Ok(())

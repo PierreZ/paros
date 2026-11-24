@@ -578,13 +578,12 @@ impl HostModel {
                     _ => {}
                 }
             }
-            if driver.halted() {
-                // A commit of unknown outcome stopped the process: the walk
-                // crashes it, and a restart reads the disk again.
-                // The walk's `Unknown` commit writes its batch first.
-                sometimes!(true, reach::WRITTEN_HALTED);
-                self.crash(&p, cx);
-                continue;
+            // A commit of unknown outcome stops the process: what it sent
+            // and answered before the commit goes out, then the walk crashes
+            // it, and a restart reads the disk again.
+            let halted = driver.halted();
+            if halted {
+                sometimes!(process.disk.wrote_unknown(), reach::WRITTEN_HALTED);
             }
             let sent: Vec<Envelope> = process.outbox.borrow_mut().drain(..).collect();
             for envelope in sent {
@@ -604,6 +603,9 @@ impl HostModel {
             }
             for reply in reads {
                 self.on_read(p, reply.read, reply.answer);
+            }
+            if halted {
+                self.crash(&p, cx);
             }
         }
     }

@@ -402,12 +402,19 @@ fn a_disk_lists_each_role_with_records_fresh_and_after_a_restart() {
 }
 
 #[test]
-fn a_disk_that_cannot_list_stops_the_process() {
+fn a_list_that_read_nothing_may_be_asked_again_and_a_lost_list_stops_the_process() {
     let (disk, clock) = (Disk::default(), Hand::default());
     let (mut driver, _) = proc(&disk, &clock);
     disk.fail_list.set(Some(StorageError::Full));
     assert_eq!(driver.on_disk(), Err(StorageError::Full));
-    assert!(driver.halted(), "a process that cannot list cannot boot");
+    assert!(
+        !driver.halted(),
+        "a list that read nothing may be asked again"
+    );
+    assert_eq!(driver.on_disk(), Ok(Vec::new()));
+    disk.fail_list.set(Some(StorageError::Lost));
+    assert_eq!(driver.on_disk(), Err(StorageError::Lost));
+    assert!(driver.halted(), "a list that lost a role cannot be trusted");
     assert_eq!(driver.on_disk(), Err(StorageError::Unknown));
 }
 
@@ -439,18 +446,71 @@ fn a_lost_record_stops_its_role_for_good_and_the_list_still_names_it() {
 }
 
 #[test]
-fn a_commit_that_finds_a_lost_record_stops_its_roles_for_good() {
+fn a_commit_that_finds_a_lost_record_stops_the_process_and_no_role_for_good() {
     let (disk, clock) = (Disk::default(), Hand::default());
     let (mut driver, _) = proc(&disk, &clock);
     start(&mut driver);
     bump(&mut driver);
     disk.fail_commit.set(Some(StorageError::Lost));
     assert!(driver.poll());
-    assert_eq!(driver.take_stopped(), vec![(1, Stop::Lost)]);
+    // The commit cannot name the role that lost a record: no role stops for
+    // good, and the scans of the next process name it.
+    assert!(driver.halted());
+    assert_eq!(driver.take_stopped(), Vec::new());
     assert_eq!(driver.ports().dropped, vec![(1, Out::Bumped { value: 1 })]);
     assert_eq!(driver.ports().outputs, Vec::new());
     assert!(driver.transport_mut().queue.borrow().is_empty());
-    assert!(!driver.halted());
+}
+
+#[test]
+fn a_halt_reports_the_steps_that_are_settled_and_steps_nothing_more() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, events) = proc(&disk, &clock);
+    start(&mut driver);
+    bump(&mut driver);
+    assert!(driver.poll());
+    // The note of value 1 waits in the transport. In the next round the
+    // watcher sees it (an output with no batch, out at once), then a bump
+    // from the ports writes a batch whose commit is `Unknown`, and the
+    // round's later inputs never step.
+    driver.ports_mut().next = vec![
+        Input::Deliver {
+            address: 1,
+            input: In::Bump,
+        },
+        Input::Deliver {
+            address: 1,
+            input: In::Bump,
+        },
+    ];
+    disk.fail_commit.set(Some(StorageError::Unknown));
+    assert!(driver.poll());
+    assert!(driver.halted());
+    assert!(
+        driver
+            .ports()
+            .outputs
+            .contains(&(2, Out::Seen { value: 1 }))
+    );
+    let recorded = events.borrow();
+    assert!(
+        recorded.iter().any(|e| matches!(
+            e.input,
+            Input::Message(Note {
+                from: 1,
+                to: 2,
+                value: 1
+            })
+        )),
+        "the step whose output went out is reported"
+    );
+    assert!(
+        !recorded.iter().any(|e| e
+            .effects
+            .iter()
+            .any(|f| matches!(f, Effect::Persist { id: 2.., .. }))),
+        "no step that waits on the unknown batch is reported"
+    );
 }
 
 #[test]
@@ -459,7 +519,6 @@ fn an_unknown_commit_stops_the_process() {
     let (mut driver, events) = proc(&disk, &clock);
     start(&mut driver);
     bump(&mut driver);
-    let reported = events.borrow().len();
     disk.fail_commit.set(Some(StorageError::Unknown));
     assert!(driver.poll());
     assert!(driver.halted());
@@ -475,11 +534,18 @@ fn an_unknown_commit_stops_the_process() {
         "the note never goes"
     );
     assert_eq!(driver.timer(), None);
-    assert_eq!(
-        events.borrow().len(),
-        reported,
+    // The starts are settled and reported; the bump, whose batch is
+    // unknown, is not.
+    let recorded = events.borrow();
+    assert!(recorded.iter().any(|e| matches!(e.input, Input::Assign(_))));
+    assert!(
+        !recorded.iter().any(|e| e
+            .effects
+            .iter()
+            .any(|f| matches!(f, Effect::Persist { .. }))),
         "a step whose batch is unknown is not reported"
     );
+    drop(recorded);
     // A halted driver does nothing more.
     bump(&mut driver);
     assert!(!driver.poll());
@@ -509,4 +575,16 @@ fn each_fault_has_one_verdict() {
     assert_eq!(StorageError::Full.verdict(), Verdict::Again);
     assert_eq!(StorageError::Lost.verdict(), Verdict::ForGood);
     assert_eq!(StorageError::Unknown.verdict(), Verdict::Halt);
+    assert_eq!(
+        StorageError::Lost.to_string(),
+        "storage: the disk lost a record of the role"
+    );
+    assert_eq!(
+        StorageError::Full.to_string(),
+        "storage: the call did nothing"
+    );
+    assert_eq!(
+        StorageError::Unknown.to_string(),
+        "storage: the backend does not know what the call did"
+    );
 }

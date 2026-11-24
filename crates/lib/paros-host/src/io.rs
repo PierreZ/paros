@@ -39,7 +39,10 @@ pub enum Verdict {
     /// [`Family::unreadable`] for a scan. Placement may start them again,
     /// from a scan.
     Again,
-    /// The roles of the call stop for good ([`Family::lost`]).
+    /// The role of the call stops for good ([`Family::lost`]). A scan names
+    /// its role. A commit holds the batches of many roles and cannot name
+    /// the one that lost a record: the driver halts, and the scans of the
+    /// next process name it, so no other role stops for good.
     ForGood,
     /// The process stops: the driver halts ([`crate::Driver::halted`]),
     /// and the program drops it and starts a new one on the same disk.
@@ -101,8 +104,9 @@ pub trait Storage<F: Family> {
     ///
     /// # Errors
     ///
-    /// `Full`: no op is durable. `Lost`: a role of the batch lost a record.
-    /// `Unknown`: the batch may or may not be durable.
+    /// `Full`: no op is durable. `Lost`: a role of the batch lost a record
+    /// (the driver cannot tell which, so the process stops). `Unknown`: the
+    /// batch may or may not be durable.
     fn commit(&mut self, ops: &[F::Op]) -> Result<(), StorageError>;
 
     /// Every record of the role at `address`.
@@ -119,7 +123,9 @@ pub trait Storage<F: Family> {
     ///
     /// # Errors
     ///
-    /// The backend cannot list the disk: the process cannot boot.
+    /// The backend cannot list the disk: the process cannot boot. `Full`:
+    /// the list read nothing, and may be asked again. `Lost` or `Unknown`:
+    /// the process stops.
     fn list(&mut self) -> Result<Vec<F::Address>, StorageError>;
 }
 

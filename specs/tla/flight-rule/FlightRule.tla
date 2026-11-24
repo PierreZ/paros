@@ -35,7 +35,7 @@
 (*            start again from a scan of their disk.                       *)
 (*   Lost     a disk lost a record of a role: the list still names the     *)
 (*            role (faulty, not empty), and its scan reports `Lost`: the   *)
-(*            role stops for good (`Stop::Damaged`).                       *)
+(*            role stops for good (`Stop::Lost`).                       *)
 (*   Unknown  a commit failed and the backend does not know what it wrote  *)
 (*            (fsyncgate): the page cache may still show the batch that    *)
 (*            is not durable, so a scan in the same process can lie. The   *)
@@ -91,7 +91,7 @@ VARIABLES
   proposed,   \* the ballots whose proposer sent its Accept
   crashes,    \* how many crashes happened
   grouped,    \* a storage commit covered two batches or more (a ghost for a reach check)
-  down,       \* the acceptors that stopped for good (`Stop::Damaged`)
+  down,       \* the acceptors that stopped for good (`Stop::Lost`)
   faults,     \* how many storage faults happened
   faulted     \* the kinds of storage faults that happened (a ghost for reach checks)
 

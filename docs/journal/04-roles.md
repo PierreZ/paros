@@ -314,10 +314,14 @@ from a scan. `Lost`: a disk lost a record of a role; the list still names the ro
 empty), its scan reports `Lost`, and the role stops for good (`Stop::Lost`). `Unknown`: a
 commit failed and the backend does not know what it wrote (fsyncgate); the page cache may still
 show a batch that is not durable, so the process stops (`Driver::halted`, as in a crash) and a
-new one reads the disk. The verdict is the fault's, whatever the call: a scan that fails `Full`
-stops its role (`Stop::Unreadable`), which may start again; a commit that fails `Lost` stops
-its roles for good; a list or a scan that fails `Unknown` stops the process. A role that keeps no
-record (a frontend) starts with no read and needs nothing of the storage.
+new one reads the disk. The halted driver first reports each step whose batches are settled, and
+asks the register nothing more. A scan that fails `Full` stops its role (`Stop::Unreadable`),
+which may start again; a list that fails `Full` may be asked again; a list or a scan that fails
+`Unknown` stops the process. A commit holds the batches of many roles and cannot name the one
+that lost a record, so a commit that fails `Lost` stops the process too: the scans of the next
+process name the role, and no other role is reported lost (the model has no `Lost` commit; this is
+the safe reading, a proposal for Pierre's review). A role that keeps no record (a frontend) starts
+with no read and needs nothing of the storage.
 `specs/tla/flight-rule/` checks these verdicts (`storage`) under single-decree Paxos, with three
 controls: a role that starts from the records that a loss left (`lost_restore`), a list that
 leaves out a damaged role so that placement starts it empty (`list_readable`), and a scan in the

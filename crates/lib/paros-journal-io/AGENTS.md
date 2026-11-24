@@ -49,8 +49,9 @@ its result and runs in the `checks` job of CI.
 - **The format is this crate's**: a backend stores keys and bytes and never reads them. A
   change of a `Kind` number or of a value's bytes is a change of the disk format.
 - **The flight rule is the generic driver's** (`paros-host`): a send or an output (a register
-  change, a read answer) that names a batch waits until the batch is durable; a failed commit
-  stops every role it held (rule 4). This crate adds no rule of its own to it.
+  change, a read answer) that names a batch waits until the batch is durable; a commit that
+  wrote nothing stops every role it held, and a commit of unknown fate halts the driver, which
+  then asks the register nothing (rule 4, #1414). This crate adds no rule of its own to it.
 - **No change to the core's contract**: `paros-consensus` and the roles of `paros-journal` keep
   their API (#1329). What this crate needs from a role is a new optional behaviour there.
 - **The absolute rule of simulation** (root `AGENTS.md`): a red seed of the driver walk is a

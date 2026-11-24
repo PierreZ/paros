@@ -380,6 +380,19 @@ fn a_new_driver_serves_the_roles_again_from_their_records() {
     let (disk_back, ..) = drivers.pop().expect("a driver").into_parts();
     world.replies.borrow_mut().clear();
     let mut drivers = vec![world.process(&disk_back, &[1, 2, 3, 11, 12, 13])];
+    // The disk lists every role that wrote, the leader none: it keeps no
+    // record.
+    let mut listed: Vec<Address> = ACCEPTORS
+        .iter()
+        .map(|node| Address::new(J, NodeId(*node)))
+        .chain(
+            REPLICAS
+                .iter()
+                .map(|node| Address::replica(J, NodeId(*node), SegmentId(1))),
+        )
+        .collect();
+    listed.sort();
+    assert_eq!(drivers[0].on_disk(), Ok(listed));
     for node in ACCEPTORS {
         let acceptor = drivers[0]
             .host()
@@ -1007,4 +1020,54 @@ fn a_change_with_no_answer_of_a_role_that_stopped_is_not_run_again() {
     driver.assign(replica);
     while driver.poll() {}
     assert!(first_trimmed(&world), "the new role asks its own trim");
+}
+
+#[test]
+fn a_halted_driver_asks_the_register_nothing_more() {
+    let world = retired_world();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[]);
+    let address = Address::new(J, NodeId(21));
+    driver.transport_mut().endpoint.route(address);
+    world.register.lose_next(false);
+    let replica = Assignment::Replica {
+        address,
+        segment: SegmentId(2),
+        set: [21, 22, 23].map(NodeId).to_vec(),
+        initial: Leader::Unset,
+    };
+    driver.assign(replica.clone());
+    while driver.poll() {}
+    assert!(!first_trimmed(&world), "the first request is lost");
+    assert_ne!(driver.inner.ports().unanswered.len(), 0, "the trim waits");
+    // A second replica starts in the round where the timer of the first is
+    // due, the round that would run the trim again. Its batch waits in the
+    // group, and the commit of the round is of unknown fate: the process
+    // stops inside the round, and runs no change after it.
+    let other = Address::new(J, NodeId(22));
+    driver.transport_mut().endpoint.route(other);
+    disk.0.borrow_mut().fail_next_commit(StorageError::Unknown);
+    driver.assign(Assignment::Replica {
+        address: other,
+        segment: SegmentId(2),
+        set: [21, 22, 23].map(NodeId).to_vec(),
+        initial: Leader::Unset,
+    });
+    world.clock.advance(TICK);
+    driver.poll();
+    assert!(
+        driver.halted(),
+        "the round committed, and its commit is unknown"
+    );
+    assert!(!first_trimmed(&world), "a halted process runs no change");
+    assert!(
+        !driver.inner.ports().unanswered.is_empty(),
+        "the lost trim still waits"
+    );
+    for _ in 0..3 {
+        world.clock.advance(TICK);
+        assert!(!driver.poll(), "a halted driver does no work");
+    }
+    driver.assign(replica);
+    assert!(!first_trimmed(&world), "nor does an assign");
 }

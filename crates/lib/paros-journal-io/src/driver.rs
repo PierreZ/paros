@@ -15,9 +15,11 @@
 //! the end of a [`poll`](Driver::poll) (group commit), in id order for each
 //! role. A send, a register change or a read answer that names a batch
 //! waits until that batch is durable; one that names a durable batch, or
-//! none, goes at once. A commit that fails stops every role that had a
-//! batch in it ([`Input::Failed`], rule 4): the batch may or may not be
-//! durable, so the sends that wait on it never go.
+//! none, goes at once. A commit that wrote nothing (`Full`) stops every
+//! role that had a batch in it ([`Input::Failed`], rule 4); a commit of
+//! unknown fate (`Unknown`) halts the driver ([`Driver::halted`]): the
+//! process stops, and a new one reads the disk. Either way the sends that
+//! wait on the failed batch never go.
 //!
 //! **Recovery** (rule 2). A role with a disk starts with a read of its
 //! records. The driver gives them to the `Host` as an input, and learns
@@ -286,6 +288,9 @@ where
     /// Serve the role that `assignment` names (the `Assignments` port,
     /// §J4.2, rule 5).
     pub fn assign(&mut self, assignment: Assignment) {
+        if self.halted() {
+            return;
+        }
         self.watch(assignment.address().journal);
         self.inner.input(Input::Assign(assignment));
     }
@@ -336,6 +341,9 @@ where
     /// first, so the `Host` judges the ask on a value done after it was
     /// sent (`specs/tla/heal-reuse/`, control `stale_view`).
     pub fn join(&mut self, address: Address, set: Vec<NodeId>, initial: Leader, copy: CopyId) {
+        if self.halted() {
+            return;
+        }
         self.watch(address.journal);
         self.inner.input(Input::Join {
             address,
@@ -349,6 +357,9 @@ where
     /// with no new set ([`Input::Abandon`]). The driver reads the register
     /// first, as for [`join`](Self::join).
     pub fn abandon(&mut self, address: Address, copy: CopyId) {
+        if self.halted() {
+            return;
+        }
         self.watch(address.journal);
         self.inner.input(Input::Abandon { address, copy });
     }
@@ -399,6 +410,9 @@ where
     /// output that still waits on a batch: the flight rule of the driver is
     /// broken.
     pub fn poll(&mut self) -> bool {
+        if self.halted() {
+            return false;
+        }
         let fired = self
             .inner
             .timer()
@@ -415,6 +429,11 @@ where
             Vec::new()
         };
         let mut busy = self.inner.poll();
+        if self.halted() {
+            // The process stopped in this round: it asks the register
+            // nothing more.
+            return busy;
+        }
         let (run, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.inner.ports_mut().unanswered)
             .into_iter()
             .partition(|entry| due.contains(entry));
