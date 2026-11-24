@@ -92,7 +92,8 @@ wasm bundle which quorums `paros-consensus` finds; without the wasm the picker s
 
 A page whose trace has a run with `beats` opens in story mode: `public/story.js` (loaded
 before `steps.js` by `src/layouts/Doc.astro`) puts its panel before `<div data-steps>` and
-hides the step-through until the reader asks for it. One screen per beat: the sentence of the
+hides the step-through until the reader asks for it. The drawing is `public/stage.js` (the
+stage), which the story and the exercises share: one look for both. One screen per beat: the sentence of the
 beat, the lanes as nodes in a fixed layout (rows by role: client, controller, proposer, batcher,
 matchmaker, proxy, node, acceptor, replica; a grid lane sits at its cell), and the messages of the beat
 moving from sender to receiver. A broadcast leaves as one (`fan`), a lost message stops half
@@ -145,8 +146,10 @@ new names its own day (`date` of its `tlc`).
 A lesson can end with exercises on the live core (`labs` in `src/course.ts`). The page sets
 `lab: true` in its front matter and puts `<div data-lab="id id id">` under `## Your turn`.
 `public/lab.js` loads the `paxos` wasm bundle and runs `PaxosLab` (`paros-wasm`,
-`src/paxos/lab.rs`): one tab per exercise, the goal, the parties (a grid lane at its cell),
-the wire as a list with Deliver and Drop on each message (large buttons, for a phone), the
+`src/paxos/lab.rs`): one tab per exercise, the goal, the parties on the stage of the story
+(`public/stage.js`: a grid lane at its cell, the leader's ring, the log strip of each node
+of a log with its holes, and each message on the wire as an arrow that crosses when the reader delivers or
+drops it), the wire as a list with Deliver and Drop on each message (large buttons, for a phone), the
 extra moves of the exercise, what the core said about the last move, Deliver all (every
 message until the wire is empty, one move), Undo and Start again. When the engine says
 the goal holds, the page shows why it matters and the next exercise. A solved exercise is

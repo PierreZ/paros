@@ -638,7 +638,7 @@ impl Run {
 
     /// What each lane holds on disk, in lane order: an acceptor's promise
     /// and votes. The other roles hold nothing on disk in this driver.
-    fn durable(&self) -> Vec<Durable> {
+    pub(crate) fn durable(&self) -> Vec<Durable> {
         parties()
             .into_iter()
             .map(|who| match who {
@@ -668,7 +668,7 @@ impl Run {
     }
 
     /// The typed state of each lane, in lane order, from its durable facts.
-    fn lane_nodes(&self, durable: &[Durable]) -> Vec<NodeState> {
+    pub(crate) fn lane_nodes(&self, durable: &[Durable]) -> Vec<NodeState> {
         parties()
             .into_iter()
             .zip(durable)
@@ -807,7 +807,7 @@ impl Run {
     }
 
     /// The log of each lane, in lane order.
-    fn logs(&self) -> Vec<Vec<LogCell>> {
+    pub(crate) fn logs(&self) -> Vec<Vec<LogCell>> {
         parties()
             .into_iter()
             .map(|who| match who {

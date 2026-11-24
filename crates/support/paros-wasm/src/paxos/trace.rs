@@ -772,7 +772,7 @@ fn grid_of(world: &WorldView) -> Option<Grid> {
 
 /// The log of each lane, in lane order: empty for a world of one decree,
 /// where a card shows the vote in its lines.
-fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
+pub(crate) fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
     if !log_world(world) {
         return Vec::new();
     }
@@ -799,6 +799,14 @@ fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
         .collect();
     logs.extend(world.matchmakers.iter().map(|_| Vec::new()));
     logs
+}
+
+/// The typed state of each lane, in lane order, as the story draws it: up
+/// or down, its role, its ballot and promise, the holes of its log. No step
+/// ran, so no lane wrote anything.
+pub(crate) fn lane_states(world: &WorldView) -> Vec<NodeState> {
+    let durable = lane_durable(world);
+    lane_nodes(world, &durable, &durable)
 }
 
 /// A few short lines per lane: what a reader must see change.
