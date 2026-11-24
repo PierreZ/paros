@@ -14,7 +14,7 @@
 //! is *not* an acceptor — it holds no vote of its own, which is what makes the
 //! quorum arithmetic visible.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use paros_consensus::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_consensus::contract::AcceptorWrite;
@@ -139,6 +139,12 @@ pub struct DecreeWorld {
     /// with different values are two values chosen for one slot: only a
     /// fault from outside the core (a wiped disk) can cause it.
     decisions: Vec<(Ballot, Command)>,
+    /// Each vote an acceptor gave, by ballot and value (its fingerprint, as an
+    /// `Accepted` names it). A value is chosen
+    /// once a Phase-2 quorum of the configuration votes for it at one
+    /// ballot, before any proposer learns it. See
+    /// [`DecreeWorld::chosen_by_votes`].
+    votes: BTreeMap<(Ballot, u64), BTreeSet<NodeId>>,
     /// What the action in progress has done so far, in Paxos.
     narration: Vec<NarrationEvent>,
 }
@@ -259,6 +265,7 @@ impl DecreeWorld {
             completed: Vec::new(),
             violation: None,
             decisions: Vec::new(),
+            votes: BTreeMap::new(),
             narration: Vec::new(),
         }
     }
@@ -334,6 +341,17 @@ impl DecreeWorld {
     #[must_use]
     pub fn decisions(&self) -> &[(Ballot, Command)] {
         &self.decisions
+    }
+
+    /// Whether a value is chosen: a Phase-2 quorum of the configuration
+    /// voted for it at one ballot, at some point of the run. This holds
+    /// before any proposer learns it (`DecreeWorld::decisions`), and it stays
+    /// when a voter votes again at a later ballot or loses its disk.
+    #[must_use]
+    pub fn chosen_by_votes(&self) -> bool {
+        self.votes
+            .values()
+            .any(|voters| self.config.has_phase2_quorum(voters))
     }
 
     /// Crash acceptor `id`: it stops, and its disk stays.
@@ -826,6 +844,10 @@ impl DecreeWorld {
             let acceptor = &mut self.acceptors[index];
             match acceptor.role.admit(ballot, slot) {
                 AcceptOutcome::Admitted => {
+                    self.votes
+                        .entry((ballot, command.fingerprint()))
+                        .or_default()
+                        .insert(to);
                     // Accepting at a ballot is also promising it, and the
                     // promise write always precedes the record it covers.
                     acceptor.role.set_promise(ballot, &mut acceptor.disk);

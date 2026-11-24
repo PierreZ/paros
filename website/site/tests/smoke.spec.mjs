@@ -419,6 +419,7 @@ const EXERCISES = [
   {
     page: "paxos/single-decree/",
     id: "vote-not-chosen",
+    intro: true,
     moves: [
       ["settle", { kind: ["Prepare", "Promise"] }],
       ["deliver", { kind: ["Accept"], to: "n1" }],
@@ -430,6 +431,7 @@ const EXERCISES = [
   {
     page: "paxos/multi-paxos/",
     id: "gap",
+    intro: true,
     moves: [
       ["extra", "The client writes bravo"],
       ["drop", { kind: ["Accept"] }],
@@ -476,8 +478,8 @@ for (const ex of EXERCISES) {
     // The stage of the story (public/stage.js) draws the parties from the
     // engine's typed state: a log world names its leader.
     await expect(lab.locator(".stage-node").first()).toBeVisible();
-    // A guided exercise opens on its intro; Skip leaves it set up.
-    if (ex.id === "gap") {
+    // A guided exercise with an intro opens on it; Skip leaves it set up.
+    if (ex.intro) {
       await expect(lab.locator(".lab-narrator")).toBeVisible();
       await lab.locator(".lab-narrator-skip").click();
       await expect(lab.locator(".lab-narrator")).toBeHidden();
