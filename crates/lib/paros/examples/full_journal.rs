@@ -69,10 +69,12 @@ use paros::journal::register::{
     RegisterCall, RegisterMember, RegisterValue,
 };
 use paros::journal::resolve::ResolveAnswer;
-use paros::journal::roles::{Campaign, LeaderPhase};
+use paros::journal::roles::acceptor::JournalAcceptor;
+use paros::journal::roles::{Campaign, LeaderPhase, PROMISE_BATCH};
 use paros::journal::{
     Command, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, SegmentId, Seq, Slot,
 };
+use paros::journal_io::layout;
 use paros::journal_io::mem::MemStorage;
 use paros::journal_io::{
     Address, Assignment, CallId, CallOutcome, ChangeError, Clock, Driver, Entry, Envelope,
@@ -99,6 +101,12 @@ const L1: u64 = 101;
 const L2: u64 = 102;
 /// The writer's uuid.
 const A: LeaderUuid = LeaderUuid(0xA);
+/// How many times the controller asks a register change or read that got
+/// no answer, before the example fails. An operation ends with no answer
+/// only in a conflict with another host's operation, and the next ask
+/// takes a newer generation; the bound only turns a run that never settles
+/// into a failure with its state.
+const ASKS: usize = 100;
 /// How long one step may take before the example fails. The whole run
 /// takes well under a second, so a CI runner that is many times slower
 /// still passes; a step that never ends fails here, with the state of each
@@ -107,9 +115,6 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// How long the program waits for one answer before it takes it as lost.
 /// No result depends on it: the client sends a lost request again, and the
 /// journal settles a copy that lands twice.
-/// How many times the hand-made controller asks a change that got no
-/// answer: far above the few conflicts that the hosts' operations cause.
-const ASKS: usize = 100;
 const ANSWER_WAIT: Duration = Duration::from_millis(500);
 
 type Process = Driver<Disk, Wire, WallClock, Matchmakers, ()>;
@@ -383,6 +388,9 @@ enum Order {
     Read(Address, Seq, usize, oneshot::Sender<ReadAnswer>),
     /// A look at the driver's state, from the task that owns it.
     Look(Box<dyn FnOnce(&Process) + Send>),
+    /// The host crashes: a last look at the driver's state, then the task
+    /// ends at once, so the look sees the state that the crash stops.
+    Crash(Box<dyn FnOnce(&Process) + Send>),
 }
 
 /// Serve one host until its order channel closes (a crash): poll the
@@ -433,6 +441,10 @@ async fn serve(
                     reads.push((process.read(address, from, limit), answer));
                 }
                 Some(Order::Look(look)) => look(&process),
+                Some(Order::Crash(look)) => {
+                    look(&process);
+                    return;
+                }
             },
             () = wake.notified() => {}
             () = tokio::time::sleep(Duration::from_nanos(due)) => {}
@@ -512,8 +524,13 @@ impl Cluster {
     }
 
     /// Host `host` crashes: its routes and its matchmaker are gone, its task
-    /// ends, its disk stays.
-    async fn crash(&mut self, host: u64) {
+    /// ends, its disk stays. `look` sees the driver's state at the crash:
+    /// the task steps nothing after it.
+    async fn crash<T: Send + 'static>(
+        &mut self,
+        host: u64,
+        look: impl FnOnce(&Process) -> T + Send + 'static,
+    ) -> T {
         let slot = self.slot(host);
         let (orders, task) = slot.running.take().expect("a running host");
         let addresses: Vec<Address> = slot.roles.iter().map(Assignment::address).collect();
@@ -524,8 +541,16 @@ impl Cluster {
             }
         }
         self.matchmakers.set_up(host, false);
-        drop(orders);
+        let (sender, receiver) = oneshot::channel();
+        orders
+            .send(Order::Crash(Box::new(move |p| {
+                let _ = sender.send(look(p));
+            })))
+            .expect("a running host takes orders");
         task.await.expect("the host's task ends");
+        receiver
+            .await
+            .expect("the host looked at its state before it ended")
     }
 
     /// Host `host` also serves `role`.
@@ -629,12 +654,19 @@ impl Cluster {
         panic!("the controller's {change:?}: no answer after {ASKS} asks");
     }
 
-    /// The controller's register read: the done value.
+    /// The controller's register read: the done value. A majority of the
+    /// matchmakers is up at each read of this run, so a read ends with no
+    /// value only when its `Confirm` meets a write still in flight (a
+    /// conflict, or a write that reached one member); the controller then
+    /// reads again, as a driver does at its next tick.
     fn register(&self) -> RegisterValue {
-        self.matchmakers
-            .client(0)
-            .read(JOURNAL)
-            .expect("a majority of the matchmakers holds a done value")
+        let mut register = self.matchmakers.client(0);
+        for _ in 0..ASKS {
+            if let Some(value) = register.read(JOURNAL) {
+                return value;
+            }
+        }
+        panic!("the controller's read: no done value after {ASKS} asks");
     }
 
     /// The generation of the write that each matchmaker holds.
@@ -1031,8 +1063,7 @@ async fn crash(
                 == Some(1)
         })
         .await;
-    let votes = cluster.look(3, votes_of_3).await.expect("host 3 runs");
-    cluster.crash(3).await;
+    let votes = cluster.crash(3, votes_of_3).await;
     write(cluster, writer, written, 3..5, false).await;
     // A register change at the two matchmakers that are up.
     let before = cluster.held();
@@ -1056,21 +1087,15 @@ async fn crash(
 
 /// The promise and the slots that acceptor 3 holds a vote at.
 fn votes_of_3(p: &Process) -> (u64, Vec<u64>) {
-    let acceptor = p.host().acceptor(at(3)).expect("acceptor 3");
+    votes_of(p.host().acceptor(at(3)).expect("acceptor 3"))
+}
+
+/// The promise and the slots that `acceptor` holds a vote at.
+fn votes_of(acceptor: &JournalAcceptor) -> (u64, Vec<u64>) {
     let votes = (0..16)
         .filter(|s| acceptor.vote(Slot(*s)).is_some())
         .collect();
     (acceptor.promised().round, votes)
-}
-
-/// The ranges of slots whose votes acceptor 3 dropped, `start .. below`.
-fn dropped_of_3(p: &Process) -> Vec<(u64, u64)> {
-    let acceptor = p.host().acceptor(at(3)).expect("acceptor 3");
-    acceptor
-        .dropped()
-        .iter()
-        .map(|(start, below)| (start.0, below.0))
-        .collect()
 }
 
 /// Step 6: host 3 starts again on its disk.
@@ -1079,31 +1104,21 @@ async fn restart(cluster: &mut Cluster, before: (u64, Vec<u64>)) {
     let records = lock(&cluster.hosts[&3].disk.0).len();
     show("records on host 3's disk", &records);
     assert!(records > 0, "acceptor 3 and replica 12 wrote their disk");
-    cluster.start(3);
-    let (read_back, dropped) = cluster
-        .look(3, |p| (votes_of_3(p), dropped_of_3(p)))
-        .await
-        .expect("host 3 runs");
+    // What acceptor 3 reads back: its disk decoded and recovered as the
+    // host does at a boot, before the host runs. Once it runs, a `Compact`
+    // from the leader may drop votes below the floor that F + 1 replicas
+    // report, so the check reads the disk alone.
+    let read_back = {
+        let entries = lock(&cluster.hosts[&3].disk.0)
+            .scan(at(3))
+            .expect("host 3's disk scans");
+        let disk = layout::decode_acceptor(at(3), &entries).expect("acceptor 3's disk is whole");
+        votes_of(&JournalAcceptor::recover(NodeId(3), disk, PROMISE_BATCH))
+    };
     show("acceptor 3: (promise, votes) before the crash", &before);
     show("acceptor 3: (promise, votes) read back", &read_back);
-    // Once back, acceptor 3 may already have compacted the votes below the
-    // floor that F + 1 replicas report (a `Compact` from the leader): those votes
-    // are dropped, never lost. Every other vote is read back.
-    let kept: Vec<u64> = before
-        .1
-        .iter()
-        .copied()
-        .filter(|slot| {
-            !dropped
-                .iter()
-                .any(|(start, below)| (*start..*below).contains(slot))
-        })
-        .collect();
-    assert_eq!(
-        read_back,
-        (before.0, kept),
-        "acceptor 3 reads back what it held, less the votes it compacted since"
-    );
+    assert_eq!(read_back, before, "acceptor 3 reads back what it held");
+    cluster.start(3);
     cluster
         .wait_until("replica 12 catches up", async |c| {
             c.replica(12).await.is_some_and(|(next, _)| next == Seq(5))
