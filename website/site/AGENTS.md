@@ -295,7 +295,12 @@ Both run on the built site, so build the wasm and the site first.
   clicks on Deliver and Drop (the rows carry `data-kind`, `data-from` and `data-to`, from
   `WireMessage` in `paros-wasm`), and the page must say the goal holds. Every exercise of the
   journal fold lab is solved by clicks on its calls (`data-call`), and every exercise of the
-  register and record labs by clicks on its moves (`data-key`); Undo takes the goal back. The quorum picker,
+  register and record labs by clicks on its moves (`data-key`); Undo takes the goal back. Two walks
+  read the tour page's own data (`#tour`), so a new chapter, or a new guide on a page that a
+  chapter links (`deeper`), is in them with no change of the test: every chapter of the tour
+  plays each of its runs in order to its end with motion at speed 8, and every
+  exercise with a guide plays "Show me how" to its end, with every line of its goal marked, and
+  is not solved. The quorum picker,
   the `quorums` widget and the `Ready` widget must answer. The live journal writes, keeps
   writing with host 3 down, reads the records back and rolls to segment 2. A new live part gets its test in
   the same pull request. No test is skipped, and a red run is not run again (`AGENTS.md`).
