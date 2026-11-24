@@ -21,6 +21,18 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The sets of tests that the jobs below split (nextest filter expressions).
+  # Every test of the workspace runs in exactly one job: `test` runs the
+  # complement of COVERAGE and TRACES, `trace-edits` runs EDITS, which is
+  # inside TRACES, and the two shards of `traces` run the rest of TRACES, cut
+  # in two by REFUSALS. `coverage-shard` runs COVERAGE (`--test coverage`).
+  COVERAGE: package(consensus-sim) & binary(coverage)
+  TRACES: >-
+    (package(consensus-sim) & binary(traces))
+    | (package(journal-sim) & (binary(traces) | binary(register_traces) | binary(roles_traces)
+    | binary(controller_traces) | binary(heal_traces) | binary(live)))
+  EDITS: package(consensus-sim) & binary(traces) & (test(edited) | test(no_record) | test(driver_mutants))
+  REFUSALS: package(consensus-sim) & binary(traces) & test(/^tlc_refuses_/)
 
 jobs:
   # Which jobs a pull request needs (`scripts/ci-plan.py rust`). `rust` is
@@ -173,10 +185,19 @@ jobs:
       - name: Package the public crates as crates.io builds them
         run: nix develop --command cargo publish --dry-run --workspace --locked
 
+  # The workspace tests, in debug, without the trace checks and the coverage
+  # gate. Each CI job has at most 30 minutes, and the trace checks took the
+  # whole `test` job to 33 minutes on main (2026-11-24): they run in the
+  # `traces` job. The coverage gate walks every flavor at its full budget: it
+  # runs in release, in the `coverage` job. The edits of recorded traces run
+  # TLC on hundreds of edited walks, and the driver mutants of each flavor on
+  # dozens of walks: they run in release, in the `trace-edits` job.
+  # The test sets are the filters of the workflow's `env`.
   test:
     needs: scope
     if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/nix
@@ -185,22 +206,56 @@ jobs:
         with:
           key: test
           cache-on-failure: true
-      # The coverage gate walks every flavor at its full budget: it runs in
-      # release, in the `coverage` job, and not here in debug. The edits of
-      # recorded traces run TLC on hundreds of edited walks, and the driver
-      # mutants of each flavor on dozens of walks: they run in release, in the
-      # `trace-edits` job.
       - name: Run cargo nextest
         run: >-
           nix develop --command cargo nextest run --profile ci
-          -E 'not (package(consensus-sim) & (binary(coverage) | (binary(traces) & (test(edited) | test(no_record) | test(driver_mutants)))))'
+          -E "not (($COVERAGE) | ($TRACES))"
+
+  # The trace checks (#1198 (trace checking)): each walk of consensus-sim and
+  # journal-sim is checked against its `*Trace.tla` spec with TLC, in debug as
+  # in the `test` job before. The edits of recorded traces are left to
+  # `trace-edits`. Two shards keep each job well inside its 30 minutes: the
+  # refusals of consensus-sim (`tlc_refuses_*`, which hold the two longest
+  # tests, 19 and 13 minutes with four TLC runs at a time) and the rest. The
+  # two filters are complements inside TRACES, so every trace check runs in
+  # one shard. The `traces` job of the `TLA` workflow runs the same tests,
+  # edits too, when this job does not run (`scripts/ci-plan.py`).
+  traces:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [refusals, rest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/nix
+      # Its own cache: `-p` builds the sim crates with their own features, so
+      # the build differs from the workspace build of the `test` job.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: traces-${{ matrix.shard }}
+          cache-on-failure: true
+      - name: Check the walks against the trace specs (${{ matrix.shard }})
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          if [ "$SHARD" = refusals ]; then
+            filter="(($TRACES) & not ($EDITS)) & ($REFUSALS)"
+          else
+            filter="(($TRACES) & not ($EDITS)) & not ($REFUSALS)"
+          fi
+          nix develop --command cargo nextest run --profile ci -p consensus-sim -p journal-sim -E "$filter"
 
   # The edits of recorded traces (#1308 (mutate recorded traces)): each trace
   # spec refuses every named edit of its recorded walks at the edited event or
   # after it, and refuses a learn whose record is gone; and each trace spec
   # refuses the driver mutants of other flavors (#1198). A change of the
   # walks can change the traces they start from, so they run for a change of
-  # the code. In debug they took the `test` job over its 30 minutes.
+  # the code. In debug they took the `test` job over its 30 minutes. The set
+  # is EDITS of the workflow's `env`.
   trace-edits:
     needs: scope
     if: ${{ needs.scope.outputs.rust == 'true' }}
@@ -216,7 +271,7 @@ jobs:
       - name: Check that every trace spec refuses the edits of its walks
         run: >-
           nix develop --command cargo nextest run --profile ci --release
-          -p consensus-sim --test traces -E 'test(edited) | test(no_record) | test(driver_mutants)'
+          -p consensus-sim --test traces -E "$EDITS"
 
   # Coverage-driven simulation with real branch coverage (#1199): the coverage
   # gate of consensus-sim, with `paros-consensus` alone instrumented by

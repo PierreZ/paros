@@ -1,3 +1,4 @@
-# The `ci` profile is what the `test` job of `.github/workflows/rust.yml` runs.
+# The `ci` profile is what the test jobs of `.github/workflows/rust.yml` run
+# (`test`, `traces`, `trace-edits`, `coverage-shard`, `coverage`).
 [profile.ci]
 fail-fast = false
