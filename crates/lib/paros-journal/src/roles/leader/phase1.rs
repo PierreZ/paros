@@ -33,7 +33,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_consensus::membership::AcceptorConfig;
-use paros_consensus::proposer::{merge_report, qualifying_answers, slot_decidable};
+use paros_consensus::proposer::{
+    PromiseFold, PromiseTally, merge_report, qualifying_answers, slot_decidable,
+};
 use paros_consensus::{Ballot, NodeId, Slot};
 
 use super::ReadSegment;
@@ -48,9 +50,6 @@ struct Report {
     faulty: BTreeMap<Slot, Ballot>,
     /// The dropped ranges, `start .. below` by start.
     dropped: BTreeMap<Slot, Slot>,
-    /// The slot the next page starts at.
-    cursor: Slot,
-    complete: bool,
 }
 
 /// What a closed Phase 1 gives the leader.
@@ -72,7 +71,11 @@ pub struct Phase1Close {
 pub struct Phase1 {
     ballot: Ballot,
     from: Slot,
+    /// The report of each acceptor asked: its keys are the asked set.
     reports: BTreeMap<NodeId, Report>,
+    /// The core's paging tally: the cursor of each acceptor mid-suffix,
+    /// and the acceptors that answered completely.
+    tally: PromiseTally<NodeId>,
 }
 
 impl Phase1 {
@@ -85,20 +88,13 @@ impl Phase1 {
             segments.iter().flat_map(ReadSegment::acceptors).collect();
         let reports = acceptors
             .into_iter()
-            .map(|node| {
-                (
-                    node,
-                    Report {
-                        cursor: from,
-                        ..Report::default()
-                    },
-                )
-            })
+            .map(|node| (node, Report::default()))
             .collect();
         Self {
             ballot,
             from,
             reports,
+            tally: PromiseTally::new(ballot, from, BTreeSet::new()),
         }
     }
 
@@ -113,57 +109,66 @@ impl Phase1 {
     #[must_use]
     pub fn wanted(&self) -> Vec<(NodeId, Slot)> {
         self.reports
-            .iter()
-            .filter(|(_, report)| !report.complete)
-            .map(|(node, report)| (*node, report.cursor))
+            .keys()
+            .filter(|node| !self.tally.answered().contains(node))
+            .map(|node| (*node, self.tally.cursor(*node)))
             .collect()
     }
 
-    /// Fold one page from `from` that starts at `at`. Returns the slot of
-    /// the next page when the acceptor has more. A page from an acceptor
-    /// that Phase 1 does not ask, at another cursor, or after its last page
-    /// is not folded.
+    /// Fold one page from `from` that starts at `at`, by the core's paging
+    /// rule ([`PromiseTally`]). A page from an acceptor that Phase 1 does
+    /// not ask, at another cursor, after its last page, or of a shape that
+    /// the rule refuses (a slot below its start or in both maps, more than a
+    /// page of entries, a cursor that does not move past its last entry, or
+    /// a dropped range with no slot) is not folded: [`PromiseFold::Ignored`],
+    /// and the acceptor is asked again from the same cursor.
     ///
     /// # Panics
     ///
-    /// When a page carries a slot below its start, or a cursor at or below
-    /// it.
-    pub fn fold(&mut self, from: NodeId, at: Slot, page: PromisePage) -> Option<Slot> {
-        let report = self.reports.get_mut(&from)?;
-        if report.complete || report.cursor != at {
-            return None;
+    /// When an assertion of the core's tally on its own state fails: a
+    /// programmer error, never a page that a peer sends.
+    pub fn fold(&mut self, from: NodeId, at: Slot, page: PromisePage) -> PromiseFold {
+        let Some(report) = self.reports.get_mut(&from) else {
+            return PromiseFold::Ignored;
+        };
+        let accepted =
+            self.tally
+                .accepts(from, self.ballot, at, &page.votes, &page.faulty, page.next);
+        if !accepted || page.dropped.iter().any(|(start, below)| start >= below) {
+            return PromiseFold::Ignored;
         }
-        assert!(
-            page.votes
-                .keys()
-                .chain(page.faulty.keys())
-                .all(|s| *s >= at),
-            "a page starts at its cursor"
-        );
         report.votes.extend(page.votes);
         report.faulty.extend(page.faulty);
         for (start, below) in page.dropped {
             ranges::add(&mut report.dropped, start, below);
         }
-        if let Some(next) = page.next {
-            assert!(next > at, "a cursor moves forward");
-            report.cursor = next;
-            Some(next)
-        } else {
-            report.complete = true;
-            None
-        }
+        let fold = self.tally.close_page(from, page.next);
+        assert!(
+            fold != PromiseFold::Ignored,
+            "a page that the tally accepts folds"
+        );
+        assert!(
+            (fold == PromiseFold::Answered) == self.tally.answered().contains(&from),
+            "an acceptor answered completely exactly when its last page folds"
+        );
+        fold
     }
 
     /// The acceptors that answered completely: the reports that
     /// [`Self::close`] reads.
+    ///
+    /// # Panics
+    ///
+    /// When an acceptor that Phase 1 does not ask answered: a programmer
+    /// error, since [`Self::fold`] ignores its pages.
     #[must_use]
     pub fn complete(&self) -> BTreeSet<NodeId> {
-        self.reports
-            .iter()
-            .filter(|(_, report)| report.complete)
-            .map(|(node, _)| *node)
-            .collect()
+        let complete = self.tally.answered().clone();
+        assert!(
+            complete.iter().all(|node| self.reports.contains_key(node)),
+            "only an acceptor that Phase 1 asks answers completely"
+        );
+        complete
     }
 
     /// The outcome of Phase 1, once the complete answers hold a Phase-1

@@ -89,7 +89,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use paros_consensus::contract::limits::RESEND_BATCH;
 use paros_consensus::membership::{AcceptorConfig, ProxyId, QuorumSystem};
-use paros_consensus::proposer::Rounds;
+use paros_consensus::proposer::{PromiseFold, Rounds};
 use paros_consensus::types::Fingerprint;
 use paros_consensus::{Ballot, NodeId, Slot};
 
@@ -562,7 +562,7 @@ impl<T> JournalLeader<T> {
                 page,
             } if ballot == self.campaign.ballot && self.phase == LeaderPhase::Phase1 => {
                 match self.phase1.fold(from, at, page) {
-                    Some(next) => {
+                    PromiseFold::Continue(next) => {
                         probe!(reachable, "leader: a promise page asks for the next page");
                         vec![LeaderEffect::Send {
                             to: from,
@@ -573,7 +573,7 @@ impl<T> JournalLeader<T> {
                             },
                         }]
                     }
-                    None => self.after_promise(),
+                    PromiseFold::Answered | PromiseFold::Ignored => self.after_promise(),
                 }
             }
             Message::Promise {
@@ -584,7 +584,7 @@ impl<T> JournalLeader<T> {
                 // A late answer folds into the tally of the blocked slots
                 // (CTRL's repair probe). A slot that a complete answer
                 // dropped is skipped first.
-                let next = self.phase1.fold(from, at, page);
+                let fold = self.phase1.fold(from, at, page);
                 let dropped: Vec<Slot> = self
                     .blocked
                     .iter()
@@ -592,8 +592,8 @@ impl<T> JournalLeader<T> {
                     .filter(|slot| self.phase1.dropped_by(*slot).is_some())
                     .collect();
                 self.skip_blocked(&dropped);
-                match next {
-                    Some(next) => vec![LeaderEffect::Send {
+                match fold {
+                    PromiseFold::Continue(next) => vec![LeaderEffect::Send {
                         to: from,
                         message: Message::Prepare {
                             ballot: self.campaign.ballot,
@@ -601,7 +601,7 @@ impl<T> JournalLeader<T> {
                             segment: self.own(),
                         },
                     }],
-                    None => self.probe_blocked(),
+                    PromiseFold::Answered | PromiseFold::Ignored => self.probe_blocked(),
                 }
             }
             Message::Learned {

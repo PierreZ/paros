@@ -1,4 +1,5 @@
 use super::*;
+use paros_consensus::contract::limits::PROMISE_BATCH;
 use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
 
 use crate::segment::SegmentId;
@@ -52,26 +53,42 @@ fn a_page_at_another_cursor_or_from_a_stranger_is_not_folded() {
     let segments = [segment(1, &[1, 2, 3], Some(0), None)];
     let mut phase1 = Phase1::new(ballot(2), Slot(0), &segments);
     assert_eq!(phase1.ballot(), ballot(2));
-    assert_eq!(phase1.fold(NodeId(9), Slot(0), page(&[], &[], None)), None);
-    assert_eq!(phase1.fold(NodeId(1), Slot(4), page(&[], &[], None)), None);
+    assert_eq!(
+        phase1.fold(NodeId(9), Slot(0), page(&[], &[], None)),
+        PromiseFold::Ignored
+    );
+    assert_eq!(
+        phase1.fold(NodeId(1), Slot(4), page(&[], &[], None)),
+        PromiseFold::Ignored
+    );
     assert_eq!(phase1.wanted().len(), 3);
     assert_eq!(
-        phase1.fold(NodeId(1), Slot(0), page(&[], &[], Some(4))),
-        Some(Slot(4))
+        phase1.fold(NodeId(1), Slot(0), page(&[(0, 1, 1)], &[], Some(4))),
+        PromiseFold::Continue(Slot(4))
     );
     assert!(phase1.wanted().contains(&(NodeId(1), Slot(4))));
-    assert_eq!(phase1.fold(NodeId(1), Slot(4), page(&[], &[], None)), None);
+    assert_eq!(
+        phase1.fold(NodeId(1), Slot(4), page(&[], &[], None)),
+        PromiseFold::Answered
+    );
     assert!(!phase1.wanted().iter().any(|(node, _)| *node == NodeId(1)));
     // A page after the last one is not folded.
     assert_eq!(
         phase1.fold(NodeId(1), Slot(4), page(&[(5, 1, 1)], &[], None)),
-        None
+        PromiseFold::Ignored
     );
     phase1.fold(NodeId(2), Slot(0), page(&[], &[], None));
     let close = phase1.close(&segments).expect("a quorum");
-    assert!(close.safe.is_empty(), "the late page is not a vote");
+    assert_eq!(
+        close.safe,
+        BTreeMap::from([(Slot(0), noop_or(1))]),
+        "the late page is not a vote"
+    );
 }
 
+/// An acceptor's votes and faulty entries are at different slots (the
+/// core's acceptor keeps them apart), so the faulty vote that each slot
+/// meets is another acceptor's.
 #[test]
 fn the_highest_vote_wins_and_a_higher_faulty_vote_blocks_the_slot() {
     let segments = [segment(1, &[1, 2, 3], Some(0), None)];
@@ -79,7 +96,7 @@ fn the_highest_vote_wins_and_a_higher_faulty_vote_blocks_the_slot() {
     phase1.fold(
         NodeId(1),
         Slot(0),
-        page(&[(0, 1, 1), (1, 3, 1), (2, 2, 2)], &[(2, 1)], None),
+        page(&[(0, 1, 1), (1, 3, 1)], &[(2, 1)], None),
     );
     assert!(
         phase1.close(&segments).is_none(),
@@ -88,7 +105,7 @@ fn the_highest_vote_wins_and_a_higher_faulty_vote_blocks_the_slot() {
     phase1.fold(
         NodeId(2),
         Slot(0),
-        page(&[(0, 2, 2), (1, 2, 2)], &[(1, 4)], None),
+        page(&[(0, 2, 2), (2, 2, 2)], &[(1, 4)], None),
     );
     let close = phase1.close(&segments).expect("a quorum");
     // Slot 0: ballot 2 wins over 1. Slot 1: the faulty ballot 4 is above the
@@ -214,20 +231,52 @@ fn no_end_when_the_segment_before_is_sealed() {
     assert_eq!(phase1.close(&segments).expect("a quorum").end, None);
 }
 
+/// A page whose shape breaks the paging rule is a page that a peer sends:
+/// Phase 1 ignores it, and asks the acceptor again from the same cursor.
 #[test]
-#[should_panic(expected = "starts at its cursor")]
-fn a_page_with_a_slot_below_its_start_is_refused() {
+fn a_page_of_the_wrong_shape_is_ignored_and_asked_again_from_its_cursor() {
     let segments = [segment(1, &[1, 2, 3], Some(0), None)];
     let mut phase1 = Phase1::new(ballot(5), Slot(3), &segments);
-    phase1.fold(NodeId(1), Slot(3), page(&[(1, 1, 1)], &[], None));
-}
-
-#[test]
-#[should_panic(expected = "moves forward")]
-fn a_cursor_that_does_not_move_is_refused() {
-    let segments = [segment(1, &[1, 2, 3], Some(0), None)];
-    let mut phase1 = Phase1::new(ballot(5), Slot(3), &segments);
-    phase1.fold(NodeId(1), Slot(3), page(&[], &[], Some(3)));
+    let at_three = |phase1: &Phase1| phase1.wanted().contains(&(NodeId(1), Slot(3)));
+    let bad = [
+        (
+            "a cursor that does not move",
+            page(&[(3, 1, 1)], &[], Some(3)),
+        ),
+        ("a continuation with no entry", page(&[], &[], Some(4))),
+        ("a slot below the cursor", page(&[(2, 1, 1)], &[], None)),
+        ("a slot in both maps", page(&[(3, 1, 1)], &[(3, 2)], None)),
+        (
+            "a dropped range with no slot",
+            PromisePage {
+                dropped: BTreeMap::from([(Slot(4), Slot(4))]),
+                ..page(&[], &[], None)
+            },
+        ),
+        (
+            "more than a page of entries",
+            PromisePage {
+                votes: (0..=PROMISE_BATCH as u64)
+                    .map(|s| (Slot(3 + s), (ballot(1), noop_or(1))))
+                    .collect(),
+                ..page(&[], &[], None)
+            },
+        ),
+    ];
+    for (why, bad) in bad {
+        assert_eq!(
+            phase1.fold(NodeId(1), Slot(3), bad),
+            PromiseFold::Ignored,
+            "{why}"
+        );
+        assert!(at_three(&phase1), "{why}: asked again from the same cursor");
+        assert!(phase1.complete().is_empty(), "{why}: no answer counts");
+    }
+    assert_eq!(
+        phase1.fold(NodeId(1), Slot(3), page(&[(3, 1, 1)], &[], None)),
+        PromiseFold::Answered,
+        "a good page at the same cursor folds"
+    );
 }
 
 #[test]
@@ -347,7 +396,7 @@ fn a_vote_of_an_answer_that_never_completes_is_neither_proposed_nor_a_threshold(
     let mut phase1 = Phase1::new(ballot(10), Slot(0), &segments);
     assert_eq!(
         phase1.fold(NodeId(1), Slot(0), page(&[(0, 9, 3)], &[], Some(1))),
-        Some(Slot(1))
+        PromiseFold::Continue(Slot(1))
     );
     phase1.fold(NodeId(2), Slot(0), page(&[(0, 2, 1)], &[], None));
     phase1.fold(NodeId(3), Slot(0), page(&[], &[(0, 5)], None));
@@ -432,7 +481,16 @@ fn a_late_answer_that_dropped_a_blocked_slot_counts_once_complete() {
         phase1.close(&segments).expect("a quorum").blocked,
         vec![Slot(1)]
     );
-    phase1.fold(NodeId(3), Slot(0), page_dropped(&[(0, 2)], Some(2)));
+    // A continuation page is full (the core's page rule): it holds the
+    // vote at slot 0, below the dropped range's last slot.
+    phase1.fold(
+        NodeId(3),
+        Slot(0),
+        PromisePage {
+            votes: BTreeMap::from([(Slot(0), (ballot(1), noop_or(1)))]),
+            ..page_dropped(&[(0, 2)], Some(2))
+        },
+    );
     assert_eq!(phase1.dropped_by(Slot(1)), None, "a partial answer");
     phase1.fold(NodeId(3), Slot(2), page(&[], &[], None));
     assert_eq!(phase1.dropped_by(Slot(1)), Some(NodeId(3)));
