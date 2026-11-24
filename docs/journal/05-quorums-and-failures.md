@@ -143,9 +143,17 @@ a boot that finds a vote damaged (`Rot`), the leader's probe, its learn and the 
   repair from a peer's vote breaks one value at one ballot (`ctrl_peer`), and a damage that drops
   the vote breaks agreement (`ctrl_drop`).
 - **A damage stays inside the contract.** A damaged copy is one of the `F` failed copies: the model
-  damages a vote only when a replica applied the slot, the slot chose another value, or a quorum of
-  a live grid holds the chosen value on disk at or above the ballot that chose it (`Spare`). A rot
-  of the last copy is data loss, outside the survive promise (`Readable`).
+  damages a vote only when a replica applied the slot, the slot chose another value, a quorum of
+  a live grid holds the chosen value on disk at or above the ballot that chose it, or no quorum can
+  choose the vote's value (`Spare`). A rot of the last copy is data loss, outside the survive
+  promise (`Readable`). The roles walk also keeps each column at no more than `F` damaged or lost
+  votes at one slot, so a tally can still decide it.
+- **A vote that no quorum can choose may be damaged, and the tally then decides a `Noop`**
+  (#1326, 2026-11-24, `Unchoosable` of `JournalCtrl.tla`). A promise quorum of the vote's grid
+  without the damaged acceptor holds no vote at the slot, kept the slot and promised above the
+  vote's ballot, so no quorum voted at that ballot. A blocked slot is then not always chosen: a
+  late answer can decide it with a `Noop` (`reach_noop`), and the learn from a replica acts only
+  on a chosen slot.
 
 ### J5.4 Zones
 

@@ -3537,8 +3537,12 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
 
 - **A boot with a damaged vote** (`Rot`): the value is lost (`Damage = "keep"`: the ballot stays),
   and the acceptor starts from its disk. A damage stays inside the contract (`Spare`): a replica
-  applied the slot, the slot chose another value, or a quorum of a live grid holds the chosen value
-  on disk at or above the ballot that chose it. A rot of the last copy is data loss (`Readable`).
+  applied the slot, the slot chose another value, a quorum of a live grid holds the chosen value
+  on disk at or above the ballot that chose it, or no quorum can choose the vote's value
+  (`Unchoosable`: a promise quorum of its grid without the acceptor holds no vote at the slot,
+  kept it and promised above the vote's ballot). A rot of the last copy is data loss (`Readable`).
+  A blocked slot is then not always chosen, so `LearnChosen` needs `IsChosen`, and the probe can
+  decide a `Noop`.
 - **The probe** (`ProbeDecide`): a blocked slot is decided on qualifying answers that hold a
   quorum of each grid that reads it, with the readable vote at the threshold, or none.
   No answer that dropped the slot enters the tally (`ProbeDrops = "skip"`).
@@ -3561,6 +3565,7 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
 | `ctrl_peer` | violation | control: a repair from a peer's vote (`Repair = "peer"`) breaks `OneValueAtBallot` |
 | `ctrl_probe_drop` | violation | control: a probe that tallies an answer that dropped the slot (`ProbeDrops = "ignore"`) chooses a `Noop` over the chosen write and breaks `Agreement` |
 | `reach_blocked`, `reach_probe`, `reach_learn`, `reach_repair`, `reach_skip` | violation | the model blocks a slot, decides one on the probe, learns one, repairs a faulty vote, and skips a dropped one |
+| `reach_noop` | violation | the probe decides a blocked slot with a `Noop` after a rot of an `Unchoosable` vote (`NoNoopProbe`) |
 
 ### `journal-repromise/`: the answer to a `Prepare` sent again, for #1326
 

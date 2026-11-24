@@ -24,3 +24,4 @@ reach_probe         violation  ci
 reach_learn         violation  ci
 reach_repair        violation  ci
 reach_skip          violation  ci
+reach_noop          violation  ci

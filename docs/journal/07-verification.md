@@ -142,9 +142,19 @@ inside the contract (a replica applied the slot, or the slot chose another comma
 meets a blocked slot, decides it on a late answer or learns it from a replica, and repairs the
 faulty votes (oracle `REPAIRED`: a repaired vote holds the chosen command at or above the ballot
 that chose it; mutant `RepairForged`; the trace events `rot`, `probe`, `learn` and `repair`, bound
-to `Rot`, `ProbeDecide`, `LearnChosen` and `AccRepair` of `journal-ctrl/`). **Open**: the coverage gate over the journal's
-probes, with CTRL faulty votes on the acceptors' disks (the leader's blocked slot has unit tests
-only); both come with the last rule group of #1326.
+to `Rot`, `ProbeDecide`, `ProbeSkip`, `LearnChosen` and `AccRepair` of `journal-ctrl/`).
+
+**The coverage gate of the roles** (#1326, `tests/roles_coverage.rs`): the roles walks in both
+shapes, branched from the runs that reach a new site, and the walk of the whole journal reach
+every `probe!` of `paros_journal::roles` (`REACHABLE` and `SOMETIMES` of `roles.rs`, with no
+excused probe; a unit test checks that the lists name each probe of the sources once). It runs
+in release, in the `trace-edits` job. Steers bring the walks to the rare branches: a rot that
+damages a vote above a repair that the network holds late, or a vote that no quorum can choose;
+a second campaign while a first leader waits on its seal; a campaign that the dropper of a
+damaged slot answers late, while the other members of the column keep the slot (the late answer
+skips the blocked slot). The checked walks of the narrow shape also meet the rules "a late answer
+that dropped a blocked slot skipped it", "a late answer decided a blocked slot with a `Noop`" and
+"an acceptor answered a `Prepare` again at its promise".
 
 **The heal walk** (#1314 (re-replication of a sealed segment's replica set), `src/heal.rs`):
 the controller role heals a retired segment while replica machines are lost for good or come

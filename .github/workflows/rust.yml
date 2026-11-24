@@ -186,11 +186,11 @@ jobs:
       # release, in the `coverage` job, and not here in debug. The edits of
       # recorded traces run TLC on hundreds of edited walks, and the driver
       # mutants of each flavor on dozens of walks: they run in release, in the
-      # `trace-edits` job.
+      # `trace-edits` job, with the coverage gate of the journal roles.
       - name: Run cargo nextest
         run: >-
           nix develop --command cargo nextest run --profile ci
-          -E 'not (package(consensus-sim) & (binary(coverage) | (binary(traces) & (test(edited) | test(no_record) | test(driver_mutants)))))'
+          -E 'not ((package(consensus-sim) & (binary(coverage) | (binary(traces) & (test(edited) | test(no_record) | test(driver_mutants))))) | (package(journal-sim) & binary(roles_coverage)))'
 
   # The edits of recorded traces (#1308 (mutate recorded traces)): each trace
   # spec refuses every named edit of its recorded walks at the edited event or
@@ -214,6 +214,14 @@ jobs:
         run: >-
           nix develop --command cargo nextest run --profile ci --release
           -p consensus-sim --test traces -E 'test(edited) | test(no_record) | test(driver_mutants)'
+      # The coverage gate of the journal roles (#1326): the roles walks and
+      # the whole journal reach every `probe!` of `paros_journal::roles`. It
+      # walks thousands of timelines, so it runs in release here, not in the
+      # `test` job.
+      - name: Check that the walks reach every probe of the journal roles
+        run: >-
+          nix develop --command cargo nextest run --profile ci --release
+          -p journal-sim --test roles_coverage
 
   # Coverage-driven simulation with real branch coverage (#1199): the coverage
   # gate of consensus-sim, with `paros-consensus` alone instrumented by

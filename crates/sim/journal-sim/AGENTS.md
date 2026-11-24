@@ -40,10 +40,17 @@ Test only: `publish = false`.
   fold that follows it (trace events `Compact`, `CompactReplica` and `Jump`): a deaf replica misses
   its segment while a truncate in flight cuts it, and one campaign in three writes from the start
   of its oldest segment, so its Phase 1 reads the dropped slots. CTRL (§J5.3): a move damages a vote of an
-  acceptor's disk at a boot, inside the contract (a replica applied the slot, or the slot chose
-  another command); the leader's blocked slot, its probe on a late answer, its learn from a
-  replica, its skip of a slot that a late answer dropped, and the acceptor's repair (`REPAIRED`,
-  mutant `RepairForged`; trace events `Rot`, `Probe`, `Skip`, `Learn` and `Repair`).
+  acceptor's disk at a boot, inside the contract (a replica applied the slot, the slot chose
+  another command, a quorum of the grid holds the chosen command, or no quorum can choose the
+  vote's command, `Unchoosable` of `journal-ctrl/`), with at most `F` damaged or lost votes of a
+  column at one slot (`within_f`); the leader's blocked slot, its probe on a late answer (which may
+  decide a `Noop`), its learn from a replica, its skip of a slot that a late answer dropped, and
+  the acceptor's repair (`REPAIRED`, mutant `RepairForged`; trace events `Rot`, `Probe`, `Skip`,
+  `Learn` and `Repair`). Steers bring the rare cases: a `Repair` that the network holds late and a
+  rot above it, and a rot that arms a late answer (`Late`: the column's other members take no
+  `Compact` until a member drops the slot; the next campaign then hears that member late, so its
+  answer skips the blocked slot). The client asks `Resolve` at every replica, and again for a
+  `Below` it settled, and every covering answer is judged.
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
   controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
   `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each
@@ -105,7 +112,10 @@ Test only: `publish = false`.
   `specs/tla/heal-reuse/HealTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/mutate.rs`: the named edits of recorded traces (#1308 (mutate recorded traces)).
 - `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/roles.rs` (the roles walks and
-  their mutants); `tests/roles_traces.rs` (the roles trace check on the narrow and the wide shapes, its rules, its
+  their mutants); `tests/roles_coverage.rs` (the coverage gate of the roles: the roles walks in both
+  shapes, branched from the runs that reach a new site, and the whole journal reach every `probe!`
+  of `paros_journal::roles`, `REACHABLE` and `SOMETIMES`, with no excused probe; in release, in the
+  `trace-edits` job of CI); `tests/roles_traces.rs` (the roles trace check on the narrow and the wide shapes, its rules, its
   control `BoundaryBeforeDurable` and its edits); `tests/register.rs` (the register
   walks and their mutants) and `tests/register_traces.rs` (the register trace check, its rules,
   its control `ForgedBootstrap` and its edits); `tests/controller.rs` (the controller walks, their
