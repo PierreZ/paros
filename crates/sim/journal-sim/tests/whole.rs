@@ -3,8 +3,8 @@
 
 use journal_sim::campaign::{campaign, try_sites};
 use journal_sim::whole::{
-    ACKED, AGREE, ALERTS, ANSWER, BOUNDED_IN_FLIGHT, FLIGHT, HEAL_HELD, ONCE, SEALED, WholeMutant,
-    reach, walk,
+    ACKED, AGAIN, AGREE, ALERTS, ANSWER, BOUNDED_IN_FLIGHT, FLIGHT, HEAL_HELD, ONCE, SEALED,
+    WholeMutant, reach, walk,
 };
 use moonpool_assertions::AssertKind;
 
@@ -93,6 +93,11 @@ fn answer_catches_a_below_inside_the_segment() {
 #[test]
 fn heal_held_catches_a_corrupt_copy() {
     caught(WholeMutant::CorruptCopy, HEAL_HELD);
+}
+
+#[test]
+fn again_catches_a_register_that_refuses_a_change_asked_again() {
+    caught(WholeMutant::RefuseAgain, AGAIN);
 }
 
 #[test]

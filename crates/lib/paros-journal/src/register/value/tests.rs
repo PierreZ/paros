@@ -505,3 +505,85 @@ fn a_bind_takes_a_ballot_above_every_bound_one() {
     );
     assert_eq!(higher.term(), opened.term(), "a bind changes no term");
 }
+
+/// A change asked again after a lost answer meets its own write: the value
+/// already holds what it writes, so it is "ok" again and changes nothing.
+/// The caller's operation writes the value again, which makes the first
+/// write done (§J3.4, "a change asked again").
+#[test]
+fn a_change_asked_again_over_its_own_write_is_ok_again() {
+    let one = SegmentId(1);
+    let seal = Change::Seal {
+        segment: one,
+        end: Slot(6),
+    };
+    let sealed = two_segments().apply(&seal).expect("sealed");
+    assert_eq!(sealed.apply(&seal), Ok(sealed.clone()));
+    // Another end lost the seal: it is refused.
+    assert_eq!(
+        sealed.apply(&Change::Seal {
+            segment: one,
+            end: Slot(7)
+        }),
+        Err(ChangeRefusal::Record(
+            one,
+            RecordRefusal::State(SegmentState::Sealed)
+        ))
+    );
+    // A replica wrote the boundary state on top of the seal: the seal
+    // asked again is still ok.
+    let write = Change::Boundary {
+        segment: one,
+        state: boundary(),
+    };
+    let bounded = sealed.apply(&write).expect("the boundary state");
+    assert_eq!(bounded.apply(&seal), Ok(bounded.clone()));
+    assert_eq!(bounded.apply(&write), Ok(bounded.clone()));
+    let other = BoundaryState {
+        next_seq: Seq(5),
+        ..boundary()
+    };
+    assert_eq!(
+        bounded.apply(&Change::Boundary {
+            segment: one,
+            state: other
+        }),
+        Err(ChangeRefusal::Record(one, RecordRefusal::BoundaryWritten))
+    );
+    let retire = Change::Retire {
+        segment: one,
+        holders: 2,
+        unrepaired_damage: false,
+    };
+    let retired = bounded.apply(&retire).expect("retired");
+    assert_eq!(retired.apply(&retire), Ok(retired.clone()));
+    assert_eq!(retired.apply(&seal), Ok(retired.clone()));
+    // A retire that its own guard refuses stays refused.
+    assert_eq!(
+        retired.apply(&Change::Retire {
+            segment: one,
+            holders: 2,
+            unrepaired_damage: true,
+        }),
+        Err(ChangeRefusal::Record(
+            one,
+            RecordRefusal::State(SegmentState::Retired)
+        ))
+    );
+    let trim = Change::Trim {
+        segment: one,
+        first_seq: Seq(4),
+    };
+    let trimmed = retired.apply(&trim).expect("trimmed");
+    assert_eq!(trimmed.apply(&trim), Ok(trimmed.clone()));
+    assert_eq!(
+        trimmed.apply(&Change::Trim {
+            segment: one,
+            first_seq: Seq(3),
+        }),
+        Err(ChangeRefusal::Record(
+            one,
+            RecordRefusal::State(SegmentState::Trimmed)
+        ))
+    );
+}

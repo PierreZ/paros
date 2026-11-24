@@ -2440,6 +2440,21 @@ impl RolesModel {
         }
         self.judge_claim(&change);
         match self.register.apply(&change) {
+            // A seal, a boundary state, a retire or a trim asked again over
+            // the value that holds it is "ok" again and changes nothing
+            // (§J3.4, "a change asked again"): no step of the model.
+            Ok(value)
+                if value == self.register
+                    && matches!(
+                        change,
+                        Change::Seal { .. }
+                            | Change::Boundary { .. }
+                            | Change::Retire { .. }
+                            | Change::Trim { .. }
+                    ) =>
+            {
+                self.observe_all(cx);
+            }
             Ok(value) => {
                 match (&change, origin) {
                     // `judge_claim` judged the state against the segment's

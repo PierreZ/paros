@@ -658,7 +658,8 @@ impl<T> JournalLeader<T> {
     }
 
     /// A register value that a done write gave. A sealing leader opens when
-    /// the value holds its own end, and stops when it holds another. An
+    /// the value holds its own end, and stops when it holds another, or
+    /// when a later leader sealed its own segment already. An
     /// open leader stops when the value holds an end of its own segment: a
     /// later leader sealed it, so no round of its own above that end is
     /// ever chosen, and the acceptors of the segment may stop once it
@@ -724,7 +725,20 @@ impl<T> JournalLeader<T> {
         let Some(done) = value.segment(before).and_then(SegmentRecord::end) else {
             return Vec::new();
         };
-        let effects = if done == end {
+        let effects = if value
+            .segment(self.own())
+            .and_then(SegmentRecord::end)
+            .is_some()
+        {
+            // A later leader sealed the leader's own segment: it takes no
+            // more writes, and an open leader would hold its callers'
+            // commands on acceptors that refuse them.
+            probe!(
+                reachable,
+                "leader: a seal of its own segment stops a sealing leader"
+            );
+            self.stop()
+        } else if done == end {
             probe!(reachable, "leader: a done seal end opens the leader");
             let own = self.segments.len() - 1;
             self.segments[own - 1].end = Some(end);
@@ -739,8 +753,11 @@ impl<T> JournalLeader<T> {
     }
 
     /// The register refused the leader's bind (a higher ballot is bound)
-    /// or its seal (another seal won, or the segment moved on). The leader
-    /// stops.
+    /// or its seal (another end won, or the segment moved on). The leader
+    /// stops. A refusal is never of the leader's own end: the register
+    /// takes a seal of the end it holds "ok" again (§J3.4, "a change asked
+    /// again"), so a seal asked again after a lost answer, whose first
+    /// write a minority took, makes that write done and opens the leader.
     pub fn refused(&mut self) -> Vec<LeaderEffect<T>> {
         match self.phase {
             LeaderPhase::Binding => {
