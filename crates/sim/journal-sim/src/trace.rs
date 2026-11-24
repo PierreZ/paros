@@ -12,6 +12,7 @@
 //! code's `WrongMode` of a truncate is written so.
 
 pub mod controller;
+pub mod election;
 pub mod heal;
 pub mod mutate;
 pub mod register;

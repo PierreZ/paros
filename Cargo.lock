@@ -412,6 +412,7 @@ dependencies = [
  "moonpool-assertions",
  "moonpool-tla",
  "moonpool-walk",
+ "paros-election",
  "paros-journal",
  "paros-journal-control",
  "paros-journal-io",

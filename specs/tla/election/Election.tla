@@ -13,7 +13,8 @@
 (* or None in multi-writer mode, §J2.4.1) and a log. The log keeps the     *)
 (* records that the fold of the election reads: each applied `SetLeader`  *)
 (* and each term record. A renewal is a fenced write that the journal      *)
-(* judges and the model does not keep, so the log stays short.             *)
+(* judges and the model does not keep, so the log stays short. A copy of  *)
+(* a write that the journal took is answered written (a duplicate).        *)
 (*                                                                         *)
 (* The steps of the election (#1420):                                      *)
 (*   Win        `SetLeader(new, old)`, with the leader of the actor's fold *)
@@ -93,7 +94,10 @@ VARIABLES inc,       \* the incarnation of each actor
           term,      \* the term it leads, 0 for none
           pub,       \* its term record is in the journal
           wfly,      \* a write of it is in flight
+          wbit,      \* the bit of its last write: a copy has the same bit
+          again,     \* its next write is a copy of the one it gave up
           jleader, jlog,   \* the journal: the leader value and the log
+          done,      \* the journal: the writes it took
           net,       \* calls to the journal, their answers and hand-on messages
           onet,      \* the orders in flight to the receiver: their terms
           seen,      \* the receiver: the highest term it saw, on disk
@@ -106,8 +110,8 @@ VARIABLES inc,       \* the incarnation of each actor
           userSet,   \* the user switched the journal to multi-writer mode
           reached    \* the event Ev happened
 
-actor == <<inc, st, mine, base, term, pub, wfly>>
-journal == <<jleader, jlog>>
+actor == <<inc, st, mine, base, term, pub, wfly, wbit, again>>
+journal == <<jleader, jlog, done>>
 receiver == <<onet, seen, orders>>
 budget == <<crashes, lost, hands, users>>
 ghost == <<stale, regress, userSet, reached>>
@@ -155,12 +159,12 @@ LiveHolder ==
 \* Every message has one shape, so that TLC can compare any two.
 Blank == [k |-> "", from |-> NoActor, to |-> NoActor, inc |-> 0, u |-> 0, old |-> 0,
           next |-> NoActor, t |-> 0, ok |-> FALSE, leader |-> 0, rec |-> "",
-          iface |-> NoIface, len |-> 0]
+          iface |-> NoIface, len |-> 0, n |-> 0]
 SL(a, u, old, nxt) == [Blank EXCEPT !.k = "sl", !.from = a, !.inc = inc[a], !.u = u,
                                     !.old = old, !.next = nxt]
 TermRecord(a, u, t) ==
   [Blank EXCEPT !.k = "w", !.from = a, !.inc = inc[a], !.u = u, !.t = t, !.rec = "term",
-                !.iface = <<a, inc[a]>>]
+                !.iface = <<a, inc[a]>>, !.n = 1 - wbit[a]]
 
 \* The messages of the current incarnation of a: its calls, and the answers
 \* and hand-on messages to it.
@@ -171,7 +175,8 @@ Init ==
   /\ st = [a \in Actors |-> "idle"] /\ mine = [a \in Actors |-> 0]
   /\ base = [a \in Actors |-> <<Unset, 0, a>>] /\ term = [a \in Actors |-> 0]
   /\ pub = [a \in Actors |-> FALSE] /\ wfly = [a \in Actors |-> FALSE]
-  /\ jleader = Unset /\ jlog = <<>>
+  /\ wbit = [a \in Actors |-> 0] /\ again = [a \in Actors |-> FALSE]
+  /\ jleader = Unset /\ jlog = <<>> /\ done = {}
   /\ net = {} /\ onet = {} /\ seen = 0 /\ orders = {}
   /\ nuuid = 0 /\ owner = [u \in Uuids |-> <<>>]
   /\ crashes = 0 /\ lost = 0 /\ hands = 0 /\ users = 0
@@ -202,7 +207,7 @@ Challenge(a) == \E s \in Prefixes :
   /\ mine' = [mine EXCEPT ![a] = u]
   /\ base' = [base EXCEPT ![a] = <<v.leader, v.term, a>>]
   /\ net' = net \cup {SL(a, u, v.leader, a)}
-  /\ UNCHANGED <<inc, term, pub, wfly, journal, receiver, owner, budget, ghost>>
+  /\ UNCHANGED <<inc, term, pub, wfly, wbit, again, journal, receiver, owner, budget, ghost>>
 
 \* A candidate, or a holder that hands on, with no message in flight (one
 \* was lost) sends the same call again.
@@ -219,6 +224,8 @@ Take(a, u, t) ==
   /\ term' = [term EXCEPT ![a] = t]
   /\ pub' = [pub EXCEPT ![a] = FALSE]
   /\ wfly' = [wfly EXCEPT ![a] = TRUE]
+  /\ wbit' = [wbit EXCEPT ![a] = 1 - wbit[a]]
+  /\ again' = [again EXCEPT ![a] = FALSE]
   /\ owner' = [owner EXCEPT ![u] = <<a, inc[a]>>]
 
 \* The answer to the `SetLeader` of a campaign. A refusal that names the
@@ -238,17 +245,21 @@ CampaignAnswer(a) ==
        ELSE /\ st' = [st EXCEPT ![a] = "idle"]
             /\ net' = net \ {m}
             /\ Hit("lost_cas")
-            /\ UNCHANGED <<mine, term, pub, wfly, owner>>
+            /\ UNCHANGED <<mine, term, pub, wfly, wbit, again, owner>>
     /\ UNCHANGED <<inc, base, journal, receiver, nuuid, budget, stale, regress,
                    userSet>>
 
 \* A holder writes: its term record until the journal holds it, then a
-\* renewal. One write of it is in flight at a time.
+\* renewal. One write of it is in flight at a time. After a write it gave
+\* up, the next write is a copy of that one: the same bit.
 Renew(a) ==
+  LET n == IF again[a] THEN wbit[a] ELSE 1 - wbit[a] IN
   /\ st[a] = "lead" /\ ~wfly[a]
   /\ wfly' = [wfly EXCEPT ![a] = TRUE]
+  /\ wbit' = [wbit EXCEPT ![a] = n]
+  /\ again' = [again EXCEPT ![a] = FALSE]
   /\ net' = net \cup {[TermRecord(a, mine[a], term[a])
-                         EXCEPT !.rec = IF pub[a] THEN "renew" ELSE "term"]}
+                         EXCEPT !.rec = IF pub[a] THEN "renew" ELSE "term", !.n = n]}
   /\ UNCHANGED <<inc, st, mine, base, term, pub, journal, receiver, nuuid, owner,
                  budget, ghost>>
 
@@ -257,7 +268,8 @@ Renew(a) ==
 Timeout(a) ==
   /\ Pending(a) = {}
   /\ wfly' = [wfly EXCEPT ![a] = FALSE]
-  /\ UNCHANGED <<inc, st, mine, base, term, pub, journal, net, receiver, nuuid,
+  /\ again' = [again EXCEPT ![a] = again[a] \/ wfly[a]]
+  /\ UNCHANGED <<inc, st, mine, base, term, pub, wbit, journal, net, receiver, nuuid,
                  owner, budget, ghost>>
 
 \* The answer to a write. A refusal deposes the holder (Stop). An answer
@@ -280,8 +292,8 @@ WriteAnswer(a) ==
                     /\ Hit(IF m.leader = None THEN "multi_stop" ELSE "deposed_stop")
                ELSE UNCHANGED <<st, term, reached>>
             /\ UNCHANGED pub
-    /\ UNCHANGED <<inc, mine, base, journal, receiver, nuuid, owner, budget, stale,
-                   regress, userSet>>
+    /\ UNCHANGED <<inc, mine, base, wbit, again, journal, receiver, nuuid, owner,
+                   budget, stale, regress, userSet>>
 
 \* A holder sends an order out of the journal; the order carries the term.
 \* It sends one only once its term record is in the journal: a holder that
@@ -303,8 +315,8 @@ HandOn(a, b) ==
   /\ base' = [base EXCEPT ![a] = <<mine[a], term[a], b>>]
   /\ mine' = [mine EXCEPT ![a] = nuuid + 1]
   /\ net' = net \cup {SL(a, nuuid + 1, mine[a], b)}
-  /\ UNCHANGED <<inc, term, pub, wfly, journal, receiver, owner, crashes, lost,
-                 users, ghost>>
+  /\ UNCHANGED <<inc, term, pub, wfly, wbit, again, journal, receiver, owner,
+                 crashes, lost, users, ghost>>
 
 \* The answer to a hand on: the holder stops either way. On a win, the next
 \* actor gets the uuid and the term number.
@@ -318,7 +330,7 @@ HandAnswer(a) ==
               THEN {[Blank EXCEPT !.k = "lead", !.to = base[a][3], !.u = mine[a],
                                   !.t = base[a][2] + 1]}
               ELSE {}
-    /\ UNCHANGED <<inc, mine, base, pub, wfly, journal, receiver, nuuid, owner,
+    /\ UNCHANGED <<inc, mine, base, pub, wfly, wbit, again, journal, receiver, nuuid, owner,
                    budget, ghost>>
 
 \* The next actor takes the handed term when it is idle. Else the term has
@@ -333,7 +345,7 @@ Adopt(b) ==
             /\ net' = (net \ {m}) \cup {TermRecord(b, m.u, m.t)}
             /\ Hit("adopted")
        ELSE /\ net' = net \ {m}
-            /\ UNCHANGED <<st, mine, term, pub, wfly, owner, reached>>
+            /\ UNCHANGED <<st, mine, term, pub, wfly, wbit, again, owner, reached>>
     /\ UNCHANGED <<inc, base, journal, receiver, nuuid, budget, stale, regress,
                    userSet>>
 
@@ -360,17 +372,26 @@ ApplySetLeader ==
                                         !.len = Len(jlog')])
        /\ Hit(IF ~ok /\ m.old \in Uuids /\ m.old # jleader THEN "late_cas_refused"
               ELSE "")
-    /\ UNCHANGED <<actor, receiver, nuuid, owner, budget, stale, regress, userSet>>
+    /\ UNCHANGED <<actor, done, receiver, nuuid, owner, budget, stale, regress, userSet>>
 
-\* A fenced write is taken only while its uuid is the leader (§J2.4.1).
+\* A fenced write is taken only while its uuid is the leader (§J2.4.1). A
+\* copy of a write that the journal took is answered written, whatever the
+\* leader is now: the journal judges the position of a write before its
+\* uuid, so a resend whose first copy landed is a duplicate. The model
+\* keeps no position: it keeps the last write it took of each incarnation,
+\* and a copy is a message equal to it (the bit tells two writes apart).
 ApplyWrite ==
   \E m \in net :
     /\ m.k = "w"
-    /\ LET ok == m.u = jleader IN
-       /\ jlog' = IF ok /\ m.rec = "term"
+    /\ LET fresh == m.u = jleader IN
+       LET ok == fresh \/ m \in done IN
+       /\ jlog' = IF fresh /\ m.rec = "term"
                   THEN Append(jlog, [k |-> "term", u |-> m.u, iface |-> m.iface, t |-> m.t])
                   ELSE jlog
-       /\ stale' = (stale \/ (ok /\ m.t < JTerm))
+       /\ done' = IF fresh
+                  THEN {d \in done : d.from # m.from \/ d.inc # m.inc} \cup {m}
+                  ELSE done
+       /\ stale' = (stale \/ (fresh /\ m.t < JTerm))
        /\ net' = (net \ {m}) \cup
                  Reply(m, [Blank EXCEPT !.k = "wans", !.to = m.from, !.ok = ok, !.u = m.u,
                                         !.t = m.t, !.rec = m.rec, !.leader = jleader])
@@ -401,6 +422,7 @@ Crash(a) ==
   /\ st' = [st EXCEPT ![a] = "idle"] /\ mine' = [mine EXCEPT ![a] = 0]
   /\ term' = [term EXCEPT ![a] = 0] /\ pub' = [pub EXCEPT ![a] = FALSE]
   /\ wfly' = [wfly EXCEPT ![a] = FALSE]
+  /\ wbit' = [wbit EXCEPT ![a] = 0] /\ again' = [again EXCEPT ![a] = FALSE]
   /\ base' = [base EXCEPT ![a] = <<Unset, 0, a>>]
   /\ net' = {m \in net : m.to # a}
   /\ UNCHANGED <<journal, receiver, nuuid, owner, lost, hands, users, ghost>>
@@ -419,7 +441,7 @@ UserMulti ==
   /\ jleader' = None
   /\ jlog' = Append(jlog, [k |-> "set", u |-> None, iface |-> NoIface, t |-> 0])
   /\ userSet' = TRUE
-  /\ UNCHANGED <<actor, net, receiver, nuuid, owner, crashes, lost, hands, stale,
+  /\ UNCHANGED <<actor, done, net, receiver, nuuid, owner, crashes, lost, hands, stale,
                  regress, reached>>
 
 -----------------------------------------------------------------------------

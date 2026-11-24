@@ -95,6 +95,15 @@ Test only: `publish = false`.
   controller's driver and signals.
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
+- `src/election.rs`: the walk of the election over a journal (`ElectionModel`, #1420
+  (paros-election)): three actors, each a `paros_election::Election` with its own journal client,
+  over one journal fold that the walk serves; lost requests and answers, crashes (a new
+  incarnation), hand-ons and a user that switches the journal to multi-writer mode. Its oracles
+  (`FRESH`, `TERMS_GROW`, `LEAD_TRUE`, `MULTI`) read the log and the reported terms and decode the
+  election record with the walk's own code; each has its `ElectionMutant` in the program or the
+  journal (`DrawsRepeat`, `PageDrops`, `WriteVanishes`, `LaxMulti`). `tests/election.rs`.
+- `src/trace/election.rs`: the events of an election walk as a trace of
+  `specs/tla/election/ElectionTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/roles.rs`: the events of a roles walk as a trace of
   `specs/tla/journal-ctrl/RolesTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/register.rs`: the events of a register walk as a trace of
@@ -111,7 +120,8 @@ Test only: `publish = false`.
   its control `ForgedBootstrap` and its edits); `tests/controller.rs` (the controller walks, their
   mutants and the role's probes) and `tests/controller_traces.rs` (the controller trace check, its
   rules, its control `ElectNoCas` and its edits); `tests/heal_traces.rs` (the heal trace check, its
-  rules, its control `SameCopyAgain` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
+  rules, its control `SameCopyAgain` and its edits); `tests/election_traces.rs` (the election
+  trace check, its rules, its control `HandSkip` and its edits); `tests/live.rs` (#1310 (check long runs live)): a
   long fold walk checked live through its events port by moonpool-tla's `Live`, and the control
   `BelowInSegment` stopped at its first wrong answer; `LIVE_MINUTES` runs one walk with no end for
   that long (the `Journal live` workflow, four hours each night).
@@ -132,12 +142,13 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
   `CoversOn`, `ResolveOn`). A step of the code that the model does not have becomes a step of the
   model, with its check, in the same PR.
 - **`RegisterTrace` extends `SegmentRecords.tla`**, **`ControllerTrace` extends
-  `GridController.tla`** and **`HealTrace` extends `HealReuse.tla`**, in the same way: each event is an action of the model. **`RolesTrace`
+  `GridController.tla`**, **`HealTrace` extends `HealReuse.tla`** and **`ElectionTrace` extends
+  `Election.tla`**, in the same way: each event is an action of the model. **`RolesTrace`
   extends `JournalCtrl.tla`**, CTRL over the compaction over `Journal.tla`: each event of the roles walk is one action of the model, with the
   parameters that the code chose.
 - **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register;
   `BoundaryBeforeDurable` for the roles; `ElectNoCas` for the controller; `SameCopyAgain` for the
-  heal: the
+  heal; `HandSkip` for the election: the
   oracles pass it, TLC refuses it) and **refuses the edits** of the recorded walks at the edited event or after it.
   **Every edit finds a place** (`mutate::judge`): an edit with no place in the checked walks
   takes the first walk of up to `PLACE_SEEDS` more seeds that has one, and TLC must accept that

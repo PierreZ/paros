@@ -13,6 +13,7 @@ pub mod campaign;
 pub mod client;
 pub mod control;
 pub mod controller;
+pub mod election;
 pub mod fold;
 pub mod heal;
 pub mod host;
