@@ -137,7 +137,10 @@ request id, `release`, the limit of moves in flight, and the cell's own control 
 through the same port; #1421 (the placement port)), and, above the journal, the election over a
 journal (`specs/tla/election/`: the term won by `SetLeader(new, old)`, the term number from the
 fold, the stop at the first refused write, the hand on, the fence of an order by its term, the
-interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)), and the
+interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)), the
+coordination store that is the election library (`specs/tla/coord/`: a multi-writer journal that
+every member folds, sessions and the dedup of their copies, the conditional expiry, the leader
+latch, the guarded record, the term fence, the trim to a checkpoint; #1420, Pierre 2026-11-24), and the
 takeover by a new coordinator (`specs/tla/takeover/`: the view of a term from its own
 registrations, the registration that raises the fence, the order checked and done in one write, a
 reference per term, the stop of a deposed coordinator, the directory asked after a gone order;

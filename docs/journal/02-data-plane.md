@@ -218,8 +218,9 @@ on paros: a leader serves nothing from local state it did not read back from the
 adjudicator is a rebuildable cache over the log and holds no truth of its own). MemoryDB's lease
 and self-demotion are deliberately not implemented in the journal: **paros enforces no lease**.
 Who becomes leader is decided by the callers of `SetLeader`: the compare-and-set is itself the
-election, as the term of architecture §3.3 uses it (decision 13), and the public election API offers
-that term to customers. The journal gives safety to writers, the election gives liveness
+election, as the coordinator's term of architecture §3.3 uses it (decision 1). The public election
+library is the coordination store of architecture §4.4 (Pierre, 2026-11-24, #1420
+(paros-election)): it owns a multi-writer journal and elects with a latch in its fold. The journal gives safety to writers, the election gives liveness
 (Brooker).
 
 Two fences, two layers, never confused: the Paxos ballot says which *machine* runs a journal's
