@@ -222,20 +222,18 @@ These points are decided:
   over an opaque address and the generic driver, with no journal in it; the journal roles of
   `paros-journal-io` run on it, and its example runs a toy coordinator.
 - **The frontend is a role like the others.** It has no layer and no crate of its own.
-- **The election over a journal is its own crate.** It is the `SetLeader` compare-and-set of
-  section 3.3, and a user can elect a leader with it as the coordinators do.
-- **The election is a thin layer on the journal client, not an actor on the host** (Pierre,
-  2026-11-23, #1420 (paros-election)). The election keeps nothing on disk: its state is the
-  journal (the uuid that leads, the term record, the renewals), and a holder that restarts draws
-  a new uuid. So it needs no persist batch and no host. It owns one pure client
-  (`paros_journal::client`), and it has the shape of that client: calls in, requests out, answers
-  in. The program gives it the time and each draw (a fresh uuid, a jitter) as values. It makes no
-  message of its own: its network is the network of the client, in memory or through the adapter.
-  It reads the silence of the holder with a read of the tail, with no watch. A coordinator is an
-  actor on the host; it holds an election inside its state and passes it the time. The fence of a
-  term is not in the election: each receiver of an order checks the term in the same write as
-  the effect (the rules of the takeover, below). So the election crate depends only on
-  `paros-journal`, and a program that has only the journal client can elect.
+- **The election library is its own crate: a coordination store over a journal** (Pierre,
+  2026-11-24, #1420 (paros-election)). The rules are in "The coordination store" below. A user
+  elects a leader with it; a coordinator wins its term with the plain `SetLeader` of section 3.3.
+- **The store is a thin layer on the journal client, not an actor on the host** (Pierre,
+  2026-11-23, kept on 2026-11-24). It keeps nothing on disk: its state is the journal. It owns
+  one pure client (`paros_journal::client`), and it has the shape of that client: calls in,
+  requests out, answers in. The program gives it the time and each draw (a session id, a jitter)
+  as values. It makes no message of its own: its network is the network of the client, in memory
+  or through the adapter. The fence of a term outside the journal is not in the store: each
+  receiver of an order checks the term in the same write as the effect (the rules of the
+  takeover, below). So the crate depends only on `paros-journal`, and a program that has only
+  the journal client can elect.
 - **One crate for each control level** (universe, cell, tenant), and each coordinator is a pure
   state machine as the journal roles are.
 - **The core has no tenant.** `paros-consensus` and `paros-journal` know no tenant. A crate that
@@ -336,6 +334,73 @@ These points are decided:
   frontend and the resolver are the thin router and serve from the last directory they read. A
   tenant keeps its registration record in the universe directory: it is one write at creation,
   and it is where the fold checks the `TenantId` (section 3.8).
+
+#### The coordination store
+
+**The election library owns a journal and gives a ZooKeeper-style client API over it** (Pierre,
+2026-11-24, #1420 (paros-election): "I want the leader election library to own a journal and
+write data to it, inspired from zookeeper client"; he chose option B of
+`/mnt/project-files/design/election-zookeeper-2026-11-24/proposal.md`, "the log is the server").
+The prior art is Zelos, the ZooKeeper clone that Facebook built over the Delos shared log
+(`docs/references/papers/delos-log-structured-protocols/`). The crate name, the record header key
+and the model folder name are **Open** until the crate is built; the model is `specs/tla/coord/`.
+
+- **The log is the server.** The store owns one journal in multi-writer mode
+  ([docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.4): every member appends, the
+  leader and the candidates too. The journal arbitrates nothing. Every member runs the same
+  **fold**: a pure function from the records, in order, to a tree of nodes and a table of
+  sessions. The fold judges each record at its position and applies it or voids it, so every
+  member computes the same result at the same position. A member learns the result of its write
+  when its fold reaches the record (Delos: `propose`, then play the log to that entry).
+- **The ZooKeeper concepts.** `seq` is the zxid. A session opens with a record that names a
+  session id the program draws (fresh, as a leader uuid, §J2.3). Each record of a session renews
+  it, and an idle session writes a heartbeat. A node has data, a version and the positions of its
+  create and its last change; an ephemeral node names its session; a sequential node takes the
+  position of its create as its name. A record can hold several operations, applied all or none
+  (ZooKeeper's `multi`, with `check(path, version)`). A watch is a filter on the fold's changes
+  while the member tails the journal, so no change between two events is lost. ZooKeeper's
+  `sync` is a read at the tail, which is linearizable (§J2.5). ACLs are out: the token at the
+  frontend decides who may touch the journal (section 3.5).
+- **Exactly-once effects over an at-least-once journal.** Each record of a session carries
+  `<<session, op_seq>>`, and a session sends one record at a time. The fold keeps, for each live
+  session, the last `op_seq` it applied: a copy at or below it does nothing (the
+  `SessionOrderEngine` of Delos). The table is in the store's fold, not in the journal, so the
+  journal keeps no dedup table (§J2.4.1). A record of an expired session does nothing: its row
+  is gone, and a late copy must not apply as a new record. A member settles its record only from
+  its own fold. TLC: `OnceEach` (control `no_dedup`), `EphemeralsEnd` (control `no_void`),
+  `SettledTrue`.
+- **Expiry is a compare-and-set on the session's last position.** The store reads no clock. A
+  member that saw no record of a session since position `last` for one timeout, on the clock the
+  program passes, appends `Expire(session, last)`, after a jitter. The fold applies it only if the
+  last record of the session is still at `last`; the expiry deletes the session's ephemeral nodes
+  in the same step (ZooKeeper's `killSession`). A slow or skewed clock can only expire a live
+  session early: that costs availability, never safety. TLC: `ExpireOnSilence` (control
+  `expire_blind`).
+- **The latch and its term.** The recipes are pure functions of the fold, so no recipe watches
+  its predecessor (there is no herd effect: every member tails the journal anyway). The leader
+  latch is Curator's `LeaderLatch`: the live session whose node has the lowest position holds
+  it. **The term is the position of the record at which the holder changed**: one holder for each
+  term, and the term grows. Curator's `LeaderSelector`, locks, semaphores, groups, queues,
+  counters, barriers and caches map the same way (the proposal, section 3).
+- **Two fences.** Inside the journal, a record can carry a guard ("my session holds the latch
+  at term `t`", or a `check`), and the fold voids a record whose guard fails: a deposed holder can
+  still append, and its guarded writes do nothing. TLC: `ActsByHolder` (control `no_guard`; a
+  holder is deposed while its session lives when another member deletes its node). Outside the
+  journal, each order carries the term, and the receiver checks it in the same write as the effect
+  (the takeover rules below). TLC: `NoRegress` (control `no_fence`), `OneSender`. A holder that saw
+  none of its own records land for part of the timeout stops sending orders (Curator's
+  `SUSPENDED`); this shortens the time with two active holders, and safety does not rest on it.
+- **Trim to a checkpoint only.** In multi-writer mode anyone may `Truncate` (§J2.4); the store is
+  the only one that truncates. A checkpoint record holds the whole state of the fold at the read
+  position `at` of the member that wrote it. The fold takes a checkpoint only when it lands at
+  `at + 1`: a checkpoint behind other records would skip them. A truncate goes only to a
+  checkpoint that the fold took, so the first record above the floor gives a new member the
+  whole state. TLC: `ViewTrue` (controls `ckpt_stale` and `trim_any`). The rule "the checkpoint
+  lands at `at + 1`" is a finding of the model: the proposal had only "truncate to a checkpoint".
+- **Not proved**: the liveness of the latch (after the holder stops and faults stop, a new holder
+  leads). **Open**: who sends expiries and checkpoints (any member, or the holder of an internal
+  latch), the heartbeat and timeout values, the size limit of a checkpoint, and whether `TTL` and
+  `CONTAINER` nodes are in the first version.
 
 **How CI holds the layers** (#1411 (CI checks that hold the layering)). The layer of each crate
 is one table, `scripts/layers.sh`. `scripts/check-layers.sh` reads the manifests through `cargo metadata` (no build) and the
