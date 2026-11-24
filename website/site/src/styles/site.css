@@ -556,6 +556,17 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 .story-choices { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px; }
 .story-controls { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--rule); }
 .story-controls .primary { flex: 1 1 auto; }
+.story-controls .story-play { min-width: 6.5em; }
+.story.playing .story-play { border-color: var(--accent); color: var(--accent); }
+.story-controls .story-speed { min-width: 3.6em; padding: 0 8px; }
+/* The progress line of the player: one mark per screen. */
+.story-line { display: flex; gap: 2px; padding: 0 12px; border-top: 1px solid var(--rule); }
+.story-mark { flex: 1 1 0; min-width: 0; height: 24px; padding: 0; border: 0; background: transparent; cursor: pointer; position: relative; }
+.story-mark::after { content: ""; position: absolute; left: 0; right: 0; top: 10px; height: 4px; background: var(--rule); }
+.story-mark.seen::after { background: var(--rule-strong); }
+.story-mark.now::after { background: var(--accent); top: 8px; height: 8px; }
+.story-mark.ask::before { content: ""; position: absolute; left: 50%; top: 3px; width: 3px; height: 3px; margin-left: -1.5px; background: var(--fg); }
+.story-mark:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .story-choice { padding: 6px 10px; border: 1px solid var(--accent); background: transparent; color: var(--fg); font-family: var(--font-sans); font-size: 14px; text-align: left; cursor: pointer; }
 .story-choice:hover, .story-choice:focus-visible { background: var(--accent-tint); }
 .story-others { padding: 8px 12px; border-top: 1px solid var(--rule); }

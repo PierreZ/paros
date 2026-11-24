@@ -50,6 +50,7 @@
     var box = { w: 360, h: 200 };
     var nodesLayer = null, wireLayer = null;
     var token = 0;
+    var speed = 1;       // the player's speed: 1.5 plays a move in 2/3 of the time
 
     // Place the lanes. `used` (lane id -> true) keeps only some lanes; with
     // no `used`, every lane is drawn. `log` leaves room for the log strip.
@@ -229,11 +230,14 @@
 
     function tween(ms, fn, mine) {
       return new Promise(function (resolve) {
-        var t0 = null;
+        // The progress adds up frame by frame, so a change of speed during
+        // a move changes the pace from that frame on, with no jump.
+        var last = null, t = 0;
         function frame(now) {
           if (mine !== token) return resolve(false);
-          if (t0 === null) t0 = now;
-          var t = ms > 0 ? Math.min(1, (now - t0) / ms) : 1;
+          if (last === null) last = now;
+          t = ms > 0 ? Math.min(1, t + ((now - last) * speed) / ms) : 1;
+          last = now;
           fn(t);
           if (t < 1) requestAnimationFrame(frame); else resolve(true);
         }
@@ -303,6 +307,8 @@
       // Start a new move: any move in progress stops at its next frame.
       begin: function () { return ++token; },
       cancel: function () { token++; },
+      // Play the next moves `v` times as fast (the player's speed).
+      speed: function (v) { speed = v > 0 ? v : 1; },
       // Whether move `mine` is still the latest.
       live: function (mine) { return mine === token; },
       wait: function (ms, mine) { return tween(ms, function () {}, mine); },

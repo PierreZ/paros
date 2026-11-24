@@ -8,7 +8,8 @@
 //   - a step-through that shows the recorded JSON in place of the live
 //     wasm run (a renamed wasm export, a bundle that does not load);
 //   - a story that does not reach its last screen, a step-through that
-//     does not reach its last step;
+//     does not reach its last step, a story player that does not play or
+//     does not stop;
 //   - an exercise that the scripted clicks on Deliver and Drop do not
 //     solve, and the Ready and quorum widgets that do not answer.
 // No test is skipped, and a red run is not run again (AGENTS.md).
@@ -139,6 +140,83 @@ for (const path of TRACED) {
     w.check();
   });
 }
+
+// The player of the story (public/story.js): Play moves on by itself, Pause
+// stops it, any other control stops it, and with reduced motion there is no
+// Play (the other tests run with reduced motion).
+test("/paxos/single-decree/: the story player plays, pauses and stops on a control", async ({ browser }) => {
+  const context = await browser.newContext({ reducedMotion: "no-preference", baseURL: test.info().project.use.baseURL });
+  const page = await context.newPage();
+  const w = watch(page);
+  await page.goto("paxos/single-decree/");
+  const story = page.locator(".panel.story");
+  const counter = story.locator(".panel-head .meta");
+  const play = story.locator(".story-play");
+  await expect(counter).toHaveText(/^screen 1 \//);
+  await expect(play).toBeVisible();
+  await expect(story.locator(".story-mark")).toHaveCount(await page.evaluate(() => {
+    const t = JSON.parse(document.getElementById("trace").textContent);
+    return t.scenarios.find((s) => s.beats && s.beats.length).beats.length;
+  }));
+  const playing = () => page.evaluate(() => window.paxosStory.playing());
+  // Fast, so that the test does not wait long for the time to read. Screen 2
+  // rests for 2.2 s / 4 at least, a wide window for the Pause below.
+  await page.evaluate(() => window.paxosStory.speed(4));
+  await play.click();
+  await expect(play).toHaveText("Pause");
+  await expect(counter).toHaveText(/^screen 2 \//, { timeout: 20_000 });
+  await expect.poll(playing).toBe(true);
+  await play.click();
+  await expect(play).toHaveText("Play");
+  expect(await playing()).toBe(false);
+  const stopped = await counter.textContent();
+  await page.waitForTimeout(1500);
+  await expect(counter).toHaveText(stopped);
+  // Played on, the run stops by itself at its first question.
+  const ask = await page.evaluate(() => {
+    const t = JSON.parse(document.getElementById("trace").textContent);
+    return t.scenarios.find((s) => s.beats && s.beats.length).beats.findIndex((b) => b.question);
+  });
+  expect(ask).toBeGreaterThan(1);
+  await page.evaluate(() => window.paxosStory.speed(20));
+  await play.click();
+  await expect(counter).toHaveText(new RegExp(`^screen ${ask + 1} \\/`), { timeout: 20_000 });
+  await expect(play).toHaveText("Play");
+  await story.locator("button.story-answer").first().click();
+  // Play again, then a press on Back stops it.
+  await play.click();
+  await expect.poll(playing).toBe(true);
+  await story.getByRole("button", { name: "Back" }).click();
+  await expect(play).toHaveText("Play");
+  // "Show each message" stops it too: the address stays the step-through's.
+  await play.click();
+  await expect.poll(playing).toBe(true);
+  await story.locator(".story-foot a").click();
+  expect(await playing()).toBe(false);
+  await page.waitForTimeout(1500);
+  expect(page.url()).toMatch(/&step=\d+$/);
+  await page.locator(".panel.steps").getByText("Back to the story").click();
+  await expect(story).toBeVisible();
+  expect(await playing()).toBe(false);
+  // A mark of the progress line opens its screen and keeps the focus, so
+  // the arrow keys go on.
+  await story.locator(".story-mark").nth(1).click();
+  await expect(counter).toHaveText(/^screen 2 \//);
+  await page.keyboard.press("ArrowRight");
+  await expect(counter).toHaveText(/^screen 3 \//);
+  w.check();
+  await context.close();
+});
+
+test("/paxos/single-decree/: with reduced motion the story has no Play", async ({ page }) => {
+  await page.goto("paxos/single-decree/");
+  const story = page.locator(".panel.story");
+  await expect(story).toBeVisible();
+  await expect(story.getByRole("button", { name: "Back" })).toBeVisible();
+  await expect(story.locator(".story-play")).toHaveCount(1);
+  await expect(story.locator(".story-play")).toBeHidden();
+  await expect(story.locator(".story-speed")).toBeHidden();
+});
 
 // One exercise of each lesson that has exercises (src/course.ts), solved by
 // clicks on the page's own buttons. Each move names the messages it acts on
