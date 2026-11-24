@@ -243,9 +243,9 @@ pub struct Phase1Outcome<Id, V> {
 /// qualifies when it reported either nothing (`none`) or a record at ballot
 /// `<= threshold`.
 ///
-/// A public function so that a Phase-1 tally outside the core (the journal
-/// leader's, over its own reports) applies the same rule: it names no slot
-/// range and no layout of the configurations.
+/// A public function so that a Phase-1 tally outside the core, over its own
+/// reports, applies the same rule: it names no slot range and no layout of
+/// the configurations.
 ///
 /// ```
 /// use std::collections::{BTreeMap, BTreeSet};
@@ -408,6 +408,7 @@ fn promise_page_shape_valid<V>(
 /// let mut tally = BTreeMap::new();
 /// merge_report(&mut tally, Slot(0), b(2), "x");
 /// merge_report(&mut tally, Slot(0), b(1), "y");
+/// merge_report(&mut tally, Slot(0), b(3), "z");
 /// merge_report(&mut tally, Slot(0), b(3), "z");
 /// assert_eq!(tally[&Slot(0)], (b(3), "z"));
 /// ```

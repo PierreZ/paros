@@ -179,12 +179,9 @@ impl Phase1 {
             return None;
         }
         let complete = self.complete();
-        let covered = segments.iter().all(|segment| {
-            segment
-                .columns
-                .iter()
-                .all(|c| c.has_phase1_quorum(&complete))
-        });
+        let covered = prior(segments)
+            .iter()
+            .all(|column| column.has_phase1_quorum(&complete));
         if !covered {
             return None;
         }
@@ -286,10 +283,16 @@ impl Phase1 {
     pub fn decide(&self, segments: &[ReadSegment], slot: Slot) -> Option<Command> {
         assert!(!segments.is_empty(), "Phase 1 reads at least one segment");
         let top = self.top(slot);
+        let complete = self.complete();
+        let reporters = self.reporters(slot);
+        assert!(
+            reporters.keys().all(|node| complete.contains(node)),
+            "only a complete answer reports a faulty vote to the tally"
+        );
         let decided = slot_decidable(
             &prior(segments),
-            &self.complete(),
-            Some(&self.reporters(slot)),
+            &complete,
+            Some(&reporters),
             top.map(|(ballot, _)| *ballot),
         );
         probe!(
