@@ -40,9 +40,10 @@
 //! 4. The writer reads them back from a replica, with the floor of the
 //!    segment in force.
 //! 5. Host 3 crashes: acceptor 3, replica 12 and matchmaker 3 are gone. Two
-//!    more writes are chosen, and the register still changes, at a majority.
-//! 6. Host 3 starts again on its disk: acceptor 3 reads its votes back, and
-//!    replica 12 catches up.
+//!    more writes are chosen, and the register still takes a change, at
+//!    matchmakers 1 and 2.
+//! 6. Host 3 starts again on its disk: acceptor 3 reads back the promise and
+//!    the votes it held, and replica 12 catches up.
 //! 7. The controller opens segment 2 (a roll). Leader L2, on host 2, seals
 //!    segment 1 and writes in segment 2.
 //! 8. The writer reads the whole journal: a sealed page of segment 1, then a
@@ -98,9 +99,14 @@ const L1: u64 = 101;
 const L2: u64 = 102;
 /// The writer's uuid.
 const A: LeaderUuid = LeaderUuid(0xA);
-/// How long a step may take before the example fails.
+/// How long one step may take before the example fails. The whole run
+/// takes well under a second, so a CI runner that is many times slower
+/// still passes; a step that never ends fails here, with the state of each
+/// host.
 const DEADLINE: Duration = Duration::from_secs(20);
 /// How long the program waits for one answer before it takes it as lost.
+/// No result depends on it: the client sends a lost request again, and the
+/// journal settles a copy that lands twice.
 const ANSWER_WAIT: Duration = Duration::from_millis(500);
 
 type Process = Driver<Disk, Wire, WallClock, Matchmakers, ()>;
@@ -218,12 +224,10 @@ struct Matchmaker {
 ///
 /// **One operation at a time.** An operation holds the matchmakers' lock
 /// from its first read to its last write, so two operations never
-/// interleave and a write is never left at a minority. With interleaved
-/// operations, an operation in conflict can leave its write at a minority;
-/// the change asked again then finds it and is refused, and today the
-/// leader takes that refusal as a loss and stops (a seal, seen in about 1
-/// run in 100). The fix of the leader is its own work; once it lands, the
-/// lock can cover one request at a time.
+/// interleave and no write stays at a minority. An operation in conflict
+/// can leave its write at a minority; the same change asked again then
+/// finds that write and is refused, and the leader takes the refusal of
+/// its own seal as a loss and stops.
 #[derive(Clone)]
 struct Matchmakers {
     set: MatchmakerSet,
@@ -315,10 +319,10 @@ impl Register for Matchmakers {
         match self.run(change) {
             CallStep::Done(value) => Ok(value),
             CallStep::Refused { refusal, .. } => Err(ChangeError::Refused(refusal)),
-            CallStep::Pending
-            | CallStep::Write { .. }
-            | CallStep::Conflict { .. }
-            | CallStep::Moved { .. } => Err(ChangeError::NoAnswer),
+            CallStep::Write { .. } => unreachable!("an operation runs on past its write step"),
+            CallStep::Pending | CallStep::Conflict { .. } | CallStep::Moved { .. } => {
+                Err(ChangeError::NoAnswer)
+            }
         }
     }
 
@@ -500,14 +504,8 @@ impl Cluster {
 
     /// Host `host` also serves `role`.
     fn assign(&mut self, host: u64, role: Assignment) {
-        let address = role.address();
-        let slot = self.slot(host);
-        slot.roles.push(role.clone());
-        if let Some((orders, _)) = &slot.running {
-            let _ = orders.send(Order::Assign(role));
-            // The route goes to the same inbox as the host's other roles:
-            // copy it from one of them.
-        }
+        // The route goes to the same inbox as the host's other roles: copy
+        // it from one of them, before the role starts and sends.
         let inbox = {
             let net = lock(&self.net);
             self.hosts[&host]
@@ -516,7 +514,12 @@ impl Cluster {
                 .find_map(|r| net.routes.get(&r.address()).cloned())
         };
         if let Some(inbox) = inbox {
-            lock(&self.net).routes.insert(address, inbox);
+            lock(&self.net).routes.insert(role.address(), inbox);
+        }
+        let slot = self.slot(host);
+        slot.roles.push(role.clone());
+        if let Some((orders, _)) = &slot.running {
+            let _ = orders.send(Order::Assign(role));
         }
     }
 
@@ -583,27 +586,30 @@ impl Cluster {
         .flatten()
     }
 
-    /// The controller's call `change` on the register, asked again until
-    /// it is done: a reshape that the register already took is done again
-    /// (it is idempotent), so a call whose first copy got no answer ends.
+    /// The controller's call `change` on the register. A majority of the
+    /// matchmakers is up at each call of this run, and one operation runs at
+    /// a time, so the call is done or refused at once.
     fn controller(&self, change: &Change) -> RegisterValue {
-        let mut register = self.matchmakers.client(0);
-        for _ in 0..1_000 {
-            match register.change(JOURNAL, change) {
-                Ok(value) => return value,
-                Err(ChangeError::NoAnswer) => {}
-                Err(refused) => panic!("the controller's {change:?}: {refused:?}"),
-            }
-        }
-        panic!("the controller's {change:?}: no answer in 1000 tries");
+        self.matchmakers
+            .client(0)
+            .change(JOURNAL, change)
+            .unwrap_or_else(|e| panic!("the controller's {change:?}: {e:?}"))
     }
 
-    /// The controller's register read.
+    /// The controller's register read: the done value.
     fn register(&self) -> RegisterValue {
-        let mut register = self.matchmakers.client(0);
-        (0..1_000)
-            .find_map(|_| register.read(JOURNAL))
-            .expect("a done register value in 1000 reads")
+        self.matchmakers
+            .client(0)
+            .read(JOURNAL)
+            .expect("a majority of the matchmakers holds a done value")
+    }
+
+    /// The generation of the write that each matchmaker holds.
+    fn held(&self) -> Vec<(u64, u64)> {
+        lock(&self.matchmakers.members)
+            .iter()
+            .map(|(id, m)| (id.0, m.member.state().written.op.round))
+            .collect()
     }
 
     /// One line for each role of each host.
@@ -708,8 +714,8 @@ impl Program {
                 records,
                 ..
             } => {
-                // Ask the replicas of every sealed segment in turn, until one
-                // covers the position.
+                // Ask the replicas of every segment in turn, until one covers
+                // the position.
                 let value = cluster.register();
                 for record in value.segments().values() {
                     for node in record.replicas() {
@@ -802,6 +808,13 @@ async fn read_at(cluster: &Cluster, set: &[NodeId], from: Seq, limit: usize) -> 
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
+    // A panic on a host's task (an assertion of a role) ends the program
+    // with an error, as a panic of `main` does.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        report(info);
+        std::process::exit(101);
+    }));
     let mut cluster = Cluster::new();
     let mut writer = Program::new(L1);
     let mut written: Vec<Record> = Vec::new();
@@ -810,13 +823,17 @@ async fn main() {
     start_hosts(&mut cluster).await;
     write(&cluster, &mut writer, &mut written, 0..3, true).await;
     read_back(&cluster, &mut writer, &written).await;
-    crash(&mut cluster, &mut writer, &mut written).await;
-    restart(&mut cluster).await;
+    let held = crash(&mut cluster, &mut writer, &mut written).await;
+    restart(&mut cluster, held).await;
     roll(&mut cluster, &mut writer, &mut written).await;
     read_all(&cluster, &mut writer, &written).await;
 
     println!("Final state:");
     cluster.report().await;
+    for (host, slot) in &cluster.hosts {
+        let (_, task) = slot.running.as_ref().expect("every host runs at the end");
+        assert!(!task.is_finished(), "the task of host {host} ended");
+    }
     println!(
         "ok: six hosts, three matchmakers, a grid of six acceptors, {} records in two segments, \
          one host restarted from its disk.",
@@ -905,7 +922,13 @@ async fn start_hosts(cluster: &mut Cluster) {
     cluster
         .wait_until("L1 opens", async |c| c.leader_open(L1).await)
         .await;
-    show("L1", &"Open: Phase 1 done on F + 1 of each column");
+    let phase = cluster
+        .look(host_of(L1), |p| {
+            p.host().leader(at(L1)).map(|l| l.phase().clone())
+        })
+        .await
+        .flatten();
+    show("L1 phase", &phase);
 }
 
 /// Writer A writes one record at each position of `seqs` (and first takes
@@ -959,32 +982,65 @@ async fn read_back(cluster: &Cluster, writer: &mut Program, written: &[Record]) 
 
 /// Step 5: host 3 crashes; the grid, the replicas and the matchmakers each
 /// keep a majority.
-async fn crash(cluster: &mut Cluster, writer: &mut Program, written: &mut Vec<Record>) {
+async fn crash(
+    cluster: &mut Cluster,
+    writer: &mut Program,
+    written: &mut Vec<Record>,
+) -> (u64, Vec<u64>) {
     println!("5. Host 3 crashes: acceptor 3, replica 12 and matchmaker 3 are gone.");
+    // L1 opened on F + 1 of each column; acceptor 3 may get its Prepare a
+    // little later.
+    cluster
+        .wait_until("acceptor 3 promises L1", async |c| {
+            c.look(3, |p| p.host().acceptor(at(3)).map(|a| a.promised().round))
+                .await
+                .flatten()
+                == Some(1)
+        })
+        .await;
+    let votes = cluster.look(3, votes_of_3).await.expect("host 3 runs");
     cluster.crash(3).await;
     write(cluster, writer, written, 3..5, false).await;
+    // A register change at the two matchmakers that are up.
+    let before = cluster.held();
     let value = cluster.register();
-    show("register read with matchmaker 3 down", &value.term());
+    let newest = value.in_force().expect("a segment in force");
+    cluster.controller(&Change::Confirm {
+        segment: newest.id(),
+        state: newest.state(),
+    });
+    let after = cluster.held();
+    show("matchmakers' write generations", &(&before, &after));
+    for ((id, old), (_, new)) in before.iter().zip(&after) {
+        if *id == 3 {
+            assert_eq!(new, old, "matchmaker 3 is down: it takes no write");
+        } else {
+            assert!(new > old, "matchmaker {id} takes the write");
+        }
+    }
+    votes
+}
+
+/// The promise and the slots that acceptor 3 holds a vote at.
+fn votes_of_3(p: &Process) -> (u64, Vec<u64>) {
+    let acceptor = p.host().acceptor(at(3)).expect("acceptor 3");
+    let votes = (0..16)
+        .filter(|s| acceptor.vote(Slot(*s)).is_some())
+        .collect();
+    (acceptor.promised().round, votes)
 }
 
 /// Step 6: host 3 starts again on its disk.
-async fn restart(cluster: &mut Cluster) {
+async fn restart(cluster: &mut Cluster, before: (u64, Vec<u64>)) {
     println!("6. Host 3 starts again on its disk.");
     let records = lock(&cluster.hosts[&3].disk.0).len();
     show("records on host 3's disk", &records);
+    assert!(records > 0, "acceptor 3 and replica 12 wrote their disk");
     cluster.start(3);
-    let (promised, votes) = cluster
-        .look(3, |p| {
-            let acceptor = p.host().acceptor(at(3)).expect("acceptor 3");
-            let votes: Vec<u64> = (0..8)
-                .filter(|s| acceptor.vote(Slot(*s)).is_some())
-                .collect();
-            (acceptor.promised(), votes)
-        })
-        .await
-        .expect("host 3 runs");
-    show("acceptor 3 reads its disk back", &(promised.round, &votes));
-    assert_eq!(promised.round, 1, "acceptor 3 promised L1 before the crash");
+    let read_back = cluster.look(3, votes_of_3).await.expect("host 3 runs");
+    show("acceptor 3: (promise, votes) before the crash", &before);
+    show("acceptor 3: (promise, votes) read back", &read_back);
+    assert_eq!(read_back, before, "acceptor 3 reads back what it held");
     cluster
         .wait_until("replica 12 catches up", async |c| {
             c.replica(12).await.is_some_and(|(next, _)| next == Seq(5))
@@ -1038,9 +1094,11 @@ async fn roll(cluster: &mut Cluster, writer: &mut Program, written: &mut Vec<Rec
 /// Step 8: the writer reads the whole journal, one segment at a time.
 async fn read_all(cluster: &Cluster, writer: &mut Program, written: &[Record]) {
     println!("8. The writer reads the whole journal.");
-    let mut all = Vec::new();
+    let mut pages = Vec::new();
     let mut from = Seq(0);
-    loop {
+    // Segment 1 ends at its seal, so the read takes two pages: the sealed
+    // page of segment 1, then the tail of segment 2.
+    for _ in 0..2 {
         let page = writer.call(cluster, |c| c.read(from, 16)).await;
         let Outcome::Page {
             records, sealed, ..
@@ -1053,15 +1111,13 @@ async fn read_all(cluster: &Cluster, writer: &mut Program, written: &[Record]) {
             &(texts(&records), if sealed { "sealed" } else { "tail" }),
         );
         from = Seq(from.0 + records.len() as u64);
-        all.extend(records);
-        if !sealed {
-            break;
-        }
+        pages.push((texts(&records), sealed));
     }
+    let all = texts(written);
     assert_eq!(
-        texts(&all),
-        texts(written),
-        "the leader time is a header the leader stamps: compare payloads"
+        pages,
+        [(all[..5].to_vec(), true), (all[5..].to_vec(), false)],
+        "the leader time is a header the leader stamps: the payloads are compared"
     );
 }
 
