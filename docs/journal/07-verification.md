@@ -280,7 +280,7 @@ only, or whose write waits in flight while other operations run and lands later,
 are down with their machine (a read or a change that no majority answers gives no answer, and a
 read repairs a write that a minority took), disk faults inside the contract (the faults of
 the driver walk's disk), and copy and abandon asks and `Copied` notices that the network loses,
-or holds and gives again later (a lost `Copied` costs no heal: the new replica reports its
+or holds and gives again later, and every `Copied` notice of a deaf machine lost for a while (a lost `Copied` costs no heal: the new replica reports its
 complete copy again at each tick while it joins).
 Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
 at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
