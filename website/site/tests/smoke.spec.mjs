@@ -392,6 +392,42 @@ for (const [path, { panel, exercises }] of Object.entries(REGISTER_EXERCISES)) {
   }
 }
 
+// The live journal (/journal/live/, public/live-journal.js): the whole
+// journal on six hosts in the page. Writes land, a crashed host does not stop
+// them, a read gives them back, and a roll puts segment 2 in force.
+test("/journal/live/: the live journal writes, survives a crash, reads and rolls", async ({ page }) => {
+  test.setTimeout(120_000);
+  const w = watch(page);
+  await page.goto("journal/live/");
+  const lab = page.locator("#live-journal");
+  await expect(lab.locator(".chip-status.accent").first()).toHaveText("live");
+  await lab.getByRole("button", { name: "fast" }).click();
+  // The page starts paused with reduced motion on (playwright.config.mjs).
+  const play = lab.locator('button[data-live="play"]');
+  if ((await play.textContent()) === "Play") await play.click();
+  await expect(play).toHaveText("Pause");
+  const written = lab.locator(".llab-summary .strip > div", { hasText: "writes done" }).locator(".v");
+  const append = lab.locator('button[data-live="append"]');
+  const wait = { timeout: 30_000 };
+  await expect(append).toBeEnabled(wait);
+  await append.click();
+  await expect(written).toHaveText("1", wait);
+  await lab.locator('button[data-live="crash:3"]').click();
+  await expect(lab.locator('[data-host="3"] .chip-status')).toHaveText("down");
+  await expect(append).toBeEnabled(wait);
+  await append.click();
+  await expect(written).toHaveText("2", wait);
+  await lab.locator('button[data-live="restart:3"]').click();
+  await expect(lab.locator('[data-host="3"] .chip-status')).toHaveText("up");
+  await expect(lab.locator('button[data-live="read"]')).toBeEnabled(wait);
+  await lab.locator('button[data-live="read"]').click();
+  await expect(lab.locator(".llab-records li")).toHaveText(["record 0", "record 1"], wait);
+  await lab.locator('button[data-live="roll"]').click();
+  await expect(lab.locator('.llab-segments [data-segment="2"] .chip-status')).toHaveText("in force", wait);
+  await expect(lab.locator('.llab-segments [data-segment="1"] .chip-status')).not.toHaveText("in force");
+  w.check();
+});
+
 test("/journal/segments/: a refused move names the guard of the record", async ({ page }) => {
   const w = watch(page);
   await page.goto("journal/segments/#lab=records-retire");

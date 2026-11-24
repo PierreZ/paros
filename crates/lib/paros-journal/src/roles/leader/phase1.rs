@@ -32,6 +32,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use paros_consensus::membership::AcceptorConfig;
+use paros_consensus::proposer::{
+    PromiseFold, PromiseTally, merge_report, qualifying_answers, slot_decidable,
+};
 use paros_consensus::{Ballot, NodeId, Slot};
 
 use super::ReadSegment;
@@ -46,9 +50,6 @@ struct Report {
     faulty: BTreeMap<Slot, Ballot>,
     /// The dropped ranges, `start .. below` by start.
     dropped: BTreeMap<Slot, Slot>,
-    /// The slot the next page starts at.
-    cursor: Slot,
-    complete: bool,
 }
 
 /// What a closed Phase 1 gives the leader.
@@ -70,7 +71,11 @@ pub struct Phase1Close {
 pub struct Phase1 {
     ballot: Ballot,
     from: Slot,
+    /// The report of each acceptor asked: its keys are the asked set.
     reports: BTreeMap<NodeId, Report>,
+    /// The core's paging tally: the cursor of each acceptor mid-suffix,
+    /// and the acceptors that answered completely.
+    tally: PromiseTally<NodeId>,
 }
 
 impl Phase1 {
@@ -83,20 +88,13 @@ impl Phase1 {
             segments.iter().flat_map(ReadSegment::acceptors).collect();
         let reports = acceptors
             .into_iter()
-            .map(|node| {
-                (
-                    node,
-                    Report {
-                        cursor: from,
-                        ..Report::default()
-                    },
-                )
-            })
+            .map(|node| (node, Report::default()))
             .collect();
         Self {
             ballot,
             from,
             reports,
+            tally: PromiseTally::new(ballot, from, BTreeSet::new()),
         }
     }
 
@@ -111,57 +109,66 @@ impl Phase1 {
     #[must_use]
     pub fn wanted(&self) -> Vec<(NodeId, Slot)> {
         self.reports
-            .iter()
-            .filter(|(_, report)| !report.complete)
-            .map(|(node, report)| (*node, report.cursor))
+            .keys()
+            .filter(|node| !self.tally.answered().contains(node))
+            .map(|node| (*node, self.tally.cursor(*node)))
             .collect()
     }
 
-    /// Fold one page from `from` that starts at `at`. Returns the slot of
-    /// the next page when the acceptor has more. A page from an acceptor
-    /// that Phase 1 does not ask, at another cursor, or after its last page
-    /// is not folded.
+    /// Fold one page from `from` that starts at `at`, by the core's paging
+    /// rule ([`PromiseTally`]). A page from an acceptor that Phase 1 does
+    /// not ask, at another cursor, after its last page, or of a shape that
+    /// the rule refuses (a slot below its start or in both maps, more than a
+    /// page of entries, a cursor that does not move past its last entry, or
+    /// a dropped range with no slot) is not folded: [`PromiseFold::Ignored`],
+    /// and the acceptor is asked again from the same cursor.
     ///
     /// # Panics
     ///
-    /// When a page carries a slot below its start, or a cursor at or below
-    /// it.
-    pub fn fold(&mut self, from: NodeId, at: Slot, page: PromisePage) -> Option<Slot> {
-        let report = self.reports.get_mut(&from)?;
-        if report.complete || report.cursor != at {
-            return None;
+    /// When an assertion of the core's tally on its own state fails: a
+    /// programmer error, never a page that a peer sends.
+    pub fn fold(&mut self, from: NodeId, at: Slot, page: PromisePage) -> PromiseFold {
+        let Some(report) = self.reports.get_mut(&from) else {
+            return PromiseFold::Ignored;
+        };
+        let accepted =
+            self.tally
+                .accepts(from, self.ballot, at, &page.votes, &page.faulty, page.next);
+        if !accepted || page.dropped.iter().any(|(start, below)| start >= below) {
+            return PromiseFold::Ignored;
         }
-        assert!(
-            page.votes
-                .keys()
-                .chain(page.faulty.keys())
-                .all(|s| *s >= at),
-            "a page starts at its cursor"
-        );
         report.votes.extend(page.votes);
         report.faulty.extend(page.faulty);
         for (start, below) in page.dropped {
             ranges::add(&mut report.dropped, start, below);
         }
-        if let Some(next) = page.next {
-            assert!(next > at, "a cursor moves forward");
-            report.cursor = next;
-            Some(next)
-        } else {
-            report.complete = true;
-            None
-        }
+        let fold = self.tally.close_page(from, page.next);
+        assert!(
+            fold != PromiseFold::Ignored,
+            "a page that the tally accepts folds"
+        );
+        assert!(
+            (fold == PromiseFold::Answered) == self.tally.answered().contains(&from),
+            "an acceptor answered completely exactly when its last page folds"
+        );
+        fold
     }
 
     /// The acceptors that answered completely: the reports that
     /// [`Self::close`] reads.
+    ///
+    /// # Panics
+    ///
+    /// When an acceptor that Phase 1 does not ask answered: a programmer
+    /// error, since [`Self::fold`] ignores its pages.
     #[must_use]
     pub fn complete(&self) -> BTreeSet<NodeId> {
-        self.reports
-            .iter()
-            .filter(|(_, report)| report.complete)
-            .map(|(node, _)| *node)
-            .collect()
+        let complete = self.tally.answered().clone();
+        assert!(
+            complete.iter().all(|node| self.reports.contains_key(node)),
+            "only an acceptor that Phase 1 asks answers completely"
+        );
+        complete
     }
 
     /// The outcome of Phase 1, once the complete answers hold a Phase-1
@@ -177,12 +184,9 @@ impl Phase1 {
             return None;
         }
         let complete = self.complete();
-        let covered = segments.iter().all(|segment| {
-            segment
-                .columns
-                .iter()
-                .all(|c| c.has_phase1_quorum(&complete))
-        });
+        let covered = prior(segments)
+            .iter()
+            .all(|column| column.has_phase1_quorum(&complete));
         if !covered {
             return None;
         }
@@ -195,14 +199,10 @@ impl Phase1 {
         let skip = |slot: Slot| ranges::contains(&dropped, slot);
         for node in &complete {
             let report = &self.reports[node];
-            // The highest ballot at each slot. Two votes at one ballot carry
-            // one command (P2c), so a tie keeps either.
-            for (slot, vote) in &report.votes {
-                top.entry(*slot)
-                    .and_modify(|held| {
-                        *held = std::cmp::max_by_key(held.clone(), vote.clone(), |v| v.0);
-                    })
-                    .or_insert_with(|| vote.clone());
+            // The highest ballot at each slot: the core's P2c merge, which
+            // asserts that two votes at one ballot carry one command.
+            for (slot, (ballot, command)) in &report.votes {
+                merge_report(&mut top, *slot, *ballot, command.clone());
             }
             for (slot, ballot) in &report.faulty {
                 rotted
@@ -276,8 +276,8 @@ impl Phase1 {
     /// `slot` among the complete answers. An answer qualifies unless it is
     /// a faulty vote above the threshold ([`Self::qualifying`]). The slot is
     /// decided when the qualifying answers hold a Phase-1 quorum of every
-    /// column of every segment read, as the core's tally asks a quorum of
-    /// every configuration: then the readable vote at the threshold is safe,
+    /// column of every segment read (the core's `slot_decidable`, each
+    /// column a configuration of its own): then the readable vote at the threshold is safe,
     /// or a `Noop` when no answer holds one. `None`: the slot waits for more
     /// answers, or for a replica that applied it.
     ///
@@ -287,11 +287,19 @@ impl Phase1 {
     #[must_use]
     pub fn decide(&self, segments: &[ReadSegment], slot: Slot) -> Option<Command> {
         assert!(!segments.is_empty(), "Phase 1 reads at least one segment");
-        let qualifying = self.qualifying(slot);
         let top = self.top(slot);
-        let decided = segments
-            .iter()
-            .all(|s| s.columns.iter().all(|c| c.has_phase1_quorum(&qualifying)));
+        let complete = self.complete();
+        let reporters = self.reporters(slot);
+        assert!(
+            reporters.keys().all(|node| complete.contains(node)),
+            "only a complete answer reports a faulty vote to the tally"
+        );
+        let decided = slot_decidable(
+            &prior(segments),
+            &complete,
+            Some(&reporters),
+            top.map(|(ballot, _)| *ballot),
+        );
         probe!(
             sometimes,
             decided && top.is_none(),
@@ -316,21 +324,21 @@ impl Phase1 {
     pub fn qualifying(&self, slot: Slot) -> BTreeSet<NodeId> {
         let complete = self.complete();
         let threshold = self.top(slot).map(|(ballot, _)| *ballot);
-        let qualifying: BTreeSet<NodeId> = complete
-            .iter()
-            .copied()
-            .filter(|node| {
-                self.reports[node]
-                    .faulty
-                    .get(&slot)
-                    .is_none_or(|ballot| threshold.is_some_and(|t| *ballot <= t))
-            })
-            .collect();
+        let qualifying = qualifying_answers(&complete, Some(&self.reporters(slot)), threshold);
         assert!(
             qualifying.is_subset(&complete),
             "only a complete answer qualifies"
         );
         qualifying
+    }
+
+    /// The faulty ballot at `slot` of each complete answer that holds one:
+    /// the reporters of the core's tally.
+    fn reporters(&self, slot: Slot) -> BTreeMap<NodeId, Ballot> {
+        self.complete()
+            .into_iter()
+            .filter_map(|node| Some((node, *self.reports[&node].faulty.get(&slot)?)))
+            .collect()
     }
 
     /// The highest readable vote at `slot` among the complete answers.
@@ -375,6 +383,19 @@ impl Phase1 {
         assert!(end >= start, "the end is at or above the start");
         Some(end)
     }
+}
+
+/// The configurations whose Phase-1 quorum a decision needs: each column of
+/// each segment read, as its own configuration, once. A column that two
+/// segments share is one configuration: its quorum is asked once.
+fn prior(segments: &[ReadSegment]) -> Vec<AcceptorConfig<NodeId>> {
+    let mut prior: Vec<AcceptorConfig<NodeId>> = Vec::new();
+    for column in segments.iter().flat_map(|segment| &segment.columns) {
+        if !prior.contains(column) {
+            prior.push(column.clone());
+        }
+    }
+    prior
 }
 
 #[cfg(test)]

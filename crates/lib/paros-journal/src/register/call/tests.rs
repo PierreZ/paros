@@ -214,3 +214,99 @@ fn a_successor_of_the_same_generation_does_not_move_the_operation() {
     );
     assert!(matches!(call.phase(), CallPhase::Reading(_)));
 }
+
+/// Run `change` as operation `round` at every member of `set`: it is done.
+fn done(
+    pool: &mut BTreeMap<MatchmakerId, RegisterMember>,
+    set: &MatchmakerSet,
+    round: u64,
+    change: Change,
+) -> RegisterValue {
+    let mut call = RegisterCall::new(op(round), set.clone(), change);
+    match run(&mut call, pool, &[1, 2, 3]).pop() {
+        Some(CallStep::Done(value)) => value,
+        other => panic!("the change is done: {other:?}"),
+    }
+}
+
+/// A leader's seal reaches one member only, and its answer is lost. A
+/// replica's boundary write reads that member, finds the half-written seal
+/// and writes it on at a majority together with the boundary state. The
+/// leader asks its seal again: the register holds its own end, so the seal
+/// is ok again and done, never refused (the leader would stop for good).
+#[test]
+fn a_seal_asked_again_over_its_own_half_write_is_done() {
+    use crate::command::Leader;
+    use crate::fold::BoundaryState;
+    use crate::segment::{SegmentId, SegmentRecord};
+    use paros_consensus::Slot;
+    use paros_consensus::journal::{LeaderUuid, Seq};
+
+    let first = set(0, &[1, 2, 3]);
+    let mut pool = members(&first, &[1, 2, 3]);
+    done(&mut pool, &first, 1, elect());
+    done(&mut pool, &first, 2, reshape(1, None));
+    done(&mut pool, &first, 3, reshape(1, Some(1)));
+    let seal = Change::Seal {
+        segment: SegmentId(1),
+        end: Slot(4),
+    };
+    let mut half = RegisterCall::new(op(4), first.clone(), seal.clone());
+    for (from, reply) in deliver(&mut pool, half.requests(), &[1, 2, 3]) {
+        half.on_reply(from, reply);
+    }
+    assert!(matches!(half.phase(), CallPhase::Writing { .. }));
+    for (from, reply) in deliver(&mut pool, half.requests(), &[1]) {
+        assert_eq!(half.on_reply(from, reply), CallStep::Pending);
+    }
+    let state = BoundaryState {
+        next_seq: Seq(2),
+        first_seq: Seq(0),
+        leader: Leader::multi(LeaderUuid(7)),
+    };
+    let mut bound = RegisterCall::new(
+        op(5),
+        first.clone(),
+        Change::Boundary {
+            segment: SegmentId(1),
+            state,
+        },
+    );
+    match run(&mut bound, &mut pool, &[1, 2]).pop() {
+        Some(CallStep::Done(value)) => assert_eq!(
+            value
+                .segment(SegmentId(1))
+                .and_then(SegmentRecord::boundary),
+            Some(state)
+        ),
+        other => panic!("the boundary write is done: {other:?}"),
+    }
+    let value = done(&mut pool, &first, 6, seal);
+    assert_eq!(
+        value.segment(SegmentId(1)).and_then(SegmentRecord::end),
+        Some(Slot(4))
+    );
+    // Without the boundary write, a seal asked again over its own half
+    // write is done too.
+    let mut pool = members(&first, &[1, 2, 3]);
+    done(&mut pool, &first, 1, elect());
+    done(&mut pool, &first, 2, reshape(1, None));
+    done(&mut pool, &first, 3, reshape(1, Some(1)));
+    let seal = Change::Seal {
+        segment: SegmentId(1),
+        end: Slot(4),
+    };
+    let mut half = RegisterCall::new(op(4), first.clone(), seal.clone());
+    for (from, reply) in deliver(&mut pool, half.requests(), &[1, 2, 3]) {
+        half.on_reply(from, reply);
+    }
+    for (from, reply) in deliver(&mut pool, half.requests(), &[1]) {
+        half.on_reply(from, reply);
+    }
+    let mut again = RegisterCall::new(op(5), first, seal);
+    let steps = run(&mut again, &mut pool, &[1, 2]);
+    assert!(
+        matches!(steps.last(), Some(CallStep::Done(value)) if value.segment(SegmentId(1)).and_then(SegmentRecord::end) == Some(Slot(4))),
+        "{steps:?}"
+    );
+}

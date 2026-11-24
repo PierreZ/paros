@@ -561,6 +561,37 @@ steps depend on the rule:
 - **A controller** acts on its own election write and its own reshape call. A refusal for the
   term tells it to stop (`grid-controller/`).
 
+#### A change asked again
+
+**A change that the value already holds is "ok" again, and the operation writes the value
+again** (2026-11-24, found by #1510 (full journal examples); `specs/tla/segment-records/`, checks
+`again` and `again_retire`, control `again_refuse`). A caller whose answer was lost (a lost
+request, a lost reply, or a write that only a minority took) asks the same change again. Its
+first write may be at a minority, and a later operation that read it may have carried it on
+under its own change: a replica's boundary state over a seal, a bind, an election. The second
+ask reads that write. If the guard refused it there, the caller would take its own write for a
+loss: a first leader would stop for good on its own seal end, and a leader would ask a retire for
+ever. So each of these changes is "ok" on a value that holds it, and the write of the value
+again makes the first write done:
+
+- **`Seal`** of the end that the record holds, in any later state of the record.
+- **`Boundary`** of the boundary state that the record holds.
+- **`Retire`** of a retired record, when its own guard holds (`F + 1` holders, no damage).
+- **`Trim`** of a trimmed record, when its floor is at or above the last `seq`.
+
+`Reshape` and `Rereplicate` were already "ok" again (their guards); a `Bind` of the bound
+ballot is "ok" again while the newest segment is the one it is bound to, and refused once a
+later segment opened, which stops the leader as it must; `Elect` is never refused, and `Confirm`
+writes the value again by its definition. A sealing leader that sees its own segment sealed by a
+later leader stops, whatever the end of the segment before. A refusal of a change
+asked again so says that the value holds another change: a first leader stops only on another
+end (`SealRefusedOnOther`), and a leader stops asking a retire only on a record that is not
+retired (`RetireRefusedOnOther`, check `retire_again`, control `retire_again_refuse`). The rule changes no done value: the second ask writes the value that
+the first write gave, so `SealOnce`, `Carried` and `NoBackward` hold as before. In
+`journal-state/`, the second ask is the step `EndDone` (or `BoundDone`) that the model already
+has. `journal-sim`'s whole walk runs the register on three matchmakers whose write one member
+can take, and judges every refusal of a change asked again (`AGAIN`, mutant `RefuseAgain`).
+
 #### Quorum everywhere
 
 Each write of the register waits for a matchmaker majority only (§J5.1,

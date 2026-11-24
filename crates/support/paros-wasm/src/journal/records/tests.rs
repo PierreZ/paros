@@ -23,11 +23,17 @@ fn each_guard_names_its_refusal() {
     lab.make("seal:1");
     assert!(refused(&mut lab, "retire:1:2").contains("NoBoundary"));
     lab.make("boundary:1");
-    assert!(refused(&mut lab, "boundary:1").contains("BoundaryWritten"));
+    let before = lab.view().world;
+    lab.make("boundary:1");
+    assert_eq!(
+        lab.view().world.records[0].state,
+        before.records[0].state,
+        "the same boundary state asked again is ok again and changes nothing"
+    );
     assert!(refused(&mut lab, "retire:1:1").contains("FewHolders"));
     assert!(refused(&mut lab, "trim:1").contains("FloorBelowEnd"));
     assert!(refused(&mut lab, "trim:2").contains("State: the record is in force"));
-    assert_eq!(lab.view().moves, 3, "a refused move is not a move");
+    assert_eq!(lab.view().moves, 4, "a refused move is not a move");
 }
 
 #[test]

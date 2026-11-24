@@ -65,8 +65,33 @@ use crate::types::{Ballot, Slot};
 /// Only the *merge* differs between the two (the election takes every slot,
 /// the probe only its still-blocked ones), so the merge stays with them and
 /// the rest lives here.
+///
+/// Public so that a Phase-1 tally outside the core pages its promises by the
+/// same rule: it knows a ballot, a first slot and a cursor for each sender,
+/// and no layout of the log.
+///
+/// ```
+/// use std::collections::{BTreeMap, BTreeSet};
+/// use paros_consensus::proposer::{PromiseFold, PromiseTally};
+/// use paros_consensus::{Ballot, NodeId, Slot};
+///
+/// let ballot = Ballot { round: 1, node: NodeId(0) };
+/// let mut tally = PromiseTally::new(ballot, Slot(0), BTreeSet::new());
+/// let votes = BTreeMap::from([(Slot(0), (ballot, "x"))]);
+/// let none = BTreeMap::new();
+/// // A first page at the first slot, with more to come.
+/// assert!(tally.accepts(NodeId(1), ballot, Slot(0), &votes, &none, Some(Slot(1))));
+/// assert_eq!(tally.close_page(NodeId(1), Some(Slot(1))), PromiseFold::Continue(Slot(1)));
+/// assert_eq!(tally.cursor(NodeId(1)), Slot(1));
+/// // A page at the old cursor is refused; the last page at the new one counts.
+/// let empty: BTreeMap<Slot, (Ballot, &str)> = BTreeMap::new();
+/// assert!(!tally.accepts(NodeId(1), ballot, Slot(0), &empty, &none, None));
+/// assert!(tally.accepts(NodeId(1), ballot, Slot(1), &empty, &none, None));
+/// assert_eq!(tally.close_page(NodeId(1), None), PromiseFold::Answered);
+/// assert!(tally.answered().contains(&NodeId(1)));
+/// ```
 #[derive(Clone, Debug)]
-struct PromiseTally<Id> {
+pub struct PromiseTally<Id> {
     /// The ballot this tally counts promises for.
     ballot: Ballot,
     /// First slot the `Prepare` covered; the cursor a first page must carry.
@@ -81,7 +106,13 @@ impl<Id: Copy + Ord> PromiseTally<Id> {
     /// A tally at `ballot` from `from_slot`, with `answered` already holding
     /// whoever answered before it opened (the candidate itself, or the
     /// election's promise quorum when a probe inherits it).
-    fn new(ballot: Ballot, from_slot: Slot, answered: BTreeSet<Id>) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error, never
+    /// an operating condition.
+    #[must_use]
+    pub fn new(ballot: Ballot, from_slot: Slot, answered: BTreeSet<Id>) -> Self {
         let tally = Self {
             ballot,
             from_slot,
@@ -114,7 +145,13 @@ impl<Id: Copy + Ord> PromiseTally<Id> {
     /// ballot, a sender not already done, and a page whose shape and cursor
     /// are what this sender owes next. Wire input, so a refusal is a `false`,
     /// never an assert.
-    fn accepts<V>(
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error, never
+    /// an operating condition.
+    #[must_use]
+    pub fn accepts<V>(
         &self,
         from: Id,
         ballot: Ballot,
@@ -126,32 +163,26 @@ impl<Id: Copy + Ord> PromiseTally<Id> {
         if self.ballot != ballot || self.answered.contains(&from) {
             return false;
         }
-        let expected = self
-            .promise_next
-            .get(&from)
-            .copied()
-            .unwrap_or(self.from_slot);
-        assert!(
-            expected >= self.from_slot,
-            "a sender's cursor never precedes the first slot"
-        );
+        let expected = self.cursor(from);
         promise_page_shape_valid(expected, accepted, faulty, from_slot, next_from_slot)
     }
 
     /// Steps 5 and 6: a page that carries a continuation cursor leaves the
-    /// sender mid-suffix; a terminal page marks it answered.
-    fn close_page(&mut self, from: Id, next_from_slot: Option<Slot>) -> PromiseFold {
+    /// sender mid-suffix; a terminal page marks it answered. The caller
+    /// closes only a page that [`Self::accepts`] took.
+    ///
+    /// # Panics
+    ///
+    /// If `from` already answered completely, or if `next_from_slot` does
+    /// not lie past the sender's cursor: a page that `accepts` refuses.
+    pub fn close_page(&mut self, from: Id, next_from_slot: Option<Slot>) -> PromiseFold {
         // Precondition, paired with `accepts`: only a sender still owing a
         // page reaches the close.
         assert!(
             !self.answered.contains(&from),
             "a page closes for a sender still owing one"
         );
-        let previous = self
-            .promise_next
-            .get(&from)
-            .copied()
-            .unwrap_or(self.from_slot);
+        let previous = self.cursor(from);
         let fold = if let Some(next) = next_from_slot {
             assert!(next > previous, "a continuation cursor only advances");
             self.promise_next.insert(from, next);
@@ -161,8 +192,69 @@ impl<Id: Copy + Ord> PromiseTally<Id> {
             self.answered.insert(from);
             PromiseFold::Answered
         };
+        // Postconditions, one for each outcome: a continuation leaves the
+        // sender at the new cursor, a last page counts its answer.
+        assert!(
+            !matches!(fold, PromiseFold::Continue(next) if self.promise_next.get(&from) != Some(&next)),
+            "a continuation leaves the sender at its new cursor"
+        );
+        assert!(
+            fold != PromiseFold::Answered || self.answered.contains(&from),
+            "a last page counts the sender's answer"
+        );
         self.assert_invariants();
         fold
+    }
+
+    /// The senders whose complete answer the tally counted, with whoever
+    /// answered before it opened.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error, never
+    /// an operating condition.
+    #[must_use]
+    pub fn answered(&self) -> &BTreeSet<Id> {
+        // An answered sender owes no page, so it holds no cursor.
+        assert!(
+            self.answered
+                .iter()
+                .all(|id| !self.promise_next.contains_key(id)),
+            "an answered sender holds no cursor"
+        );
+        assert!(
+            self.promise_next
+                .values()
+                .all(|next| *next > self.from_slot),
+            "a sender mid-suffix holds a cursor past the first slot"
+        );
+        &self.answered
+    }
+
+    /// The slot the next page of `from` must start at: its continuation
+    /// cursor when it is mid-suffix, else the first slot. Meaningless for a
+    /// sender that already answered, whose pages the tally refuses.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error, never
+    /// an operating condition.
+    #[must_use]
+    pub fn cursor(&self, from: Id) -> Slot {
+        let cursor = self
+            .promise_next
+            .get(&from)
+            .copied()
+            .unwrap_or(self.from_slot);
+        assert!(
+            cursor >= self.from_slot,
+            "a sender's cursor never precedes the first slot"
+        );
+        assert!(
+            cursor == self.from_slot || !self.answered.contains(&from),
+            "only a sender mid-suffix holds a cursor past the first slot"
+        );
+        cursor
     }
 }
 
@@ -242,7 +334,30 @@ pub struct Phase1Outcome<Id, V> {
 /// ballot `> threshold` on some member of every Q2 — so an acceptor's answer
 /// qualifies when it reported either nothing (`none`) or a record at ballot
 /// `<= threshold`.
-fn qualifying_answers<Id: Copy + Ord>(
+///
+/// A public function so that a Phase-1 tally outside the core, over its own
+/// reports, applies the same rule: it names no slot range and no layout of
+/// the configurations.
+///
+/// ```
+/// use std::collections::{BTreeMap, BTreeSet};
+/// use paros_consensus::proposer::qualifying_answers;
+/// use paros_consensus::{Ballot, NodeId};
+///
+/// let b = |round| Ballot { round, node: NodeId(9) };
+/// let answered = BTreeSet::from([NodeId(1), NodeId(2), NodeId(3)]);
+/// // Node 2 holds a faulty record at ballot 4, above the best readable 3.
+/// let reporters = BTreeMap::from([(NodeId(2), b(4)), (NodeId(3), b(3))]);
+/// let qualifying = qualifying_answers(&answered, Some(&reporters), Some(b(3)));
+/// assert_eq!(qualifying, BTreeSet::from([NodeId(1), NodeId(3)]));
+/// ```
+///
+/// # Panics
+///
+/// When an assertion on its own postcondition fails: a programmer error,
+/// never an operating condition.
+#[must_use]
+pub fn qualifying_answers<Id: Copy + Ord>(
     answered: &BTreeSet<Id>,
     reporters: Option<&BTreeMap<Id, Ballot>>,
     threshold: Option<Ballot>,
@@ -302,7 +417,31 @@ fn member_union<'a, Id: Copy + Ord + 'a>(
 /// `Noop` while the departed member holding its only clean copy is down,
 /// and the sweep goes red on two values decided for one slot (witness
 /// 9147512841470386050).
-fn slot_decidable<Id: Copy + Ord>(
+///
+/// Public for a Phase-1 tally outside the core, as [`qualifying_answers`]:
+/// a caller passes each configuration whose Phase-1 quorum it needs (each
+/// column of a grid as its own configuration, never their union).
+///
+/// ```
+/// use std::collections::{BTreeMap, BTreeSet};
+/// use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+/// use paros_consensus::proposer::slot_decidable;
+/// use paros_consensus::{Ballot, NodeId};
+///
+/// let b = |round| Ballot { round, node: NodeId(9) };
+/// let config = AcceptorConfig::new(vec![NodeId(1), NodeId(2), NodeId(3)], QuorumSystem::Majority);
+/// let reporters = BTreeMap::from([(NodeId(2), b(4))]);
+/// let two = BTreeSet::from([NodeId(1), NodeId(2)]);
+/// assert!(!slot_decidable(&[config.clone()], &two, Some(&reporters), Some(b(3))));
+/// let three = BTreeSet::from([NodeId(1), NodeId(2), NodeId(3)]);
+/// assert!(slot_decidable(&[config], &three, Some(&reporters), Some(b(3))));
+/// ```
+///
+/// # Panics
+///
+/// When an assertion of [`qualifying_answers`] fails: a programmer error.
+#[must_use]
+pub fn slot_decidable<Id: Copy + Ord>(
     prior: &[AcceptorConfig<Id>],
     answered: &BTreeSet<Id>,
     reporters: Option<&BTreeMap<Id, Ballot>>,
@@ -350,10 +489,26 @@ fn promise_page_shape_valid<V>(
 /// would let two proposers with different arrival orders select different
 /// values at one ballot, which is the one thing the rule exists to prevent.
 ///
+/// Public for a Phase-1 tally outside the core, as [`qualifying_answers`].
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use paros_consensus::proposer::merge_report;
+/// use paros_consensus::{Ballot, NodeId, Slot};
+///
+/// let b = |round| Ballot { round, node: NodeId(9) };
+/// let mut tally = BTreeMap::new();
+/// merge_report(&mut tally, Slot(0), b(2), "x");
+/// merge_report(&mut tally, Slot(0), b(1), "y");
+/// merge_report(&mut tally, Slot(0), b(3), "z");
+/// merge_report(&mut tally, Slot(0), b(3), "z");
+/// assert_eq!(tally[&Slot(0)], (b(3), "z"));
+/// ```
+///
 /// # Panics
 ///
 /// If two reports at one ballot disagree.
-fn merge_report<V: PartialEq>(
+pub fn merge_report<V: PartialEq>(
     tally: &mut BTreeMap<Slot, (Ballot, V)>,
     slot: Slot,
     ballot: Ballot,

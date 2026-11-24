@@ -309,7 +309,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `single_writer`, `multi_writer`; #1370 (journal examples)), the host's example:
   `cargo run -p paros-host --example coordinator` (#1410), the grid controller's example:
   `cargo run -p paros-journal-control --example <name>` (`controller`, `driver`), and the facade examples:
-  `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
+  `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`, `full_journal`)
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
   each one (the workflow rule "Composing crates have examples" below)
 - the doc examples: `cargo test --doc -p paros-consensus -p paros-journal-io` (nextest runs no
@@ -359,7 +359,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces --test journal_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - the site (`.github/workflows/pages.yml`, on pull requests that touch the site, `paros-wasm`,
-  `paros-consensus`, `paros-journal`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
+  `paros-consensus`, `paros-journal`, `paros-journal-io`, `paros-host`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
   build, the link check of the built site (`npm run check-links`) and the browser smoke test
   of its live parts (`nix develop .#site --command npm test`, Playwright and Chromium;
   `website/site/AGENTS.md`, "Tests")
@@ -818,7 +818,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   with its default features; it is where moonpool's storage and network get bundled, behind a
   feature, once the adapter exists (#1417 (the moonpool adapter on the generic host), in the layered parosd). Its examples (`examples/`) run a journal through
   `paros::` paths alone: `journal` in one process, `tokio_tasks` on three tokio tasks that talk
-  over channels (tokio is a dev-dependency only).
+  over channels (tokio is a dev-dependency only), `full_journal` every journal role (matchmakers, a
+  grid, leader, replicas, client) on six hosts of a multi-thread runtime, with a crash and a roll.
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
   segments, the walk of the matchmaker register across handovers, the walk of the journal
   roles, the walk of the generic driver of `paros-journal-io` on three processes, the walk of the
@@ -837,7 +838,7 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   `paros-consensus` only.
 - `crates/support/paros-wasm` — the site's wasm tools (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only; feature `journal`,
-  the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal` only.
+  the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal`, and the live journal of `/journal/live/` (every role on six hosts), on `paros-journal-io` too.
 - `crates/support/paros-authz-biscuit` — Biscuit tokens (#245 (Biscuit tokens)): root keys,
   offline mint and derive, and the verifier of a request with one Datalog policy. It stands
   alone: no other paros crate, no runtime, and no crate of the workspace uses it yet. It came

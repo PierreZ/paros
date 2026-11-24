@@ -51,7 +51,7 @@ Roles (pure tallies, no deployment knowledge):
 
 - `acceptor.rs` → `Acceptor` → the durable promise, accepted records, compaction floor, CTRL faulty set; emits its own writes.
 - `acceptor/retention.rs` → `Acceptor::truncate` / `trim_to` → the two floor-moving ops (a concern, not a role). Their TLA+ model, with the floor guard of `on_prepare` and the trim-point jump of `node/catch_up.rs`, is `specs/tla/truncation/` (#1017 (truncation model)); the floor as a fold of the journal (`Replica::compaction_target`) is in it too (#1216 (truncation model, part 2)).
-- `proposer.rs` → `Proposer` → the leader-side tallies; embeds the next five.
+- `proposer.rs` → `Proposer` → the leader-side tallies; embeds the next five. Its two Phase-1 rules are public functions, so a Phase-1 tally outside the core applies them: `merge_report` (the P2c merge) and `qualifying_answers` / `slot_decidable` (the CTRL tri-state tally). Its paging half, `PromiseTally` (the ballot, the first slot, a cursor for each sender mid-suffix and the senders that answered completely; `accepts`, `close_page`, `answered`, `cursor`), is public too, so that such a tally pages its promises by the same rule.
 - `proposer/election.rs` → Phase 1 → per-configuration completion, the P2c merge.
 - `proposer/probe.rs` → the CTRL repair probe (Stage 8) for slots a won election could not decide. The tri-state tally (`slot_decidable`) and the probe have their TLA+ model in `specs/tla/truncation/` (#1216 (truncation model, part 2)).
 - `proposer/recovery.rs` → `RecoveryPolicy::{Phase1Backed, Inherited}` → the bounded recovery a fresh leadership drains.

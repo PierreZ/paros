@@ -17,9 +17,11 @@ clippy and nextest cover both); each wasm bundle is built alone with `--no-defau
   `docs/analysis/play/game-plan.md`, a record.
 - `journal` → `src/journal.rs` + `src/journal/` → the fold lab of the site's `/journal/calls/`
   page (#1363 (journal fold lab)), and the register and record labs of `/journal/matchmakers/`
-  and `/journal/segments/` (#1364 (register and segment record lab)), and the step-through of
-  `/journal/segments/`, recorded from the journal roles (#1365 (reshape and seal step-through)). Depends on `paros-journal` only (which takes
-  `paros-consensus` with its features off). Bundle `paros_journal_lab`, staged into
+  and `/journal/segments/` (#1364 (register and segment record lab)), the step-through of
+  `/journal/segments/`, recorded from the journal roles (#1365 (reshape and seal step-through)),
+  and the live journal of `/journal/live/`. Depends on `paros-journal` (which takes
+  `paros-consensus` with its features off) and on `paros-journal-io` (its drivers and in-memory
+  backends, for the live journal only). Bundle `paros_journal_lab`, staged into
   `website/site/public/journal/wasm/`.
 - `playground` was removed on 2026-11-19 with the journal layers. It is at the tag
   `v0.2.0-alpha.1` (`docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md`).
@@ -187,6 +189,15 @@ decided slot, applied at once.
   each state line, seal end, boundary state and answer is read off the roles. Each register
   write is done at once (the register lab shows the reads and writes behind it), and each disk
   write is durable at once. `tests/journal_traces.rs` writes `website/site/src/traces/journal-seal.json`.
+- `src/journal/live.rs` → `Live`, `Move`, `View` (wasm `LiveJournal`) → the whole journal v1 on
+  six hosts, the scenario of the facade example `full_journal`: one `Driver` of `paros-journal-io`
+  per host on `MemStorage` (a crash drops the driver and keeps the disk), a `MemNetwork`, a
+  `ManualClock` that `step` advances, the register on three `RegisterMember`s (one operation at a
+  time, so no write stays at a minority), acceptors on a grid of two columns, three replicas per
+  segment (odd segments on hosts 1, 3, 5, even ones on 2, 4, 6), one leader per segment and the
+  pure client. The reader's moves: append, read, roll, crash and restart a host. The page is the
+  controller: it opens each segment with one register change. `live/tests.rs` plays the page's
+  scenario, a write that waits for a column, and every move on every host.
 
 ## Tests & gates
 
@@ -204,7 +215,7 @@ build; clippy and nextest cover the crate through the workspace.
 
 ## Deps & pins (`Cargo.toml`)
 
-`paxos`: `serde`, and `paros-consensus` (`default-features = false`, `serde`); `journal`: `serde`
-and `paros-journal`; on wasm32 also `serde_json`, the JSON of the exports. The native tests take `serde_json` as a dev-dependency.
+`paxos`: `serde`, and `paros-consensus` (`default-features = false`, `serde`); `journal`: `serde`,
+`paros-journal` and `paros-journal-io`; on wasm32 also `serde_json`, the JSON of the exports. The native tests take `serde_json` as a dev-dependency.
 wasm-only `wasm-bindgen = "=0.2.130"` (must equal the flake's `wasm-bindgen-cli`, bumped
 together) and `console_error_panic_hook`.

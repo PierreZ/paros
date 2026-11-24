@@ -71,12 +71,20 @@
 (*                 itself, or its own write of the same value).            *)
 (*                "read" = a control: it drops after a read that shows the *)
 (*                 mark.                                                   *)
+(* Again        : "ok" = a change asked again over a value that already    *)
+(*                 holds what it writes is ok, and writes the value again  *)
+(*                 (a seal of its own end, a retire of a retired record).  *)
+(*                 So a caller whose answer was lost, and whose write a    *)
+(*                 minority took, asks again and makes its write done.     *)
+(*                "refuse" = a control: the change is refused, so a first  *)
+(*                 leader stops on a refusal of its own end (check         *)
+(*                 `again_refuse`).                                        *)
 (* Faults       : the most machines that are down at one time, for good.   *)
 (* Start        : the record value before the first operation, so that a   *)
 (*                 check can start at a later point of the segment's life. *)
 EXTENDS Naturals, FiniteSets, Sequences
 
-CONSTANTS M0, T, Ops, Start, CloseFrom, FrozenServes, DropOn, Faults
+CONSTANTS M0, T, Ops, Start, CloseFrom, FrozenServes, DropOn, Again, Faults
 
 Pool  == M0 \cup T
 Gens  == {0, 1}
@@ -89,8 +97,19 @@ End(r) == r[2]
 Term(r) == r[3]
 Cfg(r) == r[4]
 
+\* The end that the seal of kind k writes.
+SealEnd(k) == IF k = "seal1" THEN 1 ELSE 2
+
+\* The value r already holds what the kind k writes: the change is asked
+\* again over its own write, or over a later value that kept it.
+Holds(k, r) ==
+    CASE k \in {"seal1", "seal2"} -> End(r) = SealEnd(k)
+      [] k = "retire"            -> St(r) = 2
+      [] OTHER                   -> FALSE
+
 \* The condition of the compare-and-set of the kind k on the value r.
 Pre(k, r) ==
+    IF Again = "ok" /\ Holds(k, r) THEN TRUE ELSE
     CASE k = "seal1"    -> St(r) = 0 /\ End(r) = 0
       [] k = "seal2"    -> St(r) = 0 /\ End(r) = 0
       [] k = "retire"   -> St(r) = 1
@@ -101,6 +120,7 @@ Pre(k, r) ==
 
 \* The value that the kind k writes over the value r.
 Post(k, r) ==
+    IF Holds(k, r) THEN r ELSE
     CASE k = "seal1"    -> <<1, 1, Term(r), Cfg(r)>>
       [] k = "seal2"    -> <<1, 2, Term(r), Cfg(r)>>
       [] k = "retire"   -> <<2, End(r), Term(r), Cfg(r)>>
@@ -328,6 +348,20 @@ SealOnce ==
         \A g \in Gens : \A Q \in Serving(g) :
             End(TopVal(Q)) \in {0, End(Wrote(i))}
 
+\* A first leader stops on a refused seal (`JournalLeader::refused`). It
+\* stops only on a read that holds another end, never on its own: a seal
+\* asked again after a lost answer finds its own write at a minority.
+SealRefusedOnOther ==
+    \A i \in Idx :
+        Ops[i] \in {"seal1", "seal2"} /\ ost[i] = "refused" =>
+            End(oseen[i]) # SealEnd(Ops[i])
+
+\* A leader asks its retire again after a lost answer (`JournalLeader`'s
+\* tick): a refused retire read a record that is not retired.
+RetireRefusedOnOther ==
+    \A i \in Idx :
+        Ops[i] = "retire" /\ ost[i] = "refused" => St(oseen[i]) # 2
+
 \* A deposed controller changes nothing: a reshape of term 1 is done only
 \* if no election that comes before it raised the term above 1.
 ReshapeFenced ==
@@ -342,6 +376,13 @@ RetireKept ==
 \* set and of the successor, holds the offload mark.
 DropKept ==
     dropped => \A g \in Gens : \A Q \in Serving(g) : St(TopVal(Q)) = 3
+
+\* Not a real invariant. TLC must find a trace: a seal asked again reads its
+\* own end and is done.
+NoAgain ==
+    ~ \E i \in Idx :
+        /\ Ops[i] \in {"seal1", "seal2"} /\ ost[i] = "done"
+        /\ End(oseen[i]) = SealEnd(Ops[i])
 
 \* Not a real invariant. TLC must find a trace: a write is done at each
 \* generation, and then the old acceptors retire or a replica drops its copy.

@@ -703,6 +703,48 @@ fn a_first_leader_whose_end_lost_stops() {
     assert_eq!(*leader.phase(), LeaderPhase::Stopped);
 }
 
+/// A sealing leader whose own seal a later operation made done, and whose
+/// own segment a later leader then sealed, stops on that value: its
+/// segment takes no more writes. Opening it would hold its callers'
+/// commands on acceptors that refuse them.
+#[test]
+fn a_sealing_leader_whose_segment_a_later_leader_sealed_stops() {
+    let value = two_segments();
+    let (mut leader, _) = campaign(&value, 2, 2, 0);
+    for node in [1, 2, 4, 5] {
+        leader.step(NodeId(node), promise(2, 0, page(&[], &[])));
+    }
+    assert_eq!(*leader.phase(), LeaderPhase::Sealing { end: Slot(0) });
+    let one = SegmentId(1);
+    let later = value
+        .apply(&Change::Seal {
+            segment: one,
+            end: Slot(0),
+        })
+        .and_then(|v| {
+            v.apply(&Change::Boundary {
+                segment: one,
+                state: crate::fold::BoundaryState::fresh(crate::command::Leader::Unset),
+            })
+        })
+        .and_then(|v| {
+            v.apply(&Change::Retire {
+                segment: one,
+                holders: 2,
+                unrepaired_damage: false,
+            })
+        })
+        .expect("segment 1 sealed at the leader's end, then retired");
+    let later = reshape(&later, &[&[7, 8, 9]])
+        .apply(&Change::Seal {
+            segment: SegmentId(2),
+            end: Slot(4),
+        })
+        .expect("a later leader sealed segment 2");
+    leader.observe(&later);
+    assert_eq!(*leader.phase(), LeaderPhase::Stopped);
+}
+
 #[test]
 fn a_refused_seal_stops_the_leader() {
     let value = two_segments();
