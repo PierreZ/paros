@@ -37,6 +37,7 @@ use paros_consensus::{Ballot, NodeId, Slot};
 use super::ReadSegment;
 use crate::command::Command;
 use crate::roles::message::PromisePage;
+use crate::roles::ranges;
 
 /// What one acceptor reported.
 #[derive(Clone, Debug, Default)]
@@ -140,8 +141,7 @@ impl Phase1 {
         report.votes.extend(page.votes);
         report.faulty.extend(page.faulty);
         for (start, below) in page.dropped {
-            let held = report.dropped.entry(start).or_insert(below);
-            *held = (*held).max(below);
+            ranges::add(&mut report.dropped, start, below);
         }
         if let Some(next) = page.next {
             assert!(next > at, "a cursor moves forward");
@@ -190,10 +190,9 @@ impl Phase1 {
         let mut rotted: BTreeMap<Slot, Ballot> = BTreeMap::new();
         let mut dropped: BTreeMap<Slot, Slot> = BTreeMap::new();
         for (start, below) in complete.iter().flat_map(|node| &self.reports[node].dropped) {
-            let held = dropped.entry(*start).or_insert(*below);
-            *held = (*held).max(*below);
+            ranges::add(&mut dropped, *start, *below);
         }
-        let skip = |slot: Slot| in_ranges(&dropped, slot);
+        let skip = |slot: Slot| ranges::contains(&dropped, slot);
         for node in &complete {
             let report = &self.reports[node];
             // The highest ballot at each slot. Two votes at one ballot carry
@@ -268,7 +267,7 @@ impl Phase1 {
     pub fn dropped_by(&self, slot: Slot) -> Option<NodeId> {
         self.complete()
             .into_iter()
-            .find(|node| in_ranges(&self.reports[node].dropped, slot))
+            .find(|node| ranges::contains(&self.reports[node].dropped, slot))
     }
 
     /// The tri-state tally of `slot` (CTRL, §J5.3, `specs/tla/journal-ctrl/`,
@@ -376,15 +375,6 @@ impl Phase1 {
         assert!(end >= start, "the end is at or above the start");
         Some(end)
     }
-}
-
-/// Whether `slot` is in one of the `ranges`, `start .. below` by start.
-#[must_use]
-pub fn in_ranges(ranges: &BTreeMap<Slot, Slot>, slot: Slot) -> bool {
-    ranges
-        .range(..=slot)
-        .next_back()
-        .is_some_and(|(_, below)| slot < *below)
 }
 
 #[cfg(test)]

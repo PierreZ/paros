@@ -51,6 +51,7 @@ pub mod acceptor;
 pub mod leader;
 pub mod message;
 pub mod proxy;
+pub(crate) mod ranges;
 pub mod replica;
 
 pub use acceptor::{AcceptorDisk, AcceptorEffect, AcceptorOp, JournalAcceptor};
