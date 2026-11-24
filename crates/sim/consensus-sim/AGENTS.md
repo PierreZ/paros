@@ -252,7 +252,8 @@ Test only: `publish = false`, never a dependency of another crate.
   walk of more than 200 kept events is skipped (TLC grows faster than the trace). The test fails
   when a rule stays unmet. About eight minutes in release on four CPUs. TLC (`tlc`) is in the nix
   dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
-  in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
+  in the two `traces` jobs of `rust.yml` for a change of the code (`refusals` and `rest`, in debug;
+  the edits in `trace-edits`), and in the `traces` job of the `TLA` workflow for
   a change of `specs/tla/` alone that reaches a folder of a trace spec (`scripts/ci-plan.py`). That job runs in four shards (`--partition count:i/4`), so each
   shard stays well under the 30 minutes of a CI job. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
   `TRACE_CHAOS`, `TRACE_MAX_EVENTS`, `TRACE_DUMP`.
