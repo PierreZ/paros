@@ -19,6 +19,9 @@ SealAgain == <<"seal1", "seal2", "seal1">>
 \* a minority, the retire reads it and makes it done, then the first leader
 \* asks its seal again.
 RetireAgain == <<"seal1", "retire", "seal1">>
+\* A retire asked again: the first retire is taken by a minority, or done
+\* with its answer lost, and the leader asks it again.
+RetireTwice == <<"retire", "retire">>
 \* The offload: the offloader marks the record, and a replica that drops its
 \* copy writes the mark again.
 Offload == <<"offload", "drop">>

@@ -69,7 +69,7 @@
 //!   (no lost acked write).
 //! - [`ALERTS`]: each alert of the controller is true of the machines as
 //!   they are, not as the view says.
-//! - [`AGAIN`]: a change asked again after its half write is never
+//! - [`AGAIN`]: a change asked again after no answer is never
 //!   refused on a value that holds it (§J3.4, "a change asked again"),
 //!   judged in the register ([`QuorumRegister`]).
 //! - [`HEAL_HELD`]: each node that a done heal added to the set of a
@@ -131,7 +131,7 @@ use paros_journal_io::{
 };
 
 pub use crate::backend::AGAIN;
-use crate::backend::{Again, Disk, LossyRegister, Lost, QuorumRegister, Wire};
+use crate::backend::{Again, Disk, Fault, LossyRegister, Lost, QuorumRegister, Wire};
 use crate::oracle::{Truth, as_written, label};
 
 /// Oracle: one command is chosen at each slot of a journal.
@@ -167,10 +167,11 @@ pub mod reach {
     /// A machine's register change wrote at one member only, and got no
     /// answer.
     pub const HALF: &str = "whole journal: a register write reached one member only";
-    /// A change asked again found its own half write, and was done.
+    /// A change asked again after no answer found its own write, and was
+    /// done.
     pub const AGAIN_OWN: &str = "whole journal: a change asked again met its own half write";
-    /// A change asked again found its half write carried on by another
-    /// operation, and was done.
+    /// A change asked again after no answer found a later write that holds
+    /// it, and was done.
     pub const AGAIN_CARRIED: &str = "whole journal: a change asked again met a carried half write";
     /// One commit held the batches of two journals.
     pub const TWO_JOURNALS: &str = "whole journal: one commit held the batches of two journals";
@@ -384,7 +385,7 @@ fn lost_change(lost: Lost) {
 }
 
 /// [`reach::AGAIN_OWN`] and [`reach::AGAIN_CARRIED`] on each change asked
-/// again after its half write, and done.
+/// again after no answer, and done.
 fn asked_again(again: Again) {
     sometimes!(again == Again::Own, reach::AGAIN_OWN);
     sometimes!(again == Again::Carried, reach::AGAIN_CARRIED);
@@ -2259,11 +2260,11 @@ impl WholeModel {
         if self.mutant == WholeMutant::LyingDisk {
             machine.disk.arm_lie();
         } else if cx.rng().chance(1, 3) {
-            let how = *cx
+            let fault = *cx
                 .rng()
-                .pick(&[Lost::Request, Lost::Reply(true), Lost::Half])
+                .pick(&[Fault::Request, Fault::Reply, Fault::Half])
                 .expect("three ways");
-            machine.register.arm(how);
+            machine.register.arm(fault);
         } else {
             machine.disk.arm(cx.rng().chance(1, 2));
         }

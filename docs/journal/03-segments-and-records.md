@@ -579,10 +579,14 @@ again makes the first write done:
 - **`Retire`** of a retired record, when its own guard holds (`F + 1` holders, no damage).
 - **`Trim`** of a trimmed record, when its floor is at or above the last `seq`.
 
-`Bind`, `Reshape` and `Rereplicate` were already "ok" again (§J3.4, their guards); `Elect` is
-never refused, and `Confirm` writes the value again by its definition. A refusal of a change
+`Reshape` and `Rereplicate` were already "ok" again (their guards); a `Bind` of the bound
+ballot is "ok" again while the newest segment is the one it is bound to, and refused once a
+later segment opened, which stops the leader as it must; `Elect` is never refused, and `Confirm`
+writes the value again by its definition. A sealing leader that sees its own segment sealed by a
+later leader stops, whatever the end of the segment before. A refusal of a change
 asked again so says that the value holds another change: a first leader stops only on another
-end (`SealRefusedOnOther`). The rule changes no done value: the second ask writes the value that
+end (`SealRefusedOnOther`), and a leader stops asking a retire only on a record that is not
+retired (`RetireRefusedOnOther`, check `retire_again`, control `retire_again_refuse`). The rule changes no done value: the second ask writes the value that
 the first write gave, so `SealOnce`, `Carried` and `NoBackward` hold as before. In
 `journal-state/`, the second ask is the step `EndDone` (or `BoundDone`) that the model already
 has. `journal-sim`'s whole walk runs the register on three matchmakers whose write one member

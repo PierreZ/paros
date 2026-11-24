@@ -356,6 +356,12 @@ SealRefusedOnOther ==
         Ops[i] \in {"seal1", "seal2"} /\ ost[i] = "refused" =>
             End(oseen[i]) # SealEnd(Ops[i])
 
+\* A leader asks its retire again after a lost answer (`JournalLeader`'s
+\* tick): a refused retire read a record that is not retired.
+RetireRefusedOnOther ==
+    \A i \in Idx :
+        Ops[i] = "retire" /\ ost[i] = "refused" => St(oseen[i]) # 2
+
 \* A deposed controller changes nothing: a reshape of term 1 is done only
 \* if no election that comes before it raised the term above 1.
 ReshapeFenced ==

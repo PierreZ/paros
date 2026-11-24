@@ -12,6 +12,8 @@ seal                 pass       ci
 # and after a retire carried the first write.
 again                pass       ci
 again_retire         pass       ci
+# A retire asked again after a lost answer, from a sealed record.
+retire_again         pass       ci
 # The offload mark, and a replica that writes it again before it drops.
 offload              pass       ci
 # Two elections, then a reshape of the deposed controller of term 1.
@@ -30,3 +32,5 @@ drop_read            violation  ci
 # A seal asked again over its own write is refused: the leader stops on its
 # own end.
 again_refuse         violation  ci
+# A retire asked again over a retired record is refused.
+retire_again_refuse  violation  ci

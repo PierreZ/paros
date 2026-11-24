@@ -221,24 +221,49 @@ pub enum Lost {
     Half,
 }
 
-/// A change asked again after its write was half done, and done.
+/// A fault that a walk arms on a process's way to the register, for its
+/// next change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    /// The request is lost: the change does not take place.
+    Request,
+    /// The reply is lost: the change takes place or is refused, and the
+    /// process hears nothing.
+    Reply,
+    /// The write reaches one member only, and the process hears nothing.
+    Half,
+}
+
+/// How the walk's register runs the write of one change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// A majority takes it, and its caller hears the answer.
+    Answered,
+    /// A majority takes it, and its caller hears nothing.
+    Unanswered,
+    /// One member takes it, and its caller hears nothing.
+    Half,
+}
+
+/// A change asked again after a write of it got no answer, and done.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Again {
-    /// Its read found its own half write.
+    /// Its read found its own first write.
     Own,
-    /// Its read found its half write carried on by a later operation (a
-    /// replica's boundary state over a seal, a bind, an election).
+    /// Its read found a later write that holds it: its first write carried
+    /// on by another operation (a replica's boundary state over a seal, a
+    /// bind, an election), or the same change of another caller.
     Carried,
 }
 
-/// Oracle of the register: a change asked again over a value that already
-/// holds what it writes is never refused (§J3.4, "a change asked again").
+/// Oracle of the register: a change asked again after a write of it got
+/// no answer, over a value that already holds what it writes, is never
+/// refused (§J3.4, "a change asked again").
 /// A refusal would tell its caller that its write lost, and a first leader
 /// would stop for good on its own seal end.
 pub const AGAIN: &str = "register: a change asked again over its own write is never refused";
 
-/// The faults that a walk arms on a process's way to the register, for its
-/// next change.
+/// The faults armed for a process's next change.
 #[derive(Clone, Copy, Debug, Default)]
 struct RegisterFaults {
     /// The request is lost: the change does not take place.
@@ -255,8 +280,9 @@ struct RegisterFaults {
 struct Members {
     at: BTreeMap<MatchmakerId, RegisterMember>,
     done: RegisterValue,
-    /// Each change whose write only one member took, with its operation:
-    /// its caller asks it again.
+    /// Each change whose write got no answer (one member took it, or a
+    /// majority did and the reply was lost), with its operation: its caller
+    /// asks it again.
     half: Vec<(Change, Ballot)>,
 }
 
@@ -264,7 +290,9 @@ struct Quorum {
     set: MatchmakerSet,
     journals: BTreeMap<JournalId, Members>,
     next: u64,
-    /// The walk's own draw of the members that an operation reaches.
+    /// The register's own draw of the members that an operation reaches,
+    /// a fixed sequence that the walk's seed does not move: which members
+    /// a change reaches follows the order of the changes only.
     draw: u64,
     /// The planted bug of [`AGAIN`]: a change asked again over a value
     /// that holds it is refused.
@@ -366,8 +394,9 @@ impl QuorumRegister {
             .map(|members| members.done.clone())
     }
 
-    /// Run `change` on the register of `journal`. With `half`, its write
-    /// reaches one member only and it answers [`ChangeError::NoAnswer`].
+    /// Run `change` on the register of `journal`, its write as `reach`
+    /// says. A write that one member takes answers
+    /// [`ChangeError::NoAnswer`].
     ///
     /// # Errors
     ///
@@ -378,12 +407,13 @@ impl QuorumRegister {
     ///
     /// On [`AGAIN`], or when an operation meets a conflict or a handover:
     /// the walk runs one operation at a time in one generation.
-    pub fn run(
+    fn run(
         &self,
         journal: JournalId,
         change: &Change,
-        half: bool,
+        reach: Reach,
     ) -> Result<RegisterValue, ChangeError> {
+        let half = reach == Reach::Half;
         let mut quorum = self.0.borrow_mut();
         let op = Ballot {
             round: quorum.next,
@@ -433,10 +463,10 @@ impl QuorumRegister {
         {
             return Err(refuse(register, change, &seen, refusal));
         }
-        let reach: &[MatchmakerId] = if half { &writers[..1] } else { &writers[..2] };
+        let takers: &[MatchmakerId] = if half { &writers[..1] } else { &writers[..2] };
         let mut done = None;
         for (to, request) in call.requests() {
-            if !reach.contains(&to) {
+            if !takers.contains(&to) {
                 continue;
             }
             let reply = register
@@ -470,13 +500,17 @@ impl QuorumRegister {
                 });
             }
         }
+        if reach == Reach::Unanswered && !register.half.iter().any(|(c, _)| c == change) {
+            register.half.push((change.clone(), op));
+        }
         register.done = done.clone();
         Ok(done)
     }
 }
 
 /// [`AGAIN`] on a refusal of `change` over `seen`: a change asked again
-/// after its half write is never refused on a value that holds it.
+/// after a write of it got no answer is never refused on a value that
+/// holds it.
 fn refuse(
     register: &Members,
     change: &Change,
@@ -533,7 +567,7 @@ impl Register for QuorumRegister {
         journal: JournalId,
         change: &Change,
     ) -> Result<RegisterValue, ChangeError> {
-        self.run(journal, change, false)
+        self.run(journal, change, Reach::Answered)
     }
 
     fn read(&mut self, journal: JournalId) -> Option<RegisterValue> {
@@ -566,14 +600,13 @@ impl LossyRegister {
         }
     }
 
-    /// Lose the next change as `how` says: its request, its reply
-    /// (`Lost::Reply`, whatever its flag), or its write past one member.
-    pub fn arm(&self, how: Lost) {
+    /// Lose the next change as `fault` says.
+    pub fn arm(&self, fault: Fault) {
         let mut faults = self.faults.borrow_mut();
-        match how {
-            Lost::Request => faults.lose_request = true,
-            Lost::Reply(_) => faults.lose_reply = true,
-            Lost::Half => faults.half = true,
+        match fault {
+            Fault::Request => faults.lose_request = true,
+            Fault::Reply => faults.lose_reply = true,
+            Fault::Half => faults.half = true,
         }
     }
 }
@@ -589,7 +622,14 @@ impl Register for LossyRegister {
             (self.lost)(Lost::Request);
             return Err(ChangeError::NoAnswer);
         }
-        let result = self.register.run(journal, change, faults.half);
+        let reach = if faults.half {
+            Reach::Half
+        } else if faults.lose_reply {
+            Reach::Unanswered
+        } else {
+            Reach::Answered
+        };
+        let result = self.register.run(journal, change, reach);
         if faults.half && result == Err(ChangeError::NoAnswer) {
             (self.lost)(Lost::Half);
             return result;

@@ -52,7 +52,7 @@ recorded-inputs 1
 retire-fence 18
 seal-chain 3
 seal-ctrl 7
-segment-records 5
+segment-records 10
 segment-replicas 19
 segment-truncate 29
 takeover 3
