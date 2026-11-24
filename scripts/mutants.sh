@@ -6,6 +6,7 @@
 #   scripts/mutants.sh --control [ARGS...]
 #   scripts/mutants.sh --journal-io [ARGS...]
 #   scripts/mutants.sh --host [ARGS...]
+#   scripts/mutants.sh --election [ARGS...]
 #
 # `--journal` runs the same two passes on paros-journal, judged by its unit
 # tests and by journal-sim (`.cargo/mutants-journal.toml`, then
@@ -23,6 +24,10 @@
 # `--host` runs one pass on paros-host, judged by its unit tests, by the unit
 # tests of paros-journal-io and by the driver walk of journal-sim
 # (`.cargo/mutants-host.toml`), with no second pass either.
+#
+# `--election` runs one pass on paros-election, judged by its unit tests and by
+# the election walk of journal-sim (`.cargo/mutants-election.toml`), with no
+# second pass either.
 #
 # ARGS go to the first pass and cut the set of mutants, for example
 # `--shard 3/48 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.
@@ -74,6 +79,11 @@ elif [ "${1:-}" = "--host" ]; then
   shift
   crate=paros-host
   first=.cargo/mutants-host.toml
+  second=
+elif [ "${1:-}" = "--election" ]; then
+  shift
+  crate=paros-election
+  first=.cargo/mutants-election.toml
   second=
 fi
 

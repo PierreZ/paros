@@ -342,8 +342,9 @@ These points are decided:
 write data to it, inspired from zookeeper client"; he chose option B of
 `/mnt/project-files/design/election-zookeeper-2026-11-24/proposal.md`, "the log is the server").
 The prior art is Zelos, the ZooKeeper clone that Facebook built over the Delos shared log
-(`docs/references/papers/delos-log-structured-protocols/`). The crate name, the record header key
-and the model folder name are **Open** until the crate is built; the model is `specs/tla/coord/`.
+(`docs/references/papers/delos-log-structured-protocols/`). The crate name (`paros-election` for now),
+the record header key (`paros-election` for now) and the model folder name are **Open**; the model
+is `specs/tla/coord/`.
 
 - **The log is the server.** The store owns one journal in multi-writer mode
   ([docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.4): every member appends, the
@@ -408,6 +409,29 @@ and the model folder name are **Open** until the crate is built; the model is `s
   whole state. TLC: `ViewTrue` (controls `ckpt_stale` and `trim_any`). The rule "the checkpoint
   lands at `at + 1`" is a finding of the model: the proposal had only "truncate to a checkpoint".
   It can starve: under steady writes, a record often lands between the read and the checkpoint.
+- **Built** (#1420 (paros-election)): `crates/lib/paros-election`, a pure crate of layer 2 on
+  `paros-journal` alone. `Tree` is the fold; `Member` is one session over one journal client;
+  `Latch`, `Group` and `Counter` are Curator's `LeaderLatch`, `GroupMember` and `SharedCount` as
+  functions of the fold. Its example `latch` elects, takes over at a higher term and starts a
+  member from a checkpoint. `journal-sim`'s election walk judges it on a lossy mailbox with
+  crashes and early expiries: each member folds the whole log, the fold is the rules written again
+  from the model, each act applies at most once and only by the holder, a settled act is as
+  reported, one session for each term, and the receiver never goes back; each oracle has a mutant
+  planted in the walk. The code adds three rules that the model does not need, each a stronger
+  form of a rule of the model: a checkpoint counts only when its state is the state of the fold
+  at its position too (a member that writes a wrong state cannot mislead a new member); a
+  transaction that fails a check or an operation still uses its `op_seq` and renews its session,
+  as the void `act` of the model does; a sequential node takes the position of its entry as its
+  name, twenty digits. Two more go past the model, with no TLA+ check of their own yet: a turn
+  and a term for each parent (the model has one latch; each parent is one latch of the model, and
+  no rule reads two parents), and a revoke that is a `Delete` in a transaction of a live session
+  (the model's `revoke` is a record of no session; the effect on the nodes is the same, and the
+  revoker's session renews). **Open**: a check of each in `specs/tla/coord/`, with a control. A
+  member that starts again from the checkpoint at the floor reports `Event::Jumped`, not each
+  change below the floor, and ends the entry in flight `Unknown` when its session is gone.
+  **Open**: a trace check of the walk against `specs/tla/coord/`, the other
+  recipes of the proposal (`LeaderSelector`, the semaphore, the read-write lock, barriers, queues,
+  `CuratorCache`), the limit of a path (`MAX_PATH`, 1024 bytes for now) and of an entry.
 - **Not proved**: the liveness of the latch (after the holder stops and faults stop, a new holder
   leads), and the liveness of the checkpoint (one checkpoint lands at `at + 1` under steady
   writes; a design that tolerates records between the read and the checkpoint is **Open**). **Open**: who sends expiries and checkpoints (any member, or the holder of an internal

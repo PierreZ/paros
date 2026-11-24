@@ -10,7 +10,8 @@ register across handovers of the set (#1325). A third walk drives the journal ro
 of segments. A fourth walk runs the generic driver of `paros-journal-io` (#1329) on three processes. A fifth walk
 drives the pure journal client (#1331) against a journal that loses and holds answers.
 A sixth walk runs the whole journal on the in-memory IO of `paros-journal-io` (#1445): two
-journals on nine machines in three zones, with their controllers and a client.
+journals on nine machines in three zones, with their controllers and a client. A seventh walk
+drives the coordination store of `paros-election` (#1420) over one journal.
 Test only: `publish = false`.
 
 ## Map
@@ -80,6 +81,15 @@ Test only: `publish = false`.
   oracles (`WRITTEN`, `ONCE`, `REFUSED`, `LED`, `TAIL`, `PAGE`, `FLOOR`: a page holds no record
   below the floor, while a sealed segment still serves the records that a later `Truncate` cut), judged on a log that the walk keeps, its
   reach sites and its planted mutants (`ClientMutant`). `tests/client.rs`.
+- `src/election.rs`: the election walk (`ElectionModel`, #1420 (paros-election)): three members of
+  `paros_election` over one multi-writer journal and the walk's mailbox, with lost, repeated and
+  reordered requests, timeouts, crashes that lose a member's memory and session, early expiries,
+  revokes, leaves and joins, checkpoints and trims, and orders to a receiver with the term fence.
+  Its oracles (`AGREE`, `TRUTH`: `Truth`, the store's rules written again from
+  `specs/tla/coord/Coord.tla` with no code of the fold, `ONCE`, `ACTS`, `SETTLED`, `ONE_HOLDER`,
+  `FENCE`), its reach sites, its liveness claim and its planted mutants (`ElectionMutant`).
+  `tests/election.rs`. `Truth` reads the entries through the store's codec. No trace check yet
+  (**Open**).
 - `src/backend.rs`: the backends of the driver walk and the whole walk: `Disk`, a disk that
   survives its process and fails commits inside the contract, `Wire`, a transport that judges
   the flight rule at each send, and `QuorumRegister`, the journal's register on three

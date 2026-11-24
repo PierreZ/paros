@@ -412,6 +412,7 @@ dependencies = [
  "moonpool-assertions",
  "moonpool-tla",
  "moonpool-walk",
+ "paros-election",
  "paros-journal",
  "paros-journal-control",
  "paros-journal-io",
@@ -534,6 +535,13 @@ dependencies = [
  "moonpool-assertions",
  "serde",
  "tracing",
+]
+
+[[package]]
+name = "paros-election"
+version = "0.2.0"
+dependencies = [
+ "paros-journal",
 ]
 
 [[package]]
