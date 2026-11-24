@@ -1,10 +1,10 @@
 // The tour of the Paxos flavors (tour plan §3.2): seven chapters, in course
 // order, on five pages. Each chapter plays its runs back to back with the
 // player of the story. Before each chapter but the first, one screen (the
-// bridge) says the problem that the chapter solves: the problem line of its
-// flavor in `src/flavors.ts` (the text of the map of /paxos/) for the first
-// chapter of a flavor, or the chapter's own line (`problem`) for a chapter
-// whose flavor's line opens another chapter ("Who must answer", "Reads").
+// bridge) says the problem that the chapter solves. The problem line of a
+// flavor in `src/flavors.ts` (the text of the map of /paxos/) opens exactly
+// one chapter of that flavor, the one that the line fits (`bridge`); every
+// other chapter has its own line (`problem`): "Who must answer" and "Reads".
 //
 // A chapter names its runs in `src/tour/<page>.ts`. Today each chapter is
 // made from the recorded runs of its lesson (the base run and the first
@@ -88,8 +88,9 @@ export function bridgeOf(chapter: Chapter): string | undefined {
  * chapter, in two or in a lesson, a tour run whose mark names another
  * chapter, a bridge that is not the problem line of the chapter's own
  * flavor, a chapter after the first with no bridge, a chapter with two, an
- * own problem line that is not one sentence of at most 140 characters, or a
- * flavor page with no chapter. */
+ * own problem line that is not one sentence of at most 140 characters, a
+ * flavor (but the first chapter's) whose problem line opens no chapter or
+ * two, or a flavor page with no chapter. */
 export function check(traces: Record<string, Trace>): void {
   const placed = new Map<string, string>();
   const inLessons = new Set(LESSONS.flatMap((l) => l.runs.map((r) => `${l.page}/${r}`)));
@@ -143,6 +144,11 @@ export function check(traces: Record<string, Trace>): void {
     }
   }
   const pages = new Set(CHAPTERS.map((c) => lessonOf(c).page));
+  for (const page of pages) {
+    if (page === lessonOf(CHAPTERS[0]).page) continue;
+    const n = CHAPTERS.filter((c) => c.bridge === page).length;
+    if (n !== 1) throw new Error(`tour: the problem line of the flavor ${page} opens ${n} chapters, not one`);
+  }
   for (const lesson of LESSONS) {
     if (lesson.page.startsWith("journal-")) continue;
     if (!pages.has(lesson.page)) throw new Error(`tour: the flavor page ${lesson.page} has no chapter`);

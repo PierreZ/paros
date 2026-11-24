@@ -152,7 +152,9 @@ chapter names the runs it plays, in `src/tour/<page>.ts`; `src/tour.ts` lists th
 (`CHAPTERS`) and its `check()` fails the build when a chapter names a lesson or a run that
 does not exist, a run with no story, two chapters name one lesson, the chapters leave course
 order, a tour run is in no chapter, in two or in a lesson, a bridge is not the chapter's own
-flavor, a chapter after the first has no bridge or has two, or a flavor page has no chapter. Chapter 1 ("One value") and both Multi-Paxos chapters
+flavor, a chapter after the first has no bridge or has two, a chapter's own line is not one
+sentence of at most 140 characters, the problem line of a flavor (but the first) opens no
+chapter or two, or a flavor page has no chapter. Chapter 1 ("One value") and both Multi-Paxos chapters
 ("The log and its leader", "Reads") play their own tour runs; each other chapter plays runs of its lesson until a flavor's
 own tour run (`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of
 `src/steps/story.rs`: 10 to 30 beats, at most 140 characters per sentence, no question, every

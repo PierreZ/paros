@@ -12,5 +12,5 @@ export const MULTI_PAXOS_LOG: Chapter = {
 export const MULTI_PAXOS_READS: Chapter = {
   lesson: "reads",
   runs: ["tour-reads"],
-  problem: "Every read through the leader is slow, and the log grows without end.",
+  problem: "If every read goes through the leader, the leader does all the work.",
 };
