@@ -8,9 +8,10 @@
 //!
 //! Both are the walk's, never the driver's: a fault they inject stays inside
 //! the contract of `paros_journal_io::Storage` (a commit that fails `Full`
-//! wrote nothing; one that fails `Unknown` may have written its batch; a
-//! lost record makes each scan of its role fail `Lost`; a commit that
-//! returned `Ok` is durable).
+//! wrote nothing; one that fails `Unknown` wrote its batch or wrote nothing;
+//! a scan that fails `Full` or `Unknown` read nothing; a list that fails
+//! `Full` read nothing and may be asked again; a lost record makes each scan
+//! of its role fail `Lost`; a commit that returned `Ok` is durable).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -29,15 +30,58 @@ use paros_journal_io::{
     StorageError, Transport,
 };
 
-/// The faults that a walk arms on a disk, for its next commit.
-#[derive(Clone, Copy, Debug, Default)]
+/// Oracle: the list at a boot names each role that the disk holds, and
+/// only those.
+pub const LISTED: &str =
+    "disk: a list at a boot names each role that the disk holds, and only those";
+
+/// A fault of the contract that a walk arms on a disk. Each fires once, on
+/// the next call of its kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskFault {
+    /// The next commit fails `Full` and writes nothing.
+    CommitFull,
+    /// The next commit writes its batch, then fails `Unknown`.
+    CommitUnknownWritten,
+    /// The next commit writes nothing and fails `Unknown`.
+    CommitUnknownUnwritten,
+    /// The next scan fails `Full` and reads nothing.
+    ScanFull,
+    /// The next scan fails `Unknown` and reads nothing.
+    ScanUnknown,
+    /// The next list fails `Full` and reads nothing.
+    ListFull,
+}
+
+impl DiskFault {
+    /// The two commit faults that a walk draws on each disk fault: one of
+    /// them, each with chance 1/2.
+    pub const COMMIT: [Self; 2] = [Self::CommitFull, Self::CommitUnknownWritten];
+    /// The other faults of the contract: a walk draws one of them too, on
+    /// each disk fault, so they add to the commit faults and never take
+    /// their place.
+    pub const MORE: [Self; 4] = [
+        Self::CommitUnknownUnwritten,
+        Self::ScanFull,
+        Self::ScanUnknown,
+        Self::ListFull,
+    ];
+}
+
+/// The faults armed on a disk.
+#[derive(Clone, Debug, Default)]
 pub struct Faults {
-    /// The commit fails `Full` and writes nothing.
-    pub fail_before: bool,
-    /// The commit writes its batch, then fails `Unknown`.
-    pub fail_after: bool,
+    /// The faults of the next commits, in order: each commit takes the
+    /// first, so a fault armed on top of another never replaces it.
+    pub commit: VecDeque<DiskFault>,
+    /// The fault of the next scan: `Full` or `Unknown`.
+    pub scan: Option<StorageError>,
+    /// The next list fails `Full`.
+    pub list: bool,
     /// A planted bug: the commit writes nothing and says it is done.
     pub lie: bool,
+    /// A planted bug: each list leaves out its first role.
+    pub hide: bool,
 }
 
 /// The disk of one process: it survives the process. `seen` looks at each
@@ -48,8 +92,14 @@ pub struct Disk {
     pub store: Rc<RefCell<MemStorage>>,
     /// The faults armed for the next commit.
     pub faults: Rc<RefCell<Faults>>,
-    /// The ops of the last commit that failed `Unknown` after its write.
-    unknown: Rc<RefCell<Vec<Op>>>,
+    /// The ops of the last commit that failed `Unknown`, and whether it
+    /// wrote them.
+    unknown: Rc<RefCell<(Vec<Op>, bool)>>,
+    /// The fault of the last scan that failed.
+    scan_failed: Rc<Cell<Option<StorageError>>>,
+    /// The roles that the disk holds a record of, or lost one of, as the
+    /// commits and the losses wrote them: the list at a boot names these.
+    roles: Rc<RefCell<BTreeSet<Address>>>,
     /// One more on each change of the records: a commit that writes, a
     /// wipe, a loss.
     version: Rc<Cell<u64>>,
@@ -64,6 +114,8 @@ impl Disk {
             store: Rc::default(),
             faults: Rc::default(),
             unknown: Rc::default(),
+            scan_failed: Rc::default(),
+            roles: Rc::default(),
             version: Rc::default(),
             seen,
         }
@@ -100,31 +152,124 @@ impl Disk {
         })
     }
 
-    /// Whether the disk holds the last op of the last commit that failed
-    /// `Unknown`: that commit wrote its batch, and only a new scan can tell.
+    /// Whether the last commit that failed `Unknown` wrote its batch: only
+    /// a new scan can tell the driver.
+    ///
+    /// # Panics
+    ///
+    /// When the disk does not hold what the commit wrote: a later commit
+    /// came from a driver that the fault halted.
     #[must_use]
     pub fn wrote_unknown(&self) -> bool {
-        self.unknown
-            .borrow()
-            .last()
-            .is_some_and(|op| self.record(op.key).as_ref() == Some(&op.value))
+        let (ops, wrote) = &*self.unknown.borrow();
+        if *wrote {
+            assert!(
+                ops.last()
+                    .is_none_or(|op| self.record(op.key).as_ref() == Some(&op.value)),
+                "a disk holds the batch of a commit that failed Unknown after its write"
+            );
+        }
+        *wrote
+    }
+
+    /// The fault of the last scan that failed, once: a walk takes it when
+    /// the driver halted or a role stopped unreadable.
+    #[must_use]
+    pub fn take_scan_failed(&self) -> Option<StorageError> {
+        self.scan_failed.take()
+    }
+
+    /// Judge the list of a boot: it names each role that a commit wrote or
+    /// a loss hit, and only those. The disk keeps that set itself, so the
+    /// judge does not trust the list of the store.
+    ///
+    /// # Panics
+    ///
+    /// When the list misses a held role or names a role with no record.
+    pub fn judge_list(&self, listed: &[Address]) {
+        let roles = self.roles.borrow();
+        for address in listed {
+            assert!(
+                roles.contains(address),
+                "{LISTED}: it names {address:?}, with no record"
+            );
+        }
+        for address in roles.iter() {
+            assert!(listed.contains(address), "{LISTED}: it misses {address:?}");
+        }
+    }
+
+    /// A new driver boots on the disk: the scan fault and the `Unknown`
+    /// commit of the driver before it belong to that driver, so a halt of
+    /// the new one never reads them.
+    pub fn boot(&self) {
+        self.scan_failed.set(None);
+        *self.unknown.borrow_mut() = (Vec::new(), false);
+    }
+
+    /// Arm one disk fault of a walk: one commit fault, `Full` or `Unknown`
+    /// after the write, each with chance 1/2, and one more fault of
+    /// [`DiskFault::MORE`] on top.
+    pub fn arm_drawn(&self, commit_after: bool, more: DiskFault) {
+        self.arm(DiskFault::COMMIT[usize::from(commit_after)]);
+        self.arm(more);
     }
 
     /// Lose every record: a planted bug, never a fault of the contract.
     pub fn wipe(&self) {
         *self.store.borrow_mut() = MemStorage::new();
+        self.roles.borrow_mut().clear();
         self.changed();
     }
 
-    /// Arm a fault of the contract for the next commit: it fails before or
-    /// after its write, as `after` says.
-    pub fn arm(&self, after: bool) {
-        let mut faults = self.faults.borrow_mut();
-        if after {
-            faults.fail_after = true;
-        } else {
-            faults.fail_before = true;
+    /// Lose every record of the role at `address`, with no report: a
+    /// planted bug, never a fault of the contract. The other roles of the
+    /// disk keep their records.
+    ///
+    /// # Panics
+    ///
+    /// When a scan of the memory fails, or the disk holds a corrupt record:
+    /// the walks that plant this bug corrupt nothing.
+    pub fn wipe_role(&self, address: Address) {
+        let mut store = self.store.borrow_mut();
+        let mut kept = MemStorage::new();
+        for other in store.list().expect("a list of memory reads it") {
+            if other == address {
+                continue;
+            }
+            let ops: Vec<Op> = store
+                .scan(other)
+                .expect("a disk with a wiped role lost no record")
+                .into_iter()
+                .map(|(key, entry)| match entry {
+                    Entry::Value(value) => Op { key, value },
+                    Entry::Corrupt => panic!("a disk with a wiped role holds no corrupt record"),
+                })
+                .collect();
+            kept.commit(&ops).expect("a commit of memory writes it");
         }
+        *store = kept;
+        drop(store);
+        self.roles.borrow_mut().remove(&address);
+        self.changed();
+    }
+
+    /// Arm a fault of the contract for the next call of its kind.
+    pub fn arm(&self, fault: DiskFault) {
+        let mut faults = self.faults.borrow_mut();
+        match fault {
+            DiskFault::CommitFull
+            | DiskFault::CommitUnknownWritten
+            | DiskFault::CommitUnknownUnwritten => faults.commit.push_back(fault),
+            DiskFault::ScanFull => faults.scan = Some(StorageError::Full),
+            DiskFault::ScanUnknown => faults.scan = Some(StorageError::Unknown),
+            DiskFault::ListFull => faults.list = true,
+        }
+    }
+
+    /// Plant the bug of a list that leaves out its first role, for good.
+    pub fn hide_a_role(&self) {
+        self.faults.borrow_mut().hide = true;
     }
 
     /// Arm the planted bug: the next commit writes nothing and says it is
@@ -137,6 +282,7 @@ impl Disk {
     /// (a fault of the contract: the loss is reported, never hidden).
     pub fn lose(&self, key: Key) {
         self.store.borrow_mut().lose(key);
+        self.roles.borrow_mut().insert(key.address);
         self.changed();
     }
 }
@@ -144,28 +290,54 @@ impl Disk {
 impl Storage<Journal> for Disk {
     fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
         (self.seen)(ops);
-        let faults = std::mem::take(&mut *self.faults.borrow_mut());
-        if faults.lie {
-            return Ok(());
-        }
-        if faults.fail_before {
-            return Err(StorageError::Full);
+        let commit = {
+            let mut faults = self.faults.borrow_mut();
+            if std::mem::take(&mut faults.lie) {
+                return Ok(());
+            }
+            faults.commit.pop_front()
+        };
+        match commit {
+            Some(DiskFault::CommitFull) => return Err(StorageError::Full),
+            Some(DiskFault::CommitUnknownUnwritten) => {
+                *self.unknown.borrow_mut() = (ops.to_vec(), false);
+                return Err(StorageError::Unknown);
+            }
+            _ => {}
         }
         self.store.borrow_mut().commit(ops)?;
+        self.roles
+            .borrow_mut()
+            .extend(ops.iter().map(|op| op.key.address));
         self.changed();
-        if faults.fail_after {
-            *self.unknown.borrow_mut() = ops.to_vec();
+        if commit == Some(DiskFault::CommitUnknownWritten) {
+            *self.unknown.borrow_mut() = (ops.to_vec(), true);
             return Err(StorageError::Unknown);
         }
         Ok(())
     }
 
     fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
+        if let Some(fault) = self.faults.borrow_mut().scan.take() {
+            self.scan_failed.set(Some(fault));
+            return Err(fault);
+        }
         self.store.borrow_mut().scan(address)
     }
 
     fn list(&mut self) -> Result<Vec<Address>, StorageError> {
-        self.store.borrow_mut().list()
+        let hide = {
+            let mut faults = self.faults.borrow_mut();
+            if std::mem::take(&mut faults.list) {
+                return Err(StorageError::Full);
+            }
+            faults.hide
+        };
+        let mut listed = self.store.borrow_mut().list()?;
+        if hide && !listed.is_empty() {
+            listed.remove(0);
+        }
+        Ok(listed)
     }
 }
 

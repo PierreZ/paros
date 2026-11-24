@@ -150,7 +150,9 @@ use paros_journal_io::{
 };
 
 pub use crate::backend::AGAIN;
-use crate::backend::{Again, Disk, Fault, Landed, LossyRegister, Lost, QuorumRegister, Wire};
+use crate::backend::{
+    Again, Disk, DiskFault, Fault, Landed, LossyRegister, Lost, QuorumRegister, Wire,
+};
 use crate::oracle::{Truth, as_written, label};
 
 /// Oracle: one command is chosen at each slot of a journal.
@@ -217,6 +219,16 @@ pub mod reach {
     /// A commit of unknown outcome had written its batch, and its process
     /// stopped.
     pub const HALTED: &str = "whole journal: an Unknown commit wrote; its process stopped";
+    /// A commit of unknown outcome had written nothing, and its process
+    /// stopped.
+    pub const HALTED_UNWRITTEN: &str = "whole journal: an Unknown commit wrote nothing; stopped";
+    /// A scan of unknown outcome stopped its process.
+    pub const SCAN_HALTED: &str = "whole journal: an Unknown scan stopped its process";
+    /// A scan read nothing (`Full`): its role stopped unreadable, and
+    /// placement served it again.
+    pub const UNREADABLE: &str = "whole journal: a failed scan stopped its role, served again";
+    /// A list read nothing (`Full`) at a boot, and was asked again.
+    pub const LIST_AGAIN: &str = "whole journal: a failed list at a boot was asked again";
     /// An acceptor read a vote back at a restart.
     pub const RESTARTED: &str = "whole journal: an acceptor read its votes back at a restart";
     /// Every machine of a zone was down at once.
@@ -278,6 +290,10 @@ pub mod reach {
         TWO_JOURNALS,
         FAILED,
         HALTED,
+        HALTED_UNWRITTEN,
+        SCAN_HALTED,
+        UNREADABLE,
+        LIST_AGAIN,
         RESTARTED,
         ZONE_OUT,
         TAKEOVER,
@@ -1017,6 +1033,7 @@ impl WholeModel {
             disk: machine.disk.clone(),
             flight: FLIGHT,
         };
+        machine.disk.boot();
         let mut driver = Driver::new(
             CONFIG,
             machine.disk.clone(),
@@ -1025,6 +1042,19 @@ impl WholeModel {
             machine.register.clone(),
             (),
         );
+        // A process that boots lists its disk first. A list that read
+        // nothing (`Full`) may be asked again. The walk serves the roles
+        // that its placement names.
+        let listed = match driver.on_disk() {
+            Err(paros_journal_io::StorageError::Full) => {
+                sometimes!(true, reach::LIST_AGAIN);
+                driver.on_disk()
+            }
+            listed => listed,
+        };
+        let listed =
+            listed.expect("a list asked again after a list that read nothing reads the disk");
+        machine.disk.judge_list(&listed);
         for assignment in &machine.placed {
             driver.assign(assignment.clone());
         }
@@ -1275,22 +1305,44 @@ impl WholeModel {
             };
             driver.poll();
             for (address, why) in driver.take_stopped() {
-                if why == paros_journal_io::Stop::Failed {
-                    sometimes!(true, reach::FAILED);
-                    // Placement serves again a role that a failed commit
-                    // stopped.
-                    if let Some(assignment) = machine.placed.iter().find(|a| a.address() == address)
-                    {
-                        driver.assign(assignment.clone());
+                // Placement serves again a role that a failed commit or a
+                // failed scan stopped: it starts again from a scan.
+                let again = match why {
+                    paros_journal_io::Stop::Failed => {
+                        sometimes!(true, reach::FAILED);
+                        true
                     }
+                    paros_journal_io::Stop::Unreadable => {
+                        let fault = machine.disk.take_scan_failed();
+                        assert_eq!(
+                            fault,
+                            Some(paros_journal_io::StorageError::Full),
+                            "a role stops unreadable only on a scan that read nothing"
+                        );
+                        sometimes!(true, reach::UNREADABLE);
+                        true
+                    }
+                    _ => false,
+                };
+                if again
+                    && let Some(assignment) = machine.placed.iter().find(|a| a.address() == address)
+                {
+                    driver.assign(assignment.clone());
                 }
             }
-            // A commit of unknown outcome stops the process: what it sent
-            // and answered before the commit goes out, then the walk takes
-            // the machine down, and a restart reads the disk again.
+            // A commit or a scan of unknown outcome stops the process: what
+            // it sent and answered before goes out, then the walk takes the
+            // machine down, and a restart reads the disk again.
             let halted = driver.halted();
             if halted {
-                sometimes!(machine.disk.wrote_unknown(), reach::HALTED);
+                if machine.disk.take_scan_failed() == Some(paros_journal_io::StorageError::Unknown)
+                {
+                    sometimes!(true, reach::SCAN_HALTED);
+                } else {
+                    let wrote = machine.disk.wrote_unknown();
+                    sometimes!(wrote, reach::HALTED);
+                    sometimes!(!wrote, reach::HALTED_UNWRITTEN);
+                }
             }
             let replies = driver.take_replies();
             let notices = driver.take_notices();
@@ -2641,7 +2693,9 @@ impl WholeModel {
             let fault = *cx.rng().pick(&FAULTS).expect("four ways");
             machine.register.arm(fault);
         } else {
-            machine.disk.arm(cx.rng().chance(1, 2));
+            let after = cx.rng().chance(1, 2);
+            let more = *cx.rng().pick(&DiskFault::MORE).expect("four faults");
+            machine.disk.arm_drawn(after, more);
         }
     }
 

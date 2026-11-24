@@ -235,8 +235,10 @@ step of the `Host` once its batches are settled. The announce, make and confirm 
 live check fed by the port, and the torn-batch control land with the adapter.
 
 **The driver walk** (#1329, `journal-sim/tests/host.rs`). Before the moonpool-sim, `journal-sim`
-walks the generic driver itself: three processes, each a `Driver` with a disk that fails commits
-inside the contract (before or after the write), a transport through the walk's mailbox (lost,
+walks the generic driver itself: three processes, each a `Driver` with a disk that fails calls
+inside the contract (a commit that fails `Full`, or `Unknown` after its write or with nothing
+written; a scan that fails `Full` or `Unknown`; a list at a boot that fails `Full` and is asked
+again; the list of the in-memory store must name each role that the disk's commits and losses wrote, and only those), a transport through the walk's mailbox (lost,
 repeated, reordered), the journal's register on three matchmakers (one on each process, down
 while its process is; a change can lose its request or its reply, reach one member only, or wait
 in flight), crashes that keep the disk, restarts that read it back, campaigns that depose a
@@ -276,7 +278,8 @@ stale position and resolves each `Below`, crashes and restarts of a machine, the
 a while, register operations whose request or reply is lost, whose write reaches one matchmaker
 only, or whose write waits in flight while other operations run and lands later, matchmakers that
 are down with their machine (a read or a change that no majority answers gives no answer, and a
-read repairs a write that a minority took), and disk faults inside the contract.
+read repairs a write that a minority took), and disk faults inside the contract (the faults of
+the driver walk's disk).
 Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
 at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
 `ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with

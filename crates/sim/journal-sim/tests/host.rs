@@ -1,6 +1,7 @@
 //! The driver walks: every seed passes every oracle, the campaign reaches
 //! every site, and each oracle catches its mutant.
 
+use journal_sim::backend::LISTED;
 use journal_sim::campaign::{campaign, try_campaign};
 use journal_sim::host::{AGREE, ANSWER, FLIGHT, HostMutant, READ, reach, walk};
 
@@ -37,4 +38,9 @@ fn answer_catches_a_taken_write_taken_as_written() {
 #[test]
 fn read_catches_a_reader_that_shifts_its_page() {
     caught(HostMutant::PageShift, READ);
+}
+
+#[test]
+fn listed_catches_a_list_that_hides_a_role() {
+    caught(HostMutant::HiddenRole, LISTED);
 }
