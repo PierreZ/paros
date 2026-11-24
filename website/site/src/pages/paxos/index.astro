@@ -6,6 +6,7 @@ import Doc from "../../layouts/Doc.astro";
 import { REPO, url } from "../../nav";
 import { LESSONS, TLC_RUN, pathOf } from "../../course";
 import { CHAPTERS, played } from "../../tour";
+import { FLAVORS } from "../../flavors";
 
 const traces = import.meta.glob("../../traces/*.json", { eager: true, import: "default" }) as Record<string, { scenarios: { id: string; beats?: unknown[] }[] }>;
 const traceOf = (page: string) => Object.entries(traces).find(([p]) => p.endsWith(`/${page}.json`))![1];
@@ -22,23 +23,6 @@ const lessons = LESSONS.map((l, i) => {
     href: url(pathOf(l)) + `#run=${l.runs[0]}&${story ? "beat" : "step"}=0` };
 });
 
-const FLAVORS = [
-  { n: 1, name: "Single-decree Paxos", path: "paxos/single-decree/",
-    problem: "Many machines must agree on one value, and some of them fail.",
-    flavor: "Acceptors choose one value. The choice never changes." },
-  { n: 2, name: "Multi-Paxos", path: "paxos/multi-paxos/",
-    problem: "A journal needs many values in order, and two round trips per record is slow.",
-    flavor: "A log of slots. One leader runs Phase 1 once, then each write costs one round trip." },
-  { n: 3, name: "Matchmaker Paxos", path: "paxos/matchmaker/",
-    problem: "Machines fail and get replaced while the journal takes writes.",
-    flavor: "Matchmakers keep the acceptors of each ballot. A change of acceptors is a new ballot." },
-  { n: 4, name: "Compartmentalized Paxos", path: "paxos/compartmentalized/",
-    problem: "One leader does all the work, so one machine sets the throughput.",
-    flavor: "The leader splits into roles that scale alone. The leader moves with no election." },
-  { n: 5, name: "Quorums", path: "paxos/quorums/",
-    problem: "Every write touches a majority of the acceptors.",
-    flavor: "The quorum system says which acceptors must answer each phase." },
-];
 
 const WORDS = [
   { id: "acceptor", word: "Acceptor",

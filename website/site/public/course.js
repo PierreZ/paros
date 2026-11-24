@@ -29,8 +29,9 @@
     answered: function (page, run, beat, answer) {
       change(function (st) { st.answers[page + "/" + run + ":" + beat] = answer; });
     },
-    // The tour: the reader is at run `run` (its index) of chapter `chapter`.
-    tourAt: function (chapter, run) { change(function (st) { st.tour.at = { chapter: chapter, run: run }; }); },
+    // The tour: the reader is at run `run` (its index) of chapter `chapter`;
+    // chapter null: the reader watched the whole tour.
+    tourAt: function (chapter, run) { change(function (st) { st.tour.at = chapter ? { chapter: chapter, run: run } : null; }); },
     // The tour: the reader watched chapter `chapter` to its end.
     tourDone: function (chapter) { change(function (st) { st.tour.done[chapter] = true; }); },
     // The reader reached the goal of exercise `id`.

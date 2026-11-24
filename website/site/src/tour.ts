@@ -1,7 +1,9 @@
 // The tour of the Paxos flavors (tour plan §3.2): seven chapters, in course
 // order, on five pages. Each chapter plays its runs back to back with the
-// player of the story; between two chapters, one screen (the bridge) says the
-// problem that the next flavor solves.
+// player of the story. Before a chapter, one screen (the bridge) can say the
+// problem that its flavor solves: the problem line of `src/flavors.ts`, the
+// same text as the map of /paxos/, never a text of its own. A chapter that
+// no problem line fits has no bridge (today: "Who must answer" and "Reads").
 //
 // A chapter names its runs in `src/tour/<page>.ts`. Today each chapter is
 // made from the recorded runs of its lesson (the base run and the first
@@ -13,6 +15,7 @@
 // `check()` runs at build time.
 
 import { LESSONS, pathOf, type Lesson } from "./course";
+import { FLAVORS } from "./flavors";
 import { SINGLE_DECREE } from "./tour/single-decree";
 import { QUORUMS_MAJORITY, QUORUMS_GRIDS } from "./tour/quorums";
 import { MULTI_PAXOS_LOG, MULTI_PAXOS_READS } from "./tour/multi-paxos";
@@ -25,8 +28,8 @@ export interface Chapter {
   lesson: string;
   /** The runs of the page that the chapter plays, in order. */
   runs: string[];
-  /** The bridge before the chapter: the problem that this flavor solves.
-   * The first chapter has none. */
+  /** The bridge before the chapter: the page of the flavor whose problem
+   * line (`src/flavors.ts`) the screen shows. The first chapter has none. */
   bridge?: string;
 }
 
@@ -64,14 +67,36 @@ export function seconds(run: Run): number {
   return s;
 }
 
+/** The text of a chapter's bridge: the problem line of its flavor. */
+export function bridgeOf(chapter: Chapter): string | undefined {
+  if (!chapter.bridge) return undefined;
+  const flavor = FLAVORS.find((f) => f.page === chapter.bridge);
+  if (!flavor) throw new Error(`tour: chapter ${chapter.lesson} names no flavor ${chapter.bridge} for its bridge`);
+  return flavor.problem;
+}
+
 /** Fail the build when the chapters and the traces disagree: a chapter names
- * a lesson or a run that does not exist, a run with no beats, a tour run in
- * no chapter or in two, a tour run whose mark names another chapter, or a
- * flavor page with no chapter. */
+ * a lesson or a run that does not exist, a run with no beats, two chapters
+ * name one lesson, the chapters are not in course order, a tour run in no
+ * chapter, in two or in a lesson, a tour run whose mark names another
+ * chapter, a bridge that is not the problem line of the chapter's own
+ * flavor, or a flavor page with no chapter. */
 export function check(traces: Record<string, Trace>): void {
   const placed = new Map<string, string>();
+  const inLessons = new Set(LESSONS.flatMap((l) => l.runs.map((r) => `${l.page}/${r}`)));
+  let last = -1;
+  const lessons = new Set<string>();
   for (const chapter of CHAPTERS) {
     const lesson = lessonOf(chapter);
+    if (lessons.has(lesson.id)) throw new Error(`tour: two chapters name the lesson ${lesson.id}`);
+    lessons.add(lesson.id);
+    const order = LESSONS.indexOf(lesson);
+    if (order < last) throw new Error(`tour: chapter ${lesson.id} is out of course order`);
+    last = order;
+    if (chapter.bridge && chapter.bridge !== lesson.page) {
+      throw new Error(`tour: the bridge of chapter ${lesson.id} names the flavor ${chapter.bridge}, not its own ${lesson.page}`);
+    }
+    bridgeOf(chapter);
     const trace = traces[lesson.page];
     if (!trace) throw new Error(`tour: chapter ${chapter.lesson} names no trace ${lesson.page}`);
     if (!chapter.runs.length) throw new Error(`tour: chapter ${chapter.lesson} plays no run`);
@@ -84,9 +109,10 @@ export function check(traces: Record<string, Trace>): void {
       }
       const key = `${lesson.page}/${id}`;
       if (run.tour && placed.has(key)) throw new Error(`tour: the tour run ${key} is in two chapters`);
+      if (run.tour && inLessons.has(key)) throw new Error(`tour: the tour run ${key} is also in a lesson`);
       placed.set(key, chapter.lesson);
     }
-    if (chapter !== CHAPTERS[0] && !chapter.bridge) throw new Error(`tour: chapter ${chapter.lesson} has no bridge`);
+    if (chapter === CHAPTERS[0] && chapter.bridge) throw new Error(`tour: the first chapter has a bridge`);
   }
   for (const trace of Object.values(traces)) {
     for (const run of trace.scenarios) {
@@ -141,7 +167,7 @@ export function played(traces: Record<string, Trace>, url: (path: string) => str
       n: k + 1,
       title: lesson.title,
       page: lesson.page,
-      bridge: chapter.bridge,
+      bridge: bridgeOf(chapter),
       deeper: `${page}#run=${lesson.runs[0]}&beat=0`,
       lesson_run: lesson.runs[0],
       turn: lesson.labs?.length ? `${page}#lab=${lesson.labs[0]}` : undefined,

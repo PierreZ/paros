@@ -240,14 +240,14 @@ test("/paxos/tour/: the title, the chapter menu, a bridge and a chapter", async 
   // The title screen fits a phone: Play is above the fold.
   const box = await screen.locator(".tour-play").boundingBox();
   expect(box.y + box.height).toBeLessThanOrEqual(660);
-  await chapters.nth(1).click();
+  await chapters.nth(2).click();
   await expect(screen.locator(".tour-bridge")).toBeVisible();
-  expect(page.url()).toMatch(/#chapter=majority$/);
+  expect(page.url()).toMatch(/#chapter=the-log$/);
   await screen.locator(".tour-next").click();
   const story = page.locator(".panel.story");
   await expect(story).toBeVisible();
   await expect(story.locator(".tour-bar")).toBeVisible();
-  await expect(story.locator(".tour-bar")).toContainText("Chapter 2/7");
+  await expect(story.locator(".tour-bar")).toContainText("Chapter 3/7");
   await expect(story.locator(".story-mark.ask")).toHaveCount(0);
   // Every chapter fits a 390 x 660 phone under the site's header.
   const fits = await page.evaluate(() => {
@@ -262,19 +262,34 @@ test("/paxos/tour/: the title, the chapter menu, a bridge and a chapter", async 
       const panel = document.querySelector(".panel.story");
       const cont = [...panel.querySelectorAll(".story-controls button")].find((b) => b.textContent === "Continue");
       let height = 0;
+      let screens = 0;
       for (let guard = 0; !panel.hidden && guard < 200; guard++) {
         height = Math.max(height, panel.getBoundingClientRect().height + header.getBoundingClientRect().height);
+        screens += 1;
         cont.click();
       }
-      out.push({ chapter: k + 1, height });
+      out.push({ chapter: k + 1, height, screens });
     }
     return out;
   });
-  for (const f of fits) expect(f.height, `chapter ${f.chapter} fits 660 px`).toBeLessThanOrEqual(660);
+  // The screens of each chapter: the beats of its runs (the tour data).
+  const beats = await page.evaluate(() => {
+    const trace = JSON.parse(document.getElementById("trace").textContent);
+    const tour = JSON.parse(document.getElementById("tour").textContent);
+    return tour.chapters.map((ch) => ch.runs.reduce((n, id) => n + trace.scenarios.find((s) => s.id === id).beats.length, 0));
+  });
+  expect(fits.length).toBe(7);
+  for (const f of fits) {
+    expect(f.screens, `chapter ${f.chapter} shows each screen`).toBe(beats[f.chapter - 1]);
+    expect(f.height, `chapter ${f.chapter} is drawn`).toBeGreaterThan(200);
+    expect(f.height, `chapter ${f.chapter} fits 660 px`).toBeLessThanOrEqual(660);
+  }
   // The end of the last chapter: the tour is done, and the menu is there.
   await expect(screen.locator(".tour-done")).toHaveText("The tour is done.");
+  // Chapter 2 has no bridge: it opens on its first run.
   await chapters.nth(1).click();
-  await screen.locator(".tour-next").click();
+  await expect(screen).toBeHidden();
+  await expect(story.locator(".tour-bar")).toContainText("Chapter 2/7");
   await expect(story.locator(".story-quiz")).toBeHidden();
   await expect(story.locator(".story-foot")).toBeHidden();
   // Back to the menu; chapter 1 opens on its first run, with no bridge.
@@ -285,12 +300,73 @@ test("/paxos/tour/: the title, the chapter menu, a bridge and a chapter", async 
   w.check();
 });
 
+// The tour with motion: Play goes from run to run and from a chapter to its
+// end, the countdown shows and Stop stops it, the keys work, a hidden page
+// stops the countdown, and a chapter opened from the address does not move.
+test("/paxos/tour/: Play goes on from run to run, the countdown stops, and Space pauses", async ({ browser }) => {
+  const context = await browser.newContext({ reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const w = watch(page);
+  await page.goto("paxos/tour/#chapter=the-log");
+  const screen = page.locator(".tour-screen");
+  const story = page.locator(".panel.story");
+  const playing = () => page.evaluate(() => window.paxosStory.playing());
+  // The chapter opens on its bridge, the problem line of Multi-Paxos.
+  await expect(screen.locator(".tour-bridge")).toHaveText("A journal needs many values in order, and two round trips per record is slow.");
+  await page.evaluate(() => window.paxosStory.speed(20));
+  await page.keyboard.press(" ");
+  await expect(story).toBeVisible();
+  await expect.poll(playing).toBe(true);
+  // Space on the story pauses it, and Play goes on.
+  await page.keyboard.press(" ");
+  await expect.poll(playing).toBe(false);
+  await story.locator(".story-play").click();
+  // Run 1 ends: run 2 plays with no press.
+  await expect(story.locator(".tour-bar")).toContainText("run 2/2", { timeout: 30_000 });
+  await expect.poll(playing).toBe(true);
+  // The chapter ends: the countdown shows, and Stop stops it.
+  await expect(screen.locator(".tour-count")).toContainText("Next chapter in", { timeout: 30_000 });
+  await screen.locator(".tour-stop").click();
+  await expect(screen.locator(".tour-count")).toHaveText("");
+  await page.waitForTimeout(1500);
+  await expect(screen.locator(".tour-done")).toBeVisible();
+  // Next chapter: "Reads" has no bridge, so its first run plays.
+  await screen.locator(".tour-next").click();
+  await expect(story.locator(".tour-bar")).toContainText("Chapter 4/7");
+  await expect.poll(playing).toBe(true);
+  // To its end, then a hidden page stops the countdown and its text.
+  await expect(screen.locator(".tour-count")).toContainText("Next chapter in", { timeout: 30_000 });
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(screen.locator(".tour-count")).toHaveText("");
+  await page.waitForTimeout(6000);
+  await expect(screen.locator(".tour-done")).toBeVisible();
+  w.check();
+  await context.close();
+});
+
+test("/paxos/tour/: a chapter opened from the address does not move before Play", async ({ browser }) => {
+  const context = await browser.newContext({ reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const w = watch(page);
+  await page.goto("paxos/tour/#chapter=one-value");
+  const story = page.locator(".panel.story");
+  await expect(story).toBeVisible();
+  await expect(story.locator(".story-controls .btn.primary")).toHaveText("Continue");
+  expect(await page.evaluate(() => window.paxosStory.playing())).toBe(false);
+  w.check();
+  await context.close();
+});
+
 test("/paxos/single-decree/: Watch this flavor plays the chapter in place, and Stop watching leaves it", async ({ page }) => {
   const w = watch(page);
   await page.goto("paxos/single-decree/");
   const story = page.locator(".panel.story");
   const watchBtn = story.locator(".tour-watch");
   await expect(watchBtn).toHaveText(/^▶ Watch this flavor \(\d+ min\)$/);
+  const before = new URL(page.url()).hash;
   await watchBtn.click();
   await expect(watchBtn).toBeHidden();
   await expect(story.locator(".tour-bar")).toBeVisible();
@@ -301,6 +377,23 @@ test("/paxos/single-decree/: Watch this flavor plays the chapter in place, and S
   expect(await page.evaluate(() => window.paxosStory.watching())).toBe(false);
   await expect(story.locator(".story-foot")).toBeVisible();
   await expect(watchBtn).toBeVisible();
+  // The lesson comes back: its questions, and the address of the reader's
+  // own place (the first screen, untouched: the address as it was).
+  await expect(story.locator(".story-mark.ask")).not.toHaveCount(0);
+  expect(new URL(page.url()).hash).toBe(before);
+  // Go deeper on a flavor page opens the lesson in place.
+  await watchBtn.click();
+  await page.evaluate(() => {
+    const p = document.querySelector(".panel.story");
+    const cont = [...p.querySelectorAll(".story-controls button")].find((b) => b.textContent === "Continue");
+    for (let i = 0; i < 100 && !p.hidden; i++) cont.click();
+  });
+  const end = page.locator(".tour-screen");
+  await expect(end.locator(".tour-done")).toHaveText("This chapter is done.");
+  await end.locator(".tour-deeper").click();
+  await expect(story).toBeVisible();
+  expect(await page.evaluate(() => window.paxosStory.watching())).toBe(false);
+  await expect(story.locator(".panel-head .meta")).toHaveText(/^screen 1 \//);
   w.check();
 });
 

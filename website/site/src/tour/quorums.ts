@@ -7,11 +7,10 @@ import type { Chapter } from "../tour";
 export const QUORUMS_MAJORITY: Chapter = {
   lesson: "majority",
   runs: ["majority"],
-  bridge: "A value is chosen when enough acceptors vote for it. How many is enough?",
 };
 
 export const QUORUMS_GRIDS: Chapter = {
   lesson: "grids",
   runs: ["base", "column-down"],
-  bridge: "Every write touches a majority of the acceptors.",
+  bridge: "quorums",
 };

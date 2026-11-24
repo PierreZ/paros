@@ -7,5 +7,5 @@ import type { Chapter } from "../tour";
 export const COMPARTMENTALIZED: Chapter = {
   lesson: "compartments",
   runs: ["colocated", "base", "proxy-crash"],
-  bridge: "One leader does all the work, so one machine sets the throughput.",
+  bridge: "compartmentalized",
 };

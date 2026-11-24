@@ -7,5 +7,5 @@ import type { Chapter } from "../tour";
 export const MATCHMAKER: Chapter = {
   lesson: "matchmakers",
   runs: ["base", "replace"],
-  bridge: "Machines fail and get replaced while the journal takes writes.",
+  bridge: "matchmaker",
 };

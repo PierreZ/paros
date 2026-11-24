@@ -428,6 +428,7 @@
   var timer = null;
   var onEnd = null;    // what Play does at the end of a run (the tour sets it)
   var leave = null;    // what leaving watch mode does (the tour sets it)
+  var kept = null;     // the lesson screen on view when watch mode began
 
   // The time to read a sentence: 0.33 s per word, from 2.2 s to 9 s.
   function readMs(text) {
@@ -583,13 +584,25 @@
     // The panel, so the tour can put its screens next to it.
     panel: panel,
     // Watch mode on (`opts.leave` runs when a link leaves it) or off (null).
+    // Leaving it opens again the screen of the lesson that was on view, so
+    // the address and the lesson progress keep the reader's own place.
     tour: function (opts) {
       stop();
+      var was = watching;
       watching = !!opts;
       leave = opts ? opts.leave || null : null;
       foot.hidden = others.hidden = watching;
       panel.classList.toggle("watching", watching);
+      if (watching && !was) kept = { run: run, at: at, touched: touched };
       asked = progress && !watching ? progress.answersOf(trace.page) : asked;
+      if (!watching && was && kept) {
+        run = kept.run;
+        touched = kept.touched;
+        layout();
+        go(kept.at, false);
+        kept = null;
+        return;
+      }
       go(at, false);
     },
     watching: function () { return watching; },
@@ -600,7 +613,8 @@
       if (!target) return false;
       stop();
       if (play && !reduced) setPlaying(true);
-      open(target, 0, !reduced);
+      // Nothing moves before the reader presses Play.
+      open(target, 0, !!play && !reduced);
       return true;
     },
     answers: function () {

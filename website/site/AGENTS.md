@@ -109,8 +109,9 @@ read the sentence (0.33 s per word, from 2.2 s to 9 s, divided by the speed), th
 next screen. It stops at a question, at the end of a run, on any other control ("Show each
 message" too; the speed button only changes the speed), and when the page is hidden; Space
 plays or pauses. It never starts by itself, the address never says "play", and with reduced
-motion there is no Play. `window.paxosStory.onEnd(f)` sets what Play does at the end of a run
-(the tour goes on to its next run). A beat with a `question` asks it before it plays: the
+motion there is no Play and no speed button. `window.paxosStory.onEnd(f)` sets what the end
+of a run does: when the player reaches it, when Play is pressed on the last screen, and, in
+watch mode, when Continue is pressed on it (the tour goes on to its next run). A beat with a `question` asks it before it plays: the
 screen shows the state before the beat, the question in place of the sentence (the sentence gives the answer away), and two
 to four answers (buttons, or the keys 1 to 4). Any answer, or "Show me", plays the beat; then
 the screen marks the right answer, the reader's answer and the reason (`why`). The answers live
@@ -155,17 +156,20 @@ The tour (plan `paxos-guided-tour-2026-11-24`, decided by Pierre on 2026-11-24) 
 flavors in seven chapters, in course order: one chapter per lesson 1 to 7, on five pages. A
 chapter names the runs it plays, in `src/tour/<page>.ts`; `src/tour.ts` lists the chapters
 (`CHAPTERS`) and its `check()` fails the build when a chapter names a lesson or a run that
-does not exist, a run with no story, a tour run that is in no chapter or in two, or a flavor
-page that has no chapter. Today each chapter plays runs of its lesson; a flavor's own tour run
-(`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of `src/steps/story.rs`: 10
-to 30 beats, at most 140 characters per sentence, no question, every `more` names a run of the
-page, every `enter` names a lane) takes their place, one chapter at a time. A run marked `tour`
-is in no lesson (`src/course.ts` accepts it).
+does not exist, a run with no story, two chapters name one lesson, the chapters leave course
+order, a tour run is in no chapter, in two or in a lesson, a bridge is not the chapter's own
+flavor, or a flavor page has no chapter. Today each chapter plays runs of its lesson; a flavor's
+own tour run (`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of
+`src/steps/story.rs`: 10 to 30 beats, at most 140 characters per sentence, no question, every
+`enter` names a lane; `check_choices` checks that every `more` names a run of the page) takes
+their place, one chapter at a time. A run marked `tour` is in no lesson (`src/course.ts`
+accepts it).
 
 - `/paxos/tour/` (`src/pages/paxos/tour.astro`) inlines only the runs of the chapters
   (`tourTrace`, ids `<chapter>--<run>`, each with its own lanes, grid and page) and plays them
-  all: a title screen with one Play and the chapter menu, a bridge before each chapter but the
-  first (the problem that the flavor solves, no protocol fact of its own), the runs, then the
+  all: a title screen with one Play and the chapter menu, a bridge before a chapter (the
+  problem line of its flavor in `src/flavors.ts`, the text of the map of /paxos/; never on the
+  first chapter, and none where no line fits: "Who must answer" and "Reads"), the runs, then the
   end of the chapter (Next chapter, after a 5 s countdown that the reader can stop when the
   player reached it; Your turn; Go deeper). The address says only `#chapter=<id>`, never play.
 - A flavor page plays its own chapters in place: "Watch this flavor (N min)" at the top of its
@@ -176,7 +180,15 @@ is in no lesson (`src/course.ts` accepts it).
   a 390 x 660 phone (the smoke test measures each one). A beat's `more` links a run, and its
   `enter` lanes are drawn from that beat on (`stage.hide`).
 - `public/course.js` keeps the place in the tour (`tourAt`) and the watched chapters
-  (`tourDone`) in this browser only; the title screen offers "Continue where you stopped".
+  (`tourDone`) in this browser only; the title screen offers "Continue where you stopped"
+  (after the last chapter, there is no place to continue from).
+- The keys: the main button of each screen of the tour has the focus, so Space presses it;
+  while a run plays, the story panel has the focus, so Space plays or pauses. A hidden page
+  stops the player, the bridge timer and the countdown, and the countdown text goes.
+- Leaving watch mode opens again the lesson screen that was on view before, so the address
+  and the lesson progress keep the reader's place. Nothing moves before the reader presses
+  Play: a chapter opened from the address shows its first screen still (a press on a chapter
+  of the menu is a press to watch it).
 
 ## Your turn (`public/lab.js`)
 

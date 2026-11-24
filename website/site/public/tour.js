@@ -77,6 +77,9 @@
     screen.hidden = false;
     story.panel.hidden = true;
     bar.hidden = true;
+    // The keys go on: Space presses the screen's main button.
+    var main = screen.querySelector(".primary");
+    if (main) main.focus({ preventScroll: true });
   }
 
   function button(cls, text, fn) {
@@ -118,7 +121,7 @@
       var go = el("div", "tour-actions");
       go.appendChild(button("btn primary tour-play", reduced ? "Start" : "▶ Play", function () { playing = !reduced; begin(0, false); }));
       var at = progress ? progress.load().tour.at : null;
-      var k = at ? chapters.findIndex(function (ch) { return ch.id === at.chapter; }) : -1;
+      var k = at && at.chapter ? chapters.findIndex(function (ch) { return ch.id === at.chapter; }) : -1;
       if (k > 0 || (k === 0 && at.run > 0)) {
         go.appendChild(button("btn tour-resume", "Continue where you stopped: chapter " + chapters[k].n, function () {
           playing = !reduced;
@@ -170,16 +173,24 @@
       (ch.runs.length > 1 ? " · run " + (r + 1) + "/" + ch.runs.length : "");
     if (progress) progress.tourAt(ch.id, r);
     story.start(ch.runs[r], playing);
+    // The keys go on: Space plays or pauses the story.
+    story.panel.focus({ preventScroll: true });
   }
 
   // The end of a run: the next run of the chapter, or the end of the chapter.
   function ended(run, how) {
     if (current < 0) return false;
     var ch = chapters[current];
-    if (how === "auto" && !story.playing()) playing = false;
+    // The player reached the end: it played, whoever pressed Play.
+    if (how === "auto") playing = !reduced;
     if (how === "play" || how === "next") playing = how === "play" && !reduced;
     if (runAt < ch.runs.length - 1) { runs(current, runAt + 1); return true; }
-    if (progress) progress.tourDone(ch.id);
+    if (progress) {
+      progress.tourDone(ch.id);
+      // The next place to continue from: the next chapter, or none.
+      var after = current + 1 < chapters.length ? chapters[current + 1] : null;
+      progress.tourAt(after ? after.id : null, 0);
+    }
     chapterEnd(how === "auto");
     return true;
   }
@@ -256,7 +267,12 @@
     if (onTourPage) { playing = false; title(); } else stopWatching();
   });
   document.addEventListener("visibilitychange", function () {
-    if (document.hidden) { clear(); playing = false; }
+    if (!document.hidden) return;
+    clear();
+    playing = false;
+    // A countdown that stopped says nothing more.
+    var count = screen.querySelector(".tour-count");
+    if (count) count.textContent = "";
   });
 
   var watchBtn = null;
