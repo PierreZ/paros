@@ -1,16 +1,16 @@
-// The two chapters of the quorums page (`src/tour.ts`). Day one: the runs of
-// the lessons "Who must answer" and "Grids". The flavor's own tour runs take
-// their place.
+// The two chapters of the quorums page (`src/tour.ts`). Each plays the
+// flavor's own tour run, one world with no restart (`tour_majority` and
+// `tour_grids` in crates/support/paros-wasm/src/paxos/trace/pages/quorums.rs).
 
 import type { Chapter } from "../tour";
 
 export const QUORUMS_MAJORITY: Chapter = {
   lesson: "majority",
-  runs: ["majority"],
+  runs: ["tour-majority"],
 };
 
 export const QUORUMS_GRIDS: Chapter = {
   lesson: "grids",
-  runs: ["base", "column-down"],
+  runs: ["tour-grids"],
   bridge: "quorums",
 };

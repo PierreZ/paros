@@ -427,7 +427,7 @@ const EXERCISES = [
       ["settle", {}],
     ],
   },
-  { page: "paxos/quorums/", id: "majority", moves: [["settle", { notTo: "n3" }], ["drop", { to: "n3" }]] },
+  { page: "paxos/quorums/", id: "majority", intro: true, moves: [["settle", { notTo: "n3" }], ["drop", { to: "n3" }]] },
   {
     page: "paxos/multi-paxos/",
     id: "gap",
@@ -450,6 +450,7 @@ const EXERCISES = [
   {
     page: "paxos/quorums/",
     id: "grid-column",
+    intro: true,
     moves: [["extra", "The client writes alpha"], ["settle", {}], ["extra", "The client writes bravo"], ["settle", {}]],
   },
   {

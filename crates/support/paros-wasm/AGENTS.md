@@ -121,7 +121,7 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   per page (`lab/single_decree.rs`, `lab/quorums.rs`, `lab/multi_paxos.rs`,
   `lab/compartmentalized.rs`, `lab/matchmaker.rs`), their tests in `lab/tests.rs`.
 - A **guided exercise** (plan `paxos-guided-tour-2026-11-24`, step F4; `gap` is the pilot, and
-  the three single-decree exercises are guided too) adds three lists to its `Exercise`; the
+  the three single-decree exercises and the two quorum exercises are guided too) adds three lists to its `Exercise`; the
   others keep them empty (`NONE`, `NO_PARTS`) until their flavor fills them:
   - `intro`: the setup as `Step`s, each a sentence and the moves it plays. `Lab::start`
     records each step's frames (one per move: the message and the `LabView` after it), and the

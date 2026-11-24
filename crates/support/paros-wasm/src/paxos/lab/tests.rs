@@ -462,14 +462,25 @@ impl Draw {
         usize::try_from(self.0 >> 33).expect("31 bits fit") % n
     }
 
-    /// A move that tries to reach the goal: an extra move or Deliver all as
-    /// often as one message, so a few moves go far. None when no move is
-    /// open (an empty wire and no extra move).
+    /// A move that tries to reach the goal: the third hint of the first line
+    /// that does not hold (asked of the part itself, so a dead end gets it
+    /// too), an extra move or Deliver all as often as one message, so a few
+    /// moves go far. From a dead end that is named wrongly, the moves that
+    /// solve a live state are played too. `None` when no move is open.
     fn goal_move(&mut self, lab: &Lab) -> Option<Move> {
         let view = lab.view();
         let mut open: Vec<Move> = (0..view.extras.len())
             .map(|index| Move::Extra { index })
             .collect();
+        let next = lab
+            .exercise
+            .parts
+            .iter()
+            .find(|part| !(part.holds)(lab))
+            .and_then(|part| (part.next)(lab));
+        if let Some(next) = next {
+            open.extend([next.clone(), next.clone(), next]);
+        }
         if !view.wire.is_empty() {
             open.push(Move::DeliverAll);
             open.push(Move::DeliverAll);
@@ -477,12 +488,33 @@ impl Draw {
             open.push(Move::Deliver { id: m.id });
             open.push(Move::Drop { id: m.id });
         }
-        (!open.is_empty()).then(|| open.swap_remove(self.below(open.len())))
+        self.pick(open)
+    }
+
+    /// The exercise `id` after up to 19 moves of the reader's.
+    fn start(&mut self, id: &str) -> Lab {
+        let mut lab = Lab::new(id).expect("the exercise exists");
+        for _ in 0..self.below(20) {
+            let Some(pick) = self.reader_move(&lab) else {
+                break;
+            };
+            lab.play(&pick);
+        }
+        lab
+    }
+
+    /// One of `open` at random; `None` when it is empty.
+    fn pick(&mut self, mut open: Vec<Move>) -> Option<Move> {
+        if open.is_empty() {
+            return None;
+        }
+        let k = self.below(open.len());
+        Some(open.swap_remove(k))
     }
 
     /// One move of the reader's, at random: each message delivered or
-    /// dropped (a delivery twice as likely), or an extra move. None when no
-    /// move is open.
+    /// dropped (a delivery twice as likely), or an extra move. `None` when
+    /// no move is open (an exercise with no extra move and an empty wire).
     fn reader_move(&mut self, lab: &Lab) -> Option<Move> {
         let view = lab.view();
         let mut open: Vec<Move> = Vec::new();
@@ -492,7 +524,7 @@ impl Draw {
             open.push(Move::Drop { id: m.id });
         }
         open.extend((0..view.extras.len()).map(|index| Move::Extra { index }));
-        (!open.is_empty()).then(|| open.swap_remove(self.below(open.len())))
+        self.pick(open)
     }
 }
 
@@ -512,6 +544,8 @@ const DEAD_ENDS: &[(&str, &[usize])] = &[
     ("two-values", &[]),
     ("duel", &[0, 1]),
     ("gap", &[0, 1]),
+    ("majority", &[0, 1, 2]),
+    ("grid-column", &[0, 1]),
 ];
 
 /// The walk met the dead end of each part that has one (`DEAD_ENDS`), and
@@ -552,13 +586,7 @@ fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
         let mut reached = 0;
         for seed in 0..1000_u64 {
             let mut draw = Draw::new(seed);
-            let mut lab = Lab::new(exercise.id).expect("the exercise exists");
-            for _ in 0..draw.below(20) {
-                let Some(pick) = draw.reader_move(&lab) else {
-                    break;
-                };
-                lab.play(&pick);
-            }
+            let mut lab = draw.start(exercise.id);
             let start = lab.moves().to_vec();
             if let Some(dead) = lab.view().stuck {
                 stuck += 1;
@@ -679,6 +707,46 @@ fn a_vote_above_slot_2_keeps_slot_2_alive() {
         lab.must(&next);
     }
     assert!(lab.view().solved, "the hints reach the goal");
+}
+
+/// In the grid, a write in the wrong order is a dead end that undo leaves,
+/// and a lost vote of slot 1 is not one: the leader sends its open Accepts
+/// again.
+#[test]
+fn a_grid_write_out_of_order_is_a_dead_end_and_a_lost_vote_is_not() {
+    let mut lab = Lab::new("grid-column").expect("grid-column exists");
+    lab.extra("The client writes bravo");
+    let stuck = lab.view().stuck.expect("bravo took slot 0");
+    assert_eq!(stuck.part, 0);
+    lab.play(&Move::Undo);
+    assert!(lab.view().stuck.is_none());
+
+    lab.extra("The client writes alpha");
+    lab.extra("The client writes bravo");
+    lab.drop_all(|m| m.kind == "Accept" && m.slot == Some(1) && m.to == "n1");
+    lab.settle(|m| m.slot == Some(1) && m.to != "n3");
+    let view = lab.view();
+    assert!(view.stuck.is_none(), "a lost Accept is no dead end");
+    assert!(!view.parts[1].holds, "column 1 misses the vote of node 1");
+    let hint = view.hint.expect("a hint");
+    assert_eq!(hint.next, Some(Move::Extra { index: 2 }), "send again");
+    lab.play(&Move::Extra { index: 2 });
+    lab.settle(|m| m.slot == Some(1) && m.to != "n3");
+    assert!(lab.view().solved);
+}
+
+/// In two of three, a message to acceptor 3 is a dead end of the last line,
+/// and a lost promise of acceptor 1 is one of the first.
+#[test]
+fn two_of_three_names_each_dead_end() {
+    let mut lab = Lab::new("majority").expect("majority exists");
+    lab.deliver(|m| m.to == "n3");
+    assert_eq!(lab.view().stuck.map(|s| s.part), Some(2));
+    lab.play(&Move::Undo);
+    lab.drop_all(|m| m.kind == "Prepare" && m.to == "n1");
+    assert_eq!(lab.view().stuck.map(|s| s.part), Some(0));
+    lab.play(&Move::Undo);
+    assert!(lab.view().stuck.is_none());
 }
 
 /// Two votes at ballot 1.5 choose alpha, even when every Accepted is lost
