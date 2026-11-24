@@ -22,6 +22,32 @@ pub struct Written {
     pub value: RegisterValue,
 }
 
+impl Written {
+    /// The highest write of `writes`, by its write generation: what a
+    /// quorum's answers give a caller or a handover (the `Close` of
+    /// `specs/tla/segment-records/`). Two writes of one generation hold one
+    /// value.
+    ///
+    /// # Panics
+    ///
+    /// When `writes` is empty, or when two writes of one generation hold
+    /// different values.
+    #[must_use]
+    pub fn highest<'a>(writes: impl Iterator<Item = &'a Written> + Clone) -> &'a Written {
+        let top = writes
+            .clone()
+            .max_by_key(|written| written.op)
+            .expect("a quorum answered");
+        assert!(
+            writes
+                .filter(|written| written.op == top.op)
+                .all(|written| written.value == top.value),
+            "one write generation holds one value"
+        );
+        top
+    }
+}
+
 /// The state a handover gives the next generation: the set, the highest
 /// write of the stop quorum and its highest read generation
 /// (`specs/tla/segment-records/`, `Close` with `CloseFrom = "max"`).
@@ -205,4 +231,31 @@ pub enum Reply {
         /// The successor of that set, once the member learned it.
         successor: Option<MatchmakerSet>,
     },
+}
+
+impl Reply {
+    /// The set later than generation `than` that a `Refused` names: its
+    /// successor when the member learned a later one, else the member's own
+    /// set when it is later. `None` for any other reply, or when the member
+    /// names no later set.
+    ///
+    /// # Panics
+    ///
+    /// When an assertion on its own postconditions fails: a programmer
+    /// error, never an operating condition.
+    #[must_use]
+    pub fn later_set(&self, than: MatchmakerGeneration) -> Option<MatchmakerSet> {
+        let Reply::Refused { set, successor, .. } = self else {
+            return None;
+        };
+        let later = successor
+            .clone()
+            .filter(|next| next.generation > than)
+            .or_else(|| (set.generation > than).then(|| set.clone()));
+        assert!(
+            later.as_ref().is_none_or(|later| later.generation > than),
+            "a later set is later"
+        );
+        later
+    }
 }

@@ -2,7 +2,7 @@ use super::*;
 use crate::RELEASE;
 use crate::command::{Fence, Record, Write};
 use crate::roles::message::PromisePage;
-use crate::segment::OpeningCall;
+use crate::segment::{Grid, OpeningCall};
 use paros_consensus::journal::{LeaderUuid, Seq};
 
 /// The answers a leader of these tests holds at most.

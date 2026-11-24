@@ -274,13 +274,10 @@ impl RegisterHandover {
     /// When an assertion on its own invariants or postconditions fails: a
     /// programmer error, never an operating condition.
     pub fn on_reply(&mut self, from: MatchmakerId, reply: Reply) -> HandoverStep {
-        if let Reply::Refused { set, successor, .. } = &reply
+        if matches!(reply, Reply::Refused { .. })
             && let Some(old) = self.old()
         {
-            let later = successor
-                .clone()
-                .filter(|next| next.generation > old.generation)
-                .or_else(|| (set.generation > old.generation).then(|| set.clone()));
+            let later = reply.later_set(old.generation);
             let publishing = matches!(self.phase, HandoverPhase::Publishing { .. });
             if let Some(later) = later
                 && !publishing
@@ -343,17 +340,7 @@ impl RegisterHandover {
         }
         // Close: the highest write of the stop majority, and its highest
         // read generation.
-        let (top, _) = stopped
-            .values()
-            .max_by_key(|(written, _)| written.op)
-            .expect("a quorum stopped");
-        assert!(
-            stopped
-                .values()
-                .filter(|(written, _)| written.op == top.op)
-                .all(|(written, _)| written.value == top.value),
-            "one write generation holds one value"
-        );
+        let top = Written::highest(stopped.values().map(|(written, _)| written));
         let successor = Successor {
             set: MatchmakerSet::new(
                 MatchmakerGeneration(old.generation.0 + 1),
