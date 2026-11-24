@@ -232,12 +232,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/nix
-      # The same debug build as the `test` job, so it shares its cache.
+      # Its own cache: `-p` builds the sim crates with their own features, so
+      # the build differs from the workspace build of the `test` job.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test
+          key: traces-${{ matrix.shard }}
           cache-on-failure: true
-          save-if: false
       - name: Check the walks against the trace specs (${{ matrix.shard }})
         env:
           SHARD: ${{ matrix.shard }}
