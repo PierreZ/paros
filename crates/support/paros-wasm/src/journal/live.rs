@@ -118,7 +118,9 @@ struct Matchmaker {
 
 /// The journal's register on its three matchmakers. A [`RegisterCall`]
 /// reads at a majority, checks the guard of its change and writes at a
-/// majority; one runs at a time, so a write is never left at a minority.
+/// majority. The page runs on one thread and a change is one synchronous
+/// call, so the operations run one after the other and a write is never
+/// left at a minority.
 #[derive(Clone)]
 struct Matchmakers {
     set: MatchmakerSet,

@@ -107,6 +107,9 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// How long the program waits for one answer before it takes it as lost.
 /// No result depends on it: the client sends a lost request again, and the
 /// journal settles a copy that lands twice.
+/// How many times the hand-made controller asks a change that got no
+/// answer: far above the few conflicts that the hosts' operations cause.
+const ASKS: usize = 100;
 const ANSWER_WAIT: Duration = Duration::from_millis(500);
 
 type Process = Driver<Disk, Wire, WallClock, Matchmakers, ()>;
@@ -225,12 +228,13 @@ struct Matchmaker {
 /// client of one host; they share the matchmakers and the counter of
 /// operation generations.
 ///
-/// **One operation at a time.** An operation holds the matchmakers' lock
-/// from its first read to its last write, so two operations never
-/// interleave and no write stays at a minority. An operation in conflict
-/// can leave its write at a minority; the same change asked again then
-/// finds that write and is refused, and the leader takes the refusal of
-/// its own seal as a loss and stops.
+/// **Operations interleave.** An operation takes the matchmakers' lock for
+/// one request at a time, so the operations of two hosts interleave as on
+/// a real network: one can read between the two writes of another, end in
+/// conflict, and leave its write at a minority. The driver asks a change
+/// with no answer again; the register takes a change that its value
+/// already holds as "ok" again and writes it once more, so the first write
+/// is done (§J3.4, "A change asked again").
 #[derive(Clone)]
 struct Matchmakers {
     set: MatchmakerSet,
@@ -281,7 +285,6 @@ impl Matchmakers {
     /// a matchmaker that is down is lost; when no majority answers a phase,
     /// the operation ends with no answer ([`CallStep::Pending`]).
     fn run(&self, change: &Change) -> CallStep {
-        let mut members = lock(&self.members);
         let op = Ballot {
             round: self.ops.fetch_add(1, Ordering::SeqCst) + 1,
             node: self.caller,
@@ -290,11 +293,15 @@ impl Matchmakers {
         loop {
             let mut next_phase = false;
             for (id, request) in call.requests() {
-                let m = members.get_mut(&id).expect("a member of the set");
-                if !m.up {
-                    continue;
-                }
-                match call.on_reply(id, m.member.step(request).reply) {
+                let reply = {
+                    let mut members = lock(&self.members);
+                    let m = members.get_mut(&id).expect("a member of the set");
+                    if !m.up {
+                        continue;
+                    }
+                    m.member.step(request).reply
+                };
+                match call.on_reply(id, reply) {
                     CallStep::Pending => {}
                     CallStep::Write { .. } => {
                         next_phase = true;
@@ -606,13 +613,20 @@ impl Cluster {
     }
 
     /// The controller's call `change` on the register. A majority of the
-    /// matchmakers is up at each call of this run, and one operation runs at
-    /// a time, so the call is done or refused at once.
+    /// matchmakers is up at each call of this run, so an operation ends with
+    /// no answer only in a conflict with the operation of a host. The
+    /// controller then asks the same change again, as a driver does: the
+    /// register takes a change that its value holds as "ok" again.
     fn controller(&self, change: &Change) -> RegisterValue {
-        self.matchmakers
-            .client(0)
-            .change(JOURNAL, change)
-            .unwrap_or_else(|e| panic!("the controller's {change:?}: {e:?}"))
+        let mut register = self.matchmakers.client(0);
+        for _ in 0..ASKS {
+            match register.change(JOURNAL, change) {
+                Ok(value) => return value,
+                Err(ChangeError::NoAnswer) => {}
+                Err(e) => panic!("the controller's {change:?}: {e:?}"),
+            }
+        }
+        panic!("the controller's {change:?}: no answer after {ASKS} asks");
     }
 
     /// The controller's register read: the done value.
@@ -1049,6 +1063,16 @@ fn votes_of_3(p: &Process) -> (u64, Vec<u64>) {
     (acceptor.promised().round, votes)
 }
 
+/// The ranges of slots whose votes acceptor 3 dropped, `start .. below`.
+fn dropped_of_3(p: &Process) -> Vec<(u64, u64)> {
+    let acceptor = p.host().acceptor(at(3)).expect("acceptor 3");
+    acceptor
+        .dropped()
+        .iter()
+        .map(|(start, below)| (start.0, below.0))
+        .collect()
+}
+
 /// Step 6: host 3 starts again on its disk.
 async fn restart(cluster: &mut Cluster, before: (u64, Vec<u64>)) {
     println!("6. Host 3 starts again on its disk.");
@@ -1056,10 +1080,30 @@ async fn restart(cluster: &mut Cluster, before: (u64, Vec<u64>)) {
     show("records on host 3's disk", &records);
     assert!(records > 0, "acceptor 3 and replica 12 wrote their disk");
     cluster.start(3);
-    let read_back = cluster.look(3, votes_of_3).await.expect("host 3 runs");
+    let (read_back, dropped) = cluster
+        .look(3, |p| (votes_of_3(p), dropped_of_3(p)))
+        .await
+        .expect("host 3 runs");
     show("acceptor 3: (promise, votes) before the crash", &before);
     show("acceptor 3: (promise, votes) read back", &read_back);
-    assert_eq!(read_back, before, "acceptor 3 reads back what it held");
+    // Once back, acceptor 3 may already have compacted the votes below the
+    // floor that F + 1 replicas report (a `Compact` from the leader): those votes
+    // are dropped, never lost. Every other vote is read back.
+    let kept: Vec<u64> = before
+        .1
+        .iter()
+        .copied()
+        .filter(|slot| {
+            !dropped
+                .iter()
+                .any(|(start, below)| (*start..*below).contains(slot))
+        })
+        .collect();
+    assert_eq!(
+        read_back,
+        (before.0, kept),
+        "acceptor 3 reads back what it held, less the votes it compacted since"
+    );
     cluster
         .wait_until("replica 12 catches up", async |c| {
             c.replica(12).await.is_some_and(|(next, _)| next == Seq(5))
