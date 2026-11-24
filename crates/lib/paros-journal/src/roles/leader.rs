@@ -924,11 +924,9 @@ impl<T> JournalLeader<T> {
     /// caller is answered `Unknown`, and the slot leaves the unapplied set.
     fn forget(&mut self, slot: Slot) -> Option<LeaderEffect<T>> {
         self.unapplied.remove(&slot);
-        let reply = self
-            .held
+        self.held
             .release(slot)
-            .map(|(token, reply)| LeaderEffect::Reply { token, reply });
-        reply
+            .map(|(token, reply)| LeaderEffect::Reply { token, reply })
     }
 
     /// The segment before the leader's own, when the leader's is pending.
