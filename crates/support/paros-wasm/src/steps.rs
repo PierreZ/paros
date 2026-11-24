@@ -14,7 +14,7 @@ pub mod story;
 
 use serde::{Deserialize, Serialize};
 
-pub use story::{Beat, Choice, Flight, NodeState, Question, Vote};
+pub use story::{Beat, Choice, Flight, NodeState, Question, Tour, Vote};
 
 /// One field of a message: `ballot` = `1.0 (round 1, node 0)`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +176,9 @@ pub struct Scenario {
     pub chapters: Vec<Chapter>,
     /// What the run ends with, read off the world.
     pub outcome: String,
+    /// The tour chapter that plays this run, when it is a tour run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tour: Option<story::Tour>,
 }
 
 /// One chapter of a run.

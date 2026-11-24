@@ -791,6 +791,7 @@ impl Run {
             grid: None,
             chapters,
             outcome: outcome.to_string(),
+            tour: None,
         }
     }
 

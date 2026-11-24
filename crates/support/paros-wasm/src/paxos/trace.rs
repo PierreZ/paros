@@ -66,6 +66,7 @@ pub struct Recorder {
     start_nodes: Vec<NodeState>,
     start_wire: Vec<Flight>,
     beats: story::Beats,
+    tour: Option<story::Tour>,
 }
 
 /// Who counts, which phase, which ballot, which slot.
@@ -100,7 +101,47 @@ impl Recorder {
             start_nodes,
             start_wire,
             beats: story::Beats::default(),
+            tour: None,
         }
+    }
+
+    /// Mark the run as a tour run: chapter `chapter` of the tour of the
+    /// Paxos flavors plays it, under `title`. A tour run tells its flavor in
+    /// one world with no restart, and `tests/paxos_tour.rs` holds it to the
+    /// rules of the tour (`story::tour_problems`).
+    ///
+    /// # Panics
+    ///
+    /// When the run is marked already.
+    pub fn tour(&mut self, chapter: &str, title: &str) -> &mut Self {
+        assert!(self.tour.is_none(), "a run is in one chapter");
+        self.tour = Some(story::Tour {
+            chapter: chapter.to_string(),
+            title: title.to_string(),
+        });
+        self
+    }
+
+    /// Link the open beat to `run`, the run of the same page that goes
+    /// deeper into it ("More on this").
+    ///
+    /// # Panics
+    ///
+    /// When no beat is open, or it links a run already.
+    pub fn more(&mut self, run: &str) -> &mut Self {
+        self.beats.more(run);
+        self
+    }
+
+    /// Make `lanes` appear at the open beat: the stage draws them from this
+    /// beat on, so it starts small and grows.
+    ///
+    /// # Panics
+    ///
+    /// When no beat is open, or a lane is named twice.
+    pub fn enter(&mut self, lanes: &[&str]) -> &mut Self {
+        self.beats.enter(lanes);
+        self
     }
 
     /// Open a beat: one screen of the run's story, with the sentence that
@@ -582,6 +623,7 @@ impl Recorder {
             lanes: Some(self.lanes),
             grid: self.grid,
             steps: self.steps,
+            tour: self.tour,
         }
     }
 }

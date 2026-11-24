@@ -1192,6 +1192,7 @@ impl Run {
             lanes: None,
             grid: None,
             steps: self.steps,
+            tour: None,
         }
     }
 }

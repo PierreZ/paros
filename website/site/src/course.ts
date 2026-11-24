@@ -8,8 +8,9 @@
 // reader's browser only.
 //
 // `check()` runs at build time: every run a lesson names exists, and every
-// run of a page with a story is in exactly one lesson. A new run needs a
-// place here, or the build fails.
+// run of a page with a story is in exactly one lesson, except a tour run
+// (`tour` in the trace), which `src/tour.ts` places in a chapter. A new run
+// needs a place here or there, or the build fails.
 
 export interface Lesson {
   /** A stable id, used in the address and in the progress. */
@@ -133,7 +134,7 @@ export function pathOf(lesson: Pick<Lesson, "page" | "path">): string {
   return lesson.path ?? `paxos/${lesson.page}/`;
 }
 
-interface TraceLike { scenarios: { id: string; label: string; beats?: unknown[] }[] }
+interface TraceLike { scenarios: { id: string; label: string; beats?: unknown[]; tour?: unknown }[] }
 
 /** The lessons of one page, in course order, with their number from 1. */
 export function lessonsOf(page: string): (Lesson & { n: number })[] {
@@ -155,7 +156,7 @@ export function check(traces: Record<string, TraceLike>): void {
   }
   for (const [page, trace] of Object.entries(traces)) {
     for (const s of trace.scenarios) {
-      if (s.beats?.length && !placed.has(`${page}/${s.id}`)) throw new Error(`course: the run ${page}/${s.id} is in no lesson: add it to src/course.ts`);
+      if (s.beats?.length && !s.tour && !placed.has(`${page}/${s.id}`)) throw new Error(`course: the run ${page}/${s.id} is in no lesson: add it to src/course.ts`);
     }
   }
 }

@@ -25,6 +25,13 @@
 // beat plays first, then the screen asks what went wrong in it. An answer
 // marks the right one and says why, with no second play.
 //
+// The tour (public/tour.js) plays runs in watch mode: no question, no choice,
+// no link to the step-through, no lesson, and nothing in the address or the
+// progress of the lessons. The page /paxos/tour/ is in watch mode from the
+// start (`data-tour` on its trace); a flavor page enters it for "Watch this
+// flavor". A beat can name a run to see next (`more`) and the lanes that
+// enter at it (`enter`): a lane is drawn from the beat it enters on.
+//
 // The drawing is public/stage.js, which the exercises share. No protocol
 // logic here: every sentence, state and message comes from the trace. This
 // script runs after stage.js and before steps.js.
@@ -38,6 +45,9 @@
   var progress = window.paxosCourse || null;
   var stories = trace.scenarios.filter(function (run) { return run.beats && run.beats.length; });
   if (!stories.length) return;
+
+  // Watch mode (see above): set by tour.js through paxosStory.tour().
+  var watching = data.dataset.tour === "on";
 
   var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -117,6 +127,9 @@
   foot.appendChild(toSteps);
   foot.appendChild(document.createTextNode(": the same run, one message per step, with what each message carries."));
   panel.appendChild(foot);
+  foot.hidden = watching;
+  others.hidden = watching;
+  panel.classList.toggle("watching", watching);
 
   mount.parentNode.insertBefore(panel, mount);
   // The step-through draws into the mount, hidden until the reader asks.
@@ -190,14 +203,17 @@
 
   // The question of the beat on screen is asked before it plays.
   function before() {
-    var q = run.beats[at].question;
+    var q = questionOf(run.beats[at]);
     return !!q && !q.after;
   }
+
+  // The question of a beat: none in watch mode.
+  function questionOf(beat) { return watching ? null : beat.question; }
 
   // The beat on screen has played to its end: a "find the bug" question with
   // no answer is asked now.
   function landed() {
-    var q = run.beats[at].question;
+    var q = questionOf(run.beats[at]);
     if (q && q.after && !(key() in asked)) {
       waiting = true;
       words();
@@ -217,7 +233,7 @@
   // The question of the beat on screen: its answers while it waits, then
   // the reader's answer, the right one and why.
   function drawQuiz(beat) {
-    var q = beat.question;
+    var q = questionOf(beat);
     quiz.textContent = "";
     quiz.hidden = !q;
     if (!q) return;
@@ -272,7 +288,7 @@
 
   // At the end of a run: the next run of its lesson, or the next lesson.
   function nextInCourse(list) {
-    var place = lessonOf(run.id);
+    var place = watching ? null : lessonOf(run.id);
     if (!place) return;
     var box = el("div", "story-next");
     var after = place.lesson.runs[place.k + 1];
@@ -307,7 +323,7 @@
   function words() {
     var beat = run.beats[at];
     counter.textContent = "screen " + (at + 1) + " / " + run.beats.length;
-    var place = lessonOf(run.id);
+    var place = watching ? null : lessonOf(run.id);
     runName.textContent = place
       ? "Lesson " + place.lesson.n + " · " + place.lesson.title + " · " + (place.k + 1) + " of " + place.lesson.runs.length + ": " + run.label
       : run.label;
@@ -340,8 +356,8 @@
       chosen.appendChild(el("span", "story-end", " " + run.outcome));
     }
     choices.textContent = "";
-    beat.choices = beat.choices || [];
-    beat.choices.forEach(function (choice) {
+    if (beat.more) drawMore(beat.more);
+    (watching ? [] : beat.choices || []).forEach(function (choice) {
       var target = null;
       trace.scenarios.forEach(function (s) { if (s.id === choice.run) target = s; });
       if (!target) return;
@@ -352,19 +368,47 @@
     });
     if (last && !waiting) {
       nextInCourse(choices);
-      if (progress) progress.seen(trace.page, run.id);
+      if (progress && !watching) progress.seen(trace.page, run.id);
     }
-    if (progress && touched) progress.at(trace.page, run.id, at);
+    if (progress && touched && !watching) progress.at(trace.page, run.id, at);
     choices.hidden = waiting || !choices.childNodes.length;
     backBtn.disabled = at === 0;
-    nextBtn.disabled = last && !waiting;
+    // In watch mode, Continue on the last screen goes where the tour says.
+    nextBtn.disabled = last && !waiting && !(watching && onEnd);
     nextBtn.textContent = waiting ? (before() ? "Show me" : "Tell me") : "Continue";
     others.querySelectorAll("button").forEach(function (b) {
       b.classList.toggle("now", b.dataset.run === run.id);
     });
-    if (window.history && window.history.replaceState && touched) {
+    if (window.history && window.history.replaceState && touched && !watching) {
       window.history.replaceState(null, "", "#run=" + run.id + "&beat=" + at);
     }
+  }
+
+  // A link to a run that tells more: in place when this page has it, else
+  // on the page of the run (`href` of a run of the tour page).
+  function drawMore(id) {
+    var target = null;
+    stories.forEach(function (s) { if (s.id === id) target = s; });
+    var a = el("a", "story-choice story-more", "More: " + (target ? target.label : id));
+    a.href = (run.href || "") + "#run=" + id + "&beat=0";
+    if (target && !run.href) {
+      a.addEventListener("click", function (e) {
+        e.preventDefault();
+        stop();
+        if (watching && leave) leave();
+        open(target, 0, true);
+      });
+    }
+    choices.appendChild(a);
+  }
+
+  // The lanes that enter after beat `n`: placed, not drawn yet.
+  function later(n) {
+    var out = {};
+    run.beats.forEach(function (beat, k) {
+      if (k > n) (beat.enter || []).forEach(function (lane) { out[lane] = true; });
+    });
+    return out;
   }
 
   var touched = false;
@@ -383,6 +427,8 @@
   var speed = 1;
   var timer = null;
   var onEnd = null;    // what Play does at the end of a run (the tour sets it)
+  var leave = null;    // what leaving watch mode does (the tour sets it)
+  var kept = null;     // the lesson screen on view when watch mode began
 
   // The time to read a sentence: 0.33 s per word, from 2.2 s to 9 s.
   function readMs(text) {
@@ -414,7 +460,7 @@
       timer = null;
       if (!playing || run.id + ":" + at !== mine || waiting) return;
       if (at < run.beats.length - 1) { go(at + 1, true); return; }
-      if (onEnd && onEnd(run)) return;
+      if (onEnd && onEnd(run, "auto")) return;
       setPlaying(false);
     }, readMs(run.beats[at].says));
   }
@@ -425,7 +471,11 @@
     touched = true;
     if (waiting) { setPlaying(false); return; }
     // At the end of a run, Play starts it again.
-    if (at === run.beats.length - 1 && !(onEnd && onEnd(run, true))) { go(0, true); return; }
+    if (at === run.beats.length - 1) {
+      if (onEnd && onEnd(run, "play")) return;
+      go(0, true);
+      return;
+    }
     if (nextBtn.textContent === "Skip") return; // the screen plays: rest() follows
     go(at + 1, true);
   }
@@ -433,12 +483,14 @@
   // The marks are built once for each run, so a mark that has the focus
   // keeps it when the screen changes; each go() only moves the classes.
   var lineOf = null;
+  var lineMode = null;
   function drawLine() {
-    if (lineOf !== run) {
+    if (lineOf !== run || lineMode !== watching) {
+      lineMode = watching;
       lineOf = run;
       line.textContent = "";
       run.beats.forEach(function (beat, k) {
-        var b = el("button", "story-mark" + (beat.question ? " ask" : ""));
+        var b = el("button", "story-mark" + (questionOf(beat) ? " ask" : ""));
         b.type = "button";
         b.setAttribute("aria-label", "Screen " + (k + 1));
         b.addEventListener("click", function () { stop(); touched = true; go(k, false); });
@@ -459,6 +511,7 @@
     var mine = view.begin();
     var beat = run.beats[at];
     waiting = before() && !(key() in asked);
+    view.hide(later(at));
     words();
     drawLine();
     if (waiting) {
@@ -502,6 +555,7 @@
     stop();
     touched = true;
     if (waiting) { answer(-1); return; }
+    if (watching && onEnd && at === run.beats.length - 1 && nextBtn.textContent !== "Skip") { onEnd(run, "next"); return; }
     if (nextBtn.textContent === "Skip") { view.cancel(); nextBtn.textContent = "Continue"; still(run.beats[at].to, run.beats[at].from); landed(); return; }
     go(at + 1, true);
   });
@@ -522,9 +576,47 @@
     pause: stop,
     playing: function () { return playing; },
     speed: function (v) { speed = v; speedBtn.textContent = v + "×"; view.speed(v); },
-    // What Play does at the end of a run: f(run, atPlay) returns true when
-    // it took over (the tour goes on to the next run). null clears it.
+    // What the end of a run does: f(run, how) returns true when it took
+    // over (the tour goes on to the next run). `how` is "auto" when the
+    // player reached the end, "play" for Play on the last screen and "next"
+    // for Continue on it in watch mode. null clears it.
     onEnd: function (f) { onEnd = f || null; },
+    // The panel, so the tour can put its screens next to it.
+    panel: panel,
+    // Watch mode on (`opts.leave` runs when a link leaves it) or off (null).
+    // Leaving it opens again the screen of the lesson that was on view, so
+    // the address and the lesson progress keep the reader's own place.
+    tour: function (opts) {
+      stop();
+      var was = watching;
+      watching = !!opts;
+      leave = opts ? opts.leave || null : null;
+      foot.hidden = others.hidden = watching;
+      panel.classList.toggle("watching", watching);
+      if (watching && !was) kept = { run: run, at: at, touched: touched };
+      asked = progress && !watching ? progress.answersOf(trace.page) : asked;
+      if (!watching && was && kept) {
+        run = kept.run;
+        touched = kept.touched;
+        layout();
+        go(kept.at, false);
+        kept = null;
+        return;
+      }
+      go(at, false);
+    },
+    watching: function () { return watching; },
+    // Open run `id` at its first screen; Play goes on when `play`.
+    start: function (id, play) {
+      var target = null;
+      stories.forEach(function (s) { if (s.id === id) target = s; });
+      if (!target) return false;
+      stop();
+      if (play && !reduced) setPlaying(true);
+      // Nothing moves before the reader presses Play.
+      open(target, 0, !!play && !reduced);
+      return true;
+    },
     answers: function () {
       return Object.keys(asked).map(function (k) {
         var p = k.split(":");

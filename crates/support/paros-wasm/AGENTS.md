@@ -75,7 +75,12 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   `Recorder::holds(fact, says)` after the beat's steps (a `holds` that fails stops the trace, so
   a change of the core cannot leave a wrong answer on the site), and ends one with
   `Recorder::choice(label, run, beat)`, which opens
-  another run of the page at one of its beats (checked when the page is assembled). Every step
+  another run of the page at one of its beats (checked when the page is assembled). A run of
+  the tour of the site (`website/site/src/tour.ts`) is marked with `Recorder::tour(chapter,
+  title)`; its beats may link a run that tells more (`Recorder::more(run)`) and name the lanes
+  that enter at them (`Recorder::enter(&[lane])`). `tests/paxos_tour.rs` holds every tour run
+  to the rules of `steps::story::tour_problems`: 10 to 30 beats, at most 140 characters per
+  sentence, no question, and every `enter` names a lane. Every step
   carries the id of its message, the messages on the wire after it (a broadcast shares one
   `fan`), and each lane's typed state with what the step wrote on its disk. Both drivers fill
   them.
