@@ -37,6 +37,17 @@ The knowledge base in [`../knowledge/`](../knowledge/) organizes these sources b
 - [`papers/paxos-vs-raft/`](papers/paxos-vs-raft/) — Howard, Mortier. The two differ *only* in
   leader election. Pairs with the etcd-raft analysis; includes a persistent-vs-volatile state checklist.
 
+### Reconfiguration (Lamport, Malkhi, Zhou)
+- [`papers/stoppable-paxos/`](papers/stoppable-paxos/): Malkhi, Lamport, Zhou (MSR, 2008). A
+  stopping command chosen at slot `i` ends the log; a reconfigurable log is a chain of stoppable
+  logs, each in one fixed configuration. Adds only Phase-2a enabling conditions (the voiding of a
+  stop that a later-ballot vote above it outvotes). The paper way to decide a seal inside Paxos.
+- [`papers/vertical-paxos/`](papers/vertical-paxos/): Lamport, Malkhi, Zhou (PODC 2009). A
+  configuration per ballot, chosen by an auxiliary master; VP I reads down to the last complete
+  ballot, VP II reads only the previous active ballot and the master activates the new one after
+  state transfer. Primary-backup, Niobe and Chain Replication as instances; a GFS chunk as its own
+  state machine.
+
 ### Variants & scaling (Whittaker et al.)
 - [`papers/matchmaker-paxos/`](papers/matchmaker-paxos/) — Whittaker et al. Safe reconfiguration of
   the acceptor set via per-round configuration registries (matchmakers).
