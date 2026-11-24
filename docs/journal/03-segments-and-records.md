@@ -34,6 +34,14 @@ Reads route by the `seq` range of the records and take their floor from the segm
 
 *Moved here from `docs/architecture/02-data-plane.md` §2.10 (#1332 (journal architecture docs)).*
 
+**Segments spread a journal across machines, and the consensus stays close to authentic Paxos**
+(Pierre, 2026-11-24). Segments are kept: they are how one journal lives on more machines than
+one grid. The agreement on each slot follows the papers (Matchmaker Paxos, Compartmentalized
+Paxos, CTRL) as closely as possible. A rule of the journal's consensus that no paper has is a
+departure: it needs its TLA+ check and its line in this section, and a change that removes one
+is preferred to a change that adds one. **Open**: which departures stay, decided by Pierre from
+the list of departures that this thread sends him.
+
 **The matchmakers of a journal hold its segment table** (decided by Pierre on 2026-11-19, with
 the TLA+ experiment of #1213 (segments in the protocol or in storage),
 `specs/tla/experiments/segments/`). A segment is the run of slots that one configuration (one
