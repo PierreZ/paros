@@ -16,6 +16,14 @@ use super::PersistId;
 /// One page of an acceptor's promise: its votes and its faulty entries at or
 /// after the slot that the `Prepare` asked from, and where the next page
 /// starts when the suffix did not fit.
+///
+/// The leader folds a page by the core's paging rule
+/// (`paros_consensus::proposer::PromiseTally`): the page starts at the
+/// acceptor's cursor, holds at most `PROMISE_BATCH` votes and faulty entries
+/// at different slots, and a page with a `next` holds at least one entry,
+/// all below `next`. The dropped ranges do not count as entries. So a page of
+/// dropped ranges only can never carry a `next`: the leader refuses it, and
+/// asks the acceptor again from the same cursor at every tick.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromisePage {
     /// The readable votes, by slot.

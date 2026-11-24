@@ -155,16 +155,8 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
     pub fn requery(&self, me: Id) -> RepairQuery<Id> {
         let to: Vec<(Id, Slot)> = member_union(&self.prior)
             .into_iter()
-            .filter(|p| *p != me && !self.promises.answered.contains(p))
-            .map(|p| {
-                let cursor = self
-                    .promises
-                    .promise_next
-                    .get(&p)
-                    .copied()
-                    .unwrap_or(self.promises.from_slot);
-                (p, cursor)
-            })
+            .filter(|p| *p != me && !self.promises.answered().contains(p))
+            .map(|p| (p, self.promises.cursor(p)))
             .collect();
         assert!(
             to.iter().all(|(p, _)| *p != me),

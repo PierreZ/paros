@@ -750,6 +750,93 @@ fn an_answered_sender_that_owes_a_page_breaks_the_check() {
     tally.assert_invariants();
 }
 
+/// A sender's cursor is the first slot until a page leaves it mid-suffix,
+/// then the continuation slot of that page; a page at another cursor is
+/// refused, and the terminal page moves the sender to the answered set.
+#[test]
+fn the_tally_cursor_follows_each_sender_and_answered_holds_the_complete_ones() {
+    let b1 = ballot(1, 0);
+    let mut tally: PromiseTally<NodeId> =
+        PromiseTally::new(b1, Slot(3), BTreeSet::from([NodeId(0)]));
+    let none: BTreeMap<Slot, Ballot> = BTreeMap::new();
+    let page: BTreeMap<Slot, (Ballot, &str)> =
+        BTreeMap::from([(Slot(3), (b1, "x")), (Slot(4), (b1, "x"))]);
+    let empty: BTreeMap<Slot, (Ballot, &str)> = BTreeMap::new();
+    assert_eq!(tally.cursor(NodeId(1)), Slot(3));
+    assert_eq!(tally.cursor(NodeId(2)), Slot(3));
+    assert_eq!(tally.answered(), &BTreeSet::from([NodeId(0)]));
+
+    assert!(tally.accepts(NodeId(1), b1, Slot(3), &page, &none, Some(Slot(5))));
+    assert_eq!(
+        tally.close_page(NodeId(1), Some(Slot(5))),
+        PromiseFold::Continue(Slot(5))
+    );
+    assert_eq!(tally.cursor(NodeId(1)), Slot(5));
+    assert_eq!(
+        tally.cursor(NodeId(2)),
+        Slot(3),
+        "another sender keeps the first slot"
+    );
+    assert!(
+        !tally.answered().contains(&NodeId(1)),
+        "a sender mid-suffix has not answered"
+    );
+
+    assert!(
+        !tally.accepts(NodeId(1), b1, Slot(3), &empty, &none, None),
+        "a page below the cursor"
+    );
+    assert!(
+        !tally.accepts(NodeId(1), ballot(2, 0), Slot(5), &empty, &none, None),
+        "another ballot"
+    );
+    assert!(tally.accepts(NodeId(1), b1, Slot(5), &empty, &none, None));
+    assert_eq!(tally.close_page(NodeId(1), None), PromiseFold::Answered);
+    assert_eq!(tally.answered(), &BTreeSet::from([NodeId(0), NodeId(1)]));
+    assert!(
+        !tally.accepts(NodeId(1), b1, Slot(5), &empty, &none, None),
+        "an answered sender"
+    );
+}
+
+/// A page whose shape is wrong is refused at the sender's cursor: a slot in
+/// both maps, a slot below the cursor, a continuation with no entry, and a
+/// page above the page ceiling.
+#[test]
+fn the_tally_refuses_a_page_of_the_wrong_shape() {
+    let b1 = ballot(1, 0);
+    let tally: PromiseTally<NodeId> = PromiseTally::new(b1, Slot(2), BTreeSet::new());
+    let vote = |slot| (Slot(slot), (b1, "x"));
+    let both = BTreeMap::from([vote(2)]);
+    let faulty = BTreeMap::from([(Slot(2), b1)]);
+    assert!(
+        !tally.accepts(NodeId(1), b1, Slot(2), &both, &faulty, None),
+        "a slot in both maps"
+    );
+    let below = BTreeMap::from([vote(1)]);
+    let none: BTreeMap<Slot, Ballot> = BTreeMap::new();
+    assert!(
+        !tally.accepts(NodeId(1), b1, Slot(2), &below, &none, None),
+        "a slot below the cursor"
+    );
+    let empty: BTreeMap<Slot, (Ballot, &str)> = BTreeMap::new();
+    assert!(
+        !tally.accepts(NodeId(1), b1, Slot(2), &empty, &none, Some(Slot(3))),
+        "an empty continuation"
+    );
+    let full: BTreeMap<Slot, (Ballot, &str)> =
+        (0..=PROMISE_BATCH as u64).map(|s| vote(2 + s)).collect();
+    assert!(
+        !tally.accepts(NodeId(1), b1, Slot(2), &full, &none, None),
+        "above the page ceiling"
+    );
+    assert_eq!(
+        tally.cursor(NodeId(1)),
+        Slot(2),
+        "a refused page moves no cursor"
+    );
+}
+
 /// A candidate holds no repair probe: the proposer's check names it.
 #[test]
 #[should_panic(expected = "a candidate holds no repair probe")]
