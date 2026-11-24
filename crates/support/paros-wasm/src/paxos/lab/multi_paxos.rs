@@ -465,7 +465,11 @@ const READ_PARTS: &[Part] = &[
         idea: "Node 2 counts its own answer and needs one more: two of three is a majority. \
                Each node answers with the highest slot that it voted in.",
         plan: "Deliver the question of node 2 to node 1, then the answer of node 1.",
-        next: |lab| deliver_first(lab, read_message).or(Some(Move::Extra { index: READ_AT_2 })),
+        next: |lab| {
+            deliver_first(lab, |m| read_message(m) && (m.to == "n1" || m.from == "n1"))
+                .or_else(|| deliver_first(lab, read_message))
+                .or(Some(Move::Extra { index: READ_AT_2 }))
+        },
         dead: |_| None,
     },
     Part {
@@ -537,7 +541,7 @@ const READ_GUIDE: &[Step] = &[
 
 pub(super) const READ: Exercise = Exercise {
     id: "read",
-    title: "Read without the leader",
+    title: "A read that waits",
     task: "alpha is chosen at slot 0. Nodes 1 and 2 voted for bravo at slot 1, and node 0, the \
            leader, has not heard yet. A client reads from node 2. Get the read served.",
     rule_off: None,

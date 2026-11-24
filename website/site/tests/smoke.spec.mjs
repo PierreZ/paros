@@ -303,10 +303,32 @@ test("/paxos/tour/: the title, the chapter menu, a bridge and a chapter", async 
   w.check();
 });
 
-// The tour with motion: Play goes from run to run and from a chapter to its
+// Play goes on from one run of a chapter to the next with no press. The
+// chapter "Change the acceptors" still plays two runs of its lesson.
+test("/paxos/tour/: Play goes on from run to run", async ({ browser }) => {
+  const context = await browser.newContext({ reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const w = watch(page);
+  await page.goto("paxos/tour/#chapter=matchmakers");
+  const screen = page.locator(".tour-screen");
+  const story = page.locator(".panel.story");
+  const playing = () => page.evaluate(() => window.paxosStory.playing());
+  await expect(screen.locator(".tour-bridge")).toBeVisible();
+  await page.evaluate(() => window.paxosStory.speed(20));
+  await page.keyboard.press(" ");
+  await expect(story).toBeVisible();
+  await expect(story.locator(".tour-bar")).toContainText("run 1/2");
+  await expect.poll(playing).toBe(true);
+  await expect(story.locator(".tour-bar")).toContainText("run 2/2", { timeout: 30_000 });
+  await expect.poll(playing).toBe(true);
+  w.check();
+  await context.close();
+});
+
+// The tour with motion: Play goes from a chapter to its
 // end, the countdown shows and Stop stops it, the keys work, a hidden page
 // stops the countdown, and a chapter opened from the address does not move.
-test("/paxos/tour/: Play goes on from run to run, the countdown stops, and Space pauses", async ({ browser }) => {
+test("/paxos/tour/: Play goes on to the end of a chapter, the countdown stops, and Space pauses", async ({ browser }) => {
   const context = await browser.newContext({ reducedMotion: "no-preference" });
   const page = await context.newPage();
   const w = watch(page);
@@ -324,14 +346,6 @@ test("/paxos/tour/: Play goes on from run to run, the countdown stops, and Space
   await page.keyboard.press(" ");
   await expect.poll(playing).toBe(false);
   await story.locator(".story-play").click();
-  // A chapter of more than one run: run 1 ends, and run 2 plays with no
-  // press. ("The log and its leader" is one tour run; a chapter made of the
-  // runs of its lesson has more.)
-  const runs = Number((await story.locator(".tour-bar").textContent()).match(/run \d+\/(\d+)/)?.[1] ?? 1);
-  if (runs > 1) {
-    await expect(story.locator(".tour-bar")).toContainText(`run 2/${runs}`, { timeout: 30_000 });
-    await expect.poll(playing).toBe(true);
-  }
   // The chapter ends: the countdown shows, and Stop stops it.
   await expect(screen.locator(".tour-count")).toContainText("Next chapter in", { timeout: 30_000 });
   await screen.locator(".tour-stop").click();
