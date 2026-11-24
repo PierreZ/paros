@@ -486,6 +486,7 @@ const EXERCISES = [
   {
     page: "paxos/compartmentalized/",
     id: "proxy-down",
+    intro: true,
     moves: [
       ["extra", "The client writes bravo"],
       ["settle", {}],

@@ -86,9 +86,15 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   every state line and quorum answer is read off those roles. The handoff run stays a
   `Recorder` run on its level, with its own lanes. Its "Break the rule" run has a `Commit`
   that the driver writes (`Run::forge_commit`): a proxy leader that commits after one vote.
+  Its tour run, `tour` (chapter "Split the leader"), is one world: node 0 first writes alone
+  (`Delegation::Colocated`; the replicas do not run yet, so no message goes to them), then
+  the replicas start and catch up on node 0's beat, the proxy leaders and the batcher enter, a proxy leader crashes and a
+  replica reads with no leader.
   `trace/compart/desk.rs` → `Desk`, `Verb` → the same deployment driven by hand, the world of
   the lesson 6 exercises (deliver or lose each message, a client write, a beat of node 0 or of
-  a proxy leader, a proxy leader crash).
+  a proxy leader, a proxy leader crash). The guided lines of those exercises read it through
+  its accessors only (`chosen`, `learned`, `written`, `counts`, `knows`, `held`, `taken_back`,
+  `lost`).
 - `src/paxos/picker.rs` → `check(shape, down)`: which quorums `paros-consensus` finds in a shape
   with some acceptors stopped; the wasm export `paxos_quorums` serves the quorums page's
   picker (#948 (quorum shapes and picker)).

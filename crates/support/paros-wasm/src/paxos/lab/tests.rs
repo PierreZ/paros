@@ -156,7 +156,7 @@ fn a_replica_that_learns_in_order_never_waits() {
         "replica 0 learns both slots"
     );
     assert!(
-        !lab.desk().waited(0) && !lab.solved(),
+        !lab.desk().held(0, 1) && !lab.solved(),
         "in order, it never waits"
     );
 }
@@ -168,7 +168,7 @@ fn a_replica_holds_a_slot_above_its_prefix_and_says_so() {
     lab.extra("The client writes bravo");
     lab.settle(|m| !(m.kind == "Commit" && m.to == "r0" && m.slot == Some(0)));
     assert_eq!(lab.desk().learned(0), None, "slot 0 is not learned yet");
-    assert!(lab.desk().waited(0));
+    assert!(lab.desk().held(0, 1));
     assert!(!lab.view().two_values, "two slots are not two values");
     let view = lab.view();
     let r0 = view
@@ -491,9 +491,15 @@ impl Draw {
         self.pick(open)
     }
 
-    /// The exercise `id` after up to 19 moves of the reader's.
-    fn start(&mut self, id: &str) -> Lab {
+    /// The exercise `id` after some first steps of `guide` (none when it is
+    /// empty) and up to 19 moves of the reader's.
+    fn start(&mut self, id: &str, guide: &[Step]) -> Lab {
         let mut lab = Lab::new(id).expect("the exercise exists");
+        if !guide.is_empty() {
+            for step in &guide[..self.below(guide.len())] {
+                (step.play)(&mut lab);
+            }
+        }
         for _ in 0..self.below(20) {
             let Some(pick) = self.reader_move(&lab) else {
                 break;
@@ -538,15 +544,19 @@ fn replay(id: &str, moves: &[Move]) -> Lab {
 
 /// The parts of each guided exercise that have a dead end, by index. An
 /// exercise can have none: with the disk rule off, `two-values` can always
-/// wipe a disk and open a ballot again, so no state stops it.
+/// wipe a disk and open a ballot again, so no state stops it; in
+/// `proxy-down`, every loss heals on a beat of node 0.
 const DEAD_ENDS: &[(&str, &[usize])] = &[
     ("vote-not-chosen", &[0, 1]),
     ("two-values", &[]),
-    ("duel", &[0, 1]),
+    ("duel", &[0, 1, 2]),
     ("gap", &[0, 1]),
     ("read", &[2, 3]),
     ("majority", &[0, 1, 2]),
     ("grid-column", &[0, 1]),
+    ("proxy-down", &[]),
+    ("lost-votes", &[0, 1]),
+    ("replica-waits", &[0, 1]),
 ];
 
 /// The walk met the dead end of each part that has one (`DEAD_ENDS`), and
@@ -576,7 +586,8 @@ fn assert_dead_ends(id: &str, judged: &[usize], stuck: usize) {
 /// dead end that is one (random moves from it never reach the goal), or its
 /// third hint names a move that is not refused and the hints alone reach
 /// the goal with no dead end on the way. The states come from seeded random
-/// moves (a fixed list of seeds: the run is the same each time).
+/// moves (a fixed list of seeds: the run is the same each time), some of
+/// them after the first steps of the guide.
 #[test]
 fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
     for exercise in exercises().iter().filter(|e| !e.parts.is_empty()) {
@@ -585,9 +596,13 @@ fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
         // state that reached the goal.
         let mut judged = vec![0_usize; exercise.parts.len()];
         let mut reached = 0;
-        for seed in 0..1000_u64 {
+        for seed in 0..1300_u64 {
             let mut draw = Draw::new(seed);
-            let mut lab = draw.start(exercise.id);
+            // A steer: the last seeds first play some steps of the guide, so
+            // the random moves start deep in the exercise and reach the dead
+            // ends that only a long line of moves gets to.
+            let steer = if seed >= 1000 { exercise.guide } else { &[] };
+            let mut lab = draw.start(exercise.id, steer);
             let start = lab.moves().to_vec();
             if let Some(dead) = lab.view().stuck {
                 stuck += 1;
@@ -777,4 +792,98 @@ fn a_majority_of_votes_is_chosen_before_a_proposer_learns_it() {
         "a chosen value is a dead end of the duel"
     );
     assert!(!lab.goal());
+}
+
+/// Alpha is chosen before a vote is lost: proxy leader 0 closes slot 0, so
+/// no vote for it comes again, and the first line is a dead end.
+#[test]
+fn votes_that_choose_alpha_first_are_a_dead_end() {
+    let mut lab = Lab::new("lost-votes").expect("lost-votes exists");
+    lab.extra("The client writes alpha");
+    lab.settle(|_| true);
+    let stuck = lab.view().stuck.expect("no vote for slot 0 comes again");
+    assert_eq!(stuck.part, 0);
+    assert!(
+        stuck.says.starts_with("Proxy leader 0 heard a majority"),
+        "{}",
+        stuck.says
+    );
+}
+
+/// A lost hand-off of slot 0: no proxy leader counts it, and node 0 does
+/// not beat in this exercise, so alpha is never chosen.
+#[test]
+fn a_lost_hand_off_of_slot_0_is_a_dead_end() {
+    let mut lab = Lab::new("lost-votes").expect("lost-votes exists");
+    lab.extra("The client writes alpha");
+    lab.drop_all(|m| m.kind == "Accept" && m.to == "p0");
+    let stuck = lab.view().stuck.expect("slot 0 is never chosen");
+    assert_eq!(stuck.part, 0);
+    assert!(
+        stuck.says.starts_with("The hand-off of slot 0"),
+        "{}",
+        stuck.says
+    );
+}
+
+/// Replica 0 learns slot 0 first: it can no longer learn slot 1 before
+/// slot 0, and the hint is gone until undo.
+#[test]
+fn a_replica_that_learns_slot_0_first_is_a_dead_end() {
+    let mut lab = Lab::new("replica-waits").expect("replica-waits exists");
+    lab.extra("The client writes alpha");
+    while !lab.desk().knows(0, 0) {
+        lab.deliver(|_| true);
+    }
+    let view = lab.view();
+    assert_eq!(view.stuck.map(|stuck| stuck.part), Some(0));
+    assert!(view.hint.is_none());
+    lab.play(&Move::Undo);
+    assert!(lab.view().stuck.is_none());
+}
+
+/// The Commit of slot 1 to replica 0 is lost after replica 0 held it: the
+/// second line is a dead end, since no proxy leader sends a Commit again.
+#[test]
+fn a_lost_commit_to_replica_0_is_a_dead_end() {
+    let mut lab = Lab::new("replica-waits").expect("replica-waits exists");
+    lab.extra("The client writes alpha");
+    lab.extra("The client writes bravo");
+    lab.settle(|m| m.slot == Some(1));
+    assert!(lab.desk().held(0, 1));
+    lab.settle(|m| m.slot == Some(0) && m.kind != "Commit");
+    lab.drop_all(|m| m.kind == "Commit" && m.to == "r0");
+    assert_eq!(lab.view().stuck.map(|stuck| stuck.part), Some(1));
+}
+
+/// Node 1 leads, node 0 is down, and the Accept of slot 2 from node 1 to
+/// node 2 is lost: a leader does not send its Accepts again, so slot 2 is
+/// never chosen, and the second line names the dead end.
+#[test]
+fn a_lost_accept_of_slot_2_under_node_1_is_a_dead_end() {
+    use Move::{Deliver, Drop, Extra};
+    let lab = replay(
+        "gap",
+        &[
+            Extra { index: 0 },
+            Drop { id: 13 },
+            Drop { id: 14 },
+            Extra { index: 1 },
+            Drop { id: 15 },
+            Extra { index: 2 },
+            Deliver { id: 16 },
+            Extra { index: 3 },
+            Deliver { id: 20 },
+            Deliver { id: 21 },
+            Deliver { id: 17 },
+            Drop { id: 18 },
+            Deliver { id: 19 },
+            Deliver { id: 22 },
+            Deliver { id: 23 },
+            Drop { id: 26 },
+        ],
+    );
+    let stuck = lab.view().stuck.expect("slot 2 is never chosen");
+    assert_eq!(stuck.part, 1);
+    assert!(stuck.says.starts_with("Node 1 leads"), "{}", stuck.says);
 }

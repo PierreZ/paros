@@ -11,6 +11,9 @@
 //! [`ProxyLeader`]: paros_consensus::ProxyLeader
 //! [`ReplicaNode`]: paros_consensus::ReplicaNode
 
+use std::collections::BTreeSet;
+
+use paros_consensus::Slot;
 use paros_consensus::membership::QuorumSystem;
 
 use super::{Layout, REPLICAS, Run, TAKE_BACK_AFTER, Who, lanes, parties, says, waiting};
@@ -37,9 +40,14 @@ pub enum Verb {
 /// The deployment of one exercise.
 pub struct Desk {
     run: Run,
-    /// Whether each replica held a chosen slot above its chosen prefix at
-    /// some point: it learned a slot out of order and waited.
-    waited: Vec<bool>,
+    /// The chosen slots that each replica held above its chosen prefix at
+    /// some point: it learned them out of order and waited.
+    held: Vec<BTreeSet<u64>>,
+    /// The messages that a lose move lost, as (kind, receiver's lane, slot).
+    /// A message delivered to a party that is down is not counted.
+    lost: Vec<(String, String, Option<u64>)>,
+    /// The slots that node 0 took back from a proxy leader.
+    taken: BTreeSet<u64>,
     /// What the last move did, one sentence per step it took.
     said: Vec<String>,
 }
@@ -57,7 +65,9 @@ impl Desk {
     pub fn new() -> Self {
         Self {
             run: Run::new(Layout::Compartmentalized),
-            waited: vec![false; REPLICAS],
+            held: vec![BTreeSet::new(); REPLICAS],
+            lost: Vec::new(),
+            taken: BTreeSet::new(),
             said: Vec::new(),
         }
     }
@@ -166,10 +176,52 @@ impl Desk {
             .map(|slot| slot.0)
     }
 
-    /// Whether replica `rank` learned a slot out of order and waited.
+    /// Whether replica `rank` held `slot` above its chosen prefix at some
+    /// point: it learned `slot` before a slot below it.
     #[must_use]
-    pub fn waited(&self, rank: usize) -> bool {
-        self.waited.get(rank).copied().unwrap_or(false)
+    pub fn held(&self, rank: usize, slot: u64) -> bool {
+        self.held.get(rank).is_some_and(|held| held.contains(&slot))
+    }
+
+    /// Whether replica `rank` has learned that `slot` is chosen.
+    #[must_use]
+    pub fn knows(&self, rank: usize, slot: u64) -> bool {
+        self.run
+            .replicas
+            .get(rank)
+            .is_some_and(|replica| replica.chosen_at(Slot(slot)).is_some())
+    }
+
+    /// Whether node 0 gave `slot` to a write: its next free slot is above.
+    #[must_use]
+    pub fn written(&self, slot: u64) -> bool {
+        self.run.nodes[0].proposer().next_slot().0 > slot
+    }
+
+    /// Whether proxy leader `id` is up and counts the votes of `slot`: it
+    /// sends its Accepts again on each of its beats.
+    #[must_use]
+    pub fn counts(&self, id: u64, slot: u64) -> bool {
+        self.run
+            .proxies
+            .get(usize::try_from(id).expect("a small id"))
+            .and_then(Option::as_ref)
+            .is_some_and(|proxy| proxy.delegator(Slot(slot)).is_some())
+    }
+
+    /// Whether node 0 took `slot` back from its proxy leader.
+    #[must_use]
+    pub fn taken_back(&self, slot: u64) -> bool {
+        self.taken.contains(&slot)
+    }
+
+    /// How many `kind` messages of `slot` to `lane` a lose move lost.
+    #[must_use]
+    pub fn lost(&self, kind: &str, lane: &str, slot: u64) -> usize {
+        self.lost
+            .iter()
+            .filter(|(k, to, at)| k == kind && to == lane && *at == Some(slot))
+            .count()
     }
 
     /// Whether node 0 still leads.
@@ -208,6 +260,17 @@ impl Desk {
             .wire
             .remove(position)
             .expect("the position is on the wire");
+        if lose {
+            let view = message_view(
+                wired.id,
+                wired.from.number(),
+                wired.to.number(),
+                0,
+                &wired.message,
+                QuorumSystem::Majority,
+            );
+            self.lost.push((view.kind, wired.to.lane(), view.slot));
+        }
         let before = self.run.steps.len();
         self.run.carry(wired, lose);
         self.after(before);
@@ -240,6 +303,7 @@ impl Desk {
                     .map(|(slot, _)| slot.0.to_string())
                     .collect();
                 let taken = self.run.leader_beats();
+                self.taken.extend(taken.iter().map(|(slot, _)| slot.0));
                 let says = if let Some((slot, proxy)) = taken.first() {
                     format!(
                         "Node 0 beats. Proxy leader {} did not answer {TAKE_BACK_AFTER} times, \
@@ -300,9 +364,7 @@ impl Desk {
             .map(|step| step.says.clone())
             .collect();
         for (rank, replica) in self.run.replicas.iter().enumerate() {
-            if !waiting(replica).is_empty() {
-                self.waited[rank] = true;
-            }
+            self.held[rank].extend(waiting(replica).iter().map(|slot| slot.0));
         }
     }
 }

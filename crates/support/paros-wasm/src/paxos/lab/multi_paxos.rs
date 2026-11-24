@@ -197,6 +197,19 @@ fn elect_on(lab: &Lab) -> Option<Move> {
     deliver_first(lab, |m| m.to != "n0" && m.from != "n0").or(Some(Move::Extra { index: ELECT }))
 }
 
+/// Node 1 leads, slot 2 is not chosen, and no message of slot 2 between
+/// nodes 1 and 2 is on the wire. Node 0 is down (node 1 won after it
+/// crashed), a leader does not send its Accepts again and an election on a
+/// leader only beats, so no move chooses slot 2 again.
+fn node_1_lost_slot_2(lab: &Lab) -> bool {
+    leads(lab, 1)
+        && !chosen_at_any(&lab.view_of_world(), 2)
+        && !lab
+            .wire()
+            .iter()
+            .any(|m| m.slot == Some(2) && m.to != "n0" && m.from != "n0")
+}
+
 const GAP_PARTS: &[Part] = &[
     Part {
         label: "bravo is at slot 1, with no vote from node 1 or 2",
@@ -269,6 +282,11 @@ const GAP_PARTS: &[Part] = &[
                 Some(
                     "No node but node 0 holds a vote at slot 2 or above, and node 0 can no \
                      longer write. Undo the moves that lost those votes.",
+                )
+            } else if node_1_lost_slot_2(lab) {
+                Some(
+                    "Node 1 leads, and every message that could choose slot 2 is lost. A \
+                     leader does not send its Accepts again. Undo the move that lost them.",
                 )
             } else {
                 None
