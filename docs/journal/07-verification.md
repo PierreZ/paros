@@ -278,8 +278,10 @@ stale position and resolves each `Below`, crashes and restarts of a machine, the
 a while, register operations whose request or reply is lost, whose write reaches one matchmaker
 only, or whose write waits in flight while other operations run and lands later, matchmakers that
 are down with their machine (a read or a change that no majority answers gives no answer, and a
-read repairs a write that a minority took), and disk faults inside the contract (the faults of
-the driver walk's disk).
+read repairs a write that a minority took), disk faults inside the contract (the faults of
+the driver walk's disk), and copy and abandon asks and `Copied` notices that the network loses,
+or holds and gives again later (a lost `Copied` costs no heal: the new replica reports its
+complete copy again at each tick while it joins).
 Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
 at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
 `ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with

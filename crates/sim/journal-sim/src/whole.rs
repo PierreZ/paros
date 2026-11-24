@@ -108,8 +108,10 @@
 //! register first, so it judges the ask on a value done after the ask was
 //! sent. In the chaos phase an ask may be lost, and the network may hold
 //! it and give it again later ([`reach::LATE_ASK`]). A complete copy
-//! reaches every live controller of the journal
-//! ([`reach::COPIED`]), and the heal's compare-and-set runs on the register
+//! reaches every live controller of the journal ([`reach::COPIED`]); in
+//! the chaos phase the network may lose that notice
+//! ([`reach::NOTICE_LOST`]), or hold it and give it again later
+//! ([`reach::NOTICE_LATE`]), and the heal's compare-and-set runs on the register
 //! like a reshape ([`reach::REREPLICATED`]).
 //!
 //! **A machine lost for good** ([`WholeAction::Lose`]): once in a run, a
@@ -241,6 +243,10 @@ pub mod reach {
     pub const COPIED: &str = "whole journal: a new replica reported its complete copy";
     /// A copy or abandon ask arrived again, late.
     pub const LATE_ASK: &str = "whole journal: a copy or abandon ask arrived again, late";
+    /// The network lost a copied notice on its way to the controllers.
+    pub const NOTICE_LOST: &str = "whole journal: the network lost a copied notice";
+    /// A copied notice arrived again, late.
+    pub const NOTICE_LATE: &str = "whole journal: a copied notice arrived again, late";
     /// A heal of a retired segment's replica set was done.
     pub const REREPLICATED: &str = "whole journal: a heal of a retired segment's set was done";
     /// A heal reshape was done with its reply lost.
@@ -310,6 +316,8 @@ pub mod reach {
         COPIED,
         REREPLICATED,
         LATE_ASK,
+        NOTICE_LOST,
+        NOTICE_LATE,
         DUPLICATE,
         UNKNOWN,
         BELOW,
@@ -571,6 +579,9 @@ pub struct WholeModel {
     /// The copy and abandon asks that the network still holds: each may
     /// arrive again, late ([`WholeAction::Late`]).
     late: Vec<(usize, Ask)>,
+    /// The copied notices that the network still holds: each may arrive
+    /// again, late ([`WholeAction::LateNotice`]).
+    late_notices: Vec<Notice>,
     /// The journal that holds the one token of the cell's rate limiter.
     token: Option<usize>,
     /// The controllers whose reports are lost until a time, by journal and
@@ -615,6 +626,8 @@ pub enum WholeAction {
     ZoneOut,
     /// A copy or abandon ask that the network held arrives again, late.
     Late,
+    /// A copied notice that the network held arrives again, late.
+    LateNotice,
     /// The reports of one controller are lost for a while: the other
     /// controller of its journal takes the term from a holder that runs.
     Mute,
@@ -645,6 +658,7 @@ impl Model for WholeModel {
             WholeAction::Fault,
             WholeAction::ZoneOut,
             WholeAction::Late,
+            WholeAction::LateNotice,
             WholeAction::Mute,
             WholeAction::Lose,
             WholeAction::Land,
@@ -657,6 +671,7 @@ impl Model for WholeModel {
                 WholeAction::Fault
                 | WholeAction::ZoneOut
                 | WholeAction::Late
+                | WholeAction::LateNotice
                 | WholeAction::Mute
                 | WholeAction::Lose,
                 Phase::Chaos,
@@ -665,6 +680,7 @@ impl Model for WholeModel {
                 WholeAction::Fault
                 | WholeAction::ZoneOut
                 | WholeAction::Late
+                | WholeAction::LateNotice
                 | WholeAction::Mute
                 | WholeAction::Lose,
                 _,
@@ -689,6 +705,7 @@ impl Model for WholeModel {
             WholeAction::Fault => self.fault(cx),
             WholeAction::ZoneOut => self.zone_out(cx),
             WholeAction::Late => self.late(cx),
+            WholeAction::LateNotice => self.late_notice(cx),
             WholeAction::Mute => self.mute(cx),
             WholeAction::Lose => self.lose(cx),
             WholeAction::Land => self.land(cx),
@@ -954,6 +971,7 @@ impl WholeModel {
             machines: BTreeMap::new(),
             journals,
             late: Vec::new(),
+            late_notices: Vec::new(),
             token: None,
             muted: BTreeMap::new(),
             lost: None,
@@ -1351,7 +1369,7 @@ impl WholeModel {
                 self.on_reply(m, reply.address.journal, reply.call, reply.outcome);
             }
             for notice in notices {
-                self.on_notice(&notice, cx);
+                self.send_notice(&notice, cx);
             }
             if halted {
                 self.down(m);
@@ -1361,6 +1379,36 @@ impl WholeModel {
 
     /// A new replica's complete copy goes to every live controller of its
     /// journal: only the one whose heal runs that copy counts it.
+    /// A notice goes to the controllers over the network. In the chaos
+    /// phase the network may lose a copied notice, and may hold a copy of
+    /// it that arrives again later ([`WholeAction::LateNotice`]).
+    fn send_notice(&mut self, notice: &Notice, cx: &mut Cx<'_, Self>) {
+        if cx.phase() == Phase::Chaos && matches!(notice, Notice::Copied { .. }) {
+            if cx.rng().chance(1, 4) {
+                self.late_notices.push(notice.clone());
+            }
+            if cx.rng().chance(1, 10) {
+                sometimes!(true, reach::NOTICE_LOST);
+                return;
+            }
+        }
+        self.on_notice(notice, cx);
+    }
+
+    /// A held copied notice arrives again; the network keeps it or not.
+    fn late_notice(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(at) = cx.rng().index(self.late_notices.len()) else {
+            return;
+        };
+        let notice = if cx.rng().chance(1, 2) {
+            self.late_notices.swap_remove(at)
+        } else {
+            self.late_notices[at].clone()
+        };
+        sometimes!(true, reach::NOTICE_LATE);
+        self.on_notice(&notice, cx);
+    }
+
     fn on_notice(&mut self, notice: &Notice, cx: &mut Cx<'_, Self>) {
         let Notice::Copied {
             address,
