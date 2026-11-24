@@ -87,7 +87,7 @@ EXTENDS Naturals, Sequences, FiniteSets
 CONSTANTS Members,
           MaxSess,      \* the session ids that members may draw: 1..MaxSess
           MaxOps,       \* the op_seq of a session goes up to MaxOps
-          MaxDup, MaxCrash, MaxExpire, MaxRevoke, MaxOrders, MaxCkpt, MaxTrim,
+          MaxDup, MaxCrash, MaxExpire, MaxRevoke, MaxOrders, MaxCkpt,
           Kinds,        \* the kinds of record a session may send: a subset of OpKinds
           Lag,          \* TRUE: a member may read a prefix that lags
           Dedup, VoidDead, Tomb, Guard, Fence, ExpireCas, CkptFresh, TrimToCkpt,
@@ -122,14 +122,13 @@ VARIABLES full,      \* the log: every record that landed, at its position
           onet,      \* the orders in flight to the receiver
           seen,      \* the receiver: the highest term it saw, on disk
           nsess,     \* the session ids drawn so far
-          dups, crashes, expires, revokes, orders, ckpts, trims,
+          dups, crashes, expires, revokes, orders, ckpts,
           senders,   \* the <<term, session>> pairs of every order sent
           regress,   \* the receiver applied an order below one it applied
           reached    \* the event Ev happened
 
 member == <<mst, msess, mseq, mop, mread, mfrom>>
-budget == <<nsess, dups, crashes, expires, revokes, orders, ckpts,
-            trims>>
+budget == <<nsess, dups, crashes, expires, revokes, orders, ckpts>>
 vars == <<full, first, pend, member, onet, seen, budget, senders, regress,
           reached>>
 
@@ -223,7 +222,7 @@ Init ==
   /\ onet = {} /\ seen = 0
   /\ nsess = 0 /\ dups = 0 /\ crashes = 0 /\ expires = 0
   /\ revokes = 0
-  /\ orders = 0 /\ ckpts = 0 /\ trims = 0
+  /\ orders = 0 /\ ckpts = 0
   /\ senders = {} /\ regress = FALSE /\ reached = FALSE
 
 \* A member with no session opens one with a fresh id.
@@ -236,7 +235,7 @@ Open(m) ==
         /\ mop' = [mop EXCEPT ![m] = r] /\ pend' = pend \cup {r}
   /\ mst' = [mst EXCEPT ![m] = "wait"]
   /\ UNCHANGED <<full, first, mread, mfrom, onet, seen, dups, crashes,
-                 expires, revokes, orders, ckpts, trims, senders, regress, reached>>
+                 expires, revokes, orders, ckpts, senders, regress, reached>>
 
 \* A member with a session and nothing in flight sends its next record: a
 \* heartbeat, a leave or a join of the latch, or an act guarded by the term
@@ -292,7 +291,7 @@ Land(r) ==
   /\ full' = Append(full, r)
   /\ Hit(Event(Cur, r, Len(full) + 1))
   /\ UNCHANGED <<first, member, onet, seen, nsess, crashes, expires,
-                 revokes, orders, ckpts, trims, senders, regress>>
+                 revokes, orders, ckpts, senders, regress>>
 
 \* A member reads up to a later position and learns from its fold. A
 \* member whose next record is below the floor starts again from the floor.
@@ -323,7 +322,7 @@ Expire(m) ==
        pend' = pend \cup {Rec("expire", s, 0, 0, View(m).last[s], 0, Init0)}
   /\ expires' = expires + 1
   /\ UNCHANGED <<full, first, member, onet, seen, nsess, dups, crashes,
-                 revokes, orders, ckpts, trims, senders, regress, reached>>
+                 revokes, orders, ckpts, senders, regress, reached>>
 
 \* Any member may revoke a node that its fold shows.
 Revoke(m) ==
@@ -332,7 +331,7 @@ Revoke(m) ==
        pend' = pend \cup {Rec("revoke", nd[1], 0, 0, 0, nd[2], Init0)}
   /\ revokes' = revokes + 1
   /\ UNCHANGED <<full, first, member, onet, seen, nsess, dups, crashes,
-                 expires, orders, ckpts, trims, senders, regress, reached>>
+                 expires, orders, ckpts, senders, regress, reached>>
 
 \* A member whose fold shows that it holds the latch sends an order with
 \* the term of its fold.
@@ -343,7 +342,7 @@ Order(m) ==
   /\ senders' = senders \cup {<<View(m).term, msess[m]>>}
   /\ orders' = orders + 1
   /\ UNCHANGED <<full, first, pend, member, seen, nsess, dups, crashes,
-                 expires, revokes, ckpts, trims, regress, reached>>
+                 expires, revokes, ckpts, regress, reached>>
 
 \* The receiver checks the term in the same write as the effect.
 Receive(o) ==
@@ -361,15 +360,14 @@ Ckpt(m) ==
   /\ pend' = pend \cup {Rec("ckpt", NoSess, 0, 0, 0, mread[m], View(m))}
   /\ ckpts' = ckpts + 1
   /\ UNCHANGED <<full, first, member, onet, seen, nsess, dups, crashes,
-                 expires, revokes, orders, trims, senders, regress, reached>>
+                 expires, revokes, orders, senders, regress, reached>>
 
-\* The library truncates the journal to a checkpoint.
+\* The library truncates the journal to a checkpoint. The checkpoints bound
+\* the trims: each trim moves the floor up to a later one.
 Trim ==
-  /\ trims < MaxTrim
   /\ \E q \in (first + 1)..Len(full) :
        /\ IF TrimToCkpt THEN q \in Cur.ck ELSE full[q].k = "ckpt"
        /\ first' = q
-  /\ trims' = trims + 1
   /\ UNCHANGED <<full, pend, member, onet, seen, nsess, dups, crashes,
                  expires, revokes, orders, ckpts, senders, regress, reached>>
 
@@ -382,7 +380,7 @@ Crash(m) ==
   /\ mread' = [mread EXCEPT ![m] = 0] /\ mfrom' = [mfrom EXCEPT ![m] = 0]
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<full, first, pend, mseq, mop, onet, seen, nsess,
-                 dups, expires, revokes, orders, ckpts, trims, senders, regress,
+                 dups, expires, revokes, orders, ckpts, senders, regress,
                  reached>>
 
 Next ==
