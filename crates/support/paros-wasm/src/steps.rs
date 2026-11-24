@@ -1,11 +1,8 @@
-//! The shape of a step-through trace, shared by the two tools (#811
-//! (Paxos flavor pages), #1365 (reshape and seal step-through)): the JSON
+//! The shape of a step-through trace (#811 (Paxos flavor pages)): the JSON
 //! that `website/site/public/steps.js` and `story.js` draw.
 //!
 //! A trace is a recorded run of real code: the Paxos pages record
-//! `paros-consensus` (`crate::paxos::trace`), the Segments page records the
-//! journal roles of `paros-journal` (`crate::journal::seal`). Both fill the
-//! same types, so the page draws both with the same script. This module holds
+//! `paros-consensus` (`crate::paxos::trace`). This module holds
 //! the types and the checks that do not depend on the code a run records:
 //! the beats of a story ([`story`]), the stages of the steps
 //! ([`fill_stages`]) and the assembly of a page ([`assemble`]).

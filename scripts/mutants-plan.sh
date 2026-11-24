@@ -13,12 +13,12 @@
 # files (`tests.rs`, `tests/`), at least `min`. cargo-mutants makes no mutant
 # in a test module. The numbers come from two measures, both at `-j 2`:
 #
-# - paros-journal (PR #1470 (re-replication of a sealed segment's replica
-#   set)): 536 such lines gave 133 mutants, and the first pass took 85
-#   minutes, about 0.16 minutes for each line (0.64 for each mutant). With 250
-#   lines, the first pass of a shard takes about 40 minutes. paros-journal-control,
-#   paros-journal-io, paros-host and paros-election use the same number; their shards of that PR took 8
-#   to 16 minutes.
+# - paros-journal, a crate removed on 2026-11-24 (PR #1470 (re-replication of
+#   a sealed segment's replica set)): 536 such lines gave 133 mutants, and the
+#   first pass took 85 minutes, about 0.16 minutes for each line (0.64 for each
+#   mutant). With 250 lines, the first pass of a shard takes about 40 minutes.
+#   paros-host uses the same number; its shard of that PR took 8 to 16
+#   minutes.
 # - paros-consensus (the comment of the old job): 70 mutants took 88 minutes,
 #   about 1.26 minutes for each mutant, twice as slow. Its number is half of
 #   the journal's, 125 lines, on the reading (not a measure) that its lines
@@ -35,9 +35,7 @@ base=${1:?usage: scripts/mutants-plan.sh <base>}
 
 entries=()
 # crate:flag:lines:min
-for row in paros-consensus::125:2 paros-journal:--journal:250:1 \
-  paros-journal-control:--control:250:1 paros-journal-io:--journal-io:250:1 \
-  paros-host:--host:250:1 paros-election:--election:250:1; do
+for row in paros-consensus::125:2 paros-host:--host:250:1; do
   IFS=: read -r crate flag per min <<< "$row"
   src=crates/lib/$crate/src
   if git diff --quiet "$base" HEAD -- "$src"; then

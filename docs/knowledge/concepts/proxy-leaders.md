@@ -133,7 +133,7 @@ open, commits a value that no quorum chose (`belief_any`).
 | The TLA+ model | `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration |
 | The driver | `paros-roles/src/proxy_leader.rs`: `run_proxy`; a machine runs the proxy of each `Role::ProxyLeader` booking the registry holds for it (PR #775 (machine proxy leaders), #765) |
 
-The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 

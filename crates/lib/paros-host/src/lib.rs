@@ -1,12 +1,13 @@
-//! **paros-host**: a pure host of actors (§J4.2 of `docs/journal/04-roles.md`,
-//! §4.4 of `docs/architecture/04-roles.md`, #1410 (split the generic host of
-//! actors)).
+//! **paros-host**: a pure host of actors (§4.4 of
+//! `docs/architecture/04-roles.md`, #1410 (split the generic host of actors);
+//! the flight rule (§J4.2) and the rule of no runtime (§J4.3) are in
+//! `docs/journal/04-roles.md` at the git tag `journal-design-a`).
 //!
 //! A role is an actor: a deterministic step under the flight rule. It reads
 //! no clock, draws no random number and does no I/O; a send waits for the
 //! persist batch that it names, and a refusal is data. One host serves every
-//! role of a process: the journal roles, the election, the coordinators and
-//! the frontend. This crate knows none of them:
+//! role of a process: the roles of the core, a journal, the election, the
+//! coordinators and the frontend. This crate knows none of them:
 //!
 //! - [`Family`]: the types that every role of one host shares (an opaque
 //!   address, a message, an op of the disk format, a batch id, ...).

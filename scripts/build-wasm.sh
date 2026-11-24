@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 # Build the site's wasm tools from the crate `paros-wasm` (#540), one bundle per
 # cargo feature: `paxos` (bundle paros_paxos, paros-consensus only), the engine
-# of the step-through diagrams of the Paxos, Consensus and Engineering pages, and
-# `journal` (bundle paros_journal_lab, paros-journal only), the fold lab of the
-# Journal pages (#1363).
+# of the step-through diagrams of the Paxos, Consensus and Engineering pages.
 #
 #   scripts/build-wasm.sh              build, then stage it into
-#                                      website/site/public/paxos/wasm/ and
-#                                      website/site/public/journal/wasm/
+#                                      website/site/public/paxos/wasm/
 #                                      (run it before `npm run build` in
 #                                      website/site)
 #   scripts/build-wasm.sh --wasm-only  only the wasm-bindgen output
@@ -40,7 +37,6 @@ build() {
 }
 
 build paxos target/wasm-tools/paxos paros_paxos --no-typescript
-build journal target/wasm-tools/journal paros_journal_lab --no-typescript
 
 if [ "${1:-}" = "--wasm-only" ]; then
   exit 0
@@ -51,9 +47,3 @@ echo "staging paros-consensus (paxos) into $PAXOS/ for the Paxos pages (#811)…
 rm -rf "$PAXOS"
 mkdir -p "$PAXOS"
 cp target/wasm-tools/paxos/paros_paxos.js target/wasm-tools/paxos/paros_paxos_bg.wasm "$PAXOS/"
-
-JOURNAL=website/site/public/journal/wasm
-echo "staging paros-journal (journal) into $JOURNAL/ for the Journal pages (#1363)…"
-rm -rf "$JOURNAL"
-mkdir -p "$JOURNAL"
-cp target/wasm-tools/journal/paros_journal_lab.js target/wasm-tools/journal/paros_journal_lab_bg.wasm "$JOURNAL/"

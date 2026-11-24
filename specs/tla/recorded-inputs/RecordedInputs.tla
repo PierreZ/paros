@@ -1,7 +1,7 @@
 -------------------------- MODULE RecordedInputs --------------------------
 (***************************************************************************)
 (* Rule 2 of the journal's sans-IO contract: every input is recorded       *)
-(* (docs/journal/04-roles.md section J4.2; #1413 (the time, the timers and *)
+(* (section J4.2 of docs/journal/04-roles.md at the tag journal-design-a; #1413 (the time, the timers and *)
 (* the draws in each role)).                                               *)
 (*                                                                         *)
 (* A host serves several roles. A role reads no clock and draws no random  *)

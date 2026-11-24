@@ -303,10 +303,32 @@ test("/paxos/tour/: the title, the chapter menu, a bridge and a chapter", async 
   w.check();
 });
 
-// The tour with motion: Play goes from run to run and from a chapter to its
+// Play goes on from one run of a chapter to the next with no press. The
+// chapter "Change the acceptors" still plays two runs of its lesson.
+test("/paxos/tour/: Play goes on from run to run", async ({ browser }) => {
+  const context = await browser.newContext({ reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const w = watch(page);
+  await page.goto("paxos/tour/#chapter=matchmakers");
+  const screen = page.locator(".tour-screen");
+  const story = page.locator(".panel.story");
+  const playing = () => page.evaluate(() => window.paxosStory.playing());
+  await expect(screen.locator(".tour-bridge")).toBeVisible();
+  await page.evaluate(() => window.paxosStory.speed(20));
+  await page.keyboard.press(" ");
+  await expect(story).toBeVisible();
+  await expect(story.locator(".tour-bar")).toContainText("run 1/2");
+  await expect.poll(playing).toBe(true);
+  await expect(story.locator(".tour-bar")).toContainText("run 2/2", { timeout: 30_000 });
+  await expect.poll(playing).toBe(true);
+  w.check();
+  await context.close();
+});
+
+// The tour with motion: Play goes from a chapter to its
 // end, the countdown shows and Stop stops it, the keys work, a hidden page
 // stops the countdown, and a chapter opened from the address does not move.
-test("/paxos/tour/: Play goes on from run to run, the countdown stops, and Space pauses", async ({ browser }) => {
+test("/paxos/tour/: Play goes on to the end of a chapter, the countdown stops, and Space pauses", async ({ browser }) => {
   const context = await browser.newContext({ reducedMotion: "no-preference" });
   const page = await context.newPage();
   const w = watch(page);
@@ -324,9 +346,6 @@ test("/paxos/tour/: Play goes on from run to run, the countdown stops, and Space
   await page.keyboard.press(" ");
   await expect.poll(playing).toBe(false);
   await story.locator(".story-play").click();
-  // Run 1 ends: run 2 plays with no press.
-  await expect(story.locator(".tour-bar")).toContainText("run 2/2", { timeout: 30_000 });
-  await expect.poll(playing).toBe(true);
   // The chapter ends: the countdown shows, and Stop stops it.
   await expect(screen.locator(".tour-count")).toContainText("Next chapter in", { timeout: 30_000 });
   await screen.locator(".tour-stop").click();
@@ -427,7 +446,7 @@ const EXERCISES = [
       ["settle", {}],
     ],
   },
-  { page: "paxos/quorums/", id: "majority", moves: [["settle", { notTo: "n3" }], ["drop", { to: "n3" }]] },
+  { page: "paxos/quorums/", id: "majority", intro: true, moves: [["settle", { notTo: "n3" }], ["drop", { to: "n3" }]] },
   {
     page: "paxos/multi-paxos/",
     id: "gap",
@@ -445,11 +464,19 @@ const EXERCISES = [
   {
     page: "paxos/multi-paxos/",
     id: "read",
-    moves: [["extra", "A client reads from node 2"], ["settle", { notTo: "n0" }], ["drop", { to: "n0" }]],
+    intro: true,
+    moves: [
+      ["extra", "A client reads from node 2"],
+      ["deliver", { kind: ["PreRead"], from: "n2", to: "n1" }],
+      ["deliver", { kind: ["PreReadAck"], from: "n1", to: "n2" }],
+      ["deliver", { kind: ["Accepted"], from: "n1", to: "n0" }],
+      ["deliver", { kind: ["Commit"], to: "n2" }],
+    ],
   },
   {
     page: "paxos/quorums/",
     id: "grid-column",
+    intro: true,
     moves: [["extra", "The client writes alpha"], ["settle", {}], ["extra", "The client writes bravo"], ["settle", {}]],
   },
   {
@@ -581,11 +608,6 @@ test("/consensus/driver/: the Ready widget elects a leader and commits a write",
   w.check();
 });
 
-// Every exercise of the journal fold lab (public/journal-lab.js), solved by
-// clicks on its call buttons. A call is named by its data-call key (`A:write`,
-// `seal`, from `Call::key` in crates/support/paros-wasm/src/journal/world.rs);
-// the calls follow the `solution` of each exercise in
-// crates/support/paros-wasm/src/journal/lab.rs.
 // A guided exercise (lab.js, `parts` in paros-wasm's lab.rs), on "gap":
 // the intro plays step by step with Next (reduced motion: no Play), the goal
 // is a checklist, the Hint has three levels and the third outlines the
@@ -793,130 +815,3 @@ test("every exercise with a guide plays Show me how to its end and is not solved
   await context.close();
 });
 
-const JOURNAL_EXERCISES = {
-  "journal-duplicate": ["A:write-lost", "A:resend"],
-  "journal-fenced": ["B:read", "B:set-leader", "A:write"],
-  "journal-multi": ["A:set-multi", "B:write-open", "C:write-open"],
-  "journal-below": ["A:write-lost", "seal", "A:resend", "A:resolve"],
-  "journal-truncated": ["A:write-lost", "A:read", "A:truncate", "A:resend"],
-};
-
-for (const [id, keys] of Object.entries(JOURNAL_EXERCISES)) {
-  test(`/journal/calls/: the journal exercise "${id}" is solved by its calls`, async ({ page }) => {
-    const w = watch(page);
-    await page.goto(`journal/calls/#lab=${id}`);
-    const lab = page.locator("#your-turn-lab");
-    await expect(lab.locator(".lab-tab.now")).toBeVisible();
-    await expect(lab.locator(".chip-status.accent").first()).toHaveText("live");
-    const done = lab.locator(".lab-done");
-    await expect(done).toBeHidden();
-    for (const key of keys) {
-      await lab.locator(`.lab-extras button[data-call="${key}"]`).click();
-      await expect(lab.locator(".jlab-answer .chip-status.gap", { hasText: "refused" })).toHaveCount(0);
-    }
-    await expect(done, "the page says the goal holds").toBeVisible();
-    await expect(done).not.toBeEmpty();
-    await expect(lab.locator(".lab-tab.now .lab-tab-n")).toHaveText("✓");
-    // Undo takes the last call back, and the goal no longer holds.
-    await lab.getByRole("button", { name: "Undo" }).click();
-    await expect(done).toBeHidden();
-    w.check();
-  });
-}
-
-// Every exercise of the register lab (/journal/matchmakers/) and of the record
-// lab (/journal/segments/), both in public/register-lab.js, solved by clicks
-// on its moves. A move is named by its data-key (`P>m1:deliver`, `seal:1`),
-// from `World::actions` in crates/support/paros-wasm/src/journal/register.rs
-// and records.rs; the keys follow the `solution` of each exercise there.
-const REGISTER_EXERCISES = {
-  "journal/matchmakers/": {
-    panel: "#your-turn-register",
-    exercises: {
-      "register-down": ["P:elect", "P>m1:deliver", "P>m2:deliver", "P>m1:deliver", "P>m2:deliver"],
-      "register-race": ["P:elect", "Q:elect", "P>m1:deliver", "P>m2:deliver", "Q>m2:deliver", "Q>m3:deliver",
-        "P>m1:deliver", "P>m2:deliver", "Q>m2:deliver", "Q>m3:deliver"],
-      "register-minority": ["P:elect", "P>m1:deliver", "P>m2:deliver", "P>m1:lose", "P>m2:drop", "P>m3:drop",
-        "Q:elect", "Q>m2:deliver", "Q>m3:deliver", "Q>m2:deliver", "Q>m3:deliver"],
-      "register-refused": ["Q:elect", "Q>m2:deliver", "Q>m3:deliver", "Q>m2:deliver", "Q>m3:deliver",
-        "P:reshape", "P>m1:deliver", "P>m3:deliver"],
-    },
-  },
-  "journal/segments/": {
-    panel: "#your-turn-records",
-    exercises: {
-      "records-retire": ["reshape", "seal:1", "boundary:1", "retire:1:2"],
-      "records-trim": ["reshape", "seal:1", "boundary:1", "truncate", "trim:1"],
-      "records-third": ["reshape", "seal:1", "boundary:1", "retire:1:2", "reshape"],
-    },
-  },
-};
-
-for (const [path, { panel, exercises }] of Object.entries(REGISTER_EXERCISES)) {
-  for (const [id, keys] of Object.entries(exercises)) {
-    test(`/${path}: the exercise "${id}" is solved by its moves`, async ({ page }) => {
-      const w = watch(page);
-      await page.goto(`${path}#lab=${id}`);
-      const lab = page.locator(panel);
-      await expect(lab.locator(".lab-tab.now")).toBeVisible();
-      await expect(lab.locator(".chip-status.accent").first()).toHaveText("live");
-      const done = lab.locator(".lab-done");
-      await expect(done).toBeHidden();
-      for (const key of keys) {
-        await lab.locator(`.lab-extras button[data-key="${key}"]`).click();
-        await expect(lab.locator(".rlab-refused")).toHaveCount(0);
-      }
-      await expect(done, "the page says the goal holds").toBeVisible();
-      await expect(done).not.toBeEmpty();
-      await expect(lab.locator(".lab-tab.now .lab-tab-n")).toHaveText("✓");
-      await lab.getByRole("button", { name: "Undo" }).click();
-      await expect(done).toBeHidden();
-      w.check();
-    });
-  }
-}
-
-// The live journal (/journal/live/, public/live-journal.js): the whole
-// journal on six hosts in the page. Writes land, a crashed host does not stop
-// them, a read gives them back, and a roll puts segment 2 in force.
-test("/journal/live/: the live journal writes, survives a crash, reads and rolls", async ({ page }) => {
-  test.setTimeout(120_000);
-  const w = watch(page);
-  await page.goto("journal/live/");
-  const lab = page.locator("#live-journal");
-  await expect(lab.locator(".chip-status.accent").first()).toHaveText("live");
-  await lab.getByRole("button", { name: "fast" }).click();
-  // The page starts paused with reduced motion on (playwright.config.mjs).
-  const play = lab.locator('button[data-live="play"]');
-  if ((await play.textContent()) === "Play") await play.click();
-  await expect(play).toHaveText("Pause");
-  const written = lab.locator(".llab-summary .strip > div", { hasText: "writes done" }).locator(".v");
-  const append = lab.locator('button[data-live="append"]');
-  const wait = { timeout: 30_000 };
-  await expect(append).toBeEnabled(wait);
-  await append.click();
-  await expect(written).toHaveText("1", wait);
-  await lab.locator('button[data-live="crash:3"]').click();
-  await expect(lab.locator('[data-host="3"] .chip-status')).toHaveText("down");
-  await expect(append).toBeEnabled(wait);
-  await append.click();
-  await expect(written).toHaveText("2", wait);
-  await lab.locator('button[data-live="restart:3"]').click();
-  await expect(lab.locator('[data-host="3"] .chip-status')).toHaveText("up");
-  await expect(lab.locator('button[data-live="read"]')).toBeEnabled(wait);
-  await lab.locator('button[data-live="read"]').click();
-  await expect(lab.locator(".llab-records li")).toHaveText(["record 0", "record 1"], wait);
-  await lab.locator('button[data-live="roll"]').click();
-  await expect(lab.locator('.llab-segments [data-segment="2"] .chip-status')).toHaveText("in force", wait);
-  await expect(lab.locator('.llab-segments [data-segment="1"] .chip-status')).not.toHaveText("in force");
-  w.check();
-});
-
-test("/journal/segments/: a refused move names the guard of the record", async ({ page }) => {
-  const w = watch(page);
-  await page.goto("journal/segments/#lab=records-retire");
-  const lab = page.locator("#your-turn-records");
-  await lab.locator('.lab-extras button[data-key="seal:1"]').click();
-  await expect(lab.locator(".rlab-refused")).toContainText("NoSuccessor");
-  w.check();
-});

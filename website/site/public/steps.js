@@ -6,8 +6,8 @@
 // live in the browser. The page holds the trace in
 // <script type="application/json" id="trace"> and a <div data-steps> where
 // the diagram goes; the script's data-wasm names the wasm bundle, data-call
-// the function that records a page (`paxos_trace` on the Paxos pages,
-// `journal_trace` on the Journal pages, #1365), and data-source the crate
+// the function that records a page (`paxos_trace` on the Paxos pages),
+// and data-source the crate
 // that the runs come from.
 //
 // What a reader sees, top to bottom:

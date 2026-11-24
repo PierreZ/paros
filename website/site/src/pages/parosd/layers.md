@@ -31,9 +31,9 @@ the exact table, are **Open** (§4.4).
 
 | Layer | What it is | Today |
 |---|---|---|
-| 0 | The Paxos flavors. No tenant, no cell. | `paros-consensus` |
-| 1 | The journal v1, its grid controller, and the client | `paros-journal`, `paros-journal-control` |
-| 2 | The host of actors: the role contract, the flight rule, group commit, the IO traits | `paros-journal-io` |
+| 0 | The Paxos flavors, and the host of actors (the role contract, the flight rule, group commit, the IO traits). No tenant, no cell. | `paros-consensus`, `paros-host` |
+| 1 | The journal, its controller, and the client | to build again (the first design is at the tag `journal-design-a`) |
+| 2 | The roles of the core on the host: addresses, the message envelope, the disk layout, recovery | to build |
 | 3 | A fold over a journal, and the election by `SetLeader` | to build |
 | 4 | One crate for each control level: universe, cell, tenant. The tenancy wrapper makes the pair (tenant, journal) here, above the core | to build |
 | 5 | The machine, the names, the tokens | `paros-authz-biscuit`; the rest to build |
@@ -49,7 +49,7 @@ wasm today: §4.4 calls that a finding.
 - A program that needs one decision, or a replicated log, takes `paros-consensus` alone: the
   [Consensus](../../consensus/) pages show it.
 - A program that needs a durable, fenced log takes the journal and the host, and implements the
-  traits of `paros-journal-io` for its own disk and network: the [Journal](../../journal/) pages.
+  traits of the host for its own disk and network.
 - A program that needs a leader takes the election crate of layer 3 and the journal. The
   coordinators of paros use the same API (§3.3, "One election mechanism for everyone").
 - A program that needs tenants wraps the journal with the tenancy crate. The core never learns
@@ -58,12 +58,11 @@ wasm today: §4.4 calls that a finding.
 ## A role is a pure actor
 
 A role (an acceptor, a leader, a coordinator, the frontend) is a pure `step` under the flight
-rule of the journal
-([§J4.2](https://github.com/PierreZ/paros/blob/main/docs/journal/04-roles.md#j42-the-journals-sans-io-contract)):
+rule of the host (§J4.2 of the first journal design, at the tag `journal-design-a`):
 a send waits for the persist batch that it names, the step reads no clock and draws no random
 number, and a refusal is data. One pure host serves every role of a process (goal 8). So each
 layer gets its own TLA+ model, its own walk and its own trace check, as the
-[core](../../consensus/proof/) and the journal have now.
+[core](../../consensus/proof/) has now.
 
 The frontend is a role like the others. It has no layer and no crate of its own. moonpool gets
 no actor layer: an activation of a role is a group of endpoints of moonpool RPC, and the paros

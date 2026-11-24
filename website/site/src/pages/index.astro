@@ -18,7 +18,6 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
       <div class="actions">
         <a class="btn primary" href={url("paxos/tour/")}>▶ Learn the Paxos flavors</a>
         <a class="btn" href={url("consensus/")}>How it is built</a>
-        <a class="btn" href={url("journal/")}>The journal</a>
       </div>
     </div>
 
@@ -48,12 +47,11 @@ const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
       <p class="aside"><a href={url("consensus/")}>The library</a> · <a href={url("consensus/driver/")}>the driver loop</a> · <a href={url("consensus/deployments/")}>the deployments</a> · <a href={url("consensus/proof/")}>how it is checked</a></p>
     </Panel>
 
-    <Panel num="03" title="The journal" meta="designed · checked in TLA+ · being built">
+    <Panel num="03" title="The journal" meta="to be designed again">
       <p>One ordered, durable log for each journal id, with four calls: <code>Write</code>, <code>Read</code>, <code>Truncate</code> and <code>SetLeader</code>.
-        Paxos chooses every record, segments let the acceptors change with no stop, and no step
-        waits for every member of a group. Each rule has a TLA+ model; the pure journal core is
-        built, and the roles come next.</p>
-      <p class="aside"><a href={url("journal/")}>The journal pages</a>. The service around it, <a href={url("parosd/")}><code>parosd</code></a>, is being rebuilt; the version before the
+        The journal is built again on the consensus core, once the core has segments: a segment
+        ends at a decided command, and the acceptors keep one log.</p>
+      <p class="aside">The first design of the journal is at the tag <code>journal-design-a</code>. The service around it, <a href={url("parosd/")}><code>parosd</code></a>, is being rebuilt; the version before the
         rewrite is at the tag <a href={TAG}><code>v0.2.0-alpha.1</code></a>.</p>
     </Panel>
   </div>

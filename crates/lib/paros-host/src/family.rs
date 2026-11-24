@@ -5,8 +5,7 @@
 //! The roles of one host share one address type, one message type, one
 //! disk format and one kind of batch id, so the driver can route, hold and
 //! commit them without knowing what they are. A family is a type with no
-//! value (a marker): the journal's is `Journal`, in the crate
-//! paros-journal-io.
+//! value (a marker), as the toy family of the tests is.
 
 use core::fmt::Debug;
 

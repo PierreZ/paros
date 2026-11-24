@@ -60,7 +60,7 @@ A client has no field to put an id in. So a caller that crafts the right `u64` g
 it can only reach the frontend, and the frontend asks for a token. A reference of moonpool RPC
 is not a credential either; the fences stay with the terms and the ballots.
 
-The core knows no tenant. `paros-consensus` and `paros-journal` carry one journal id. The pair
+The core knows no tenant. `paros-consensus` carries one journal id. The pair
 (tenant, journal) is made above the core, by the tenancy crate that wraps it (#1402 (remove the
 tenant from the core)).
 

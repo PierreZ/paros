@@ -2,9 +2,8 @@
 # Fails when a composing crate of paros has no example (Pierre, 2026-11-21).
 #
 # A composing crate is a library crate of `crates/lib/` that depends on
-# another library crate of the workspace: `paros` (the facade),
-# `paros-journal`, `paros-journal-control`, `paros-journal-io` and `paros-election` today, and later the moonpool adapter
-# (the journal client is a module of paros-journal, #1331). A user programs against these crates, so each one
+# another library crate of the workspace: `paros` (the facade) today, and
+# later the journal and the moonpool adapter. A user programs against these crates, so each one
 # shows its abstractions and its developer experience in a runnable example.
 # The examples are how a reviewer judges the API.
 #

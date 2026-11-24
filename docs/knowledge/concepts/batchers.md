@@ -21,7 +21,7 @@ executed a batch of `n` sends `n` replies.
 
 - The Multi-Paxos model. A slot holds one write; a write holds many records.
 - A **multi-writer** journal has no leader uuid and no expected sequence: an accepted write gets
-  `[next_seq, next_seq + n)` at apply (`docs/journal/02-data-plane.md` §J2.4). Writers own
+  `[next_seq, next_seq + n)` at apply (`docs/journal/02-data-plane.md` §J2.4 (tag `journal-design-a`)). Writers own
   duplicates (at-least-once).
 - A batcher is stateless. It may crash and lose what it queued; its writers see no answer.
 
@@ -113,10 +113,10 @@ journal refuse a write it already holds. A single-writer journal merges in its c
 |---|---|
 | The pure roles | `paros-consensus/src/batcher.rs`: `Batcher`, `push`, `tick`, `lower_limits`, `BatchLimits`, `Batch`, `Unbatcher::scatter` |
 | The driver | `paros-roles/src/batcher.rs`: `run_batcher`; every machine serves the endpoint over the cell's address book |
-| The decision | `docs/journal/02-data-plane.md` §J2.4 |
+| The decision | `docs/journal/02-data-plane.md` §J2.4 (tag `journal-design-a`) |
 | The TLA+ model | `specs/tla/compartments/` (#1190 (rework 6.10)): one range for each write, also across a `TooLarge` split and a leader change, with the control `resend_ambiguous` (a batcher that sends an ambiguous batch again applies a write two times) |
 
-The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 

@@ -89,8 +89,129 @@ pub(super) fn quorums() -> Trace {
             stuck_column(),
             two_shapes(),
             partitions(),
+            tour_majority(),
+            tour_grids(),
         ],
     )
+}
+
+/// One node of `nodes` sends or receives `message`.
+fn touches_any(nodes: &'static [u64]) -> impl Fn(&MessageView) -> bool {
+    move |message| nodes.iter().any(|node| touches(*node)(message))
+}
+
+/// A `kind` message to one node of `nodes`.
+fn kind_to(kind: &'static str, nodes: &'static [u64]) -> impl Fn(&MessageView) -> bool {
+    move |message| message.kind == kind && nodes.contains(&message.to)
+}
+
+/// The tour run of chapter 2, "Who must answer": five nodes and one shape,
+/// a majority. Three of five answer each phase; the node that two majorities
+/// share carries the vote to the next ballot; two nodes down and the writes
+/// go on; a third down and a write waits, with nothing lost.
+fn tour_majority() -> Scenario {
+    let mut run = Recorder::new("act2/the-read-that-lies");
+    run.tour("majority", "Who must answer");
+    run.beat("Five nodes, and each one is an acceptor. Each phase waits for a majority: 3 of 5.")
+        .beat("Node 0 starts an election. Its Prepares to nodes 3 and 4 are lost.")
+        .play(elect(0), "node 0 starts an election")
+        .drop_all(kind_to("Prepare", &[3, 4]))
+        .beat("Nodes 1 and 2 promise. With its own promise, node 0 has 3 of 5, so it leads.")
+        .settle(any)
+        .holds(leads(0), "node 0 leads with 3 promises of 5");
+    run.beat("A client writes alpha at slot 0. The Accepts to nodes 3 and 4 are lost too.")
+        .play(propose(0, "alpha"), "the client writes alpha")
+        .drop_all(kind_to("Accept", &[3, 4]))
+        .beat("Nodes 0, 1 and 2 vote: 3 of 5. alpha is chosen, and only these three nodes know it.")
+        .settle_dropping(touches_any(&[3, 4]))
+        .holds(chosen_at(0, "alpha"), "alpha is chosen at slot 0");
+    run.beat("Now nodes 0 and 1 crash. Of the three nodes that voted, only node 2 is up.")
+        .play(crash(0), "node 0 crashes")
+        .play(crash(1), "node 1 crashes");
+    run.beat("Node 4 starts an election. Nodes 2, 3 and 4 are up: just a majority.")
+        .play(elect(4), "node 4 starts an election")
+        .settle(|message| message.kind == "Prepare" && ![0, 1].contains(&message.to))
+        .drop_all(touches_any(&[0, 1]))
+        .beat("Two majorities of five always share a node. Here it is node 2, and its promise reports alpha.")
+        .more("break-the-rule")
+        .settle(|message| message.kind == "Promise")
+        .holds(leads(4), "node 4 leads with nodes 2 and 3");
+    run.beat(
+        "So node 4 proposes alpha again at slot 0. Nodes 2, 3 and 4 vote, and alpha stays chosen.",
+    )
+    .settle_dropping(touches_any(&[0, 1]))
+    .holds(chosen_at(0, "alpha"), "alpha is still chosen at slot 0");
+    run.beat("Two nodes of five are down, and writes go on. A client writes bravo at slot 1.")
+        .play(propose(4, "bravo"), "the client writes bravo")
+        .settle_dropping(touches_any(&[0, 1]))
+        .holds(chosen_at(1, "bravo"), "bravo is chosen at slot 1");
+    run.beat("Now node 3 crashes too. Only nodes 2 and 4 are up: 2 of 5, less than a majority.")
+        .play(crash(3), "node 3 crashes");
+    run.beat("A client writes charlie. Only nodes 2 and 4 can vote, so charlie waits.")
+        .play(propose(4, "charlie"), "the client writes charlie")
+        .settle_dropping(touches_any(&[0, 1, 3]))
+        .holds(open_slot(2), "slot 2 waits for a third vote");
+    run.beat("No vote is lost. Node 3 restarts, and node 4 sends its open Accepts again.")
+        .play(Action::Restart { node: 3 }, "node 3 restarts")
+        .play(
+            Action::ResendPending { node: 4 },
+            "node 4 sends its open Accepts again",
+        )
+        .beat("Node 3 votes, and charlie is chosen. A majority of 5 nodes survives 2 failures.")
+        .more("majority")
+        .settle_dropping(touches_any(&[0, 1]))
+        .holds(chosen_at(2, "charlie"), "charlie is chosen at slot 2");
+    run.finish("tour-majority", "Who must answer", log_outcome)
+}
+
+/// The tour run of chapter 5, "Grids": the same six acceptors as a grid of
+/// 2 rows and 3 columns. One node of every column elects; one full column
+/// writes; a node down stops its column only, and the leader moves the slot.
+fn tour_grids() -> Scenario {
+    let mut run = Recorder::new(LEVEL);
+    run.tour("grids", "Grids");
+    run.beat("Six acceptors stand in a grid of 2 rows and 3 columns. A majority would be 4 of 6.")
+        .beat("The grid has two shapes. To elect: one node of every column. To write: one full column.")
+        .beat("Node 0 starts an election. Its Prepares to nodes 3, 4 and 5 are lost.")
+        .play(elect(0), "node 0 starts an election")
+        .drop_all(kind_to("Prepare", &[3, 4, 5]))
+        .beat("Nodes 1 and 2 promise. With node 0, that is one node of each column, so node 0 leads.")
+        .more("election")
+        .settle(any)
+        .holds(leads(0), "node 0 leads with one node of each column");
+    run.beat("Slot 0 belongs to column 0: nodes 0 and 3. A client writes alpha, and node 3 votes.")
+        .play(propose(0, "alpha"), "the client writes alpha")
+        .settle(kind("Accept"))
+        .beat("The full column voted, so alpha is chosen. Two acceptors of six did the work.")
+        .settle(any)
+        .holds(chosen_at(0, "alpha"), "alpha is chosen at slot 0");
+    run.beat("Why is it safe? A full column holds one node of every election quorum.")
+        .beat("So a later leader always hears from a node of the column that chose alpha.")
+        .more("two-shapes");
+    run.beat("Now node 4 crashes. It is one of the two nodes of column 1.")
+        .play(crash(4), "node 4 crashes");
+    run.beat("Slot 1 belongs to column 1. A client writes bravo, but node 4 cannot vote, so bravo waits.")
+        .more("column-down")
+        .play(propose(0, "bravo"), "the client writes bravo")
+        .settle_dropping(touches(4))
+        .holds(open_slot(1), "slot 1 waits for node 4");
+    run.beat("The leader moves slot 1 to column 2: the same ballot and the same value, to nodes 2 and 5.")
+        .more("stuck-column")
+        .play(
+            Action::MoveRound {
+                node: 0,
+                slot: 1,
+                column: 2,
+            },
+            "the leader moves slot 1 to column 2",
+        )
+        .settle_dropping(touches(4))
+        .holds(chosen_at(1, "bravo"), "bravo is chosen at slot 1");
+    run.beat("A node down stops the slots of its column only. The other columns go on.")
+        .beat("Partitions are another shape: a majority of one partition writes, a majority of each elects.")
+        .more("partitions")
+        .beat("A grid writes to few acceptors. The price: each election must ask every column.");
+    run.finish("tour-grids", "Grids", log_outcome)
 }
 
 /// The base run: node 0 is elected by one node of each column, then each

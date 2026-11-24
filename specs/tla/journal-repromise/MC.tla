@@ -1,1 +1,0 @@
-../journal-state/MC.tla

@@ -117,7 +117,7 @@ Two facts paros asserts make this hold:
 | The analysis | `docs/analysis/consensus/matchmaker-interaction-verification.md` |
 | The TLA+ model | `specs/tla/matchmaker/` (#1200): the phase, `H_b` above the maximum watermark, Phase 1 over every configuration, each rule with a control |
 
-The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 

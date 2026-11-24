@@ -13,7 +13,6 @@ const traceOf = (page: string) => Object.entries(traces).find(([p]) => p.endsWit
 const PAGE_NAMES: Record<string, string> = {
   "single-decree": "Single-decree Paxos", "quorums": "Quorums", "multi-paxos": "Multi-Paxos",
   "compartmentalized": "Compartmentalized Paxos", "matchmaker": "Matchmaker Paxos",
-  "journal-seal": "Journal segments",
 };
 const chapters = played(Object.fromEntries(Object.entries(traces).map(([p, t]) => [p.replace(/^.*\/(.+)\.json$/, "$1"), t])) as never, url);
 const tourMinutes = chapters.reduce((s, c) => s + c.minutes, 0);
@@ -45,7 +44,7 @@ const WORDS = [
 const f = (n: number) => FLAVORS[n - 1];
 ---
 <Doc title="The Paxos course" kicker="Paxos" section="paxos/" siblings={[]}
-  description="A course in eight lessons, from one value to a journal that changes its acceptors. Every run on these pages is recorded from the real paros-consensus and paros-journal.">
+  description="A course in seven lessons, from one value to a journal that changes its acceptors. Every run on these pages is recorded from the real paros-consensus.">
 
   <h2 id="map">The map</h2>
   <p>One journal of a cell, from a write to the log. Each tag names the flavor that does the
@@ -90,7 +89,7 @@ const f = (n: number) => FLAVORS[n - 1];
   </div>
 
   <h2 id="course">The course</h2>
-  <p>Eight lessons, in order: seven on the Paxos flavors, then one on the journal that paros builds from them. Each lesson is a group of recorded runs on one page. A run tells
+  <p>Seven lessons, in order, one on each Paxos flavor. Each lesson is a group of recorded runs on one page. A run tells
   one idea per screen, and before some screens it asks what will happen. At the end of a run,
   the page offers the next run of the lesson.</p>
   <a class="tour-entry" href={url("paxos/tour/")}>

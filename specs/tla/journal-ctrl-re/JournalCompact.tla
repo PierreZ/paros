@@ -1,1 +1,0 @@
-../journal-compact/JournalCompact.tla

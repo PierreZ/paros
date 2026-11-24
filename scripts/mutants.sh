@@ -2,32 +2,11 @@
 # Mutation testing of paros-consensus, in two passes (`.cargo/mutants.toml`).
 #
 #   scripts/mutants.sh [ARGS...]
-#   scripts/mutants.sh --journal [ARGS...]
-#   scripts/mutants.sh --control [ARGS...]
-#   scripts/mutants.sh --journal-io [ARGS...]
 #   scripts/mutants.sh --host [ARGS...]
-#   scripts/mutants.sh --election [ARGS...]
 #
-# `--journal` runs the same two passes on paros-journal, judged by its unit
-# tests and by journal-sim (`.cargo/mutants-journal.toml`, then
-# `.cargo/mutants-journal-tlc.toml`).
-#
-# `--control` runs one pass on paros-journal-control, judged by its unit tests,
-# by journal-sim's sweep of the controller's decisions and by its controller
-# walks (`.cargo/mutants-control.toml`).
-#
-# `--journal-io` runs one pass on paros-journal-io, judged by its unit tests
-# and by the driver walk of journal-sim (`.cargo/mutants-journal-io.toml`).
-# The driver has no trace check yet, so there is no second pass: a mutant
-# that the first pass misses survives.
-#
-# `--host` runs one pass on paros-host, judged by its unit tests, by the unit
-# tests of paros-journal-io and by the driver walk of journal-sim
-# (`.cargo/mutants-host.toml`), with no second pass either.
-#
-# `--election` runs one pass on paros-election, judged by its unit tests and by
-# the election walk of journal-sim (`.cargo/mutants-election.toml`), with no
-# second pass either.
+# `--host` runs one pass on paros-host, judged by its unit tests
+# (`.cargo/mutants-host.toml`). The host has no trace check yet, so there is
+# no second pass: a mutant that the first pass misses survives.
 #
 # ARGS go to the first pass and cut the set of mutants, for example
 # `--shard 3/48 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.
@@ -60,30 +39,10 @@ second=.cargo/mutants-tlc.toml
 # unmutated tree. Their filter is read from the second pass's config below, so
 # the baseline runs every test that the second pass runs.
 baseline_args=(--features paros-consensus/serde -p paros-consensus -p consensus-sim)
-if [ "${1:-}" = "--journal" ]; then
-  shift
-  crate=paros-journal
-  first=.cargo/mutants-journal.toml
-  second=.cargo/mutants-journal-tlc.toml
-  baseline_args=(-p paros-journal -p journal-sim)
-elif [ "${1:-}" = "--control" ]; then
-  shift
-  crate=paros-journal-control
-  first=.cargo/mutants-control.toml
-elif [ "${1:-}" = "--journal-io" ]; then
-  shift
-  crate=paros-journal-io
-  first=.cargo/mutants-journal-io.toml
-  second=
-elif [ "${1:-}" = "--host" ]; then
+if [ "${1:-}" = "--host" ]; then
   shift
   crate=paros-host
   first=.cargo/mutants-host.toml
-  second=
-elif [ "${1:-}" = "--election" ]; then
-  shift
-  crate=paros-election
-  first=.cargo/mutants-election.toml
   second=
 fi
 

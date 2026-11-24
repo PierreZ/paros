@@ -13,6 +13,8 @@ use crate::paxos::level::common::{crash, propose, start_election as elect};
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
 use crate::paxos::view::{RoleView, WorldView};
 
+mod tour;
+
 /// The setup: three nodes, each an acceptor and a replica.
 const LEVEL: &str = "act2/steady-state";
 
@@ -102,6 +104,8 @@ pub(super) fn multi_paxos() -> Trace {
             handoff_lost(),
             read_waits(),
             break_the_rule(),
+            tour::the_log(),
+            tour::reads(),
         ],
     )
 }
