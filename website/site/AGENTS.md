@@ -209,6 +209,18 @@ driver (`Desk` in `src/paxos/trace/compart/desk.rs`), not a level: node 0, two p
 (lanes `p0`, `p1`) and two replicas (`r0`, `r1`).
 Without the wasm, the section says so.
 
+A guided exercise (its view has `parts`; `gap` today, the others as their flavor gets its
+intro, parts and guide in `paros-wasm`) adds, all from the engine:
+- **An intro** that plays the setup on the stage, one sentence per step: Next, Play or Pause,
+  the speed and Skip. It never starts by itself; with reduced motion there is no Play.
+- **The goal as a checklist**: one line per part, with its mark when it holds.
+- **Hint**, in three levels: the idea, the plan, then an outline on the button to press now.
+- **A dead end**: when a line cannot hold again, the page says why and offers Undo.
+- **Show me how**: the exercise from its start, then its guide on the live core, one step and
+  one sentence at a time, with the button of each move outlined before the message moves. The
+  press plays it (with reduced motion, Next plays each step). The reader's moves wait. A demo
+  never counts as solved; at its end, "Now you" starts the exercise again, with no intro.
+
 The Journal pages have their own "Your turn" (#1363 (journal fold lab)): `lab: journal` in the
 front matter loads `public/journal-lab.js` (and `course.js`, for the solved marks), and
 `<div data-journal-lab="id id id">` mounts it. It loads the `journal` wasm bundle

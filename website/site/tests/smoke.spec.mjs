@@ -476,6 +476,12 @@ for (const ex of EXERCISES) {
     // The stage of the story (public/stage.js) draws the parties from the
     // engine's typed state: a log world names its leader.
     await expect(lab.locator(".stage-node").first()).toBeVisible();
+    // A guided exercise opens on its intro; Skip leaves it set up.
+    if (ex.id === "gap") {
+      await expect(lab.locator(".lab-narrator")).toBeVisible();
+      await lab.locator(".lab-narrator-skip").click();
+      await expect(lab.locator(".lab-narrator")).toBeHidden();
+    }
     if (ex.id === "gap") await expect(lab.locator(".stage-node.leader")).toHaveCount(1);
     const problem = await page.evaluate((moves) => {
       const panel = document.getElementById("your-turn-lab");
@@ -577,6 +583,118 @@ test("/consensus/driver/: the Ready widget elects a leader and commits a write",
 // `seal`, from `Call::key` in crates/support/paros-wasm/src/journal/world.rs);
 // the calls follow the `solution` of each exercise in
 // crates/support/paros-wasm/src/journal/lab.rs.
+// A guided exercise (lab.js, `parts` in paros-wasm's lab.rs), on "gap":
+// the intro plays step by step with Next (reduced motion: no Play), the goal
+// is a checklist, the Hint has three levels and the third outlines the
+// button to press, a dead end says so and Undo leaves it, and "Show me how"
+// plays the guide to its end with every line of the checklist marked, but
+// never counts as solved; "Now you" starts again.
+test("/paxos/multi-paxos/: the guided exercise: intro, checklist, hints, dead end, Show me how", async ({ page }) => {
+  const w = watch(page);
+  await page.goto("paxos/multi-paxos/#lab=gap");
+  const lab = page.locator("#your-turn-lab");
+  const narr = lab.locator(".lab-narrator");
+  await expect(narr).toBeVisible();
+  await expect(lab.locator(".lab-narrator-play")).toBeHidden();
+  await expect(lab.locator(".lab-narrator-at")).toHaveText("Intro 1/2");
+  // The reader's moves wait while the intro plays.
+  await expect(lab.locator(".lab-extras .btn").first()).toBeDisabled();
+  await lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ }).click();
+  await expect(lab.locator(".lab-narrator-at")).toHaveText("Intro 2/2");
+  await lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ }).click();
+  await expect(narr).toBeHidden();
+  await expect(lab.locator(".lab-chosen")).toContainText("slot 0 = alpha");
+  // The checklist: four lines, none holds yet.
+  const parts = lab.locator(".lab-parts li");
+  await expect(parts).toHaveCount(4);
+  await expect(lab.locator(".lab-parts li.holds")).toHaveCount(0);
+  // Three levels of hint; the third outlines the move to press.
+  const hint = lab.locator(".lab-hint-btn");
+  await hint.click();
+  await expect(lab.locator(".lab-hint p")).toHaveCount(1);
+  await hint.click();
+  await expect(lab.locator(".lab-hint p")).toHaveCount(2);
+  await hint.click();
+  await expect(lab.locator(".btn.lab-next")).toHaveText("The client writes bravo");
+  await lab.locator(".btn.lab-next").click();
+  // The hint of the same line goes on outlining the next move: an Accept to drop.
+  await expect(lab.locator(".btn.lab-next")).toHaveText("Drop");
+  // A dead end: an Accept of slot 1 reaches node 1.
+  await lab.locator('.lab-msg[data-kind="Accept"][data-to="n1"] .lab-deliver').click();
+  const stuck = lab.locator(".lab-stuck");
+  await expect(stuck).toBeVisible();
+  await expect(lab.locator(".lab-hint-btn")).toBeHidden();
+  await stuck.locator(".btn", { hasText: "Undo" }).click();
+  await expect(stuck).toBeHidden();
+  // Show me how: the guide from the start, step by step, to its end.
+  await lab.locator(".lab-show-btn").click();
+  await expect(narr).toBeVisible();
+  await expect(lab.locator(".lab-narrator-at")).toHaveText(/^Step 1\/\d+$/);
+  // While the reader reads why, the button of the first move (an extra
+  // move) has the outline; then the next step's first move (a Drop).
+  await expect(lab.locator(".lab-extras .btn.lab-next")).toHaveText("The client writes bravo");
+  await lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ }).click();
+  await expect(lab.locator(".lab-narrator-at")).toHaveText(/^Step 2\/\d+$/);
+  await expect(lab.locator(".lab-wire .btn.lab-next")).toHaveText("Drop");
+  for (let i = 0; i < 20 && (await lab.locator(".lab-narrator-skip").textContent()) !== "Now you"; i++) {
+    await lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ }).click();
+  }
+  await expect(lab.locator(".lab-narrator-skip")).toHaveText("Now you");
+  await expect(lab.locator(".lab-parts li.holds")).toHaveCount(4);
+  await expect(lab.locator(".lab-done")).toBeHidden();
+  expect(await page.evaluate(() => {
+    const st = JSON.parse(localStorage.getItem("paros-course-v1") || "{}");
+    return !!(st.solved && st.solved.gap);
+  })).toBe(false);
+  // Now you: the exercise starts again, with no intro.
+  await lab.locator(".lab-narrator-skip").click();
+  await expect(narr).toBeHidden();
+  await expect(lab.locator(".lab-parts li.holds")).toHaveCount(0);
+  await expect(lab.locator(".lab-extras .btn").first()).toBeEnabled();
+  w.check();
+});
+
+// "Show me how" with motion: the press plays the guide by itself, each
+// move's button is outlined before it plays, Pause stops it, and Play goes
+// on to the end; Skip during a moving intro leaves the lab set up.
+test("/paxos/multi-paxos/: Show me how plays by itself with motion, and Skip stops a moving intro", async ({ browser }) => {
+  const context = await browser.newContext({ reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const w = watch(page);
+  await page.goto("paxos/multi-paxos/#lab=gap");
+  const lab = page.locator("#your-turn-lab");
+  await expect(lab.locator(".lab-narrator")).toBeVisible();
+  // Play the intro, then Skip while its messages move.
+  await lab.locator(".lab-narrator-play").click();
+  await expect(lab.locator(".lab-narrator-at")).toHaveText("Intro 1/2");
+  await page.waitForTimeout(600);
+  await lab.locator(".lab-narrator-skip").click();
+  await expect(lab.locator(".lab-narrator")).toBeHidden();
+  await expect(lab.locator(".lab-chosen")).toContainText("slot 0 = alpha");
+  await expect(lab.locator(".lab-extras .btn").first()).toBeEnabled();
+  await expect(lab.locator(".lab-msg")).toHaveCount(0);
+  // Show me how plays by itself, at the fastest speed.
+  await lab.locator(".lab-show-btn").click();
+  await lab.locator(".lab-narrator-speed").click();
+  await expect(lab.locator(".lab-narrator-play")).toHaveText("Pause");
+  await expect(lab.locator(".lab-narrator-at")).toHaveText(/^Step 2\//, { timeout: 20000 });
+  // Pause: a step that plays ends, and then nothing moves on.
+  await lab.locator(".lab-narrator-play").click();
+  await expect(lab.locator(".lab-narrator-play")).toHaveText("Play");
+  await page.waitForTimeout(8000);
+  const at = await lab.locator(".lab-narrator-at").textContent();
+  await page.waitForTimeout(3000);
+  await expect(lab.locator(".lab-narrator-at")).toHaveText(at);
+  await lab.locator(".lab-narrator-play").click();
+  await expect(lab.locator(".lab-narrator-skip")).toHaveText("Now you", { timeout: 90000 });
+  await expect(lab.locator(".lab-parts li.holds")).toHaveCount(4);
+  await expect(lab.locator(".lab-done")).toBeHidden();
+  await lab.locator(".lab-narrator-skip").click();
+  await expect(lab.locator(".lab-parts li.holds")).toHaveCount(0);
+  w.check();
+  await context.close();
+});
+
 const JOURNAL_EXERCISES = {
   "journal-duplicate": ["A:write-lost", "A:resend"],
   "journal-fenced": ["B:read", "B:set-leader", "A:write"],

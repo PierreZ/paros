@@ -657,6 +657,29 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 .lab-extras .btn { min-height: 40px; text-align: left; }
 .lab .lab-said { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rule); font-size: 14px; color: var(--muted); min-height: 2.6em; }
 .lab-controls { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--rule); }
+/* A guided exercise: the goal as a checklist, the hint, the dead end, and
+   the narrator of the intro and of "Show me how". */
+.lab .lab-parts { list-style: none; margin: 0; padding: 4px 12px 8px; display: flex; flex-direction: column; gap: 2px; font-family: var(--font-sans); font-size: 15px; }
+.lab-parts > li::before { content: none !important; }
+.lab-parts > li { color: var(--muted); }
+.lab-parts > li.holds { color: var(--fg); }
+.lab-part-mark { display: inline-block; width: 1.4em; font-family: var(--font-mono); }
+.lab-parts > li.holds .lab-part-mark { color: var(--done); }
+.lab-help { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--rule); }
+.lab-help .btn { min-height: 40px; }
+.lab .lab-hint { flex: 1 1 100%; font-size: 14px; }
+.lab .lab-hint p { margin: 4px 0 0; }
+.lab .lab-stuck { margin: 8px 12px; font-family: var(--font-sans); font-size: 15px; border-color: var(--gap); }
+.lab .lab-stuck::before { color: var(--gap); }
+.lab .lab-stuck .btn { margin-top: 8px; }
+.lab .btn.lab-next { outline: 3px solid var(--accent); outline-offset: 2px; }
+.lab-narrator { padding: 8px 12px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+.lab .lab-narrator-says { margin: 0 0 8px; font-family: var(--font-sans); font-size: 16px; line-height: 1.45; min-height: 2.9em; }
+.lab-narrator-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.lab-narrator-bar .btn { min-height: 40px; }
+.lab-narrator-at { margin-right: auto; color: var(--muted); }
+.lab-narrator-play { min-width: 6.5em; }
+.lab-narrator[hidden], .lab-help[hidden], .lab-stuck[hidden], .lab-parts[hidden] { display: none; }
 
 /* The journal fold lab (public/journal-lab.js): the view, the segments with
    their records, the writers, the calls and the answer of paros-journal. */
@@ -715,3 +738,4 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 .llab .llab-records li { padding: 2px 6px; border: 1px solid var(--rule); }
 .llab .llab-events li { overflow-wrap: anywhere; }
 .llab .llab-events li:first-child { color: var(--fg); }
+.lab .btn[hidden] { display: none; }

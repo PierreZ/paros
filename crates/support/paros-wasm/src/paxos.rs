@@ -367,6 +367,27 @@ mod wasm {
         pub fn view(&self) -> String {
             json(&self.inner.view())
         }
+
+        /// The `LabView` before the intro played, as JSON; `null` when the
+        /// exercise has no intro.
+        #[must_use]
+        pub fn intro_start(&self) -> String {
+            json(&self.inner.intro_start())
+        }
+
+        /// Intro step `n` as it played (its sentence and one frame per
+        /// move), as JSON; `null` past the last step.
+        #[must_use]
+        pub fn intro_step(&self, n: usize) -> String {
+            json(&self.inner.intro_step(n))
+        }
+
+        /// Play guide step `n` ("Show me how"), as JSON; `null` past the
+        /// last step. The lab is a demo from then on: it never counts as
+        /// solved until Start again.
+        pub fn guide_step(&mut self, n: usize) -> String {
+            json(&self.inner.guide_step(n))
+        }
     }
 
     /// The `Ready` inspector of the sans-IO page (#951): three
