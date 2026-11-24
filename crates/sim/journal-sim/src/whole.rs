@@ -84,6 +84,11 @@
 //!   higher ballot bound or promised, a newer segment, a seal of its own
 //!   segment, or another end of the segment before it. Placement replaces
 //!   a stopped leader, so without this judge a wrong stop costs nothing.
+//! - [`CONTROLLER_STOPPED`]: each controller that stops (a decision
+//!   `Stop`, an abandoned heal of an older term, a reshape or a heal
+//!   refused on its term) has a true cause: a value it read holds a term
+//!   that deposes it and that a matchmaker held, or a change was refused on
+//!   its term while a matchmaker held a term that deposes it.
 //! - [`HEAL_HELD`]: each node that a done heal added to the set of a
 //!   retired segment holds every slot of it on its disk while the set
 //!   names it, but the slots below its compaction point, each of which
@@ -123,7 +128,9 @@ use std::rc::Rc;
 
 use moonpool_walk::{Cx, Model, Phase, Walk, sometimes};
 
-use paros_journal::register::{Ballot, Change, MatchmakerGeneration, RegisterValue};
+use paros_journal::register::{
+    Ballot, Change, ChangeRefusal, MatchmakerGeneration, RegisterValue, Term,
+};
 use paros_journal::roles::CopyId;
 use paros_journal::roles::{Campaign, LeaderPhase, Message, PROMISE_BATCH};
 use paros_journal::segment::{OpeningCall, SegmentRecord, SegmentState};
@@ -173,6 +180,10 @@ pub const HEAL_HELD: &str =
 pub const DISK: &str = "whole journal: every replica disk holds the chosen log";
 /// Oracle: each leader that stops on its own has a true cause in the walk.
 pub const STOPPED: &str = "whole journal: each leader that stops has a true cause";
+
+/// Oracle: each controller that stops (`Action::Stop`) has a true cause: a
+/// matchmaker held a term that deposes it.
+pub const CONTROLLER_STOPPED: &str = "whole journal: each controller that stops has a true cause";
 
 /// The coverage sites of the whole journal walk.
 pub mod reach {
@@ -250,6 +261,8 @@ pub mod reach {
     pub const DISK_TRIM: &str = "whole journal: a replica disk held a judged compaction point";
     /// A leader stopped on its own, for a true cause.
     pub const LEADER_STOPPED: &str = "whole journal: a leader stopped for a true cause";
+    /// A controller stopped on a value whose term deposes it.
+    pub const CONTROLLER_DEPOSED: &str = "whole journal: a controller read a term that deposes it";
     /// A machine was lost for good.
     pub const LOST: &str = "whole journal: a machine was lost for good";
     /// A heal replaced a replica of a retired segment on the lost machine.
@@ -288,6 +301,7 @@ pub mod reach {
         LOST,
         LOST_HEALED,
         LEADER_STOPPED,
+        CONTROLLER_DEPOSED,
         DISK_TRIM,
         FROZEN,
         LATE,
@@ -347,6 +361,11 @@ pub enum WholeMutant {
     /// sealing leader stops with no true cause.
     /// [`STOPPED`] catches it.
     RefuseSeal,
+    /// A controller's read gives, one time in four in the chaos phase, the
+    /// value with a term that no matchmaker held, one above, won by
+    /// another node: the controller stops with no true cause.
+    /// [`CONTROLLER_STOPPED`] catches it.
+    ForgedTerm,
 }
 
 /// The weights of the walk's crash and restart steps: a machine comes
@@ -388,6 +407,9 @@ const CONTROL: ControlConfig = ControlConfig {
 const LEADERS: u64 = 100_000;
 /// The nodes of the controllers: `CONTROLLERS + machine`.
 const CONTROLLERS: u64 = 1_000_000;
+/// The holder of the forged term of [`WholeMutant::ForgedTerm`]: a node
+/// that is no controller of the walk.
+const FORGED_HOLDER: u64 = 999;
 /// A leader that does not write after this many ticks is replaced.
 const STUCK: u64 = 30;
 /// The uuid of each journal's writer.
@@ -1690,8 +1712,10 @@ impl WholeModel {
             register: self.register.clone(),
             id,
             chaos: cx.phase() == Phase::Chaos,
+            forge: self.mutant == WholeMutant::ForgedTerm,
             cx,
             ran: Vec::new(),
+            reads: Vec::new(),
         };
         let cell = WalkCell {
             j,
@@ -1713,10 +1737,13 @@ impl WholeModel {
         let now = self.now();
         let holder = self.value(j).term().holder;
         let mut driver = self.journals[j].ctls[c].driver.take().expect("up");
+        let term_before = driver.controller().term();
         let (mut register, mut cell) = self.ports(j, cx);
         let polled = driver.poll(now, &mut register, &mut cell);
         let ran = std::mem::take(&mut register.ran);
+        let reads = std::mem::take(&mut register.reads);
         drop(register);
+        self.judge_controller_stop(j, &driver, term_before, &reads, &ran);
         self.token = cell.token;
         let me = driver.controller().me();
         let value = self.value(j);
@@ -1729,6 +1756,60 @@ impl WholeModel {
         self.journals[j].ctls[c].driver = Some(driver);
         self.ran(j, &ran);
         self.polled(j, c, polled, cx);
+    }
+
+    /// [`CONTROLLER_STOPPED`]: a controller of journal `j` that held term
+    /// `before` and holds no term after its step stopped. Each way the role
+    /// stops (a decision `Stop`, an abandoned heal of an older term, a
+    /// reshape or a heal refused on its term) has one of two causes:
+    /// - a value that it read or that a done change gave holds a term that a
+    ///   matchmaker held and that deposes it (a later number, or the same
+    ///   number won by another);
+    /// - a change of its step was refused on its term, and a matchmaker
+    ///   held a term that deposes it.
+    fn judge_controller_stop(
+        &self,
+        j: usize,
+        driver: &ControlDriver,
+        before: Option<u64>,
+        reads: &[Term],
+        ran: &[(Change, Outcome, bool)],
+    ) {
+        let (Some(number), None) = (before, driver.controller().term()) else {
+            return;
+        };
+        let me = driver.controller().me();
+        let held = self.register.held(self.journals[j].id);
+        let deposes = |t: &Term| t.number > number || (t.number == number && t.holder != Some(me));
+        let seen =
+            reads
+                .iter()
+                .copied()
+                .chain(ran.iter().filter_map(|(_, outcome, _)| match outcome {
+                    Outcome::Done(value) => Some(value.term()),
+                    _ => None,
+                }));
+        let mut read_cause = false;
+        for t in seen.filter(|t| deposes(t)) {
+            assert!(
+                held.terms.contains(&(t.number, t.holder)),
+                "{CONTROLLER_STOPPED}: controller {me:?} of journal {j} read the term {t:?}, \
+                 which no matchmaker held: {:?}",
+                held.terms
+            );
+            read_cause = true;
+        }
+        let refused = ran
+            .iter()
+            .any(|(_, outcome, _)| matches!(outcome, Outcome::Refused(ChangeRefusal::Term { .. })));
+        assert!(
+            read_cause || (refused && held.deposes(number, me)),
+            "{CONTROLLER_STOPPED}: controller {me:?} of journal {j} stopped at term {number} \
+             with no term that deposes it: it read {reads:?}, its changes gave {ran:?}, \
+             the matchmakers held {:?}",
+            held.terms
+        );
+        sometimes!(read_cause, reach::CONTROLLER_DEPOSED);
     }
 
     /// Note the register operations that a controller of journal `j` ran.
@@ -1816,10 +1897,13 @@ impl WholeModel {
         let Some(mut driver) = self.journals[j].ctls[c].driver.take() else {
             return;
         };
+        let term_before = driver.controller().term();
         let (mut register, mut cell) = self.ports(j, cx);
         let polled = driver.copied(now, segment, copy, &mut register, &mut cell);
         let ran = std::mem::take(&mut register.ran);
+        let reads = std::mem::take(&mut register.reads);
         drop(register);
+        self.judge_controller_stop(j, &driver, term_before, &reads, &ran);
         self.token = cell.token;
         self.journals[j].ctls[c].driver = Some(driver);
         self.ran(j, &ran);
@@ -2622,13 +2706,29 @@ struct WalkRegister<'a, 'b> {
     register: QuorumRegister,
     id: JournalId,
     chaos: bool,
+    forge: bool,
     cx: &'a mut Cx<'b, WholeModel>,
     ran: Vec<(Change, Outcome, bool)>,
+    /// The term of each value that a read gave.
+    reads: Vec<Term>,
 }
 
 impl ControlRegister for WalkRegister<'_, '_> {
     fn read(&mut self) -> Option<RegisterValue> {
-        self.register.quorum_read(self.id)
+        let value = self.register.quorum_read(self.id)?;
+        if self.forge && self.chaos && self.cx.rng().chance(1, 4) {
+            let term = value.term();
+            let forged = Term {
+                number: term.number + 1,
+                holder: Some(NodeId(FORGED_HOLDER)),
+            };
+            // The forged value keeps the segments and has no binding: no
+            // controller reads the binding.
+            self.reads.push(forged);
+            return Some(RegisterValue::from_parts(forged, value.segments().clone()));
+        }
+        self.reads.push(value.term());
+        Some(value)
     }
 
     /// A controller's change meets the faults of a machine's change: its

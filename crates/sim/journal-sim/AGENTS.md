@@ -104,7 +104,10 @@ Test only: `publish = false`.
   retired segment's replica set on the `Host` (#1314); its oracles (`AGREE`, `SEALED`, `FLIGHT`,
   `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`, `BOUNDED_IN_FLIGHT`, `AGAIN`, `DISK`: every
   replica disk holds the chosen log, `STOPPED`: every leader that stops on its own has a true cause
-  in the facts that a matchmaker ever held or an acceptor's disk promised), its reach sites and its
+  in the facts that a matchmaker ever held or an acceptor's disk promised, `CONTROLLER_STOPPED`:
+  every controller that stops (on any of its four ways) was deposed by a term that a value it
+  read holds and a matchmaker held, or by a refusal on its term, mutant
+  `ForgedTerm`), its reach sites and its
   planted mutants (`WholeMutant`). `tests/whole.rs` also requires every `probe!` of the
   controller's driver and signals.
 - `tests/determinism.rs`: each walk runs two seeds twice and compares the logs

@@ -317,12 +317,16 @@ pub struct Held {
     pub ends: BTreeSet<(SegmentId, Slot)>,
     /// The newest segment ever written.
     pub newest: Option<SegmentId>,
+    /// Each controller term ever written: its number and its holder.
+    pub terms: BTreeSet<(u64, Option<NodeId>)>,
 }
 
 impl Held {
     fn fold(&mut self, value: &RegisterValue) {
         self.bound = self.bound.max(value.bound());
         self.newest = self.newest.max(value.newest().map(SegmentRecord::id));
+        self.terms
+            .insert((value.term().number, value.term().holder));
         for record in value.segments().values() {
             if let Some(end) = record.end() {
                 self.ends.insert((record.id(), end));
@@ -334,6 +338,15 @@ impl Held {
     #[must_use]
     pub fn other_end(&self, segment: SegmentId, end: Slot) -> bool {
         self.ends.iter().any(|(s, e)| *s == segment && *e != end)
+    }
+
+    /// Whether a member ever held a term that deposes `me` at term
+    /// `number`: a later number, or the same number won by another.
+    #[must_use]
+    pub fn deposes(&self, number: u64, me: NodeId) -> bool {
+        self.terms
+            .iter()
+            .any(|(n, holder)| *n > number || (*n == number && *holder != Some(me)))
     }
 
     /// Whether a member ever held an end of `segment`.
