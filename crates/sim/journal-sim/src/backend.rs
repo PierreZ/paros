@@ -12,7 +12,7 @@
 //! lost record makes each scan of its role fail `Lost`; a commit that
 //! returned `Ok` is durable).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
@@ -50,6 +50,9 @@ pub struct Disk {
     pub faults: Rc<RefCell<Faults>>,
     /// The ops of the last commit that failed `Unknown` after its write.
     unknown: Rc<RefCell<Vec<Op>>>,
+    /// One more on each change of the records: a commit that writes, a
+    /// wipe, a loss.
+    version: Rc<Cell<u64>>,
     seen: fn(&[Op]),
 }
 
@@ -61,8 +64,20 @@ impl Disk {
             store: Rc::default(),
             faults: Rc::default(),
             unknown: Rc::default(),
+            version: Rc::default(),
             seen,
         }
+    }
+
+    /// The version of the records: it changes on each change of them, so
+    /// a judge of the records judges a version once.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version.get()
+    }
+
+    fn changed(&self) {
+        self.version.set(self.version.get() + 1);
     }
 
     /// The value at `key`, if the disk holds one. A role whose disk lost a
@@ -98,6 +113,7 @@ impl Disk {
     /// Lose every record: a planted bug, never a fault of the contract.
     pub fn wipe(&self) {
         *self.store.borrow_mut() = MemStorage::new();
+        self.changed();
     }
 
     /// Arm a fault of the contract for the next commit: it fails before or
@@ -121,6 +137,7 @@ impl Disk {
     /// (a fault of the contract: the loss is reported, never hidden).
     pub fn lose(&self, key: Key) {
         self.store.borrow_mut().lose(key);
+        self.changed();
     }
 }
 
@@ -135,6 +152,7 @@ impl Storage<Journal> for Disk {
             return Err(StorageError::Full);
         }
         self.store.borrow_mut().commit(ops)?;
+        self.changed();
         if faults.fail_after {
             *self.unknown.borrow_mut() = ops.to_vec();
             return Err(StorageError::Unknown);

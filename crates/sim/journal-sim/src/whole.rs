@@ -497,6 +497,8 @@ pub struct WholeModel {
     register: QuorumRegister,
     machines: BTreeMap<u64, Machine>,
     journals: Vec<Journal>,
+    /// The version of each machine's disk that [`DISK`] judged last.
+    disks_judged: RefCell<BTreeMap<u64, u64>>,
     /// The copy and abandon asks that the network still holds: each may
     /// arrive again, late ([`WholeAction::Late`]).
     late: Vec<(usize, Ask)>,
@@ -855,6 +857,7 @@ impl WholeModel {
             });
         }
         let mut model = Self {
+            disks_judged: RefCell::default(),
             mutant,
             clock: ManualClock::new(),
             register,
@@ -1966,6 +1969,14 @@ impl WholeModel {
     /// fold: a hole fails the oracle.
     fn judge_disks(&self) {
         for (m, machine) in &self.machines {
+            // Each check holds for good once it holds: the chosen log and
+            // the decided floor only grow, so a version of a disk is
+            // judged once.
+            let version = machine.disk.version();
+            if self.disks_judged.borrow().get(m) == Some(&version) {
+                continue;
+            }
+            self.disks_judged.borrow_mut().insert(*m, version);
             let mut store = machine.disk.store.borrow_mut();
             let addresses = store.list().expect("a list of memory");
             for address in addresses.into_iter().filter(|a| a.segment.is_some()) {
