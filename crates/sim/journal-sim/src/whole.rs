@@ -5,7 +5,8 @@
 //! **The deployment.** Nine machines in three zones (`a`: 1 to 3, `b`: 4
 //! to 6, `c`: 7 to 9). Each machine is one process: one generic [`Driver`]
 //! with its disk, its transport through the walk's mailbox, the shared
-//! clock and the shared register ([`MemRegister`]). Each process serves the
+//! clock and the shared register ([`QuorumRegister`]: three matchmakers,
+//! whose write a minority can take). Each process serves the
 //! roles of **two journals** at once: the acceptors, the segment replicas
 //! and the leaders of each. Journal 1 starts with its acceptors on 1, 4 and
 //! 7 and its replicas on 2, 5 and 8; journal 2 with its acceptors on 2, 5
@@ -36,7 +37,10 @@
 //! **The faults.** The walk crashes and restarts machines; a zone goes out
 //! (every machine of it crashes at once); a disk fails a commit inside the
 //! contract (before or after its write); the network loses, repeats and
-//! reorders messages. A crash drops the driver and keeps the disk; a
+//! reorders messages. A register change loses its request or its reply,
+//! or its write reaches one matchmaker only and no answer comes: the
+//! driver asks it again, and a later operation may carry the half write
+//! on first (a bind, an election, a boundary state over a seal). A crash drops the driver and keeps the disk; a
 //! restart is a new driver on the same disk, and placement serves its roles
 //! again. A machine that stays down long enough is down for the controller,
 //! which heals the grid and the replica set with a reshape, or holds and
@@ -65,6 +69,9 @@
 //!   (no lost acked write).
 //! - [`ALERTS`]: each alert of the controller is true of the machines as
 //!   they are, not as the view says.
+//! - [`AGAIN`]: a change asked again after its half write is never
+//!   refused on a value that holds it (§J3.4, "a change asked again"),
+//!   judged in the register ([`QuorumRegister`]).
 //! - [`HEAL_HELD`]: each node that a done heal added to the set of a
 //!   retired segment holds every slot of it on its disk while the set
 //!   names it, but the slots below its compaction point, each of which
@@ -116,14 +123,15 @@ use paros_journal_control::{
     Action, Alert, Ask, Cell, ControlConfig, ControlDriver, ControlRegister, FailureDomain,
     MatchmakerId, MatchmakerSet, Outcome, Polled, ProcessId, Report, Tunables, Windows,
 };
-use paros_journal_io::mem::{ManualClock, MemRegister};
+use paros_journal_io::mem::ManualClock;
 use paros_journal_io::storage::Storage as _;
 use paros_journal_io::{
     Address, Assignment, CallId, CallOutcome, ChangeError, Clock, Driver, Envelope, HostConfig,
     JournalId, Notice, Op, Register,
 };
 
-use crate::backend::{Disk, LossyRegister, Wire};
+pub use crate::backend::AGAIN;
+use crate::backend::{Again, Disk, LossyRegister, Lost, QuorumRegister, Wire};
 use crate::oracle::{Truth, as_written, label};
 
 /// Oracle: one command is chosen at each slot of a journal.
@@ -156,6 +164,14 @@ pub mod reach {
     pub const LOST_DONE: &str = "whole journal: a lost register reply hid a done write";
     /// A machine's register change got no answer, and no write took place.
     pub const LOST_UNDONE: &str = "whole journal: a register change was lost before it ran";
+    /// A machine's register change wrote at one member only, and got no
+    /// answer.
+    pub const HALF: &str = "whole journal: a register write reached one member only";
+    /// A change asked again found its own half write, and was done.
+    pub const AGAIN_OWN: &str = "whole journal: a change asked again met its own half write";
+    /// A change asked again found its half write carried on by another
+    /// operation, and was done.
+    pub const AGAIN_CARRIED: &str = "whole journal: a change asked again met a carried half write";
     /// One commit held the batches of two journals.
     pub const TWO_JOURNALS: &str = "whole journal: one commit held the batches of two journals";
     /// A commit wrote nothing (`Full`) and stopped its roles.
@@ -212,6 +228,9 @@ pub mod reach {
     pub const ALL: &[&str] = &[
         LOST_DONE,
         LOST_UNDONE,
+        HALF,
+        AGAIN_OWN,
+        AGAIN_CARRIED,
         TWO_JOURNALS,
         FAILED,
         HALTED,
@@ -280,6 +299,11 @@ pub enum WholeMutant {
     /// payload byte, another command becomes a `Noop`. [`HEAL_HELD`]
     /// catches it.
     CorruptCopy,
+    /// The register refuses a seal, a boundary state, a retire or a trim
+    /// over a value that holds it, so a change asked again after its half
+    /// write is refused and a first leader stops on its own end. [`AGAIN`]
+    /// catches it.
+    RefuseAgain,
 }
 
 /// The weights of the walk's crash and restart steps: a machine comes
@@ -348,11 +372,22 @@ fn two_journals(ops: &[Op]) {
 /// and the verdict; the payload at each position written; the fold.
 type Judged = (Vec<(u64, &'static str)>, BTreeMap<u64, Vec<u8>>, Truth);
 
-/// [`reach::LOST_DONE`] and [`reach::LOST_UNDONE`] on each register change
-/// that got no answer.
-fn lost_change(done: bool) {
-    sometimes!(done, reach::LOST_DONE);
-    sometimes!(!done, reach::LOST_UNDONE);
+/// [`reach::LOST_DONE`], [`reach::LOST_UNDONE`] and [`reach::HALF`] on
+/// each register change that got no answer.
+fn lost_change(lost: Lost) {
+    sometimes!(lost == Lost::Reply(true), reach::LOST_DONE);
+    sometimes!(
+        matches!(lost, Lost::Request | Lost::Reply(false)),
+        reach::LOST_UNDONE
+    );
+    sometimes!(lost == Lost::Half, reach::HALF);
+}
+
+/// [`reach::AGAIN_OWN`] and [`reach::AGAIN_CARRIED`] on each change asked
+/// again after its half write, and done.
+fn asked_again(again: Again) {
+    sometimes!(again == Again::Own, reach::AGAIN_OWN);
+    sometimes!(again == Again::Carried, reach::AGAIN_CARRIED);
 }
 
 type Proc = Driver<Disk, Wire, ManualClock, LossyRegister, ()>;
@@ -431,7 +466,7 @@ struct Journal {
 pub struct WholeModel {
     mutant: WholeMutant,
     clock: ManualClock,
-    register: MemRegister,
+    register: QuorumRegister,
     machines: BTreeMap<u64, Machine>,
     journals: Vec<Journal>,
     /// The copy and abandon asks that the network still holds: each may
@@ -706,7 +741,10 @@ impl WholeModel {
     ///
     /// When a first segment cannot open.
     pub fn build(mutant: WholeMutant, _cx: &mut Cx<'_, Self>) -> Self {
-        let register = MemRegister::new();
+        let register = QuorumRegister::new(asked_again);
+        if mutant == WholeMutant::RefuseAgain {
+            register.plant_refuse_again();
+        }
         let mut journals = Vec::new();
         for (i, id) in JOURNALS.into_iter().enumerate() {
             let shift = u64::try_from(i).expect("two journals");
@@ -2213,14 +2251,19 @@ impl WholeModel {
     }
 
     /// Arm a commit fault on a machine, or one in three times the loss of
-    /// its next register change (its request or its reply).
+    /// its next register change: its request, its reply, or its write past
+    /// one member.
     fn fault(&mut self, cx: &mut Cx<'_, Self>) {
         let m = *cx.rng().pick(&MACHINES).expect("machines");
         let machine = &self.machines[&m];
         if self.mutant == WholeMutant::LyingDisk {
             machine.disk.arm_lie();
         } else if cx.rng().chance(1, 3) {
-            machine.register.arm(cx.rng().chance(1, 2));
+            let how = *cx
+                .rng()
+                .pick(&[Lost::Request, Lost::Reply(true), Lost::Half])
+                .expect("three ways");
+            machine.register.arm(how);
         } else {
             machine.disk.arm(cx.rng().chance(1, 2));
         }
@@ -2274,7 +2317,7 @@ impl WholeModel {
 /// a request (1 in 10) or a reply (1 in 8) is lost. It notes each operation
 /// with its outcome and whether the write took place.
 struct WalkRegister<'a, 'b> {
-    register: MemRegister,
+    register: QuorumRegister,
     id: JournalId,
     chaos: bool,
     cx: &'a mut Cx<'b, WholeModel>,

@@ -18,8 +18,11 @@ pub enum ChangeError {
     /// The register holds no journal of this id: no write took place.
     Unknown,
     /// No answer came (a lost request or a lost reply): the write may or
-    /// may not have taken place. The caller learns which from a later done
-    /// value, or from a refusal of the same change asked again.
+    /// may not have taken place, and a minority may hold it. The caller
+    /// asks the same change again. The register takes a change that its
+    /// value already holds "ok" again and writes the value again (§J3.4, "a
+    /// change asked again"), so a second ask that finds the first write
+    /// makes it done; a refusal says that the value holds another change.
     NoAnswer,
 }
 

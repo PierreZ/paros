@@ -75,7 +75,9 @@ pub enum Change {
         release: Release,
     },
     /// The first leader of the next configuration seals `segment` at `end`
-    /// and puts the next segment in force at `end` (§J3.1).
+    /// and puts the next segment in force at `end` (§J3.1). A seal of the
+    /// end that the record holds gets "ok" again, a later state of the
+    /// record too: the leader asks it again after a lost answer.
     Seal {
         /// The segment in force.
         segment: SegmentId,
@@ -84,14 +86,16 @@ pub enum Change {
         end: Slot,
     },
     /// The first replica that applied every slot of the sealed `segment`
-    /// writes its boundary state.
+    /// writes its boundary state. The boundary state that the record holds
+    /// gets "ok" again.
     Boundary {
         /// The sealed segment.
         segment: SegmentId,
         /// The fold at the end of the segment.
         state: BoundaryState,
     },
-    /// The leader retires the sealed `segment`.
+    /// The leader retires the sealed `segment`. A retire of a retired
+    /// record gets "ok" again, while its own guard holds.
     Retire {
         /// The sealed segment.
         segment: SegmentId,
@@ -127,7 +131,8 @@ pub enum Change {
         segment: SegmentId,
     },
     /// A replica whose fold has `first_seq` at or above the last `seq` of
-    /// `segment` marks it trimmed.
+    /// `segment` marks it trimmed. A trim of a trimmed record gets "ok"
+    /// again, while its own guard holds.
     Trim {
         /// The segment.
         segment: SegmentId,
@@ -279,6 +284,9 @@ impl RegisterValue {
     pub fn apply(&self, change: &Change) -> Result<Self, ChangeRefusal> {
         self.assert_invariants();
         let mut next = self.clone();
+        if self.holds(change) {
+            return Ok(next);
+        }
         match change {
             Change::Bind { ballot } => {
                 let newest = self.newest().ok_or(ChangeRefusal::Empty)?.id();
@@ -349,6 +357,50 @@ impl RegisterValue {
             "a change opens at most one segment"
         );
         Ok(next)
+    }
+
+    /// The value already holds what `change` writes, so the change is
+    /// "ok" again and writes the value again (§J3.4, "a change asked
+    /// again"). A caller whose answer was lost asks the same change again
+    /// (`NoAnswer` of the `paros_journal_io::Register` port); its first write may be at a
+    /// minority, and a later operation may have carried it on under its own
+    /// change (a replica's boundary state over a seal, a retire). The read
+    /// of the second ask shows that write: a refusal would tell the caller
+    /// that its write lost, and a first leader would stop on its own seal
+    /// end (`specs/tla/segment-records/`, control `again_refuse`). The
+    /// operation writes the value again, so the write is done. A change
+    /// whose own guard fails on its arguments is never "ok" again.
+    fn holds(&self, change: &Change) -> bool {
+        let record = |segment: &SegmentId| self.segment(*segment);
+        match change {
+            Change::Seal { segment, end } => {
+                record(segment).is_some_and(|record| record.end() == Some(*end))
+            }
+            Change::Boundary { segment, state } => {
+                record(segment).is_some_and(|record| record.boundary() == Some(*state))
+            }
+            Change::Retire {
+                segment,
+                holders,
+                unrepaired_damage,
+            } => record(segment).is_some_and(|record| {
+                record.state() == SegmentState::Retired
+                    && *holders >= record.grid().acks()
+                    && !unrepaired_damage
+            }),
+            Change::Trim { segment, first_seq } => record(segment).is_some_and(|record| {
+                record.state() == SegmentState::Trimmed
+                    && record
+                        .boundary()
+                        .is_some_and(|boundary| *first_seq >= boundary.next_seq)
+            }),
+            Change::Bind { .. }
+            | Change::Elect { .. }
+            | Change::Reshape { .. }
+            | Change::Rereplicate { .. }
+            | Change::Offload { .. }
+            | Change::Confirm { .. } => false,
+        }
     }
 
     /// `Reshape`: the guards `Idempotent`, `TermCheck`, `ExpCheck` and

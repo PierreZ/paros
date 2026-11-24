@@ -739,8 +739,11 @@ impl<T> JournalLeader<T> {
     }
 
     /// The register refused the leader's bind (a higher ballot is bound)
-    /// or its seal (another seal won, or the segment moved on). The leader
-    /// stops.
+    /// or its seal (another end won, or the segment moved on). The leader
+    /// stops. A refusal is never of the leader's own end: the register
+    /// takes a seal of the end it holds "ok" again (§J3.4, "a change asked
+    /// again"), so a seal asked again after a lost answer, whose first
+    /// write a minority took, makes that write done and opens the leader.
     pub fn refused(&mut self) -> Vec<LeaderEffect<T>> {
         match self.phase {
             LeaderPhase::Binding => {
