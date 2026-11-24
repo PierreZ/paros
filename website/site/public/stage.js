@@ -230,11 +230,14 @@
 
     function tween(ms, fn, mine) {
       return new Promise(function (resolve) {
-        var t0 = null;
+        // The progress adds up frame by frame, so a change of speed during
+        // a move changes the pace from that frame on, with no jump.
+        var last = null, t = 0;
         function frame(now) {
           if (mine !== token) return resolve(false);
-          if (t0 === null) t0 = now;
-          var t = ms > 0 ? Math.min(1, ((now - t0) * speed) / ms) : 1;
+          if (last === null) last = now;
+          t = ms > 0 ? Math.min(1, t + ((now - last) * speed) / ms) : 1;
+          last = now;
           fn(t);
           if (t < 1) requestAnimationFrame(frame); else resolve(true);
         }

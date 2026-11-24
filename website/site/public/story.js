@@ -109,6 +109,7 @@
   toSteps.addEventListener("click", function (e) {
     e.preventDefault();
     if (!window.paxosSteps) return;
+    stop();
     var beat = run.beats[at];
     panel.hidden = true;
     window.paxosSteps.show(run.id, beat.to);
@@ -373,7 +374,8 @@
   // Play goes on by itself: after the messages of a screen stop, it waits
   // the time to read the sentence, then plays the next screen. It stops at
   // a question, at the end of a run, when the reader presses any other
-  // control, and when the page is hidden. It never starts by itself, and
+  // control (the speed button only changes the speed), and when the page
+  // is hidden. It never starts by itself, and
   // with reduced motion there is no Play: each screen appears complete.
 
   var SPEEDS = [1, 1.5, 0.75];
@@ -394,7 +396,6 @@
     playing = on;
     clear();
     playBtn.textContent = on ? "Pause" : "Play";
-    playBtn.setAttribute("aria-pressed", on ? "true" : "false");
     panel.classList.toggle("playing", on);
   }
 
@@ -406,6 +407,8 @@
     if (!playing || nextBtn.textContent === "Skip") return;
     clear();
     if (waiting) { setPlaying(false); return; }
+    // The last screen of a run: Play stops at once, unless a hook goes on.
+    if (at === run.beats.length - 1 && !onEnd) { setPlaying(false); return; }
     var mine = run.id + ":" + at;
     timer = setTimeout(function () {
       timer = null;
@@ -427,15 +430,25 @@
     go(at + 1, true);
   }
 
+  // The marks are built once for each run, so a mark that has the focus
+  // keeps it when the screen changes; each go() only moves the classes.
+  var lineOf = null;
   function drawLine() {
-    line.textContent = "";
-    run.beats.forEach(function (beat, k) {
-      var b = el("button", "story-mark" + (k < at ? " seen" : "") + (k === at ? " now" : "") + (beat.question ? " ask" : ""));
-      b.type = "button";
-      b.setAttribute("aria-label", "Screen " + (k + 1));
-      if (k === at) b.setAttribute("aria-current", "step");
-      b.addEventListener("click", function () { stop(); touched = true; go(k, false); });
-      line.appendChild(b);
+    if (lineOf !== run) {
+      lineOf = run;
+      line.textContent = "";
+      run.beats.forEach(function (beat, k) {
+        var b = el("button", "story-mark" + (beat.question ? " ask" : ""));
+        b.type = "button";
+        b.setAttribute("aria-label", "Screen " + (k + 1));
+        b.addEventListener("click", function () { stop(); touched = true; go(k, false); });
+        line.appendChild(b);
+      });
+    }
+    Array.prototype.forEach.call(line.children, function (b, k) {
+      b.classList.toggle("seen", k < at);
+      b.classList.toggle("now", k === at);
+      if (k === at) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current");
     });
   }
 
@@ -509,6 +522,9 @@
     pause: stop,
     playing: function () { return playing; },
     speed: function (v) { speed = v; speedBtn.textContent = v + "×"; view.speed(v); },
+    // What Play does at the end of a run: f(run, atPlay) returns true when
+    // it took over (the tour goes on to the next run). null clears it.
+    onEnd: function (f) { onEnd = f || null; },
     answers: function () {
       return Object.keys(asked).map(function (k) {
         var p = k.split(":");
@@ -516,6 +532,7 @@
       });
     },
     show: function (id, n) {
+      stop();
       var target = null;
       stories.forEach(function (s) { if (s.id === id) target = s; });
       if (!target) target = stories[0];

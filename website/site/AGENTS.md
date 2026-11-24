@@ -106,10 +106,12 @@ complete. The player (tour plan §3.1) sits under the sentence: a progress line 
 per screen (a dot marks a screen that asks), Back, Play or Pause, Continue and the speed (1×,
 1.5×, 0.75×). Play goes on by itself: when the messages of a screen stop, it waits the time to
 read the sentence (0.33 s per word, from 2.2 s to 9 s, divided by the speed), then plays the
-next screen. It stops at a question, at the end of a run, on any other control, and when the
-page is hidden; Space plays or pauses. It never starts by itself, the address never says
-"play", and with reduced motion there is no Play. A beat with a `question` asks it before it plays: the screen shows the state before
-the beat, the question in place of the sentence (the sentence gives the answer away), and two
+next screen. It stops at a question, at the end of a run, on any other control ("Show each
+message" too; the speed button only changes the speed), and when the page is hidden; Space
+plays or pauses. It never starts by itself, the address never says "play", and with reduced
+motion there is no Play. `window.paxosStory.onEnd(f)` sets what Play does at the end of a run
+(the tour goes on to its next run). A beat with a `question` asks it before it plays: the
+screen shows the state before the beat, the question in place of the sentence (the sentence gives the answer away), and two
 to four answers (buttons, or the keys 1 to 4). Any answer, or "Show me", plays the beat; then
 the screen marks the right answer, the reader's answer and the reason (`why`). The answers live
 in the page only (`window.paxosStory.answers()`), and each one fires `paxos:answer` on the
