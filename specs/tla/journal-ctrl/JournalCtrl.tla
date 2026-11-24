@@ -92,23 +92,27 @@ ProbePromised(b, Q) ==
 \* `Agreement` breaks.
 ProbeDecide(b, s, Qs) ==
   LET hs == {h \in bH[b] : s \in ReadSet(b, h)}
-      rs == UNION {Reports(b, Qs[h]) : h \in hs}
-      xs == {x[2][s] : x \in rs}
-      rd == {x \in xs : x[1] > 0 /\ x[2] # None}
-      thr == Max({0} \cup {x[1] : x \in rd})
       all == UNION {Qs[h] : h \in hs}
   IN
   /\ s \in bblock[b]
   /\ \A h \in hs : Qs[h] \in QOf[h] /\ ProbePromised(b, Qs[h])
-  /\ ProbeDrops = "ignore" \/ \A x \in rs : s \notin x[3]
-  /\ \A x \in xs : ~(Faulty(x) /\ x[1] > thr)
-  /\ bsafe' = [bsafe EXCEPT ![b][s] =
-       IF rd = {} THEN None ELSE (CHOOSE x \in rd : x[1] = thr)[2]]
-  /\ bblock' = [bblock EXCEPT ![b] = @ \ {s}]
-  /\ IF Direct
-     THEN /\ mprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE mprom[a]]
-          /\ dprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE dprom[a]]
-     ELSE UNCHANGED <<mprom, dprom>>
+  \* The leader folds a report of each acceptor, page by page, as in
+  \* `Phase1On`.
+  /\ \E R \in Picks(b, all) :
+     LET rs == UNION {Picked(b, R, Qs[h]) : h \in hs}
+         xs == {x[2][s] : x \in rs}
+         rd == {x \in xs : x[1] > 0 /\ x[2] # None}
+         thr == Max({0} \cup {x[1] : x \in rd})
+     IN
+     /\ ProbeDrops = "ignore" \/ \A x \in rs : s \notin x[3]
+     /\ \A x \in xs : ~(Faulty(x) /\ x[1] > thr)
+     /\ bsafe' = [bsafe EXCEPT ![b][s] =
+          IF rd = {} THEN None ELSE (CHOOSE x \in rd : x[1] = thr)[2]]
+     /\ bblock' = [bblock EXCEPT ![b] = @ \ {s}]
+     /\ IF Direct
+        THEN /\ mprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE mprom[a]]
+             /\ dprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE dprom[a]]
+        ELSE UNCHANGED <<mprom, dprom>>
   /\ UNCHANGED <<reg, bst, bH, bE, bend, blo, bstart, prop, bskip, mvote, pend, dvote,
                  crashes, rots, p1b, sent2b, adrop, dadrop, rep>>
 

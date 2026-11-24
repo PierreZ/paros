@@ -3569,8 +3569,15 @@ An acceptor that gets a `Prepare` again at a ballot it already promised answers 
 write; the answer waits on its last batch, so it carries what its disk holds. `Repromise(a, b)`
 of `Journal.tla` is that answer, in `NextRe` and `SpecRe` (not in `Next`, which would make every
 check of `journal-state/` six times larger). `RolesTrace` maps the roles walk's `repromise` event
-to it. The folder holds only configurations: `Journal.tla` and `MC.tla` are those of
-`journal-state/`.
+to it. The leader folds the answers it received, page by page, so a Phase 1 (`Phase1On`, and
+`ProbeDecide` of `journal-ctrl/`) reads, for each slot of each acceptor, the report of one
+promise of the ballot (`Picks`, `Picked`), never the union of every answer that acceptor sent
+(#1517 (Phase 1 reads the report the leader received)). `ProbeSkip` still reads any answer: a
+dropped slot in one of them proves the compaction. `ProbeDecide` picks again, apart from the pick of
+`Phase1On`, while the leader keeps one report of each acceptor once it is whole: the model allows
+more mixes than the code makes, so its safety checks cover the code, but a trace check would not
+refuse a leader that folds a later promise into a whole report. The folder holds only configurations:
+`Journal.tla` and `MC.tla` are those of `journal-state/`.
 
 | Check | Result | What it shows |
 |---|---|---|

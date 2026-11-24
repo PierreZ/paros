@@ -477,13 +477,51 @@ Reread(b) ==
 \* the end, once the end was done at its Register.
 ReadSet(b, h) == IF ReadRule = "end" /\ bE[b][h] # None THEN 0..(bE[b][h] - 1) ELSE Slots
 
-\* The reports of Phase 1 of b from the acceptors of Q: <<a, votes>>. With
-\* `Direct`, the promises are durable in the step, so Phase 1 takes them from
-\* the acceptors in one step (as `experiments/segments/a/`); else from the
-\* promises that the acceptors sent.
+\* The reports of Phase 1 of b from the acceptors of Q: <<a, votes, drop>>.
+\* With `Direct`, the promises are durable in the step, so Phase 1 takes
+\* them from the acceptors in one step (as `experiments/segments/a/`); else
+\* from the promises that the acceptors sent. The leader folds the report
+\* of an acceptor page by page, and an acceptor that answers a `Prepare`
+\* again (`Repromise`, a boot between two pages) sends promises of b that
+\* differ, so each page may come from another promise: `R[a]` is the
+\* report of a, its vote at each slot from one promise and its drops from
+\* the promises it picks (#1517 (Phase 1 reads one report per
+\* acceptor)). `ProbeSkip` reads any promise, so it uses `Reports`.
 Reports(b, Q) ==
   IF Direct THEN {<<a, mvote[a], adrop[a]>> : a \in Q}
   ELSE {<<m.a, m.votes, m.drop>> : m \in {m \in p1b : m.b = b /\ m.a \in Q}}
+Picked(b, R, Q) ==
+  IF Direct THEN {<<a, mvote[a], adrop[a]>> : a \in Q}
+  ELSE {<<a, R[a][1], R[a][2]>> : a \in Q}
+\* The vote maps over the slots of S that take the vote of each slot from
+\* one promise of Ms. A set of maps, not of picks: two promises that give
+\* one slot the same vote give one map, so the set stays small.
+RECURSIVE VotesOf(_, _)
+VotesOf(Ms, S) ==
+  IF S = {} THEN {[x \in {} |-> None]}
+  ELSE LET s == CHOOSE s \in S : TRUE IN
+       {[x \in S |-> IF x = s THEN v ELSE f[x]] :
+          f \in VotesOf(Ms, S \ {s}), v \in {m.votes[s] : m \in Ms}}
+\* The reports that the leader of b can fold from the promises of b that a
+\* sent: <<votes, drop>>, the vote of each slot from one promise and the
+\* drops of some of them. The vote and the drop are picked apart, so the
+\* model holds every mix that the pages can make, and more. One promise
+\* gives one report, its own.
+ReportsOf(a, b) ==
+  LET Ms == {m \in p1b : m.a = a /\ m.b = b} IN
+  IF \E m \in Ms : Ms = {m}
+  THEN {<<m.votes, m.drop>> : m \in Ms}
+  ELSE {<<v, UNION D>> : v \in VotesOf(Ms, Slots),
+                         D \in (SUBSET {m.drop : m \in Ms}) \ {{}}}
+\* The functions that give each acceptor a of S one report of b.
+RECURSIVE PicksOf(_, _)
+PicksOf(b, S) ==
+  IF S = {} THEN {[x \in {} |-> None]}
+  ELSE LET a == CHOOSE a \in S : TRUE IN
+       {[x \in S |-> IF x = a THEN r ELSE f[x]] :
+          f \in PicksOf(b, S \ {a}), r \in ReportsOf(a, b)}
+\* With `Direct`, no pick: `Picked` reads the acceptors.
+Picks(b, S) == IF Direct THEN {[x \in {} |-> None]} ELSE PicksOf(b, S)
 Promised(b, Q) ==
   IF Direct THEN \A a \in Q : a \in Active /\ mprom[a] < b
   ELSE \A a \in Q : \E m \in p1b : m.a = a /\ m.b = b
@@ -496,8 +534,9 @@ Phase1On(b, Qs) ==
   /\ g \in Live
   /\ bst[b] = "new"
   /\ \A h \in bH[b] : Qs[h] \in QOf[h] /\ Promised(b, Qs[h])
-  /\ LET \* The votes seen at each slot, in the read set of each grid.
-          seen(s) == {x[2][s] : x \in UNION {Reports(b, Qs[h]) : h \in {h \in bH[b] : s \in ReadSet(b, h)}}}
+  /\ \E R \in Picks(b, UNION {Qs[h] : h \in bH[b]}) :
+     LET \* The votes seen at each slot, in the read set of each grid.
+          seen(s) == {x[2][s] : x \in UNION {Picked(b, R, Qs[h]) : h \in {h \in bH[b] : s \in ReadSet(b, h)}}}
           voted(s) == {x \in seen(s) : x[1] > 0}
           \* A faulty vote has a ballot and no value.
           readable(s) == {x \in voted(s) : x[2] # None}
@@ -510,7 +549,7 @@ Phase1On(b, Qs) ==
           \* a late answer (`JournalCtrl.tla`, `ProbeDecide`) or a replica.
           thr(s) == IF readable(s) = {} THEN 0 ELSE top1(s)[1]
           qual(s, h) == {a \in Qs[h] :
-                          \A x \in Reports(b, {a}) :
+                          \A x \in Picked(b, R, {a}) :
                             ~(x[2][s][1] > thr(s) /\ x[2][s][2] = None)}
           blocked(s) == /\ \E x \in voted(s) : x[2] = None /\
                                \A y \in readable(s) : y[1] < x[1]
@@ -518,14 +557,14 @@ Phase1On(b, Qs) ==
                               \E Q \in QOf[h] : Q \subseteq qual(s, h)
           \* The slots with a vote in the old grid: a dropped vote counts.
           old == IF g >= 2 /\ g - 1 \in bH[b]
-                 THEN {s \in Slots : \E x \in Reports(b, Qs[g - 1]) :
+                 THEN {s \in Slots : \E x \in Picked(b, R, Qs[g - 1]) :
                          x[2][s][1] > 0 \/ s \in x[3]}
                  ELSE {}
           all == UNION {Qs[h] : h \in bH[b]}
           \* A slot that one acceptor dropped is chosen and applied at
           \* F + 1 replicas (`JournalCompact.tla`): the leader proposes
           \* nothing there.
-          skip == UNION {x[3] : x \in UNION {Reports(b, Qs[h]) : h \in bH[b]}}
+          skip == UNION {x[3] : x \in UNION {Picked(b, R, Qs[h]) : h \in bH[b]}}
       IN /\ bsafe' = [bsafe EXCEPT ![b] =
               [s \in Slots |-> IF readable(s) # {} /\ ~blocked(s) /\ s \notin skip
                                THEN top1(s)[2] ELSE None]]
