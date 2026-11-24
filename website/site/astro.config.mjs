@@ -52,7 +52,12 @@ const redirects = {
   "/paxos/tricky": "/paxos/",
   "/paxos/beyond-multi-paxos": "/paxos/",
   "/beyond-multi-paxos.html": "/paxos/",
+  // The Journal pages left with the journal of design A (2026-11-24).
+  "/journal": "/",
 };
+for (const p of ["calls", "segments", "matchmakers", "quorums-and-failures", "controller", "live", "checks"]) {
+  redirects[`/journal/${p}`] = "/";
+}
 for (const p of single) {
   redirects[`/paxos/${p}`] = "/paxos/single-decree/";
   redirects[`/${p}.html`] = "/paxos/single-decree/";

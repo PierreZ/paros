@@ -59,11 +59,6 @@ papers and the contract.
 | `PREFIX_SHRINKS` | the durable chosen prefix never moves back |
 | `READ_SEES_WRITES` | a leaderless read sees every write that completed before it started |
 
-[`journal-sim`](https://github.com/PierreZ/paros/tree/main/crates/sim/journal-sim) does the same
-for the pure journal core: the walk of the fold over a chain of segments (`FOLD`, `VIEW`,
-`RESOLVE`, `REFOLD`) and the walk of the matchmaker register across handovers (`CARRIED`,
-`ACTED`).
-
 ## Each walk is checked against its model
 
 Each walk records its steps, and TLC checks that the trace is a run of the TLA+ model
@@ -91,5 +86,5 @@ their union. A nightly run walks new seeds.
 ## What is not there yet
 
 - A moonpool-sim run of the whole journal, with its driver, many journals in one process, machine
-  and zone loss (#1330 (paros-journal-moonpool)). The journal roles are not built yet (#1326).
+  and zone loss. The journal is designed again on the core with segments.
 - Coverage of the model's states, not only of the code's branches (moonpool #553).

@@ -18,7 +18,7 @@ returns a default, a `>` that becomes `>=`, a guard that becomes `true`. For eac
 must fail. An edit that every test passes is a **survivor**, and it gets the test that sees it.
 
 - **Each night**, the `Mutants nightly` workflow runs the edits of the lines that main changed
-  since the last green night, in `paros-consensus` and in the journal crates. It has two passes:
+  since the last green night, in `paros-consensus` and in `paros-host`. It has two passes:
   the unit tests and the walks, then the TLC trace checks on the edits that the first pass
   missed. A survivor fails the night, and the next night judges those lines again. A pull request
   runs no edit.

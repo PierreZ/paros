@@ -2,30 +2,33 @@
 
 ## 2. The data plane
 
-**The data plane is the journal's, and its rules moved to [`docs/journal/`](../journal/README.md)**
-(#1332 (journal architecture docs), 2026-11-20). `docs/journal/` is the one home of every journal
-rule: the four calls, the modes, the answers, reads, truncation, limits, segments, the matchmaker
-register, quorum everywhere, the controller and the v1 scope. Each heading below stays so that a
-reference such as "§2.10" in an issue, a PR or another chapter still finds its rule: it links to
-the new home. What stays here is the part of the service around the journal.
+**The data plane is the journal's, and the journal is to be designed again** (Pierre,
+2026-11-24, D6 of [`docs/archive/journal-design-a/prompt.md`](../archive/journal-design-a/prompt.md)).
+The journal v1 of design A held every journal rule in `docs/journal/` (#1332 (journal
+architecture docs), 2026-11-20): the four calls, the modes, the answers, reads, truncation,
+limits, segments, the matchmaker register, quorum everywhere, the controller and the v1 scope.
+That folder was removed with the journal crates; it is at the git tag `journal-design-a`. Each
+heading below stays so that a reference such as "§2.10" in an issue, a PR or another chapter
+still finds where design A had its rule. What stays here is the part of the service around the
+journal.
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2 (the calls and the two modes).
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2 at the tag `journal-design-a` (the calls and the two modes).
 
 ### 2.1 Positions
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.1.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.1 at the tag `journal-design-a`.
 
 ### 2.2 Single-writer writes and fencing
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.2.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.2 at the tag `journal-design-a`.
 
 ### 2.3 Leadership
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.3.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.3 at the tag `journal-design-a`.
 
 ### 2.4 Multi-writer journals
 
-The rules moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.4. The service part stays here: where the cell books the batchers, and how the service built the mode at the tag.
+The rules are to be designed again (D6, 2026-11-24); design A had them in `docs/journal/02-data-plane.md` §J2.4 at the tag `journal-design-a`. The service part stays here: where the cell books the batchers, and how the service built the mode at the tag.
 
 Every machine serves the batcher endpoint over the cell's address book. The cell books each
 multi-writer journal's batchers, by the `batchers` count that a person typed for it (rule 7), on
@@ -49,52 +52,52 @@ purpose.
 
 #### 2.4.1 The switch between modes
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.4.1.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.4.1 at the tag `journal-design-a`.
 
 ### 2.5 Reads
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.5.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.5 at the tag `journal-design-a`.
 
 ### 2.6 Truncation
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.6.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.6 at the tag `journal-design-a`.
 
 ### 2.7 Limits
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.7.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.7 at the tag `journal-design-a`.
 
 ### 2.8 Underneath
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.9.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.9 at the tag `journal-design-a`.
 
 ### 2.9 Store durability
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.10.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.10 at the tag `journal-design-a`.
 
 ### 2.10 Segments
 
-Moved to [docs/journal/03-segments-and-records.md](../journal/03-segments-and-records.md): segments §J3.1, a user truncate across segments §J3.2, a leaderless read of the tail across a reshape §J3.3.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/03-segments-and-records.md` at the tag `journal-design-a`: segments §J3.1, a user truncate across segments §J3.2, a leaderless read of the tail across a reshape §J3.3.
 
 ### 2.11 Quorum everywhere
 
-Moved to [docs/journal/05-quorums-and-failures.md](../journal/05-quorums-and-failures.md) §J5.1.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/05-quorums-and-failures.md` §J5.1 at the tag `journal-design-a`.
 
 ### 2.12 The grid controller's fenced reshape
 
-Moved to [docs/journal/06-controller.md](../journal/06-controller.md) §J6.1.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/06-controller.md` §J6.1 at the tag `journal-design-a`.
 
 ### 2.13 A column below quorum
 
-Moved to [docs/journal/05-quorums-and-failures.md](../journal/05-quorums-and-failures.md) §J5.5.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/05-quorums-and-failures.md` §J5.5 at the tag `journal-design-a`.
 
 ### 2.14 Record headers
 
-Moved to [docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.8.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/02-data-plane.md` §J2.8 at the tag `journal-design-a`.
 
 ### 2.15 The v1 scope of the journal
 
-Moved to [docs/journal/01-goal.md](../journal/01-goal.md) §J1.1.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/01-goal.md` §J1.1 at the tag `journal-design-a`.
 
 ### 2.16 The journal's matchmaker register
 
-Moved to [docs/journal/03-segments-and-records.md](../journal/03-segments-and-records.md) §J3.4 (the stub [02-1-journal-register.md](02-1-journal-register.md) keeps the old file name).
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/03-segments-and-records.md` §J3.4 at the tag `journal-design-a` (the stub [02-1-journal-register.md](02-1-journal-register.md) keeps the old file name).

@@ -138,7 +138,7 @@ configuration-based. It may be shut down only after GC ([configuration GC](confi
 | The client | `paros-client/src/lib.rs`: `reconfigure`, `reconfigure_to` |
 | Who asks in a cell | `paros-coordinator/src/tenant/moves.rs`: a move off a draining machine reconfigures onto the machines that stay |
 
-The rows that name `paros-client`, `paros-coordinator` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-client`, `paros-coordinator` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 

@@ -93,7 +93,7 @@ a tenant on, write to, read from, break and watch heal (section 9). The homelab 
 decisions of section 1 above. Goals 7 to 10 say how paros is built (section 4.4, AGENTS.md).
 Goal 11 says what an operator gets: Pierre, 2026-11-22, "parosd should be easy to operate,
 because of self healing and autoscaling". The scaling is for after the journal v1, whose
-controller takes no action from load (journal §J6).
+controller takes no action from load (§J6 of `docs/journal/` at the git tag `journal-design-a`).
 
 | # | Goal | In short |
 |---|---|---|
@@ -112,7 +112,7 @@ controller takes no action from load (journal §J6).
 **How goal 11 reads in a design** (Pierre, 2026-11-22). When a design leaves a task to a
 person, ask which component can do it. A component that does such a task observes the system
 and acts on it; it has one duty; and it offers that duty as a call, so that another component
-or a tool can use it. The grid controller of a journal is one example (journal §J6): it reads
+or a tool can use it. The grid controller of a journal is one example (§J6 of `docs/journal/` at the git tag `journal-design-a`): it reads
 the measures of its roles and reshapes the journal. The examples are not the goal.
 
 **The eight root rules** are the consequences of these goals in the service. Each one replaced a

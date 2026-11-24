@@ -406,19 +406,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "journal-sim"
-version = "0.2.0"
-dependencies = [
- "moonpool-assertions",
- "moonpool-tla",
- "moonpool-walk",
- "paros-election",
- "paros-journal",
- "paros-journal-control",
- "paros-journal-io",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -513,9 +500,6 @@ version = "0.2.0"
 dependencies = [
  "paros-consensus",
  "paros-host",
- "paros-journal",
- "paros-journal-io",
- "tokio",
 ]
 
 [[package]]
@@ -538,41 +522,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "paros-election"
-version = "0.2.0"
-dependencies = [
- "paros-journal",
-]
-
-[[package]]
 name = "paros-host"
 version = "0.2.0"
-
-[[package]]
-name = "paros-journal"
-version = "0.2.0"
-dependencies = [
- "moonpool-assertions",
- "paros-consensus",
-]
-
-[[package]]
-name = "paros-journal-control"
-version = "0.2.0"
-dependencies = [
- "moonpool-assertions",
- "paros-consensus",
- "paros-journal",
-]
-
-[[package]]
-name = "paros-journal-io"
-version = "0.2.0"
-dependencies = [
- "paros-consensus",
- "paros-host",
- "paros-journal",
-]
 
 [[package]]
 name = "paros-wasm"
@@ -580,8 +531,6 @@ version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "paros-consensus",
- "paros-journal",
- "paros-journal-io",
  "serde",
  "serde_json",
  "wasm-bindgen",
@@ -963,27 +912,6 @@ checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
 dependencies = [
  "num-conv",
  "time-core",
-]
-
-[[package]]
-name = "tokio"
-version = "1.54.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
-dependencies = [
- "pin-project-lite",
- "tokio-macros",
-]
-
-[[package]]
-name = "tokio-macros"
-version = "2.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.6",
 ]
 
 [[package]]

@@ -405,4 +405,4 @@ contribution from above, while Lemma 1's proof uses exact counts, which is the f
 
 ### 5.1 Journal health
 
-Moved to [docs/journal/06-controller.md](../journal/06-controller.md) §J6.2 (#1332 (journal architecture docs), 2026-11-20): the health measure of every part of a journal, the spares of a column, the seven journal states, the catalogue, a zone loss and the tests of the controller's decisions.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/06-controller.md` §J6.2 at the tag `journal-design-a` (#1332 (journal architecture docs), 2026-11-20): the health measure of every part of a journal, the spares of a column, the seven journal states, the catalogue, a zone loss and the tests of the controller's decisions.

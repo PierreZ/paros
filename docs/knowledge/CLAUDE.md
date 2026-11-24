@@ -27,7 +27,7 @@ Read this file first. The index of every concept, its card and its sources is
 | How a real system implements it | `../references/<repo>/` (etcd-raft, frankenpaxos, ceph, foundationdb) |
 | paros's own design note for a rule | `../analysis/` |
 | The target design of the journal service | `../architecture/` |
-| The journal v1 and its rules | `../journal/` (link to it; a card never copies a journal rule) |
+| The journal v1 of design A and its rules | `docs/journal/` at the git tag `journal-design-a` (a card never copies a journal rule) |
 
 A design note in `../analysis/` is paros's own text. A card may point to it, but a design note
 is the **subject** of a card, never its only source.
@@ -42,7 +42,7 @@ is the **subject** of a card, never its only source.
 5. Reads: leaderless quorum reads.
 6. Reconfiguration: matchmaking, reconfiguration as a round change, GC, matchmaker generations.
 7. Storage: corrupted storage recovery, truncation and the trim point, boot safety.
-8. On the log: the writer fence, [segments and the seal](concepts/segments-and-seal.md).
+8. On the log: the writer fence. (The card on segments comes back with the segments of the core.)
 
 `concepts.md` marks each card verified or planned, group by group. A card that waits for a source
 says so in its row.
@@ -85,8 +85,7 @@ reviewer checked it, then `verified <date>`).
   each symbol against the code, then the status line says `verified <date>`.
 - **Keep it current**: a PR that adds or changes a concept updates its card (AGENTS.md).
 - **Point to the tree, and mark the tag.** §9 names the code and the judges in the tree today
-  (the core probes, the `consensus-sim` and `journal-sim` oracles, the TLA+ models). Code that
-  only the git tag `v0.2.0-alpha.1` holds is marked so, with its recap in
-  `../archive/v0.2.0-alpha.1/`.
+  (the core probes, the `consensus-sim` oracles, the TLA+ models). Code that only a git tag
+  holds (`v0.2.0-alpha.1`, `journal-design-a`) is marked so, with its recap in `../archive/`.
 - **Writing**: ASD-STE100 Simplified Technical English, most of the time. Say "cell", never
   "cluster" (a source's own word stays in a quote).

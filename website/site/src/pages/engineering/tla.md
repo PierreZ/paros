@@ -91,14 +91,3 @@ failing check, 101 caught because a check ran past three times its time, and **3
 #1345 (guards that survive mutation) lists each survivor; the weekly `TLA mutants` workflow
 stays red until the list is empty. The trace specs (`*Trace.tla`) are not mutated by this script:
 the [edits of recorded traces](../simulation/#each-walk-is-checked-against-its-model) test them.
-
-## The composed journal model
-
-The journal has one model for each rule, then one model that composes them:
-[`journal-state/`](https://github.com/PierreZ/paros/tree/main/specs/tla/journal-state). It runs
-three segments, the seal, register writes that are partial or lost, the fold and `Resolve`.
-Its state is the disk: each acceptor has a memory, a queue of writes and a disk, and it can crash
-between two writes. Its controls show the write orders that are unsafe, for example a vote
-written before the promise that it raises (`order_vote_first`). §J7.2 of
-[`docs/journal/`](https://github.com/PierreZ/paros/blob/main/docs/journal/07-verification.md)
-lists what it decided.

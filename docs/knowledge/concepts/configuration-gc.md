@@ -188,7 +188,7 @@ A node that stopped at the release instead left every later campaign short of a 
 | The analysis | `docs/analysis/consensus/matchmaker-gc-and-generations.md` |
 | The TLA+ model | `specs/tla/matchmaker/` (#1200): scenarios 1 and 2, the effective floor and the retirement above it, with the controls `gc_early`, `retire_one_ack` and `retire_removed` |
 
-The rows that name `paros-client`, `paros-coordinator`, `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-client`, `paros-coordinator`, `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 

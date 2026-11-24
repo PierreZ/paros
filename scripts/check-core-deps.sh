@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fails when a library crate of paros gains a runtime, I/O or storage dependency
-# (Pierre, 2026-11-21; docs/journal/04-roles.md §J4.3).
+# (Pierre, 2026-11-21; docs/architecture/04-roles.md §4.4).
 #
 # paros is a library: a program uses it by implementing its traits (storage,
 # transport, clock) and driving its pure state machines. The pure crates below
@@ -14,17 +14,17 @@
 #   features only observe: they decide nothing and do no I/O.
 # - The examples of a pure crate build with its dev-dependencies, and they are
 #   the proof that a program uses the crate with no runtime (#1370 (journal
-#   examples)). So with no feature on, its normal and dev dependencies
+#   examples), whose crates were removed on 2026-11-24). So with no feature on, its normal and dev dependencies
 #   together are workspace crates only.
 #
-# The facade `paros` is checked with its default features: an adapter (the
-# moonpool host, #1330 (paros-journal-moonpool)) is an optional feature of the
+# The facade `paros` is checked with its default features: an adapter (a
+# moonpool host) is an optional feature of the
 # facade, off by default, and lives in its own crate.
 #
 # The pure crates are the crates of layers 0 to 5 of the layer table,
 # `scripts/layers.sh` (docs/architecture/04-roles.md §4.4): a new crate of
 # those layers is checked here as soon as it has its row. A crate that does
-# I/O (an adapter such as paros-journal-moonpool) is in layer 6 or above.
+# I/O (an adapter, such as a moonpool host) is in layer 6 or above.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -106,6 +106,6 @@ done
 check_observation_only "$FACADE (default features)" -p "$FACADE"
 
 if [ "$status" -ne 0 ]; then
-  echo "check-core-deps: a pure crate must not depend on a runtime, I/O or storage crate (docs/journal/04-roles.md §J4.3)" >&2
+  echo "check-core-deps: a pure crate must not depend on a runtime, I/O or storage crate (docs/architecture/04-roles.md §4.4)" >&2
 fi
 exit "$status"

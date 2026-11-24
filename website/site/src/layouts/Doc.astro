@@ -38,16 +38,6 @@ const PAGES: Record<string, Sibling[]> = {
     { title: "The deployments", path: "consensus/deployments/" },
     { title: "How it is checked", path: "consensus/proof/" },
   ],
-  "journal/": [
-    { title: "The journal", path: "journal/" },
-    { title: "The calls", path: "journal/calls/" },
-    { title: "Segments", path: "journal/segments/" },
-    { title: "Matchmakers and the register", path: "journal/matchmakers/" },
-    { title: "Quorums and failures", path: "journal/quorums-and-failures/" },
-    { title: "The controller", path: "journal/controller/" },
-    { title: "The journal, live", path: "journal/live/" },
-    { title: "How it is checked", path: "journal/checks/" },
-  ],
   "parosd/": [
     { title: "parosd", path: "parosd/" },
     { title: "Layers that stand alone", path: "parosd/layers/" },
@@ -69,7 +59,7 @@ const PAGES: Record<string, Sibling[]> = {
 const traces = import.meta.glob("../traces/*.json", { eager: true, import: "default" });
 const trace = fm.trace ? traces[`../traces/${fm.trace}.json`] : undefined;
 // The exercises of the Paxos course (public/lab.js), not the Journal labs.
-const paxosLab = !!fm.lab && !["journal", "register", "live"].includes(fm.lab);
+const paxosLab = !!fm.lab;
 if (fm.trace && !trace) throw new Error(`no trace src/traces/${fm.trace}.json`);
 type T = { scenarios: { id: string; label: string; beats?: unknown[] }[] };
 const byPage = Object.fromEntries(Object.entries(traces).map(([p, t]) => [p.replace(/^.*\/(.+)\.json$/, "$1"), t as T]));
@@ -90,28 +80,16 @@ const course = fm.trace ? lessonsOf(fm.trace).map((l) => {
       href: url(pathOf(next)) + `#run=${next.runs[0]}&${story(next.page) ? "beat" : "step"}=0` },
   };
 }) : [];
-// The engine that records the trace again in the browser: the Paxos pages run
-// paros-consensus (`paxos_trace`), the Journal pages the journal roles of
-// paros-journal (`journal_trace`, #1365).
-const engine = fm.trace?.startsWith("journal-")
-  ? { wasm: url("journal/wasm/paros_journal_lab.js"), call: "journal_trace", source: "paros-journal" }
-  : { wasm: url("paxos/wasm/paros_paxos.js"), call: "paxos_trace", source: "paros-consensus" };
+// The engine that records the trace again in the browser: paros-consensus
+// (`paxos_trace`).
+const engine = { wasm: url("paxos/wasm/paros_paxos.js"), call: "paxos_trace", source: "paros-consensus" };
 // A page of a design that is checked but not built yet says so at the top (#1349).
 const STATUS: Record<string, { tag: string; html: string }> = {
-  journal: {
-    tag: "design · checked in TLA+",
-    html: `The journal v1 is designed, and each of its rules has a TLA+ model. Its code is being
-      built (<a href="${REPO}/issues/1323">#1323</a>): the pure journal core and the
-      matchmaker register and the first roles (<code>paros-journal</code>) exist, and so do the IO
-      traits and the driver (<code>paros-journal-io</code>), and the controller
-      (<code>paros-journal-control</code>); the other roles do not exist yet. The rules are in <a href="${REPO}/tree/main/docs/journal"><code>docs/journal/</code></a>;
-      this page explains them and links each section.`,
-  },
   parosd: {
     tag: "design · not built",
     html: `The design of parosd is written in
       <a href="${REPO}/tree/main/docs/architecture"><code>docs/architecture/</code></a>, and its
-      code is not built. The layers are built after the journal v1, in the order of
+      code is not built. The layers are built after the journal, in the order of
       <a href="${REPO}/issues/1409">#1409</a>. This page explains the design and links each
       section; the rules are in the docs.`,
   },
@@ -147,10 +125,6 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
     {chapters.length > 0 && <script is:inline src={url("tour.js")} />}
     {widget && <script is:inline type="module" src={url("engineering.js")} />}
     {paxosLab && <script is:inline type="module" src={url("lab.js")} />}
-    {(fm.lab === "journal" || fm.lab === "register") && !trace && <script is:inline src={url("course.js")} />}
-    {fm.lab === "journal" && <script is:inline type="module" src={url("journal-lab.js")} />}
-    {fm.lab === "register" && <script is:inline type="module" src={url("register-lab.js")} />}
-    {fm.lab === "live" && <script is:inline type="module" src={url("live-journal.js")} />}
     {(prev || next) && (
       <nav class="pager label" aria-label="Next and previous pages">
         {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}

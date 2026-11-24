@@ -1,9 +1,10 @@
 # paros-host
 
 The pure host of actors (#1410 (split the generic host of actors), step 1 of #1409 (build the
-layered parosd)). One host serves every role of a process: the journal roles today, and the
-election, the coordinators and the frontend next. The crate knows none of them. The contract is
-`docs/journal/04-roles.md` §J4.2 (the flight rule and the four other rules) and
+layered parosd)). One host serves every role of a process: later the roles of the core, the
+journal, the election, the coordinators and the frontend. The crate knows none of them. The
+contract is §J4.2 of `docs/journal/04-roles.md` at the git tag `journal-design-a` (the flight
+rule and the four other rules; `docs/archive/journal-design-a/README.md`) and
 `docs/architecture/04-roles.md` §4.4 ("A role is an actor"). Read them before you change the
 code, and change them in the same PR when a rule changes.
 
@@ -21,20 +22,20 @@ code, and change them in the same PR when a rule changes.
 | `driver.rs` | `Driver`: group commit, held sends and outputs, recovery reads, the timer of each role, the draws, the events port, the verdict of each storage fault (a halt on `Unknown`), the list of the roles on the disk (`on_disk`) | rules 1, 4 |
 | `toy.rs` | a toy family for the tests: a counter with a disk and a watcher with none | |
 
-Each module keeps its unit tests in `<module>/tests.rs`. The journal (`paros-journal-io`) runs
-its roles on this crate: its tests and the driver walk of `journal-sim` judge the host too.
+Each module keeps its unit tests in `<module>/tests.rs`. No crate of the workspace runs its
+roles on this crate yet: the journal of design A did, and it was removed on 2026-11-24.
 
 `examples/coordinator.rs`: a toy coordinator with a disk and two workers with none, on the host
 and the driver, with a crash and a restart. It names no journal. CI runs it in the `checks` job.
 
 ## Rules
 
-- **A pure crate** (§J4.3): it depends on no crate, in `[dependencies]` and in
+- **A pure crate** (§J4.3 of the same document): it depends on no crate, in `[dependencies]` and in
   `[dev-dependencies]`. No trait requires `Send`, an executor or a runtime type. Layer 0 of
   `scripts/layers.sh`.
 - **It knows no role.** No journal, no tenant, no coordinator name in the code. A fact that only
   one family needs is a method of `Family` or `Role` with a default, or it stays in the family's
-  crate (the journal's routing of a `Holds` to two roles is in `paros-journal-io`).
+  crate.
 - **The host is pure**: no I/O, no clock, no randomness. Every input is recorded, and the time
   comes with it. Each role sets its own timer, and a fire goes to that role alone. A role asks a
   random value (`Effect::Draw`); the driver draws it from its `Entropy` and gives it back as
@@ -51,7 +52,7 @@ and the driver, with a crash and a restart. It names no journal. CI runs it in t
 
 ## Gates
 
-`cargo nextest run -p paros-host -p paros-journal-io -p journal-sim`, `cargo run -p paros-host
+`cargo nextest run -p paros-host`, `cargo run -p paros-host
 --example coordinator`, `cargo clippy --all-targets -- -D warnings`,
 `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-host --no-deps`,
 `scripts/check-layers.sh --wasm`, `scripts/check-core-deps.sh` and `scripts/mutants.sh --host`,

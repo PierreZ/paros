@@ -2,7 +2,6 @@
 export const NAV = [
   { name: "Paxos", path: "paxos/" },
   { name: "Consensus", path: "consensus/" },
-  { name: "Journal", path: "journal/" },
   { name: "parosd", path: "parosd/" },
   { name: "Engineering", path: "engineering/" },
 ] as const;

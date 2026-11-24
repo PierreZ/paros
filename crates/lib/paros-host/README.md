@@ -16,8 +16,7 @@ process.
 | `Ports`, `Events` | Where the outputs of the roles go, and the record of each step for a trace check |
 
 No trait requires `Send`, an executor or a runtime type, and the crate depends on no crate.
-The journal of paros (`paros-journal-io`) runs its acceptors, replicas, leaders and proxy
-leaders on it.
+No crate of the workspace runs its roles on it yet; the roles of the core will.
 
 ## Example
 

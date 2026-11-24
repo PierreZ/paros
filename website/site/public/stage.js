@@ -29,7 +29,7 @@
   // of a node label so that the direction reads on a phone.
   var ARROW = "M-9 -1.6 H0 V-5.5 L9 0 L0 5.5 V1.6 H-9 Z";
   // Rows of the drawing, top to bottom, by the role of a lane. The client and
-  // the controller of a Journal page sit above the proposers.
+  // the controller sit above the proposers.
   var ROWS = ["client", "controller", "proposer", "batcher", "matchmaker", "proxy", "node", "acceptor", "replica"];
 
   function svg(tag, attrs, text) {

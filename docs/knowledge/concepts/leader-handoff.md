@@ -172,7 +172,7 @@ from which A4 and the rest of the safety proof follow.
 | The durable frontier | `paros-consensus/src/node/phase2.rs`: `record_own_round` |
 | Who calls it | `paros-roles/src/node/stop.rs`: `hand_on` (a clean stop hands each leadership on, #560); `paros-roles/src/node/shared.rs`: `offer_handoff` (the driver's BUGGIFY site); `paros-roles/src/node/operator.rs`: `handoff`, the internal `Handoff` RPC, on request of the cell coordinator (a move off the leader's machine, or a leader balance, #687 (rebalance a cell)), as etcd-raft's leader transfer is asked for (`../references/etcd-raft/check-quorum.md` §6) |
 
-The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 The rule is stated in the module doc of `node/handoff.rs` (what authority is, why no durable
 fence is needed, authority uniqueness) and in the doc of `can_relinquish` (one hop only). The
