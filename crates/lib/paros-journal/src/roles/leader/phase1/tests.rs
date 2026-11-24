@@ -387,6 +387,19 @@ fn the_seal_end_counts_only_the_segment_before() {
         Some(Slot(7)),
         "the dropped range 2..7 is the highest fact of the segment before"
     );
+    // A vote, then a faulty vote, above the range raise the end.
+    for (votes, faulty, end) in [(&[(8, 1, 1)][..], &[][..], 9), (&[][..], &[(9, 1)][..], 10)] {
+        let mut phase1 = Phase1::new(ballot(5), Slot(0), &segments);
+        for node in [1, 2, 7, 8] {
+            phase1.fold(NodeId(node), Slot(0), page(&[], &[], None));
+        }
+        phase1.fold(NodeId(4), Slot(0), page(votes, faulty, None));
+        phase1.fold(NodeId(5), Slot(0), page_dropped(&[(2, 7)], None));
+        assert_eq!(
+            phase1.close(&segments).expect("a quorum").end,
+            Some(Slot(end))
+        );
+    }
 }
 
 #[test]
@@ -424,4 +437,7 @@ fn a_late_answer_that_dropped_a_blocked_slot_counts_once_complete() {
     phase1.fold(NodeId(3), Slot(2), page(&[], &[], None));
     assert_eq!(phase1.dropped_by(Slot(1)), Some(NodeId(3)));
     assert_eq!(phase1.dropped_by(Slot(2)), None);
+    // The tally alone would decide the slot now (nodes 1 and 3 qualify):
+    // the leader must skip it first.
+    assert_eq!(phase1.decide(&segments, Slot(1)), Some(noop_or(1)));
 }

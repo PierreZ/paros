@@ -1033,8 +1033,7 @@ impl<T> JournalLeader<T> {
                 "leader: a blocked slot that an answer dropped is skipped"
             );
             self.blocked.retain(|s| s != slot);
-            // A range that starts at the slot already holds it.
-            self.dropped.entry(*slot).or_insert(Slot(slot.0 + 1));
+            ranges::add(&mut self.dropped, *slot, Slot(slot.0 + 1));
         }
         assert!(
             slots.iter().all(|slot| !self.blocked.contains(slot)),
