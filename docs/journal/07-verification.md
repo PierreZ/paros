@@ -237,8 +237,11 @@ live check fed by the port, and the torn-batch control land with the adapter.
 **The driver walk** (#1329, `journal-sim/tests/host.rs`). Before the moonpool-sim, `journal-sim`
 walks the generic driver itself: three processes, each a `Driver` with a disk that fails commits
 inside the contract (before or after the write), a transport through the walk's mailbox (lost,
-repeated, reordered), crashes that keep the disk, restarts that read it back, campaigns that
-depose a leader, and a writer that sends a call again. Its oracles share no code with the
+repeated, reordered), the journal's register on three matchmakers (one on each process, down
+while its process is; a change can lose its request or its reply, reach one member only, or wait
+in flight), crashes that keep the disk, restarts that read it back, campaigns that depose a
+leader, and a writer that sends a call again. Each register fake keeps the register contract of
+`paros-journal-io` (`contract::register`, run on it in `journal-sim/tests/backend.rs`). Its oracles share no code with the
 driver: `AGREE` (no two `Commit`s on the wire name two commands at one slot), `FLIGHT` (an
 `Accepted` or a `Promise` leaves only once the state it reports is on the disk) and `ANSWER`
 (each answer is the whole log's at a slot of the command). Each has its planted mutant: a disk
@@ -270,13 +273,27 @@ and segment replicas of both journals), two controllers for each journal
 (`paros_journal_control::role`) that are elected, heal a column, seal and get deposed, a reshape
 token shared by the journals, a client that claims the writer, writes, sends again, resends with a
 stale position and resolves each `Below`, crashes and restarts of a machine, the loss of a zone for
-a while, register operations whose request or reply is lost, and disk faults inside the contract.
+a while, register operations whose request or reply is lost, whose write reaches one matchmaker
+only, or whose write waits in flight while other operations run and lands later, matchmakers that
+are down with their machine (a read or a change that no majority answers gives no answer, and a
+read repairs a write that a minority took), and disk faults inside the contract.
 Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
 at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
 `ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with
-its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
-and `ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
-(`WholeMutant`). At the end of the walk each journal converges: a controller holds the term, the
+its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position),
+`ALERTS` (each alert of the controller is true of the machines), `DISK` (each replica's disk, on
+every machine up or down, holds the chosen log: each slot it holds, its base and its compaction
+point are the chosen log's, and its compaction floor is at or below the decided floor) and
+`STOPPED` (each leader that stops on its own has a true cause for the phase it stopped from: a
+higher bound or a later segment for a bind, a higher promise in Phase 1, a seal of its own segment
+for an open leader, another end of the segment before it or a newer segment for a sealing leader;
+the facts
+include the writes that a minority of the matchmakers took, since a role may act on one). Each has
+its planted mutant (`WholeMutant`; `RefuseSeal` for `STOPPED`, `CorruptCopy` for `DISK`).
+`STOPPED` exists because the walk heals what it judges: placement replaces a stopped leader, so a
+leader that stops for a wrong reason (the bug of #1511 (a change asked again over its own write))
+costs nothing that another oracle sees. Each walk of `journal-sim` also runs two seeds twice and
+compares the logs (`tests/determinism.rs`). At the end of the walk each journal converges: a controller holds the term, the
 newest segment is in force, the older ones are retired (by the leader, §J3.1), and every replica of the newest segment
 holds the whole log. One replica node serves one replica for each segment of its journal, so a
 heal keeps the live replicas of a column (Pierre, 2026-11-22, #1445); the address and the disk key
@@ -286,7 +303,7 @@ abandoned copy (`Driver::join`, `Driver::abandon`, which read the register first
 judges each ask on a value done after it was sent), may lose an ask or give it again later
 (site `LATE_ASK`), and gives each complete copy to the controllers (sites `REREPLICATE`,
 `COPIED`, `REREPLICATED`). The oracle `HEAL_HELD` judges that each node a done heal added holds
-every slot of the retired segment on its disk while the set names it (mutant `EarlyCopied`: the
+every slot of the retired segment on its disk while the set names it (`DISK` judges the bytes) (mutant `EarlyCopied`: the
 walk reports a copy complete when it asks it). The walk also loses one machine that hosts no
 matchmaker for good (move `Lose`, site `LOST`): `CONVERGES` then needs the newest grid, its replica
 set and every retired replica set to name no node of that machine (site `LOST_HEALED`). A walk

@@ -69,10 +69,12 @@ use paros::journal::register::{
     RegisterCall, RegisterMember, RegisterValue,
 };
 use paros::journal::resolve::ResolveAnswer;
-use paros::journal::roles::{Campaign, LeaderPhase};
+use paros::journal::roles::acceptor::JournalAcceptor;
+use paros::journal::roles::{Campaign, LeaderPhase, PROMISE_BATCH};
 use paros::journal::{
     Command, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, SegmentId, Seq, Slot,
 };
+use paros::journal_io::layout;
 use paros::journal_io::mem::MemStorage;
 use paros::journal_io::{
     Address, Assignment, CallId, CallOutcome, ChangeError, Clock, Driver, Entry, Envelope,
@@ -99,6 +101,12 @@ const L1: u64 = 101;
 const L2: u64 = 102;
 /// The writer's uuid.
 const A: LeaderUuid = LeaderUuid(0xA);
+/// How many times the controller asks a register change or read that got
+/// no answer, before the example fails. An operation ends with no answer
+/// only in a conflict with another host's operation, and the next ask
+/// takes a newer generation; the bound only turns a run that never settles
+/// into a failure with its state.
+const ASKS: usize = 100;
 /// How long one step may take before the example fails. The whole run
 /// takes well under a second, so a CI runner that is many times slower
 /// still passes; a step that never ends fails here, with the state of each
@@ -225,12 +233,13 @@ struct Matchmaker {
 /// client of one host; they share the matchmakers and the counter of
 /// operation generations.
 ///
-/// **One operation at a time.** An operation holds the matchmakers' lock
-/// from its first read to its last write, so two operations never
-/// interleave and no write stays at a minority. An operation in conflict
-/// can leave its write at a minority; the same change asked again then
-/// finds that write and is refused, and the leader takes the refusal of
-/// its own seal as a loss and stops.
+/// **Operations interleave.** An operation takes the matchmakers' lock for
+/// one request at a time, so the operations of two hosts interleave as on
+/// a real network: one can read between the two writes of another, end in
+/// conflict, and leave its write at a minority. The driver asks a change
+/// with no answer again; the register takes a change that its value
+/// already holds as "ok" again and writes it once more, so the first write
+/// is done (§J3.4, "A change asked again").
 #[derive(Clone)]
 struct Matchmakers {
     set: MatchmakerSet,
@@ -281,7 +290,6 @@ impl Matchmakers {
     /// a matchmaker that is down is lost; when no majority answers a phase,
     /// the operation ends with no answer ([`CallStep::Pending`]).
     fn run(&self, change: &Change) -> CallStep {
-        let mut members = lock(&self.members);
         let op = Ballot {
             round: self.ops.fetch_add(1, Ordering::SeqCst) + 1,
             node: self.caller,
@@ -290,11 +298,15 @@ impl Matchmakers {
         loop {
             let mut next_phase = false;
             for (id, request) in call.requests() {
-                let m = members.get_mut(&id).expect("a member of the set");
-                if !m.up {
-                    continue;
-                }
-                match call.on_reply(id, m.member.step(request).reply) {
+                let reply = {
+                    let mut members = lock(&self.members);
+                    let m = members.get_mut(&id).expect("a member of the set");
+                    if !m.up {
+                        continue;
+                    }
+                    m.member.step(request).reply
+                };
+                match call.on_reply(id, reply) {
                     CallStep::Pending => {}
                     CallStep::Write { .. } => {
                         next_phase = true;
@@ -376,6 +388,9 @@ enum Order {
     Read(Address, Seq, usize, oneshot::Sender<ReadAnswer>),
     /// A look at the driver's state, from the task that owns it.
     Look(Box<dyn FnOnce(&Process) + Send>),
+    /// The host crashes: a last look at the driver's state, then the task
+    /// ends at once, so the look sees the state that the crash stops.
+    Crash(Box<dyn FnOnce(&Process) + Send>),
 }
 
 /// Serve one host until its order channel closes (a crash): poll the
@@ -426,6 +441,10 @@ async fn serve(
                     reads.push((process.read(address, from, limit), answer));
                 }
                 Some(Order::Look(look)) => look(&process),
+                Some(Order::Crash(look)) => {
+                    look(&process);
+                    return;
+                }
             },
             () = wake.notified() => {}
             () = tokio::time::sleep(Duration::from_nanos(due)) => {}
@@ -505,8 +524,13 @@ impl Cluster {
     }
 
     /// Host `host` crashes: its routes and its matchmaker are gone, its task
-    /// ends, its disk stays.
-    async fn crash(&mut self, host: u64) {
+    /// ends, its disk stays. `look` sees the driver's state at the crash:
+    /// the task steps nothing after it.
+    async fn crash<T: Send + 'static>(
+        &mut self,
+        host: u64,
+        look: impl FnOnce(&Process) -> T + Send + 'static,
+    ) -> T {
         let slot = self.slot(host);
         let (orders, task) = slot.running.take().expect("a running host");
         let addresses: Vec<Address> = slot.roles.iter().map(Assignment::address).collect();
@@ -517,8 +541,16 @@ impl Cluster {
             }
         }
         self.matchmakers.set_up(host, false);
-        drop(orders);
+        let (sender, receiver) = oneshot::channel();
+        orders
+            .send(Order::Crash(Box::new(move |p| {
+                let _ = sender.send(look(p));
+            })))
+            .expect("a running host takes orders");
         task.await.expect("the host's task ends");
+        receiver
+            .await
+            .expect("the host looked at its state before it ended")
     }
 
     /// Host `host` also serves `role`.
@@ -606,21 +638,35 @@ impl Cluster {
     }
 
     /// The controller's call `change` on the register. A majority of the
-    /// matchmakers is up at each call of this run, and one operation runs at
-    /// a time, so the call is done or refused at once.
+    /// matchmakers is up at each call of this run, so an operation ends with
+    /// no answer only in a conflict with the operation of a host. The
+    /// controller then asks the same change again, as a driver does: the
+    /// register takes a change that its value holds as "ok" again.
     fn controller(&self, change: &Change) -> RegisterValue {
-        self.matchmakers
-            .client(0)
-            .change(JOURNAL, change)
-            .unwrap_or_else(|e| panic!("the controller's {change:?}: {e:?}"))
+        let mut register = self.matchmakers.client(0);
+        for _ in 0..ASKS {
+            match register.change(JOURNAL, change) {
+                Ok(value) => return value,
+                Err(ChangeError::NoAnswer) => {}
+                Err(e) => panic!("the controller's {change:?}: {e:?}"),
+            }
+        }
+        panic!("the controller's {change:?}: no answer after {ASKS} asks");
     }
 
-    /// The controller's register read: the done value.
+    /// The controller's register read: the done value. A majority of the
+    /// matchmakers is up at each read of this run, so a read ends with no
+    /// value only when its `Confirm` meets a write still in flight (a
+    /// conflict, or a write that reached one member); the controller then
+    /// reads again, as a driver does at its next tick.
     fn register(&self) -> RegisterValue {
-        self.matchmakers
-            .client(0)
-            .read(JOURNAL)
-            .expect("a majority of the matchmakers holds a done value")
+        let mut register = self.matchmakers.client(0);
+        for _ in 0..ASKS {
+            if let Some(value) = register.read(JOURNAL) {
+                return value;
+            }
+        }
+        panic!("the controller's read: no done value after {ASKS} asks");
     }
 
     /// The generation of the write that each matchmaker holds.
@@ -1017,8 +1063,7 @@ async fn crash(
                 == Some(1)
         })
         .await;
-    let votes = cluster.look(3, votes_of_3).await.expect("host 3 runs");
-    cluster.crash(3).await;
+    let votes = cluster.crash(3, votes_of_3).await;
     write(cluster, writer, written, 3..5, false).await;
     // A register change at the two matchmakers that are up.
     let before = cluster.held();
@@ -1042,7 +1087,11 @@ async fn crash(
 
 /// The promise and the slots that acceptor 3 holds a vote at.
 fn votes_of_3(p: &Process) -> (u64, Vec<u64>) {
-    let acceptor = p.host().acceptor(at(3)).expect("acceptor 3");
+    votes_of(p.host().acceptor(at(3)).expect("acceptor 3"))
+}
+
+/// The promise and the slots that `acceptor` holds a vote at.
+fn votes_of(acceptor: &JournalAcceptor) -> (u64, Vec<u64>) {
     let votes = (0..16)
         .filter(|s| acceptor.vote(Slot(*s)).is_some())
         .collect();
@@ -1055,11 +1104,21 @@ async fn restart(cluster: &mut Cluster, before: (u64, Vec<u64>)) {
     let records = lock(&cluster.hosts[&3].disk.0).len();
     show("records on host 3's disk", &records);
     assert!(records > 0, "acceptor 3 and replica 12 wrote their disk");
-    cluster.start(3);
-    let read_back = cluster.look(3, votes_of_3).await.expect("host 3 runs");
+    // What acceptor 3 reads back: its disk decoded and recovered as the
+    // host does at a boot, before the host runs. Once it runs, a `Compact`
+    // from the leader may drop votes below the floor that F + 1 replicas
+    // report, so the check reads the disk alone.
+    let read_back = {
+        let entries = lock(&cluster.hosts[&3].disk.0)
+            .scan(at(3))
+            .expect("host 3's disk scans");
+        let disk = layout::decode_acceptor(at(3), &entries).expect("acceptor 3's disk is whole");
+        votes_of(&JournalAcceptor::recover(NodeId(3), disk, PROMISE_BATCH))
+    };
     show("acceptor 3: (promise, votes) before the crash", &before);
     show("acceptor 3: (promise, votes) read back", &read_back);
     assert_eq!(read_back, before, "acceptor 3 reads back what it held");
+    cluster.start(3);
     cluster
         .wait_until("replica 12 catches up", async |c| {
             c.replica(12).await.is_some_and(|(next, _)| next == Seq(5))

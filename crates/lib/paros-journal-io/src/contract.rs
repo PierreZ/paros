@@ -9,6 +9,20 @@
 //! contract::storage_reopen(MemStorage::new, |storage| storage);
 //! ```
 //!
+//! The register suite takes a register that holds one journal:
+//!
+//! ```
+//! use paros_journal::register::RegisterValue;
+//! use paros_journal_io::contract;
+//! use paros_journal_io::mem::MemRegister;
+//!
+//! contract::register(|journal| {
+//!     let register = MemRegister::new();
+//!     register.create(journal, RegisterValue::new());
+//!     register
+//! });
+//! ```
+//!
 //! Each suite panics, with the rule that failed, on the first break.
 //!
 //! **A suite certifies the API only** (Pierre, 2026-11-19). That a batch is
@@ -17,12 +31,16 @@
 //! inject faults (the moonpool-sim of the journal, §J7.4, #1330).
 
 use paros_consensus::journal::JournalId;
+use paros_journal::register::{Ballot, Change, RegisterValue};
 use paros_journal::roles::{Message, PersistId};
-use paros_journal::{NodeId, SegmentId, Slot};
+use paros_journal::{
+    BoundaryState, Grid, Leader, NodeId, OpeningCall, RELEASE, SegmentId, Seq, Slot,
+};
 
 use crate::clock::Clock;
 use crate::family::Journal;
 use crate::layout::{Entry, Key, Kind, Op};
+use crate::register::{ChangeError, Register};
 use crate::storage::Storage;
 use crate::transport::Transport;
 use crate::wire::{Address, Envelope};
@@ -315,6 +333,173 @@ pub fn clock<C: Clock>(clock: &C, mut wait: impl FnMut()) {
         assert!(now >= last, "clock: the time never goes back");
         last = now;
     }
+}
+
+/// The controller's call at `term` that opens the segment after `expected`.
+fn opening(term: u64, expected: Option<SegmentId>) -> Change {
+    Change::Reshape {
+        opening: OpeningCall {
+            term,
+            expected,
+            grid: Grid::new(1, vec![vec![NodeId(1), NodeId(2), NodeId(3)]])
+                .expect("register: a v1 grid"),
+            replicas: vec![NodeId(11), NodeId(12), NodeId(13)],
+        },
+        release: RELEASE,
+    }
+}
+
+/// The changes of the register suite, in order: each kind of change that
+/// the journal's roles and controller ask but the trim, refusals of the
+/// term, bind, unretired, seal and retire guards, and each change that
+/// the journal asks again (a bind, a reshape, a seal, a boundary state, a
+/// retire) twice in a row, the second over its own done write.
+fn register_script() -> Vec<Change> {
+    let s1 = SegmentId(1);
+    let seal = |end| Change::Seal {
+        segment: s1,
+        end: Slot(end),
+    };
+    let boundary = Change::Boundary {
+        segment: s1,
+        state: BoundaryState {
+            next_seq: Seq(3),
+            first_seq: Seq(0),
+            leader: Leader::Unset,
+        },
+    };
+    let retire = |holders| Change::Retire {
+        segment: s1,
+        holders,
+        unrepaired_damage: false,
+    };
+    vec![
+        Change::Elect { holder: NodeId(1) },
+        opening(1, None),
+        Change::Bind {
+            ballot: Ballot {
+                round: 1,
+                node: NodeId(21),
+            },
+        },
+        Change::Bind {
+            ballot: Ballot {
+                round: 1,
+                node: NodeId(21),
+            },
+        },
+        Change::Elect { holder: NodeId(2) },
+        opening(1, Some(s1)),
+        opening(2, Some(s1)),
+        opening(2, Some(s1)),
+        Change::Bind {
+            ballot: Ballot {
+                round: 1,
+                node: NodeId(20),
+            },
+        },
+        Change::Bind {
+            ballot: Ballot {
+                round: 2,
+                node: NodeId(21),
+            },
+        },
+        retire(2),
+        seal(4),
+        seal(4),
+        seal(5),
+        boundary.clone(),
+        boundary,
+        retire(1),
+        retire(2),
+        retire(2),
+    ]
+}
+
+/// The contract of [`Register`] on a fresh register that `fresh(journal)`
+/// makes, which holds `journal` at [`RegisterValue::new`] and no other
+/// journal. On a healthy register every change answers: a change whose
+/// guard holds is done and gives the value that
+/// [`RegisterValue::apply`] gives, a change whose guard fails is
+/// [`ChangeError::Refused`] with the guard's refusal and changes nothing, a
+/// change asked again over its own done write is done again (§J3.4, "a
+/// change asked again"), a read gives the value of the last done write, and
+/// a journal that the register does not hold is [`ChangeError::Unknown`]
+/// and reads `None`. The suite runs the same changes on a value of its own
+/// and compares each answer with it.
+///
+/// # Panics
+///
+/// On the first answer or read that breaks the contract, with the rule.
+pub fn register<R: Register>(mut fresh: impl FnMut(JournalId) -> R) {
+    let journal = JournalId(7);
+    let other = JournalId(8);
+    let mut register = fresh(journal);
+    let mut value = RegisterValue::new();
+    assert_eq!(
+        register.read(journal),
+        Some(value.clone()),
+        "register: a fresh register reads its start value"
+    );
+    assert_eq!(
+        register.read(other),
+        None,
+        "register: a journal that the register does not hold reads none"
+    );
+    assert_eq!(
+        register.change(other, &Change::Elect { holder: NodeId(1) }),
+        Err(ChangeError::Unknown),
+        "register: a change of a journal that the register does not hold is unknown"
+    );
+    assert_eq!(
+        register.read(other),
+        None,
+        "register: a change does not create a register"
+    );
+    let mut done = 0;
+    let mut refused = 0;
+    let mut last: Option<Change> = None;
+    for change in register_script() {
+        let answer = register.change(journal, &change);
+        if last.as_ref() == Some(&change) {
+            assert!(
+                answer.is_ok(),
+                "register: a change asked again over its own done write is done again: {change:?} gave {answer:?}"
+            );
+        }
+        last = Some(change.clone());
+        match value.apply(&change) {
+            Ok(next) => {
+                assert_eq!(
+                    answer,
+                    Ok(next.clone()),
+                    "register: a change whose guard holds is done with the applied value: {change:?}"
+                );
+                value = next;
+                done += 1;
+            }
+            Err(refusal) => {
+                assert_eq!(
+                    answer,
+                    Err(ChangeError::Refused(refusal)),
+                    "register: a change whose guard fails is refused with its guard: {change:?}"
+                );
+                refused += 1;
+            }
+        }
+        assert_eq!(
+            register.read(journal),
+            Some(value.clone()),
+            "register: a read gives the value of the last done write, after {change:?}"
+        );
+    }
+    assert!(done > 0, "register: the suite runs done changes");
+    assert!(refused > 0, "register: the suite runs refused changes");
+    assert_eq!(
+        register.read(other),
+        None,
+        "register: the changes of one journal create no other"
+    );
 }
 
 #[cfg(test)]

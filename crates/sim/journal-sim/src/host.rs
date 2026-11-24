@@ -5,7 +5,11 @@
 //! a disk that survives a crash and fails some commits inside the contract
 //! (a failed commit may or may not have written its batch), a transport
 //! whose messages go through the walk's mailbox (lost, repeated and
-//! reordered), a clock that the walk moves, and the journal's register.
+//! reordered), a clock that the walk moves, and the journal's register on
+//! three matchmakers ([`QuorumRegister`]): process `p` hosts matchmaker
+//! `p`, which is down while the process is; a change can lose its request
+//! or its reply, reach one member only, or wait in flight while other
+//! operations run, and a read repairs a write that a minority took.
 //! Process `p` serves acceptor `p` and replica `10 + p` of segment 1, and,
 //! after a campaign on it, leader `100 + p`. A crash drops the driver and
 //! keeps the disk; a restart is a new driver on the same disk, and the
@@ -43,20 +47,20 @@ use std::rc::Rc;
 
 use moonpool_walk::{Cx, Model, Phase, Walk, sometimes};
 
-use paros_journal::register::{Ballot, Change, RegisterValue};
+use paros_journal::register::{Ballot, Change, MatchmakerId, RegisterValue};
 use paros_journal::roles::PersistId;
 use paros_journal::roles::{Campaign, LeaderPhase, Message};
 use paros_journal::{
     Answer, Command, Fence, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, ReadAnswer,
     Record, Reply, SegmentId, Seq, Slot, Write,
 };
-use paros_journal_io::mem::{ManualClock, MemRegister};
+use paros_journal_io::mem::ManualClock;
 use paros_journal_io::{
     Address, Assignment, CallId, CallOutcome, Driver, Envelope, HostConfig, JournalId, Key, Kind,
     Op,
 };
 
-use crate::backend::{Disk, Wire};
+use crate::backend::{Disk, Fault, Landed, LossyRegister, Lost, QuorumRegister, Wire};
 
 use crate::oracle::{Truth, as_written, label};
 
@@ -100,6 +104,14 @@ pub mod reach {
     /// An answer to a read of a driver before a restart reached the new
     /// driver of the process, with the id of a read of the new driver.
     pub const STALE_READ_ACK: &str = "driver walk: a stale read answer reached a restarted process";
+    /// A register change reached one matchmaker only, and no answer came.
+    pub const REGISTER_HALF: &str = "driver walk: a register write reached one matchmaker only";
+    /// A register change waited in flight while other operations ran.
+    pub const REGISTER_LATE: &str = "driver walk: a register write waited in flight";
+    /// A register write in flight landed and was done.
+    pub const REGISTER_LATE_DONE: &str = "driver walk: a register write in flight landed done";
+    /// A register read repaired a write that a minority took.
+    pub const REGISTER_REPAIRED: &str = "driver walk: a register read repaired a minority write";
 
     /// Every site of the walk.
     pub const ALL: &[&str] = &[
@@ -115,6 +127,10 @@ pub mod reach {
         READ_SERVED,
         STALE_READ_ACK,
         BUSY,
+        REGISTER_HALF,
+        REGISTER_LATE,
+        REGISTER_LATE_DONE,
+        REGISTER_REPAIRED,
     ];
 }
 
@@ -155,12 +171,29 @@ fn grouped(ops: &[Op]) {
     sometimes!(roles.len() >= 2, reach::GROUPED);
 }
 
-type Proc = Driver<Disk, Wire, ManualClock, MemRegister, ()>;
+type Proc = Driver<Disk, Wire, ManualClock, LossyRegister, ()>;
+
+/// The ways a register change can go unanswered.
+const FAULTS: [Fault; 4] = [Fault::Request, Fault::Reply, Fault::Half, Fault::Late];
+
+/// The register sites on each change that got no answer.
+fn lost_change(lost: Lost) {
+    sometimes!(lost == Lost::Half, reach::REGISTER_HALF);
+    sometimes!(lost == Lost::Late, reach::REGISTER_LATE);
+}
+
+/// [`reach::REGISTER_REPAIRED`] on each read that repaired a write a
+/// minority took.
+fn repaired() {
+    sometimes!(true, reach::REGISTER_REPAIRED);
+}
 
 /// One process: its driver while it is up, its disk always.
 struct Process {
     driver: Option<Proc>,
     disk: Disk,
+    /// The register as this process reaches it.
+    register: LossyRegister,
     inbox: Rc<RefCell<VecDeque<Envelope>>>,
     outbox: Rc<RefCell<Vec<Envelope>>>,
 }
@@ -186,7 +219,7 @@ struct OpenRead {
 pub struct HostModel {
     mutant: HostMutant,
     clock: ManualClock,
-    register: MemRegister,
+    register: QuorumRegister,
     processes: BTreeMap<u64, Process>,
     round: u64,
     /// Every command a `Commit` on the wire named, by slot.
@@ -243,8 +276,11 @@ pub enum HostAction {
     Read,
     /// The network delivers the `PreReadAck`s that it held back.
     Late,
-    /// The next commit of a process fails.
+    /// The next commit of a process fails, or its next register change
+    /// goes unanswered.
     Fault,
+    /// One register write in flight lands at the members that are up.
+    Land,
 }
 
 impl Model for HostModel {
@@ -266,12 +302,14 @@ impl Model for HostModel {
             HostAction::Read,
             HostAction::Late,
             HostAction::Fault,
+            HostAction::Land,
         ]
     }
 
     fn weight(action: HostAction, phase: Phase) -> u32 {
         match (action, phase) {
-            (HostAction::Fault | HostAction::Campaign, Phase::Chaos) | (HostAction::Late, _) => 2,
+            (HostAction::Fault | HostAction::Campaign, Phase::Chaos)
+            | (HostAction::Late | HostAction::Land, _) => 2,
             (HostAction::Fault, _) | (HostAction::Read, Phase::Settle) => 0,
             (HostAction::Poll | HostAction::Tick | HostAction::Write, Phase::Settle)
             | (HostAction::Campaign, _) => 1,
@@ -291,6 +329,7 @@ impl Model for HostModel {
             HostAction::Read => self.read(cx),
             HostAction::Late => self.late(cx),
             HostAction::Fault => self.fault(cx),
+            HostAction::Land => self.land(cx),
         }
     }
 
@@ -322,6 +361,7 @@ impl Model for HostModel {
     fn crash(&mut self, node: &u64, _cx: &mut Cx<'_, Self>) {
         let process = self.processes.get_mut(node).expect("a process");
         process.driver = None;
+        self.register.set_up(Self::matchmaker(*node), false);
         process.inbox.borrow_mut().clear();
         process.outbox.borrow_mut().clear();
         if self.call.as_ref().is_some_and(|c| c.process == *node) {
@@ -355,6 +395,12 @@ impl Model for HostModel {
     }
 
     fn converged(&self) -> Result<(), String> {
+        if self.register.in_flight() > 0 {
+            return Err(format!(
+                "{} register writes are in flight",
+                self.register.in_flight()
+            ));
+        }
         if self.call.is_some() || self.again.is_some() {
             return Err("the writer has a call in flight".into());
         }
@@ -412,8 +458,8 @@ impl HostModel {
     /// # Panics
     ///
     /// When the first segment cannot open.
-    pub fn build(mutant: HostMutant, _cx: &mut Cx<'_, Self>) -> Self {
-        let register = MemRegister::new();
+    pub fn build(mutant: HostMutant, cx: &mut Cx<'_, Self>) -> Self {
+        let register = QuorumRegister::new(|_| {}, repaired, cx.rng().next_u64());
         let value = RegisterValue::new()
             .apply(&Change::Elect { holder: NodeId(0) })
             .expect("an election");
@@ -455,6 +501,7 @@ impl HostModel {
                 Process {
                     driver: None,
                     disk: Disk::new(grouped),
+                    register: LossyRegister::new(model.register.clone(), lost_change),
                     inbox: Rc::default(),
                     outbox: Rc::default(),
                 },
@@ -474,6 +521,11 @@ impl HostModel {
 
     fn leader(p: u64) -> Address {
         Address::new(J, NodeId(100 + p))
+    }
+
+    /// The matchmaker that process `p` hosts.
+    fn matchmaker(p: u64) -> MatchmakerId {
+        MatchmakerId(p)
     }
 
     fn process_of(node: NodeId) -> u64 {
@@ -499,6 +551,7 @@ impl HostModel {
     /// A new driver for process `p` on its disk: it serves the acceptor and
     /// the replica again.
     fn start(&mut self, p: u64) {
+        self.register.set_up(Self::matchmaker(p), true);
         let process = self.processes.get_mut(&p).expect("a process");
         let wire = Wire {
             inbox: Rc::clone(&process.inbox),
@@ -511,7 +564,7 @@ impl HostModel {
             process.disk.clone(),
             wire,
             self.clock.clone(),
-            self.register.clone(),
+            process.register.clone(),
             (),
         );
         driver.assign(Self::assignment(Self::acceptor(p)));
@@ -869,9 +922,21 @@ impl HostModel {
             // good.
             disk.lose(Key::new(Self::acceptor(p), Kind::Promise, 0));
             self.lost = Some(p);
+        } else if cx.rng().chance(1, 3) {
+            let fault = *cx.rng().pick(&FAULTS).expect("four ways");
+            self.processes[&p].register.arm(fault);
         } else {
             disk.arm(!cx.rng().chance(1, 2));
         }
+    }
+
+    /// One register write in flight lands, at the members that are up.
+    fn land(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(pick) = cx.rng().index(self.register.in_flight()) else {
+            return;
+        };
+        let landed = self.register.land(pick);
+        sometimes!(landed == Landed::Done, reach::REGISTER_LATE_DONE);
     }
 
     /// [`ANSWER`]: judge each answer whose command the chosen prefix holds.

@@ -1762,7 +1762,11 @@ impl RolesModel {
             });
         // Steer: a leader whose seal answer is lost waits; a campaign then
         // may seal the segment it opened before it hears its own seal.
-        let unanswered = cx.phase() == Phase::Chaos && !self.unanswered.is_empty();
+        // One campaign in two, as for `second`: each such campaign may
+        // depose the later leader before it opens, and only an open later
+        // leader releases the seal asked again.
+        let unanswered =
+            !self.unanswered.is_empty() && cx.phase() == Phase::Chaos && cx.rng().chance(1, 2);
         let second = second || again || armed || unanswered;
         // After the faults stop, a new campaign tells the acceptors that
         // started again their belief: until a `Prepare` does, an acceptor
@@ -2873,7 +2877,7 @@ impl RolesModel {
             return;
         }
         let (origin, mut change) = self.queue.remove(index);
-        if let Origin::Leader(node, round) = origin {
+        if let (Origin::Leader(node, round), Change::Seal { .. }) = (origin, &change) {
             self.unanswered.remove(&(node, round));
         }
         if let (RolesMutant::StaleBoundary, Change::Boundary { segment, state }) =
@@ -3358,11 +3362,9 @@ impl RolesModel {
         let waits = if let Some(index) = writer {
             self.calls.values().any(|call| call.writer == Some(index))
         } else {
-            let limit = if self.burst || cx.rng().chance(1, 8) {
-                3
-            } else {
-                2
-            };
+            // The draw comes first, so a burst shifts no later draw.
+            let wide = cx.rng().chance(1, 8);
+            let limit = if self.burst || wide { 3 } else { 2 };
             self.calls
                 .values()
                 .filter(|call| call.writer.is_none())

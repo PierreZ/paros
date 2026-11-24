@@ -211,15 +211,11 @@ impl JournalProxy {
         // A delegation at or above the ballot taken: the rounds strictly
         // below it are dropped, and each of their leaders hears the ballot
         // that dropped them.
-        let mut leaders: Vec<NodeId> = Vec::new();
-        for stale in self.rounds.close_below(ballot) {
+        let stale = self.rounds.close_below(ballot);
+        for _ in &stale {
             probe!(reachable, "proxy: a higher ballot drops the rounds below");
-            if let Some(dropped) = self.delegations.remove(&stale)
-                && !leaders.contains(&dropped.leader)
-            {
-                leaders.push(dropped.leader);
-            }
         }
+        let leaders = self.drop_delegations(stale);
         if !leaders.is_empty() {
             let known = self
                 .ballot
@@ -240,6 +236,13 @@ impl JournalProxy {
                     round.ballot(),
                     ballot,
                     "the rounds below the ballot are dropped"
+                );
+                // One ballot, one proposer (P2b): a re-delegation carries
+                // the round's own command. The leader stamps the leader
+                // time of a write one time, at propose.
+                assert!(
+                    *round.command() == command,
+                    "a re-delegation at the open round's ballot carries the round's command"
                 );
                 probe!(
                     reachable,
@@ -338,15 +341,10 @@ impl JournalProxy {
             .filter(|(_, round)| round.ballot() == ballot)
             .map(|(slot, _)| *slot)
             .collect();
-        let mut leaders: Vec<NodeId> = Vec::new();
-        for slot in refused {
-            self.rounds.close(slot);
-            if let Some(delegation) = self.delegations.remove(&slot)
-                && !leaders.contains(&delegation.leader)
-            {
-                leaders.push(delegation.leader);
-            }
+        for slot in &refused {
+            self.rounds.close(*slot);
         }
+        let leaders = self.drop_delegations(refused);
         probe!(
             sometimes,
             !leaders.is_empty(),
@@ -361,6 +359,24 @@ impl JournalProxy {
             .collect()
     }
 
+    /// Drop the delegations of `slots`, whose rounds are closed, and give
+    /// each of their leaders once, in the order met.
+    fn drop_delegations(&mut self, slots: Vec<Slot>) -> Vec<NodeId> {
+        let mut leaders: Vec<NodeId> = Vec::new();
+        for slot in slots {
+            assert!(
+                !self.rounds.by_slot().contains_key(&slot),
+                "a delegation is dropped after its round closes"
+            );
+            if let Some(dropped) = self.delegations.remove(&slot)
+                && !leaders.contains(&dropped.leader)
+            {
+                leaders.push(dropped.leader);
+            }
+        }
+        leaders
+    }
+
     /// The proxy's own rules.
     ///
     /// # Panics
@@ -373,11 +389,7 @@ impl JournalProxy {
             "each open round has its delegation"
         );
         assert!(
-            self.ballot.is_none_or(|ballot| self
-                .rounds
-                .by_slot()
-                .values()
-                .all(|r| r.ballot() == ballot)),
+            self.ballot.is_none_or(|ballot| self.rounds.all_at(ballot)),
             "every open round runs at the highest ballot taken"
         );
     }

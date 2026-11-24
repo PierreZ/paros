@@ -111,8 +111,12 @@ Each entry names the decision that rejected it.
   on 2026-11-15, decision 1). The coordinator moves with each leader change of the journal, and
   the control plane gets knowledge of the core. The coordinator is a client of the journal that
   holds the leader uuid, decoupled from the Paxos leader.
-- **A separate election library** (decision 13). Two mechanisms for one problem. The term of the
-  control-plane kit is the public election API, and the library is deleted.
+- **The election journal library of the tag** (decision 13). Two mechanisms for one problem, and
+  the election journal was on the path of each term. It is deleted. The coordinators win their
+  term with `SetLeader` (rule 3). The first plan of decision 13 made that term the public election
+  API too. Pierre replaced that part on 2026-11-24 (#1420 (paros-election)): the public election
+  library is the coordination store of section 4.4, a ZooKeeper-style client over its own
+  journal. It never sits on the path of a coordinator's term.
 - **Four levels of coordinators, or one cell actor for all** (decision 6). The goal had four
   levels and the code had one actor with a booked slot that ran nothing. Three small control
   planes of one kit (tenant, cell, universe), hosted in one process, replace both.

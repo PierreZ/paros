@@ -20,6 +20,7 @@ ctrl_drop           violation  ci
 ctrl_peer           violation  ci
 ctrl_probe_drop     violation  ci
 ctrl_unchoose       violation  ci
+ctrl_unchoose_safe  violation  ci
 reach_blocked       violation  ci
 reach_probe         violation  ci
 reach_learn         violation  ci

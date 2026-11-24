@@ -24,11 +24,13 @@ reconfiguration, Compartmentalized Paxos for scale. A new control-plane need is 
 "which journal, which election, which flavor?" before anything new is built; a cluster file, a
 lock service, a gossip protocol or a hand-rolled agreement protocol is the wrong answer.
 
-**The election is the compare-and-set on the journal** (decisions 1 and 13). An election is not
-a second journal: the actor that wins `SetLeader(new, old)` on a control journal holds the term
-of that journal (rule 3, section 3.3). The same mechanism is the public election API, so a
-customer elects a leader the way the coordinators do. The election journal and its library are
-deleted.
+**A coordinator's term is the compare-and-set on its control journal** (decision 1). An election
+is not a second journal: the actor that wins `SetLeader(new, old)` on a control journal holds the
+term of that journal (rule 3, section 3.3). The old election journal and its library are deleted.
+**The public election library is a coordination store over a journal** (Pierre, 2026-11-24,
+#1420 (paros-election), section 4.4): a ZooKeeper-style client that owns one journal, with
+sessions, nodes and the recipes of Apache Curator (a leader latch, locks, groups) on top. A
+customer elects a leader with it, and the leader and the candidates write data into it.
 
 The control plane is itself stored in journals and coordinated through the same primitive the
 tenants use. It has three control planes of one shape, plus the journals they govern (decision

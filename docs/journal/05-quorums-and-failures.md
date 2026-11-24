@@ -154,8 +154,9 @@ a boot that finds a vote damaged (`Rot`), the leader's probe, its learn and the 
   without the damaged acceptor holds no vote at the slot, kept the slot and promised above the
   vote's ballot, so no quorum voted at that ballot. A blocked slot is then not always chosen: a
   late answer can decide it with a `Noop` (`reach_noop`), and the learn from a replica acts only
-  on a chosen slot. The invariant `BlockedChosen` says this (Pierre, 2026-11-24): each blocked
-  slot is chosen, or the highest ballot that voted there is a ballot that no quorum can complete (`DeadAt`). A probe decides a
+  on a chosen slot. The invariant `BlockedChosen` says this (Pierre, 2026-11-24): each slot that
+  a ballot `b` blocked is chosen, or the highest ballot below `b` that voted there is a ballot that
+  no quorum can complete (`DeadAt`). A probe decides a
   `Noop` at an unchosen slot only after such a rot (`NoNoopProbe`).
 
 ### J5.4 Zones

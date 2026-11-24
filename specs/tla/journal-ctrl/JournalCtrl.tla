@@ -238,15 +238,18 @@ DeadAt(a, s, f) ==
        /\ a \notin Q
        /\ \A x \in Q : dprom[x] > f /\ \A v \in Cmds : <<s, f, v, x>> \notin sent2b
 
-\* A blocked slot is chosen, or the highest ballot that voted there is a
-\* ballot that no quorum can complete: a rot needs a lasting copy of a
-\* chosen value, or a vote that no quorum can choose (`Spare`), and the
-\* blocked slot's top report is a damaged vote.
+\* A slot that ballot b blocked is chosen, or the highest ballot below b
+\* that voted there is a ballot that no quorum can complete: a rot needs a
+\* lasting copy of a chosen value, or a vote that no quorum can choose
+\* (`Spare`), and the blocked slot's top report is a damaged vote. Only the
+\* ballots below b count: a later leader may vote at the slot after b
+\* blocked it, and its vote says nothing of what b's Phase 1 read.
 BlockedChosen == \A b \in Ballots : \A s \in bblock[b] :
   \/ IsChosen(s)
   \/ \E a \in Acceptors, f \in Ballots, v \in Cmds :
+       /\ f < b
        /\ <<s, f, v, a>> \in sent2b
-       /\ \A m \in sent2b : m[1] = s => m[2] <= f
+       /\ \A m \in sent2b : m[1] = s /\ m[2] < b => m[2] <= f
        /\ DeadAt(a, s, f)
 
 (***************************************************************************)

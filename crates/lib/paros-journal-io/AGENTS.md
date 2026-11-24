@@ -23,7 +23,7 @@ Read them before you change the code, and change them in the same PR when a rule
 | `host/role.rs` | the journal roles behind `paros_host::Role`: the acceptor, the replica, the leader (it stamps each write with the step's `now`) and the proxy, and the map of their effects | rules 1, 2 |
 | `driver.rs` | the journal `Driver` on `paros_host::Driver`: the journal's ports (register changes, call and read answers, notices), `assign`, `call`, `read`, `join`, `abandon` | rule 1 |
 | `mem.rs` | backends in memory: `MemStorage`, `MemNetwork` and its `Endpoint`, `ManualClock`, `MemRegister` | |
-| `contract.rs` | the suites that check a backend: `storage`, `storage_reopen`, `transport`, `clock` | rule 4 |
+| `contract.rs` | the suites that check a backend: `storage`, `storage_reopen`, `transport`, `clock`, `register` | rule 4 |
 
 Each module keeps its unit tests in `<module>/tests.rs`. The driver walk of
 `crates/sim/journal-sim` (`src/host.rs`, `tests/host.rs`) judges the driver and the `Host`

@@ -285,7 +285,8 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight; the faults of a storage (`Full`, `Lost`, `Unknown`) and their verdicts, with the list of the roles on a disk (`docs/journal/04-roles.md` §J4.2) | the generic `Driver` of `paros-host`, its `StorageError`, `Verdict` and `Storage::list` | `flight-rule/` | #1255 (journal sans-IO contract), done; #1414 (Storage lists the roles on a disk and reports typed faults) |
 | Rule 2 of the journal's sans-IO contract, every input is recorded: the time and the random draws in each input, one timer for each role (`docs/journal/04-roles.md` §J4.2) | not built (`paros-host`, #1413) | `recorded-inputs/` | #1413 (the time, the timers and the draws in each role) |
-| The election over a journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after #1323 (build the paros journal v1)) | `election/` | #1420 (paros-election) |
+| The coordinator's term over its control journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (the coordinators of `paros-cell`, #1423, use the journal client directly) | `election/` | #1420 (paros-election) |
+| The coordination store, the election library (Pierre, 2026-11-24): a multi-writer journal that every member folds, sessions with a dedup of `<<session, op_seq>>` over at-least-once copies, the conditional expiry, the leader latch with its term as a position, the guarded record, the fence of an order by its term, the trim to a checkpoint only (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after this model) | `coord/` | #1420 (paros-election) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
@@ -3542,8 +3543,9 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
   (`Unchoosable`: a promise quorum of its grid without the acceptor holds no vote at the slot,
   kept it and promised above the vote's ballot). A rot of the last copy is data loss (`Readable`).
   A blocked slot is then not always chosen, so `LearnChosen` needs `IsChosen`, and the probe can
-  decide a `Noop`. `BlockedChosen` says so: each blocked slot is chosen, or the highest ballot that
-  voted there is a ballot that no quorum can complete (`DeadAt`).
+  decide a `Noop`. `BlockedChosen` says so: each slot that a ballot `b` blocked is chosen, or the highest
+  ballot below `b` that voted there is a ballot that no quorum can complete (`DeadAt`). A later
+  ballot may vote at the slot after `b` blocked it, so only the ballots below `b` count.
 - **The probe** (`ProbeDecide`): a blocked slot is decided on qualifying answers that hold a
   quorum of each grid that reads it, with the readable vote at the threshold, or none.
   No answer that dropped the slot enters the tally (`ProbeDrops = "skip"`).
@@ -3566,6 +3568,7 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
 | `ctrl_peer` | violation | control: a repair from a peer's vote (`Repair = "peer"`) breaks `OneValueAtBallot` |
 | `ctrl_probe_drop` | violation | control: a probe that tallies an answer that dropped the slot (`ProbeDrops = "ignore"`) chooses a `Noop` over the chosen write and breaks `Agreement` |
 | `ctrl_unchoose` | violation | control: a vote counts as unchoosable without the promises above its ballot (`Unchoose = "any"`), and `BlockedChosen` breaks |
+| `ctrl_unchoose_safe` | violation | the same control, judged by the safety invariants of `ctrl` without `BlockedChosen`: a rot then takes a vote that a chosen value still needs, and `Readable` (data loss) breaks |
 | `reach_blocked`, `reach_probe`, `reach_learn`, `reach_repair`, `reach_skip` | violation | the model blocks a slot, decides one on the probe, learns one, repairs a faulty vote, and skips a dropped one |
 | `reach_noop` | violation | the probe decides a blocked slot that is not chosen with a `Noop`, after a rot of an `Unchoosable` vote (`NoNoopProbe`) |
 

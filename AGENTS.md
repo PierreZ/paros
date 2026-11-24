@@ -137,7 +137,10 @@ request id, `release`, the limit of moves in flight, and the cell's own control 
 through the same port; #1421 (the placement port)), and, above the journal, the election over a
 journal (`specs/tla/election/`: the term won by `SetLeader(new, old)`, the term number from the
 fold, the stop at the first refused write, the hand on, the fence of an order by its term, the
-interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)), and the
+interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)), the
+coordination store that is the election library (`specs/tla/coord/`: a multi-writer journal that
+every member folds, sessions and the dedup of their copies, the conditional expiry, the leader
+latch, the guarded record, the term fence, the trim to a checkpoint; #1420, Pierre 2026-11-24), and the
 takeover by a new coordinator (`specs/tla/takeover/`: the view of a term from its own
 registrations, the registration that raises the fence, the order checked and done in one write, a
 reference per term, the stop of a deposed coordinator, the directory asked after a gone order;
@@ -322,8 +325,12 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
 - the edits of recorded traces (#1308 (mutate recorded traces)), in release in the
-  `trace-edits` job: `cargo nextest run --release -p consensus-sim --test traces -E
-  'test(edited) | test(no_record)'`. The `test` job leaves them out.
+  `trace-edits` job: `cargo nextest run --release -p consensus-sim --test traces -E "$EDITS"`.
+- the other trace checks of consensus-sim and journal-sim (TLC on each walk), in debug in the
+  two `traces` jobs of `rust.yml` (`refusals`: the `tlc_refuses_*` tests of consensus-sim;
+  `rest`: the others). The `test` job leaves every trace check and the coverage gate out. The
+  sets are nextest filters in the `env` of `rust.yml` (`COVERAGE`, `TRACES`, `EDITS`,
+  `REFUSALS`), and every test of the workspace runs in exactly one job.
 - not on a pull request: the `Mutants nightly` workflow (`mutants-nightly.yml`, since
   2026-11-23) runs cargo-mutants on the lines of `crates/lib/paros-consensus/src` that main
   changed since the head of the last green night (`scripts/mutants.sh --in-diff crate.diff`).
@@ -376,8 +383,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`,
 Markdown, `docs/`, `specs/`, the TLA+ scripts) runs only the `wasm` job of `rust.yml`
 (`scripts/ci-plan.py rust`); a push to `main` runs everything. The `traces` jobs of the `TLA`
-workflow run only when the `test` job of `rust.yml` does not, since that job runs the same trace
-tests. Rust 2024 edition, toolchain pinned in `rust-toolchain.toml` (incl.
+workflow run only when the `traces` and `trace-edits` jobs of `rust.yml` do not, since those
+jobs run the same trace tests. Rust 2024 edition, toolchain pinned in `rust-toolchain.toml` (incl.
 `wasm32-unknown-unknown`), clippy pedantic on (`[workspace.lints]`). The whole workspace passes
 pedantic with no lint allowed (Pierre, 2026-11-19): fix the code, never add `#[allow(clippy::..)]`.
 When a lint is wrong for one item, write `#[expect(clippy::<lint>, reason = "..")]` on that item

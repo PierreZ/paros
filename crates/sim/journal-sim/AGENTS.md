@@ -83,7 +83,8 @@ Test only: `publish = false`.
   `SameCopyAgain`). `tests/heal.rs`; `tests/controller.rs` runs it in the gate of the role's probes.
 - `src/host.rs`: the driver walk (`HostModel`, #1329): three processes, each a `Driver` of
   `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
-  walk's mailbox, crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
+  walk's mailbox, the register on three matchmakers (`QuorumRegister`, one matchmaker on each
+  process, with lost, half and late writes), crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
   `FLIGHT`, `ANSWER`), its reach sites and its planted mutants (`HostMutant`). `tests/host.rs`.
 - `src/client.rs`: the client walk (`ClientModel`, #1331): two programs with a `Client` of
   `paros_journal::client`, a lossy mailbox, held and lost answers, seals, `Resolve`, reads; its
@@ -93,9 +94,17 @@ Test only: `publish = false`.
 - `src/backend.rs`: the backends of the driver walk and the whole walk: `Disk`, a disk that
   survives its process and fails commits inside the contract, `Wire`, a transport that judges
   the flight rule at each send, and `QuorumRegister`, the journal's register on three
-  matchmakers (one `RegisterCall` per change, a read and a write at two members), whose write
-  `LossyRegister` can make reach one member only, with the oracle `AGAIN`: a change asked again
-  over a value that holds it is never refused (§J3.4, "a change asked again").
+  matchmakers (one `RegisterCall` per change, a read and a write at the members that are up, in
+  an order drawn from the seed). A matchmaker is down while its machine is: a change or a read
+  that no majority answers gives no answer. A read gives the top write that a majority holds,
+  or repairs a write that a minority took with a `Confirm` (a choice of this fake; the repair can
+  be refused, and the read gives no answer).
+  `LossyRegister` loses a change's request or its reply, makes its write reach one member only,
+  or holds it in flight (`Fault::Late`) while other operations run, until `QuorumRegister::land`
+  writes it at the members that are up. The oracle `AGAIN`: a change asked again over a value
+  that holds it is never refused (§J3.4, "a change asked again"). `tests/backend.rs` runs the
+  register contract suite of `paros-journal-io` (`contract::register`) on both registers: a
+  fake that breaks its trait's contract tests nothing.
 - `src/whole.rs`: the whole-journal walk (`WholeModel`, #1445): two journals on nine machines in
   three zones, a `Driver` on each machine, the controllers of each journal run by
   `paros_journal_control::ControlDriver` on the reports of the machines (the walk is its register
@@ -104,9 +113,13 @@ Test only: `publish = false`.
   writes, resends and resolves, crashes, the loss of a zone for a while, the loss of one machine
   for good (`Lose`), lost register calls, register writes that one matchmaker only takes, and disk faults, the leader's retire and the heal of a
   retired segment's replica set on the `Host` (#1314); its oracles (`AGREE`, `SEALED`, `FLIGHT`,
-  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`, `BOUNDED_IN_FLIGHT`, `AGAIN`), its reach sites and its
+  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`, `BOUNDED_IN_FLIGHT`, `AGAIN`, `DISK`: every
+  replica disk holds the chosen log, `STOPPED`: every leader that stops on its own has a true cause
+  in the facts that a matchmaker ever held or an acceptor's disk promised), its reach sites and its
   planted mutants (`WholeMutant`). `tests/whole.rs` also requires every `probe!` of the
   controller's driver and signals.
+- `tests/determinism.rs`: each walk runs two seeds twice and compares the logs
+  (`Walk::check_determinism`).
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/roles.rs`: the events of a roles walk as a trace of
@@ -163,6 +176,11 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
 - **TLC checks both roles shapes**: the narrow walks, and the wide walks (grids of two columns,
   promises in pages of two). `RolesTrace` gives each slot the Phase 2 quorums of its column
   (`Q2Of`, `slot % columns`) and Phase 1 a majority of every column.
+- **A walk that heals judges what it heals.** When the walk replaces a role that gave up (a
+  stopped leader, a failed role), an oracle judges that the role gave up for a true cause first
+  (`STOPPED` in the whole walk). Else a wrong stop costs nothing that an oracle sees.
+- **Every walk has a determinism test** in `tests/determinism.rs`, and every draw of a walk's
+  backend starts from the seed (`QuorumRegister::new` takes its draw from `cx.rng()`).
 - **A mutant test judges the clean walk too**: each seed that fails with the mutant must pass
   without it (`caught` in `tests/roles.rs` and `tests/whole.rs`).
 - **The walks run on fresh seeds each night** (`.github/workflows/journal-nightly.yml`): the first

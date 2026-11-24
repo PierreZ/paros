@@ -5,7 +5,7 @@
 # `Live` checks the events in chunks while the walk runs; each chunk starts
 # from every state the chunk before it ended in, so one TLC behaviour's
 # limit of 65,535 states does not bound the run. The seed moves with the
-# date. The `traces` job of `tla.yml` and the `test` job of `rust.yml` run
+# date. The `traces` jobs of `tla.yml` and of `rust.yml` run
 # the same test on one short walk. A red night is a finding: the test
 # prints the seed, the refused event and the model state before it.
 name: Journal live

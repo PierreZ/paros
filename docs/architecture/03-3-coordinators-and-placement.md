@@ -36,17 +36,19 @@ candidate) fail.
   it is registered, alive, and has followed the control journal to its tail. No list of
   candidates is kept, and no candidate comes from a booking or from the first configuration
   (step 3.6, #1023).
-- **One election mechanism for everyone** (decision 13). The election over a journal is its own
-  crate (section 4.4; working name `paros-election`, #1420 (paros-election)): win a journal with
-  `SetLeader`, renew by writing, stop at the first refused write, hand on with `SetLeader(next,
-  me)`. It is the public election API, and each coordinator uses it over its control journal. The
-  election journal library (`paros::client::election`) is deleted. Multi-writer journals stay a
-  data-plane feature: the election refuses a journal whose leader is `None`. TLC checks the
-  election alone in `specs/tla/election/`: one holder for each term, a holder that stops at its
-  first refused write, a fenced order of an old term refused, an interface that ends with its
-  term, and a multi-writer journal that the election never takes back. The crate is a thin layer
-  on the pure journal client (`paros_journal::client`), and not an actor on the host (Pierre,
-  2026-11-23; section 4.4).
+- **The coordinator's term needs no library** (decision 1; Pierre, 2026-11-24, #1420
+  (paros-election)). A coordinator wins its control journal with `SetLeader`, renews by
+  writing, stops at the first refused write, and hands on with `SetLeader(next, me)`: these are
+  the calls of the journal client, with no other layer. TLC checks this term alone in
+  `specs/tla/election/`: one holder for each term, a holder that stops at its first refused
+  write, a fenced order of an old term refused, an interface that ends with its term, and a
+  multi-writer control journal that the term never takes back. The old election journal library
+  (`paros::client::election`) is deleted.
+- **The public election library is a coordination store** (Pierre, 2026-11-24, option B of the
+  proposal of that day; section 4.4, "The coordination store"). It owns a multi-writer journal,
+  and a user elects a leader with its latch. It replaces the first plan of decision 13, in which
+  the public election API was the same `SetLeader` term as the coordinators'. **Open** (after
+  the store is built): whether the coordinators move onto the store too, which changes rule 3.
 - **Each control journal has one writer, its coordinator.** An operator or a client sends a
   request with an idempotency id, and the coordinator writes it under its own term. No admin
   session claims a control journal (section 3.1).

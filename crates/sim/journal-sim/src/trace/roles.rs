@@ -30,6 +30,12 @@ pub fn roles_spec() -> TraceCheck {
 
 /// The grid of the first segment of every roles walk.
 const FIRST_GRID: [u64; 3] = [1, 2, 3];
+/// `CompactAt` of `RolesTrace.cfg`: the replicas of a segment that compact
+/// to a slot before its acceptors may.
+const COMPACT_AT: usize = 2;
+/// The replicas of segment `p` are `10 p + 1 ..= 10 p + 3` (the walk's
+/// `set_of`), so a replica's segment is its id over this stride.
+const REPLICA_SET_STRIDE: i64 = 10;
 
 fn set(items: impl IntoIterator<Item = u64>) -> Value {
     Value::Set(items.into_iter().map(int).collect())
@@ -506,7 +512,7 @@ pub const EDITS: &[Edit] = &[
     }),
     repeat_edit!("a reshape repeated", "reshape"),
     // The first acceptor compaction whose slot one higher fewer than
-    // `CompactAt` (2) replicas of its segment compacted to: a compaction
+    // `COMPACT_AT` replicas of its segment compacted to: a compaction
     // there is a step the model refuses.
     Edit::new("an acceptor compaction one slot higher", |events| {
         change_first(
@@ -521,12 +527,14 @@ pub const EDITS: &[Edit] = &[
                             } else {
                                 None
                             };
-                            if let Some((r, slot)) = point.filter(|(r, _)| r / 10 == p) {
+                            if let Some((r, slot)) =
+                                point.filter(|(r, _)| r / REPLICA_SET_STRIDE == p)
+                            {
                                 let top = reached.entry(r).or_insert(slot);
                                 *top = (*top).max(slot);
                             }
                         }
-                        reached.values().filter(|slot| **slot > x).count() < 2
+                        reached.values().filter(|slot| **slot > x).count() < COMPACT_AT
                     })
             },
             |e| plus(e, "x", 1),

@@ -14,6 +14,7 @@ cas-register 4
 cell-control 2
 compartments 3
 config-register 8
+coord 3
 ctrl-grid 18
 ctrl-segments 1
 decree 2
