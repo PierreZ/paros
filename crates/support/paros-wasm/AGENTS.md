@@ -192,8 +192,8 @@ decided slot, applied at once.
 - `src/journal/live.rs` → `Live`, `Move`, `View` (wasm `LiveJournal`) → the whole journal v1 on
   six hosts, the scenario of the facade example `full_journal`: one `Driver` of `paros-journal-io`
   per host on `MemStorage` (a crash drops the driver and keeps the disk), a `MemNetwork`, a
-  `ManualClock` that `step` advances, the register on three `RegisterMember`s (one operation at a
-  time, so no write stays at a minority), acceptors on a grid of two columns, three replicas per
+  `ManualClock` that `step` advances, the register on three `RegisterMember`s (one thread, so its
+  operations run one after the other and no write stays at a minority), acceptors on a grid of two columns, three replicas per
   segment (odd segments on hosts 1, 3, 5, even ones on 2, 4, 6), one leader per segment and the
   pure client. The reader's moves: append, read, roll, crash and restart a host. The page is the
   controller: it opens each segment with one register change. `live/tests.rs` plays the page's

@@ -37,9 +37,11 @@ of the hosts, matchmakers and segments is read from the roles and the register.
 Three things are simpler than in a real cell. The controller is the page: it opens segment 1,
 asks for each new segment with one register change, and starts the new leader from the front
 of the replicas of the old segment, where the journal has [the controller](../controller/) role. A
-leader also moves only at a roll. And the register runs one operation at a time, so no
-write stays at a minority of the matchmakers. A leader stops today when its own seal comes back
-refused after a partial write; the fix is open in the library.
+leader also moves only at a roll. And the page runs on one thread, so the register's operations
+run one after the other and no write stays at a minority of the matchmakers. In the facade
+example `full_journal`, the operations of six hosts interleave: a write can stay at a minority,
+and the change asked again finds it and makes it done ([A change asked
+again](https://github.com/PierreZ/paros/blob/main/docs/journal/03-segments-and-records.md#a-change-asked-again)).
 
 ## Things to try
 
