@@ -5,6 +5,7 @@
 import Doc from "../../layouts/Doc.astro";
 import { REPO, url } from "../../nav";
 import { LESSONS, TLC_RUN, pathOf } from "../../course";
+import { CHAPTERS, played } from "../../tour";
 
 const traces = import.meta.glob("../../traces/*.json", { eager: true, import: "default" }) as Record<string, { scenarios: { id: string; beats?: unknown[] }[] }>;
 const traceOf = (page: string) => Object.entries(traces).find(([p]) => p.endsWith(`/${page}.json`))![1];
@@ -13,6 +14,8 @@ const PAGE_NAMES: Record<string, string> = {
   "compartmentalized": "Compartmentalized Paxos", "matchmaker": "Matchmaker Paxos",
   "journal-seal": "Journal segments",
 };
+const chapters = played(Object.fromEntries(Object.entries(traces).map(([p, t]) => [p.replace(/^.*\/(.+)\.json$/, "$1"), t])) as never, url);
+const tourMinutes = chapters.reduce((s, c) => s + c.minutes, 0);
 const lessons = LESSONS.map((l, i) => {
   const story = traceOf(l.page).scenarios.some((s) => s.beats?.length);
   return { ...l, n: i + 1, story, pageName: PAGE_NAMES[l.page] ?? l.page,
@@ -106,6 +109,11 @@ const f = (n: number) => FLAVORS[n - 1];
   <p>Eight lessons, in order: seven on the Paxos flavors, then one on the journal that paros builds from them. Each lesson is a group of recorded runs on one page. A run tells
   one idea per screen, and before some screens it asks what will happen. At the end of a run,
   the page offers the next run of the lesson.</p>
+  <a class="tour-entry" href={url("paxos/tour/")}>
+    <span class="tour-entry-kicker label">Start here · {CHAPTERS.length} chapters · about {tourMinutes} min</span>
+    <span class="tour-entry-title">▶ Watch the tour</span>
+    <span class="tour-entry-text">One chapter for each of lessons 1 to 7. Press Play and watch the recorded runs, with no question. Each chapter ends with its lesson and its first exercise.</span>
+  </a>
   <p class="course-resume" data-course-resume hidden></p>
   <ol class="course">
     {lessons.map((l) => (

@@ -1,0 +1,32 @@
+---
+// The tour of the Paxos flavors (src/tour.ts): every chapter back to back,
+// played by the story player (public/story.js) in watch mode and driven by
+// public/tour.js. The page holds only the runs of the chapters, copied out of
+// their traces at build time (`tourTrace`), so it stays small.
+import Doc from "../../layouts/Doc.astro";
+import { url } from "../../nav";
+import { check as checkCourse } from "../../course";
+import { check, played, tourTrace } from "../../tour";
+
+const traces = import.meta.glob("../../traces/*.json", { eager: true, import: "default" });
+const byPage = Object.fromEntries(Object.entries(traces).map(([p, t]) => [p.replace(/^.*\/(.+)\.json$/, "$1"), t])) as never;
+checkCourse(byPage);
+check(byPage);
+const trace = tourTrace(byPage, url);
+const tour = { chapters: played(byPage, url), all: true };
+const json = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
+---
+<Doc title="The tour" kicker="Paxos" section="paxos/" siblings={[]}
+  description="The Paxos flavors in seven short chapters of recorded runs. Press Play and watch: each run is recorded from the real paros-consensus.">
+  <div data-steps hidden></div>
+  <noscript><p>The tour needs JavaScript. Each chapter is also a lesson of the <a href={url("paxos/#course")}>course</a>.</p></noscript>
+  <script is:inline type="application/json" id="trace" data-tour="on" data-source="paros-consensus" set:html={json(trace)} />
+  <script is:inline type="application/json" id="tour" set:html={json(tour)} />
+  <script is:inline src={url("course.js")} />
+  <script is:inline src={url("stage.js")} />
+  <script is:inline src={url("story.js")} />
+  <script is:inline src={url("tour.js")} />
+  <p class="aside">Each chapter ends with a link to its lesson (Go deeper) and to its first exercise
+  (Your turn). The lessons ask questions before some screens; the tour asks none. Your place in
+  the tour stays in this browser only.</p>
+</Doc>

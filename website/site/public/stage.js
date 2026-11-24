@@ -19,6 +19,7 @@
 //   stage.draw(state, writes);          // state: { nodes, state, logs, wire }
 //   var mine = stage.begin();           // cancels a move in progress
 //   stage.step(before, after, { message, lost, writes }, mine).then(...)
+//   stage.hide({ lane: true });         // placed, drawn once it enters
 (function () {
   var SVG = "http://www.w3.org/2000/svg";
   var MOVE = 650;      // ms for a message to cross
@@ -51,6 +52,7 @@
     var nodesLayer = null, wireLayer = null;
     var token = 0;
     var speed = 1;       // the player's speed: 1.5 plays a move in 2/3 of the time
+    var hidden = {};     // lane id -> true: placed, but not drawn yet (it enters later)
 
     // Place the lanes. `used` (lane id -> true) keeps only some lanes; with
     // no `used`, every lane is drawn. `log` leaves room for the log strip.
@@ -103,6 +105,7 @@
     function drawNodes(st, writes) {
       nodesLayer.textContent = "";
       lanes.forEach(function (entry) {
+        if (hidden[entry.lane.id]) return;
         var node = (st.nodes && st.nodes[entry.i]) || { alive: true };
         var lines = (st.state && st.state[entry.i]) || [];
         var g = svg("g", { class: "stage-node " + entry.lane.role + (node.alive ? "" : " down") + (node.role === "leader" ? " leader" : "") });
@@ -309,6 +312,9 @@
       cancel: function () { token++; },
       // Play the next moves `v` times as fast (the player's speed).
       speed: function (v) { speed = v > 0 ? v : 1; },
+      // Keep the lanes of `ids` (lane id -> true) out of the drawing: they
+      // keep their place, so the layout does not move when they enter.
+      hide: function (ids) { hidden = ids || {}; },
       // Whether move `mine` is still the latest.
       live: function (mine) { return mine === token; },
       wait: function (ms, mine) { return tween(ms, function () {}, mine); },

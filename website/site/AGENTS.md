@@ -149,6 +149,35 @@ from TLC's output, never from an estimate. To refresh them, run for each lesson,
 <config>.cfg MC.tla`, copy "distinct states found", and change `TLC_RUN` the same day. A lesson whose run alone is
 new names its own day (`date` of its `tlc`).
 
+## The tour (`src/tour.ts`, `public/tour.js`)
+
+The tour (plan `paxos-guided-tour-2026-11-24`, decided by Pierre on 2026-11-24) plays the Paxos
+flavors in seven chapters, in course order: one chapter per lesson 1 to 7, on five pages. A
+chapter names the runs it plays, in `src/tour/<page>.ts`; `src/tour.ts` lists the chapters
+(`CHAPTERS`) and its `check()` fails the build when a chapter names a lesson or a run that
+does not exist, a run with no story, a tour run that is in no chapter or in two, or a flavor
+page that has no chapter. Today each chapter plays runs of its lesson; a flavor's own tour run
+(`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of `src/steps/story.rs`: 10
+to 30 beats, at most 140 characters per sentence, no question, every `more` names a run of the
+page, every `enter` names a lane) takes their place, one chapter at a time. A run marked `tour`
+is in no lesson (`src/course.ts` accepts it).
+
+- `/paxos/tour/` (`src/pages/paxos/tour.astro`) inlines only the runs of the chapters
+  (`tourTrace`, ids `<chapter>--<run>`, each with its own lanes, grid and page) and plays them
+  all: a title screen with one Play and the chapter menu, a bridge before each chapter but the
+  first (the problem that the flavor solves, no protocol fact of its own), the runs, then the
+  end of the chapter (Next chapter, after a 5 s countdown that the reader can stop when the
+  player reached it; Your turn; Go deeper). The address says only `#chapter=<id>`, never play.
+- A flavor page plays its own chapters in place: "Watch this flavor (N min)" at the top of its
+  story; "Stop watching", Go deeper and Your turn leave watch mode.
+- Watch mode in `story.js` (`paxosStory.tour()`): no question, no choice, no step-through link,
+  no lesson, nothing in the address or the lesson progress; the tour bar replaces the story's
+  head, and the drawing keeps to 40% of the screen height, so every screen of every chapter fits
+  a 390 x 660 phone (the smoke test measures each one). A beat's `more` links a run, and its
+  `enter` lanes are drawn from that beat on (`stage.hide`).
+- `public/course.js` keeps the place in the tour (`tourAt`) and the watched chapters
+  (`tourDone`) in this browser only; the title screen offers "Continue where you stopped".
+
 ## Your turn (`public/lab.js`)
 
 A lesson can end with exercises on the live core (`labs` in `src/course.ts`). The page sets

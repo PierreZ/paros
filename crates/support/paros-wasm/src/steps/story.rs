@@ -46,7 +46,32 @@ pub struct Beat {
     /// What the reader can do at the end of the beat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<Choice>,
+    /// The run of the same page that goes deeper into this beat: the tour
+    /// links it as "More on this".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more: Option<String>,
+    /// The lanes that appear at this beat: before it, the stage does not
+    /// draw them, so it starts small and grows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enter: Vec<String>,
 }
+
+/// The mark of a tour run: a run written for the tour of the Paxos flavors,
+/// which tells one flavor in one world with no restart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tour {
+    /// The chapter of the tour that plays it (`src/tour.ts` of the site).
+    pub chapter: String,
+    /// The chapter's title.
+    pub title: String,
+}
+
+/// The fewest and the most beats of a tour run.
+pub const TOUR_BEATS: std::ops::RangeInclusive<usize> = 10..=30;
+
+/// The longest sentence of a tour run, in characters: the stage, the
+/// sentence and the player fit one phone screen.
+pub const TOUR_SAYS: usize = 140;
 
 /// The fewest and the most answers of a question: a question with one answer
 /// asks nothing, and five answers do not fit a phone screen.
@@ -225,7 +250,43 @@ impl Beats {
             to: at,
             question: None,
             choices: Vec::new(),
+            more: None,
+            enter: Vec::new(),
         });
+    }
+
+    /// Link the open beat to `run`, the run of the same page that goes
+    /// deeper.
+    ///
+    /// # Panics
+    ///
+    /// When no beat is open, or it has a link already.
+    pub(crate) fn more(&mut self, run: &str) {
+        let open = self
+            .beats
+            .last_mut()
+            .expect("a link ends a beat: open one first");
+        assert!(open.more.is_none(), "a beat links one run: {:?}", open.says);
+        open.more = Some(run.to_string());
+    }
+
+    /// Make `lanes` appear at the open beat.
+    ///
+    /// # Panics
+    ///
+    /// When no beat is open, or a lane is named twice.
+    pub(crate) fn enter(&mut self, lanes: &[&str]) {
+        let open = self
+            .beats
+            .last_mut()
+            .expect("lanes enter at a beat: open one first");
+        for lane in lanes {
+            assert!(
+                !open.enter.iter().any(|known| known == lane),
+                "{lane} enters once"
+            );
+            open.enter.push((*lane).to_string());
+        }
     }
 
     /// Ask the reader a question before the open beat plays.
@@ -344,14 +405,21 @@ impl Beats {
 }
 
 /// Check that every choice of every run opens a run of the page at one of its
-/// beats.
+/// beats, and that every "More on this" names a run of the page.
 ///
 /// # Panics
 ///
-/// When a choice names a run the page does not have, or a beat that run does
-/// not have.
+/// When a choice or a link names a run the page does not have, or a choice
+/// names a beat that run does not have.
 pub(crate) fn check_choices(page: &str, runs: &[super::Scenario]) {
     for run in runs {
+        for more in run.beats.iter().filter_map(|beat| beat.more.as_ref()) {
+            assert!(
+                runs.iter().any(|other| &other.id == more),
+                "{page}/{}: \"More on this\" names no run {more:?}",
+                run.id
+            );
+        }
         for choice in run.beats.iter().flat_map(|beat| &beat.choices) {
             let target = runs
                 .iter()
@@ -375,6 +443,45 @@ pub(crate) fn check_choices(page: &str, runs: &[super::Scenario]) {
     }
 }
 
+/// What breaks the rules of a tour run, for each run of `trace` marked as
+/// one: between 10 and 30 beats, one sentence of at most 140 characters
+/// each, no question (the tour is for watching; the questions stay in the
+/// lessons), and every lane of `enter` a lane of the run. An empty list: no
+/// tour run breaks a rule.
+#[must_use]
+pub fn tour_problems(trace: &super::Trace) -> Vec<String> {
+    let mut problems = Vec::new();
+    for run in trace.scenarios.iter().filter(|run| run.tour.is_some()) {
+        let name = format!("{}/{}", trace.page, run.id);
+        if !TOUR_BEATS.contains(&run.beats.len()) {
+            problems.push(format!(
+                "{name}: {} beats, not {} to {}",
+                run.beats.len(),
+                TOUR_BEATS.start(),
+                TOUR_BEATS.end()
+            ));
+        }
+        let lanes = run.lanes.as_ref().unwrap_or(&trace.lanes);
+        for (k, beat) in run.beats.iter().enumerate() {
+            let long = beat.says.chars().count();
+            if long > TOUR_SAYS {
+                problems.push(format!(
+                    "{name} beat {k}: {long} characters, more than {TOUR_SAYS}"
+                ));
+            }
+            if beat.question.is_some() {
+                problems.push(format!("{name} beat {k}: a question"));
+            }
+            for lane in &beat.enter {
+                if !lanes.iter().any(|known| &known.id == lane) {
+                    problems.push(format!("{name} beat {k}: {lane} enters, but is no lane"));
+                }
+            }
+        }
+    }
+    problems
+}
+
 /// The holes of a log: every slot from `floor` up to the highest slot of
 /// `slots` that `slots` does not hold.
 #[cfg(feature = "paxos")]
@@ -389,6 +496,36 @@ pub(crate) fn holes(floor: u64, slots: impl IntoIterator<Item = u64>) -> Vec<u64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_beat_carries_its_link_and_the_lanes_that_enter() {
+        let mut beats = Beats::default();
+        beats.open(0, "One acceptor holds the vote.");
+        beats.open(1, "Two more acceptors join.");
+        beats.enter(&["n2", "n3"]);
+        beats.more("acceptor-down");
+        let beats = beats.finish(2);
+        assert!(beats[0].more.is_none() && beats[0].enter.is_empty());
+        assert_eq!(beats[1].enter, ["n2", "n3"]);
+        assert_eq!(beats[1].more.as_deref(), Some("acceptor-down"));
+    }
+
+    #[test]
+    #[should_panic(expected = "a beat links one run")]
+    fn a_beat_links_one_run() {
+        let mut beats = Beats::default();
+        beats.open(0, "A write.");
+        beats.more("gap");
+        beats.more("leader-crash");
+    }
+
+    #[test]
+    #[should_panic(expected = "n2 enters once")]
+    fn a_lane_enters_once() {
+        let mut beats = Beats::default();
+        beats.open(0, "A write.");
+        beats.enter(&["n2", "n2"]);
+    }
 
     #[test]
     fn a_beat_ends_where_the_next_one_starts() {

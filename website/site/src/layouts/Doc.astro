@@ -3,6 +3,7 @@
 import Base from "./Base.astro";
 import { REPO, url } from "../nav";
 import { LESSONS, check, lessonsOf, pathOf } from "../course";
+import { CHAPTERS, check as checkTour, played } from "../tour";
 
 interface Sibling { title: string; path: string }
 interface Props {
@@ -73,6 +74,10 @@ if (fm.trace && !trace) throw new Error(`no trace src/traces/${fm.trace}.json`);
 type T = { scenarios: { id: string; label: string; beats?: unknown[] }[] };
 const byPage = Object.fromEntries(Object.entries(traces).map(([p, t]) => [p.replace(/^.*\/(.+)\.json$/, "$1"), t as T]));
 check(byPage);
+checkTour(byPage as never);
+// The chapters of the tour on this page (public/tour.js): "Watch this flavor".
+const chapters = fm.trace ? played(byPage as never, url, fm.trace) : [];
+const tourData = { chapters, of: CHAPTERS.length, all_href: url("paxos/tour/") };
 // The lessons of this page, for public/story.js: each run with its label,
 // and where the reader goes when the lesson ends.
 const course = fm.trace ? lessonsOf(fm.trace).map((l) => {
@@ -138,6 +143,8 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
     {(trace || paxosLab) && <script is:inline src={url("stage.js")} />}
     {trace && <script is:inline src={url("story.js")} />}
     {trace && <script is:inline src={url("steps.js")} />}
+    {chapters.length > 0 && <script is:inline type="application/json" id="tour" set:html={JSON.stringify(tourData).replace(/</g, "\\u003c")} />}
+    {chapters.length > 0 && <script is:inline src={url("tour.js")} />}
     {widget && <script is:inline type="module" src={url("engineering.js")} />}
     {paxosLab && <script is:inline type="module" src={url("lab.js")} />}
     {(fm.lab === "journal" || fm.lab === "register") && !trace && <script is:inline src={url("course.js")} />}

@@ -1,6 +1,7 @@
 // The progress of the Paxos course (src/course.ts), kept in this browser
 // only: the runs the reader saw to their end, the answers the reader gave,
-// the exercises the reader solved, and the last screen the reader opened. Nothing leaves the browser. When the
+// the exercises the reader solved, the last screen the reader opened, and
+// where the reader is in the tour (public/tour.js). Nothing leaves the browser. When the
 // storage is blocked or empty, the course works the same and remembers
 // nothing.
 (function () {
@@ -10,7 +11,8 @@
     var st = null;
     try { st = JSON.parse(window.localStorage.getItem(KEY) || "null"); } catch (e) { st = null; }
     if (!st || typeof st !== "object") st = {};
-    return { seen: st.seen || {}, answers: st.answers || {}, solved: st.solved || {}, last: st.last || null };
+    return { seen: st.seen || {}, answers: st.answers || {}, solved: st.solved || {}, last: st.last || null,
+      tour: { at: (st.tour && st.tour.at) || null, done: (st.tour && st.tour.done) || {} } };
   }
   function save(st) {
     try { window.localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) { /* storage blocked */ }
@@ -27,6 +29,10 @@
     answered: function (page, run, beat, answer) {
       change(function (st) { st.answers[page + "/" + run + ":" + beat] = answer; });
     },
+    // The tour: the reader is at run `run` (its index) of chapter `chapter`.
+    tourAt: function (chapter, run) { change(function (st) { st.tour.at = { chapter: chapter, run: run }; }); },
+    // The tour: the reader watched chapter `chapter` to its end.
+    tourDone: function (chapter) { change(function (st) { st.tour.done[chapter] = true; }); },
     // The reader reached the goal of exercise `id`.
     solved: function (id) { change(function (st) { st.solved[id] = true; }); },
     // The answers already given on one page: "run:beat" -> answer.
