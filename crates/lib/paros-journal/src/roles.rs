@@ -139,6 +139,7 @@ pub const REACHABLE: &[&str] = &[
     "leader: a higher promise stops the leader",
     "leader: a replica holds the sealed segment",
     "leader: a seal of its own segment stops the leader",
+    "leader: a seal of its own segment stops a sealing leader",
     "leader: a retire seen in Phase 1 is kept",
     "leader: a done seal end opens the leader",
     "leader: a seal end of another stops the leader",

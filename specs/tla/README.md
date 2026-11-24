@@ -3542,7 +3542,8 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
   (`Unchoosable`: a promise quorum of its grid without the acceptor holds no vote at the slot,
   kept it and promised above the vote's ballot). A rot of the last copy is data loss (`Readable`).
   A blocked slot is then not always chosen, so `LearnChosen` needs `IsChosen`, and the probe can
-  decide a `Noop`.
+  decide a `Noop`. `BlockedChosen` says so: each blocked slot is chosen, or the highest ballot that
+  voted there is a ballot that no quorum can complete (`DeadAt`).
 - **The probe** (`ProbeDecide`): a blocked slot is decided on qualifying answers that hold a
   quorum of each grid that reads it, with the readable vote at the threshold, or none.
   No answer that dropped the slot enters the tally (`ProbeDrops = "skip"`).
@@ -3557,15 +3558,16 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
 
 | Check | Result | What it shows |
 |---|---|---|
-| `ctrl` | pass | one grid of three, two writes that race for one slot, three ballots, one rot: the safety of `Journal.tla` and `JournalCompact.tla`, `OneValueAtBallot` (two readable votes at one slot and ballot carry one value, in memory and on disk) and `NoProposeBlocked` |
+| `ctrl` | pass | one grid of three, two writes that race for one slot, three ballots, one rot: the safety of `Journal.tla` and `JournalCompact.tla`, `OneValueAtBallot` (two readable votes at one slot and ballot carry one value, in memory and on disk), `NoProposeBlocked` and `BlockedChosen` |
 | `ctrl_g2` | pass | two segments of one acceptor each, a seal: a blocked slot of the old grid below the end |
 | `ctrl_trunc` | pass | one grid of three, a write and a `Truncate` over it, two ballots, one rot: a compaction drops the blocked slot, and the leader skips it (`SkipCompacted`) |
 | `ctrl_re` | pass | `ctrl_trunc` with `SpecRR`: an acceptor answers a `Prepare` again at a ballot it promised (`Repromise`), so the probe, the skip and the decide meet a second answer that carries what its disk holds now. CI checks the states that 7 minutes of BFS reach; `ctrl_re_full` (`--all`) checks them all |
 | `ctrl_drop` | violation | control: a damage that drops the vote (`Damage = "drop"`) breaks `Agreement` |
 | `ctrl_peer` | violation | control: a repair from a peer's vote (`Repair = "peer"`) breaks `OneValueAtBallot` |
 | `ctrl_probe_drop` | violation | control: a probe that tallies an answer that dropped the slot (`ProbeDrops = "ignore"`) chooses a `Noop` over the chosen write and breaks `Agreement` |
+| `ctrl_unchoose` | violation | control: a vote counts as unchoosable without the promises above its ballot (`Unchoose = "any"`), and `BlockedChosen` breaks |
 | `reach_blocked`, `reach_probe`, `reach_learn`, `reach_repair`, `reach_skip` | violation | the model blocks a slot, decides one on the probe, learns one, repairs a faulty vote, and skips a dropped one |
-| `reach_noop` | violation | the probe decides a blocked slot with a `Noop` after a rot of an `Unchoosable` vote (`NoNoopProbe`) |
+| `reach_noop` | violation | the probe decides a blocked slot that is not chosen with a `Noop`, after a rot of an `Unchoosable` vote (`NoNoopProbe`) |
 
 ### `journal-repromise/`: the answer to a `Prepare` sent again, for #1326
 

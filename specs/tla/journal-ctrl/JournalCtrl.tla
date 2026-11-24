@@ -20,6 +20,10 @@
 (*     replica applied, under the ballot that the faulty vote keeps        *)
 (*     (`AccRepair`).                                                      *)
 (*                                                                         *)
+(* Unchoose "any" is a control: a vote counts as unchoosable without the   *)
+(* promises above its ballot, a later `Accept` can still complete it, and  *)
+(* `BlockedChosen` breaks (`ctrl_unchoose`).                               *)
+(*                                                                         *)
 (* Damage "keep" and Repair "chosen" are the design. Damage "drop" is a    *)
 (* control: a boot that drops the damaged vote reads the slot as a slot    *)
 (* with no vote, and `Agreement` breaks. Repair "peer" is a control: the   *)
@@ -28,12 +32,13 @@
 (***************************************************************************)
 EXTENDS JournalCompact
 
-CONSTANTS MaxRot, Damage, Repair, ProbeDrops
+CONSTANTS MaxRot, Damage, Repair, ProbeDrops, Unchoose
 
 ASSUME MaxRot \in Nat
 ASSUME Damage \in {"keep", "drop"}
 ASSUME Repair \in {"chosen", "peer"}
 ASSUME ProbeDrops \in {"skip", "ignore"}
+ASSUME Unchoose \in {"promised", "any"}
 
 Faulty(x) == x[1] > 0 /\ x[2] = None
 
@@ -57,7 +62,7 @@ Unchoosable(a, s) ==
             /\ dvote[x][s] = NoVote
             /\ mvote[x][s] = NoVote
             /\ s \notin adrop[x] \cup dadrop[x]
-            /\ dprom[x] > f
+            /\ Unchoose = "any" \/ dprom[x] > f
             /\ \A v \in Cmds : <<s, f, v, x>> \notin sent2b
 
 \* The damage of a's vote at s leaves the value readable for good: a
@@ -233,14 +238,16 @@ DeadAt(a, s, f) ==
        /\ a \notin Q
        /\ \A x \in Q : dprom[x] > f /\ \A v \in Cmds : <<s, f, v, x>> \notin sent2b
 
-\* A blocked slot is chosen, or an acceptor voted there at a ballot that no
-\* quorum can complete: a rot needs a lasting copy of a chosen value, or a
-\* vote that no quorum can choose (`Spare`), and the blocked slot's top
-\* report is a damaged vote.
+\* A blocked slot is chosen, or the highest ballot that voted there is a
+\* ballot that no quorum can complete: a rot needs a lasting copy of a
+\* chosen value, or a vote that no quorum can choose (`Spare`), and the
+\* blocked slot's top report is a damaged vote.
 BlockedChosen == \A b \in Ballots : \A s \in bblock[b] :
   \/ IsChosen(s)
   \/ \E a \in Acceptors, f \in Ballots, v \in Cmds :
-       <<s, f, v, a>> \in sent2b /\ DeadAt(a, s, f)
+       /\ <<s, f, v, a>> \in sent2b
+       /\ \A m \in sent2b : m[1] = s => m[2] <= f
+       /\ DeadAt(a, s, f)
 
 (***************************************************************************)
 (* Reach: each must be violated, so that a passing check is not empty.     *)

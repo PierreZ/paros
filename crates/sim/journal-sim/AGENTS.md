@@ -49,8 +49,12 @@ Test only: `publish = false`.
   `Learn` and `Repair`). Steers bring the rare cases: a `Repair` that the network holds late and a
   rot above it, and a rot that arms a late answer (`Late`: the column's other members take no
   `Compact` until a member drops the slot; the next campaign then hears that member late, so its
-  answer skips the blocked slot). The client asks `Resolve` at every replica, and again for a
-  `Below` it settled, and every covering answer is judged.
+  answer skips the blocked slot), and a seal whose answer is lost (the register took it; the
+  leader observes no value until its seal asked again runs, which waits until a later leader
+  opens in a later segment, so that leader may seal the first leader's own segment). The
+  `Truncate` that cuts the writes in flight is the third call of a burst, so a deaf replica
+  jumps to a blind point and folds blind. The client asks `Resolve` at every replica, and again
+  for a `Below` it settled, and every covering answer is judged.
 - `src/control.rs` (+ `src/control/reference.rs`): the grid controller's decisions (#1261 (grid
   controller decision tests), §J6.2 tests 1, 2, 5 and 6). `views` gives every small view (`P <= 3`,
   `F <= 2`, no zones or three or four zones, each count of up, suspect and down members of each

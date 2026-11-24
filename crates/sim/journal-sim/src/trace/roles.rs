@@ -505,8 +505,32 @@ pub const EDITS: &[Edit] = &[
         Some((at, edited))
     }),
     repeat_edit!("a reshape repeated", "reshape"),
+    // The first acceptor compaction whose slot one higher fewer than
+    // `CompactAt` (2) replicas of its segment compacted to: a compaction
+    // there is a step the model refuses.
     Edit::new("an acceptor compaction one slot higher", |events| {
-        change_first(events, |e, i| is(&e[i], "compact"), |e| plus(e, "x", 1))
+        change_first(
+            events,
+            |e, i| {
+                is(&e[i], "compact")
+                    && num(&e[i], "p").zip(num(&e[i], "x")).is_some_and(|(p, x)| {
+                        let mut reached = BTreeMap::new();
+                        for event in &e[..i] {
+                            let point = if is(event, "compact_replica") || is(event, "jump") {
+                                num(event, "r").zip(num(event, "slot"))
+                            } else {
+                                None
+                            };
+                            if let Some((r, slot)) = point.filter(|(r, _)| r / 10 == p) {
+                                let top = reached.entry(r).or_insert(slot);
+                                *top = (*top).max(slot);
+                            }
+                        }
+                        reached.values().filter(|slot| **slot > x).count() < 2
+                    })
+            },
+            |e| plus(e, "x", 1),
+        )
     }),
     Edit::new("a replica compaction one slot higher", |events| {
         change_first(

@@ -152,7 +152,9 @@ in release, in the `trace-edits` job. Steers bring the walks to the rare branche
 damages a vote above a repair that the network holds late, or a vote that no quorum can choose;
 a second campaign while a first leader waits on its seal; a campaign that the dropper of a
 damaged slot answers late, while the other members of the column keep the slot (the late answer
-skips the blocked slot). The checked walks of the narrow shape also meet the rules "a late answer
+skips the blocked slot); a seal whose answer is lost, asked again only once a later leader
+opened in a later segment (so a later seal of the first leader's own segment stops it, §J3.4,
+"a change asked again"). The checked walks of the narrow shape also meet the rules "a late answer
 that dropped a blocked slot skipped it", "a late answer decided a blocked slot with a `Noop`" and
 "an acceptor answered a `Prepare` again at its promise".
 

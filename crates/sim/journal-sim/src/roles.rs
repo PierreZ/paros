@@ -716,6 +716,15 @@ const POOL: u64 = 6;
 const RESEND_PAGE: usize = 4;
 /// The proposers.
 const PROPOSERS: [u64; 3] = [101, 102, 103];
+
+/// The column of `grid` that holds the Phase 2 quorums of `slot`:
+/// `slot % columns`. A grid has at least one column.
+fn column_of(grid: &Grid, slot: Slot) -> &[NodeId] {
+    let columns = grid.columns();
+    let index = usize::try_from(slot.0 % u64::try_from(columns.len()).expect("few"))
+        .expect("a column index");
+    &columns[index]
+}
 /// The proxy leaders: a campaign delegates to them on one seed in two.
 const PROXIES: [u64; 3] = [201, 202, 203];
 /// The writers.
@@ -730,6 +739,10 @@ pub struct RolesModel {
     initial: Leader,
     register: RegisterValue,
     queue: Vec<(Origin, Change)>,
+    /// The leaders, by node and round, whose seal the register took while
+    /// its answer was lost: they observe no value until the seal they ask
+    /// again runs.
+    unanswered: BTreeSet<(NodeId, u64)>,
     acceptors: BTreeMap<NodeId, AcceptorNode>,
     replicas: BTreeMap<NodeId, ReplicaNode>,
     leaders: BTreeMap<NodeId, JournalLeader<u64>>,
@@ -808,6 +821,9 @@ pub struct RolesModel {
     read_boots: BTreeMap<NodeId, PersistId>,
     /// The replica that hears the register late, if any.
     slow: Option<NodeId>,
+    /// A `Truncate` that cuts the writes in flight is proposed now: it is the
+    /// third call of a burst.
+    burst: bool,
     /// The replica that loses every message until a peer compacts to a
     /// point whose fold is blind, or its segment is no longer in force, if
     /// any: it
@@ -1510,6 +1526,7 @@ impl RolesModel {
             initial,
             register: RegisterValue::new(),
             queue: Vec::new(),
+            unanswered: BTreeSet::new(),
             acceptors,
             replicas: BTreeMap::new(),
             leaders: BTreeMap::new(),
@@ -1548,6 +1565,7 @@ impl RolesModel {
             read_boots: BTreeMap::new(),
             slow: None,
             deaf: None,
+            burst: false,
             blinded: BTreeSet::new(),
             settled_served: false,
             late: None,
@@ -1665,6 +1683,25 @@ impl RolesModel {
         self.open_segment(grid, cx);
     }
 
+    /// The proposer of a campaign. A second campaign runs on a proposer
+    /// that does not wait on its seal or on a lost answer; when every
+    /// proposer waits, any proposer runs it.
+    fn proposer(&self, second: bool, sealing: &[NodeId], cx: &mut Cx<'_, Self>) -> NodeId {
+        let mut others: Vec<u64> = PROPOSERS
+            .iter()
+            .copied()
+            .filter(|p| {
+                !second
+                    || !sealing.contains(&NodeId(*p))
+                        && !self.unanswered.iter().any(|(node, _)| node.0 == *p)
+            })
+            .collect();
+        if others.is_empty() {
+            others = PROPOSERS.to_vec();
+        }
+        NodeId(*cx.rng().pick(&others).expect("proposers"))
+    }
+
     /// A proposer campaigns: a new ballot, bound to the newest segment.
     fn campaign(&mut self, cx: &mut Cx<'_, Self>) {
         self.release_late(false, cx);
@@ -1723,7 +1760,10 @@ impl RolesModel {
                         })
                     })
             });
-        let second = second || again || armed;
+        // Steer: a leader whose seal answer is lost waits; a campaign then
+        // may seal the segment it opened before it hears its own seal.
+        let unanswered = cx.phase() == Phase::Chaos && !self.unanswered.is_empty();
+        let second = second || again || armed || unanswered;
         // After the faults stop, a new campaign tells the acceptors that
         // started again their belief: until a `Prepare` does, an acceptor
         // answers no read (§J3.3), and no read can be served.
@@ -1739,17 +1779,7 @@ impl RolesModel {
         if live && !second && !unread && (cx.phase() != Phase::Chaos || !cx.rng().chance(1, 8)) {
             return;
         }
-        // A second campaign runs on a proposer that does not wait on its
-        // seal; when every proposer waits, any proposer runs it.
-        let mut others: Vec<u64> = PROPOSERS
-            .iter()
-            .copied()
-            .filter(|p| !second || !sealing.contains(&NodeId(*p)))
-            .collect();
-        if others.is_empty() {
-            others = PROPOSERS.to_vec();
-        }
-        let proposer = NodeId(*cx.rng().pick(&others).expect("proposers"));
+        let proposer = self.proposer(second, &sealing, cx);
         self.round += 1;
         let ballot = paros_journal::register::Ballot {
             round: self.round,
@@ -2050,7 +2080,16 @@ impl RolesModel {
                 }
                 LeaderEffect::Register(change) => {
                     let round = self.leaders[&node].ballot().round;
-                    self.queue.push((Origin::Leader(node, round), change));
+                    // A leader whose seal answer is lost asks it again on
+                    // each tick; one ask waits in the queue.
+                    let waiting = self.unanswered.contains(&(node, round))
+                        && self.queue.iter().any(|(origin, queued)| {
+                            matches!(origin, Origin::Leader(n, r) if *n == node && *r == round)
+                                && *queued == change
+                        });
+                    if !waiting {
+                        self.queue.push((Origin::Leader(node, round), change));
+                    }
                 }
                 LeaderEffect::Reply { token, reply } => self.reply(token, reply),
                 // The walk's acceptors of a retired segment stop on their
@@ -2581,10 +2620,7 @@ impl RolesModel {
         else {
             return false;
         };
-        let columns = record.grid().columns();
-        let index = usize::try_from(slot.0 % u64::try_from(columns.len()).expect("few"))
-            .expect("a column index");
-        let column = &columns[index];
+        let column = column_of(record.grid(), slot);
         let empty = column
             .iter()
             .filter(|x| **x != node)
@@ -2663,10 +2699,7 @@ impl RolesModel {
             .values()
             .filter(|record| record.state() < SegmentState::Retired)
             .any(|record| {
-                let columns = record.grid().columns();
-                let index = usize::try_from(slot.0 % u64::try_from(columns.len()).expect("few"))
-                    .expect("a column index");
-                let column = &columns[index];
+                let column = column_of(record.grid(), slot);
                 let holders = column
                     .iter()
                     .filter(|x| **x != node)
@@ -2775,26 +2808,74 @@ impl RolesModel {
             .map(SegmentRecord::id)
     }
 
+    /// Whether the queued change at `index`, a seal, waits in chaos. Two
+    /// steers:
+    /// - a seal waits on three register steps in four while a later first
+    ///   leader of the newest segment runs its Phase 1, so the two leaders
+    ///   seal together and one sees the end of the other;
+    /// - a seal asked again after a lost answer waits until a later leader
+    ///   opens in a later segment (after a
+    ///   reshape), so that leader may seal the segment of the first leader
+    ///   before the first leader hears its own seal.
+    fn seal_held(&self, index: usize, cx: &mut Cx<'_, Self>) -> bool {
+        let (Origin::Leader(node, round), Change::Seal { .. }) = self.queue[index] else {
+            return false;
+        };
+        if self.unanswered.contains(&(node, round)) {
+            let own = self.leaders.get(&node).and_then(JournalLeader::segment);
+            let opened = self.leaders.values().any(|l| {
+                l.ballot().round > round
+                    && l.segment() != own
+                    && matches!(l.phase(), LeaderPhase::Open { .. })
+            });
+            return !opened;
+        }
+        let newest = self.register.newest().expect("a segment").id();
+        self.leaders.values().any(|l| {
+            l.ballot().round > round
+                && *l.phase() == LeaderPhase::Phase1
+                && l.segment() == Some(newest)
+        }) && cx.rng().chance(3, 4)
+    }
+
+    /// The register took a seal of `segment` at `end`. `SEALED`: no slot at
+    /// or above the end is chosen for the segment. A leader's answer is
+    /// lost on one seal in four in chaos: the leader asks it again, and
+    /// observes no value until then.
+    fn sealed(&mut self, origin: Origin, segment: SegmentId, end: Slot, cx: &mut Cx<'_, Self>) {
+        for (slot, (_, round, node)) in &self.chosen {
+            assert!(
+                *slot < end || self.bound[&(*round, *node)] != segment,
+                "{SEALED}: {segment:?} sealed at {end:?} chose slot {slot:?}"
+            );
+        }
+        sometimes!(true, reach::SEALED);
+        if let Origin::Leader(node, b) = origin {
+            cx.record(RolesEvent::Seal { b });
+            if cx.phase() == Phase::Chaos && cx.rng().chance(1, 4) {
+                self.unanswered.insert((node, b));
+                let again = Change::Seal { segment, end };
+                if !self.queue.iter().any(|(o, c)| {
+                    matches!(o, Origin::Leader(n, r) if *n == node && *r == b) && *c == again
+                }) {
+                    self.queue.push((origin, again));
+                }
+            }
+        }
+    }
+
     /// One queued register change runs.
     fn register_step(&mut self, cx: &mut Cx<'_, Self>) {
         let Some(index) = cx.rng().index(self.queue.len()) else {
             return;
         };
-        // Steer: a seal waits on three register steps in four while a later
-        // first leader of the same segment runs its Phase 1, so the two
-        // leaders seal together and one sees the end of the other.
-        if let (Origin::Leader(_, round), Change::Seal { .. }) = &self.queue[index]
-            && cx.phase() == Phase::Chaos
-            && self.leaders.values().any(|l| {
-                l.ballot().round > *round
-                    && *l.phase() == LeaderPhase::Phase1
-                    && l.segment() == Some(self.register.newest().expect("a segment").id())
-            })
-            && cx.rng().chance(3, 4)
-        {
+        if cx.phase() == Phase::Chaos && self.seal_held(index, cx) {
             return;
         }
         let (origin, mut change) = self.queue.remove(index);
+        if let Origin::Leader(node, round) = origin {
+            self.unanswered.remove(&(node, round));
+        }
         if let (RolesMutant::StaleBoundary, Change::Boundary { segment, state }) =
             (self.mutant, &mut change)
             && let Some(base) = Self::set_of(*segment)
@@ -2866,16 +2947,7 @@ impl RolesModel {
                         self.bind(node, *ballot, &value, cx);
                     }
                     (Change::Seal { segment, end }, _) => {
-                        for (slot, (_, round, node)) in &self.chosen {
-                            assert!(
-                                *slot < *end || self.bound[&(*round, *node)] != *segment,
-                                "{SEALED}: {segment:?} sealed at {end:?} chose slot {slot:?}"
-                            );
-                        }
-                        sometimes!(true, reach::SEALED);
-                        if let Origin::Leader(_, b) = origin {
-                            cx.record(RolesEvent::Seal { b });
-                        }
+                        self.sealed(origin, *segment, *end, cx);
                     }
                     _ => {}
                 }
@@ -2934,6 +3006,9 @@ impl RolesModel {
         for node in leaders {
             let value = self.register.clone();
             let leader = self.leaders.get_mut(&node).expect("a leader");
+            if self.unanswered.contains(&(node, leader.ballot().round)) {
+                continue;
+            }
             let sealing = matches!(leader.phase(), LeaderPhase::Sealing { .. });
             let effects = leader.observe(&value);
             sometimes!(
@@ -3277,13 +3352,17 @@ impl RolesModel {
     fn propose(&mut self, writer: Option<usize>, command: Command, cx: &mut Cx<'_, Self>) {
         // A client has one call in flight: a writer waits for its answer,
         // and the unfenced calls of the walk are at most two, or three in a
-        // burst. So the calls in flight are at most one more than the
+        // burst (the `Truncate` that cuts the writes in flight is one). So the calls in flight are at most one more than the
         // leader's window, and a leader whose window is full answers a
         // burst busy now and then.
         let waits = if let Some(index) = writer {
             self.calls.values().any(|call| call.writer == Some(index))
         } else {
-            let limit = if cx.rng().chance(1, 8) { 3 } else { 2 };
+            let limit = if self.burst || cx.rng().chance(1, 8) {
+                3
+            } else {
+                2
+            };
             self.calls
                 .values()
                 .filter(|call| call.writer.is_none())
@@ -3592,7 +3671,9 @@ impl RolesModel {
             (fence, Seq(cx.rng().below(next + 2)), false)
         };
         let tokens = self.tokens;
+        self.burst = deafen;
         self.propose(None, Command::Truncate { fence, up_to }, cx);
+        self.burst = false;
         // Only a `Truncate` that holds a slot cuts the segment: a busy
         // leader refused it.
         let held = self.tokens > tokens && self.calls.contains_key(&self.tokens);
