@@ -13,16 +13,16 @@
 //! returned `Ok` is durable).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
-use paros_journal::NodeId;
 use paros_journal::register::{
     Ballot, CallStep, Change, ChangeRefusal, MatchmakerGeneration, MatchmakerId, MatchmakerSet,
     MemberState, RegisterCall, RegisterMember, RegisterValue, Reply, Written,
 };
 use paros_journal::roles::Message;
 use paros_journal::segment::{RecordRefusal, SegmentRecord, SegmentState};
+use paros_journal::{NodeId, SegmentId, Slot};
 use paros_journal_io::mem::MemStorage;
 use paros_journal_io::{
     Address, ChangeError, Entry, Envelope, Journal, JournalId, Key, Kind, Op, Register, Storage,
@@ -275,11 +275,51 @@ struct RegisterFaults {
     half: bool,
 }
 
+/// The facts that a member of a journal's register ever held, written by
+/// a done write or by a half write: the truth that a judge of a stop reads
+/// (a role may stop on a value that a minority holds). Each fact only grows,
+/// though a later write may replace a half write at its member.
+#[derive(Clone, Debug, Default)]
+pub struct Held {
+    /// The highest ballot ever bound.
+    pub bound: Option<Ballot>,
+    /// Each seal end ever written, by segment.
+    pub ends: BTreeSet<(SegmentId, Slot)>,
+    /// The newest segment ever written.
+    pub newest: Option<SegmentId>,
+}
+
+impl Held {
+    fn fold(&mut self, value: &RegisterValue) {
+        self.bound = self.bound.max(value.bound());
+        self.newest = self.newest.max(value.newest().map(SegmentRecord::id));
+        for record in value.segments().values() {
+            if let Some(end) = record.end() {
+                self.ends.insert((record.id(), end));
+            }
+        }
+    }
+
+    /// Whether a member ever held an end of `segment` other than `end`.
+    #[must_use]
+    pub fn other_end(&self, segment: SegmentId, end: Slot) -> bool {
+        self.ends.iter().any(|(s, e)| *s == segment && *e != end)
+    }
+
+    /// Whether a member ever held an end of `segment`.
+    #[must_use]
+    pub fn sealed(&self, segment: SegmentId) -> bool {
+        self.ends.iter().any(|(s, _)| *s == segment)
+    }
+}
+
 /// The register of one journal: its members, and the value of the last
 /// done write.
 struct Members {
     at: BTreeMap<MatchmakerId, RegisterMember>,
     done: RegisterValue,
+    /// Every fact a member ever held.
+    held: Held,
     /// Each change whose write got no answer (one member took it, or a
     /// majority did and the reply was lost), with its operation: its caller
     /// asks it again.
@@ -290,13 +330,16 @@ struct Quorum {
     set: MatchmakerSet,
     journals: BTreeMap<JournalId, Members>,
     next: u64,
-    /// The register's own draw of the members that an operation reaches,
-    /// a fixed sequence that the walk's seed does not move: which members
-    /// a change reaches follows the order of the changes only.
+    /// The register's own draw of the members that an operation reaches.
+    /// It starts from the walk's seed, and then follows the order of the
+    /// changes only: the walk's other draws do not move it.
     draw: u64,
     /// The planted bug of [`AGAIN`]: a change asked again over a value
     /// that holds it is refused.
     refuse_again: bool,
+    /// A planted bug: a seal asked for the first time is refused on a
+    /// value whose guard takes it.
+    refuse_seal: bool,
     again: fn(Again),
 }
 
@@ -331,9 +374,11 @@ pub struct QuorumRegister(Rc<RefCell<Quorum>>);
 
 impl QuorumRegister {
     /// A register on three members with no journal; `again` is called on
-    /// each change asked again after a half write that is done.
+    /// each change asked again after a half write that is done. `draw`
+    /// starts the draw of the members that each operation reaches: a walk
+    /// takes it from its seed, so each seed sees its own orders.
     #[must_use]
-    pub fn new(again: fn(Again)) -> Self {
+    pub fn new(again: fn(Again), draw: u64) -> Self {
         let set = MatchmakerSet::new(
             MatchmakerGeneration(0),
             vec![MatchmakerId(1), MatchmakerId(2), MatchmakerId(3)],
@@ -342,8 +387,10 @@ impl QuorumRegister {
             set,
             journals: BTreeMap::new(),
             next: 1,
-            draw: 0x9E37_79B9_7F4A_7C15,
+            // A xorshift never leaves zero.
+            draw: draw.max(1),
             refuse_again: false,
+            refuse_seal: false,
             again,
         })))
     }
@@ -351,6 +398,23 @@ impl QuorumRegister {
     /// Plant the bug of [`AGAIN`].
     pub fn plant_refuse_again(&self) {
         self.0.borrow_mut().refuse_again = true;
+    }
+
+    /// Plant a register that refuses each seal asked for the first time,
+    /// on a value whose guard takes it: a sealing leader stops with no
+    /// true cause (the `STOPPED` oracle of the whole walk).
+    pub fn plant_refuse_seal(&self) {
+        self.0.borrow_mut().refuse_seal = true;
+    }
+
+    /// Every fact a member of the register of `journal` ever held.
+    #[must_use]
+    pub fn held(&self, journal: JournalId) -> Held {
+        self.0
+            .borrow()
+            .journals
+            .get(&journal)
+            .map_or_else(Held::default, |members| members.held.clone())
     }
 
     /// The register of `journal`, holding `value` at every member.
@@ -373,11 +437,14 @@ impl QuorumRegister {
                 (*id, RegisterMember::new(*id, state))
             })
             .collect();
+        let mut held = Held::default();
+        held.fold(&value);
         let old = quorum.journals.insert(
             journal,
             Members {
                 at,
                 done: value,
+                held,
                 half: Vec::new(),
             },
         );
@@ -422,7 +489,12 @@ impl QuorumRegister {
         quorum.next += 1;
         let readers = quorum.order();
         let writers = quorum.order();
-        let (set, refuse_again, again) = (quorum.set.clone(), quorum.refuse_again, quorum.again);
+        let (set, refuse_again, refuse_seal, again) = (
+            quorum.set.clone(),
+            quorum.refuse_again,
+            quorum.refuse_seal,
+            quorum.again,
+        );
         let Some(register) = quorum.journals.get_mut(&journal) else {
             return Err(ChangeError::Unknown);
         };
@@ -457,11 +529,8 @@ impl QuorumRegister {
             }
             other => panic!("a read of the walk's register ends in {other:?}"),
         };
-        if refuse_again
-            && seen == value
-            && let Some(refusal) = planted(&seen, change)
-        {
-            return Err(refuse(register, change, &seen, refusal));
+        if let Some(error) = plant(register, (refuse_again, refuse_seal), change, &seen, &value) {
+            return Err(error);
         }
         let takers: &[MatchmakerId] = if half { &writers[..1] } else { &writers[..2] };
         let mut done = None;
@@ -469,12 +538,9 @@ impl QuorumRegister {
             if !takers.contains(&to) {
                 continue;
             }
-            let reply = register
-                .at
-                .get_mut(&to)
-                .expect("a member")
-                .step(request)
-                .reply;
+            let member = register.at.get_mut(&to).expect("a member");
+            let reply = member.step(request).reply;
+            register.held.fold(&member.state().written.value);
             match call.on_reply(to, reply) {
                 CallStep::Pending => {}
                 CallStep::Done(value) => done = Some(value),
@@ -506,6 +572,25 @@ impl QuorumRegister {
         register.done = done.clone();
         Ok(done)
     }
+}
+
+/// The refusal of a planted bug, if one is planted and applies:
+/// `refuse_again` refuses a change over a value that holds it already,
+/// `refuse_seal` refuses a seal asked for the first time.
+fn plant(
+    register: &Members,
+    (refuse_again, refuse_seal): (bool, bool),
+    change: &Change,
+    seen: &RegisterValue,
+    value: &RegisterValue,
+) -> Option<ChangeError> {
+    let refusal = planted(seen, change)?;
+    if refuse_again && seen == value {
+        return Some(refuse(register, change, seen, refusal));
+    }
+    let first = !register.half.iter().any(|(c, _)| c == change);
+    (refuse_seal && first && matches!(change, Change::Seal { .. }))
+        .then_some(ChangeError::Refused(refusal))
 }
 
 /// [`AGAIN`] on a refusal of `change` over `seen`: a change asked again

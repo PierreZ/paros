@@ -93,9 +93,13 @@ Test only: `publish = false`.
   writes, resends and resolves, crashes, the loss of a zone for a while, the loss of one machine
   for good (`Lose`), lost register calls, register writes that one matchmaker only takes, and disk faults, the leader's retire and the heal of a
   retired segment's replica set on the `Host` (#1314); its oracles (`AGREE`, `SEALED`, `FLIGHT`,
-  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`, `BOUNDED_IN_FLIGHT`, `AGAIN`), its reach sites and its
+  `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`, `BOUNDED_IN_FLIGHT`, `AGAIN`, `DISK`: every
+  replica disk holds the chosen log, `STOPPED`: every leader that stops on its own has a true cause
+  in the facts that a matchmaker ever held or an acceptor's disk promised), its reach sites and its
   planted mutants (`WholeMutant`). `tests/whole.rs` also requires every `probe!` of the
   controller's driver and signals.
+- `tests/determinism.rs`: each walk runs two seeds twice and compares the logs
+  (`Walk::check_determinism`).
 - `src/campaign.rs`: the campaign, which owns the assertion table and judges the reach sites.
 - `src/trace.rs`: the events of a walk as a trace of `specs/tla/journal-state/FoldTrace.tla`.
 - `src/trace/roles.rs`: the events of a roles walk as a trace of
@@ -149,6 +153,11 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
 - **TLC checks both roles shapes**: the narrow walks, and the wide walks (grids of two columns,
   promises in pages of two). `RolesTrace` gives each slot the Phase 2 quorums of its column
   (`Q2Of`, `slot % columns`) and Phase 1 a majority of every column.
+- **A walk that heals judges what it heals.** When the walk replaces a role that gave up (a
+  stopped leader, a failed role), an oracle judges that the role gave up for a true cause first
+  (`STOPPED` in the whole walk). Else a wrong stop costs nothing that an oracle sees.
+- **Every walk has a determinism test** in `tests/determinism.rs`, and every draw of a walk's
+  backend starts from the seed (`QuorumRegister::new` takes its draw from `cx.rng()`).
 - **A mutant test judges the clean walk too**: each seed that fails with the mutant must pass
   without it (`caught` in `tests/roles.rs` and `tests/whole.rs`).
 - **The walks run on fresh seeds each night** (`.github/workflows/journal-nightly.yml`): the first

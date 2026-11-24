@@ -263,8 +263,17 @@ Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s na
 at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
 `ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with
 its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
-and `ALERTS` (each alert of the controller is true of the machines). Each has its planted mutant
-(`WholeMutant`). At the end of the walk each journal converges: a controller holds the term, the
+`ALERTS` (each alert of the controller is true of the machines), `DISK` (each replica's disk, on
+every machine up or down, holds the chosen log: each slot it holds, its base and its compaction
+point are the chosen log's, and its compaction floor is at or below the decided floor) and
+`STOPPED` (each leader that stops on its own has a true cause: a higher ballot bound or promised,
+a newer segment, a seal of its own segment, or another end of the segment before it; the facts
+include the writes that a minority of the matchmakers took, since a role may act on one). Each has
+its planted mutant (`WholeMutant`; `RefuseSeal` for `STOPPED`, `CorruptCopy` for `DISK`).
+`STOPPED` exists because the walk heals what it judges: placement replaces a stopped leader, so a
+leader that stops for a wrong reason (the bug of #1511 (a change asked again over its own write))
+costs nothing that another oracle sees. Each walk of `journal-sim` also runs two seeds twice and
+compares the logs (`tests/determinism.rs`). At the end of the walk each journal converges: a controller holds the term, the
 newest segment is in force, the older ones are retired (by the leader, §J3.1), and every replica of the newest segment
 holds the whole log. One replica node serves one replica for each segment of its journal, so a
 heal keeps the live replicas of a column (Pierre, 2026-11-22, #1445); the address and the disk key
@@ -274,7 +283,7 @@ abandoned copy (`Driver::join`, `Driver::abandon`, which read the register first
 judges each ask on a value done after it was sent), may lose an ask or give it again later
 (site `LATE_ASK`), and gives each complete copy to the controllers (sites `REREPLICATE`,
 `COPIED`, `REREPLICATED`). The oracle `HEAL_HELD` judges that each node a done heal added holds
-every slot of the retired segment on its disk while the set names it (mutant `EarlyCopied`: the
+every slot of the retired segment on its disk while the set names it (`DISK` judges the bytes) (mutant `EarlyCopied`: the
 walk reports a copy complete when it asks it). The walk also loses one machine that hosts no
 matchmaker for good (move `Lose`, site `LOST`): `CONVERGES` then needs the newest grid, its replica
 set and every retired replica set to name no node of that machine (site `LOST_HEALED`). A walk

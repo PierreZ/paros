@@ -261,6 +261,9 @@ pub struct JournalLeader<T> {
     /// Empty while the bind runs.
     segments: Vec<ReadSegment>,
     phase: LeaderPhase,
+    /// The seal end the leader asked the register for, kept once it opens
+    /// or stops: an observation for a judge of why it stopped.
+    seal_end: Option<Slot>,
     phase1: Phase1,
     /// The votes Phase 1 found: the leader proposes each again.
     safe: BTreeMap<Slot, Command>,
@@ -309,6 +312,7 @@ impl<T> JournalLeader<T> {
             segment: None,
             segments: Vec::new(),
             phase: LeaderPhase::Binding,
+            seal_end: None,
             phase1,
             safe: BTreeMap::new(),
             blocked: Vec::new(),
@@ -449,6 +453,15 @@ impl<T> JournalLeader<T> {
     #[must_use]
     pub fn phase(&self) -> &LeaderPhase {
         &self.phase
+    }
+
+    /// The seal end the leader asked the register for, if Phase 1 closed
+    /// on the segment before its own. It stays once the leader opens or
+    /// stops, so an observer can judge a stop: a sealing leader stops only
+    /// on a value that holds another end.
+    #[must_use]
+    pub fn seal_end(&self) -> Option<Slot> {
+        self.seal_end
     }
 
     /// The leader's Phase 1: the reports it gathered.
@@ -977,6 +990,7 @@ impl<T> JournalLeader<T> {
                 let end = end.expect("Phase 1 over the segment before gives an end");
                 probe!(reachable, "leader: a first leader writes the seal end");
                 self.phase = LeaderPhase::Sealing { end };
+                self.seal_end = Some(end);
                 vec![LeaderEffect::Register(Change::Seal {
                     segment: before,
                     end,
