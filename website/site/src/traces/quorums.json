@@ -48821,7 +48821,7 @@
           "to": 64
         },
         {
-          "says": "Nothing is lost. Node 3 restarts, and node 4 sends its open Accept again.",
+          "says": "No vote is lost. Node 3 restarts, and node 4 sends its open Accepts again.",
           "from": 64,
           "to": 66
         },

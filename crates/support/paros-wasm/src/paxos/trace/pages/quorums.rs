@@ -151,7 +151,7 @@ fn tour_majority() -> Scenario {
         .play(propose(4, "charlie"), "the client writes charlie")
         .settle_dropping(touches_any(&[0, 1, 3]))
         .holds(open_slot(2), "slot 2 waits for a third vote");
-    run.beat("Nothing is lost. Node 3 restarts, and node 4 sends its open Accept again.")
+    run.beat("No vote is lost. Node 3 restarts, and node 4 sends its open Accepts again.")
         .play(Action::Restart { node: 3 }, "node 3 restarts")
         .play(
             Action::ResendPending { node: 4 },

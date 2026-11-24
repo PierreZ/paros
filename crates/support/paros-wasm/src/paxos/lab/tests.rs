@@ -462,17 +462,23 @@ impl Draw {
         usize::try_from(self.0 >> 33).expect("31 bits fit") % n
     }
 
-    /// A move that tries to reach the goal: the hinted move, an extra move
-    /// or Deliver all as often as one message, so a few moves go far. A dead
-    /// end has no hint, so from one this is a random walk; a dead end that is
-    /// named wrongly is left by such a walk, and the hints then reach the
-    /// goal. `None` when no move is open.
+    /// A move that tries to reach the goal: the third hint of the first line
+    /// that does not hold (asked of the part itself, so a dead end gets it
+    /// too), an extra move or Deliver all as often as one message, so a few
+    /// moves go far. From a dead end that is named wrongly, the moves that
+    /// solve a live state are played too. `None` when no move is open.
     fn goal_move(&mut self, lab: &Lab) -> Option<Move> {
         let view = lab.view();
         let mut open: Vec<Move> = (0..view.extras.len())
             .map(|index| Move::Extra { index })
             .collect();
-        if let Some(next) = view.hint.and_then(|hint| hint.next) {
+        let next = lab
+            .exercise
+            .parts
+            .iter()
+            .find(|part| !(part.holds)(lab))
+            .and_then(|part| (part.next)(lab));
+        if let Some(next) = next {
             open.extend([next.clone(), next.clone(), next]);
         }
         if !view.wire.is_empty() {
