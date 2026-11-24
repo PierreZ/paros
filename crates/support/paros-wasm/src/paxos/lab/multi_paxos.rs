@@ -107,10 +107,10 @@ fn ballot(text: &str) -> (u64, u64) {
     (round.parse().unwrap_or(0), node.parse().unwrap_or(0))
 }
 
-/// An `Accept` of slot 2 to node 1 or node 2 is on the wire, and its
-/// receiver is up and has promised no higher ballot: delivered, it is a
-/// vote.
-fn accept_2_live(lab: &Lab) -> Option<u64> {
+/// An `Accept` of a slot that `hit` matches is on the wire to node 1 or
+/// node 2, and its receiver is up and has promised no higher ballot:
+/// delivered, it is a vote.
+fn accept_live(lab: &Lab, hit: impl Fn(u64) -> bool) -> Option<u64> {
     let world = lab.view_of_world();
     world
         .wire
@@ -120,7 +120,7 @@ fn accept_2_live(lab: &Lab) -> Option<u64> {
                 return false;
             };
             m.kind == "Accept"
-                && m.slot == Some(2)
+                && m.slot.is_some_and(&hit)
                 && m.to != 0
                 && world.nodes.iter().any(|node| {
                     node.id == m.to
@@ -134,17 +134,18 @@ fn accept_2_live(lab: &Lab) -> Option<u64> {
         .map(|m| m.id)
 }
 
-/// Node 1 or node 2 holds a vote at slot 2, or a live `Accept` of slot 2 is
-/// on its way to one of them: a value can still be chosen at slot 2 with no
-/// new write (a new leader proposes a reported vote again).
+/// Node 1 or node 2 holds a vote at slot 2 or above, or a live `Accept` of
+/// such a slot is on its way to one of them: slot 2 can still be chosen with
+/// no new write. A new leader proposes a reported vote at slot 2 again, and
+/// fills slot 2 with a `Noop` when a vote above it sets its frontier.
 fn slot_2_alive(lab: &Lab) -> bool {
     let voted = lab
         .view_of_world()
         .nodes
         .iter()
         .filter(|node| node.id != 0)
-        .any(|node| node.accepted.iter().any(|vote| vote.slot == 2));
-    voted || accept_2_live(lab).is_some()
+        .any(|node| node.accepted.iter().any(|vote| vote.slot >= 2));
+    voted || accept_live(lab, |slot| slot >= 2).is_some()
 }
 
 /// Node 0 holds a vote for bravo at slot 1.
@@ -244,26 +245,33 @@ const GAP_PARTS: &[Part] = &[
                 return Some(Move::Extra { index: CHARLIE });
             }
             // The votes of slot 2 first, before a new ballot outdates them.
-            if let Some(id) = accept_2_live(lab) {
+            if let Some(id) = accept_live(lab, |slot| slot == 2) {
                 return Some(Move::Deliver { id });
             }
             // Then the rest of slot 2: its votes reach node 0.
             if let Some(deliver) = deliver_first(lab, |m| m.slot == Some(2)) {
                 return Some(deliver);
             }
-            // A vote at slot 2 that node 0 never counted: a new leader
-            // proposes it again.
+            // A vote above slot 2 sets a new leader's frontier there.
+            if let Some(id) = accept_live(lab, |slot| slot > 2) {
+                return Some(Move::Deliver { id });
+            }
             if slot_2_alive(lab) {
+                // A new leader proposes the votes again, and fills the rest.
                 elect_on(lab)
+            } else if leads_live(lab) {
+                // Slot 2 is lost: a write above it gives a new leader a
+                // frontier there.
+                Some(Move::Extra { index: CHARLIE })
             } else {
                 None
             }
         },
         dead: |lab| {
-            if !can_write_at(lab, 2) && !slot_2_alive(lab) {
+            if !leads_live(lab) && !slot_2_alive(lab) {
                 Some(
-                    "No node but node 0 holds a vote at slot 2, and no write can reach slot 2 \
-                     now. Undo the move that lost the votes of slot 2.",
+                    "No node but node 0 holds a vote at slot 2 or above, and node 0 can no \
+                     longer write. Undo the moves that lost those votes.",
                 )
             } else {
                 None

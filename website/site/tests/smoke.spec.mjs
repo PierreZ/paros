@@ -630,6 +630,12 @@ test("/paxos/multi-paxos/: the guided exercise: intro, checklist, hints, dead en
   await lab.locator(".lab-show-btn").click();
   await expect(narr).toBeVisible();
   await expect(lab.locator(".lab-narrator-at")).toHaveText(/^Step 1\/\d+$/);
+  // While the reader reads why, the button of the first move (an extra
+  // move) has the outline; then the next step's first move (a Drop).
+  await expect(lab.locator(".lab-extras .btn.lab-next")).toHaveText("The client writes bravo");
+  await lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ }).click();
+  await expect(lab.locator(".lab-narrator-at")).toHaveText(/^Step 2\/\d+$/);
+  await expect(lab.locator(".lab-wire .btn.lab-next")).toHaveText("Drop");
   for (let i = 0; i < 20 && (await lab.locator(".lab-narrator-skip").textContent()) !== "Now you"; i++) {
     await lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ }).click();
   }
@@ -671,11 +677,11 @@ test("/paxos/multi-paxos/: Show me how plays by itself with motion, and Skip sto
   await lab.locator(".lab-show-btn").click();
   await lab.locator(".lab-narrator-speed").click();
   await expect(lab.locator(".lab-narrator-play")).toHaveText("Pause");
-  // The first move is an extra move: its button is outlined before it plays.
-  await expect(lab.locator(".lab-extras .btn.lab-next")).toHaveText("The client writes bravo");
   await expect(lab.locator(".lab-narrator-at")).toHaveText(/^Step 2\//, { timeout: 20000 });
+  // Pause: a step that plays ends, and then nothing moves on.
   await lab.locator(".lab-narrator-play").click();
   await expect(lab.locator(".lab-narrator-play")).toHaveText("Play");
+  await page.waitForTimeout(8000);
   const at = await lab.locator(".lab-narrator-at").textContent();
   await page.waitForTimeout(3000);
   await expect(lab.locator(".lab-narrator-at")).toHaveText(at);

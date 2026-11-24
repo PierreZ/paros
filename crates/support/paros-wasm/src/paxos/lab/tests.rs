@@ -446,39 +446,82 @@ fn an_exercise_with_parts_has_the_goal_of_its_parts() {
     }
 }
 
+/// A seeded draw, the same each run.
+struct Draw(u64);
+
+impl Draw {
+    fn new(seed: u64) -> Self {
+        Self(seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1))
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(self.0 >> 33).expect("31 bits fit") % n
+    }
+
+    /// One move of the reader's, at random: each message delivered or
+    /// dropped (a delivery twice as likely), or an extra move.
+    fn reader_move(&mut self, lab: &Lab) -> Move {
+        let view = lab.view();
+        let mut open: Vec<Move> = Vec::new();
+        for m in &view.wire {
+            open.push(Move::Deliver { id: m.id });
+            open.push(Move::Deliver { id: m.id });
+            open.push(Move::Drop { id: m.id });
+        }
+        open.extend((0..view.extras.len()).map(|index| Move::Extra { index }));
+        open.swap_remove(self.below(open.len()))
+    }
+}
+
+fn replay(id: &str, moves: &[Move]) -> Lab {
+    let mut lab = Lab::new(id).expect("the exercise exists");
+    for again in moves {
+        lab.play(again);
+    }
+    lab
+}
+
 /// From any state the reader can reach, a guided exercise either names a
-/// dead end, or its third hint names a move that is not refused, and the
-/// hints alone then reach the goal with no dead end on the way. The states
-/// come from seeded random moves (a fixed list of seeds: the run is the same
-/// each time).
+/// dead end that is one (random moves from it never reach the goal), or its
+/// third hint names a move that is not refused and the hints alone reach
+/// the goal with no dead end on the way. The states come from seeded random
+/// moves (a fixed list of seeds: the run is the same each time).
 #[test]
 fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
     for exercise in exercises().iter().filter(|e| !e.parts.is_empty()) {
         let mut stuck = 0;
         for seed in 0..1000_u64 {
-            let mut rng = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            let mut draw = |n: usize| {
-                rng = rng
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                usize::try_from(rng >> 33).expect("31 bits fit") % n
-            };
+            let mut draw = Draw::new(seed);
             let mut lab = Lab::new(exercise.id).expect("the exercise exists");
-            let prefix = draw(20);
-            for _ in 0..prefix {
-                let view = lab.view();
-                let mut open: Vec<Move> = Vec::new();
-                for m in &view.wire {
-                    open.push(Move::Deliver { id: m.id });
-                    open.push(Move::Drop { id: m.id });
-                }
-                open.extend((0..view.extras.len()).map(|index| Move::Extra { index }));
-                let pick = open[draw(open.len())].clone();
+            for _ in 0..draw.below(20) {
+                let pick = draw.reader_move(&lab);
                 lab.play(&pick);
             }
             let start = lab.moves().to_vec();
-            if lab.view().stuck.is_some() {
+            if let Some(dead) = lab.view().stuck {
                 stuck += 1;
+                // A named dead end is one: random moves from it never reach
+                // the goal (the first 20 dead ends, 20 tries of 40 moves).
+                if stuck <= 20 {
+                    for _ in 0..20 {
+                        let mut tried = replay(exercise.id, &start);
+                        for _ in 0..40 {
+                            let pick = draw.reader_move(&tried);
+                            tried.play(&pick);
+                            assert!(
+                                !tried.view().solved,
+                                "{} after {start:?}: the dead end {:?} is not one: {:?} reach the goal",
+                                exercise.id,
+                                dead.says,
+                                tried.moves()
+                            );
+                        }
+                    }
+                }
                 continue;
             }
             for _ in 0..MOVES {
@@ -522,4 +565,40 @@ fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
             exercise.id
         );
     }
+}
+
+/// Slot 2 lost its Accepts, but a vote at slot 3 sets a new leader's
+/// frontier above it: slot 2 gets a `Noop`, so this is no dead end, and the
+/// hints reach the goal.
+#[test]
+fn a_vote_above_slot_2_keeps_slot_2_alive() {
+    let mut lab = Lab::new("gap").expect("gap exists");
+    lab.extra("The client writes bravo");
+    lab.drop_all(|m| m.kind == "Accept" && m.slot == Some(1));
+    lab.extra("The client writes charlie");
+    lab.drop_all(|m| m.kind == "Accept" && m.slot == Some(2));
+    lab.extra("The client writes charlie");
+    let to_1 = lab
+        .wire()
+        .into_iter()
+        .find(|m| m.kind == "Accept" && m.slot == Some(3) && m.to == "n1")
+        .expect("an Accept of slot 3 to node 1");
+    lab.must(&Move::Deliver { id: to_1.id });
+    assert!(
+        lab.view().stuck.is_none(),
+        "a vote at slot 3 keeps slot 2 alive"
+    );
+    for _ in 0..MOVES {
+        let view = lab.view();
+        if view.solved {
+            break;
+        }
+        assert!(view.stuck.is_none());
+        let next = view
+            .hint
+            .and_then(|hint| hint.next)
+            .expect("a hint names a move");
+        lab.must(&next);
+    }
+    assert!(lab.view().solved, "the hints reach the goal");
 }

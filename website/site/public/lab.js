@@ -350,6 +350,16 @@ function mountLab(mount, engine) {
     narrSays.textContent = step.says;
     narrPlay.textContent = nr.playing ? "Pause" : "Play";
     narrNext.textContent = "Next";
+    // While the reader reads why, the button of the step's first move has
+    // the outline.
+    shown = step.frames.length ? moveOf(step.frames[0]) : null;
+    outline();
+  }
+  // The move of a frame, as the button that plays it.
+  function moveOf(frame) {
+    if (frame.message != null) return { kind: frame.lost ? "drop" : "deliver", id: frame.message };
+    if (frame.extra != null) return { kind: "extra", index: frame.extra };
+    return null;
   }
   // Play the moves of the current step, then wait the time to read, then go
   // on when playing.
@@ -365,8 +375,7 @@ function mountLab(mount, engine) {
       if (narrating !== nr || nr.run !== run) return;
       const before = view;
       // Before a move, its button gets the outline.
-      shown = frame.message != null ? { kind: frame.lost ? "drop" : "deliver", id: frame.message }
-        : frame.extra != null ? { kind: "extra", index: frame.extra } : null;
+      shown = moveOf(frame);
       outline();
       if (shown && !reduced) await scene.wait(450, scene.begin());
       if (narrating !== nr || nr.run !== run) return;
