@@ -172,6 +172,9 @@ impl Storage<Journal> for Disk {
     fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
         lock(&self.0).scan(address)
     }
+    fn list(&mut self) -> Result<Vec<Address>, StorageError> {
+        lock(&self.0).list()
+    }
 }
 
 /// The inbox of one host, and the signal that wakes its task.
