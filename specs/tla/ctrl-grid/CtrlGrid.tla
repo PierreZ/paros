@@ -14,7 +14,7 @@
 (*     (`Cfg`), and until GC a candidate needs a Phase-1 quorum of every   *)
 (*     configuration of its history H_b (Matchmaker Paxos, `matchmaker/`). *)
 (*     A sealed segment is an older configuration of H_b, read below its   *)
-(*     end (docs/journal/03-segments-and-records.md §J3.1).                *)
+(*     end (§J3.1 of docs/journal/, at the git tag journal-design-a).      *)
 (*   - The scrub of the grid controller: it finds a damaged record while   *)
 (*     the acceptor runs, and the acceptor repairs it from a copy of the   *)
 (*     chosen value. The journal keeps no record in memory, so a scrub     *)

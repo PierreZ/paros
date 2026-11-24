@@ -127,7 +127,7 @@ sequenceDiagram
 | The marker in the store | `paros-storage/src/journal.rs`: the metainfo (two local copies) |
 | The machine identity | `paros-machine/src/lifecycle.rs` (the machine record); `docs/architecture/03-2-machines.md` |
 
-The rows that name `paros-machine`, `paros-roles`, `paros-storage` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-machine`, `paros-roles`, `paros-storage` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 
@@ -135,8 +135,8 @@ The rows that name `paros-machine`, `paros-roles`, `paros-storage` point to code
   (`paros-consensus/src/node/boot.rs`, probe "boot: the fold stops at a hole under the chosen
   prefix"), and a retired node rejoins through its `RetireMark` at the next incarnation. The
   walks restart nodes from their disks ("cluster: a node restarted from a disk with a promise").
-- The journal's on-disk format refuses a damaged entry (`paros-journal-io/src/layout.rs`,
-  `Damage`).
+- The on-disk format of the journal of design A refused a damaged entry
+  (`paros-journal-io/src/layout.rs`, `Damage`, at the git tag `journal-design-a`).
 - The format marker and the amnesia refusal below were in `paros-storage` and `paros-roles`; they
   are not built again yet.
 

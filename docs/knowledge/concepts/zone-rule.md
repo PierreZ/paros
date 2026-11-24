@@ -119,15 +119,15 @@ is "every `q2` spans at least two zones", WPaxos's `fz = 1`.
 | Where it binds, and the redraws | `paros-model/src/placement.rs`: `zone_rule_binds`, `ZONE_DRAWS` |
 | The decision | `docs/architecture/05-failure-model-and-zones.md` §5 (#215, #748 (survive)) |
 
-The rows that name `paros-model` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-model` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 
 - Unit tests of `membership/zone_rule.rs` in `paros-consensus`.
-- The grid controller places a heal under the zone rule (`paros-journal-control/src/placement.rs`,
-  `GridZones`), judged by `journal-sim`'s sweep of every small view against a reference
-  `decide`.
-- The model `specs/tla/health/`: no placement over two zones after a zone loss.
+- The grid controller of design A placed a heal under the zone rule
+  (`paros-journal-control/src/placement.rs`, `GridZones`), and the model `specs/tla/health/`
+  checked no placement over two zones after a zone loss. Both are at the git tag
+  `journal-design-a` (removed on 2026-11-24).
 
 **Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 

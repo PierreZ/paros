@@ -39,8 +39,8 @@ candidate) fail.
 - **The coordinator's term needs no library** (decision 1; Pierre, 2026-11-24, #1420
   (paros-election)). A coordinator wins its control journal with `SetLeader`, renews by
   writing, stops at the first refused write, and hands on with `SetLeader(next, me)`: these are
-  the calls of the journal client, with no other layer. TLC checks this term alone in
-  `specs/tla/election/`: one holder for each term, a holder that stops at its first refused
+  the calls of the journal client, with no other layer. TLC checked this term alone in
+  `specs/tla/election/` (at the git tag `journal-design-a`): one holder for each term, a holder that stops at its first refused
   write, a fenced order of an old term refused, an interface that ends with its term, and a
   multi-writer control journal that the term never takes back. The old election journal library
   (`paros::client::election`) is deleted.

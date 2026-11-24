@@ -95,8 +95,7 @@ const PAGE_NAMES: Record<string, string> = {
   a position, <code>SetLeader</code> names the client that may write, and <code>Truncate</code> drops
   a prefix. The core judges no command at <code>propose</code>. Each node judges a command when its
   slot is applied, in slot order, so each node gives the same <code>Outcome</code>. A write on a
-  journal with no writer is chosen by Paxos and refused by the journal. The journal v1 core,
-  <code>paros-journal</code>, uses this crate with its features off and adds no concept to it.</p>
+  journal with no writer is chosen by Paxos and refused by the journal.</p>
 
   <h2 id="pages">The pages</h2>
   <ol class="index-list">

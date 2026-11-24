@@ -77,9 +77,8 @@ reason. Two parts do it, and each has one job (§4.4, "The cut of the old tenant
 </div>
 
 - **The grid controller** of each journal drives the change of its membership. It changes the
-  journal only through its fenced reshape call
-  ([The controller](../../journal/controller/),
-  [§J6.1](https://github.com/PierreZ/paros/blob/main/docs/journal/06-controller.md#j61-the-grid-controllers-fenced-reshape)).
+  journal only through its fenced reshape call (§J6.1 of the first journal design, at the tag
+  `journal-design-a`; the controller is to be designed again).
 - **The cell** answers the questions of the whole cell through the **placement port**: which
   member must leave (its machine drains, is slow, is held or is gone), where a new member goes,
   and how many moves run at one time. A grant of the port is also the token of the rate limit of
@@ -87,6 +86,6 @@ reason. Two parts do it, and each has one job (§4.4, "The cut of the old tenant
 
 ## In paros
 
-The machine is a crate of layer 5 (#1426 (paros-machine)); the controller exists today as
-`paros-journal-control`. The model `cell-control` with a machine wiped and admitted again proves
+The machine is a crate of layer 5 (#1426 (paros-machine)); the controller of the first journal
+design, `paros-journal-control`, is at the tag `journal-design-a`. The model `cell-control` with a machine wiped and admitted again proves
 rule 5; it is **not proved** until its gate is green.

@@ -21,7 +21,7 @@
 # Each argument that is not `--all` names a folder of specs/tla/; with no
 # folder, every folder of a model of the plan runs. An experiment of
 # specs/tla/experiments/ runs only when it is named, for example
-# `scripts/check-tla.sh experiments/segments/a`. CI checks the folders that a
+# `scripts/check-tla.sh experiments/stale-stopped/restart`. CI checks the folders that a
 # change can break, the experiments too (`scripts/ci-plan.py`). A violation in an initial state counts as a
 # violation too (`grid/` checks constants only), and so does a violation of an
 # action property (`[][A]_vars`).

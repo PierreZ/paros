@@ -85,7 +85,7 @@ message of such a batch waits for the flush ("only from a batch that does not ra
 promise", the `split_early` doc).
 
 **The journal's flight rule** (#1255 (journal sans-IO contract),
-`docs/journal/04-roles.md` §J4.2). The journal's roles replace the one batch in flight
+`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)). The journal's roles replace the one batch in flight
 with ids: each persist batch has an id, each send names the persist id it waits on, and the
 driver transmits a send only once that batch is durable. The driver may then pipeline and group
 commit. A reply that writes nothing (a second copy of a `Prepare` at the promised ballot) waits
@@ -141,9 +141,9 @@ crash. paros quarantines a journal on a storage fault and re-opens it later
 | The durable scalars and their contract | `paros-consensus/src/contract/hard_state.rs`: `HardState` |
 | The write ops and the fsync rule | `paros-consensus/src/contract/write.rs`: `WriteOp`, `AcceptorWrite`, `MustSync::for_batch`, `WriteOp::needs_sync` |
 | The leader's early send | `paros-roles/src/node/ready.rs`: `split_early`, `send_early` |
-| The journal's flight rule (not built) | `docs/journal/04-roles.md` §J4.2; the model `specs/tla/flight-rule/` |
+| The journal's flight rule (not built) | `docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`); the model `specs/tla/flight-rule/` |
 
-The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 The rule is stated in the `Ready` doc (the five steps) and the `HardState` doc (the durability
 contract). `docs/analysis/go-raft/etcd-raft-sans-io-patterns.md` §2 compares the shape with
@@ -164,9 +164,9 @@ etcd-raft's.
   its batch was durable", "cluster: a node crashed between persist and send"), and a crash may
   lose a write that no fsync covered ("cluster: a crash lost a write no fsync covered"), with
   `PREFIX_SHRINKS` as the oracle and `Mutant::LoseChosenIndex` as its control.
-- The journal's flight rule has its own model, `specs/tla/flight-rule/`, and the journal state
+- The flight rule of `paros-host` has its own model, `specs/tla/flight-rule/`, and the journal state
   model treats the acceptor's state as memory, a queue of writes and a disk
-  (`specs/tla/journal-state/`, #1309 (the state is the disk)).
+  (`specs/tla/journal-state/`, #1309 (the state is the disk) (at the git tag `journal-design-a`)).
 
 **Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 

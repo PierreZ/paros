@@ -31,7 +31,7 @@ above `GROUP_MINUTES` (at most `FOLDER_MINUTES`) runs alone.
 Every plan also judges the two tables of the folders: a folder with no line
 in `scripts/tla-minutes.txt` or in `scripts/mutate-tla-shards.txt` fails it.
 
-The trace checks (`traces`) run the walks of consensus-sim and journal-sim
+The trace checks (`traces`) run the walks of consensus-sim
 against the `*Trace.tla` specs. They run in the TLA workflow when a folder of a
 trace spec runs and the Rust jobs do not: when the Rust jobs run, the `test`
 and `trace-edits` jobs of the Rust workflow run the same trace tests on the same

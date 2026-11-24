@@ -143,6 +143,6 @@ This is the shape of FoundationDB's spill. It is not proposed now.
   memory. Then its two choices are Pierre's: a request to the driver or a synchronous read of
   `Storage` inside a step (which the sans-IO contract forbids today), and a refusal or a hold
   at the hard limit.
-- **Open: the journal v1.** The journal roles of `paros-journal` keep their own records
-  (`docs/journal/04-roles.md`). Whether they report the same measure is a question for #1323
-  (build the paros journal v1).
+- **Open: the journal.** The journal is built again on the core with segments
+  (`docs/archive/journal-design-a/prompt.md`). Whether its roles report the same measure is
+  decided when it is built.

@@ -4,6 +4,5 @@ dist/
 public/shared/
 public/playground/
 public/paxos/wasm/
-public/journal/wasm/
 test-results/
 playwright-report/

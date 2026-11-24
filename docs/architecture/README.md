@@ -28,10 +28,13 @@ by admin calls and `cell init` as a single-decree Paxos (2026-10-09); the journa
 configuration redesign (2026-10-28). Where an older decision and a decision of the rework
 disagree, the rework wins, and these files say so where it matters.
 
-**The journal has its own map** (#1332 (journal architecture docs), 2026-11-20):
-[`docs/journal/`](../journal/README.md) is the one home of every rule of the journal v1. The
-journal rules of §2, §2.16, §4.2, §5.1 and the journal part of §4.3 moved there; each moved
-section keeps its heading here with a link to its new home, and the section map below names it.
+**The journal is to be designed again** (Pierre, 2026-11-24, D6 of
+[`docs/archive/journal-design-a/prompt.md`](../archive/journal-design-a/prompt.md)). The journal v1
+of design A had its own map, `docs/journal/`, which held the journal rules of §2, §2.16, §4.2,
+§5.1 and the journal part of §4.3 (#1332 (journal architecture docs), 2026-11-20). It was removed
+with the journal crates; it is at the git tag `journal-design-a`. Each of those sections keeps its
+heading here, says "to be designed again" and names where design A had it. The journal comes back
+on the consensus core once the core has segments.
 These files keep the service around the journal: cells, tenants, machines, coordinators,
 placement, the frontend, the resolver and the universe.
 
@@ -43,8 +46,8 @@ stays valid: find its file in the section map.
 ## Files, in order
 
 1. [01-goal.md](01-goal.md): §1 Goal; §1.1 The goals and the root rules
-2. [02-data-plane.md](02-data-plane.md): §2 The data plane (links to `docs/journal/`)
-3. [02-1-journal-register.md](02-1-journal-register.md): §2.16 The journal's matchmaker register (a link to `docs/journal/`)
+2. [02-data-plane.md](02-data-plane.md): §2 The data plane (to be designed again)
+3. [02-1-journal-register.md](02-1-journal-register.md): §2.16 The journal's matchmaker register (to be designed again)
 4. [03-1-cell-tenant-and-bootstrap.md](03-1-cell-tenant-and-bootstrap.md): §3 The control plane; §3.1 The cell tenant and bootstrap
 5. [03-2-machines.md](03-2-machines.md): §3.2 Machines
 6. [03-3-coordinators-and-placement.md](03-3-coordinators-and-placement.md): §3.3 Control planes, recovery and placement

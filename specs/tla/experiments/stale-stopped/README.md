@@ -118,7 +118,7 @@ Neither fix exists in the code. This section is my reading of the code, not a ch
   with another nonce. `paros-consensus` has no RNG, so the driver gives the nonce to
   `MatchmakerReconfigurer::new`. The nonce must differ between two incarnations of one node: a
   random `u64` of the driver does it with a small chance of a collision (the same trust as the
-  client's fresh leader uuids, `docs/journal/02-data-plane.md` §J2.3), or a boot counter on
+  client's fresh leader uuids, `docs/journal/02-data-plane.md` §J2.3 (tag `journal-design-a`)), or a boot counter on
   disk does it for sure (and that is a disk write again). No disk write in the handover itself,
   and the floor rule stays.
 - **Durable round.** The reconfigurer keeps nothing on disk today. It needs a write in its

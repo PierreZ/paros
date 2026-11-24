@@ -1,15 +1,15 @@
 # Mutation testing of the lines that main changed since the last green night
 # (Pierre, 2026-11-23: mutation testing moved off pull requests). A pull
 # request runs no mutant; this workflow runs, each night, the mutants of
-# the lines of paros-consensus, paros-journal, paros-journal-control,
-# paros-journal-io, paros-host and paros-election that main changed since the head of the last successful
+# the lines of paros-consensus and paros-host that main changed since the
+# head of the last successful
 # scheduled run of this workflow (before the first green night: since the
 # head of the first night; with no night at all: the last 24 hours).
 # So a red night is judged again the next night until a fix lands.
 #
 # The jobs are those the `mutants` job of `rust.yml` had: one for each
 # shard of each changed crate (`scripts/mutants-plan.sh`), two passes for
-# paros-consensus and paros-journal (`scripts/mutants.sh`). A survivor fails
+# paros-consensus (`scripts/mutants.sh`). A survivor fails
 # its shard and is a finding (AGENTS.md, the absolute rule): add the test
 # that sees it. The `Mutants` workflow (`mutants.yml`) still runs every
 # mutant of paros-consensus each week.
@@ -101,12 +101,11 @@ jobs:
         run: |
           earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
           sudo "$earlyoom" -m 8 -s 100 -r 0 \
-            --prefer '^(paros_consensu|consensus_sim|paros_journal|paros_host|paros_election|journal_sim|flavors|walks|mutants|traces|coverage|host|election)' \
+            --prefer '^(paros_consensu|consensus_sim|paros_host|flavors|walks|mutants|traces|coverage|host)' \
             --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
             > earlyoom.log 2>&1 &
-      # `scripts/mutants.sh` (no flag) is paros-consensus; `--journal` adds the
-      # trace checks of journal-sim as a second pass; `--control`,
-      # `--journal-io`, `--host` and `--election` run one pass.
+      # `scripts/mutants.sh` (no flag) is paros-consensus, in two passes;
+      # `--host` runs one pass.
       - name: Run the mutants of the lines main changed
         env:
           BASE: ${{ needs.plan.outputs.base }}

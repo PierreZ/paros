@@ -138,7 +138,7 @@ its caller drives the retries (the matchmaker reconfigurer, or the machine that 
 | The durable writes | `paros-consensus/src/contract/write.rs`: `AcceptorWrite::SetPromise`, `AcceptorWrite::AppendAccepted` |
 | Decree users | `paros-consensus/src/matchmaker/reconfigurer.rs` (the matchmaker handover, `SuccessorDecree`); `paros-machine` (`cell init`, #277) |
 
-The rows that name `paros-machine` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-machine` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 The rule is stated in the module docs of `acceptor.rs` (the acceptor knows nothing but its
 votes) and `decree.rs` (no separate kernel: a decree is the `Proposer` over one slot).

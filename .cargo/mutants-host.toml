@@ -2,17 +2,14 @@
 # `.cargo/mutants.toml` says how a pass runs.
 #
 # The judge: the unit tests of paros-host (the generic Host and driver on a
-# toy family), the unit tests of paros-journal-io (the journal Host and
-# driver, which run on the generic ones) and the driver walk of journal-sim
-# (`tests/host.rs`: its oracles and their controls). The host has no trace
-# check yet, so no second pass.
+# toy family). The host has no trace check yet, so no second pass.
 
 # Equivalent mutants only, each with its reason (AGENTS.md, the absolute
 # rule: no allow list).
 exclude_re = []
 
-test_package = ["paros-host", "paros-journal-io", "journal-sim"]
+test_package = ["paros-host"]
 test_tool = "nextest"
-additional_cargo_test_args = ["-E", "package(paros-host) | package(paros-journal-io) | binary(host)"]
+additional_cargo_test_args = ["-E", "package(paros-host)"]
 profile = "mutants"
 minimum_test_timeout = 120
