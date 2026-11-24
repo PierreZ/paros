@@ -221,6 +221,24 @@ const RULES: &[Rule] = &[
     ("an acceptor repaired its faulty vote", |e| {
         has(e, |e| matches!(e, RolesEvent::Repair { .. }))
     }),
+    (
+        "a late answer that dropped a blocked slot skipped it",
+        |e| has(e, |e| matches!(e, RolesEvent::Skip { .. })),
+    ),
+    (
+        "a late answer decided a blocked slot with a Noop",
+        |events| {
+            has(events, |e| {
+                matches!(e, RolesEvent::Probe { b, s, .. }
+                if events.iter().any(|later| matches!(later,
+                    RolesEvent::Propose { b: pb, s: ps, command: Command::Noop }
+                        if pb == b && ps == s)))
+            })
+        },
+    ),
+    ("an acceptor answered a Prepare again at its promise", |e| {
+        has(e, |e| matches!(e, RolesEvent::Repromise { .. }))
+    }),
 ];
 
 /// A checked walk: its seed, its events and its trace.

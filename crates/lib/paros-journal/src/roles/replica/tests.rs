@@ -215,12 +215,9 @@ fn two_commands_chosen_at_one_slot_break_paxos() {
 }
 
 #[test]
-fn a_commit_of_another_segment_or_past_the_end_is_not_taken() {
+fn a_commit_of_another_segment_or_an_accepted_is_not_taken() {
     let mut replica = based();
     assert_eq!(replica.step(LEADER, commit(2, 0, claim(7))).len(), 0);
-    replica.observe(&sealed(1));
-    assert_eq!(replica.end(), Some(Slot(1)));
-    assert_eq!(replica.step(LEADER, commit(1, 1, claim(7))).len(), 0);
     assert_eq!(replica.chosen().len(), 0);
     assert_eq!(
         replica
@@ -234,6 +231,15 @@ fn a_commit_of_another_segment_or_past_the_end_is_not_taken() {
             .len(),
         0
     );
+}
+
+#[test]
+#[should_panic(expected = "a slot chosen for a segment is below its seal end")]
+fn a_commit_past_the_seal_end_breaks_the_seal() {
+    let mut replica = based();
+    replica.observe(&sealed(1));
+    assert_eq!(replica.end(), Some(Slot(1)));
+    replica.step(LEADER, commit(1, 1, claim(7)));
 }
 
 #[test]

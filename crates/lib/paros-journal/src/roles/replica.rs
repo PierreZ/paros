@@ -837,7 +837,7 @@ impl SegmentReplica {
     /// fold, which slots of batches still in flight may have moved, so it
     /// goes to the client once `after` is durable, as every answer of the
     /// replica (the flight rule, §J4.2). `NotCovered` until the replica has
-    /// its base.
+    /// its base, and once it dropped its copy.
     #[must_use]
     pub fn resolve(
         &self,
@@ -846,6 +846,13 @@ impl SegmentReplica {
         records: &[Record],
     ) -> (ResolveAnswer, Option<PersistId>) {
         let after = self.flight.last();
+        if self.dropped {
+            probe!(
+                reachable,
+                "replica: a Resolve at a dropped copy is not covered"
+            );
+            return (ResolveAnswer::NotCovered, after);
+        }
         let Some(folded) = &self.folded else {
             probe!(
                 reachable,
@@ -911,14 +918,21 @@ impl SegmentReplica {
             );
             return effects;
         }
+        // The compaction point is at or above the start, so a slot below
+        // the start returned above. The seal end counts every vote of the
+        // segment (§J3.1), so no slot at or above the end is chosen there:
+        // a `Commit` past the end is a detected violation of the seal,
+        // never a late message.
+        assert!(
+            self.end.is_none_or(|end| slot < end),
+            "a slot chosen for a segment is below its seal end"
+        );
         if let Some(held) = self.chosen.get(&slot) {
             assert!(
                 *held == command,
                 "one command is chosen at a slot (Paxos agreement)"
             );
-        } else if self.end.is_none_or(|end| slot < end)
-            && self.start().is_none_or(|start| slot >= start)
-        {
+        } else {
             let id = self.flight.batch();
             self.chosen.insert(slot, command.clone());
             effects.push(ReplicaEffect::Persist {
@@ -928,12 +942,6 @@ impl SegmentReplica {
                     command: command.clone(),
                 }],
             });
-        } else {
-            probe!(
-                reachable,
-                "replica: a Commit outside its segment is dropped"
-            );
-            return effects;
         }
         let mut applied = self.walk();
         probe!(
