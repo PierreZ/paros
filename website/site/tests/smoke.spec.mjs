@@ -286,6 +286,9 @@ test("/paxos/tour/: the title, the chapter menu, a bridge and a chapter", async 
   }
   // The end of the last chapter: the tour is done, and the menu is there.
   await expect(screen.locator(".tour-done")).toHaveText("The tour is done.");
+  // The end of the tour has no main button: the focus is still on a button
+  // of the screen, so the keys go on.
+  expect(await page.evaluate(() => !!document.activeElement && !!document.activeElement.closest(".tour-screen"))).toBe(true);
   // Chapter 2 has no bridge: it opens on its first run.
   await chapters.nth(1).click();
   await expect(screen).toBeHidden();
@@ -328,7 +331,8 @@ test("/paxos/tour/: Play goes on from run to run, the countdown stops, and Space
   await expect(screen.locator(".tour-count")).toContainText("Next chapter in", { timeout: 30_000 });
   await screen.locator(".tour-stop").click();
   await expect(screen.locator(".tour-count")).toHaveText("");
-  await page.waitForTimeout(1500);
+  // Longer than the countdown: Stop stopped the timer, not only its text.
+  await page.waitForTimeout(6000);
   await expect(screen.locator(".tour-done")).toBeVisible();
   // Next chapter: "Reads" has no bridge, so its first run plays.
   await screen.locator(".tour-next").click();
@@ -390,6 +394,9 @@ test("/paxos/single-decree/: Watch this flavor plays the chapter in place, and S
   });
   const end = page.locator(".tour-screen");
   await expect(end.locator(".tour-done")).toHaveText("This chapter is done.");
+  // The place in the whole tour moves to the next chapter of the course,
+  // which is on another page.
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("paros-course-v1")).tour.at.chapter)).toBe("majority");
   await end.locator(".tour-deeper").click();
   await expect(story).toBeVisible();
   expect(await page.evaluate(() => window.paxosStory.watching())).toBe(false);

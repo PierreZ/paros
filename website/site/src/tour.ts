@@ -100,6 +100,9 @@ export function check(traces: Record<string, Trace>): void {
     const trace = traces[lesson.page];
     if (!trace) throw new Error(`tour: chapter ${chapter.lesson} names no trace ${lesson.page}`);
     if (!chapter.runs.length) throw new Error(`tour: chapter ${chapter.lesson} plays no run`);
+    if (new Set(chapter.runs).size !== chapter.runs.length) {
+      throw new Error(`tour: chapter ${chapter.lesson} names one run twice`);
+    }
     for (const id of chapter.runs) {
       const run = trace.scenarios.find((s) => s.id === id);
       if (!run) throw new Error(`tour: chapter ${chapter.lesson} names no run ${lesson.page}/${id}`);
@@ -145,6 +148,9 @@ export interface PlayedChapter {
   minutes: number;
   /** The ids of its runs in the trace of the page that plays it. */
   runs: string[];
+  /** The id of the next chapter of the whole tour, where the place in the
+   * tour moves at the end of this one; none after the last chapter. */
+  next?: string;
 }
 
 /** The id of a run of chapter `chapter` in the trace of the tour page: the
@@ -173,6 +179,7 @@ export function played(traces: Record<string, Trace>, url: (path: string) => str
       turn: lesson.labs?.length ? `${page}#lab=${lesson.labs[0]}` : undefined,
       minutes: Math.max(1, Math.round(runs.reduce((s, r) => s + seconds(r), 0) / 60)),
       runs: chapter.runs.map((id) => (only ? id : tourId(lesson.id, id))),
+      next: k + 1 < CHAPTERS.length ? lessonOf(CHAPTERS[k + 1]).id : undefined,
     };
   });
 }

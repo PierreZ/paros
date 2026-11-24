@@ -77,8 +77,9 @@
     screen.hidden = false;
     story.panel.hidden = true;
     bar.hidden = true;
-    // The keys go on: Space presses the screen's main button.
-    var main = screen.querySelector(".primary");
+    // The keys go on: Space presses the screen's main button, or the first
+    // button or link of a screen with no main button (the end of the tour).
+    var main = screen.querySelector(".primary") || screen.querySelector("button, a[href]");
     if (main) main.focus({ preventScroll: true });
   }
 
@@ -187,9 +188,9 @@
     if (runAt < ch.runs.length - 1) { runs(current, runAt + 1); return true; }
     if (progress) {
       progress.tourDone(ch.id);
-      // The next place to continue from: the next chapter, or none.
-      var after = current + 1 < chapters.length ? chapters[current + 1] : null;
-      progress.tourAt(after ? after.id : null, 0);
+      // The next place to continue from: the next chapter of the whole
+      // tour (a flavor page plays only some), or none after the last.
+      progress.tourAt(ch.next || null, 0);
     }
     chapterEnd(how === "auto");
     return true;
