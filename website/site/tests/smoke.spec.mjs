@@ -426,10 +426,11 @@ const EXERCISES = [
       ["settle", {}],
     ],
   },
-  { page: "paxos/quorums/", id: "majority", moves: [["settle", { notTo: "n3" }], ["drop", { to: "n3" }]] },
+  { page: "paxos/quorums/", id: "majority", guided: true, moves: [["settle", { notTo: "n3" }], ["drop", { to: "n3" }]] },
   {
     page: "paxos/multi-paxos/",
     id: "gap",
+    guided: true,
     moves: [
       ["extra", "The client writes bravo"],
       ["drop", { kind: ["Accept"] }],
@@ -448,6 +449,7 @@ const EXERCISES = [
   {
     page: "paxos/quorums/",
     id: "grid-column",
+    guided: true,
     moves: [["extra", "The client writes alpha"], ["settle", {}], ["extra", "The client writes bravo"], ["settle", {}]],
   },
   {
@@ -477,7 +479,7 @@ for (const ex of EXERCISES) {
     // engine's typed state: a log world names its leader.
     await expect(lab.locator(".stage-node").first()).toBeVisible();
     // A guided exercise opens on its intro; Skip leaves it set up.
-    if (ex.id === "gap") {
+    if (ex.guided) {
       await expect(lab.locator(".lab-narrator")).toBeVisible();
       await lab.locator(".lab-narrator-skip").click();
       await expect(lab.locator(".lab-narrator")).toBeHidden();
