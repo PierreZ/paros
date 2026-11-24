@@ -70,8 +70,7 @@ use paros::journal::register::{
 use paros::journal::resolve::ResolveAnswer;
 use paros::journal::roles::{Campaign, LeaderPhase};
 use paros::journal::{
-    Command, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, SegmentId,
-    SegmentState, Seq, Slot,
+    Command, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, SegmentId, Seq, Slot,
 };
 use paros::journal_io::mem::MemStorage;
 use paros::journal_io::{
@@ -216,6 +215,15 @@ struct Matchmaker {
 /// and writes at a majority. Each copy of this handle is the register
 /// client of one host; they share the matchmakers and the counter of
 /// operation generations.
+///
+/// **One operation at a time.** An operation holds the matchmakers' lock
+/// from its first read to its last write, so two operations never
+/// interleave and a write is never left at a minority. With interleaved
+/// operations, an operation in conflict can leave its write at a minority;
+/// the change asked again then finds it and is refused, and today the
+/// leader takes that refusal as a loss and stops (a seal, seen in about 1
+/// run in 100). The fix of the leader is its own work; once it lands, the
+/// lock can cover one request at a time.
 #[derive(Clone)]
 struct Matchmakers {
     set: MatchmakerSet,
@@ -262,75 +270,36 @@ impl Matchmakers {
         }
     }
 
-    /// Run one operation of `change`: the step that ends it.
+    /// Run one operation of `change`: the step that ends it. A request to
+    /// a matchmaker that is down is lost; when no majority answers a phase,
+    /// the operation ends with no answer ([`CallStep::Pending`]).
     fn run(&self, change: &Change) -> CallStep {
-        let round = self.ops.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut members = lock(&self.members);
         let op = Ballot {
-            round,
+            round: self.ops.fetch_add(1, Ordering::SeqCst) + 1,
             node: self.caller,
         };
         let mut call = RegisterCall::new(op, self.set.clone(), change.clone());
         loop {
-            let mut moved = false;
+            let mut next_phase = false;
             for (id, request) in call.requests() {
-                // A request to a matchmaker that is down is lost.
-                let reply = {
-                    let mut members = lock(&self.members);
-                    let m = members.get_mut(&id).expect("a member of the set");
-                    if !m.up {
-                        continue;
-                    }
-                    m.member.step(request).reply
-                };
-                match call.on_reply(id, reply) {
+                let m = members.get_mut(&id).expect("a member of the set");
+                if !m.up {
+                    continue;
+                }
+                match call.on_reply(id, m.member.step(request).reply) {
                     CallStep::Pending => {}
                     CallStep::Write { .. } => {
-                        moved = true;
+                        next_phase = true;
                         break;
                     }
                     step => return step,
                 }
             }
-            if !moved {
-                // Every matchmaker that is up answered, and no majority did.
+            if !next_phase {
                 return CallStep::Pending;
             }
         }
-    }
-
-    /// Run one operation of `change`. An operation in conflict with a
-    /// later one ended without a done write, but a minority may hold its
-    /// write: the outcome is unknown, so the answer is `NoAnswer`, as for a
-    /// lost reply. The caller asks again, and the next operation opens above
-    /// the conflict.
-    fn change_once(&self, change: &Change) -> Result<RegisterValue, ChangeError> {
-        match self.run(change) {
-            CallStep::Done(value) => Ok(value),
-            CallStep::Refused { refusal, .. } => Err(ChangeError::Refused(refusal)),
-            CallStep::Conflict { above } => {
-                self.ops.fetch_max(above.round, Ordering::SeqCst);
-                Err(ChangeError::NoAnswer)
-            }
-            CallStep::Pending | CallStep::Moved { .. } | CallStep::Write { .. } => {
-                Err(ChangeError::NoAnswer)
-            }
-        }
-    }
-
-    /// The value of a done write, read from the matchmakers' state without
-    /// a read generation: a write that a majority holds is done, and a done
-    /// write is all that [`Register::read`] may give. `None` while the
-    /// highest write is held by a minority only.
-    fn peek(&self) -> Option<RegisterValue> {
-        let members = lock(&self.members);
-        let held: Vec<_> = members
-            .values()
-            .filter(|m| m.up)
-            .map(|m| m.member.state().written.clone())
-            .collect();
-        let top = held.iter().max_by_key(|w| w.op)?;
-        let holders = held.iter().filter(|w| w.op == top.op).count();
-        (holders > members.len() / 2).then(|| top.value.clone())
     }
 }
 
@@ -343,37 +312,32 @@ impl Register for Matchmakers {
         if journal != JOURNAL {
             return Err(ChangeError::Unknown);
         }
-        self.change_once(change)
+        match self.run(change) {
+            CallStep::Done(value) => Ok(value),
+            CallStep::Refused { refusal, .. } => Err(ChangeError::Refused(refusal)),
+            CallStep::Pending
+            | CallStep::Write { .. }
+            | CallStep::Conflict { .. }
+            | CallStep::Moved { .. } => Err(ChangeError::NoAnswer),
+        }
     }
 
-    /// The value of a done write: the value that a majority of the
-    /// matchmakers holds, else a read at a majority that writes the value it
-    /// saw again with a `Confirm` of the newest segment, so a value that only
-    /// a minority took is never given out (§J3.4, "act on a write seen
-    /// done").
+    /// The value of a done write: the highest write, when a majority of the
+    /// matchmakers holds it. A read takes no read generation: it only gives
+    /// a write that is done already (§J3.4, "act on a write seen done").
     fn read(&mut self, journal: JournalId) -> Option<RegisterValue> {
         if journal != JOURNAL {
             return None;
         }
-        if let Some(value) = self.peek() {
-            return Some(value);
-        }
-        // Segment 0 does not exist: the guard refuses, so this operation
-        // only reads.
-        let probe = Change::Confirm {
-            segment: SegmentId(0),
-            state: SegmentState::InForce,
-        };
-        let CallStep::Refused { seen, .. } = self.run(&probe) else {
-            return None;
-        };
-        // A journal with no segment yet is not open: nothing to give.
-        let newest = seen.segments().values().next_back()?;
-        let confirm = Change::Confirm {
-            segment: newest.id(),
-            state: newest.state(),
-        };
-        self.change_once(&confirm).ok()
+        let members = lock(&self.members);
+        let held: Vec<_> = members
+            .values()
+            .filter(|m| m.up)
+            .map(|m| &m.member.state().written)
+            .collect();
+        let top = held.iter().max_by_key(|w| w.op)?;
+        let holders = held.iter().filter(|w| w.op == top.op).count();
+        (holders > members.len() / 2).then(|| top.value.clone())
     }
 }
 
@@ -414,6 +378,9 @@ async fn serve(
             if let Some(i) = reads.iter().position(|(c, _)| *c == reply.read) {
                 let _ = reads.swap_remove(i).1.send(reply.answer);
             }
+        }
+        for (address, stop) in process.take_stopped() {
+            println!("  host {host}: the role at {address:?} stopped: {stop:?}");
         }
         for notice in process.take_notices() {
             if let Notice::Retired { segment, .. } = notice {
@@ -633,10 +600,10 @@ impl Cluster {
 
     /// The controller's register read.
     fn register(&self) -> RegisterValue {
-        self.matchmakers
-            .clone()
-            .read(JOURNAL)
-            .expect("a done register value")
+        let mut register = self.matchmakers.client(0);
+        (0..1_000)
+            .find_map(|_| register.read(JOURNAL))
+            .expect("a done register value in 1000 reads")
     }
 
     /// One line for each role of each host.
