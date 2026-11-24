@@ -100,7 +100,8 @@ jobs:
       # `paros-journal-io` (#1329) do the same for the journal fold and for the journal roles on
       # the traits and the driver, with backends in memory and a storage written by hand. The
       # examples of the facade `paros` run a journal through `paros::` paths alone, in one process
-      # (`journal`) and on three tokio tasks (`tokio_tasks`; tokio is a dev-dependency of the facade). The example of
+      # (`journal`), on three tokio tasks (`tokio_tasks`; tokio is a dev-dependency of the facade) and, with every
+      # journal role (matchmakers, a grid, a roll, a crash), on six hosts of a multi-thread runtime (`full_journal`). The example of
       # `paros-host` (#1410 (split the generic host of actors)) runs roles that are not journal roles on the
       # generic host and driver. Every composing
       # crate has examples (`scripts/check-examples.sh`). They are linted under the
@@ -149,6 +150,8 @@ jobs:
         run: nix develop --command cargo run -p paros --example journal
       - name: Run the facade example tokio_tasks
         run: nix develop --command cargo run -p paros --example tokio_tasks
+      - name: Run the facade example full_journal
+        run: nix develop --command cargo run -p paros --example full_journal
       # nextest runs no doc test, so the examples of the rustdoc run here.
       - name: Run the doc examples
         run: nix develop --command cargo test --doc -p paros-consensus -p paros-journal-io

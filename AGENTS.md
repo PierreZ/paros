@@ -309,7 +309,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `single_writer`, `multi_writer`; #1370 (journal examples)), the host's example:
   `cargo run -p paros-host --example coordinator` (#1410), the grid controller's example:
   `cargo run -p paros-journal-control --example <name>` (`controller`, `driver`), and the facade examples:
-  `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`)
+  `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`, `full_journal`)
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
   each one (the workflow rule "Composing crates have examples" below)
 - the doc examples: `cargo test --doc -p paros-consensus -p paros-journal-io` (nextest runs no
@@ -818,7 +818,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   with its default features; it is where moonpool's storage and network get bundled, behind a
   feature, once the adapter exists (#1417 (the moonpool adapter on the generic host), in the layered parosd). Its examples (`examples/`) run a journal through
   `paros::` paths alone: `journal` in one process, `tokio_tasks` on three tokio tasks that talk
-  over channels (tokio is a dev-dependency only).
+  over channels (tokio is a dev-dependency only), `full_journal` every journal role (matchmakers, a
+  grid, leader, replicas, client) on six hosts of a multi-thread runtime, with a crash and a roll.
 - `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
   segments, the walk of the matchmaker register across handovers, the walk of the journal
   roles, the walk of the generic driver of `paros-journal-io` on three processes, the walk of the
