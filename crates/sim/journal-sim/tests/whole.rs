@@ -3,8 +3,8 @@
 
 use journal_sim::campaign::{campaign, try_sites};
 use journal_sim::whole::{
-    ACKED, AGAIN, AGREE, ALERTS, ANSWER, BOUNDED_IN_FLIGHT, DISK, FLIGHT, HEAL_HELD, ONCE, SEALED,
-    STOPPED, WholeMutant, reach, walk,
+    ACKED, AGAIN, AGREE, ALERTS, ANSWER, BOUNDED_IN_FLIGHT, CONTROLLER_STOPPED, DISK, FLIGHT,
+    HEAL_HELD, ONCE, SEALED, STOPPED, WholeMutant, reach, walk,
 };
 use moonpool_assertions::AssertKind;
 
@@ -103,6 +103,11 @@ fn again_catches_a_register_that_refuses_a_change_asked_again() {
 #[test]
 fn stopped_catches_a_register_that_refuses_a_first_seal() {
     caught(WholeMutant::RefuseSeal, STOPPED);
+}
+
+#[test]
+fn controller_stopped_catches_a_read_with_a_forged_term() {
+    caught(WholeMutant::ForgedTerm, CONTROLLER_STOPPED);
 }
 
 #[test]

@@ -271,13 +271,17 @@ at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end),
 its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position),
 `ALERTS` (each alert of the controller is true of the machines), `DISK` (each replica's disk, on
 every machine up or down, holds the chosen log: each slot it holds, its base and its compaction
-point are the chosen log's, and its compaction floor is at or below the decided floor) and
+point are the chosen log's, and its compaction floor is at or below the decided floor),
 `STOPPED` (each leader that stops on its own has a true cause for the phase it stopped from: a
 higher bound or a later segment for a bind, a higher promise in Phase 1, a seal of its own segment
 for an open leader, another end of the segment before it or a newer segment for a sealing leader;
 the facts
-include the writes that a minority of the matchmakers took, since a role may act on one). Each has
-its planted mutant (`WholeMutant`; `RefuseSeal` for `STOPPED`, `CorruptCopy` for `DISK`).
+include the writes that a minority of the matchmakers took, since a role may act on one) and
+`CONTROLLER_STOPPED` (each controller that stops, on a decision `Stop`, an abandoned heal or a
+change refused on its term, was deposed: a value it read holds a later term or its term won by
+another node, and a matchmaker held that term; or a change was refused on its term while a
+matchmaker held such a term). Each has its planted mutant (`WholeMutant`; `RefuseSeal` for
+`STOPPED`, `ForgedTerm` for `CONTROLLER_STOPPED`, `CorruptCopy` for `DISK`).
 `STOPPED` exists because the walk heals what it judges: placement replaces a stopped leader, so a
 leader that stops for a wrong reason (the bug of #1511 (a change asked again over its own write))
 costs nothing that another oracle sees. Each walk of `journal-sim` also runs two seeds twice and
