@@ -93,6 +93,8 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-host --no-deps
       - name: Check the journal IO crate's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal-io --no-deps
+      - name: Check the coordination store's rustdoc links
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-election --no-deps
       # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
       # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
       # them is a test of the public API's shape as much as of the protocol. The examples of
@@ -103,7 +105,9 @@ jobs:
       # (`journal`), on three tokio tasks (`tokio_tasks`; tokio is a dev-dependency of the facade) and, with every
       # journal role (matchmakers, a grid, a roll, a crash), on six hosts of a multi-thread runtime (`full_journal`). The example of
       # `paros-host` (#1410 (split the generic host of actors)) runs roles that are not journal roles on the
-      # generic host and driver. Every composing
+      # generic host and driver. The example of `paros-election` (#1420 (paros-election)) elects a
+      # leader with a latch over a journal in memory, takes over at a higher term and starts a
+      # member from a checkpoint. Every composing
       # crate has examples (`scripts/check-examples.sh`). They are linted under the
       # same pedantic clippy as the crate by the clippy step's `--all-targets` above.
       - name: Run single_decree
@@ -146,6 +150,8 @@ jobs:
         run: nix develop --command cargo run -p paros-journal-control --example controller
       - name: Run the grid controller example driver
         run: nix develop --command cargo run -p paros-journal-control --example driver
+      - name: Run the coordination store example latch
+        run: nix develop --command cargo run -p paros-election --example latch
       - name: Run the facade example journal
         run: nix develop --command cargo run -p paros --example journal
       - name: Run the facade example tokio_tasks

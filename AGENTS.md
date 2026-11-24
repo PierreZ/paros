@@ -298,7 +298,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
-  `-p paros-journal`, `-p paros-journal-control`, `-p paros-host` and `-p paros-journal-io`
+  `-p paros-journal`, `-p paros-journal-control`, `-p paros-host`, `-p paros-journal-io` and
+  `-p paros-election`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` (and its `--self-test`),
   `scripts/count-assertions.py --min <floor>` (#248 (TigerStyle assertions)) and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
@@ -311,7 +312,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
   `single_writer`, `multi_writer`; #1370 (journal examples)), the host's example:
   `cargo run -p paros-host --example coordinator` (#1410), the grid controller's example:
-  `cargo run -p paros-journal-control --example <name>` (`controller`, `driver`), and the facade examples:
+  `cargo run -p paros-journal-control --example <name>` (`controller`, `driver`), the coordination
+  store's example: `cargo run -p paros-election --example latch`, and the facade examples:
   `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`, `full_journal`)
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
   each one (the workflow rule "Composing crates have examples" below)
@@ -464,7 +466,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
-  (the facade), `paros-journal`, `paros-journal-control` and `paros-journal-io`; later the moonpool adapter (the
+  (the facade), `paros-journal`, `paros-journal-control`, `paros-journal-io` and `paros-election`; later the moonpool adapter (the
   journal client is a module of `paros-journal`, #1331). A user programs against these crates, so each one has runnable examples in
   `examples/` that use its public API as a user would (the facade's examples import `paros::`
   paths only). An example asserts what it shows, so CI runs it as a test: add each new example
@@ -816,6 +818,13 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   process and its `Driver`, both on `paros-host`, the `Events` port, backends in memory (`mem`) and
   the contract suites (`contract`). Its examples `in_memory`, `custom_storage` and `multi_writer`
   run the roles on it.
+- `crates/lib/paros-election` — the coordination store over a journal, the election library
+  (#1420 (paros-election), `docs/architecture/04-roles.md` §4.4, "The coordination store"; model
+  `specs/tla/coord/`): `Tree`, the fold of sessions, nodes and the turn of each latch; `Member`, one
+  session over one journal client; the recipes `Latch`, `Group` and `Counter`. Pure, layer 2, on
+  `paros-journal` alone; not published yet, and not in the facade. Its example `latch` elects a
+  leader, takes over at a higher term and starts a member from a checkpoint. Walked by
+  `journal-sim`'s election walk.
 - `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`, `paros::host`,
   `paros::journal`, `paros::journal_io`). A program depends on `paros` alone. Wasm-safe and provider-free
   with its default features; it is where moonpool's storage and network get bundled, behind a
@@ -828,7 +837,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   roles, the walk of the generic driver of `paros-journal-io` on three processes, the walk of the
   whole journal on the in-memory IO (two journals, their controllers and a client; #1445), the sweep of
   the grid controller's decisions over every small view against a reference `decide`
-  (`control`, #1261) and the walk of the controller role (`controller`), with oracles that share no
+  (`control`, #1261) and the walk of the controller role (`controller`), the walk of the coordination store (`election`:
+  three members of `paros-election` over a lossy mailbox, #1420), with oracles that share no
   code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
   `specs/tla/journal-state/FoldTrace.tla`, `specs/tla/segment-records/RegisterTrace.tla` and
   `specs/tla/journal-ctrl/RolesTrace.tla` (and of the controller walk against `specs/tla/grid-controller/ControllerTrace.tla`, and of the heal walk against `specs/tla/heal-reuse/HealTrace.tla`), and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310

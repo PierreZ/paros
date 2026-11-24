@@ -13,6 +13,7 @@ paros-journal = { path = "crates/lib/paros-journal", version = "0.2.0", default-
 paros-journal-control = { path = "crates/lib/paros-journal-control" }
 paros-host = { path = "crates/lib/paros-host", version = "0.2.0" }
 paros-journal-io = { path = "crates/lib/paros-journal-io", version = "0.2.0" }
+paros-election = { path = "crates/lib/paros-election" }
 
 
 [workspace.package]

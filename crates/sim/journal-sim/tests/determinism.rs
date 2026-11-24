@@ -2,7 +2,7 @@
 //! model that reads a clock, a `HashMap` order or a generator of its own
 //! fails here (moonpool-walk's `check_determinism`).
 
-use journal_sim::{client, controller, fold, heal, host, register, roles, whole};
+use journal_sim::{client, controller, election, fold, heal, host, register, roles, whole};
 use moonpool_walk::{Model, Walk};
 
 /// The seeds that each walk runs twice.
@@ -60,6 +60,14 @@ fn the_driver_walk_is_deterministic() {
 #[test]
 fn the_client_walk_is_deterministic() {
     deterministic("client", &client::walk(client::ClientMutant::None, 1));
+}
+
+#[test]
+fn the_election_walk_is_deterministic() {
+    deterministic(
+        "election",
+        &election::walk(election::ElectionMutant::None, 1),
+    );
 }
 
 #[test]
