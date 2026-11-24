@@ -98,7 +98,8 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   `trace/compart/desk.rs` → `Desk`, `Verb` → the same deployment driven by hand, the world of
   the lesson 6 exercises (deliver or lose each message, a client write, a beat of node 0 or of
   a proxy leader, a proxy leader crash). The guided lines of those exercises read it through
-  accessors only (`written`, `counts`, `knows`, `held`, `taken_back`, `lost`).
+  its accessors only (`chosen`, `learned`, `written`, `counts`, `knows`, `held`, `taken_back`,
+  `lost`).
 - `src/paxos/picker.rs` → `check(shape, down)`: which quorums `paros-consensus` finds in a shape
   with some acceptors stopped; the wasm export `paxos_quorums` serves the quorums page's
   picker (#948 (quorum shapes and picker)).

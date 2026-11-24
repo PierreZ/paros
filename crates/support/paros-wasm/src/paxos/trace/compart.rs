@@ -1764,7 +1764,9 @@ fn tour_split(run: &mut Run) {
         |run| run.chosen().iter().any(|line| line == "slot 1 = bravo"),
         "the proxy leader chooses bravo",
     );
-    run.story("Node 0 sent one message for this write. The proxy leaders did the rest.");
+    run.story(
+        "As the leader, node 0 sent one message for this write. The proxy leader did the rest.",
+    );
     run.story("A batcher enters. Two writers send charlie and delta to it.")
         .enter(&[Who::Batcher]);
     run.batch(&[(1, "charlie"), (2, "delta")]);
@@ -1841,7 +1843,7 @@ fn tour_faults(run: &mut Run) {
     run.settle(|_, _, _| false);
     run.holds(|run| !run.reads[1].is_empty(), "replica 1 serves the read");
     run.story(
-        "Node 0 now only orders the writes. The other work runs on machines that can be added.",
+        "As the leader, node 0 now only orders the writes. The rest runs on machines that can be added.",
     );
 }
 

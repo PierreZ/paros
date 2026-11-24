@@ -43103,7 +43103,7 @@
           "more": "base"
         },
         {
-          "says": "Node 0 sent one message for this write. The proxy leaders did the rest.",
+          "says": "As the leader, node 0 sent one message for this write. The proxy leader did the rest.",
           "from": 31,
           "to": 31
         },
@@ -43164,7 +43164,7 @@
           "to": 81
         },
         {
-          "says": "Node 0 now only orders the writes. The other work runs on machines that can be added.",
+          "says": "As the leader, node 0 now only orders the writes. The rest runs on machines that can be added.",
           "from": 81,
           "to": 81
         }

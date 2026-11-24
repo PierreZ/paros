@@ -43,7 +43,8 @@ pub struct Desk {
     /// The chosen slots that each replica held above its chosen prefix at
     /// some point: it learned them out of order and waited.
     held: Vec<BTreeSet<u64>>,
-    /// The messages lost so far, as (kind, receiver's lane, slot).
+    /// The messages that a lose move lost, as (kind, receiver's lane, slot).
+    /// A message delivered to a party that is down is not counted.
     lost: Vec<(String, String, Option<u64>)>,
     /// The slots that node 0 took back from a proxy leader.
     taken: BTreeSet<u64>,
@@ -214,7 +215,7 @@ impl Desk {
         self.taken.contains(&slot)
     }
 
-    /// How many `kind` messages of `slot` to `lane` were lost.
+    /// How many `kind` messages of `slot` to `lane` a lose move lost.
     #[must_use]
     pub fn lost(&self, kind: &str, lane: &str, slot: u64) -> usize {
         self.lost

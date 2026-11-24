@@ -658,6 +658,11 @@ fn votes_that_choose_alpha_first_are_a_dead_end() {
     lab.settle(|_| true);
     let stuck = lab.view().stuck.expect("no vote for slot 0 comes again");
     assert_eq!(stuck.part, 0);
+    assert!(
+        stuck.says.starts_with("Proxy leader 0 heard a majority"),
+        "{}",
+        stuck.says
+    );
 }
 
 /// A lost hand-off of slot 0: no proxy leader counts it, and node 0 does
@@ -667,7 +672,13 @@ fn a_lost_hand_off_of_slot_0_is_a_dead_end() {
     let mut lab = Lab::new("lost-votes").expect("lost-votes exists");
     lab.extra("The client writes alpha");
     lab.drop_all(|m| m.kind == "Accept" && m.to == "p0");
-    assert!(lab.view().stuck.is_some(), "slot 0 is never chosen");
+    let stuck = lab.view().stuck.expect("slot 0 is never chosen");
+    assert_eq!(stuck.part, 0);
+    assert!(
+        stuck.says.starts_with("The hand-off of slot 0"),
+        "{}",
+        stuck.says
+    );
 }
 
 /// Replica 0 learns slot 0 first: it can no longer learn slot 1 before

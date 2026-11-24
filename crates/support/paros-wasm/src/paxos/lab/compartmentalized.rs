@@ -228,10 +228,19 @@ const LOST_VOTES_PARTS: &[Part] = &[
         },
         dead: |lab| {
             let more = on_wire(lab, vote_to_p0) + on_wire(lab, accept_of_p0);
-            (votes_lost(lab) + more < 2 && !p0_will_count(lab)).then_some(
-                "Proxy leader 0 heard a majority and closed slot 0, so no vote for slot 0 comes \
-                 again. Undo to before the votes reached it.",
-            )
+            if votes_lost(lab) + more >= 2 || p0_will_count(lab) {
+                None
+            } else if lab.desk().lost("Accept", "p0", 0) > 0 {
+                Some(
+                    "The hand-off of slot 0 to proxy leader 0 was lost, so no Accept and no vote \
+                     of slot 0 comes. Node 0 does not beat here. Undo that move.",
+                )
+            } else {
+                Some(
+                    "Proxy leader 0 heard a majority and closed slot 0, so no vote for slot 0 \
+                     comes again. Undo to before the votes reached it.",
+                )
+            }
         },
     },
     Part {
