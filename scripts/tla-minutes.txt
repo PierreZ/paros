@@ -39,7 +39,7 @@ health 3.5
 journal-compact 2.5
 journal-ctrl 14.2
 journal-ids 6
-journal-state 21
+journal-state 22.2
 leader-handoff 15
 matchmaker 6.5
 multi-paxos 20
