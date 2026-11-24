@@ -32,6 +32,7 @@ health 0
 journal-compact 1
 journal-ctrl 6
 journal-ids 3
+journal-repromise 1
 journal-state 29
 leader-handoff 12
 matchmaker 3
