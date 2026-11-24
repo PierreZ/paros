@@ -242,7 +242,30 @@ pub struct Phase1Outcome<Id, V> {
 /// ballot `> threshold` on some member of every Q2 — so an acceptor's answer
 /// qualifies when it reported either nothing (`none`) or a record at ballot
 /// `<= threshold`.
-fn qualifying_answers<Id: Copy + Ord>(
+///
+/// A public function so that a Phase-1 tally outside the core (the journal
+/// leader's, over its own reports) applies the same rule: it names no slot
+/// range and no layout of the configurations.
+///
+/// ```
+/// use std::collections::{BTreeMap, BTreeSet};
+/// use paros_consensus::proposer::qualifying_answers;
+/// use paros_consensus::{Ballot, NodeId};
+///
+/// let b = |round| Ballot { round, node: NodeId(9) };
+/// let answered = BTreeSet::from([NodeId(1), NodeId(2), NodeId(3)]);
+/// // Node 2 holds a faulty record at ballot 4, above the best readable 3.
+/// let reporters = BTreeMap::from([(NodeId(2), b(4)), (NodeId(3), b(3))]);
+/// let qualifying = qualifying_answers(&answered, Some(&reporters), Some(b(3)));
+/// assert_eq!(qualifying, BTreeSet::from([NodeId(1), NodeId(3)]));
+/// ```
+///
+/// # Panics
+///
+/// When an assertion on its own postcondition fails: a programmer error,
+/// never an operating condition.
+#[must_use]
+pub fn qualifying_answers<Id: Copy + Ord>(
     answered: &BTreeSet<Id>,
     reporters: Option<&BTreeMap<Id, Ballot>>,
     threshold: Option<Ballot>,
@@ -302,7 +325,31 @@ fn member_union<'a, Id: Copy + Ord + 'a>(
 /// `Noop` while the departed member holding its only clean copy is down,
 /// and the sweep goes red on two values decided for one slot (witness
 /// 9147512841470386050).
-fn slot_decidable<Id: Copy + Ord>(
+///
+/// Public for a Phase-1 tally outside the core, as [`qualifying_answers`]:
+/// a caller passes each configuration whose Phase-1 quorum it needs (each
+/// column of a grid as its own configuration, never their union).
+///
+/// ```
+/// use std::collections::{BTreeMap, BTreeSet};
+/// use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+/// use paros_consensus::proposer::slot_decidable;
+/// use paros_consensus::{Ballot, NodeId};
+///
+/// let b = |round| Ballot { round, node: NodeId(9) };
+/// let config = AcceptorConfig::new(vec![NodeId(1), NodeId(2), NodeId(3)], QuorumSystem::Majority);
+/// let reporters = BTreeMap::from([(NodeId(2), b(4))]);
+/// let two = BTreeSet::from([NodeId(1), NodeId(2)]);
+/// assert!(!slot_decidable(&[config.clone()], &two, Some(&reporters), Some(b(3))));
+/// let three = BTreeSet::from([NodeId(1), NodeId(2), NodeId(3)]);
+/// assert!(slot_decidable(&[config], &three, Some(&reporters), Some(b(3))));
+/// ```
+///
+/// # Panics
+///
+/// When an assertion of [`qualifying_answers`] fails: a programmer error.
+#[must_use]
+pub fn slot_decidable<Id: Copy + Ord>(
     prior: &[AcceptorConfig<Id>],
     answered: &BTreeSet<Id>,
     reporters: Option<&BTreeMap<Id, Ballot>>,
@@ -350,10 +397,25 @@ fn promise_page_shape_valid<V>(
 /// would let two proposers with different arrival orders select different
 /// values at one ballot, which is the one thing the rule exists to prevent.
 ///
+/// Public for a Phase-1 tally outside the core, as [`qualifying_answers`].
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use paros_consensus::proposer::merge_report;
+/// use paros_consensus::{Ballot, NodeId, Slot};
+///
+/// let b = |round| Ballot { round, node: NodeId(9) };
+/// let mut tally = BTreeMap::new();
+/// merge_report(&mut tally, Slot(0), b(2), "x");
+/// merge_report(&mut tally, Slot(0), b(1), "y");
+/// merge_report(&mut tally, Slot(0), b(3), "z");
+/// assert_eq!(tally[&Slot(0)], (b(3), "z"));
+/// ```
+///
 /// # Panics
 ///
 /// If two reports at one ballot disagree.
-fn merge_report<V: PartialEq>(
+pub fn merge_report<V: PartialEq>(
     tally: &mut BTreeMap<Slot, (Ballot, V)>,
     slot: Slot,
     ballot: Ballot,
