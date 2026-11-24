@@ -75,10 +75,19 @@
   var choices = el("div", "story-choices");
   panel.appendChild(choices);
 
+  // The player: a progress line with one mark per screen, then Back, Play or
+  // Pause, Continue and the speed.
+  var line = el("div", "story-line");
+  line.setAttribute("role", "group");
+  line.setAttribute("aria-label", "Screens of this story");
+  panel.appendChild(line);
   var controls = el("div", "story-controls");
   var backBtn = el("button", "btn", "Back");
+  var playBtn = el("button", "btn story-play", "Play");
   var nextBtn = el("button", "btn primary", "Continue");
-  [backBtn, nextBtn].forEach(function (b) { b.type = "button"; controls.appendChild(b); });
+  var speedBtn = el("button", "btn story-speed tnum", "1×");
+  speedBtn.title = "Speed of the player";
+  [backBtn, playBtn, nextBtn, speedBtn].forEach(function (b) { b.type = "button"; controls.appendChild(b); });
   panel.appendChild(controls);
 
   var others = el("details", "story-others");
@@ -88,7 +97,7 @@
       var b = el("button", "steps-chapter", run.label);
       b.type = "button";
       b.dataset.run = run.id;
-      b.addEventListener("click", function () { open(run, 0, true); });
+      b.addEventListener("click", function () { stop(); open(run, 0, true); });
       others.appendChild(b);
     });
     panel.appendChild(others);
@@ -192,9 +201,11 @@
       waiting = true;
       words();
     }
+    rest();
   }
 
   function answer(i) {
+    stop();
     var q = run.beats[at].question;
     asked[key()] = i;
     var detail = { page: trace.page, run: run.id, beat: at, answer: i, right: i === q.right };
@@ -268,6 +279,7 @@
       var b = el("button", "btn primary story-next-btn", "Next in this lesson: " + after.label);
       b.type = "button";
       b.addEventListener("click", function () {
+        stop();
         stories.forEach(function (s) { if (s.id === after.id) open(s, 0, true); });
       });
       box.appendChild(b);
@@ -334,7 +346,7 @@
       if (!target) return;
       var b = el("button", "story-choice", choice.label);
       b.type = "button";
-      b.addEventListener("click", function () { open(target, choice.beat, true); });
+      b.addEventListener("click", function () { stop(); open(target, choice.beat, true); });
       choices.appendChild(b);
     });
     if (last && !waiting) {
@@ -356,6 +368,77 @@
 
   var touched = false;
 
+  // ---- the player ----
+  //
+  // Play goes on by itself: after the messages of a screen stop, it waits
+  // the time to read the sentence, then plays the next screen. It stops at
+  // a question, at the end of a run, when the reader presses any other
+  // control, and when the page is hidden. It never starts by itself, and
+  // with reduced motion there is no Play: each screen appears complete.
+
+  var SPEEDS = [1, 1.5, 0.75];
+  var playing = false;
+  var speed = 1;
+  var timer = null;
+  var onEnd = null;    // what Play does at the end of a run (the tour sets it)
+
+  // The time to read a sentence: 0.33 s per word, from 2.2 s to 9 s.
+  function readMs(text) {
+    var n = (text || "").split(/\s+/).filter(Boolean).length;
+    return Math.min(9000, Math.max(2200, 330 * n)) / speed;
+  }
+
+  function clear() { if (timer) { clearTimeout(timer); timer = null; } }
+
+  function setPlaying(on) {
+    playing = on;
+    clear();
+    playBtn.textContent = on ? "Pause" : "Play";
+    playBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    panel.classList.toggle("playing", on);
+  }
+
+  function stop() { if (playing) setPlaying(false); }
+
+  // The screen on view is complete: when playing, the next one follows.
+  function rest() {
+    // A screen whose messages still move rests when they stop.
+    if (!playing || nextBtn.textContent === "Skip") return;
+    clear();
+    if (waiting) { setPlaying(false); return; }
+    var mine = run.id + ":" + at;
+    timer = setTimeout(function () {
+      timer = null;
+      if (!playing || run.id + ":" + at !== mine || waiting) return;
+      if (at < run.beats.length - 1) { go(at + 1, true); return; }
+      if (onEnd && onEnd(run)) return;
+      setPlaying(false);
+    }, readMs(run.beats[at].says));
+  }
+
+  function play() {
+    if (reduced) return;
+    setPlaying(true);
+    touched = true;
+    if (waiting) { setPlaying(false); return; }
+    // At the end of a run, Play starts it again.
+    if (at === run.beats.length - 1 && !(onEnd && onEnd(run, true))) { go(0, true); return; }
+    if (nextBtn.textContent === "Skip") return; // the screen plays: rest() follows
+    go(at + 1, true);
+  }
+
+  function drawLine() {
+    line.textContent = "";
+    run.beats.forEach(function (beat, k) {
+      var b = el("button", "story-mark" + (k < at ? " seen" : "") + (k === at ? " now" : "") + (beat.question ? " ask" : ""));
+      b.type = "button";
+      b.setAttribute("aria-label", "Screen " + (k + 1));
+      if (k === at) b.setAttribute("aria-current", "step");
+      b.addEventListener("click", function () { stop(); touched = true; go(k, false); });
+      line.appendChild(b);
+    });
+  }
+
   // Show beat `n`: play its steps when `animate`, else draw its end.
   function go(n, animate) {
     n = Math.max(0, Math.min(run.beats.length - 1, n));
@@ -364,8 +447,10 @@
     var beat = run.beats[at];
     waiting = before() && !(key() in asked);
     words();
+    drawLine();
     if (waiting) {
       still(beat.from, beat.from);
+      stop();
       return;
     }
     if (!animate || reduced || beat.from === beat.to) {
@@ -390,8 +475,18 @@
     go(beat, animate);
   }
 
-  backBtn.addEventListener("click", function () { touched = true; nextBtn.textContent = "Continue"; go(at - 1, false); });
+  backBtn.addEventListener("click", function () { stop(); touched = true; nextBtn.textContent = "Continue"; go(at - 1, false); });
+  playBtn.addEventListener("click", function () { if (playing) setPlaying(false); else play(); });
+  speedBtn.addEventListener("click", function () {
+    speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+    speedBtn.textContent = speed + "×";
+    view.speed(speed);
+    rest();
+  });
+  playBtn.hidden = speedBtn.hidden = reduced;
+  document.addEventListener("visibilitychange", function () { if (document.hidden) stop(); });
   nextBtn.addEventListener("click", function () {
+    stop();
     touched = true;
     if (waiting) { answer(-1); return; }
     if (nextBtn.textContent === "Skip") { view.cancel(); nextBtn.textContent = "Continue"; still(run.beats[at].to, run.beats[at].from); landed(); return; }
@@ -401,6 +496,7 @@
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     var digit = /^[1-4]$/.test(e.key) ? parseInt(e.key, 10) - 1 : -1;
     if (waiting && digit >= 0 && digit < run.beats[at].question.answers.length) { answer(digit); e.preventDefault(); return; }
+    if (e.key === " " && !reduced && e.target === panel) { playBtn.click(); e.preventDefault(); return; }
     if (e.key === "ArrowRight") { nextBtn.click(); e.preventDefault(); }
     else if (e.key === "ArrowLeft") { if (!backBtn.disabled) backBtn.click(); e.preventDefault(); }
   });
@@ -408,6 +504,11 @@
 
   // The step-through calls back here: open the beat that holds step `n`.
   window.paxosStory = {
+    // The player, for the smoke test: play, pause, its state and its speed.
+    play: play,
+    pause: stop,
+    playing: function () { return playing; },
+    speed: function (v) { speed = v; speedBtn.textContent = v + "×"; view.speed(v); },
     answers: function () {
       return Object.keys(asked).map(function (k) {
         var p = k.split(":");
