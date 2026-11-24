@@ -101,6 +101,7 @@ pub(super) fn single_decree() -> Trace {
             repeated_answers(),
             accept_is_a_promise(),
             break_the_rule(),
+            tour(),
         ],
     )
 }
@@ -629,4 +630,80 @@ fn break_the_rule() -> Scenario {
         "Break the rule: an acceptor forgets its vote",
         decree_outcome,
     )
+}
+
+/// The tour run of chapter 1, "One value" (tour plan §5.1): the whole flavor
+/// in one world with no restart. One proposer gets alpha chosen; a second
+/// proposer at a higher ballot finds the vote and keeps alpha; then the
+/// acceptors stop one by one, and a restart reads the vote back from disk.
+fn tour() -> Scenario {
+    let mut run = Recorder::new(LEVEL);
+    run.tour("one-value", "One value");
+    run.beat(
+        "Three acceptors must choose one value. Each keeps two facts on disk: its highest \
+         promise and its vote.",
+    )
+    .beat("Phase 1: proposer 5 picks ballot 1.5 and sends a Prepare to each acceptor.")
+    .play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
+    .beat("Each acceptor writes its promise to disk, then answers: I refuse every ballot below 1.5.")
+    .settle(kind("Prepare"))
+    .beat("Two promises of three are a majority. No promise reports a vote, so proposer 5 asks for alpha.")
+    .settle(kind("Promise"))
+    .holds(on_wire("Accept"), "proposer 5 asks for votes")
+    .beat("Phase 2: each acceptor writes its vote for alpha to disk, then answers Accepted.")
+    .settle(kind("Accept"))
+    .holds(majority_voted("alpha"), "a majority voted for alpha")
+    .beat("Two votes at one ballot are a majority: alpha is chosen. Proposer 5 learns it and tells each acceptor.")
+    .more("lost-message")
+    .settle(any)
+    .holds(chosen("alpha"), "alpha is chosen");
+    run.beat("Now proposer 8 wants bravo. It picks a higher ballot, 1.8, and sends a Prepare.")
+        .enter(&["n8"])
+        .more("duel")
+        .play(
+            open(8, "bravo"),
+            "proposer 8 opens a higher ballot for bravo",
+        );
+    run.beat("Each acceptor promises 1.8, and each promise reports its vote: alpha at ballot 1.5.")
+        .settle(move |message| of(8)(message) && phase1(message));
+    run.beat("Proposer 8 must propose the value of the highest vote it heard of. This is the rule: it asks for alpha.")
+        .more("fenced-out")
+        .holds(on_wire("Accept"), "proposer 8 asks for votes");
+    run.beat("The acceptors vote for alpha at 1.8. A chosen value never changes: a later ballot finds it and keeps it.")
+        .settle(any)
+        .holds(voted(1, "alpha"), "acceptor 1 votes for alpha at ballot 1.8")
+        .holds(chosen("alpha"), "alpha stays chosen");
+    run.beat("Now acceptor 3 stops. Proposer 5 opens a higher ballot again.")
+        .more("acceptor-down")
+        .play(Action::Crash { node: 3 }, "acceptor 3 crashes")
+        .play(open(5, "alpha"), "proposer 5 opens a higher ballot again");
+    run.beat("Acceptors 1 and 2 still answer. Two of three are a majority, and the ballot ends with alpha.")
+        .settle(any)
+        .holds(chosen("alpha"), "alpha stays chosen with acceptor 3 down");
+    run.beat("Now acceptor 2 stops too. Proposer 8 opens a higher ballot.")
+        .play(Action::Crash { node: 2 }, "acceptor 2 crashes")
+        .play(open(8, "bravo"), "proposer 8 opens a higher ballot");
+    run.beat("Only acceptor 1 answers. One of three is not a majority: the ballot waits, and nothing is lost.")
+        .settle(any)
+        .holds(chosen("alpha"), "alpha stays chosen with one acceptor up")
+        .holds(|world| !on_wire("Accept")(world), "one promise asks for no vote");
+    run.beat("Acceptor 2 restarts. It reads its promise and its vote back from its disk.")
+        .more("acceptor-restart")
+        .play(Action::Restart { node: 2 }, "acceptor 2 restarts")
+        .holds(
+            voted(2, "alpha"),
+            "acceptor 2 holds its vote after a restart",
+        );
+    run.beat(
+        "Proposer 8 tries again. Acceptors 1 and 2 report alpha, so the ballot ends with alpha.",
+    )
+    .play(
+        open(8, "bravo"),
+        "proposer 8 tries again at a higher ballot",
+    )
+    .settle(any)
+    .holds(chosen("alpha"), "alpha stays chosen after the restart");
+    run.beat("One value, chosen once: a majority, a promise and a vote on disk keep it. An empty disk breaks it.")
+        .more("break-the-rule");
+    run.finish("tour", "One value", decree_outcome)
 }

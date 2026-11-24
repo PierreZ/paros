@@ -634,19 +634,18 @@ fn a_log_node_has_a_role_and_shows_its_holes() {
 
 // ---- the single-decree chapter (#1148 (single-decree chapter)) ----
 
-/// Every run of `page` but the base run is a story that tells every step
-/// and ends with a way back to the base run's last screen, which offers
-/// every other run.
+/// Every run of `page` but the base run and the tour runs is a story that
+/// tells every step and ends with a way back to the base run's last screen,
+/// which offers every other run. A tour run is in no lesson: the tour plays
+/// it, and it offers no choice (`tests/paxos_tour.rs`).
 fn every_run_is_a_story_that_leads_back(page_name: &str) {
     let trace = page(page_name);
     let base = run(&trace, "base");
     let turn = base.beats.last().expect("the base run has beats");
     let opened: Vec<&str> = turn.choices.iter().map(|c| c.run.as_str()).collect();
-    // A tour run is played by the tour (`src/tour.ts` of the site), not
-    // opened from the choices: it ends on the chapter's own buttons.
     let lessons: Vec<_> = trace.scenarios[1..]
         .iter()
-        .filter(|run| run.tour.is_none())
+        .filter(|r| r.tour.is_none())
         .collect();
     let others: Vec<&str> = lessons.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(opened, others, "the last screen offers every other run");

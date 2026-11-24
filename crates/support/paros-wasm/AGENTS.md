@@ -126,9 +126,9 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   fails CI. Undo is a replay: the engine draws no randomness. The exercises live in one file
   per page (`lab/single_decree.rs`, `lab/quorums.rs`, `lab/multi_paxos.rs`,
   `lab/compartmentalized.rs`, `lab/matchmaker.rs`), their tests in `lab/tests.rs`.
-- A **guided exercise** (plan `paxos-guided-tour-2026-11-24`, step F4; `gap` is the pilot) adds
-  three lists to its `Exercise`; the others keep them empty (`NONE`, `NO_PARTS`) until their
-  flavor fills them:
+- A **guided exercise** (plan `paxos-guided-tour-2026-11-24`, step F4; `gap` is the pilot, and
+  the three single-decree exercises are guided too) adds three lists to its `Exercise`; the
+  others keep them empty (`NONE`, `NO_PARTS`) until their flavor fills them:
   - `intro`: the setup as `Step`s, each a sentence and the moves it plays. `Lab::start`
     records each step's frames (one per move: the message and the `LabView` after it), and the
     page plays them (`PaxosLab::intro_start`, `intro_step(n)`).
@@ -136,6 +136,12 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
     three levels (`idea`, `plan`, `next`: the move to press now) and a dead end (`dead`,
     `dead_says`: the line cannot hold again). The goal is that every part holds (a test checks
     it). `LabView` gives `parts`, `hint` (of the first line that does not hold) and `stuck`.
+    `DEAD_ENDS` in `lab/tests.rs` names the parts of each guided exercise that have a dead end
+    (none for `two-values`: with the disk rule off, a wipe and a new ballot always remain), and
+    the random walk of the tests must meet exactly those. "No value is chosen" in `duel` and
+    `vote-not-chosen` is `DecreeWorld::chosen_by_votes`: a Phase-2 quorum voted for one value at
+    one ballot, before any proposer learns it. `two-values` judges what a proposer learns
+    (`chosen` of the view, `DecreeWorld::violation`), and its labels say so.
   - `guide`: the solution as `Step`s. The tests play it, and "Show me how" plays it on the page
     (`PaxosLab::guide_step(n)`). A guide step makes the lab a demo: its goal never counts as
     solved, and the reader's moves wait until Start again.

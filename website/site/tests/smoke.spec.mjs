@@ -419,6 +419,7 @@ const EXERCISES = [
   {
     page: "paxos/single-decree/",
     id: "vote-not-chosen",
+    intro: true,
     moves: [
       ["settle", { kind: ["Prepare", "Promise"] }],
       ["deliver", { kind: ["Accept"], to: "n1" }],
