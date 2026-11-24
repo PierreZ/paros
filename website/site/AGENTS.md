@@ -296,8 +296,9 @@ Both run on the built site, so build the wasm and the site first.
   `WireMessage` in `paros-wasm`), and the page must say the goal holds. Every exercise of the
   journal fold lab is solved by clicks on its calls (`data-call`), and every exercise of the
   register and record labs by clicks on its moves (`data-key`); Undo takes the goal back. Two walks
-  read the tour page's own data (`#tour`), so a new chapter or guide is in them with no change
-  of the test: every chapter of the tour plays to its end with motion at full speed, and every
+  read the tour page's own data (`#tour`), so a new chapter, or a new guide on a page that a
+  chapter links (`deeper`), is in them with no change of the test: every chapter of the tour
+  plays each of its runs in order to its end with motion at speed 8, and every
   exercise with a guide plays "Show me how" to its end, with every line of its goal marked, and
   is not solved. The quorum picker,
   the `quorums` widget and the `Ready` widget must answer. The live journal writes, keeps
