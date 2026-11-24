@@ -131,8 +131,7 @@ The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`:
 
 **Judges today:**
 
-- The models `specs/tla/truncation/`, `specs/tla/truncation-reconfig/` and
-  `specs/tla/segment-truncate/`, and the trace spec `specs/tla/node/TruncationTrace.tla`.
+- The models `specs/tla/truncation/` and `specs/tla/truncation-reconfig/`, and the trace spec `specs/tla/node/TruncationTrace.tla`.
 - `consensus-sim`'s flavors `Flavor::compaction` and `Flavor::compartments_compacting`, with the
   sites "cluster: a node's disk dropped a truncated prefix", "cluster: a node jumped to a trim
   point" and "cluster: a truncate raised first_seq".

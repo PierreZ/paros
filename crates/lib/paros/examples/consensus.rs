@@ -25,6 +25,8 @@ use paros::consensus::{ColocatedNode, Config, Limits, Message, NodeId, Slot, Val
 
 const NODES: [NodeId; 3] = [NodeId(1), NodeId(2), NodeId(3)];
 const WRITER: LeaderUuid = LeaderUuid(0xA11CE);
+/// The most batches that one pump drains before the example calls it a bug.
+const BUDGET: usize = 1_000;
 
 /// The nodes, their disks, the wire and what each node learned.
 struct Cluster {
@@ -67,13 +69,18 @@ impl Cluster {
             return;
         };
         let disk = self.disks.get_mut(&id).expect("each node has a disk");
-        loop {
+        for _ in 0..BUDGET {
             let pool = node.pool().to_vec();
             let ready = node.ready();
             if ready.is_empty() {
                 ready.advance();
                 return;
             }
+            // Plain Multi-Paxos has no matchmaker and serves no quorum read
+            // here: those buckets of the batch stay empty.
+            assert_eq!(ready.match_requests(), []);
+            assert_eq!(ready.gc_requests(), []);
+            assert_eq!(ready.read_states(), []);
             disk.apply(ready.writes());
             for (audience, message) in ready.messages() {
                 for to in audience.resolve(&pool, id) {
@@ -87,6 +94,7 @@ impl Cluster {
             ready.advance();
             node.advance_recovery();
         }
+        panic!("node {id} did not become quiet");
     }
 
     /// Deliver until the wire is empty. A message to a node that is down is

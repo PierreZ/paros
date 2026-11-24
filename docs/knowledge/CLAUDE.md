@@ -27,7 +27,7 @@ Read this file first. The index of every concept, its card and its sources is
 | How a real system implements it | `../references/<repo>/` (etcd-raft, frankenpaxos, ceph, foundationdb) |
 | paros's own design note for a rule | `../analysis/` |
 | The target design of the journal service | `../architecture/` |
-| The journal v1 and its rules | `../journal/` (link to it; a card never copies a journal rule) |
+| The journal v1 of design A and its rules | `docs/journal/` at the git tag `journal-design-a` (a card never copies a journal rule) |
 
 A design note in `../analysis/` is paros's own text. A card may point to it, but a design note
 is the **subject** of a card, never its only source.

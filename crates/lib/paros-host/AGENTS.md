@@ -30,7 +30,7 @@ and the driver, with a crash and a restart. It names no journal. CI runs it in t
 
 ## Rules
 
-- **A pure crate** (§J4.3): it depends on no crate, in `[dependencies]` and in
+- **A pure crate** (§J4.3 of the same document): it depends on no crate, in `[dependencies]` and in
   `[dev-dependencies]`. No trait requires `Send`, an executor or a runtime type. Layer 0 of
   `scripts/layers.sh`.
 - **It knows no role.** No journal, no tenant, no coordinator name in the code. A fact that only

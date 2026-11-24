@@ -133,7 +133,7 @@ promise fence alone ends a read on the old grid; on a full grid the row that it 
 meet the Phase-1 quorum of the new grid's first leader, and the fence needs the seal of each row
 (decision 31, #1209). An acceptor of a retired segment that loses its state answers with promise
 0, so the promise alone no longer fences; the belief half of the fence and the refusal of an
-acceptor that did not hear close that case (`specs/tla/experiments/segments/reads/`, #1254
+acceptor that did not hear close that case (`specs/tla/experiments/segments/reads/` (at the git tag `journal-design-a`), #1254
 (leaderless reads across a reshape): `part_fence`, `fence_rows` and `wipe_belief` pass;
 `part_bare`, `fence_only`, `seal_only` and `part_wipe_fence` fail). The journal keeps this fence
 and does not read the segment table at a matchmaker quorum on each read (decided on 2026-11-20).

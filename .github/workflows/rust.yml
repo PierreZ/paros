@@ -325,7 +325,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/nix
-      - name: Re-record the step-through traces of the Paxos and Segments pages and check they are committed (#811 (Paxos flavor pages), #1365 (reshape and seal step-through))
+      - name: Re-record the step-through traces of the Paxos pages and check they are committed (#811 (Paxos flavor pages))
         run: |
           nix develop --command cargo test -p paros-wasm --test paxos_traces
           git diff --exit-code -- website/site/src/traces

@@ -173,7 +173,7 @@ The rows that name `paros-roles`, `paros-storage` point to code at the git tag `
   is refused by the trace check (`specs/tla/node/FaultsTrace.tla`).
 - The models: the faulty entries of CTRL and the repair probe in `specs/tla/truncation/`, CTRL on
   a grid in `specs/tla/ctrl-grid/`, and the copies of a sealed segment in
-  `specs/tla/ctrl-segments/`.
+  `specs/tla/ctrl-segments/` (at the git tag `journal-design-a`).
 
 **Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
@@ -203,7 +203,7 @@ The rows that name `paros-roles`, `paros-storage` point to code at the git tag `
   majority.
 - The seal end of a journal segment counts a faulty report as a vote: the end is one above the
   highest slot where the sealing leader's Phase 1 saw any vote in the old grid, faulty votes too
-  (#1313 (the seal end against a CTRL faulty record), `specs/tla/seal-ctrl/`). A later Phase 1
+  (#1313 (the seal end against a CTRL faulty record), `specs/tla/seal-ctrl/` (at the git tag `journal-design-a`)). A later Phase 1
   reads every slot of the old grid until it retires, so the tri-state tally then still sees the
   slot.
 - Snapshot recovery ([PAR §3.5]) does not apply: paros runs no application and takes no snapshot
@@ -215,7 +215,7 @@ The rows that name `paros-roles`, `paros-storage` point to code at the git tag `
 - **Faulty counted as none in the seal end.** A seal end from readable votes only lands at or
   below a chosen slot whose top copy rotted; the new grid then writes a second value above the
   end, and the retire stops the acceptors that hold the chosen copy (`specs/tla/seal-ctrl/`,
-  control `end_readable`).
+  control `end_readable` (at the git tag `journal-design-a`)).
 - **Asking only the newest configuration.** A successor whose members never held the slot filled
   it with `Noop` while the departed member that held its only clean copy was down. The sweep went
   red on two values for one slot (#267, witness 9147512841470386050; the `slot_decidable` doc).

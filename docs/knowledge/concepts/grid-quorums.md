@@ -126,7 +126,7 @@ grid (#1483 (read fence on a grid whose Phase-1 quorums do not meet); the unit t
   when `f + 1 <= acks <= rows - f` (`specs/tla/grid/GridCheck.tla`, `PerColumnTolerance`). The
   partitions (`rows = 2F+1`, `acks = F+1`) survive `F` down in every column; the full-column grid
   survives none. The journal's rule that every step waits for a quorum only (#1257 (quorum
-  everywhere), `specs/tla/quorum-everywhere/`) therefore uses the majority and the partitions.
+  everywhere), `specs/tla/quorum-everywhere/` (at the git tag `journal-design-a`)) therefore uses the majority and the partitions.
 
 ## 8. Costs
 

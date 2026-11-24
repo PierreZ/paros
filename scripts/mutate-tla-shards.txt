@@ -14,6 +14,7 @@ cas-register 4
 cell-control 2
 compartments 3
 config-register 8
+ctrl-grid 18
 decree 2
 flight-rule 2
 generations 8

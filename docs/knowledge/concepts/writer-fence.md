@@ -163,14 +163,14 @@ The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`:
   multi-writer and `SetLeader(new, None)` single-writer again. The fold judges the position of a
   fenced `Write` (below `next_seq`: `Duplicate` if identical, else refused) before its uuid, so
   the resend of a write in flight across a switch still tells its writer whether it landed. TLC
-  checks it, with controls, in `specs/tla/multi-writer/` (02-data-plane.md §2.4.1). The sources
+  checked it, with controls, in `specs/tla/multi-writer/` (02-data-plane.md §2.4.1) (at the git tag `journal-design-a`). The sources
   have no such switch: it is paros's own rule.
 - **Each multi-writer mode has its own tag** (#1495 (a late copy of SetLeader reinstates a
   uuid)): the leader value of the mode is `Leader::Multi(tag)`, the caller draws the tag fresh as
   it draws a uuid, and `SetLeader(new, old)` compares `old` with the whole value. A late copy of
-  a call made in an earlier mode then never matches a later one. `specs/tla/multi-writer/` checks
+  a call made in an earlier mode then never matches a later one. `specs/tla/multi-writer/` (at the git tag `journal-design-a`) checked
   the rule with copies of `SetLeader` proposed again; its control `setleader_copy` (one value for
-  every mode) breaks `RefusalFinal`.
+  every mode) broke `RefusalFinal`.
 
 ## 10. Pitfalls
 

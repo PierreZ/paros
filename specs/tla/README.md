@@ -222,6 +222,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Phase-1 bypass of Matchmaker MultiPaxos (§3.6), with GC, the handoff and two bypasses in a row | not built (#579 (zero-stall reconfiguration) is at the tag) | `zero-stall/` | #1018 (zero-stall model, more rules), done |
 | Truncation: the compaction floor as a fold of the journal, the trim-point jump, the retry of a laggard, the gap fill, and the faulty entries of CTRL with the repair probe, on plain Multi-Paxos | `acceptor/retention.rs`, `node/catch_up.rs`, `node/acceptor.rs`, `node.rs` (`compact`), `replica.rs` (`compaction_target`), `proposer.rs` (`slot_decidable`), `proposer/probe.rs` | `truncation/` | #1017 (truncation model), #1216 (truncation model, part 2), done |
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
+| CTRL on a grid: the tri-state tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen value in one write | `proposer.rs` (`slot_decidable`), `acceptor.rs`; the scrub and the repair are designed, not built | `ctrl-grid/` | #1263 (CTRL recovery in the journal), done |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight; the faults of a storage (`Full`, `Lost`, `Unknown`) and their verdicts, with the list of the roles on a disk (`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)) | the generic `Driver` of `paros-host`, its `StorageError`, `Verdict` and `Storage::list` | `flight-rule/` | #1255 (journal sans-IO contract), done; #1414 (Storage lists the roles on a disk and reports typed faults) |
 | Rule 2 of the journal's sans-IO contract, every input is recorded: the time and the random draws in each input, one timer for each role (`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)) | not built (`paros-host`, #1413) | `recorded-inputs/` | #1413 (the time, the timers and the draws in each role) |
@@ -368,7 +369,7 @@ waits for good, and the decision hold keeps slot 2 from its ack. A bypass thus n
 quorum of the old configuration after the switch, as Phase 1 of an ordinary campaign does.
 
 - **With a grid column below quorum, the decision hold never acks** (#1258 (reshape with a
-  column below quorum), `degraded-reshape/`): it waits for a Phase-1 quorum of the old grid,
+  column below quorum), `degraded-reshape/` (at the git tag `journal-design-a`)): it waits for a Phase-1 quorum of the old grid,
   which no longer exists. The hold that gates only the acks and the read basis also misorders
   two reads on the old basis. A hold before Phase 2 on `F + 1` of one old column, or the
   segment-record check, closes both and stays live. GC with no hold keeps `Agreement`
@@ -2315,6 +2316,42 @@ up to `F`: it learned it (and so holds a record, `mark_chosen`) or jumped above 
 `TrimmedTo` (and so refuses a campaign from below its floor). Each Phase-1 quorum of `C2` meets
 that Phase-2 quorum. No decision is refuted.
 
+### `ctrl-grid/`: the CTRL tally on a grid and across configurations, the scrub and the repair, for #1263
+
+`truncation/` checks CTRL on plain Multi-Paxos on a majority. This model adds grid quorums,
+several configurations in `H_b` (the journal of design A read a sealed segment as an older
+configuration, below its end; at the git tag `journal-design-a`), and a scrub, which finds a damaged record while the acceptor runs
+(#1263 (CTRL recovery in the journal), items 1, 3 and 5). The model is the log of `truncation/`
+with no floor and no truncation: a campaign asks from slot 0, a ballot is bound to one
+configuration (`Cfg`), the win and the tally need a Phase-1 quorum of every configuration of
+`H_b`, and Phase 2 runs in the configuration of the ballot. A damaged record is found by a scrub
+(the acceptor keeps running) or by a boot (its ballots die and its learned value goes); both give
+the same faulty record. A repair writes a faulty record again, under the ballot that it keeps.
+`RecordsTrue` checks that a readable record at or above the ballot that chose a slot holds the
+chosen value.
+
+| Check | CI | Result |
+|---|---|---|
+| `grid4` | ci | pass: a grid of two columns of two (acks 1), two ballots, two commands, one damaged record, the repair of a chosen value (77 thousand states) |
+| `grid4_restart` | ci | pass: the same with one restart, and `DeadSilent` (a ballot whose owner booted again proposes nothing) (263 thousand states) |
+| `majority` | ci | pass: a majority of three, three ballots, so that a faulty report can sit above a readable one (2.8 million states, 7 min) |
+| `two_one` | ci | pass: two configurations, `c1` (a1, a2, a3; ballot 1) and `c2` (a3, a4; ballots 2 and 3), one command |
+| `two` | long | pass: the same with two commands (3.0 million states, 8 min) |
+| `drop_first_up` | long | pass: a repair in two writes (delete, then write) with no restart |
+| `drop_first_two`, `drop_first_lead` | ci | pass: the same with two ballots; in `drop_first_lead` the repairing acceptor owns the next ballot. The acceptor that deleted its record promises and campaigns only once it wrote the new one: without that, its empty promise fills a chosen slot. `drop_first_two` also checks `InBounds` (the faults and restarts stay in the bounds of the check) and `OwnRecords` (a won campaign's allocator is past every record of the owner's own promise) |
+| `repair_none` | long | pass: no repair, only a later `Accept` heals: the repair adds a copy, it never decides |
+| `live` | long | pass: `Ends`, the last ballot settles and every faulty record of a learned slot is repaired |
+| `grid` | long, 60 min | pass (bounded): a grid of two columns of three, acks 2; no violation in 60 min (10.9 million distinct states, depth 19), a bounded run, not a proof |
+| `grid_majority` | long | violation of `NoFillChosen`: the majority control on the default grid (668 thousand states, 1 min) |
+| `reach_faulty`, `reach_block`, `reach_repair`, `reach_cross` | ci | violation: a faulty record of a chosen slot, a repair probe, a repair, and a ballot of `c2` that chooses a slot where a record of `c1` is faulty |
+| `grid4_majority` | ci | violation of `NoFillChosen`: the qualifying answers need a majority of the four members. Ballot 1 chooses `v` on `a1`; a scrub finds `a1` damaged; ballot 2 hears `a1` faulty and three empty answers, three is a majority, and it fills the slot with a `Noop`. The grid needs both members of column 0 to qualify, and `a1` does not: the slot is blocked |
+| `plus_one` | ci | violation of `NoFillChosen`: the threshold is one above the highest readable report (item 5) |
+| `tally_none` | ci | violation of `NoFillChosen`: a faulty report counts as no vote |
+| `two_current` | ci | violation of `NoFillChosen`: the tally asks only `c2`. Ballot 1 chooses `v` in `c1`, a scrub finds a record of `c1` damaged, and the leader of `c2` fills the slot with a `Noop` on the empty answers of `c2` |
+| `damage_drop` | ci | violation of `Agreement`: a scrub drops the damaged record, and the slot reads as a slot with no vote |
+| `repair_peer` | ci | violation of `Agreement`: the repair writes the value of a peer's vote under its own ballot, not a chosen value |
+| `drop_first` | ci | violation of `NoFillChosen`: the repair deletes the record, the node restarts before it writes the new one, and the slot reads as a slot with no vote |
+
 ### `recorded-inputs/`: every input is recorded, for #1413 (the time, the timers and the draws in each role)
 
 `RecordedInputs.tla` is a host of two roles. A role asks a timer (`Arm`) at the time of its input
@@ -2478,7 +2515,7 @@ What the model found:
   rule off, `safety_dup` and `live` pass.
 
 What is not in the model: the election itself (`election/` at the git tag `journal-design-a`), Paxos inside the control journal,
-the placement of a role on another machine (`placement-port/`), a machine that loses its disk (a
+the placement of a role on another machine (`placement-port/` (at the git tag `journal-design-a`)), a machine that loses its disk (a
 new machine), a machine that reads the term of the journal late (it learns each term at once
 here), the ack of a registration (a registration is never lost), and the birth nonce of the key
 that `Assign` carries (#1419 (the tenancy wrapper and paros-names), `journal-ids/`). The model

@@ -164,9 +164,9 @@ etcd-raft's.
   its batch was durable", "cluster: a node crashed between persist and send"), and a crash may
   lose a write that no fsync covered ("cluster: a crash lost a write no fsync covered"), with
   `PREFIX_SHRINKS` as the oracle and `Mutant::LoseChosenIndex` as its control.
-- The journal's flight rule has its own model, `specs/tla/flight-rule/`, and the journal state
+- The flight rule of `paros-host` has its own model, `specs/tla/flight-rule/`, and the journal state
   model treats the acceptor's state as memory, a queue of writes and a disk
-  (`specs/tla/journal-state/`, #1309 (the state is the disk)).
+  (`specs/tla/journal-state/`, #1309 (the state is the disk) (at the git tag `journal-design-a`)).
 
 **Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 

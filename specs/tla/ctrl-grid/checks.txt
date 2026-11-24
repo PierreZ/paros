@@ -1,0 +1,38 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs> [<minutes>]
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+#
+# CTRL in the journal (#1263 (CTRL recovery in the journal)): the tri-state
+# tally on a grid and across the configurations of H_b, the scrub and the
+# repair of a faulty record. Two commands, one slot, one damaged record.
+grid4           pass       ci
+grid4_restart   pass       ci
+majority        pass       ci
+two_one         pass       ci
+# A repair in two writes with no restart, two ballots: the acceptor that
+# deleted its record promises and campaigns only once it wrote the new one.
+drop_first_two  pass       ci
+drop_first_lead pass       ci
+# Reach: a check that must break, so that the passing checks are not empty.
+reach_faulty    violation  ci
+reach_block     violation  ci
+reach_repair    violation  ci
+reach_cross     violation  ci
+# Controls: each one breaks the property of its file.
+grid4_majority  violation  ci
+plus_one        violation  ci
+tally_none      violation  ci
+two_current     violation  ci
+damage_drop     violation  ci
+repair_peer     violation  ci
+drop_first      violation  ci
+# The long checks: two commands across two configurations, the default grid
+# of the journal (two columns of three), the repair variants.
+two             pass       long
+drop_first_up   pass       long
+repair_none     pass       long
+live            pass       long
+grid            pass       long   60
+grid_majority   violation  long

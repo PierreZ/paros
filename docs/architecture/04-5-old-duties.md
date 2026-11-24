@@ -108,6 +108,8 @@ candidacy only.
 
 #### Duties that had no home, and their home
 
+A `§J` section on this page is a section of `docs/journal/` at the git tag `journal-design-a`.
+
 Three duties of the tag had no home in the layer table. Pierre gave each one its home on
 2026-11-22 (#1412 (the duty table)). One rule covers the three: **the tenant coordinator gives
 birth to a journal and keeps its controller alive; the grid controller of the journal keeps
