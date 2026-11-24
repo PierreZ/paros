@@ -257,8 +257,9 @@ impl Role for CellRole {
         }
     }
 
-    fn tick(&mut self, (): &(), _: Time, _: Actor) -> Vec<Effect<Cell>> {
-        Vec::new()
+    /// No role here sets a timer.
+    fn fire(&mut self, (): &(), _: Time, _: Actor) -> Vec<Effect<Cell>> {
+        unreachable!("no role of the cell sets a timer")
     }
 
     fn stop(&mut self, _: Actor, _: &Why) -> Vec<Effect<Cell>> {
@@ -328,7 +329,7 @@ type Proc = Driver<Host<CellRole>, Disk, Wire, Stopped, Finished, ()>;
 
 fn process(disk: &Disk) -> Proc {
     let mut driver = Driver::new(
-        Host::new(1_000, ()),
+        Host::new(()),
         disk.clone(),
         Wire::default(),
         Stopped,

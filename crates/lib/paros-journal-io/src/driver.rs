@@ -190,6 +190,12 @@ impl<R: Register> Ports<Host> for JournalPorts<R> {
         Vec::new()
     }
 
+    /// A change with no answer of a stopped role is not run again: a later
+    /// role at its address asks its own changes.
+    fn stopped(&mut self, address: Address) {
+        self.unanswered.retain(|(a, _)| *a != address);
+    }
+
     /// A read that waited on a batch of a stopped role is unserved: the fold
     /// it read may hold a batch that is lost. A register change that waited
     /// is dropped.
@@ -379,28 +385,35 @@ where
             .inner
             .timer()
             .is_some_and(|at| at <= self.inner.clock().now());
+        // A change that got no answer runs again at the next fire of the
+        // timer, once the roles saw the newest done value: a write of the
+        // first try that took place reached them first, and they judge a
+        // refusal of the second try on it. A change that gets no answer in
+        // this round waits for the next fire, and a stop of the role drops
+        // its changes (`JournalPorts::stopped`).
+        let due = if fired {
+            self.inner.ports().unanswered.clone()
+        } else {
+            Vec::new()
+        };
         let mut busy = self.inner.poll();
-        // A change that got no answer runs again, paced by the timer, once
-        // the roles saw the newest done value: a write of the first try that
-        // took place reached them first, and they judge a refusal of the
-        // second try on it. A change of a role that stopped is dropped.
-        if fired {
-            let unanswered = std::mem::take(&mut self.inner.ports_mut().unanswered);
-            let mut again = false;
-            for (address, change) in unanswered {
-                if !self.host().serves(address) {
-                    continue;
-                }
-                again = true;
-                if let Some(input) = self.inner.ports_mut().change(address, &change) {
-                    self.inner.input(input);
-                }
+        let (run, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.inner.ports_mut().unanswered)
+            .into_iter()
+            .partition(|entry| due.contains(entry));
+        self.inner.ports_mut().unanswered = kept;
+        for (address, change) in &run {
+            assert!(
+                self.host().serves(*address),
+                "a change with no answer belongs to a role that runs"
+            );
+            if let Some(input) = self.inner.ports_mut().change(*address, change) {
+                self.inner.input(input);
             }
-            // A second round commits what the answers stepped.
-            if again {
-                self.inner.poll();
-                busy = true;
-            }
+        }
+        // A second round commits what the answers stepped.
+        if !run.is_empty() {
+            self.inner.poll();
+            busy = true;
         }
         busy
     }

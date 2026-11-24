@@ -9,7 +9,7 @@ use paros_journal::register::{Ballot, RegisterValue};
 use paros_journal::roles::{Campaign, LeaderPhase, Message};
 use paros_journal::{
     Answer, Fence, Grid, JournalView, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record,
-    Reply, SegmentId, SegmentRecord, Seq, Slot, Write,
+    Reply, SegmentId, SegmentRecord, SegmentState, Seq, Slot, Write,
 };
 
 use super::*;
@@ -442,14 +442,16 @@ fn the_events_port_reports_every_step_once_its_batches_are_durable() {
 }
 
 #[test]
-fn poll_says_when_it_worked_and_the_timer_is_the_hosts() {
+fn poll_says_when_it_worked_and_the_timer_is_the_roles() {
     let world = World::new();
     let disk = Shared::default();
-    let mut driver = world.process(&disk, &[1]);
+    let acceptor = world.process(&disk, &[1]);
+    assert_eq!(acceptor.timer(), None, "an acceptor sets no timer");
+    let mut driver = world.process(&Shared::default(), &[11]);
     assert_eq!(
         driver.timer(),
         Some(Time(TICK)),
-        "armed one tick after time 0"
+        "the replica set its timer one tick after its start at time 0"
     );
     while driver.poll() {}
     assert!(!driver.poll(), "nothing to do");
@@ -931,7 +933,7 @@ fn a_seal_whose_reply_is_lost_opens_the_leader_from_the_done_value() {
 }
 
 #[test]
-fn a_seal_whose_request_is_lost_runs_again_at_the_next_timer() {
+fn a_seal_whose_request_is_lost_takes_place_later() {
     let world = World::new();
     let disk = Shared::default();
     let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
@@ -940,5 +942,68 @@ fn a_seal_whose_request_is_lost_runs_again_at_the_next_timer() {
     });
     let value = world.register.value(J).expect("the register");
     let first = value.segment(SegmentId(1)).expect("segment 1");
-    assert_eq!(first.end(), Some(from), "the seal ran again");
+    assert_eq!(first.end(), Some(from), "the leader sends the seal again");
+}
+
+/// Whether segment 1 of the register is trimmed.
+fn first_trimmed(world: &World) -> bool {
+    world
+        .register
+        .value(J)
+        .and_then(|v| v.segment(SegmentId(1)).map(SegmentRecord::state))
+        == Some(SegmentState::Trimmed)
+}
+
+#[test]
+fn a_trim_whose_request_is_lost_runs_again_at_the_next_timer() {
+    // A replica asks the trim of a retired segment once for each value it
+    // observes, so only the driver asks a lost trim again: no new value
+    // comes while the trim waits.
+    let world = retired_world();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[]);
+    let address = Address::new(J, NodeId(21));
+    driver.transport_mut().endpoint.route(address);
+    world.register.lose_next(false);
+    driver.assign(Assignment::Replica {
+        address,
+        segment: SegmentId(2),
+        set: [21, 22, 23].map(NodeId).to_vec(),
+        initial: Leader::Unset,
+    });
+    while driver.poll() {}
+    assert!(!first_trimmed(&world), "the first request is lost");
+    world.run(&mut [driver], "the trim runs again", |_| {
+        first_trimmed(&world)
+    });
+}
+
+#[test]
+fn a_change_with_no_answer_of_a_role_that_stopped_is_not_run_again() {
+    let world = retired_world();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[]);
+    let address = Address::new(J, NodeId(21));
+    driver.transport_mut().endpoint.route(address);
+    world.register.lose_next(false);
+    let replica = Assignment::Replica {
+        address,
+        segment: SegmentId(2),
+        set: [21, 22, 23].map(NodeId).to_vec(),
+        initial: Leader::Unset,
+    };
+    driver.assign(replica.clone());
+    while driver.poll() {}
+    assert!(!first_trimmed(&world), "the first request is lost");
+    // The role stops, and a new one starts at its address: the change of the
+    // role that stopped is not the new role's.
+    driver.unassign(address);
+    while driver.poll() {}
+    assert!(
+        driver.inner.ports().unanswered.is_empty(),
+        "a stop drops the changes of the role"
+    );
+    driver.assign(replica);
+    while driver.poll() {}
+    assert!(first_trimmed(&world), "the new role asks its own trim");
 }

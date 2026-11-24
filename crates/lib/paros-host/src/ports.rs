@@ -75,6 +75,13 @@ pub trait Ports<M: Machine> {
     ) {
         let _ = (address, output);
     }
+
+    /// The role at `address` stopped: an output that the ports keep for it
+    /// (a call to run again) is not the output of a later role at the same
+    /// address.
+    fn stopped(&mut self, address: <M::Family as Family>::Address) {
+        let _ = address;
+    }
 }
 
 /// Every output, in order; none gives an input back.

@@ -33,10 +33,13 @@
 //! that it waits on. The driver transmits a send only once that batch is
 //! durable; it may commit many batches in one write.
 //!
-//! **Time.** The `Host` arms one timer ([`Effect::SetTimer`]). When it
-//! fires, every leader and every replica takes its periodic step: the
-//! leaders re-send at most [`HostConfig::resend_page`] rounds, and the
-//! replicas ask their peers for the slots they miss.
+//! **Time** (rule 2). Each leader, proxy and replica sets its own timer
+//! ([`Effect::SetTimer`]) when it starts, [`HostConfig::tick`] later, and
+//! again each time it fires. The driver fires the timer to its role alone
+//! ([`Input::TimerFired`]): a leader or a proxy re-sends at most
+//! [`HostConfig::resend_page`] rounds, and a replica asks its peers for the
+//! slots it misses. An acceptor sets no timer. No journal role draws a
+//! random value.
 
 use std::collections::BTreeMap;
 
@@ -68,7 +71,7 @@ pub type CallId = u64;
 /// The settings of a `Host`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostConfig {
-    /// The nanoseconds between two periodic steps.
+    /// The nanoseconds between two fires of the timer of a role.
     pub tick: u64,
     /// The rounds that a leader re-sends at most on one periodic step: a
     /// re-send of every round floods a bounded network (§J4.2).
@@ -183,8 +186,20 @@ pub enum Input {
         /// The command.
         command: Command,
     },
-    /// The timer that [`Effect::SetTimer`] armed fired.
-    TimerFired,
+    /// The timer that the role at `address` set ([`Effect::SetTimer`]) is
+    /// due.
+    TimerFired {
+        /// The role.
+        address: Address,
+    },
+    /// The random value that the role at `address` asked for
+    /// ([`Effect::Draw`]). No journal role asks one today.
+    Drawn {
+        /// The role.
+        address: Address,
+        /// The value.
+        value: u64,
+    },
     /// Start the new replica at `address` (its segment named) for the copy
     /// `copy` of a heal of the retired segment (#1314), with `set`, the
     /// replica set that the grid controller read, as the members to copy
@@ -321,10 +336,12 @@ pub enum Output {
 pub(crate) struct Shared {
     /// The value of the last done write on each journal's register.
     values: BTreeMap<JournalId, RegisterValue>,
-    /// The rounds that a leader or a proxy re-sends at most on one tick.
+    /// The rounds that a leader or a proxy re-sends at most on one fire.
     resend_page: usize,
     /// The answers that a leader holds at most.
     window: usize,
+    /// The nanoseconds between two fires of the timer of a role.
+    tick: u64,
 }
 
 impl Shared {
@@ -362,6 +379,14 @@ impl Shared {
     pub(crate) fn window(&self) -> usize {
         self.window
     }
+
+    /// The timer of the role at `address`, set at `now`.
+    pub(crate) fn timer(&self, address: Address, now: Time) -> Effect {
+        Effect::SetTimer {
+            address,
+            at: now.after(self.tick),
+        }
+    }
 }
 
 /// The roles of one process.
@@ -390,14 +415,12 @@ impl Host {
         );
         assert!(config.window > 0, "a leader holds at least one answer");
         Self {
-            inner: paros_host::Host::new(
-                config.tick,
-                Shared {
-                    values: BTreeMap::new(),
-                    resend_page: config.resend_page,
-                    window: config.window,
-                },
-            ),
+            inner: paros_host::Host::new(Shared {
+                values: BTreeMap::new(),
+                resend_page: config.resend_page,
+                window: config.window,
+                tick: config.tick,
+            }),
         }
     }
 
@@ -520,7 +543,10 @@ impl Host {
                     effects.push(Self::unserved(address, call, true));
                 }
             }
-            Input::TimerFired => host.tick(now, &mut effects),
+            Input::TimerFired { address } => {
+                host.fire(now, address, &mut effects);
+            }
+            Input::Drawn { address, value } => host.drawn(now, address, value, &mut effects),
             Input::Join {
                 address,
                 set,
@@ -684,8 +710,12 @@ impl Machine for Host {
         Input::Message(envelope)
     }
 
-    fn timer_fired() -> Input {
-        Input::TimerFired
+    fn timer_fired(address: Address) -> Input {
+        Input::TimerFired { address }
+    }
+
+    fn drawn(address: Address, value: u64) -> Input {
+        Input::Drawn { address, value }
     }
 }
 

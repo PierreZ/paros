@@ -3,9 +3,12 @@
 //!
 //! The `Host` maps each address to its role, starts a role that placement
 //! assigns (with a read of its records first when it has a disk), routes
-//! each input to its role, arms one timer for the periodic step of every
-//! role, and stops a role. It does no I/O and reads no clock: the driver
-//! gives the time with every input, so a recorded run replays (rule 2).
+//! each input to its role, keeps one deadline for the timer of each role,
+//! and stops a role. It does no I/O, reads no clock and draws no random
+//! value: the driver gives the time with every input, fires the timer of a
+//! role to that role alone, and gives each random value that a role asks
+//! for as an input, so a recorded run replays (rule 2,
+//! `specs/tla/recorded-inputs/`).
 //!
 //! The methods ([`assign`](Host::assign), [`deliver`](Host::deliver),
 //! [`stop`](Host::stop), ...) are the blocks of a step: a host of a family
@@ -59,8 +62,20 @@ pub enum Input<F: Family> {
         /// The input.
         input: F::Input,
     },
-    /// The timer that [`Effect::SetTimer`] armed fired.
-    TimerFired,
+    /// The timer that the role at `address` set ([`Effect::SetTimer`]) is
+    /// due.
+    TimerFired {
+        /// The role.
+        address: F::Address,
+    },
+    /// The random value that the role at `address` asked for
+    /// ([`Effect::Draw`]), drawn by the driver.
+    Drawn {
+        /// The role.
+        address: F::Address,
+        /// The value.
+        value: u64,
+    },
 }
 
 /// One effect of a step.
@@ -101,10 +116,19 @@ pub enum Effect<F: Family> {
         /// The batch of the role it waits on; `None` waits on nothing.
         after: Option<F::Batch>,
     },
-    /// Fire the timer at `at`.
+    /// Fire the timer of the role at `address` at `at`. A role has one
+    /// timer: a later `SetTimer` of the role moves it.
     SetTimer {
+        /// The role.
+        address: F::Address,
         /// The time.
         at: Time,
+    },
+    /// Draw a random value for the role at `address`, and give it back as
+    /// [`Input::Drawn`].
+    Draw {
+        /// The role.
+        address: F::Address,
     },
     /// The role at `address` stopped, and the host no longer serves it.
     Stopped {
@@ -143,12 +167,12 @@ impl<R: Role + core::fmt::Debug> core::fmt::Debug for Slot<R> {
 
 /// The roles of one process.
 pub struct Host<R: Role> {
-    /// The nanoseconds between two periodic steps.
-    tick: u64,
     shared: R::Shared,
     roles: BTreeMap<Address<R>, Slot<R>>,
-    /// Whether the timer is armed.
-    armed: bool,
+    /// The deadline of the timer of each role that set one.
+    deadlines: BTreeMap<Address<R>, Time>,
+    /// The draws that each role asked for and has not got yet.
+    draws: BTreeMap<Address<R>, u32>,
 }
 
 impl<R> Clone for Host<R>
@@ -158,10 +182,10 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            tick: self.tick,
             shared: self.shared.clone(),
             roles: self.roles.clone(),
-            armed: self.armed,
+            deadlines: self.deadlines.clone(),
+            draws: self.draws.clone(),
         }
     }
 }
@@ -173,30 +197,30 @@ where
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Host")
-            .field("tick", &self.tick)
             .field("shared", &self.shared)
             .field("roles", &self.roles)
-            .field("armed", &self.armed)
+            .field("deadlines", &self.deadlines)
+            .field("draws", &self.draws)
             .finish()
     }
 }
 
 impl<R: Role> Host<R> {
-    /// A `Host` that serves no role yet, whose periodic step comes every
-    /// `tick` nanoseconds.
-    ///
-    /// # Panics
-    ///
-    /// When `tick` is zero.
+    /// A `Host` that serves no role yet.
     #[must_use]
-    pub fn new(tick: u64, shared: R::Shared) -> Self {
-        assert!(tick > 0, "the timer moves time forward");
+    pub fn new(shared: R::Shared) -> Self {
         Self {
-            tick,
             shared,
             roles: BTreeMap::new(),
-            armed: false,
+            deadlines: BTreeMap::new(),
+            draws: BTreeMap::new(),
         }
+    }
+
+    /// The deadline of the timer of the role at `address`, if it set one.
+    #[must_use]
+    pub fn deadline(&self, address: Address<R>) -> Option<Time> {
+        self.deadlines.get(&address).copied()
     }
 
     /// The state of the process that every role reads.
@@ -277,7 +301,12 @@ impl<R: Role> Host<R> {
             Input::Deliver { address, input } => {
                 self.deliver(now, address, input, &mut effects);
             }
-            Input::TimerFired => self.tick(now, &mut effects),
+            Input::TimerFired { address } => {
+                self.fire(now, address, &mut effects);
+            }
+            Input::Drawn { address, value } => {
+                self.drawn(now, address, value, &mut effects);
+            }
         }
         self.settle(&mut effects);
         effects
@@ -295,11 +324,10 @@ impl<R: Role> Host<R> {
         if self.roles.contains_key(&address) {
             return;
         }
-        self.arm(now, effects);
         match R::start(&self.shared, now, assignment.clone()) {
             Start::Running(role, out) => {
                 self.roles.insert(address, Slot::Running(role));
-                effects.extend(out);
+                self.extend(address, out, effects);
             }
             Start::Recover => {
                 self.roles.insert(address, Slot::Recovering(assignment));
@@ -324,7 +352,7 @@ impl<R: Role> Host<R> {
         match R::recover(&self.shared, now, address, assignment, records) {
             Ok((role, out)) => {
                 self.roles.insert(address, Slot::Running(role));
-                effects.extend(out);
+                self.extend(address, out, effects);
             }
             Err(why) => self.stop(address, why, effects),
         }
@@ -351,32 +379,84 @@ impl<R: Role> Host<R> {
         let Some(Slot::Running(role)) = self.roles.get_mut(&address) else {
             return false;
         };
-        effects.extend(role.step(&self.shared, now, address, input));
+        let out = role.step(&self.shared, now, address, input);
+        self.extend(address, out, effects);
         true
     }
 
-    /// The periodic step of every role that runs, in address order, then
-    /// the timer again.
-    pub fn tick(&mut self, now: Time, effects: &mut Vec<Effect<R::Family>>) {
-        for (address, slot) in &mut self.roles {
-            if let Slot::Running(role) = slot {
-                effects.extend(role.tick(&self.shared, now, *address));
-            }
+    /// The timer of the role at `address` is due: the role alone fires
+    /// ([`Role::fire`]), and its deadline is gone until it sets one again.
+    /// A fire before the role's deadline, or for a role with no timer (the
+    /// role moved or lost it, or stopped), changes nothing. Returns whether
+    /// the role fired.
+    pub fn fire(
+        &mut self,
+        now: Time,
+        address: Address<R>,
+        effects: &mut Vec<Effect<R::Family>>,
+    ) -> bool {
+        if self.deadlines.get(&address).is_none_or(|at| *at > now) {
+            return false;
         }
-        self.armed = true;
-        effects.push(Effect::SetTimer {
-            at: now.after(self.tick),
-        });
+        let Some(Slot::Running(role)) = self.roles.get_mut(&address) else {
+            unreachable!("only a role that runs has a timer");
+        };
+        self.deadlines.remove(&address);
+        let out = role.fire(&self.shared, now, address);
+        self.extend(address, out, effects);
+        true
     }
 
-    /// Arm the timer when it is not armed.
-    pub fn arm(&mut self, now: Time, effects: &mut Vec<Effect<R::Family>>) {
-        if !self.armed {
-            self.armed = true;
-            effects.push(Effect::SetTimer {
-                at: now.after(self.tick),
-            });
+    /// The random value that the role at `address` asked for. A value that
+    /// the role did not ask for (it stopped since, and a new role took the
+    /// address) changes nothing.
+    pub fn drawn(
+        &mut self,
+        now: Time,
+        address: Address<R>,
+        value: u64,
+        effects: &mut Vec<Effect<R::Family>>,
+    ) {
+        let Some(asked) = self.draws.get_mut(&address) else {
+            return;
+        };
+        *asked -= 1;
+        if *asked == 0 {
+            self.draws.remove(&address);
         }
+        let Some(Slot::Running(role)) = self.roles.get_mut(&address) else {
+            unreachable!("only a role that runs asks a draw");
+        };
+        let out = role.drawn(&self.shared, now, address, value);
+        self.extend(address, out, effects);
+    }
+
+    /// Add `out`, the effects of the role at `address` that runs, to
+    /// `effects`, and keep the deadline of each timer that it sets.
+    ///
+    /// # Panics
+    ///
+    /// When the role sets a timer, or asks a draw, for another role.
+    fn extend(
+        &mut self,
+        address: Address<R>,
+        out: Vec<Effect<R::Family>>,
+        effects: &mut Vec<Effect<R::Family>>,
+    ) {
+        for effect in &out {
+            match effect {
+                Effect::SetTimer { address: role, at } => {
+                    assert!(*role == address, "a role sets its own timer");
+                    self.deadlines.insert(address, *at);
+                }
+                Effect::Draw { address: role } => {
+                    assert!(*role == address, "a role asks its own draws");
+                    *self.draws.entry(address).or_insert(0) += 1;
+                }
+                _ => {}
+            }
+        }
+        effects.extend(out);
     }
 
     /// Stop the role at `address` for `why`: its last effects, then
@@ -395,10 +475,22 @@ impl<R: Role> Host<R> {
             return;
         };
         if let Slot::Running(mut role) = slot {
-            effects.extend(role.stop(address, &why));
+            let out = role.stop(address, &why);
+            assert!(
+                !out.iter()
+                    .any(|e| matches!(e, Effect::SetTimer { .. } | Effect::Draw { .. })),
+                "a role that stops sets no timer and asks no draw"
+            );
+            effects.extend(out);
         }
+        self.deadlines.remove(&address);
+        self.draws.remove(&address);
         effects.push(Effect::Stopped { address, why });
         assert!(!self.roles.contains_key(&address), "a stopped role is gone");
+        assert!(
+            !self.deadlines.contains_key(&address),
+            "a stopped role has no timer"
+        );
     }
 
     /// The end of every step: stop each role that ended by its own step

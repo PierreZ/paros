@@ -12,12 +12,14 @@
 //!   address, a message, an op of the disk format, a batch id, ...).
 //! - [`Role`]: one actor, with [`Start`].
 //! - [`Host`]: the pure state machine that maps each address to its role,
-//!   starts a role from its records, routes each input, and arms the timer.
+//!   starts a role from its records, routes each input, and keeps the
+//!   deadline of each role's timer.
 //! - [`Machine`]: what a driver drives; a `Host` is one, and a family that
 //!   routes some inputs itself wraps a `Host` in its own.
 //! - [`Driver`]: the generic driver, with group commit and held sends and
 //!   outputs (the flight rule), over a [`Storage`], a [`Transport`], a
-//!   [`Clock`], the output [`Ports`] and the [`Events`] port.
+//!   [`Clock`], an [`Entropy`] source, the output [`Ports`] and the
+//!   [`Events`] port.
 //!
 //! **No runtime** (§J4.3). This crate depends on no crate. No trait
 //! requires `Send`, an executor or a runtime type.
@@ -40,7 +42,7 @@ mod toy;
 pub use driver::Driver;
 pub use family::Family;
 pub use host::{Effect, Host, Input};
-pub use io::{Clock, Storage, StorageError, Transport};
+pub use io::{Clock, Entropy, NoDraws, Storage, StorageError, Transport};
 pub use machine::Machine;
 pub use ports::{Event, Events, Ports};
 pub use role::{Role, Start};

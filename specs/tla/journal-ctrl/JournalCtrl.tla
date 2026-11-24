@@ -179,6 +179,12 @@ NextR ==
 
 SpecR == Init /\ [][NextR]_vars
 
+\* CTRL with an answer to a Prepare sent again (`Repromise`): a second
+\* answer at a ballot that the probe, the skip and the decide read too.
+NextRR == NextR \/ \E a \in Acceptors, b \in Ballots : Repromise(a, b)
+
+SpecRR == Init /\ [][NextRR]_vars
+
 (***************************************************************************)
 (* Safety.                                                                 *)
 (***************************************************************************)

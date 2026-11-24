@@ -72,3 +72,26 @@ pub trait Clock {
     /// The time now.
     fn now(&self) -> Time;
 }
+
+/// The random source of one process. A role draws no random value: it asks
+/// for one ([`crate::Effect::Draw`]), the driver draws it here, and the value
+/// comes back as a recorded input (§J4.2, rule 2). A simulation gives a
+/// seeded source, so a seed is a run.
+pub trait Entropy {
+    /// A new random value.
+    fn draw(&mut self) -> u64;
+}
+
+/// The random source of a driver whose roles ask no draw.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoDraws;
+
+impl Entropy for NoDraws {
+    /// # Panics
+    ///
+    /// Always: a role asked a draw from a driver that has no random source
+    /// ([`crate::Driver::with_entropy`] gives one).
+    fn draw(&mut self) -> u64 {
+        unreachable!("a role asked a draw from a driver with no random source")
+    }
+}

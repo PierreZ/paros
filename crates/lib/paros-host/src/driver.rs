@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::family::Family;
 use crate::host::Effect;
-use crate::io::{Clock, Storage, Transport};
+use crate::io::{Clock, Entropy, NoDraws, Storage, Transport};
 use crate::machine::Machine;
 use crate::ports::{Event, Events, Ports};
 use crate::time::Time;
@@ -57,11 +57,12 @@ struct Pending<M: Machine> {
 }
 
 /// The driver of one process.
-pub struct Driver<M: Machine, S, T, C, P, E> {
+pub struct Driver<M: Machine, S, T, C, P, E, D = NoDraws> {
     machine: M,
     storage: S,
     transport: T,
     clock: C,
+    entropy: D,
     ports: P,
     events: E,
     /// The inputs that wait for their step, in order.
@@ -82,7 +83,8 @@ pub struct Driver<M: Machine, S, T, C, P, E> {
     settled: BTreeMap<Address<M>, Batch<M>>,
     /// The steps not reported yet.
     pending: VecDeque<Pending<M>>,
-    timer: Option<Time>,
+    /// The deadline of the timer of each role that set one.
+    timers: BTreeMap<Address<M>, Time>,
     stopped: Vec<(Address<M>, Stop<M>)>,
 }
 
@@ -95,7 +97,8 @@ where
     P: Ports<M>,
     E: Events<M>,
 {
-    /// A driver of `machine`.
+    /// A driver of `machine`, whose roles ask no random draw
+    /// ([`with_entropy`](Self::with_entropy) gives a random source).
     #[must_use]
     pub fn new(machine: M, storage: S, transport: T, clock: C, ports: P, events: E) -> Self {
         Self {
@@ -103,6 +106,7 @@ where
             storage,
             transport,
             clock,
+            entropy: NoDraws,
             ports,
             events,
             inputs: VecDeque::new(),
@@ -113,11 +117,56 @@ where
             ended: BTreeSet::new(),
             settled: BTreeMap::new(),
             pending: VecDeque::new(),
-            timer: None,
+            timers: BTreeMap::new(),
             stopped: Vec::new(),
         }
     }
 
+    /// The same driver, which draws each random value that a role asks for
+    /// from `entropy`.
+    ///
+    /// # Panics
+    ///
+    /// When a step already ran: the random source is part of the driver
+    /// from its first step.
+    #[must_use]
+    pub fn with_entropy<D: Entropy>(self, entropy: D) -> Driver<M, S, T, C, P, E, D> {
+        assert!(
+            self.pending.is_empty() && self.inputs.is_empty() && self.timers.is_empty(),
+            "the random source comes before the first step"
+        );
+        Driver {
+            machine: self.machine,
+            storage: self.storage,
+            transport: self.transport,
+            clock: self.clock,
+            entropy,
+            ports: self.ports,
+            events: self.events,
+            inputs: self.inputs,
+            group: self.group,
+            held: self.held,
+            held_outputs: self.held_outputs,
+            durable: self.durable,
+            settled: self.settled,
+            pending: self.pending,
+            timers: self.timers,
+            stopped: self.stopped,
+            ended: self.ended,
+        }
+    }
+}
+
+impl<M, S, T, C, P, E, D> Driver<M, S, T, C, P, E, D>
+where
+    M: Machine,
+    S: Storage<M::Family>,
+    T: Transport<M::Family>,
+    C: Clock,
+    P: Ports<M>,
+    E: Events<M>,
+    D: Entropy,
+{
     /// The machine, to read its roles.
     #[must_use]
     pub fn machine(&self) -> &M {
@@ -158,10 +207,17 @@ where
         &self.events
     }
 
-    /// The time of the timer that the machine armed.
+    /// The earliest deadline of the timers that the roles set: when the
+    /// program should poll again.
     #[must_use]
     pub fn timer(&self) -> Option<Time> {
-        self.timer
+        self.timers.values().min().copied()
+    }
+
+    /// The random source.
+    #[must_use]
+    pub fn entropy(&self) -> &D {
+        &self.entropy
     }
 
     /// The storage, the transport, the clock, the ports and the events port.
@@ -187,8 +243,9 @@ where
         self.drain();
     }
 
-    /// One round of work: step every message that arrived, fire the timer
-    /// when it is due, step the inputs of the ports, then commit the batches
+    /// One round of work: step every message that arrived, fire each timer
+    /// that is due to its role alone (in deadline order, then address
+    /// order), step the inputs of the ports, then commit the batches
     /// of the round in one write and release what waited on them. Returns
     /// whether the round did any work.
     ///
@@ -203,10 +260,23 @@ where
             busy = true;
             self.input(M::message(envelope));
         }
-        if self.timer.is_some_and(|at| at <= self.clock.now()) {
+        let now = self.clock.now();
+        let mut due: Vec<(Time, Address<M>)> = self
+            .timers
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(address, at)| (*at, *address))
+            .collect();
+        due.sort();
+        for (at, address) in due {
+            // A fire earlier in this loop can stop the role or set its timer
+            // again: only the deadline that is still the role's fires.
+            if self.timers.get(&address) != Some(&at) {
+                continue;
+            }
             busy = true;
-            self.timer = None;
-            self.input(M::timer_fired());
+            self.timers.remove(&address);
+            self.input(M::timer_fired(address));
         }
         for input in self.ports.poll(&self.machine) {
             busy = true;
@@ -304,8 +374,12 @@ where
                     self.held_outputs.push((id, address, output));
                 }
             }
-            Effect::SetTimer { at } => {
-                self.timer = Some(self.timer.map_or(at, |armed| armed.min(at)));
+            Effect::SetTimer { address, at } => {
+                self.timers.insert(address, at);
+            }
+            Effect::Draw { address } => {
+                let value = self.entropy.draw();
+                self.inputs.push_back(M::drawn(address, value));
             }
             Effect::Stopped { address, why } => self.on_stopped(address, why),
         }
@@ -395,7 +469,9 @@ where
         for (_, role, output) in stopped {
             self.ports.dropped(role, output);
         }
+        self.ports.stopped(address);
         self.durable.remove(&address);
+        self.timers.remove(&address);
         self.stopped.push((address, why));
     }
 

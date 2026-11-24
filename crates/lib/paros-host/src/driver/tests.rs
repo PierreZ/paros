@@ -3,9 +3,7 @@ use std::rc::Rc;
 
 use super::*;
 use crate::host::{Host, Input};
-use crate::toy::{Assignment, Disk, Hand, In, Note, Out, Stop, Toy, ToyRole, Wire};
-
-const TICK: u64 = 10;
+use crate::toy::{Assignment, Dice, Disk, Hand, In, Note, Out, Stop, TICK, Toy, ToyRole, Wire};
 
 /// Ports that keep every output, and every output that a stop dropped.
 #[derive(Default)]
@@ -14,6 +12,8 @@ struct Kept {
     dropped: Vec<(u32, Out)>,
     /// Inputs that the next poll gives the host.
     next: Vec<Input<Toy>>,
+    /// Inputs that the next output gives the host.
+    on_output: Vec<Input<Toy>>,
 }
 
 impl Ports<Host<ToyRole>> for Kept {
@@ -23,7 +23,7 @@ impl Ports<Host<ToyRole>> for Kept {
 
     fn output(&mut self, address: u32, output: Out) -> Vec<Input<Toy>> {
         self.outputs.push((address, output));
-        Vec::new()
+        std::mem::take(&mut self.on_output)
     }
 
     fn dropped(&mut self, address: u32, output: Out) {
@@ -41,18 +41,19 @@ impl crate::ports::Events<Host<ToyRole>> for Shared {
     }
 }
 
-type Proc = Driver<Host<ToyRole>, Disk, Wire, Hand, Kept, Shared>;
+type Proc = Driver<Host<ToyRole>, Disk, Wire, Hand, Kept, Shared, Dice>;
 
 fn proc(disk: &Disk, clock: &Hand) -> (Proc, Events) {
     let events: Events = Rc::default();
     let driver = Driver::new(
-        Host::new(TICK, 0),
+        Host::new(0),
         disk.clone(),
         Wire::default(),
         clock.clone(),
         Kept::default(),
         Shared(events.clone()),
-    );
+    )
+    .with_entropy(Dice::default());
     (driver, events)
 }
 
@@ -236,7 +237,8 @@ fn an_output_that_does_not_wait_is_dropped_before_its_batch_is_durable() {
             .iter()
             .any(|(_, out)| matches!(out, Out::Report { .. }))
     );
-    assert_eq!(driver.timer(), Some(Time(2 * TICK)));
+    // The counter's next fire, and the watcher's timer with its draw of 7.
+    assert_eq!(driver.timer(), Some(Time(TICK + 7)));
     clock.0.set(2 * TICK);
     assert!(driver.poll());
     assert!(
@@ -299,5 +301,86 @@ fn a_role_that_ends_keeps_no_durable_entry_after_its_last_commit() {
     assert!(
         !driver.durable.contains_key(&1),
         "a role that ended keeps no durable entry"
+    );
+}
+
+#[test]
+fn a_recorded_run_replays_to_the_same_effects() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, events) = proc(&disk, &clock);
+    start(&mut driver);
+    bump(&mut driver);
+    assert!(driver.poll());
+    for at in [TICK, TICK + 7, 2 * TICK, 3 * TICK] {
+        clock.0.set(at);
+        driver.poll();
+    }
+    bump(&mut driver);
+    assert!(driver.poll());
+    let recorded = events.borrow().clone();
+    assert!(
+        recorded
+            .iter()
+            .any(|e| matches!(e.input, Input::Drawn { .. })),
+        "the run draws"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|e| e.input == Input::TimerFired { address: 2 }),
+        "the watcher's own timer fires"
+    );
+    assert!(
+        recorded
+            .iter()
+            .filter(|e| e.input == Input::TimerFired { address: 1 })
+            .count()
+            >= 2,
+        "the counter's timer fires again"
+    );
+    // A new host, with no disk, no clock and no random source: the recorded
+    // inputs alone give the same effects, step by step.
+    let mut again: Host<ToyRole> = Host::new(0);
+    for event in &recorded {
+        assert_eq!(
+            again.step(event.now, event.input.clone()),
+            event.effects,
+            "the step of {:?} at {:?}",
+            event.input,
+            event.now
+        );
+    }
+    assert_eq!(again.role(1), driver.machine().role(1));
+    assert_eq!(again.role(2), driver.machine().role(2));
+}
+
+#[test]
+fn a_timer_set_again_inside_the_round_of_fires_is_kept() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, _) = proc(&disk, &clock);
+    for address in [1, 3] {
+        driver.input(Input::Assign(Assignment::Counter {
+            address,
+            peers: Vec::new(),
+        }));
+    }
+    bump(&mut driver);
+    assert!(driver.poll());
+    // Both timers are due at TICK. The report of counter 1 restarts counter
+    // 3, which sets a new timer before its own old fire comes.
+    clock.0.set(TICK);
+    driver.ports_mut().on_output = vec![
+        Input::Unassign(3),
+        Input::Assign(Assignment::Counter {
+            address: 3,
+            peers: Vec::new(),
+        }),
+    ];
+    assert!(driver.poll());
+    assert_eq!(driver.machine().deadline(3), Some(Time(2 * TICK)));
+    assert_eq!(
+        driver.timers.get(&3),
+        Some(&Time(2 * TICK)),
+        "the driver keeps the timer that the host keeps"
     );
 }

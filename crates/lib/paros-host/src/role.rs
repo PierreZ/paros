@@ -2,10 +2,11 @@
 //! rule (§J4.2, rule 1; `docs/architecture/04-roles.md` §4.4, "A role is an
 //! actor").
 //!
-//! A role reads no clock and does no I/O. Each call takes the time and one
-//! input, and returns the role's effects ([`Effect`]): a persist batch with
-//! its id, a send that names the batch it waits on, and an output that
-//! names the batch it waits on. A role with a disk starts from its records
+//! A role reads no clock, draws no random value and does no I/O. Each call
+//! takes the time and one input, and returns the role's effects
+//! ([`Effect`]): a persist batch with its id, a send that names the batch
+//! it waits on, an output that names the batch it waits on, the deadline of
+//! the role's one timer, and an ask for a random value. A role with a disk starts from its records
 //! ([`Role::recover`]); a role with no disk starts at once
 //! ([`Start::Running`]).
 //!
@@ -74,13 +75,32 @@ pub trait Role: Sized {
         input: <Self::Family as Family>::Input,
     ) -> Vec<Effect<Self::Family>>;
 
-    /// The periodic step of the role at `address`, at `now`.
-    fn tick(
+    /// The timer that the role at `address` set ([`Effect::SetTimer`]) is
+    /// due, at `now`. The timer is gone: a role that wants another sets it.
+    fn fire(
         &mut self,
         shared: &Self::Shared,
         now: Time,
         address: <Self::Family as Family>::Address,
     ) -> Vec<Effect<Self::Family>>;
+
+    /// The random value that the role at `address` asked for
+    /// ([`Effect::Draw`]), at `now`. A role draws no random value itself: the
+    /// driver draws it and the value is a recorded input (§J4.2, rule 2).
+    ///
+    /// # Panics
+    ///
+    /// The default panics: a role that asks no draw gets none.
+    fn drawn(
+        &mut self,
+        shared: &Self::Shared,
+        now: Time,
+        address: <Self::Family as Family>::Address,
+        value: u64,
+    ) -> Vec<Effect<Self::Family>> {
+        let _ = (shared, now, address, value);
+        unreachable!("a role that asks no draw gets none")
+    }
 
     /// The role at `address` stops for `why`: the effects of its end (the
     /// answers of the calls it still holds).

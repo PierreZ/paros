@@ -1,7 +1,9 @@
 //! A toy family for the tests of the host and the driver: a counter with a
-//! disk, which persists each bump and then tells its peers, and a watcher
-//! with no disk, which reports each higher value and ends at a limit. It
-//! is not a journal role, so the tests show that the host knows none.
+//! disk, which persists each bump, tells its peers and reports its value at
+//! each fire of its timer, and a watcher with no disk, which reports each
+//! higher value, ends at a limit, and sets one timer whose jitter is a
+//! random draw. It is not a journal role, so the tests show that the host
+//! knows none.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
@@ -9,12 +11,15 @@ use std::rc::Rc;
 
 use crate::family::Family;
 use crate::host::Effect;
-use crate::io::{Clock, Storage, StorageError, Transport};
+use crate::io::{Clock, Entropy, Storage, StorageError, Transport};
 use crate::role::{Role, Start};
 use crate::time::Time;
 
 /// The value at which a watcher ends by its own step.
 pub const LIMIT: u64 = 3;
+
+/// The period of a counter's timer, and the fixed part of a watcher's.
+pub const TICK: u64 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Toy;
@@ -145,6 +150,10 @@ pub enum ToyRole {
     },
     Watcher {
         seen: u64,
+        /// The jitter of its timer, once the driver drew it.
+        jitter: Option<u64>,
+        /// Whether its timer fired.
+        woke: bool,
     },
 }
 
@@ -157,14 +166,21 @@ impl Role for ToyRole {
     fn start(_shared: &u64, _now: Time, assignment: Assignment) -> Start<Self> {
         match assignment {
             Assignment::Counter { .. } => Start::Recover,
-            Assignment::Watcher { .. } => Start::Running(ToyRole::Watcher { seen: 0 }, Vec::new()),
+            Assignment::Watcher { address } => Start::Running(
+                ToyRole::Watcher {
+                    seen: 0,
+                    jitter: None,
+                    woke: false,
+                },
+                vec![Effect::Draw { address }],
+            ),
         }
     }
 
     fn recover(
         shared: &u64,
-        _now: Time,
-        _address: u32,
+        now: Time,
+        address: u32,
         assignment: Assignment,
         records: &Vec<(u64, u64)>,
     ) -> Result<(Self, Vec<Effect<Toy>>), Stop> {
@@ -183,7 +199,10 @@ impl Role for ToyRole {
                 peers,
                 ended: false,
             },
-            Vec::new(),
+            vec![Effect::SetTimer {
+                address,
+                at: now.after(TICK),
+            }],
         ))
     }
 
@@ -228,7 +247,7 @@ impl Role for ToyRole {
                 });
                 out
             }
-            (ToyRole::Watcher { seen }, In::Note { value, .. }) if value > *seen => {
+            (ToyRole::Watcher { seen, .. }, In::Note { value, .. }) if value > *seen => {
                 *seen = value;
                 vec![Effect::Output {
                     address,
@@ -240,15 +259,40 @@ impl Role for ToyRole {
         }
     }
 
-    fn tick(&mut self, _shared: &u64, _now: Time, address: u32) -> Vec<Effect<Toy>> {
+    fn fire(&mut self, _shared: &u64, now: Time, address: u32) -> Vec<Effect<Toy>> {
         match self {
-            ToyRole::Counter { value, last, .. } if *last > 0 => vec![Effect::Output {
-                address,
-                output: Out::Report { value: *value },
-                after: Some(*last),
-            }],
-            _ => Vec::new(),
+            ToyRole::Counter { value, last, .. } => {
+                let mut out = Vec::new();
+                if *last > 0 {
+                    out.push(Effect::Output {
+                        address,
+                        output: Out::Report { value: *value },
+                        after: Some(*last),
+                    });
+                }
+                out.push(Effect::SetTimer {
+                    address,
+                    at: now.after(TICK),
+                });
+                out
+            }
+            ToyRole::Watcher { woke, .. } => {
+                *woke = true;
+                Vec::new()
+            }
         }
+    }
+
+    fn drawn(&mut self, _shared: &u64, now: Time, address: u32, value: u64) -> Vec<Effect<Toy>> {
+        let ToyRole::Watcher { jitter, .. } = self else {
+            unreachable!("a counter asks no draw")
+        };
+        assert!(jitter.is_none(), "a watcher asks one draw");
+        *jitter = Some(value % TICK);
+        vec![Effect::SetTimer {
+            address,
+            at: now.after(TICK + value % TICK),
+        }]
     }
 
     fn stop(&mut self, _address: u32, _why: &Stop) -> Vec<Effect<Toy>> {
@@ -257,7 +301,7 @@ impl Role for ToyRole {
 
     fn done(&self) -> Option<Stop> {
         match self {
-            ToyRole::Watcher { seen } if *seen >= LIMIT => Some(Stop::Done),
+            ToyRole::Watcher { seen, .. } if *seen >= LIMIT => Some(Stop::Done),
             ToyRole::Counter { ended: true, .. } => Some(Stop::Done),
             _ => None,
         }
@@ -321,5 +365,17 @@ pub struct Hand(pub Rc<Cell<u64>>);
 impl Clock for Hand {
     fn now(&self) -> Time {
         Time(self.0.get())
+    }
+}
+
+/// A random source that gives 7, 14, 21, ...: each draw is new, and a test
+/// knows it.
+#[derive(Clone, Debug, Default)]
+pub struct Dice(pub u64);
+
+impl Entropy for Dice {
+    fn draw(&mut self) -> u64 {
+        self.0 += 7;
+        self.0
     }
 }

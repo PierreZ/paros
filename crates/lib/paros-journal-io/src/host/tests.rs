@@ -69,20 +69,18 @@ fn prepare(journal: JournalId, to: u64) -> Input {
 fn an_acceptor_starts_with_a_read_and_routes_by_journal() {
     let mut host = Host::new(CONFIG);
     let effects = host.step(Time(5), acceptor(at(J, 1)));
-    assert_eq!(
-        effects,
-        vec![
-            Effect::SetTimer { at: Time(15) },
-            Effect::Read { address: at(J, 1) }
-        ]
-    );
+    assert_eq!(effects, vec![Effect::Read { address: at(J, 1) }]);
     assert!(host.serves(at(J, 1)));
     assert!(host.acceptor(at(J, 1)).is_none(), "it still recovers");
     assert!(
         host.step(Time(6), prepare(J, 1)).is_empty(),
         "a role that recovers loses its messages"
     );
-    assert_eq!(host.step(Time(6), recovered(at(J, 1))), Vec::new());
+    assert_eq!(
+        host.step(Time(6), recovered(at(J, 1))),
+        Vec::new(),
+        "an acceptor sets no timer"
+    );
     assert!(host.acceptor(at(J, 1)).is_some());
     assert_eq!(
         host.step(Time(6), recovered(at(J, 1))),
@@ -280,7 +278,7 @@ fn a_leader_needs_a_register_value_and_answers_calls() {
 }
 
 #[test]
-fn the_timer_ticks_every_role_and_arms_again() {
+fn the_timer_of_a_replica_fires_it_and_it_sets_it_again() {
     let mut host = Host::new(CONFIG);
     host.step(
         Time(0),
@@ -299,10 +297,16 @@ fn the_timer_ticks_every_role_and_arms_again() {
             initial: Leader::Unset,
         }),
     );
-    assert!(effects.contains(&Effect::SetTimer { at: Time(10) }));
-    host.step(
-        Time(0),
-        recovered(Address::replica(J, NodeId(11), SegmentId(1))),
+    let segment = Address::replica(J, NodeId(11), SegmentId(1));
+    assert_eq!(effects, vec![Effect::Read { address: segment }]);
+    let effects = host.step(Time(0), recovered(segment));
+    assert_eq!(
+        effects.last(),
+        Some(&Effect::SetTimer {
+            address: segment,
+            at: Time(10),
+        }),
+        "the replica sets its timer when it starts"
     );
     let base = host.replica(replica).and_then(SegmentReplica::front);
     assert_eq!(
@@ -310,13 +314,19 @@ fn the_timer_ticks_every_role_and_arms_again() {
         Some(Slot(0)),
         "the replica took its base from the value"
     );
-    let effects = host.step(Time(10), Input::TimerFired);
+    let effects = host.step(Time(10), Input::TimerFired { address: segment });
     let pulls = effects
         .iter()
         .filter(|e| matches!(e, Effect::Send { envelope, .. } if matches!(envelope.message, Message::Pull { .. })))
         .count();
     assert_eq!(pulls, 2, "the replica asks its two peers");
-    assert_eq!(effects.last(), Some(&Effect::SetTimer { at: Time(20) }));
+    assert_eq!(
+        effects.last(),
+        Some(&Effect::SetTimer {
+            address: segment,
+            at: Time(20),
+        })
+    );
 }
 
 #[test]
