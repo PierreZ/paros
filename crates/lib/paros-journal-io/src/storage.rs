@@ -23,9 +23,15 @@
 //!   [`Key::to_bytes`](crate::Key::to_bytes), and no record of another
 //!   role. A record the backend finds corrupt is
 //!   [`Entry::Corrupt`](crate::Entry::Corrupt).
+//! - **Listed.** `list` names every role that has a record on the disk, and
+//!   every role whose records the disk lost (faulty, not empty), so a
+//!   process that boots serves them again before it reads its assignments.
 //!
-//! The error of a storage call ([`StorageError`]) means "unknown": the
-//! batch may or may not be durable, and the roles of the batch stop.
+//! A fault of a storage call is typed ([`StorageError`]), with one verdict
+//! each (`paros_host::Verdict`): `Full` (nothing done; the roles stop and
+//! may start again), `Lost` (a record of the role is gone; it stops for
+//! good) and `Unknown` (the backend does not know what it wrote; the
+//! process stops).
 //!
 //! A contract suite certifies the API only. Crash safety is claimed only on
 //! a disk that can inject faults (Pierre, 2026-11-19).

@@ -2,8 +2,8 @@
 //!
 //! A machine is a pure step, `input` at `now` to effects, plus the inputs
 //! that the driver itself builds: a recovery, a failed read, a failed
-//! commit, a message, the timer of a role and a random draw. [`Host`] is a machine with the inputs of
-//! [`Input`]. A family that routes some inputs itself (the journal) wraps a
+//! commit, a lost record, a message, the timer of a role and a random draw.
+//! [`Host`] is a machine with the inputs of [`Input`]. A family that routes some inputs itself (the journal) wraps a
 //! `Host` in a machine of its own, with its own inputs.
 
 use core::fmt::Debug;
@@ -33,8 +33,12 @@ pub trait Machine {
     fn unreadable(address: <Self::Family as Family>::Address) -> Self::Input;
 
     /// The input that says a commit with a batch of the role at `address`
-    /// failed.
+    /// wrote nothing.
     fn failed(address: <Self::Family as Family>::Address) -> Self::Input;
+
+    /// The input that says the disk lost a record of the role at `address`:
+    /// the role stops for good.
+    fn lost(address: <Self::Family as Family>::Address) -> Self::Input;
 
     /// The input of a message that arrived.
     fn message(envelope: <Self::Family as Family>::Envelope) -> Self::Input;
@@ -68,6 +72,10 @@ impl<R: Role> Machine for Host<R> {
 
     fn failed(address: <R::Family as Family>::Address) -> Self::Input {
         Input::Failed { address }
+    }
+
+    fn lost(address: <R::Family as Family>::Address) -> Self::Input {
+        Input::Lost { address }
     }
 
     fn message(envelope: <R::Family as Family>::Envelope) -> Self::Input {

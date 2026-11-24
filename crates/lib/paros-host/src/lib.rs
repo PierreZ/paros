@@ -42,7 +42,7 @@ mod toy;
 pub use driver::Driver;
 pub use family::Family;
 pub use host::{Effect, Host, Input};
-pub use io::{Clock, Entropy, NoDraws, Storage, StorageError, Transport};
+pub use io::{Clock, Entropy, NoDraws, Storage, StorageError, Transport, Verdict};
 pub use machine::Machine;
 pub use ports::{Event, Events, Ports};
 pub use role::{Role, Start};

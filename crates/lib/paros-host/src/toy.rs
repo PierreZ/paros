@@ -76,6 +76,7 @@ pub enum Stop {
     Unreadable,
     Failed,
     Damaged,
+    Lost,
     Done,
 }
 
@@ -136,6 +137,10 @@ impl Family for Toy {
 
     fn failed() -> Stop {
         Stop::Failed
+    }
+
+    fn lost() -> Stop {
+        Stop::Lost
     }
 }
 
@@ -309,18 +314,37 @@ impl Role for ToyRole {
 }
 
 /// A disk in memory, shared by its copies; a test can make the next commit
-/// fail, and the next scan.
+/// fail, and the next scan, with a fault of its choice, and can lose the
+/// records of a role.
 #[derive(Clone, Debug, Default)]
 pub struct Disk {
     pub records: Rc<std::cell::RefCell<BTreeMap<(u32, u64), u64>>>,
-    pub fail_commit: Rc<Cell<bool>>,
-    pub fail_scan: Rc<Cell<bool>>,
+    pub fail_commit: Rc<Cell<Option<StorageError>>>,
+    pub fail_scan: Rc<Cell<Option<StorageError>>>,
+    pub fail_list: Rc<Cell<Option<StorageError>>>,
+    /// The roles that lost records: listed, and each scan reports `Lost`.
+    pub lost: Rc<std::cell::RefCell<std::collections::BTreeSet<u32>>>,
+}
+
+impl Disk {
+    /// The disk loses the last record of the role at `address`.
+    pub fn lose(&self, address: u32) {
+        let mut records = self.records.borrow_mut();
+        let last = records
+            .range((address, 0)..=(address, u64::MAX))
+            .next_back()
+            .map(|(key, _)| *key);
+        if let Some(key) = last {
+            records.remove(&key);
+        }
+        self.lost.borrow_mut().insert(address);
+    }
 }
 
 impl Storage<Toy> for Disk {
     fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
-        if self.fail_commit.replace(false) {
-            return Err(StorageError("planted".into()));
+        if let Some(fault) = self.fail_commit.take() {
+            return Err(fault);
         }
         let mut records = self.records.borrow_mut();
         for op in ops {
@@ -330,8 +354,11 @@ impl Storage<Toy> for Disk {
     }
 
     fn scan(&mut self, address: u32) -> Result<Vec<(u64, u64)>, StorageError> {
-        if self.fail_scan.replace(false) {
-            return Err(StorageError("planted".into()));
+        if let Some(fault) = self.fail_scan.take() {
+            return Err(fault);
+        }
+        if self.lost.borrow().contains(&address) {
+            return Err(StorageError::Lost);
         }
         Ok(self
             .records
@@ -339,6 +366,20 @@ impl Storage<Toy> for Disk {
             .range((address, 0)..=(address, u64::MAX))
             .map(|((_, batch), value)| (*batch, *value))
             .collect())
+    }
+
+    fn list(&mut self) -> Result<Vec<u32>, StorageError> {
+        if let Some(fault) = self.fail_list.take() {
+            return Err(fault);
+        }
+        let mut roles: std::collections::BTreeSet<u32> = self
+            .records
+            .borrow()
+            .keys()
+            .map(|(address, _)| *address)
+            .collect();
+        roles.extend(self.lost.borrow().iter().copied());
+        Ok(roles.into_iter().collect())
     }
 }
 

@@ -74,6 +74,7 @@ enum Why {
     Unassigned,
     Unreadable,
     Failed,
+    Lost,
 }
 
 /// The family of the example's roles.
@@ -134,6 +135,10 @@ impl Family for Cell {
 
     fn failed() -> Why {
         Why::Failed
+    }
+
+    fn lost() -> Why {
+        Why::Lost
     }
 }
 
@@ -285,6 +290,15 @@ impl Storage<Cell> for Disk {
         );
         Ok(self.0.borrow().clone())
     }
+
+    /// Only the coordinator keeps records: the workers start with no read.
+    fn list(&mut self) -> Result<Vec<Actor>, StorageError> {
+        Ok(if self.0.borrow().is_empty() {
+            Vec::new()
+        } else {
+            vec![Actor::Coordinator]
+        })
+    }
 }
 
 /// One process: every message goes through the queue, a local one too.
@@ -374,9 +388,11 @@ fn main() {
         "each task finished once, by the worker it went to"
     );
 
-    // A crash: the driver is dropped, the disk stays.
+    // A crash: the driver is dropped, the disk stays. The new process lists
+    // the roles on its disk before it serves its assignments.
     drop(driver);
     let mut driver = process(&disk);
+    assert_eq!(driver.on_disk(), Ok(vec![Actor::Coordinator]));
     settle(&mut driver);
     println!("after a restart: {:?}", disk.0.borrow());
     assert_eq!(

@@ -61,16 +61,48 @@ fn scan<S: Storage<Journal>>(storage: &mut S, address: Address) -> Vec<(Key, Ent
     entries
 }
 
+fn list<S: Storage<Journal>>(storage: &mut S) -> Vec<Address> {
+    let roles = storage
+        .list()
+        .unwrap_or_else(|error| panic!("storage: a list of a healthy disk fails: {error}"));
+    assert!(
+        roles.windows(2).all(|pair| pair[0] < pair[1]),
+        "storage: a list names each role once, in address order"
+    );
+    roles
+}
+
 fn commit<S: Storage<Journal>>(storage: &mut S, ops: &[Op]) {
     storage
         .commit(ops)
         .unwrap_or_else(|error| panic!("storage: a commit on a healthy disk fails: {error}"));
 }
 
+/// A list names the roles `with` that have records, and then `r` too once
+/// a commit gave it one: a replica apart from its node's acceptor.
+fn lists<S: Storage<Journal>>(disk: &mut S, with: [Address; 3], r: Address) {
+    let mut roles = with.to_vec();
+    roles.sort();
+    assert_eq!(
+        list(disk),
+        roles,
+        "storage: a list names each role that has records, and no other"
+    );
+    commit(disk, &[op(r, Kind::Durable, 0, b"r")]);
+    roles.push(r);
+    roles.sort();
+    assert_eq!(
+        list(disk),
+        roles,
+        "storage: a list names a replica apart from its node's acceptor"
+    );
+}
+
 /// The contract of [`Storage`] on fresh disks that `fresh` makes: a
 /// commit is seen by every later scan, the ops of a commit apply in order,
-/// a scan gives one role's records in key order and no other record, and
-/// a fresh disk is empty.
+/// a scan gives one role's records in key order and no other record, a
+/// list names each role with records once, in address order, and a fresh
+/// disk is empty.
 ///
 /// # Panics
 ///
@@ -81,13 +113,20 @@ pub fn storage<S: Storage<Journal>>(mut fresh: impl FnMut() -> S) {
     let b = Address::new(JournalId(256), NodeId(1));
     let c = Address::new(JournalId(1), NodeId(256));
 
+    // A replica of `a`'s node: a role of its own, with its own records.
+    let r = Address::replica(JournalId(1), NodeId(1), SegmentId(2));
+
     let mut disk = fresh();
-    for address in [a, b, c] {
+    for address in [a, b, c, r] {
         assert!(
             scan(&mut disk, address).is_empty(),
             "storage: a fresh disk is empty"
         );
     }
+    assert!(
+        list(&mut disk).is_empty(),
+        "storage: a fresh disk lists no role"
+    );
 
     // One commit across three roles; slots out of order.
     commit(
@@ -121,6 +160,11 @@ pub fn storage<S: Storage<Journal>>(mut fresh: impl FnMut() -> S) {
         vec![(Kind::Chosen, 3, b"other node".to_vec())],
         "storage: two roles of one journal do not mix"
     );
+    assert!(
+        scan(&mut disk, r).is_empty(),
+        "storage: a replica of a node does not see the node's acceptor"
+    );
+    lists(&mut disk, [a, b, c], r);
 
     // In one commit, the later op at a key wins; a later commit overwrites.
     commit(
@@ -190,11 +234,18 @@ pub fn storage_reopen<S: Storage<Journal>>(
     );
     commit(&mut disk, &[op(a, Kind::Vote, 1, b"v1")]);
     let before = values(&scan(&mut disk, a));
+    let listed = list(&mut disk);
+    assert_eq!(listed, vec![a], "storage: a list names the one role");
     let mut disk = reopen(disk);
     assert_eq!(
         values(&scan(&mut disk, a)),
         before,
         "storage: a commit is seen after a reopen"
+    );
+    assert_eq!(
+        list(&mut disk),
+        listed,
+        "storage: a list after a reopen names the same roles"
     );
 }
 

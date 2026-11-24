@@ -145,4 +145,8 @@ impl Family for Journal {
     fn failed() -> Stop {
         Stop::Failed
     }
+
+    fn lost() -> Stop {
+        Stop::Lost
+    }
 }
