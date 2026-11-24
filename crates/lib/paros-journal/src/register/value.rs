@@ -361,15 +361,16 @@ impl RegisterValue {
 
     /// The value already holds what `change` writes, so the change is
     /// "ok" again and writes the value again (§J3.4, "a change asked
-    /// again"). A caller whose answer was lost asks the same change again
-    /// (`NoAnswer` of the `paros_journal_io::Register` port); its first write may be at a
-    /// minority, and a later operation may have carried it on under its own
-    /// change (a replica's boundary state over a seal, a retire). The read
-    /// of the second ask shows that write: a refusal would tell the caller
-    /// that its write lost, and a first leader would stop on its own seal
-    /// end (`specs/tla/segment-records/`, control `again_refuse`). The
-    /// operation writes the value again, so the write is done. A change
-    /// whose own guard fails on its arguments is never "ok" again.
+    /// again"). A caller whose answer was lost (no answer came from the
+    /// driver's register port) asks the same change again. Its first write
+    /// may be at a minority, and a later operation may have carried it on
+    /// under its own change (a replica's boundary state over a seal, a
+    /// retire). The read of the second ask shows that write: a refusal
+    /// would tell the caller that its write lost, and a first leader would
+    /// stop on its own seal end (`specs/tla/segment-records/`, control
+    /// `again_refuse`). The operation writes the value again, so the write
+    /// is done. A change whose own guard fails on its arguments is never
+    /// "ok" again.
     fn holds(&self, change: &Change) -> bool {
         let record = |segment: &SegmentId| self.segment(*segment);
         match change {
