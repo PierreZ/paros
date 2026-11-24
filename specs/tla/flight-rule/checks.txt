@@ -10,3 +10,11 @@ own_batch           violation  ci
 own_batch_durable   violation  ci
 reach_crash         violation  ci
 reach_group         violation  ci
+# The faults of a storage (#1414): Full, Lost and Unknown, each with its verdict.
+storage             pass       ci
+lost_restore        violation  ci
+list_readable       violation  ci
+unknown_rescan      violation  ci
+reach_full          violation  ci
+reach_lost          violation  ci
+reach_unknown       violation  ci

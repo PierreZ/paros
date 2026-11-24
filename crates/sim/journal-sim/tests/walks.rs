@@ -1,7 +1,7 @@
 //! The fold walks: every seed passes every oracle, and the campaign
 //! reaches every site.
 
-use journal_sim::campaign::{campaign, try_campaign};
+use journal_sim::campaign::{campaign, first_seed, try_campaign};
 use journal_sim::fold::{FoldModel, FoldMutant, Shape, reach};
 use moonpool_walk::Walk;
 
@@ -11,6 +11,7 @@ const SEEDS: u64 = 200;
 fn walk(shape: Shape) -> Walk<FoldModel> {
     Walk::<FoldModel>::new()
         .seeds(SEEDS)
+        .first_seed(first_seed())
         .chaos_steps(120)
         .model(move |cx| FoldModel::build(shape, FoldMutant::None, cx))
 }

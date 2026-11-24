@@ -511,6 +511,7 @@ name = "paros"
 version = "0.2.0"
 dependencies = [
  "paros-consensus",
+ "paros-host",
  "paros-journal",
  "paros-journal-io",
  "tokio",
@@ -543,6 +544,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "paros-host"
+version = "0.2.0"
+
+[[package]]
 name = "paros-journal"
 version = "0.2.0"
 dependencies = [
@@ -564,6 +569,7 @@ name = "paros-journal-io"
 version = "0.2.0"
 dependencies = [
  "paros-consensus",
+ "paros-host",
  "paros-journal",
 ]
 

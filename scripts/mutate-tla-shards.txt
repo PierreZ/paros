@@ -19,7 +19,7 @@ ctrl-segments 1
 decree 2
 degraded-reshape 12
 election 3
-flight-rule 1
+flight-rule 2
 generations 8
 grid 0
 grid-controller 4
@@ -30,8 +30,10 @@ handover-scalars 2
 heal-reuse 2
 health 0
 journal-compact 1
-journal-ctrl 4
+journal-ctrl 6
 journal-ids 3
+journal-read 3
+journal-repromise 1
 journal-state 29
 leader-handoff 12
 matchmaker 3
@@ -46,6 +48,7 @@ re-replication 9
 read-replica 0
 reads 40
 reads-rows4 0
+recorded-inputs 1
 retire-fence 18
 seal-chain 3
 seal-ctrl 7

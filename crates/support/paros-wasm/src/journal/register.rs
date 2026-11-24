@@ -198,6 +198,12 @@ fn value_text(value: &RegisterValue) -> String {
 #[must_use]
 pub fn refusal_text(refusal: &ChangeRefusal) -> String {
     match refusal {
+        ChangeRefusal::Bound { held, asked } => format!(
+            "Bound: ballot {} is bound, the bind names ballot {} and cannot take the newest segment",
+            ballot(*held),
+            ballot(*asked)
+        ),
+        ChangeRefusal::Empty => "Empty: the journal has no segment to bind a ballot to".to_string(),
         ChangeRefusal::Term { held, asked } => {
             format!("Term: the register holds term {held}, the call names term {asked}")
         }

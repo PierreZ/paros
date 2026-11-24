@@ -2,17 +2,18 @@
 //! journal, the flight rule on the effects, calls and the timer.
 
 use paros_journal::register::Ballot;
-use paros_journal::roles::{LeaderPhase, Message};
+use paros_journal::roles::{LeaderPhase, Message, PersistId};
 use paros_journal::{Grid, OpeningCall, RELEASE, Slot};
 
 use super::*;
-use crate::layout::{Kind, acceptor_ops};
+use crate::layout::{self, Kind, acceptor_ops};
 
 const J: JournalId = JournalId(1);
 const K: JournalId = JournalId(2);
 const CONFIG: HostConfig = HostConfig {
     tick: 10,
     resend_page: 4,
+    window: 64,
 };
 
 fn at(journal: JournalId, node: u64) -> Address {
@@ -68,20 +69,18 @@ fn prepare(journal: JournalId, to: u64) -> Input {
 fn an_acceptor_starts_with_a_read_and_routes_by_journal() {
     let mut host = Host::new(CONFIG);
     let effects = host.step(Time(5), acceptor(at(J, 1)));
-    assert_eq!(
-        effects,
-        vec![
-            Effect::SetTimer { at: Time(15) },
-            Effect::Read { address: at(J, 1) }
-        ]
-    );
+    assert_eq!(effects, vec![Effect::Read { address: at(J, 1) }]);
     assert!(host.serves(at(J, 1)));
     assert!(host.acceptor(at(J, 1)).is_none(), "it still recovers");
     assert!(
         host.step(Time(6), prepare(J, 1)).is_empty(),
         "a role that recovers loses its messages"
     );
-    assert_eq!(host.step(Time(6), recovered(at(J, 1))), Vec::new());
+    assert_eq!(
+        host.step(Time(6), recovered(at(J, 1))),
+        Vec::new(),
+        "an acceptor sets no timer"
+    );
     assert!(host.acceptor(at(J, 1)).is_some());
     assert_eq!(
         host.step(Time(6), recovered(at(J, 1))),
@@ -204,40 +203,46 @@ fn a_damaged_record_stops_the_role() {
 }
 
 #[test]
-fn a_leader_needs_a_register_value_and_answers_calls() {
+fn a_leader_binds_its_ballot_and_answers_calls() {
     let leader = at(J, 100);
+    let ballot = Ballot {
+        round: 1,
+        node: NodeId(100),
+    };
     let campaign = Campaign {
-        ballot: Ballot {
-            round: 1,
-            node: NodeId(100),
-        },
-        segment: SegmentId(1),
+        ballot,
         from: Slot(0),
     };
     let assign = Input::Assign(Assignment::Leader {
         address: leader,
         proxies: Vec::new(),
-        campaign: campaign.clone(),
+        campaign,
     });
     let mut host = Host::new(CONFIG);
-    let effects = host.step(Time(0), assign.clone());
-    assert_eq!(
-        effects.last(),
-        Some(&Effect::Stopped {
+    let effects = host.step(Time(0), assign);
+    assert!(
+        effects.contains(&Effect::Output {
             address: leader,
-            why: Stop::NoCampaign,
+            output: Output::Register {
+                change: Change::Bind { ballot },
+            },
+            after: None,
         }),
-        "no register value yet"
+        "the leader asks the bind of its ballot first"
     );
-    host.step(
+    assert_eq!(
+        host.leader(leader).map(|l| l.phase().clone()),
+        Some(LeaderPhase::Binding)
+    );
+    let bound = value().apply(&Change::Bind { ballot }).expect("a bind");
+    let effects = host.step(
         Time(0),
         Input::Observe {
             journal: J,
-            value: value(),
+            value: bound.clone(),
         },
     );
-    assert_eq!(host.value(J), Some(&value()));
-    let effects = host.step(Time(0), assign);
+    assert_eq!(host.value(J), Some(&bound));
     let prepares = effects
         .iter()
         .filter(|e| matches!(e, Effect::Send { envelope, after: None, .. } if matches!(envelope.message, Message::Prepare { .. })))
@@ -257,10 +262,13 @@ fn a_leader_needs_a_register_value_and_answers_calls() {
     for (address, id) in [(leader, 1), (at(J, 1), 2)] {
         assert_eq!(
             host.step(Time(1), call(address, id)),
-            vec![Effect::Reply {
+            vec![Effect::Output {
                 address,
-                call: id,
-                outcome: CallOutcome::NotLeader,
+                output: Output::Reply {
+                    call: id,
+                    outcome: CallOutcome::NotLeader,
+                },
+                after: None,
             }]
         );
     }
@@ -276,7 +284,7 @@ fn a_leader_needs_a_register_value_and_answers_calls() {
 }
 
 #[test]
-fn the_timer_ticks_every_role_and_arms_again() {
+fn the_timer_of_a_replica_fires_it_and_it_sets_it_again() {
     let mut host = Host::new(CONFIG);
     host.step(
         Time(0),
@@ -295,10 +303,16 @@ fn the_timer_ticks_every_role_and_arms_again() {
             initial: Leader::Unset,
         }),
     );
-    assert!(effects.contains(&Effect::SetTimer { at: Time(10) }));
-    host.step(
-        Time(0),
-        recovered(Address::replica(J, NodeId(11), SegmentId(1))),
+    let segment = Address::replica(J, NodeId(11), SegmentId(1));
+    assert_eq!(effects, vec![Effect::Read { address: segment }]);
+    let effects = host.step(Time(0), recovered(segment));
+    assert_eq!(
+        effects.last(),
+        Some(&Effect::SetTimer {
+            address: segment,
+            at: Time(10),
+        }),
+        "the replica sets its timer when it starts"
     );
     let base = host.replica(replica).and_then(SegmentReplica::front);
     assert_eq!(
@@ -306,13 +320,19 @@ fn the_timer_ticks_every_role_and_arms_again() {
         Some(Slot(0)),
         "the replica took its base from the value"
     );
-    let effects = host.step(Time(10), Input::TimerFired);
+    let effects = host.step(Time(10), Input::TimerFired { address: segment });
     let pulls = effects
         .iter()
         .filter(|e| matches!(e, Effect::Send { envelope, .. } if matches!(envelope.message, Message::Pull { .. })))
         .count();
     assert_eq!(pulls, 2, "the replica asks its two peers");
-    assert_eq!(effects.last(), Some(&Effect::SetTimer { at: Time(20) }));
+    assert_eq!(
+        effects.last(),
+        Some(&Effect::SetTimer {
+            address: segment,
+            at: Time(20),
+        })
+    );
 }
 
 #[test]
@@ -911,10 +931,12 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
     // A role that is not a replica that serves answers unserved.
     assert_eq!(
         host.step(Time(0), read(0)),
-        vec![Effect::ReadReply {
+        vec![Effect::Output {
             address: replica,
-            read: 7,
-            answer: ReadAnswer::Unserved,
+            output: Output::ReadReply {
+                read: 7,
+                answer: ReadAnswer::Unserved,
+            },
             after: None,
         }]
     );
@@ -935,12 +957,16 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
             value: value(),
         },
     );
+    let mut tags = Vec::new();
     let asked: Vec<NodeId> = host
         .step(Time(1), read(0))
         .into_iter()
         .filter_map(|effect| match effect {
             Effect::Send { envelope, .. } => {
-                assert!(matches!(envelope.message, Message::PreRead { read: 7, .. }));
+                let Message::PreRead { read: tag, .. } = envelope.message else {
+                    panic!("a PreRead: {envelope:?}");
+                };
+                tags.push(tag);
                 assert_eq!(envelope.receiver(), at(J, envelope.to.0));
                 Some(envelope.to)
             }
@@ -948,13 +974,15 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
         })
         .collect();
     assert_eq!(asked, vec![NodeId(1), NodeId(2), NodeId(3)]);
+    let tag = tags[0];
+    assert!(tags.iter().all(|t| *t == tag), "one read, one tag");
     let ack = |from| Envelope {
         journal: J,
         from: NodeId(from),
         to: NodeId(11),
         message: Message::PreReadAck {
             segment: SegmentId(1),
-            read: 7,
+            read: tag,
             watermark: None,
             bound: SegmentId(1),
         },
@@ -965,10 +993,12 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::ReadReply {
+            [Effect::Output {
                 address,
-                read: 7,
-                answer: ReadAnswer::Page { sealed: false, .. },
+                output: Output::ReadReply {
+                    read: 7,
+                    answer: ReadAnswer::Page { sealed: false, .. },
+                },
                 ..
             }] if *address == replica
         ),

@@ -60,7 +60,7 @@ struct Sizes {
 #[must_use]
 pub fn trace(fresh: Leader, events: &[RolesEvent]) -> Trace {
     let mut sizes = Sizes {
-        grids: vec![set(FIRST_GRID)],
+        grids: vec![Value::Seq(vec![set(FIRST_GRID)])],
         slots: 1,
         ballots: 1,
         crashes: 0,
@@ -107,10 +107,15 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
                 Some(sizes.grids.len() + 1),
                 "segments open in order"
             );
-            sizes.grids.push(set(grid.iter().copied()));
+            sizes.grids.push(Value::Seq(
+                grid.iter().map(|c| set(c.iter().copied())).collect(),
+            ));
             (
                 "reshape",
-                vec![("g", int(*g)), ("grid", set(grid.iter().copied()))],
+                vec![
+                    ("g", int(*g)),
+                    ("grid", set(grid.iter().flatten().copied())),
+                ],
             )
         }
         RolesEvent::Register { b, from } => {
@@ -118,6 +123,7 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
             ("register", vec![("b", int(*b)), ("from", int(*from))])
         }
         RolesEvent::Promise { a, b } => ("promise", vec![("a", int(*a)), ("b", int(*b))]),
+        RolesEvent::Repromise { a, b } => ("repromise", vec![("a", int(*a)), ("b", int(*b))]),
         RolesEvent::Accept { a, b, s } => {
             sizes.slots = sizes.slots.max(*s + 1);
             (
@@ -523,8 +529,24 @@ pub const EDITS: &[Edit] = &[
         )
     }),
     repeat_edit!("a rot repeated", "rot"),
-    Edit::new("a rot of the next slot", |events| {
-        change_first(events, |e, i| is(&e[i], "rot"), |e| plus(e, "s", 1))
+    // A rot of a slot that no leader proposed yet: an unchosen slot is never
+    // spare. (The next slot may be spare too, so it is no edit.)
+    Edit::new("a rot of a slot not yet proposed", |events| {
+        let at = events.iter().position(|e| is(e, "rot"))?;
+        let proposed = |e: &Value| is(e, "propose");
+        let earlier: Vec<i64> = events[..at]
+            .iter()
+            .filter(|e| proposed(e))
+            .filter_map(|e| num(e, "s"))
+            .collect();
+        let slot = events[at..]
+            .iter()
+            .filter(|e| proposed(e))
+            .filter_map(|e| num(e, "s"))
+            .find(|s| !earlier.contains(s))?;
+        let mut edited = events.to_vec();
+        edited[at] = with(&events[at], "s", Value::Int(slot));
+        Some((at, edited))
     }),
     repeat_edit!("a probe repeated", "probe"),
     Edit::new("a probe on one answer", |events| {

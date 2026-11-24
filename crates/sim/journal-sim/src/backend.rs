@@ -1,8 +1,9 @@
 //! The backends of the walks that run the generic driver of
 //! `paros-journal-io` (the driver walk, [`crate::host`], and the whole
 //! journal walk, [`crate::whole`]): a disk that survives its process and
-//! fails commits inside the contract, and a transport that sends into the
-//! walk's mailbox and judges the flight rule at the wire.
+//! fails commits inside the contract, a transport that sends into the
+//! walk's mailbox and judges the flight rule at the wire, and a register
+//! that loses a request or a reply.
 //!
 //! Both are the walk's, never the driver's: a fault they inject stays inside
 //! the contract of `paros_journal_io::Storage` (a failed commit may or may
@@ -12,10 +13,13 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use paros_journal::register::Ballot;
+use paros_journal::register::{Ballot, Change, RegisterValue};
 use paros_journal::roles::Message;
-use paros_journal_io::mem::MemStorage;
-use paros_journal_io::{Address, Entry, Envelope, Key, Kind, Op, Storage, StorageError, Transport};
+use paros_journal_io::mem::{MemRegister, MemStorage};
+use paros_journal_io::{
+    Address, ChangeError, Entry, Envelope, Journal, JournalId, Key, Kind, Op, Register, Storage,
+    StorageError, Transport,
+};
 
 /// The faults that a walk arms on a disk, for its next commit.
 #[derive(Clone, Copy, Debug, Default)]
@@ -91,8 +95,8 @@ impl Disk {
     }
 }
 
-impl Storage for Disk {
-    fn commit(&mut self, ops: &[Op], sync: bool) -> Result<(), StorageError> {
+impl Storage<Journal> for Disk {
+    fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
         (self.seen)(ops);
         let faults = std::mem::take(&mut *self.faults.borrow_mut());
         if faults.lie {
@@ -101,7 +105,7 @@ impl Storage for Disk {
         if faults.fail_before {
             return Err(StorageError("the walk failed the commit".into()));
         }
-        self.store.borrow_mut().commit(ops, sync)?;
+        self.store.borrow_mut().commit(ops)?;
         if faults.fail_after {
             return Err(StorageError(
                 "the walk failed the commit after its write".into(),
@@ -140,7 +144,7 @@ pub struct Wire {
     pub flight: &'static str,
 }
 
-impl Transport for Wire {
+impl Transport<Journal> for Wire {
     fn send(&mut self, envelope: Envelope) {
         let flight = self.flight;
         match &envelope.message {
@@ -169,5 +173,76 @@ impl Transport for Wire {
 
     fn receive(&mut self) -> Option<Envelope> {
         self.inbox.borrow_mut().pop_front()
+    }
+}
+
+/// The faults that a walk arms on a process's way to the register, for its
+/// next change.
+#[derive(Clone, Copy, Debug, Default)]
+struct RegisterFaults {
+    /// The request is lost: the change does not take place.
+    lose_request: bool,
+    /// The reply is lost: the change takes place or is refused, and the
+    /// process hears nothing.
+    lose_reply: bool,
+}
+
+/// The shared register as one process reaches it: a change whose request
+/// or reply the walk lost answers [`ChangeError::NoAnswer`], inside the
+/// contract of `paros_journal_io::Register` (the write may or may not have
+/// taken place). Reads are never lost.
+#[derive(Clone)]
+pub struct LossyRegister {
+    register: MemRegister,
+    faults: Rc<RefCell<RegisterFaults>>,
+    /// Called on each change that got no answer, with whether its write
+    /// took place.
+    lost: fn(bool),
+}
+
+impl LossyRegister {
+    /// The shared `register` as one process reaches it, which calls `lost`
+    /// on each change that gets no answer.
+    #[must_use]
+    pub fn new(register: MemRegister, lost: fn(bool)) -> Self {
+        Self {
+            register,
+            faults: Rc::default(),
+            lost,
+        }
+    }
+
+    /// Lose the next change: its request, or its reply as `after` says.
+    pub fn arm(&self, after: bool) {
+        let mut faults = self.faults.borrow_mut();
+        if after {
+            faults.lose_reply = true;
+        } else {
+            faults.lose_request = true;
+        }
+    }
+}
+
+impl Register for LossyRegister {
+    fn change(
+        &mut self,
+        journal: JournalId,
+        change: &Change,
+    ) -> Result<RegisterValue, ChangeError> {
+        let faults = std::mem::take(&mut *self.faults.borrow_mut());
+        if faults.lose_request {
+            (self.lost)(false);
+            return Err(ChangeError::NoAnswer);
+        }
+        let result = self.register.change(journal, change);
+        if faults.lose_reply {
+            (self.lost)(result.is_ok());
+            return Err(ChangeError::NoAnswer);
+        }
+        result
+    }
+
+    fn read(&mut self, journal: JournalId) -> Option<RegisterValue> {
+        self.register.read(journal)
     }
 }

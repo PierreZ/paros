@@ -184,37 +184,21 @@ fn tlc_refuses_a_below_in_the_segment_in_force() {
     );
 }
 
-/// The least number of edits that find a place in the recorded traces.
-const MIN_EDITS: usize = 20;
-
-/// TLC refuses every edit of the recorded traces at or after the edited
-/// event (#1308 (mutate recorded traces)).
+/// Every edit finds a place in a walk, and TLC refuses it at or after the
+/// edited event (#1308 (mutate recorded traces)).
 #[test]
 fn tlc_refuses_the_edited_fold_traces() {
     let check = fold_spec();
     require_tlc(&check);
     let (walks, _) = checked();
     let recorded: Vec<&Trace> = walks.iter().map(|(_, _, traced)| traced).collect();
-    let mut placed = 0;
-    let mut wrong = Vec::new();
-    for edit in mutate::edits() {
-        let Some(mutant) = recorded.iter().find_map(|traced| edit.apply(traced)) else {
-            eprintln!("edit {:?}: no place", edit.name);
-            continue;
-        };
-        placed += 1;
-        match check.check(&mutant.trace).expect("TLC gives a verdict") {
-            Verdict::Rejected(rejection) if rejection.index >= mutant.at => {}
-            Verdict::InvariantViolated { matched, .. } if matched >= mutant.at => {}
-            other => wrong.push(format!("{}: at {}, {other:?}", edit.name, mutant.at)),
-        }
-    }
-    assert!(
-        wrong.is_empty(),
-        "edits TLC did not refuse where it must: {wrong:#?}"
-    );
-    assert!(
-        placed >= MIN_EDITS,
-        "only {placed} edits found a place, {MIN_EDITS} must"
-    );
+    let from = walks
+        .iter()
+        .map(|(seed, ..)| seed + 1)
+        .max()
+        .expect("a checked walk");
+    mutate::judge(&check, mutate::edits(), &recorded, from, |seed| {
+        let (fresh, events) = replay(FoldMutant::None, seed).expect("the walk passes");
+        trace(fresh, &events)
+    });
 }

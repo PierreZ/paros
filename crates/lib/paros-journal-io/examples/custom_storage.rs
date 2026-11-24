@@ -32,7 +32,9 @@ use paros_journal::Slot;
 use paros_journal_io::contract;
 use paros_journal_io::layout::KEY_LEN;
 use paros_journal_io::mem::{ManualClock, MemNetwork, MemRegister};
-use paros_journal_io::{Address, Driver, Entry, HostConfig, Key, Op, Storage, StorageError};
+use paros_journal_io::{
+    Address, Driver, Entry, HostConfig, Journal, Key, Op, Storage, StorageError,
+};
 
 use common::{
     JOURNAL, TICK, acceptor, at, claim, elected, leader, open, replica, reply_of, reshape, show,
@@ -93,8 +95,8 @@ impl LogStorage {
     }
 }
 
-impl Storage for LogStorage {
-    fn commit(&mut self, ops: &[Op], _sync: bool) -> Result<(), StorageError> {
+impl Storage<Journal> for LogStorage {
+    fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
         let mut batch = Vec::new();
         for op in ops {
             batch.extend(op.key.to_bytes());
@@ -134,6 +136,7 @@ type Process = Driver<LogStorage, paros_journal_io::mem::Endpoint, ManualClock, 
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 16,
+    window: 64,
 };
 const NODES: [u64; 6] = [1, 2, 3, 11, 12, 13];
 const L1: u64 = 100;
@@ -238,7 +241,7 @@ fn start(
     let mut roles: Vec<_> = NODES[..3].iter().map(|n| acceptor(*n)).collect();
     roles.extend(NODES[3..].iter().map(|n| replica(*n, 1)));
     if lead {
-        roles.push(leader(L1, 1, 1, Slot(0)));
+        roles.push(leader(L1, 1, Slot(0)));
     }
     for role in roles {
         process.transport_mut().route(role.address());

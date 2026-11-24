@@ -32,9 +32,10 @@ flight rule:
 - `JournalAcceptor` (`roles/acceptor.rs`): the core's `Acceptor` over the journal's `Command`.
   One acceptor serves every segment whose grid names it, with one promise. An `Accept` that raises
   the promise writes the promise and the vote in one batch (#1309).
-- `JournalLeader` (`roles/leader.rs`, `roles/leader/phase1.rs`): the leader of one ballot, bound to
-  the newest segment. Its Phase 1 reads every segment that is not retired, a sealed one only below
-  its end, and needs `F + 1` of every column of every grid. A first leader of a pending segment
+- `JournalLeader` (`roles/leader.rs`, `roles/leader/phase1.rs`): the leader of one ballot. It
+  binds the ballot to the newest segment by a `Bind` on the register first, and takes its
+  configuration from that done write (§J3.1). Its Phase 1 reads every slot of every segment that
+  is not retired, and needs `F + 1` of every column of every grid. A first leader of a pending segment
   writes the seal end (one above the highest vote of the old grid, a faulty vote included,
   #1313) and opens only on a done write of its own end. It writes again every slot from its first
   slot: the vote its Phase 1 saw, else a `Noop` (#1233), except a slot whose top report is a
@@ -118,7 +119,7 @@ enum Input {
 }
 
 enum Effect {
-    Persist { id: PersistId, ops: Vec<Op>, sync: bool },
+    Persist { id: PersistId, ops: Vec<Op> },
     Send { to: Address, msg: Message, after: PersistId },
     Read { read: ReadId, range: Range },
     SetTimer { timer: TimerId, at: Instant },
@@ -179,7 +180,22 @@ checks each of these against `Journal.tla` (§J7.3).
 pure (§J4.3): the four traits that a backend implements, the `Host`, the generic `Driver`, the
 backends in memory (`mem`) and the contract suites (`contract`).
 
-- *Rule 1.* The `Driver` steps the `Host` at once for each input and keeps every persist batch of
+- *The generic host of actors* (#1410 (split the generic host of actors), `crates/lib/paros-host`,
+  2026-11-23). The part of the `Host` and the `Driver` that knows no journal is a crate of its own,
+  with no dependency: the `Role` trait (start at once or from the records, step, tick, stop, and
+  an end by the role's own step), the `Host` of many roles over an opaque address, the generic
+  `Driver` (group commit, held sends, held outputs, recovery reads, the timer), the `Storage`,
+  `Transport` and `Clock` traits and the `Events` and output ports. A `Family` names the types that
+  the roles of one host share: an address, a message, a batch id, an op and the records of the
+  disk format, an assignment, an input, an output and a stop. `paros-journal-io` keeps the journal
+  roles behind the `Role` trait, their address, the register, the disk layout and the contract
+  suites; a backend of the journal implements `Storage<Journal>` and `Transport<Journal>`. A send
+  waits on a batch, and so does an output (a register change, a read answer); a periodic report
+  (a heal's copy report) is dropped when its batch is not durable yet. One trait fits the four
+  journal roles and a toy coordinator; the example `coordinator` of `paros-host` runs roles that
+  are not journal roles. `specs/tla/flight-rule/` is the model of the host.
+
+- *Rule 1.* The generic `Driver` steps the `Host` at once for each input and keeps every persist batch of
   a round in one group. At the end of `Driver::poll` it commits the group in one storage write
   (group commit), in id order for each role, then transmits the sends and runs the register
   changes that waited on a batch of the group. A commit that fails stops every role that had a
@@ -188,15 +204,20 @@ backends in memory (`mem`) and the contract suites (`contract`).
   after a batch waits on that batch.
 - *Rule 2.* A role with a disk starts with `Effect::Read`; the driver scans the role's records
   and gives them back as `Input::Recovered`, and learns from them the role's highest durable
-  batch. The driver gives the time (`Time`) with every input of the `Host`. The `Host` arms one
-  timer (`Effect::SetTimer`); when it fires (`Input::TimerFired`), each leader and each replica
-  takes its periodic step. The leader takes the time of each proposal from its caller
+  batch. The driver gives the time (`Time`) with every input of the `Host`. Each role has its own
+  timer: it sets the deadline (`Effect::SetTimer`, which names the role), the `Host` keeps one
+  deadline for each role, and the driver fires a due timer to its role alone
+  (`Input::TimerFired`, which names the role; #1413 (the time, the timers and the draws in each
+  role)). A leader, a proxy and a replica set their timer when they start and again at each
+  fire, and take their periodic step then; an acceptor sets none. A role draws no random value:
+  it asks one (`Effect::Draw`), and the driver draws it from its `Entropy` source and gives it
+  back as `Input::Drawn`, a recorded input. No journal role draws today; the election does
+  (the jitter of a challenge). A test in `paros-host` records a run with timers and draws and
+  replays its inputs on a new `Host` to the same effects. The leader takes the time of each proposal from its caller
   (`JournalLeader::propose`, the leader time of §J2.8). A client read is an input
   (`Input::Read`) to a replica, answered by `Effect::ReadReply` once the replica's batch is
   durable; the driver gives it back as `ReadReply` (`Driver::read`, `Driver::take_reads`).
-  **Open**: timers and random draws inside each role (the roles keep `tick(page)` and take no
-  random value yet), and reads of a slot range as effects (`ReadDone`), which wait for the
-  offload.
+  **Open**: reads of a slot range as effects (`ReadDone`), which wait for the offload.
 - *Rule 3.* The `Host` maps each `Address` (a journal, a node, and the segment of a replica) to
   its role, routes each input, and turns the role's effects into `Effect`s that name their journal
   and their sender. A replica node serves one replica for each segment of its journal, so a heal
@@ -204,10 +225,26 @@ backends in memory (`mem`) and the contract suites (`contract`).
   memory)); an `Unassign` of the node with no segment stops every role of the node. The driver gives every
   send to the `Transport`, a send between two roles of one process too. One process may serve
   every role, or one role; the `Host` does not change.
-- *Rule 4.* `Storage` is one trait: `commit(ops, sync)`, atomic, and `scan(address)`, every
+- *Rule 4.* `Storage` is one trait: `commit(ops)`, atomic and durable when it returns `Ok`, and `scan(address)`, every
   record of one role in key order. The format is the crate's (`layout`): a `Key` is the journal,
   the node, the segment of a replica (0 for every other role), the kind of the record and an index (a slot), and its bytes sort as the key does,
   so each op is namespaced by (journal, role). Each batch ends with the role's `Durable` record.
+  `commit` has no `sync` flag (proposal of the Fable review of 2026-11-23, item 4): every batch
+  of a role holds state that a send waits on, so the driver never had a batch that a crash may
+  lose, and the flag was always on.
+- *A leader's window* (Fable review of 2026-11-23, item 2; decision 30, a limit on each size). A
+  leader holds at most `window` answers, which the driver chooses (`HostConfig::window`, at
+  least one): a proposal above it is `Proposed::Busy`, and the `Host` answers the call
+  `CallOutcome::Busy`. The command holds no slot, so the caller sends it again later, as after
+  `NotLeader`. So a leader whose rounds do not close (a column below quorum) holds a bounded
+  memory. **Open**: the window of a deployment, which the program chooses.
+- *A register change with no answer* (Fable review of 2026-11-23, item 3). `Register::change`
+  answers a done value, a refusal, `Unknown` (no register for the journal) or `NoAnswer` (a lost
+  request or reply: the write may or may not have taken place). The driver gives the roles the
+  done value or the refusal; it keeps a change with no answer and runs it again at the next
+  timer, after it gave the roles the newest value that a read of the register shows. A write of
+  the first try that took place reaches the role first, so a leader whose seal took place opens,
+  and the refusal of the second try finds it open and changes nothing.
   The damage report is per role: a record the backend reports corrupt (`Entry::Corrupt`), or that
   does not decode as its kind, stops the role with `Stop::Damaged` and its keys. A
   `StorageError` means "unknown". The contract suites (`contract::storage`,
@@ -237,6 +274,14 @@ it in.
 simulation or in production, replays from its recorded inputs, and a failing run of the whole
 journal under moonpool-sim replays exactly.
 
+*Proof.* `specs/tla/recorded-inputs/` (#1413 (the time, the timers and the draws in each role)):
+roles that arm and fire timers whose deadline adds a random jitter. With the time and the draw in
+each input and one deadline for each role, every recorded run replays to the same effects at any
+clock and with any random source (`ReplayExact`), and a role gets a fire only at or after its own
+deadline (`OwnTimer`). Three controls break it: a role that reads the clock (`clock`), a role that
+draws its own jitter (`draw`), and one timer for every role whose fire goes to every role
+(`shared`).
+
 **Rule 3: a pure `Host`.** A process serves many roles of many journals. The `Host` is a pure
 state machine in the core: it maps (journal, role, instance) to a role, routes each input to it
 and merges the effects. The driver drives one `Host`. A message between two roles of one process
@@ -258,6 +303,19 @@ trait means "unknown": the batch may or may not be durable, and the role of that
 ops serves all three, and one contract suite tests every backend. An atomic commit gives rule 1
 its meaning: a batch is durable or not, never torn. A contract suite certifies the API only;
 crash safety is claimed only on a faultable disk (decided by Pierre on 2026-11-19).
+
+*The faults of a storage* (#1414 (Storage lists the roles on a disk and reports typed faults)). A
+storage lists the roles that have records on its disk, and reports each fault as a typed value
+with one verdict. `Full`: a commit wrote nothing; its roles stop (`Stop::Failed`) and start again
+from a scan. `Lost`: a disk lost a record of a role; the list still names the role (faulty, not
+empty), its scan reports `Lost`, and the role stops for good (`Stop::Damaged`). `Unknown`: a
+commit failed and the backend does not know what it wrote (fsyncgate); the page cache may still
+show a batch that is not durable, so the process stops and a new one reads the disk.
+`specs/tla/flight-rule/` checks these verdicts (`storage`) under single-decree Paxos, with three
+controls: a role that starts from the records that a loss left (`lost_restore`), a list that
+leaves out a damaged role so that placement starts it empty (`list_readable`), and a scan in the
+same process after `Unknown` (`unknown_rescan`). **Open** (#1414): the code; the trait still has
+one `StorageError`.
 
 **Rule 5: two ports.** `Events` carries the recorded (input, effects) pair of each `Host` step,
 after durability. The trace check reads it, live and chunk by chunk (moonpool-tla `Live`,

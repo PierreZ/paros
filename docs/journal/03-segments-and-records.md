@@ -48,14 +48,15 @@ checked, each with a control that TLC breaks:
 
 - The first leader of the next configuration writes the end slot once, by compare-and-set, after
   its Phase 1. The end is **one above the highest slot where its Phase 1 saw a vote in the old
-  grid**, not the first uncommitted slot: with that end, a Phase 1 that reads the old grid only
-  below the end chooses two values for one slot. The sealing leader proposes again, in its own
-  grid, each vote below the end that the replicas did not apply.
+  grid**, not the first uncommitted slot: with that end, the new grid writes a second value at a
+  chosen slot above the end, and the retire stops the acceptors that hold the chosen vote. The
+  sealing leader proposes again, in its own grid, each vote below the end that the replicas did
+  not apply.
 - **A faulty vote counts for the end** (#1313 (the seal end against a CTRL faulty record), checked
   on 2026-11-20 by `specs/tla/seal-ctrl/`). "Saw a vote" includes a CTRL faulty report (a record
   that kept its ballot and lost its value), so the end is the frontier of the sealer's Phase 1 over
   the old grid. An end of readable votes only (`end_readable`) lands at or below a chosen slot whose
-  top copy rotted, and the next leader, reading below the end, chooses a second value there. The
+  top copy rotted, and the next leader chooses a second value there. The
   seal does not wait for the repair probe: a blocked slot below the end stays in the tri-state tally
   of every later Phase 1. Two other candidates keep one value but leave a chosen slot of the old
   grid at or above an end of readable votes, out of the boundary state and the retire: a seal that
@@ -66,7 +67,25 @@ checked, each with a control that TLC breaks:
   election gap fill of the core, #1233 (segments gap fill)). Without the `Noop`, a slot below
   the end with no vote is a hole that no ballot can write, because the old grid is sealed: the
   replicas stop at it for ever, so retire, offload and trim never come.
-- A later Phase 1 reads a sealed configuration only below its end.
+- **A later Phase 1 reads every slot of every configuration that is not retired**, sealed or not,
+  below its end and above it (decided by Pierre on 2026-11-23, review of segments in Paxos, finding
+  3; checked by `specs/tla/journal-read/`, `end_applied_safe`, with the control
+  `end_applied_end` that reads a sealed grid only below its end and chooses two values). One
+  value for each slot rests on the promises alone: the end routes a slot to its replica set and
+  decides the retire, and it never hides a vote. It is a pure journal fact.
+- **A leader binds its ballot before its Phase 1** (decided on 2026-11-23, review of segments in
+  Paxos, finding 2; `specs/tla/journal-read/`, control `bind_stale`). The leader writes
+  `Bind(ballot)` on the register by compare-and-set, and takes its configuration (the segment
+  the register bound the ballot to) and the segments its Phase 1 reads from the value of that
+  done write. The register takes a bind only above every bound ballot, so a higher ballot is
+  bound to the same segment or a later one. A bind of the bound ballot is "ok" again while the
+  newest segment is still the one it is bound to (a lost reply). **Open**: a leader that
+  restarts and campaigns again at the same ballot is outside the model; the step that builds a
+  durable ballot for the leader decides it. A bound leader may take a later value than the
+  one of its own done write before its Phase 1 (a value of another write, or the "ok" again
+  of a resent bind): it reads the newer ends and retires, and one value stays chosen
+  (`journal-read/`, `bind_late`). A ballot bound from a value read before a seal reads only the sealed grid as its own, and two values
+  are chosen. This is the registration of Matchmaker Paxos, kept in the journal's register.
 - A leader's writes are fenced by its promise quorum, never by the table version, so a change of
   a sealed segment (retire, offload, trim) never stops the tail (as in Delos).
 - A replica drops its copy of a segment only after the record says offloaded. The object key is
@@ -475,6 +494,7 @@ opens the segment to its trim. A segment is the run of slots of one configuratio
 | Identity of the opening call: term, expected configuration, grid | the grid controller, in the same write | Written once, with the new segment. The register compares a retry with it | `grid-controller/` (`noidem`, `noexp_noidem`) |
 | Release number of the segment | the writer of the new segment | Written once, with the new segment. A role refuses a release it does not know (upgrade minimum of v1, Pierre, 2026-11-19, journal design) | no model: the field enters no safety rule |
 | Replica set of the segment | the grid controller, in the reshape call that opens the segment: the call names the grid and the replica set of the new segment, in the same write. A heal of a sealed segment changes it later (decision 4 of §J1.1) | Written with the new segment, under the guards of the reshape call. A change of a sealed segment's set (a heal, §J3.1): by the grid controller, a compare-and-set on the register version that it read (and on its term), only from `retired`, removing a member and adding a new replica whose own report says its copy, from a full member of the set, reached the segment end (#1314) | `journal-state/` (each segment's set comes with its reshape; `retire_early`, `Readable`); `segment-replicas/` checks a fixed set; `re-replication/` checks a change (`count_start`, `copy_any`, `live_outside`, `cas_term`, `cas_blind`, `report_sticky`) |
+| Highest bound ballot and its segment | a leader, before its Phase 1 | `Bind(ballot)`: the ballot is above the bound ballot, which binds it to the newest segment, or it is the bound ballot and the newest segment is the one it is bound to ("ok" again, no change). The leader takes its configuration and its Phase 1 from the value of this done write | `journal-state/` (`Register`); `journal-read/` (control `bind_stale`); `register/value.rs` tests |
 | Seal end of the predecessor; the predecessor becomes `sealed` and the new segment `in force` | the first leader of the new configuration, after its Phase 1 over the old and the new grid | Written once, by compare-and-set from "no end". The end is one above the highest slot where its Phase 1 saw a vote in the old grid. A CTRL faulty vote counts, so the end is the frontier of that Phase 1 over the old grid (#1313 (the seal end against a CTRL faulty record), §J3.1) | `experiments/segments/a/` (the end, `end_uncommitted_*`); `seal-ctrl/` (`end_readable`, `wait_cover`, `end_readable_cover`); `segment-records/` (`seal`, `SealOnce`); `grid-controller/` (`SealIn`) |
 | Boundary state of a sealed segment: `next_seq`, `first_seq` and the writer uuid | the first replica of the segment's set that applied every slot of the segment | Written once, by compare-and-set from "no boundary", in one write with all three fields. The value is the fold at the end of the segment. A replica of the next segment starts from the record of the segment just before it, never from the newest record | `segment-replicas/` (`boundary_early`, `boundary_seq`, `retire_norecord`); `segment-truncate/` (`nofirst`, `trimstate`); `seal-chain/` (`record_latest`, `record_reach_empty`) |
 | `retired` | the leader | From `sealed`, once `F + 1` replicas of the set hold the segment and the boundary state is written. A found damage that is not repaired also blocks it (a margin, Pierre, 2026-11-20, #1263). The old acceptors stop only after this write is done | `segment-replicas/` (`retire_early`, `retire_norecord`); `segment-records/` (`seal`, `RetireKept`); `ctrl-segments/` (`retire_f`, `live_retire_f`; the margin: `retire_any` passes) |
@@ -498,7 +518,7 @@ A segment goes through these states, in this order. Each step is one compare-and
 | State | Entered by | Meaning |
 |---|---|---|
 | `pending` | the reshape call | The configuration is announced. No leader writes in it yet |
-| `in force` | the seal end of the predecessor | A leader of this configuration chose its ballot and sealed the predecessor. Leaders write here. A Phase 1 still reads the predecessor below its end until the predecessor retires |
+| `in force` | the seal end of the predecessor | A leader of this configuration chose its ballot and sealed the predecessor. Leaders write here. A Phase 1 still reads every slot of the predecessor until the predecessor retires |
 | `sealed` | the seal end, written by the first leader of the next configuration | No new slot. The slots below the end may still be written again in the new grid, and the replicas may still apply them |
 | `retired` | the leader's write, after `F + 1` holders and the boundary state | The old acceptors stop. The next segment never needs these slots |
 | `offloaded` | the offloader's mark (after v1) | The object holds the segment. A replica may drop its copy |
@@ -511,7 +531,7 @@ architecture §4.1 uses the words for rule 1 of the core: there, the **switch** 
 force once its leader holds every recovered slot at a Phase-2 quorum of it, and a removed node
 stops when the switch is durable. In the journal, the step that lets the old acceptors stop is
 the **retire**, not the seal: the seal end makes the new configuration in force, and a later
-Phase 1 still reads the old grid below the end, so a slot that the old grid chose is never lost
+Phase 1 still reads every slot of the old grid, so a slot that the old grid chose is never lost
 before the retire (`experiments/segments/a/`). The leaderless read (§J5.1, "the
 configuration in force") and the belief fence (§J3.1, "an acceptor that did not hear what
 is in force") use the journal meaning.

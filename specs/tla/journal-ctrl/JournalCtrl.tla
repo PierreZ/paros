@@ -52,7 +52,7 @@ Spare(a, s) ==
   \/ Learned(s)
   \/ IsChosen(s) /\ dvote[a][s][2] # ChosenVal(s)
   \/ /\ IsChosen(s)
-     /\ \E g \in Live : \E Q \in QOf[g] :
+     /\ \E g \in Live : \E Q \in Q2Of(g, s) :
           /\ a \notin Q
           /\ \A x \in Q :
                /\ dvote[x][s][1] > 0
@@ -178,6 +178,12 @@ NextR ==
   \/ \E a \in Acceptors, s \in Slots, v \in Cmds, c \in Ballots : AccRepair(a, s, v, c)
 
 SpecR == Init /\ [][NextR]_vars
+
+\* CTRL with an answer to a Prepare sent again (`Repromise`): a second
+\* answer at a ballot that the probe, the skip and the decide read too.
+NextRR == NextR \/ \E a \in Acceptors, b \in Ballots : Repromise(a, b)
+
+SpecRR == Init /\ [][NextRR]_vars
 
 (***************************************************************************)
 (* Safety.                                                                 *)

@@ -48,7 +48,7 @@ use paros_consensus::contract::limits::PROMISE_BATCH;
 use paros_consensus::contract::write::AcceptorWrite;
 use paros_consensus::{Ballot, NodeId, Slot};
 
-use super::message::{Message, PromisePage};
+use super::message::{Message, PromisePage, ReadTag};
 use super::{Flight, PersistId};
 use crate::command::Command;
 use crate::segment::SegmentId;
@@ -417,7 +417,7 @@ impl JournalAcceptor {
 
     /// The answer to a leaderless read: the vote watermark and the belief,
     /// once the last batch is durable. No answer with no belief.
-    fn pre_read(&self, from: NodeId, segment: SegmentId, read: u64) -> Vec<AcceptorEffect> {
+    fn pre_read(&self, from: NodeId, segment: SegmentId, read: ReadTag) -> Vec<AcceptorEffect> {
         let Some(bound) = self.bound else {
             probe!(
                 reachable,

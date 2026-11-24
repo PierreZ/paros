@@ -450,3 +450,58 @@ fn a_seal_needs_its_successor_pending() {
         Err(ChangeRefusal::NoSuccessor(SegmentId(1)))
     );
 }
+
+#[test]
+fn a_bind_takes_a_ballot_above_every_bound_one() {
+    let ballot = |round| paros_consensus::Ballot {
+        round,
+        node: NodeId(7),
+    };
+    assert_eq!(
+        RegisterValue::new().apply(&Change::Bind { ballot: ballot(2) }),
+        Err(ChangeRefusal::Empty),
+        "a journal with no segment has no configuration to bind"
+    );
+    let value = elect(&RegisterValue::new())
+        .apply(&reshape(1, None))
+        .expect("the first segment");
+    assert_eq!(value.bound(), None);
+    let bound = value
+        .apply(&Change::Bind { ballot: ballot(2) })
+        .expect("a first bind");
+    assert_eq!(bound.binding(), Some((ballot(2), SegmentId(1))));
+    assert_eq!(
+        bound.apply(&Change::Bind { ballot: ballot(2) }),
+        Ok(bound.clone()),
+        "the bound ballot on the same newest segment is ok again and changes nothing"
+    );
+    assert_eq!(
+        bound.apply(&Change::Bind { ballot: ballot(1) }),
+        Err(ChangeRefusal::Bound {
+            held: ballot(2),
+            asked: ballot(1)
+        }),
+        "a bind below the bound ballot is refused"
+    );
+    let opened = bound
+        .apply(&reshape(1, Some(1)))
+        .expect("the second segment");
+    assert_eq!(
+        opened.apply(&Change::Bind { ballot: ballot(2) }),
+        Err(ChangeRefusal::Bound {
+            held: ballot(2),
+            asked: ballot(2)
+        }),
+        "the bound ballot never takes a later segment"
+    );
+    let higher = opened
+        .apply(&Change::Bind { ballot: ballot(3) })
+        .expect("a higher bind");
+    assert_eq!(higher.binding(), Some((ballot(3), SegmentId(2))));
+    assert_eq!(
+        higher.segments(),
+        opened.segments(),
+        "a bind changes no record"
+    );
+    assert_eq!(higher.term(), opened.term(), "a bind changes no term");
+}

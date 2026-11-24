@@ -11,6 +11,8 @@ use crate::command::Command;
 use crate::fold::{Answer, JournalState};
 use crate::segment::SegmentId;
 
+use super::PersistId;
+
 /// One page of an acceptor's promise: its votes and its faulty entries at or
 /// after the slot that the `Prepare` asked from, and where the next page
 /// starts when the suffix did not fit.
@@ -29,6 +31,27 @@ pub struct PromisePage {
     /// of its set: the leader proposes nothing there, and the seal end
     /// counts it as a vote.
     pub dropped: BTreeMap<Slot, Slot>,
+}
+
+/// The replica's tag of one leaderless read (§J2.5): the acceptors echo it
+/// in their `PreReadAck`, and the replica counts an answer only for the
+/// read that carries the same tag.
+///
+/// The tag is unique across the restarts of a replica. `boot` is the id of
+/// the first batch of the replica's incarnation (written empty by its first
+/// read when it has written none), and every `PreRead` waits on it. A later incarnation
+/// starts above every durable batch, so its `boot` is above the `boot` of
+/// every earlier incarnation that sent a `PreRead`. `number` counts the
+/// reads of one incarnation. So an answer to a read of an earlier
+/// incarnation, still in flight at a restart, never counts for a new read:
+/// it reports a watermark from before the restart, and a write
+/// acknowledged since then would be missing from the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReadTag {
+    /// The first batch of the replica's incarnation.
+    pub boot: PersistId,
+    /// The read's number in that incarnation, from 1.
+    pub number: u64,
 }
 
 /// A message between two roles of the journal.
@@ -136,16 +159,16 @@ pub enum Message {
     PreRead {
         /// The segment of the reader.
         segment: SegmentId,
-        /// The reader's id of the read.
-        read: u64,
+        /// The replica's tag of the read.
+        read: ReadTag,
     },
     /// Acceptor to replica: the answer to a `PreRead`. It waits on the
     /// acceptor's last batch, so the votes it reports are durable.
     PreReadAck {
         /// The segment of the reader.
         segment: SegmentId,
-        /// The reader's id of the read.
-        read: u64,
+        /// The replica's tag of the read, echoed.
+        read: ReadTag,
         /// The highest slot the acceptor voted in, if any.
         watermark: Option<Slot>,
         /// The newest segment a ballot that the acceptor promised since its

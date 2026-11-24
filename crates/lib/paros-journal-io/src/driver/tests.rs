@@ -8,21 +8,25 @@ use std::rc::Rc;
 use paros_journal::register::{Ballot, RegisterValue};
 use paros_journal::roles::{Campaign, LeaderPhase, Message};
 use paros_journal::{
-    Answer, Fence, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, Reply,
-    SegmentId, SegmentRecord, Seq, Slot, Write,
+    Answer, Fence, Grid, JournalView, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record,
+    Reply, SegmentId, SegmentRecord, SegmentState, Seq, Slot, Write,
 };
 
 use super::*;
-use crate::layout::{Entry, Key, Kind};
+use crate::events::Event;
+use crate::host::Effect;
+use crate::layout::{self, Entry, Key, Kind, Op};
 use crate::mem::{Endpoint, ManualClock, MemNetwork, MemRegister, MemStorage};
 use crate::register::Register;
 use crate::storage::StorageError;
+use crate::wire::Envelope;
 
 const J: JournalId = JournalId(1);
 const TICK: u64 = 1_000;
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 4,
+    window: 64,
 };
 const LEADER: Address = Address {
     journal: J,
@@ -37,9 +41,9 @@ const A: LeaderUuid = LeaderUuid(0xA);
 #[derive(Clone, Default)]
 struct Shared(Rc<RefCell<MemStorage>>);
 
-impl Storage for Shared {
-    fn commit(&mut self, ops: &[Op], sync: bool) -> Result<(), StorageError> {
-        self.0.borrow_mut().commit(ops, sync)
+impl Storage<Journal> for Shared {
+    fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
+        self.0.borrow_mut().commit(ops)
     }
 
     fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
@@ -73,7 +77,7 @@ fn ballot_bytes(ballot: Ballot) -> Vec<u8> {
     bytes
 }
 
-impl Transport for Checked {
+impl Transport<Journal> for Checked {
     fn send(&mut self, envelope: Envelope) {
         match &envelope.message {
             Message::Accepted { ballot, slot } => {
@@ -198,7 +202,6 @@ fn assign(driver: &mut TestDriver, nodes: &[u64]) {
                         round: 1,
                         node: address.node,
                     },
-                    segment: SegmentId(1),
                     from: Slot(0),
                 },
             },
@@ -390,7 +393,6 @@ fn a_new_driver_serves_the_roles_again_from_their_records() {
                 round: 2,
                 node: next.node,
             },
-            segment: SegmentId(1),
             from: Slot(0),
         },
     });
@@ -438,14 +440,16 @@ fn the_events_port_reports_every_step_once_its_batches_are_durable() {
 }
 
 #[test]
-fn poll_says_when_it_worked_and_the_timer_is_the_hosts() {
+fn poll_says_when_it_worked_and_the_timer_is_the_roles() {
     let world = World::new();
     let disk = Shared::default();
-    let mut driver = world.process(&disk, &[1]);
+    let acceptor = world.process(&disk, &[1]);
+    assert_eq!(acceptor.timer(), None, "an acceptor sets no timer");
+    let mut driver = world.process(&Shared::default(), &[11]);
     assert_eq!(
         driver.timer(),
         Some(Time(TICK)),
-        "armed one tick after time 0"
+        "the replica set its timer one tick after its start at time 0"
     );
     while driver.poll() {}
     assert!(!driver.poll(), "nothing to do");
@@ -562,14 +566,17 @@ fn a_restarted_acceptor_answers_with_no_write_at_its_promise() {
     world.run(&mut drivers, "the leader opens again", open);
 }
 
-#[test]
-fn a_second_leader_seals_the_first_segment_through_the_register() {
-    let world = World::new();
-    let disk = Shared::default();
-    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
-    world.run(&mut drivers, "the leader opens", open);
+/// Segment 2 opens, and a second leader of it runs on the process of
+/// `drivers`, with segment 1's replicas at slot `from`; `before` runs just
+/// before its campaign. Gives the leader and `from`.
+fn second_leader(
+    world: &World,
+    drivers: &mut [TestDriver],
+    before: impl FnOnce(&World),
+) -> (Address, Slot) {
+    world.run(drivers, "the leader opens", open);
     let set = drivers[0].call(LEADER, claim());
-    answer(&world, &mut drivers, 0, set);
+    answer(world, drivers, 0, set);
 
     let mut register = world.register.clone();
     let value = register.read(J).expect("the register");
@@ -605,6 +612,7 @@ fn a_second_leader_seals_the_first_segment_through_the_register() {
         .replica(Address::new(J, NodeId(11)))
         .and_then(paros_journal::roles::SegmentReplica::front)
         .expect("a front");
+    before(world);
     drivers[0].assign(Assignment::Leader {
         address: next,
         proxies: Vec::new(),
@@ -613,15 +621,23 @@ fn a_second_leader_seals_the_first_segment_through_the_register() {
                 round: 2,
                 node: next.node,
             },
-            segment: SegmentId(2),
             from,
         },
     });
-    world.run(&mut drivers, "the second leader opens", |d| {
+    world.run(drivers, "the second leader opens", |d| {
         d[0].host()
             .leader(next)
             .is_some_and(|l| matches!(l.phase(), LeaderPhase::Open { .. }))
     });
+    (next, from)
+}
+
+#[test]
+fn a_second_leader_seals_the_first_segment_through_the_register() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
+    let (_, from) = second_leader(&world, &mut drivers, |_| {});
     let value = world.register.value(J).expect("the register");
     let first = value.segment(SegmentId(1)).expect("segment 1");
     assert_eq!(first.end(), Some(from), "sealed one above the last vote");
@@ -862,32 +878,129 @@ fn a_read_at_a_role_that_stops_is_unserved() {
 }
 
 #[test]
-fn a_stop_answers_only_the_held_reads_of_its_role() {
-    let world = World::new();
-    let disk = Shared::default();
-    let mut driver = world.process(&disk, &[11, 12]);
-    let stopped = Address::replica(J, NodeId(11), SegmentId(1));
-    let kept = Address::replica(J, NodeId(12), SegmentId(1));
-    // Two reads that wait on a batch of their replica, as inside a round.
-    driver
-        .held_reads
-        .push((PersistId(1), stopped, 7, ReadAnswer::Unserved));
-    driver
-        .held_reads
-        .push((PersistId(1), kept, 8, ReadAnswer::Unserved));
-    driver.on_stopped(stopped, Stop::Unassigned);
+fn a_read_that_a_stop_drops_is_unserved_and_a_dropped_notice_is_lost() {
+    let mut ports = JournalPorts::new(MemRegister::new());
+    let replica = Address::replica(J, NodeId(11), SegmentId(1));
+    let view = JournalView {
+        leader: Leader::Unset,
+        next_seq: Seq(0),
+        first_seq: Seq(0),
+    };
+    // The page waited on a batch of its stopped replica: the fold it read
+    // may hold a batch that is lost, so the reader learns only `Unserved`.
+    ports.dropped(
+        replica,
+        Output::ReadReply {
+            read: 7,
+            answer: ReadAnswer::Truncated(view),
+        },
+    );
     assert_eq!(
-        driver.take_reads(),
+        ports.reads,
         vec![ReadReply {
-            address: stopped,
+            address: replica,
             read: 7,
             answer: ReadAnswer::Unserved,
         }]
     );
-    assert_eq!(
-        driver.held_reads,
-        vec![(PersistId(1), kept, 8, ReadAnswer::Unserved)],
-        "the read of a role that runs still waits on its batch"
+    ports.dropped(
+        replica,
+        Output::Retired {
+            segment: SegmentId(1),
+        },
     );
-    driver.held_reads.clear();
+    assert_eq!(ports.reads.len(), 1);
+    assert_eq!(ports.replies, Vec::new());
+    assert_eq!(ports.notices, Vec::new());
+}
+
+#[test]
+fn a_seal_whose_reply_is_lost_opens_the_leader_from_the_done_value() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
+    // The seal of the second leader takes place, and its reply is lost: the
+    // leader learns the done seal from the register, and opens.
+    let (_, from) = second_leader(&world, &mut drivers, |world| {
+        world.register.lose_next(true);
+    });
+    let value = world.register.value(J).expect("the register");
+    let first = value.segment(SegmentId(1)).expect("segment 1");
+    assert_eq!(first.end(), Some(from), "the lost seal took place");
+}
+
+#[test]
+fn a_seal_whose_request_is_lost_takes_place_later() {
+    let world = World::new();
+    let disk = Shared::default();
+    let mut drivers = vec![world.process(&disk, &[1, 2, 3, 11, 12, 13, 100])];
+    let (_, from) = second_leader(&world, &mut drivers, |world| {
+        world.register.lose_next(false);
+    });
+    let value = world.register.value(J).expect("the register");
+    let first = value.segment(SegmentId(1)).expect("segment 1");
+    assert_eq!(first.end(), Some(from), "the leader sends the seal again");
+}
+
+/// Whether segment 1 of the register is trimmed.
+fn first_trimmed(world: &World) -> bool {
+    world
+        .register
+        .value(J)
+        .and_then(|v| v.segment(SegmentId(1)).map(SegmentRecord::state))
+        == Some(SegmentState::Trimmed)
+}
+
+#[test]
+fn a_trim_whose_request_is_lost_runs_again_at_the_next_timer() {
+    // A replica asks the trim of a retired segment once for each value it
+    // observes, so only the driver asks a lost trim again: no new value
+    // comes while the trim waits.
+    let world = retired_world();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[]);
+    let address = Address::new(J, NodeId(21));
+    driver.transport_mut().endpoint.route(address);
+    world.register.lose_next(false);
+    driver.assign(Assignment::Replica {
+        address,
+        segment: SegmentId(2),
+        set: [21, 22, 23].map(NodeId).to_vec(),
+        initial: Leader::Unset,
+    });
+    while driver.poll() {}
+    assert!(!first_trimmed(&world), "the first request is lost");
+    world.run(&mut [driver], "the trim runs again", |_| {
+        first_trimmed(&world)
+    });
+}
+
+#[test]
+fn a_change_with_no_answer_of_a_role_that_stopped_is_not_run_again() {
+    let world = retired_world();
+    let disk = Shared::default();
+    let mut driver = world.process(&disk, &[]);
+    let address = Address::new(J, NodeId(21));
+    driver.transport_mut().endpoint.route(address);
+    world.register.lose_next(false);
+    let replica = Assignment::Replica {
+        address,
+        segment: SegmentId(2),
+        set: [21, 22, 23].map(NodeId).to_vec(),
+        initial: Leader::Unset,
+    };
+    driver.assign(replica.clone());
+    while driver.poll() {}
+    assert!(!first_trimmed(&world), "the first request is lost");
+    // The role stops, and a new one starts at its address: the change of the
+    // role that stopped is not the new role's.
+    driver.unassign(address);
+    while driver.poll() {}
+    assert!(
+        driver.inner.ports().unanswered.is_empty(),
+        "a stop drops the changes of the role"
+    );
+    driver.assign(replica);
+    while driver.poll() {}
+    assert!(first_trimmed(&world), "the new role asks its own trim");
 }

@@ -1,8 +1,8 @@
 //! The **value of the register** and its compare-and-set changes
 //! (`docs/journal/03-segments-and-records.md` §J3.4).
 //!
-//! The register holds the controller term and one [`SegmentRecord`] for
-//! each segment of the journal. A [`Change`] is what one register
+//! The register holds the controller term, the highest ballot bound to a
+//! configuration, and one [`SegmentRecord`] for each segment of the journal. A [`Change`] is what one register
 //! operation asks: [`RegisterValue::apply`] checks its guard on the value of
 //! the highest write that the operation read, and gives the new value or a
 //! [`ChangeRefusal`]. A refusal changes nothing. The register writes the
@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use paros_consensus::journal::Seq;
-use paros_consensus::{NodeId, Slot};
+use paros_consensus::{Ballot, NodeId, Slot};
 
 use crate::codec::Release;
 use crate::fold::BoundaryState;
@@ -31,6 +31,9 @@ pub struct Term {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct RegisterValue {
     term: Term,
+    /// The highest ballot that a [`Change::Bind`] bound and the segment it
+    /// bound it to, `None` before the first bind.
+    binding: Option<(Ballot, SegmentId)>,
     segments: BTreeMap<SegmentId, SegmentRecord>,
 }
 
@@ -38,6 +41,22 @@ pub struct RegisterValue {
 /// [`RegisterValue::apply`] (§J3.4, the table of the records).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
+    /// A leader binds `ballot` to the newest segment, its configuration
+    /// (§J3.4, the registration of Matchmaker Paxos;
+    /// `specs/tla/journal-state/`, `Register`; `specs/tla/journal-read/`). The guard: `ballot` is above
+    /// every ballot that a bind already took, or it is the bound ballot and
+    /// the newest segment is still the one it is bound to (a resend after a
+    /// lost reply, or a restarted leader: the write changes nothing). So the
+    /// binds are in ballot order, the newest segment only grows, and a
+    /// higher ballot is bound to the same segment or a later one: a ballot
+    /// above a seal never reads the sealed grid as its own (control
+    /// `bind_stale`). The leader takes its configuration and the segments
+    /// its Phase 1 reads from the value of this write once it is done
+    /// ([`crate::roles::JournalLeader`]).
+    Bind {
+        /// The ballot.
+        ballot: Ballot,
+    },
     /// A controller candidate raises the term by one and holds it. Of two
     /// candidates that read the same term, one loses: the register takes
     /// one write at each generation.
@@ -130,6 +149,15 @@ pub enum Change {
 /// Why the register refused a [`Change`]. A refusal changes nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangeRefusal {
+    /// A bind of a ballot below the highest bound ballot, or of the bound
+    /// ballot once a later segment opened: the ballot cannot take the
+    /// newest configuration.
+    Bound {
+        /// The highest bound ballot.
+        held: Ballot,
+        /// The ballot of the bind.
+        asked: Ballot,
+    },
     /// The term of a reshape call is not the term of the register: the
     /// caller is deposed, or it did not win the term yet.
     Term {
@@ -151,6 +179,9 @@ pub enum ChangeRefusal {
     Unretired(SegmentId),
     /// The register holds no record of this segment.
     NoSegment(SegmentId),
+    /// A bind on a journal with no segment: there is no configuration to
+    /// bind the ballot to.
+    Empty,
     /// A seal needs a pending successor of the segment.
     NoSuccessor(SegmentId),
     /// A confirm found the segment in another state.
@@ -169,14 +200,19 @@ impl RegisterValue {
         Self::default()
     }
 
-    /// A register as the codec or a test builds it.
+    /// A register as a test or a walk builds it, with no binding: a
+    /// [`Change::Bind`] applied to it binds the newest segment.
     ///
     /// # Panics
     ///
     /// When a record is keyed under another id than its own.
     #[must_use]
     pub fn from_parts(term: Term, segments: BTreeMap<SegmentId, SegmentRecord>) -> Self {
-        let value = Self { term, segments };
+        let value = Self {
+            term,
+            binding: None,
+            segments,
+        };
         value.assert_invariants();
         value
     }
@@ -185,6 +221,20 @@ impl RegisterValue {
     #[must_use]
     pub fn term(&self) -> Term {
         self.term
+    }
+
+    /// The highest ballot that a [`Change::Bind`] bound, `None` before the
+    /// first bind.
+    #[must_use]
+    pub fn bound(&self) -> Option<Ballot> {
+        self.binding.map(|(ballot, _)| ballot)
+    }
+
+    /// The highest bound ballot and the segment it is bound to, its
+    /// configuration, `None` before the first bind.
+    #[must_use]
+    pub fn binding(&self) -> Option<(Ballot, SegmentId)> {
+        self.binding
     }
 
     /// The records, by segment.
@@ -230,6 +280,19 @@ impl RegisterValue {
         self.assert_invariants();
         let mut next = self.clone();
         match change {
+            Change::Bind { ballot } => {
+                let newest = self.newest().ok_or(ChangeRefusal::Empty)?.id();
+                match self.binding {
+                    Some((held, segment)) if *ballot == held && segment == newest => {}
+                    Some((held, _)) if *ballot <= held => {
+                        return Err(ChangeRefusal::Bound {
+                            held,
+                            asked: *ballot,
+                        });
+                    }
+                    _ => next.binding = Some((*ballot, newest)),
+                }
+            }
             Change::Elect { holder } => {
                 next.term = Term {
                     number: self.term.number + 1,
@@ -270,6 +333,11 @@ impl RegisterValue {
         }
         next.assert_invariants();
         assert!(next.term.number >= self.term.number, "the term never falls");
+        assert!(next.bound() >= self.bound(), "the bound ballot never falls");
+        assert!(
+            next.binding.map(|(_, segment)| segment) >= self.binding.map(|(_, segment)| segment),
+            "a higher ballot is bound to the same segment or a later one"
+        );
         assert!(
             self.segments
                 .keys()
@@ -423,6 +491,12 @@ impl RegisterValue {
             (self.term.number == 0) == self.term.holder.is_none(),
             "a term above 0 has a holder"
         );
+        if let Some((_, segment)) = self.binding {
+            assert!(
+                self.segments.contains_key(&segment),
+                "a ballot is bound to a segment the register holds"
+            );
+        }
     }
 }
 

@@ -29,10 +29,16 @@ fn the_wide_roles_walk() {
 /// Some seed of `mutant` fails on `oracle`. A planted bug can break more
 /// than one oracle; each seed stops at the first it breaks.
 fn caught(mutant: RolesMutant, oracle: &str) {
-    let walk = walk(Shape::NARROW, mutant, 1, 1000);
+    let walk_of = |m| walk(Shape::NARROW, m, 1, 1000);
+    let (planted, clean) = (walk_of(mutant), walk_of(RolesMutant::None));
     let mut failures = Vec::new();
     for seed in 1..=300 {
-        if let Err(failure) = walk.replay(seed) {
+        if let Err(failure) = planted.replay(seed) {
+            // A seed that fails with the mutant passes without it: the
+            // mutant made the failure.
+            if let Err(failure) = clean.replay(seed) {
+                panic!("seed {seed} fails with no mutant: {failure}");
+            }
             let text = failure.to_string();
             if text.contains(oracle) {
                 return;
@@ -78,6 +84,21 @@ fn boundary_catches_a_stale_boundary_state() {
 #[test]
 fn resolve_catches_a_resolve_at_the_segment_in_force() {
     caught(RolesMutant::ResolveInForce, RESOLVE);
+}
+
+#[test]
+fn read_catches_a_page_cut_short() {
+    caught(RolesMutant::ShortPage, READ);
+}
+
+#[test]
+fn read_catches_a_replica_that_never_serves() {
+    caught(RolesMutant::ReadUnserved, READ);
+}
+
+#[test]
+fn fold_catches_a_below_inside_the_segment() {
+    caught(RolesMutant::BelowInSegment, FOLD);
 }
 
 #[test]

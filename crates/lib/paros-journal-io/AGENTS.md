@@ -1,7 +1,11 @@
 # paros-journal-io
 
-The traits that a backend of the journal implements, the pure `Host`, the generic `Driver` and
+The traits that a backend of the journal implements, the journal's pure `Host`, its `Driver` and
 the contract suites (#1329 (paros-journal-io), step 8 of `docs/journal/08-build-steps.md`). The
+`Host` and the `Driver` run on the generic host of actors of `crates/lib/paros-host` (#1410
+(split the generic host of actors)): the generic crate holds the map of roles, the start from
+records, the timer, the flight rule and the group commit; this crate holds the journal roles,
+their address, the register, the disk layout and the contract suites. The
 contract is `docs/journal/04-roles.md` §J4.2 (the five rules) and the layering rule is §J4.3.
 Read them before you change the code, and change them in the same PR when a rule changes.
 
@@ -9,12 +13,15 @@ Read them before you change the code, and change them in the same PR when a rule
 
 | Module | What it holds | Rule |
 |---|---|---|
-| `wire.rs` | `Address` (a journal and a node), `Envelope`, `Time` | rule 3 |
+| `wire.rs` | `Address` (a journal, a node and the segment of a replica), `Envelope`, `Time` (the generic host's) | rule 3 |
+| `family.rs` | `Journal`, the family of the journal roles for `paros_host::Family`; `Launch` (an assignment or a heal's join) and `RoleInput` (an input of one role) | rules 1 to 4 |
 | `layout.rs` | the on-disk format: `Key` and its bytes, `Kind`, `Op`, `Entry`, the ops of each role's batch, the decode of a role's records with its `Damage` | rule 4 |
-| `storage.rs`, `transport.rs`, `clock.rs`, `register.rs` | the four traits a backend implements | rules 2, 4 |
-| `events.rs` | the `Events` port and `Event` | rule 5 |
-| `host.rs` | the pure `Host`: `Assignment`, `Input` (with `Join` and `Abandon`, the new replica of a heal, #1314, and `Read`, a leaderless read at a replica), `Effect` (with `ReadReply`), `Stop`, `CallOutcome`; a leader stamps each write with the host's `now` | rules 1 to 3, 5 |
-| `driver.rs` | the generic `Driver`: group commit, held sends, register changes and read answers, recovery reads, the timer, the events port, `read` and `take_reads` | rule 1 |
+| `storage.rs`, `transport.rs`, `clock.rs` | the generic host's traits, for `Journal`: a backend implements `Storage<Journal>` and `Transport<Journal>` | rules 2, 4 |
+| `register.rs` | the `Register` port of the journal | |
+| `events.rs` | `Event`, the generic host's event with the journal's `Input` | rule 5 |
+| `host.rs` | the journal `Host` on `paros_host::Host`: `Assignment`, `Input` (with `Join` and `Abandon`, the new replica of a heal, #1314, and `Read`, a leaderless read at a replica), `Output`, `Stop`, `CallOutcome`; the routing that is the journal's own (the register value to every role of its journal, a `Holds` to two roles, a node-wide `Unassign`, a join and an abandon) | rules 1 to 3, 5 |
+| `host/role.rs` | the journal roles behind `paros_host::Role`: the acceptor, the replica, the leader (it stamps each write with the step's `now`) and the proxy, and the map of their effects | rules 1, 2 |
+| `driver.rs` | the journal `Driver` on `paros_host::Driver`: the journal's ports (register changes, call and read answers, notices), `assign`, `call`, `read`, `join`, `abandon` | rule 1 |
 | `mem.rs` | backends in memory: `MemStorage`, `MemNetwork` and its `Endpoint`, `ManualClock`, `MemRegister` | |
 | `contract.rs` | the suites that check a backend: `storage`, `storage_reopen`, `transport`, `clock` | rule 4 |
 
@@ -41,8 +48,9 @@ its result and runs in the `checks` job of CI.
   time comes with it.
 - **The format is this crate's**: a backend stores keys and bytes and never reads them. A
   change of a `Kind` number or of a value's bytes is a change of the disk format.
-- **The flight rule is the driver's**: a send or a register change that names a batch waits
-  until the batch is durable; a failed commit stops every role it held (rule 4).
+- **The flight rule is the generic driver's** (`paros-host`): a send or an output (a register
+  change, a read answer) that names a batch waits until the batch is durable; a failed commit
+  stops every role it held (rule 4). This crate adds no rule of its own to it.
 - **No change to the core's contract**: `paros-consensus` and the roles of `paros-journal` keep
   their API (#1329). What this crate needs from a role is a new optional behaviour there.
 - **The absolute rule of simulation** (root `AGENTS.md`): a red seed of the driver walk is a
@@ -50,9 +58,10 @@ its result and runs in the `checks` job of CI.
 
 ## Gates
 
-`cargo nextest run -p paros-journal-io -p journal-sim`, `cargo run -p paros-journal-io --example
+`cargo nextest run -p paros-host -p paros-journal-io -p journal-sim`, `cargo run -p paros-journal-io --example
 in_memory`, `--example custom_storage`, `--example single_writer` and `--example multi_writer`, `cargo test --doc -p paros-journal-io`,
 `cargo clippy --all-targets -- -D warnings`,
 `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-journal-io --no-deps`,
 `cargo check --target wasm32-unknown-unknown -p paros-journal-io`,
-`scripts/check-core-deps.sh` and `scripts/mutants.sh --journal-io`, all in `nix develop`.
+`scripts/check-core-deps.sh`, `scripts/mutants.sh --journal-io` and `scripts/mutants.sh
+--host`, all in `nix develop`.

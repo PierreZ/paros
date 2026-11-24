@@ -39,6 +39,8 @@
 (*                                                                         *)
 (* THE LOG. A slot holds a `Noop` (the election gap fill) or a command:    *)
 (*   [op "w", u, e, id]   a `Write` of one record. u is a uuid (a fenced   *)
+(*   [op "w", u, e, id, n] a `Write` of n records, at the positions e to   *)
+(*                        e + n - 1 (`RolesTrace.tla`, the wide walk).     *)
 (*                        write at the position e) or None (unfenced).     *)
 (*   [op "tr", u, up]     a `Truncate` to the position up, under u.        *)
 (*   [op "sl", new, old]  `SetLeader(new, old)`; new may be None.          *)
@@ -89,7 +91,9 @@
 (*            where it saw one.                                            *)
 (*   RetireRule "full": retire once the boundary state is done and         *)
 (*            RetireAt replicas of the set hold every slot. "early": at    *)
-(*            the seal.                                                    *)
+(*            the seal. "off": no retire, to check Phase 1 alone (a wrong  *)
+(*            end breaks only the retire: `end_applied_safe` of            *)
+(*            `journal-read/`).                                            *)
 (*   ReshapeGuard TRUE: a reshape needs every older configuration retired  *)
 (*            (`RetireGuard` of `grid-controller/`). FALSE: no guard.      *)
 (*   Lookup   "below": the fold answers `Below` for a fenced write whose   *)
@@ -104,6 +108,18 @@
 (*   TrimRule "sealed": a segment is trimmed once its end is done and a    *)
 (*            fold has `first_seq` at or above its last `seq`. "open": the *)
 (*            open segment can be trimmed too, on its range so far.        *)
+(*   ReadRule "all": Phase 1 reads every slot of every configuration that  *)
+(*            is not retired, sealed or not (plain Matchmaker Paxos), so   *)
+(*            one value for each slot does not rest on the seal end. "end":*)
+(*            a sealed configuration is read only below its end, as it was *)
+(*            done at the ballot's `Register` (the old rule: with a wrong  *)
+(*            end, `end_applied_end` of journal-read/ chooses two values). *)
+(*   Bind     "cas": a ballot binds to the newest configuration, above     *)
+(*            every bound ballot, in one compare-and-set on the register   *)
+(*            (`Change::Bind`). "stale": a ballot above every bound ballot *)
+(*            binds to any configuration that is not retired, from a stale *)
+(*            register value that showed it in force and not sealed (a     *)
+(*            host that skips the compare-and-set).                        *)
 (*                                                                         *)
 (* Constants that size a check, with no rule in them:                      *)
 (*   Values   slot -> the commands that a leader may propose there (a      *)
@@ -131,7 +147,7 @@ CONSTANTS
   Partial,                \* TRUE: a register write can be partial and lost
   GenOK,                  \* the pairs <<ballot, configuration>> that may register
   Reply1b, Reply2b, WriteOrder, EndRule, EndAct, BoundAct, GapFill,
-  RetireRule, ReshapeGuard, Lookup, Resolve, TrimRule
+  RetireRule, ReshapeGuard, Lookup, Resolve, TrimRule, ReadRule, Bind
 
 ASSUME G \in Nat /\ G >= 1 /\ NS \in Nat /\ NS >= 1 /\ NB \in Nat /\ NB >= 1
 ASSUME MaxCrash \in Nat /\ RetireAt \in Nat /\ RetireAt >= 1
@@ -141,10 +157,11 @@ ASSUME WriteOrder \in {"atomic", "prom_first", "vote_first"}
 ASSUME EndRule \in {"voted", "applied"}
 ASSUME EndAct \in {"done", "read"} /\ BoundAct \in {"done", "read"}
 ASSUME GapFill \in BOOLEAN /\ ReshapeGuard \in BOOLEAN
-ASSUME RetireRule \in {"full", "early"}
+ASSUME RetireRule \in {"full", "early", "off"}
 ASSUME Lookup \in {"below", "local"}
 ASSUME Resolve \in {"write", "uuid", "early"}
 ASSUME TrimRule \in {"sealed", "open"}
+ASSUME ReadRule \in {"all", "end"} /\ Bind \in {"cas", "stale"}
 
 Gens == 1..G
 Slots == 0..(NS - 1)
@@ -152,6 +169,17 @@ Ballots == 1..NB
 Replicas == UNION {RepOf[g] : g \in Gens}
 ASSUME \A g \in Gens : CfgOf[g] \subseteq Acceptors /\ QOf[g] \subseteq SUBSET CfgOf[g]
 ASSUME \A g \in Gens : \A Q1, Q2 \in QOf[g] : Q1 \cap Q2 # {}
+
+\* The Phase 2 quorums of slot s in configuration g. A grid of one column
+\* has one kind of quorum, `QOf[g]`; a grid of many columns chooses slot s
+\* in its column `s % columns`, and its Phase 1 needs a quorum of every
+\* column (section J5.1). `RolesTrace.tla` overrides this definition for the
+\* grids of two columns of the wide roles walk; every quorum of Phase 1
+\* meets every quorum of Phase 2 of each slot.
+Q2Of(g, s) == QOf[g]
+ASSUME \A g \in Gens : \A s \in 0..(NS - 1) :
+         /\ Q2Of(g, s) \subseteq SUBSET CfgOf[g]
+         /\ \A Q1 \in QOf[g] : \A Q2 \in Q2Of(g, s) : Q1 \cap Q2 # {}
 ASSUME \A g, h \in Gens : g # h => RepOf[g] \cap RepOf[h] = {}
 ASSUME \A g \in Gens : Cardinality(RepOf[g]) >= RetireAt
 ASSUME \A s \in Slots : Noop \notin Values[s]
@@ -228,7 +256,7 @@ Active == UNION {CfgOf[g] : g \in Live}
 (* Chosen values: a quorum of the ballot's grid sent its vote.             *)
 (***************************************************************************)
 ChosenAtBal(s, v, b) ==
-  bgen[b] # 0 /\ \E Q \in QOf[bgen[b]] : \A a \in Q : <<s, b, v, a>> \in sent2b
+  bgen[b] # 0 /\ \E Q \in Q2Of(bgen[b], s) : \A a \in Q : <<s, b, v, a>> \in sent2b
 Cmds == UNION {Values[s] : s \in Slots} \cup {Noop}
 Chosen(s, v) == \E b \in Ballots : ChosenAtBal(s, v, b)
 IsChosen(s) == \E v \in Cmds : Chosen(s, v)
@@ -245,6 +273,8 @@ Frontier == IF \A s \in Slots : IsChosen(s) THEN NS
 (***************************************************************************)
 Empty == [leader |-> L0, next |-> 0, first |-> 0, recs |-> {}]
 Fenced(v) == v.u # None
+\* The records of a write: n, or one when the write names no n.
+Size(v) == IF "n" \in DOMAIN v THEN v.n ELSE 1
 \* The journal is multi-writer: None, or a mode with its tag.
 IsMulti(l) == l = None \/ l \in Tags
 
@@ -270,7 +300,7 @@ Step(base, st, v) ==
   LET r == Res(base, st, v) IN
   IF r # "ok" THEN st
   ELSE CASE v.op = "w" ->
-              [st EXCEPT !.next = @ + 1,
+              [st EXCEPT !.next = @ + Size(v),
                          !.recs = @ \cup {<<st.next, v.u, v.id>>}]
          [] v.op = "tr" ->
               [st EXCEPT !.first = Max({@, Min({v.up, st.next})})]
@@ -388,25 +418,64 @@ HighFrom == Max({LowFrom} \cup
 \* campaign does not change them: the leader of a retired configuration's
 \* acceptors waits, and a seal by another first leader stops this one.
 \* A ballot registers once, above every registered ballot: the second guard
-\* also refuses b itself once it registered.
+\* also refuses b itself once it registered. The code's register is
+\* `Change::Bind`; its "ok" again for the bound ballot on the same newest
+\* configuration changes nothing, so the model has no step for it.
 \* The leader writes from `lo`, from `LowFrom` to `HighFrom`. Phase 1 reads
 \* every slot from `lo`, so a lower `lo` reads more. `Register` takes the
 \* highest; `JournalCompact.tla` also takes the lowest, so that a Phase 1
 \* reads the slots the acceptors dropped.
-RegisterFrom(b, lo) ==
+\* Ballot b binds to configuration g and writes from lo. Above every bound
+\* ballot. Bound to the newest configuration, it keeps the done end of each
+\* configuration; bound to an older one, it saw no end.
+RegisterIn(b, g, lo) ==
   /\ \A c \in Ballots : bgen[c] # 0 => c < b
-  /\ <<b, top>> \in GenOK
-  /\ bgen' = [bgen EXCEPT ![b] = top]
-  /\ bH' = [bH EXCEPT ![b] = H(top)]
-  /\ bE' = [bE EXCEPT ![b] = [h \in Gens |-> IF Done(rend[h]) THEN rend[h].v ELSE None]]
+  /\ <<b, g>> \in GenOK
+  /\ bgen' = [bgen EXCEPT ![b] = g]
+  /\ bH' = [bH EXCEPT ![b] = H(g)]
+  /\ bE' = [bE EXCEPT ![b] = [h \in Gens |->
+                IF g = top /\ Done(rend[h]) THEN rend[h].v ELSE None]]
   /\ blo' = [blo EXCEPT ![b] = lo]
   /\ UNCHANGED <<top, rend, rbound, rret, rtrim, bst, bsafe, bend, bstart, prop, bskip, bblock, acc, rep>>
 
+RegisterFrom(b, lo) == RegisterIn(b, top, lo)
+
 Register(b) == RegisterFrom(b, HighFrom)
 
-\* The slots of h that the Phase 1 of b reads: below the end, once the end
-\* was done at its Register.
-ReadSet(b, h) == IF bE[b][h] # None THEN 0..(bE[b][h] - 1) ELSE Slots
+\* The control of `Bind`: ballot b binds to g, a configuration that is not
+\* retired, from a stale register value. That value showed g as the newest
+\* configuration with no end, so the leader reads the configurations up to
+\* g and writes from the start of the oldest one: a leader that takes its
+\* configuration from a value it read, not from the value of its own done
+\* `Change::Bind`.
+StaleRegister(b, g) ==
+  /\ Bind = "stale"
+  /\ RegisterIn(b, g, Start(Min(H(g))))
+
+\* Ballot b, bound and before its Phase 1, takes a later register value
+\* than the one of its own done `Bind`: a value that another write gave
+\* (a seal, a retire, a reshape) or the "ok" again of a `Bind` that it sent
+\* again after a lost reply (`JournalLeader::observe` takes every value
+\* that names its ballot as bound). It reads the configurations of its
+\* binding that are not retired in that value, the end of each one that is
+\* done there, and writes from the start of the oldest one or above. A value
+\* where every configuration of the binding is retired gives a Phase 1 that
+\* asks nobody and never closes, so the model has no step for it; an
+\* unbound ballot reads nothing (`H(0)` is empty).
+Reread(b) ==
+  /\ bst[b] = "new"
+  /\ H(bgen[b]) # {}
+  /\ bH' = [bH EXCEPT ![b] = H(bgen[b])]
+  /\ bE' = [bE EXCEPT ![b] = [h \in Gens |->
+                IF Done(rend[h]) THEN rend[h].v ELSE None]]
+  /\ blo' = [blo EXCEPT ![b] = Max({blo[b], Start(Min(H(bgen[b])))})]
+  /\ UNCHANGED <<reg, bst, bsafe, bend, bstart, prop, bskip, bblock, acc, rep>>
+
+\* The slots of h that the Phase 1 of b reads. With "all", every slot: the
+\* end of a sealed configuration bounds nothing in Phase 1, and one value
+\* for each slot rests on the promises alone. With "end", the slots below
+\* the end, once the end was done at its Register.
+ReadSet(b, h) == IF ReadRule = "end" /\ bE[b][h] # None THEN 0..(bE[b][h] - 1) ELSE Slots
 
 \* The reports of Phase 1 of b from the acceptors of Q: <<a, votes>>. With
 \* `Direct`, the promises are durable in the step, so Phase 1 takes them from
@@ -576,6 +645,19 @@ Promise(a, b) ==
           /\ UNCHANGED <<p1b, dprom>>
   /\ UNCHANGED <<reg, ldr, mvote, dvote, crashes, rots, sent2b, adrop, dadrop, rep>>
 
+\* An acceptor answers again a `Prepare` at the ballot it holds on disk,
+\* with no write: its reply waits on its last batch, so it carries the
+\* disk as that batch left it (the flight rule, section J4.2). It changes
+\* no state of the acceptor. As `Flush`, it needs no grid that runs: a
+\* reply that waited on a batch goes once the batch is durable. `SpecRe`
+\* adds it to `Next`: each answer sent again is one more report, so the
+\* checks of `Spec` leave it out to keep their state spaces, and the
+\* checks `repromise` and `reach_repromise` judge it.
+Repromise(a, b) ==
+  /\ dprom[a] = b
+  /\ p1b' = p1b \cup {[a |-> a, b |-> b, votes |-> dvote[a], drop |-> dadrop[a]]}
+  /\ UNCHANGED <<reg, ldr, mprom, mvote, dprom, dvote, crashes, rots, sent2b, adrop, dadrop, pend, rep>>
+
 Accept(a, b, s) ==
   LET v == prop[b][s]
       send == Reply2b = "disk"
@@ -638,7 +720,7 @@ Crash(a) ==
 \* A quorum of a grid that still runs holds a chosen vote of slot s on disk.
 \* (A later ballot can only vote the chosen value again, so a quorum may hold
 \* it at several ballots of its grid.)
-OnDisk(s) == IsChosen(s) /\ \E g \in Live : \E Q \in QOf[g] : \A a \in Q :
+OnDisk(s) == IsChosen(s) /\ \E g \in Live : \E Q \in Q2Of(g, s) : \A a \in Q :
   /\ dvote[a][s][1] > 0
   /\ bgen[dvote[a][s][1]] = g
   /\ dvote[a][s][2] = ChosenVal(s)
@@ -762,6 +844,7 @@ Holders(p) == {r \in RepOf[p] : rbase[r] # None /\ Done(rend[p]) /\ Front(r) = r
 Retire(p) ==
   /\ ~rret[p]
   /\ Done(rend[p])
+  /\ RetireRule # "off"
   /\ IF RetireRule = "full"
      THEN Done(rbound[p]) /\ Cardinality(Holders(p)) >= RetireAt
      ELSE TRUE
@@ -794,6 +877,7 @@ Drop(r) ==
 Next ==
   \/ Reshape
   \/ \E b \in Ballots : Register(b) \/ Phase1(b) \/ SealWrite(b) \/ Open(b)
+  \/ \E b \in Ballots, g \in Live : StaleRegister(b, g)
   \/ \E b \in Ballots, s \in Slots, v \in Cmds : Propose(b, s, v)
   \/ \E a \in Acceptors :
        \/ Flush(a) \/ Crash(a)
@@ -804,6 +888,17 @@ Next ==
   \/ \E s \in Slots, r \in Replicas : ResolveBelow(s, r)
 
 Spec == Init /\ [][Next]_vars
+
+\* `Next` with a leader that takes a later register value before its
+\* Phase 1 (`Reread`).
+NextLate == Next \/ \E b \in Ballots : Reread(b)
+SpecLate == Init /\ [][NextLate]_vars
+\* Reach: a ballot can take a later value that changes the ends it reads.
+NoLateRead == \A b \in Ballots : ~ENABLED (Reread(b) /\ bE' # bE)
+
+\* `Next` with the answers that acceptors send again (`Repromise`).
+NextRe == Next \/ \E a \in Acceptors, b \in Ballots : Repromise(a, b)
+SpecRe == Init /\ [][NextRe]_vars
 
 (***************************************************************************)
 (* Safety.                                                                 *)
@@ -911,6 +1006,9 @@ Ends == <>[](NoHole /\ \A s \in Slots : IsChosen(s) => acked[s] # None)
 (***************************************************************************)
 \* A crash between two writes of one batch, and a value chosen after it.
 NoCrashMid == ~(crashes > 0 /\ \E s \in Slots : IsChosen(s))
+\* No acceptor sent two different answers at one ballot: `SpecRe` breaks it
+\* once an answer sent again carries a vote that the first answer did not.
+OnePromise == \A m1, m2 \in p1b : m1.a = m2.a /\ m1.b = m2.b => m1 = m2
 \* Three segments: two seals done, a write acked in the third.
 NoThird == ~(G >= 3 /\ Done(rend[2]) /\ \E s \in Slots :
                s >= rend[2].v /\ acked[s] = "ok")

@@ -58,6 +58,7 @@ fn main() {
         HostConfig {
             tick: TICK,
             resend_page: 16,
+            window: 64,
         },
         MemStorage::new(),
         MemNetwork::new().endpoint(),
@@ -170,7 +171,6 @@ fn roles() -> Vec<Assignment> {
                 round: 1,
                 node: NodeId(LEADER),
             },
-            segment: SegmentId(1),
             from: Slot(0),
         },
     };

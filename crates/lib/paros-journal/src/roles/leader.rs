@@ -3,16 +3,29 @@
 //!
 //! A leader belongs to one ballot and keeps its state in memory: a leader
 //! that stops is a ballot that takes no more steps (`specs/tla/journal-state/`).
-//! Its ballot is bound to the newest segment of the register, its
-//! configuration (the matchmakers bind it, §J3.4).
 //!
-//! The steps, each from the model (`Phase1`, `SealWrite`, `Open`,
-//! `Propose`, and CTRL's `ProbeDecide`, `LearnChosen` and `AccRepair`):
+//! The steps, each from the model (`Register`, `Phase1`, `SealWrite`,
+//! `Open`, `Propose`, and CTRL's `ProbeDecide`, `LearnChosen` and
+//! `AccRepair`):
 //!
+//! 0. **The bind** (§J3.4): the leader binds its ballot to the newest
+//!    segment by compare-and-set on the register ([`Change::Bind`]), and
+//!    takes its configuration and the segments its Phase 1 reads from the
+//!    value of that write once it is done. The register takes a bind only
+//!    above every bound ballot, so a higher ballot is bound to the same
+//!    segment or a later one; a bind of the bound ballot is ok again while
+//!    the newest segment is the one it is bound to (a lost reply). Before
+//!    its Phase 1 the leader takes any value that names its ballot as
+//!    bound, a later one too (model `Reread`, check `bind_late`). A
+//!    leader never binds from a value it was
+//!    given: a value read before a seal binds a ballot above the seal to
+//!    the sealed grid, and two values are chosen (control `bind_stale`).
 //! 1. **Phase 1** ([`phase1`]) asks every acceptor of every segment that is
 //!    not retired, from the first slot it writes, and needs a Phase-1 quorum
-//!    of each grid: `F + 1` of every column (§J5.1). A sealed segment is read
-//!    only below its end (§J3.1). Each slot takes the highest vote that the
+//!    of each grid: `F + 1` of every column (§J5.1). It reads every slot of
+//!    every such grid, sealed or not: one value for each slot rests on the
+//!    promises alone, never on the seal end (§J3.1, `end_applied_safe` of
+//!    `specs/tla/journal-state/`). Each slot takes the highest vote that the
 //!    reads saw (P2c).
 //! 2. **The seal**: when the leader's segment is pending, the leader is a
 //!    first leader of it. It writes the end of the segment before, one above
@@ -93,16 +106,19 @@ use phase1::{Phase1, Phase1Close, in_ranges};
 /// next proxy: a proxy that crashed or lost its messages costs a few ticks.
 pub const MOVE_AFTER: u64 = 3;
 
-/// What the driver gives a new leader.
+/// What the driver gives a new leader. The configuration is not in it:
+/// the leader's bind on the register chooses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Campaign {
     /// The leader's ballot.
     pub ballot: Ballot,
-    /// The configuration the ballot is bound to: the newest segment.
-    pub segment: SegmentId,
-    /// The first slot the leader reads and writes: the applied prefix of
-    /// the oldest segment that its Phase 1 reads (every slot below it is
-    /// applied at a replica of that segment).
+    /// The first slot the leader reads and writes: at or below the applied
+    /// prefix of the oldest segment that its Phase 1 reads (every slot below
+    /// it is applied at a replica of that segment). The applied prefix only
+    /// grows, so a prefix that the driver read before the bind stays below
+    /// it. A segment that retires before the bind is not read: the leader
+    /// then raises the first slot to the start of the oldest segment it
+    /// reads ([`JournalLeader::from`]).
     pub from: Slot,
 }
 
@@ -138,6 +154,9 @@ pub enum LeaderEffect<T> {
 /// Where the leader is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LeaderPhase {
+    /// The bind of the ballot runs: the leader waits for the done value of
+    /// its [`Change::Bind`].
+    Binding,
     /// Phase 1 runs.
     Phase1,
     /// Phase 1 is done; the write of the seal end runs.
@@ -150,7 +169,8 @@ pub enum LeaderPhase {
         /// The first slot of its segment.
         start: Slot,
     },
-    /// The leader stopped: a higher ballot, a lost seal, or the driver.
+    /// The leader stopped: a refused bind, a higher ballot, a lost seal,
+    /// or the driver.
     Stopped,
 }
 
@@ -160,9 +180,13 @@ pub enum Proposed {
     /// The command holds `slot`; its answer comes as a
     /// [`LeaderEffect::Reply`].
     Slot(Slot),
-    /// The leader does not write (Phase 1, the seal, stopped): the command
+    /// The leader does not write (the bind, Phase 1, the seal, stopped): the command
     /// holds no slot, and the caller may send it elsewhere.
     NotLeader,
+    /// The leader holds `window` answers already, the most its caller allows
+    /// (decision 30: a limit on each size): the command holds no slot, and
+    /// the caller may send it again once an answer came.
+    Busy,
 }
 
 /// A segment as the leader's Phase 1 reads it.
@@ -177,7 +201,9 @@ pub struct ReadSegment {
     pub replicas: Vec<NodeId>,
     /// Its first slot, once it is in force.
     pub start: Option<Slot>,
-    /// Its end, once it is sealed: Phase 1 reads it only below the end.
+    /// Its end, once it is sealed. Phase 1 reads every slot of the grid all
+    /// the same: the end routes a slot to its replica set, it never hides a
+    /// vote.
     pub end: Option<Slot>,
 }
 
@@ -222,12 +248,6 @@ impl ReadSegment {
         rows / 2 + 1
     }
 
-    /// Whether Phase 1 reads `slot` here: below the end of a sealed segment.
-    #[must_use]
-    pub fn reads(&self, slot: Slot) -> bool {
-        self.end.is_none_or(|end| slot < end)
-    }
-
     /// Every acceptor of the grid.
     pub fn acceptors(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.columns
@@ -260,7 +280,10 @@ struct Unapplied {
 #[derive(Clone, Debug)]
 pub struct JournalLeader<T> {
     campaign: Campaign,
+    /// The segment the bind chose, `None` while the bind runs.
+    segment: Option<SegmentId>,
     /// The segments Phase 1 reads, oldest first; the last is the leader's.
+    /// Empty while the bind runs.
     segments: Vec<ReadSegment>,
     phase: LeaderPhase,
     phase1: Phase1,
@@ -293,48 +316,24 @@ pub struct JournalLeader<T> {
 }
 
 impl<T> JournalLeader<T> {
-    /// A leader for `campaign`, from `value`, a register value that a done
-    /// write gave. Returns the leader and the `Prepare`s of its Phase 1, or
-    /// `None` when its segment is not in `value` or is past in force.
+    /// A leader for `campaign`, and the bind of its ballot: the leader
+    /// starts Phase 1 once the done value of the bind reaches it
+    /// ([`Self::observe`]), and stops when the register refuses the bind
+    /// ([`Self::refused`]).
     ///
     /// # Panics
     ///
     /// When an assertion on its own postconditions fails: a programmer
     /// error, never an operating condition.
     #[must_use]
-    pub fn campaign(
-        campaign: Campaign,
-        value: &RegisterValue,
-    ) -> Option<(Self, Vec<LeaderEffect<T>>)> {
-        let own = value.segment(campaign.segment)?;
-        if own.state() > SegmentState::InForce {
-            return None;
-        }
-        let segments: Vec<ReadSegment> = value
-            .segments()
-            .values()
-            .filter(|record| record.id() <= campaign.segment)
-            .filter(|record| {
-                record.state() < SegmentState::Retired
-                    && (record.state() != SegmentState::Pending || record.id() == campaign.segment)
-            })
-            .map(|record| ReadSegment {
-                id: record.id(),
-                columns: ReadSegment::columns_of(record.grid()),
-                replicas: record.replicas().to_vec(),
-                start: record.start(),
-                end: record.end(),
-            })
-            .collect();
-        assert!(
-            segments.last().is_some_and(|s| s.id == campaign.segment),
-            "the leader's own segment is the last it reads"
-        );
-        let phase1 = Phase1::new(campaign.ballot, campaign.from, &segments);
+    pub fn campaign(campaign: Campaign) -> (Self, Vec<LeaderEffect<T>>) {
+        let ballot = campaign.ballot;
+        let phase1 = Phase1::new(ballot, campaign.from, &[]);
         let leader = Self {
             campaign,
-            segments,
-            phase: LeaderPhase::Phase1,
+            segment: None,
+            segments: Vec::new(),
+            phase: LeaderPhase::Binding,
             phase1,
             safe: BTreeMap::new(),
             blocked: Vec::new(),
@@ -349,9 +348,81 @@ impl<T> JournalLeader<T> {
             dropped: BTreeMap::new(),
             compaction: BTreeMap::new(),
         };
-        let effects = leader.prepares();
         leader.assert_invariants();
-        Some((leader, effects))
+        (
+            leader,
+            vec![LeaderEffect::Register(Change::Bind { ballot })],
+        )
+    }
+
+    /// The done value of the leader's bind: its configuration is the
+    /// segment the register bound its ballot to, and its Phase 1 reads every
+    /// segment of `value` up to that one that is not retired, its own
+    /// pending segment included. Returns the `Prepare`s of Phase 1.
+    fn bind_done(&mut self, value: &RegisterValue) -> Vec<LeaderEffect<T>> {
+        assert!(self.phase == LeaderPhase::Binding, "a leader binds once");
+        let (ballot, own) = value
+            .binding()
+            .expect("the value of the leader's own bind has a binding");
+        assert!(
+            ballot == self.campaign.ballot,
+            "the value of the leader's own bind"
+        );
+        let own = value
+            .segment(own)
+            .expect("a ballot is bound to a segment the register holds");
+        assert!(
+            own.state() <= SegmentState::InForce,
+            "the newest segment is pending or in force"
+        );
+        let own = own.id();
+        let segments: Vec<ReadSegment> = value
+            .segments()
+            .values()
+            .filter(|record| {
+                record.id() <= own
+                    && record.state() < SegmentState::Retired
+                    && (record.state() != SegmentState::Pending || record.id() == own)
+            })
+            .map(|record| ReadSegment {
+                id: record.id(),
+                columns: ReadSegment::columns_of(record.grid()),
+                replicas: record.replicas().to_vec(),
+                start: record.start(),
+                end: record.end(),
+            })
+            .collect();
+        assert!(
+            segments.last().is_some_and(|s| s.id == own),
+            "the leader's own segment is the last it reads"
+        );
+        // The driver read `from` before the bind. A segment that retired
+        // since is not read, and every slot below the start of the oldest
+        // segment read is in a retired segment: chosen, and held by `F + 1`
+        // replicas of its set. So the leader starts at that start at least,
+        // and never fills a chosen slot of a retired segment.
+        if let Some(start) = segments.first().and_then(|segment| segment.start)
+            && start > self.campaign.from
+        {
+            probe!(
+                reachable,
+                "leader: a retire before the bind raises the first slot"
+            );
+            self.campaign.from = start;
+        }
+        assert!(
+            segments
+                .first()
+                .and_then(|segment| segment.start)
+                .is_none_or(|start| start <= self.campaign.from),
+            "the leader reads from the start of its oldest segment or above"
+        );
+        self.phase1 = Phase1::new(self.campaign.ballot, self.campaign.from, &segments);
+        self.segment = Some(own);
+        self.segments = segments;
+        self.phase = LeaderPhase::Phase1;
+        probe!(reachable, "leader: a done bind starts Phase 1");
+        self.prepares()
     }
 
     /// Delegate the Phase 2 of every round to `proxies` (§J4.1, the proxy
@@ -377,10 +448,22 @@ impl<T> JournalLeader<T> {
         self.campaign.ballot
     }
 
-    /// The segment the leader's ballot is bound to.
+    /// The first slot the leader reads and writes: the campaign's, raised at
+    /// the bind to the start of the oldest segment it reads.
     #[must_use]
-    pub fn segment(&self) -> SegmentId {
-        self.campaign.segment
+    pub fn from(&self) -> Slot {
+        self.campaign.from
+    }
+
+    /// The segment the leader's ballot is bound to, once its bind is done.
+    #[must_use]
+    pub fn segment(&self) -> Option<SegmentId> {
+        self.segment
+    }
+
+    /// The bound segment, past the bind.
+    fn own(&self) -> SegmentId {
+        self.segment.expect("a leader past its bind has a segment")
     }
 
     /// Where the leader is.
@@ -427,20 +510,28 @@ impl<T> JournalLeader<T> {
 
     /// Propose `command` for the caller `token`, at `time`, the clock of
     /// the leader's host in nanoseconds: a write carries it as its leader
-    /// time (§J2.8, [`Command::stamped`]).
+    /// time (§J2.8, [`Command::stamped`]). The leader holds at most `window`
+    /// answers, which its driver chooses: a proposal above it is
+    /// [`Proposed::Busy`], so a leader whose rounds do not close (a column
+    /// below quorum) holds a bounded memory (decision 30).
     ///
     /// # Panics
     ///
-    /// When an assertion on its own postconditions fails: a programmer
-    /// error, never an operating condition.
+    /// When `window` is 0, or an assertion on its own postconditions fails.
     pub fn propose(
         &mut self,
         token: T,
         command: Command,
         time: u64,
+        window: usize,
     ) -> (Proposed, Vec<LeaderEffect<T>>) {
+        assert!(window > 0, "a leader holds at least one answer");
         if !matches!(self.phase, LeaderPhase::Open { .. }) {
             return (Proposed::NotLeader, Vec::new());
+        }
+        if self.held.len() >= window {
+            probe!(reachable, "leader: a full window refuses a proposal");
+            return (Proposed::Busy, Vec::new());
         }
         let command = command.stamped(time);
         let slot = self.next;
@@ -448,6 +539,10 @@ impl<T> JournalLeader<T> {
         self.held.hold(slot, token, command.clone());
         let effects = self.open_round(slot, command);
         assert!(!self.held.is_empty(), "a proposal holds its answer");
+        assert!(
+            self.held.len() <= window,
+            "the leader holds at most its window"
+        );
         assert!(self.next > slot, "the next slot moves past a proposal");
         self.assert_invariants();
         (Proposed::Slot(slot), effects)
@@ -473,7 +568,7 @@ impl<T> JournalLeader<T> {
                             message: Message::Prepare {
                                 ballot: self.campaign.ballot,
                                 from: next,
-                                segment: self.campaign.segment,
+                                segment: self.own(),
                             },
                         }]
                     }
@@ -502,7 +597,7 @@ impl<T> JournalLeader<T> {
                         message: Message::Prepare {
                             ballot: self.campaign.ballot,
                             from: next,
-                            segment: self.campaign.segment,
+                            segment: self.own(),
                         },
                     }],
                     None => self.probe_blocked(),
@@ -573,9 +668,23 @@ impl<T> JournalLeader<T> {
     /// When an assertion on its own postconditions fails: a programmer
     /// error, never an operating condition.
     pub fn observe(&mut self, value: &RegisterValue) -> Vec<LeaderEffect<T>> {
+        if self.phase == LeaderPhase::Binding {
+            let effects = match value.bound() {
+                Some(bound) if bound == self.campaign.ballot => self.bind_done(value),
+                Some(bound) if bound > self.campaign.ballot => {
+                    // A higher ballot took the register: the leader's bind is
+                    // refused, or was never written.
+                    probe!(reachable, "leader: a higher bound ballot stops the leader");
+                    self.stop()
+                }
+                _ => Vec::new(),
+            };
+            self.assert_invariants();
+            return effects;
+        }
         if let LeaderPhase::Open { .. } = self.phase {
             if value
-                .segment(self.campaign.segment)
+                .segment(self.own())
                 .and_then(SegmentRecord::end)
                 .is_some()
             {
@@ -628,10 +737,15 @@ impl<T> JournalLeader<T> {
         effects
     }
 
-    /// The register refused the leader's seal: another seal won, or the
-    /// segment moved on. The leader stops.
+    /// The register refused the leader's bind (a higher ballot is bound)
+    /// or its seal (another seal won, or the segment moved on). The leader
+    /// stops.
     pub fn refused(&mut self) -> Vec<LeaderEffect<T>> {
         match self.phase {
+            LeaderPhase::Binding => {
+                probe!(reachable, "leader: a refused bind stops the leader");
+                self.stop()
+            }
             LeaderPhase::Sealing { .. } => {
                 probe!(reachable, "leader: a refused seal stops the leader");
                 self.stop()
@@ -684,6 +798,9 @@ impl<T> JournalLeader<T> {
             "a re-send page is at most RESEND_BATCH"
         );
         match self.phase {
+            LeaderPhase::Binding => vec![LeaderEffect::Register(Change::Bind {
+                ballot: self.campaign.ballot,
+            })],
             LeaderPhase::Phase1 => self.prepares(),
             LeaderPhase::Sealing { end } => vec![LeaderEffect::Register(Change::Seal {
                 segment: self
@@ -827,7 +944,7 @@ impl<T> JournalLeader<T> {
                 message: Message::Prepare {
                     ballot: self.campaign.ballot,
                     from,
-                    segment: self.campaign.segment,
+                    segment: self.own(),
                 },
             })
             .collect()
@@ -944,7 +1061,7 @@ impl<T> JournalLeader<T> {
                 self.safe.insert(slot, command);
                 Vec::new()
             }
-            LeaderPhase::Phase1 | LeaderPhase::Stopped => {
+            LeaderPhase::Binding | LeaderPhase::Phase1 | LeaderPhase::Stopped => {
                 unreachable!("only a leader past Phase 1 holds blocked slots")
             }
         }
@@ -1156,7 +1273,7 @@ impl<T> JournalLeader<T> {
             probe!(reachable, "leader: a chosen blocked slot is repaired");
             effects.extend(
                 self.phase1
-                    .faulty_at(&self.segments, slot)
+                    .faulty_at(slot)
                     .into_iter()
                     .map(|to| LeaderEffect::Send {
                         to,
@@ -1364,9 +1481,16 @@ impl<T> JournalLeader<T> {
     /// slot below the next slot, or an unapplied slot is open.
     pub fn assert_invariants(&self) {
         assert!(
-            self.segments
-                .last()
-                .is_some_and(|s| s.id == self.campaign.segment),
+            self.segment.is_none() == self.segments.is_empty(),
+            "a bound leader reads its segments, an unbound one none"
+        );
+        assert!(
+            self.segment.is_some()
+                || matches!(self.phase, LeaderPhase::Binding | LeaderPhase::Stopped),
+            "only the bind and a stop come before the configuration"
+        );
+        assert!(
+            self.segment.is_none() || self.segments.last().map(|s| s.id) == self.segment,
             "the leader's own segment is the last it reads"
         );
         if let [.., before, own] = &self.segments[..] {

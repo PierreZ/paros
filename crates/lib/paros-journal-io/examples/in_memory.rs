@@ -38,7 +38,7 @@
 mod common;
 
 use paros_journal::register::Ballot;
-use paros_journal::roles::LeaderPhase;
+use paros_journal::roles::{JournalLeader, LeaderPhase};
 use paros_journal::{Answer, Leader, NodeId, Reply, SegmentId, Seq, Slot};
 use paros_journal_io::mem::{Endpoint, ManualClock, MemNetwork, MemRegister, MemStorage};
 use paros_journal_io::{
@@ -55,6 +55,7 @@ type Process = Driver<MemStorage, Endpoint, ManualClock, MemRegister, ()>;
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 16,
+    window: 64,
 };
 /// Leader L1 on process 1, then leader L2 on process 3.
 const L1: u64 = 100;
@@ -187,7 +188,7 @@ fn open_first(cluster: &mut Cluster) {
             vec![acceptor(node), replica(10 + node, 1)],
         );
     }
-    cluster.assign(0, leader(L1, 1, 1, Slot(0)));
+    cluster.assign(0, leader(L1, 1, Slot(0)));
     cluster.run_until("L1 opens", |c| {
         c.processes[0].as_ref().is_some_and(|p| open(p, L1))
     });
@@ -268,11 +269,22 @@ fn seal(cluster: &mut Cluster) {
         .filter_map(|i| cluster.replica_front(i, 11 + i as u64))
         .max()
         .expect("a replica of segment 1");
-    cluster.assign(2, leader(L2, 2, 2, from));
+    cluster.assign(2, leader(L2, 2, from));
     cluster.run_until("L2 opens and segment 2 folds", |c| {
         c.processes[2].as_ref().is_some_and(|p| open(p, L2))
             && (0..3).all(|i| c.replica_front(i, 21 + i as u64).is_some())
     });
+    let bound = cluster
+        .process(2)
+        .host()
+        .leader(at(L2))
+        .and_then(JournalLeader::segment);
+    show("L2 bound to", &bound);
+    assert_eq!(
+        bound,
+        Some(SegmentId(2)),
+        "the bind takes the newest segment"
+    );
     let value = cluster.register.value(JOURNAL).expect("the register");
     let record = value.segment(SegmentId(1)).expect("segment 1");
     let end = record.end().expect("segment 1 is sealed");

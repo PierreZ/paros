@@ -48,8 +48,8 @@ use paros::journal::{
 };
 use paros::journal_io::mem::{MemRegister, MemStorage};
 use paros::journal_io::{
-    Address, Assignment, CallOutcome, Clock, Driver, Envelope, HostConfig, JournalId, Register,
-    Time, Transport,
+    Address, Assignment, CallOutcome, Clock, Driver, Envelope, HostConfig, Journal, JournalId,
+    Register, Time, Transport,
 };
 
 const JOURNAL: JournalId = JournalId(1);
@@ -79,7 +79,7 @@ struct Channels {
     receiver: UnboundedReceiver<Envelope>,
 }
 
-impl Transport for Channels {
+impl Transport<Journal> for Channels {
     fn send(&mut self, envelope: Envelope) {
         if let Some(inbox) = self.routes.borrow().get(&envelope.receiver()) {
             // A send to a task that stopped is a lost message: the roles
@@ -246,6 +246,7 @@ fn start(clock: TokioClock) -> Vec<(Process, Task, u64)> {
             HostConfig {
                 tick: TICK,
                 resend_page: 16,
+                window: 64,
             },
             MemStorage::new(),
             Channels {
@@ -330,7 +331,8 @@ fn open_segment() -> MemRegister {
     register
 }
 
-/// The leader of round 1, bound to segment 1.
+/// The leader of round 1: its bind on the register binds it to segment 1,
+/// the newest.
 fn leader() -> Assignment {
     Assignment::Leader {
         address: at(LEADER),
@@ -340,7 +342,6 @@ fn leader() -> Assignment {
                 round: 1,
                 node: NodeId(LEADER),
             },
-            segment: SegmentId(1),
             from: Slot(0),
         },
     }

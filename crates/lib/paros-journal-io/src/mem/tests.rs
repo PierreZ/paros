@@ -22,15 +22,13 @@ fn mem_storage_reports_a_corrupt_record_and_a_planted_failure() {
         key,
         value: vec![1],
     };
-    storage
-        .commit(std::slice::from_ref(&op), true)
-        .expect("a commit");
+    storage.commit(std::slice::from_ref(&op)).expect("a commit");
     storage.corrupt(key);
     assert_eq!(
         storage.scan(address).expect("a scan"),
         vec![(key, Entry::Corrupt)]
     );
-    storage.commit(&[op], true).expect("a commit");
+    storage.commit(&[op]).expect("a commit");
     assert_eq!(
         storage.scan(address).expect("a scan"),
         vec![(key, Entry::Value(vec![1]))],
@@ -42,12 +40,12 @@ fn mem_storage_reports_a_corrupt_record_and_a_planted_failure() {
         value: vec![2],
     };
     let error = storage
-        .commit(std::slice::from_ref(&other), true)
+        .commit(std::slice::from_ref(&other))
         .expect_err("a planted failure");
     assert_eq!(error.to_string(), "storage: a planted failure");
     assert_eq!(storage.len(), 1, "a failed commit writes nothing");
     storage
-        .commit(&[other], true)
+        .commit(&[other])
         .expect("only the next commit fails");
     assert_eq!(storage.len(), 2);
     assert!(!storage.is_empty());
@@ -125,4 +123,49 @@ fn mem_register_runs_a_change_or_refuses_it() {
     let before = register.value(journal);
     assert!(register.change(journal, &unknown).is_err(), "no segment 9");
     assert_eq!(register.value(journal), before, "a refusal changes nothing");
+}
+
+#[test]
+fn mem_register_refuses_a_change_of_a_journal_it_does_not_hold() {
+    let mut register = MemRegister::new();
+    let elect = Change::Elect { holder: NodeId(0) };
+    assert!(
+        register.change(JournalId(5), &elect).is_err(),
+        "no register for journal 5"
+    );
+    assert_eq!(
+        register.read(JournalId(5)),
+        None,
+        "a change does not create a register"
+    );
+}
+
+#[test]
+fn mem_register_loses_a_planted_request_or_reply() {
+    let journal = JournalId(4);
+    let mut register = MemRegister::new();
+    register.create(journal, RegisterValue::new());
+    let elect = Change::Elect { holder: NodeId(0) };
+    register.lose_next(false);
+    assert_eq!(
+        register.change(journal, &elect),
+        Err(ChangeError::NoAnswer),
+        "a lost request"
+    );
+    assert_eq!(
+        register.read(journal),
+        Some(RegisterValue::new()),
+        "a lost request runs nothing"
+    );
+    register.lose_next(true);
+    assert_eq!(
+        register.change(journal, &elect),
+        Err(ChangeError::NoAnswer),
+        "a lost reply"
+    );
+    assert_ne!(
+        register.read(journal),
+        Some(RegisterValue::new()),
+        "a lost reply hides a done write"
+    );
 }

@@ -1,20 +1,23 @@
-//! The **generic driver** (§J4.2): it drives one [`Host`] with a storage,
-//! a transport, a clock, a register and an events port, and keeps the
-//! flight rule.
+//! The **journal driver** (§J4.2): the generic driver of `paros-host`
+//! ([`paros_host::Driver`]) over the journal [`Host`], with the journal's
+//! ports: the register, the answers of calls and reads, and the notices.
 //!
-//! The driver is written against the traits of this crate only. It spawns
-//! nothing, blocks on nothing and needs no `Send`: a program calls
-//! [`Driver::poll`] in its own loop, on any runtime or none.
+//! The generic driver keeps the flight rule, the group commit, the recovery
+//! reads and the events port; this module adds the calls of a journal
+//! program (assign, call, read, join, abandon) and runs each register
+//! change that a role asks. It spawns nothing, blocks on nothing and needs
+//! no `Send`: a program calls [`Driver::poll`] in its own loop, on any
+//! runtime or none.
 //!
 //! **The flight rule** (rule 1). Each step of the `Host` may emit persist
-//! batches and sends. The driver steps on at once: it keeps the batches in
-//! one group and commits the whole group in one storage write at the end of
-//! a [`poll`](Driver::poll) (group commit), in id order for each role. A
-//! send, or a register change, that names a batch waits until that batch is
-//! durable; one that names a durable batch, or none, goes at once. A
-//! commit that fails stops every role that had a batch in it
-//! ([`Input::Failed`], rule 4): the batch may or may not be durable, so the
-//! sends that wait on it never go.
+//! batches, sends and outputs. The driver steps on at once: it keeps the
+//! batches in one group and commits the whole group in one storage write at
+//! the end of a [`poll`](Driver::poll) (group commit), in id order for each
+//! role. A send, a register change or a read answer that names a batch
+//! waits until that batch is durable; one that names a durable batch, or
+//! none, goes at once. A commit that fails stops every role that had a
+//! batch in it ([`Input::Failed`], rule 4): the batch may or may not be
+//! durable, so the sends that wait on it never go.
 //!
 //! **Recovery** (rule 2). A role with a disk starts with a read of its
 //! records. The driver gives them to the `Host` as an input, and learns
@@ -29,21 +32,18 @@
 //! is lost, and so are the sends that waited on it. A new driver on the
 //! same storage serves the roles again from their records.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use paros_consensus::journal::JournalId;
+use paros_host::{Clock, Events, Ports, Storage, Transport};
 use paros_journal::register::{Change, RegisterValue};
-use paros_journal::roles::{CopyId, PersistId, ReadAnswer};
+use paros_journal::roles::{CopyId, ReadAnswer};
 use paros_journal::{Command, Leader, NodeId, SegmentId, Seq};
 
-use crate::clock::Clock;
-use crate::events::{Event, Events};
-use crate::host::{Assignment, CallId, CallOutcome, Effect, Host, HostConfig, Input, Stop};
-use crate::layout::{self, Entry, Key, Op};
-use crate::register::Register;
-use crate::storage::Storage;
-use crate::transport::Transport;
-use crate::wire::{Address, Envelope, Time};
+use crate::family::Journal;
+use crate::host::{Assignment, CallId, CallOutcome, Host, HostConfig, Input, Output, Stop};
+use crate::register::{ChangeError, Register};
+use crate::wire::{Address, Time};
 
 /// The answer of a client call, with the leader that gave it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,54 +91,138 @@ pub enum Notice {
     },
 }
 
-/// A step of the `Host` that the driver has not reported yet, with the
-/// batches it persisted.
-struct Pending {
-    event: Event,
-    batches: Vec<(Address, PersistId)>,
+/// The journal's ports of the generic driver: the register, and what the
+/// roles answer and report until the program takes it.
+struct JournalPorts<R> {
+    register: R,
+    /// The value of the last done write that the `Host` observed.
+    observed: BTreeMap<JournalId, RegisterValue>,
+    /// The register changes that got no answer: each runs again at the
+    /// next timer, until the register answers it.
+    unanswered: Vec<(Address, Change)>,
+    replies: Vec<CallReply>,
+    reads: Vec<ReadReply>,
+    notices: Vec<Notice>,
+}
+
+impl<R: Register> JournalPorts<R> {
+    fn new(register: R) -> Self {
+        Self {
+            register,
+            observed: BTreeMap::new(),
+            unanswered: Vec::new(),
+            replies: Vec::new(),
+            reads: Vec::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    /// The input that gives the `Host` the register value of `journal`,
+    /// when it is new.
+    fn watch(&mut self, journal: JournalId) -> Option<Input> {
+        let value = self.register.read(journal)?;
+        if self.observed.get(&journal) == Some(&value) {
+            return None;
+        }
+        self.observed.insert(journal, value.clone());
+        Some(Input::Observe { journal, value })
+    }
+
+    /// Run `change` on the register: the input of its result, the done
+    /// value or the refusal. A change with no answer gives no input: it
+    /// waits for the next timer and runs again ([`ChangeError::NoAnswer`]).
+    fn change(&mut self, address: Address, change: &Change) -> Option<Input> {
+        match self.register.change(address.journal, change) {
+            Ok(value) => {
+                self.observed.insert(address.journal, value.clone());
+                Some(Input::Observe {
+                    journal: address.journal,
+                    value,
+                })
+            }
+            Err(ChangeError::Refused(_) | ChangeError::Unknown) => Some(Input::Refused { address }),
+            Err(ChangeError::NoAnswer) => {
+                if !self
+                    .unanswered
+                    .iter()
+                    .any(|(a, c)| *a == address && c == change)
+                {
+                    self.unanswered.push((address, change.clone()));
+                }
+                None
+            }
+        }
+    }
+}
+
+impl<R: Register> Ports<Host> for JournalPorts<R> {
+    /// Each journal's register value, when it is new.
+    fn poll(&mut self, host: &Host) -> Vec<Input> {
+        let journals: Vec<JournalId> = host.journals().collect();
+        journals
+            .into_iter()
+            .filter_map(|journal| self.watch(journal))
+            .collect()
+    }
+
+    fn output(&mut self, address: Address, output: Output) -> Vec<Input> {
+        match output {
+            Output::Register { change } => {
+                return self.change(address, &change).into_iter().collect();
+            }
+            Output::Reply { call, outcome } => self.replies.push(CallReply {
+                address,
+                call,
+                outcome,
+            }),
+            Output::Copied { segment, copy } => self.notices.push(Notice::Copied {
+                address,
+                segment,
+                copy,
+            }),
+            Output::Retired { segment } => self.notices.push(Notice::Retired { address, segment }),
+            Output::ReadReply { read, answer } => self.reads.push(ReadReply {
+                address,
+                read,
+                answer,
+            }),
+        }
+        Vec::new()
+    }
+
+    /// A change with no answer of a stopped role is not run again: a later
+    /// role at its address asks its own changes.
+    fn stopped(&mut self, address: Address) {
+        self.unanswered.retain(|(a, _)| *a != address);
+    }
+
+    /// A read that waited on a batch of a stopped role is unserved: the fold
+    /// it read may hold a batch that is lost. A register change that waited
+    /// is dropped.
+    fn dropped(&mut self, address: Address, output: Output) {
+        if let Output::ReadReply { read, .. } = output {
+            self.reads.push(ReadReply {
+                address,
+                read,
+                answer: ReadAnswer::Unserved,
+            });
+        }
+    }
 }
 
 /// The driver of one process.
 pub struct Driver<S, T, C, R, E> {
-    host: Host,
-    storage: S,
-    transport: T,
-    clock: C,
-    register: R,
-    events: E,
-    /// The inputs that wait for their step, in order.
-    inputs: VecDeque<Input>,
-    /// The batches of the next commit, in the order the roles emitted them.
-    group: Vec<(Address, PersistId, Vec<Op>)>,
-    /// The sends that wait on a batch of their sender.
-    held: Vec<(PersistId, Address, Envelope)>,
-    /// The register changes that wait on a batch of their role.
-    held_changes: Vec<(PersistId, Address, Change)>,
-    /// The read answers that wait on a batch of their replica.
-    held_reads: Vec<(PersistId, Address, CallId, ReadAnswer)>,
-    /// The highest durable batch of each role that runs.
-    durable: BTreeMap<Address, PersistId>,
-    /// The highest settled batch of each role: durable, or failed.
-    settled: BTreeMap<Address, PersistId>,
-    /// The steps not reported yet.
-    pending: VecDeque<Pending>,
-    /// The value of the last done write that the `Host` observed.
-    observed: BTreeMap<JournalId, RegisterValue>,
-    timer: Option<Time>,
+    inner: paros_host::Driver<Host, S, T, C, JournalPorts<R>, E>,
     calls: CallId,
-    replies: Vec<CallReply>,
-    reads: Vec<ReadReply>,
-    notices: Vec<Notice>,
-    stopped: Vec<(Address, Stop)>,
 }
 
 impl<S, T, C, R, E> Driver<S, T, C, R, E>
 where
-    S: Storage,
-    T: Transport,
+    S: Storage<Journal>,
+    T: Transport<Journal>,
     C: Clock,
     R: Register,
-    E: Events,
+    E: Events<Host>,
 {
     /// A driver of a new [`Host`] with `config`.
     #[must_use]
@@ -151,81 +235,64 @@ where
         events: E,
     ) -> Self {
         Self {
-            host: Host::new(config),
-            storage,
-            transport,
-            clock,
-            register,
-            events,
-            inputs: VecDeque::new(),
-            group: Vec::new(),
-            held: Vec::new(),
-            held_changes: Vec::new(),
-            held_reads: Vec::new(),
-            durable: BTreeMap::new(),
-            settled: BTreeMap::new(),
-            pending: VecDeque::new(),
-            observed: BTreeMap::new(),
-            timer: None,
+            inner: paros_host::Driver::new(
+                Host::new(config),
+                storage,
+                transport,
+                clock,
+                JournalPorts::new(register),
+                events,
+            ),
             calls: 0,
-            replies: Vec::new(),
-            reads: Vec::new(),
-            notices: Vec::new(),
-            stopped: Vec::new(),
         }
     }
 
     /// The `Host`, to read its roles.
     #[must_use]
     pub fn host(&self) -> &Host {
-        &self.host
+        self.inner.machine()
     }
 
     /// The storage.
     #[must_use]
     pub fn storage(&self) -> &S {
-        &self.storage
+        self.inner.storage()
     }
 
     /// The transport.
     pub fn transport_mut(&mut self) -> &mut T {
-        &mut self.transport
+        self.inner.transport_mut()
     }
 
     /// The events port.
     #[must_use]
     pub fn events(&self) -> &E {
-        &self.events
+        self.inner.events()
     }
 
     /// The time of the timer that the `Host` armed.
     #[must_use]
     pub fn timer(&self) -> Option<Time> {
-        self.timer
+        self.inner.timer()
     }
 
     /// The storage, the transport, the clock, the register and the events
     /// port. What was not committed is lost, as in a crash.
     pub fn into_parts(self) -> (S, T, C, R, E) {
-        (
-            self.storage,
-            self.transport,
-            self.clock,
-            self.register,
-            self.events,
-        )
+        let (storage, transport, clock, ports, events) = self.inner.into_parts();
+        (storage, transport, clock, ports.register, events)
     }
 
     /// Serve the role that `assignment` names (the `Assignments` port,
     /// §J4.2, rule 5).
     pub fn assign(&mut self, assignment: Assignment) {
         self.watch(assignment.address().journal);
-        self.input(Input::Assign(assignment));
+        self.inner.input(Input::Assign(assignment));
     }
 
     /// Stop serving the role at `address`.
     pub fn unassign(&mut self, address: Address) {
-        self.input(Input::Unassign(address));
+        self.inner.input(Input::Unassign(address));
     }
 
     /// Send `command` to the leader at `address`. The answer comes in
@@ -234,7 +301,7 @@ where
     pub fn call(&mut self, address: Address, command: Command) -> CallId {
         self.calls += 1;
         let call = self.calls;
-        self.input(Input::Call {
+        self.inner.input(Input::Call {
             address,
             call,
             command,
@@ -249,7 +316,7 @@ where
     pub fn read(&mut self, address: Address, from: Seq, limit: usize) -> CallId {
         self.calls += 1;
         let read = self.calls;
-        self.input(Input::Read {
+        self.inner.input(Input::Read {
             address,
             read,
             from,
@@ -260,7 +327,7 @@ where
 
     /// The answers of client reads since the last take.
     pub fn take_reads(&mut self) -> Vec<ReadReply> {
-        std::mem::take(&mut self.reads)
+        std::mem::take(&mut self.inner.ports_mut().reads)
     }
 
     /// Start the new replica at `address` (its segment named) for the copy
@@ -270,7 +337,7 @@ where
     /// sent (`specs/tla/heal-reuse/`, control `stale_view`).
     pub fn join(&mut self, address: Address, set: Vec<NodeId>, initial: Leader, copy: CopyId) {
         self.watch(address.journal);
-        self.input(Input::Join {
+        self.inner.input(Input::Join {
             address,
             set,
             initial,
@@ -283,24 +350,24 @@ where
     /// first, as for [`join`](Self::join).
     pub fn abandon(&mut self, address: Address, copy: CopyId) {
         self.watch(address.journal);
-        self.input(Input::Abandon { address, copy });
+        self.inner.input(Input::Abandon { address, copy });
     }
 
     /// The answers of client calls since the last take.
     pub fn take_replies(&mut self) -> Vec<CallReply> {
-        std::mem::take(&mut self.replies)
+        std::mem::take(&mut self.inner.ports_mut().replies)
     }
 
     /// What the roles told their outside since the last call: a new
     /// replica's complete copy, for the grid controller of its plan, and a
     /// done retire, for placement (the old acceptors may stop).
     pub fn take_notices(&mut self) -> Vec<Notice> {
-        std::mem::take(&mut self.notices)
+        std::mem::take(&mut self.inner.ports_mut().notices)
     }
 
     /// The roles that stopped since the last take, and why.
     pub fn take_stopped(&mut self) -> Vec<(Address, Stop)> {
-        std::mem::take(&mut self.stopped)
+        self.inner.take_stopped()
     }
 
     /// One round of work: step every message that arrived, fire the timer
@@ -310,335 +377,51 @@ where
     ///
     /// # Panics
     ///
-    /// When the round ends with a batch to commit, or with a send or a
-    /// register change that still waits on a batch: the flight rule of the
-    /// driver is broken.
+    /// When the round ends with a batch to commit, or with a send or an
+    /// output that still waits on a batch: the flight rule of the driver is
+    /// broken.
     pub fn poll(&mut self) -> bool {
-        let mut busy = false;
-        while let Some(envelope) = self.transport.receive() {
+        let fired = self
+            .inner
+            .timer()
+            .is_some_and(|at| at <= self.inner.clock().now());
+        // A change that got no answer runs again at the next fire of the
+        // timer, once the roles saw the newest done value: a write of the
+        // first try that took place reached them first, and they judge a
+        // refusal of the second try on it. A change that gets no answer in
+        // this round waits for the next fire, and a stop of the role drops
+        // its changes (`JournalPorts::stopped`).
+        let due = if fired {
+            self.inner.ports().unanswered.clone()
+        } else {
+            Vec::new()
+        };
+        let mut busy = self.inner.poll();
+        let (run, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.inner.ports_mut().unanswered)
+            .into_iter()
+            .partition(|entry| due.contains(entry));
+        self.inner.ports_mut().unanswered = kept;
+        for (address, change) in &run {
+            assert!(
+                self.host().serves(*address),
+                "a change with no answer belongs to a role that runs"
+            );
+            if let Some(input) = self.inner.ports_mut().change(*address, change) {
+                self.inner.input(input);
+            }
+        }
+        // A second round commits what the answers stepped.
+        if !run.is_empty() {
+            self.inner.poll();
             busy = true;
-            self.input(Input::Message(envelope));
         }
-        if self.timer.is_some_and(|at| at <= self.clock.now()) {
-            busy = true;
-            self.timer = None;
-            self.input(Input::TimerFired);
-        }
-        let journals: Vec<JournalId> = self.host.journals().collect();
-        for journal in journals {
-            busy |= self.watch(journal);
-        }
-        // A release can step new batches (a register value that a held
-        // change gave): commit until the round leaves none.
-        while self.commit() {
-            busy = true;
-        }
-        assert!(
-            self.group.is_empty(),
-            "a round ends with no batch to commit"
-        );
-        assert!(self.held.is_empty(), "a round ends with no held send");
-        assert!(
-            self.held_changes.is_empty(),
-            "a round ends with no held register change"
-        );
-        assert!(self.held_reads.is_empty(), "a round ends with no held read");
-        self.report();
         busy
     }
 
     /// Give the `Host` the register value of `journal` when it is new.
-    fn watch(&mut self, journal: JournalId) -> bool {
-        let Some(value) = self.register.read(journal) else {
-            return false;
-        };
-        if self.observed.get(&journal) == Some(&value) {
-            return false;
-        }
-        self.observed.insert(journal, value.clone());
-        self.input(Input::Observe { journal, value });
-        true
-    }
-
-    /// Step `input`, then every input that its effects give.
-    fn input(&mut self, input: Input) {
-        self.inputs.push_back(input);
-        self.drain();
-    }
-
-    /// Step every input that waits, in order.
-    fn drain(&mut self) {
-        while let Some(input) = self.inputs.pop_front() {
-            let now = self.clock.now();
-            let effects = self.host.step(now, input.clone());
-            let mut batches = Vec::new();
-            for effect in &effects {
-                if let Effect::Persist { address, id, .. } = effect {
-                    batches.push((*address, *id));
-                }
-                self.apply(effect.clone());
-            }
-            self.pending.push_back(Pending {
-                event: Event {
-                    now,
-                    input,
-                    effects,
-                },
-                batches,
-            });
-        }
-    }
-
-    fn apply(&mut self, effect: Effect) {
-        match effect {
-            Effect::Read { address } => match self.storage.scan(address) {
-                Ok(entries) => {
-                    self.durable.remove(&address);
-                    if let Some(id) = layout::durable_of(&entries) {
-                        self.durable.insert(address, id);
-                        self.settled.insert(address, id);
-                    }
-                    let entries = self.with_group(address, entries);
-                    self.inputs.push_back(Input::Recovered { address, entries });
-                }
-                Err(_) => self.inputs.push_back(Input::Unreadable { address }),
-            },
-            Effect::Persist { address, id, ops } => {
-                assert!(
-                    self.group
-                        .iter()
-                        .rev()
-                        .find(|(a, ..)| *a == address)
-                        .is_none_or(|(_, last, _)| *last < id),
-                    "the batches of a role are in id order"
-                );
-                self.group.push((address, id, ops));
-            }
-            Effect::Send {
-                sender,
-                envelope,
-                after,
-            } => {
-                if self.is_durable(sender, after) {
-                    self.transport.send(envelope);
-                } else {
-                    let id = after.expect("a held send names a batch");
-                    self.held.push((id, sender, envelope));
-                }
-            }
-            Effect::Register {
-                address,
-                change,
-                after,
-            } => {
-                if self.is_durable(address, after) {
-                    self.change(address, &change);
-                } else {
-                    let id = after.expect("a held change names a batch");
-                    self.held_changes.push((id, address, change));
-                }
-            }
-            Effect::Reply {
-                address,
-                call,
-                outcome,
-            } => self.replies.push(CallReply {
-                address,
-                call,
-                outcome,
-            }),
-            Effect::ReadReply {
-                address,
-                read,
-                answer,
-                after,
-            } => self.read_reply(address, read, answer, after),
-            Effect::SetTimer { at } => {
-                self.timer = Some(self.timer.map_or(at, |armed| armed.min(at)));
-            }
-            Effect::Copied {
-                address,
-                segment,
-                copy,
-                after,
-            } => {
-                // A report of a copy whose last batch is not durable yet is
-                // dropped: the replica reports again at its next tick.
-                if self.is_durable(address, after) {
-                    self.notices.push(Notice::Copied {
-                        address,
-                        segment,
-                        copy,
-                    });
-                }
-            }
-            Effect::Retired { address, segment } => {
-                self.notices.push(Notice::Retired { address, segment });
-            }
-            Effect::Stopped { address, why } => self.on_stopped(address, why),
-        }
-    }
-
-    /// The records of the role at `address` as the disk will hold them
-    /// once the group commits: `entries`, with the ops of the role's
-    /// batches that the group still holds on top (a later op at a key
-    /// wins). A role that starts again before the commit reads its own
-    /// last writes, and its new batches follow the last one.
-    fn with_group(&self, address: Address, entries: Vec<(Key, Entry)>) -> Vec<(Key, Entry)> {
-        let mut records: BTreeMap<[u8; layout::KEY_LEN], (Key, Entry)> = entries
-            .into_iter()
-            .map(|(key, entry)| (key.to_bytes(), (key, entry)))
-            .collect();
-        for (_, _, ops) in self.group.iter().filter(|(role, ..)| *role == address) {
-            for op in ops {
-                records.insert(op.key.to_bytes(), (op.key, Entry::Value(op.value.clone())));
-            }
-        }
-        records.into_values().collect()
-    }
-
-    fn is_durable(&self, address: Address, after: Option<PersistId>) -> bool {
-        after.is_none_or(|id| self.durable.get(&address).is_some_and(|d| *d >= id))
-    }
-
-    /// Run `change` on the register, and give the `Host` its result.
-    fn change(&mut self, address: Address, change: &Change) {
-        match self.register.change(address.journal, change) {
-            Ok(value) => {
-                self.observed.insert(address.journal, value.clone());
-                self.inputs.push_back(Input::Observe {
-                    journal: address.journal,
-                    value,
-                });
-            }
-            Err(_) => self.inputs.push_back(Input::Refused { address }),
-        }
-    }
-
-    /// Commit the group in one write, then release what waited on it.
-    /// Returns whether there was a group.
-    fn commit(&mut self) -> bool {
-        if self.group.is_empty() {
-            return false;
-        }
-        let group = std::mem::take(&mut self.group);
-        let ops: Vec<Op> = group.iter().flat_map(|(_, _, ops)| ops.clone()).collect();
-        let mut tops: BTreeMap<Address, PersistId> = BTreeMap::new();
-        for (address, id, _) in &group {
-            tops.insert(*address, *id);
-        }
-        for (address, id) in &tops {
-            self.settled.insert(*address, *id);
-        }
-        if self.storage.commit(&ops, true).is_ok() {
-            self.durable.extend(tops);
-            self.release();
-        } else {
-            // Each role of the group stops, and its stop drops what waited
-            // on the group.
-            for address in tops.into_keys() {
-                self.input(Input::Failed { address });
-            }
-        }
-        true
-    }
-
-    /// The role at `address` stopped: what waited on its batches is
-    /// dropped.
-    fn on_stopped(&mut self, address: Address, why: Stop) {
-        // A stopped role writes and sends nothing more: what waited
-        // on its batches is dropped. A replica that dropped its copy
-        // stopped by its own step, so its last batches (a copy that
-        // ends) stay in the group and reach the disk; any other stop
-        // takes them out of the group, settled.
-        let other = |role: Address| role != address;
-        if why != Stop::Dropped {
-            if let Some(id) = self
-                .group
-                .iter()
-                .rev()
-                .find_map(|(role, id, _)| (!other(*role)).then_some(*id))
-            {
-                self.settled.insert(address, id);
-            }
-            self.group.retain(|(role, ..)| other(*role));
-        }
-        self.held.retain(|(_, sender, _)| other(*sender));
-        self.held_changes.retain(|(_, role, _)| other(*role));
-        // A read that waited on a batch of a stopped role is
-        // unserved: the fold it read may hold a batch that is lost.
-        let (stopped, kept) = std::mem::take(&mut self.held_reads)
-            .into_iter()
-            .partition(|(_, role, ..)| !other(*role));
-        self.held_reads = kept;
-        for (_, address, read, _) in stopped {
-            self.reads.push(ReadReply {
-                address,
-                read,
-                answer: ReadAnswer::Unserved,
-            });
-        }
-        self.durable.remove(&address);
-        self.stopped.push((address, why));
-    }
-
-    /// Give the answer of a read once batch `after` of its replica is
-    /// durable: now, or held until then.
-    fn read_reply(
-        &mut self,
-        address: Address,
-        read: CallId,
-        answer: ReadAnswer,
-        after: Option<PersistId>,
-    ) {
-        if self.is_durable(address, after) {
-            self.reads.push(ReadReply {
-                address,
-                read,
-                answer,
-            });
-        } else {
-            let id = after.expect("a held read names a batch");
-            self.held_reads.push((id, address, read, answer));
-        }
-    }
-
-    /// Send what waited on a batch that is durable now.
-    fn release(&mut self) {
-        let held = std::mem::take(&mut self.held);
-        for (id, sender, envelope) in held {
-            if self.is_durable(sender, Some(id)) {
-                self.transport.send(envelope);
-            } else {
-                self.held.push((id, sender, envelope));
-            }
-        }
-        let changes = std::mem::take(&mut self.held_changes);
-        for (id, address, change) in changes {
-            if self.is_durable(address, Some(id)) {
-                self.change(address, &change);
-            } else {
-                self.held_changes.push((id, address, change));
-            }
-        }
-        for (id, address, read, answer) in std::mem::take(&mut self.held_reads) {
-            self.read_reply(address, read, answer, Some(id));
-        }
-        self.drain();
-    }
-
-    /// Report, in order, each step whose batches are all settled.
-    fn report(&mut self) {
-        while let Some(front) = self.pending.front() {
-            let settled = front
-                .batches
-                .iter()
-                .all(|(address, id)| self.settled.get(address).is_some_and(|s| s >= id));
-            if !settled {
-                break;
-            }
-            let pending = self.pending.pop_front().expect("a front");
-            self.events.record(pending.event);
+    fn watch(&mut self, journal: JournalId) {
+        if let Some(input) = self.inner.ports_mut().watch(journal) {
+            self.inner.input(input);
         }
     }
 }

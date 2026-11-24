@@ -10,9 +10,9 @@
 //!   the core's [`Acceptor`](paros_consensus::acceptor::Acceptor) over the
 //!   journal's [`Command`](crate::Command). An `Accept` that raises the
 //!   promise writes the promise and the vote in one batch (#1309).
-//! - [`leader`]: [`JournalLeader`], the consensus leader of one ballot. Its
-//!   Phase 1 reads every segment that is not retired, a sealed one only
-//!   below its end; it seals the segment before its own at one above the
+//! - [`leader`]: [`JournalLeader`], the consensus leader of one ballot. It
+//!   binds its ballot to the newest segment on the register first; its
+//!   Phase 1 reads every slot of every segment that is not retired; it seals the segment before its own at one above the
 //!   highest vote that its Phase 1 saw in the old grid (a CTRL faulty vote
 //!   counts, #1313); it fills every slot below the start of its segment
 //!   with the vote it saw or a `Noop` (#1233); it writes each slot in one
@@ -55,7 +55,7 @@ pub mod replica;
 
 pub use acceptor::{AcceptorDisk, AcceptorEffect, AcceptorOp, JournalAcceptor};
 pub use leader::{Campaign, JournalLeader, LeaderEffect, LeaderPhase, Proposed};
-pub use message::{Message, PromisePage};
+pub use message::{Message, PromisePage, ReadTag};
 pub use paros_consensus::contract::limits::{PROMISE_BATCH, RESEND_BATCH};
 pub use paros_consensus::contract::write::AcceptorWrite;
 pub use proxy::{JournalProxy, ProxyEffect};

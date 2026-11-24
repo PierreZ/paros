@@ -5,6 +5,7 @@ use crate::RELEASE;
 use crate::command::{Command, Fence, Leader, Write};
 use crate::fold::JournalView;
 use crate::register::{Change, RegisterValue};
+use crate::roles::message::ReadTag;
 use crate::roles::replica::ReplicaDisk;
 use crate::segment::{Grid, OpeningCall, SegmentRecord};
 
@@ -81,7 +82,14 @@ fn commit(slot: u64, command: Command) -> Message {
     }
 }
 
-fn ack(read: u64, watermark: Option<u64>, bound: u64) -> Message {
+/// The tag of the open read `read` of `replica`.
+fn tag_of(replica: &SegmentReplica, read: u64) -> ReadTag {
+    replica.reads[&read]
+        .tag
+        .expect("a read of the open segment has a tag")
+}
+
+fn ack(read: ReadTag, watermark: Option<u64>, bound: u64) -> Message {
     Message::PreReadAck {
         segment: SegmentId(1),
         read,
@@ -141,9 +149,9 @@ fn a_read_of_an_open_segment_asks_the_grid_and_serves_at_a_quorum() {
         "the read asks every acceptor"
     );
     assert!(answers(&effects).is_empty(), "no answer before a quorum");
-    let effects = replica.step(NodeId(1), ack(1, Some(2), 1));
+    let effects = replica.step(NodeId(1), ack(tag_of(&replica, 1), Some(2), 1));
     assert!(answers(&effects).is_empty(), "one answer is no quorum");
-    let effects = replica.step(NodeId(2), ack(1, Some(2), 1));
+    let effects = replica.step(NodeId(2), ack(tag_of(&replica, 1), Some(2), 1));
     let answered = answers(&effects);
     assert_eq!(answered.len(), 1);
     let (seqs, view, sealed) = page(&answered[0].1);
@@ -157,8 +165,8 @@ fn a_read_of_an_open_segment_asks_the_grid_and_serves_at_a_quorum() {
 fn a_read_waits_until_the_fold_covers_the_highest_watermark() {
     let mut replica = served();
     replica.read(1, Seq(1), 10);
-    replica.step(NodeId(1), ack(1, Some(4), 1));
-    let effects = replica.step(NodeId(3), ack(1, None, 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 1), Some(4), 1));
+    let effects = replica.step(NodeId(3), ack(tag_of(&replica, 1), None, 1));
     assert!(answers(&effects).is_empty(), "slot 4 may be chosen");
     let effects = replica.step(LEADER, commit(3, write(2, 3)));
     assert!(answers(&effects).is_empty(), "slot 4 is not applied yet");
@@ -173,14 +181,15 @@ fn a_read_waits_until_the_fold_covers_the_highest_watermark() {
 fn an_answer_that_knows_a_later_segment_supersedes_the_read() {
     let mut replica = served();
     replica.read(1, Seq(0), 10);
-    replica.step(NodeId(1), ack(1, Some(0), 1));
-    let effects = replica.step(NodeId(2), ack(1, Some(0), 2));
+    let tag = tag_of(&replica, 1);
+    replica.step(NodeId(1), ack(tag, Some(0), 1));
+    let effects = replica.step(NodeId(2), ack(tag, Some(0), 2));
     assert_eq!(
         answers(&effects),
         vec![(1, ReadAnswer::Superseded(SegmentId(2)))]
     );
     assert_eq!(replica.reads(), 0);
-    let late = replica.step(NodeId(3), ack(1, Some(0), 1));
+    let late = replica.step(NodeId(3), ack(tag, Some(0), 1));
     assert!(answers(&late).is_empty(), "a closed read takes no answer");
 }
 
@@ -188,10 +197,10 @@ fn an_answer_that_knows_a_later_segment_supersedes_the_read() {
 fn an_answer_from_outside_the_grid_is_not_counted() {
     let mut replica = served();
     replica.read(1, Seq(0), 10);
-    replica.step(NodeId(1), ack(1, Some(0), 1));
-    let effects = replica.step(NodeId(9), ack(1, Some(0), 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 1), Some(0), 1));
+    let effects = replica.step(NodeId(9), ack(tag_of(&replica, 1), Some(0), 1));
     assert_eq!(answers(&effects), Vec::new());
-    let effects = replica.step(NodeId(9), ack(1, Some(0), 7));
+    let effects = replica.step(NodeId(9), ack(tag_of(&replica, 1), Some(0), 7));
     assert!(answers(&effects).is_empty(), "nor its fence");
     assert_eq!(replica.reads(), 1);
 }
@@ -200,10 +209,10 @@ fn an_answer_from_outside_the_grid_is_not_counted() {
 fn an_answer_for_another_segment_is_not_counted() {
     let mut replica = served();
     replica.read(1, Seq(0), 10);
-    replica.step(NodeId(1), ack(1, Some(0), 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 1), Some(0), 1));
     let other = Message::PreReadAck {
         segment: SegmentId(2),
-        read: 1,
+        read: tag_of(&replica, 1),
         watermark: Some(Slot(0)),
         bound: SegmentId(2),
     };
@@ -219,14 +228,14 @@ fn an_answer_for_another_segment_is_not_counted() {
 fn a_page_holds_at_most_its_limit_and_starts_at_the_position() {
     let mut replica = served();
     replica.read(1, Seq(1), 1);
-    replica.step(NodeId(1), ack(1, None, 1));
-    let effects = replica.step(NodeId(2), ack(1, None, 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 1), None, 1));
+    let effects = replica.step(NodeId(2), ack(tag_of(&replica, 1), None, 1));
     let (seqs, ..) = page(&answers(&effects)[0].1);
     assert_eq!(seqs, vec![1]);
     // A limit of 0 is cut to one record.
     replica.read(2, Seq(0), 0);
-    replica.step(NodeId(1), ack(2, None, 1));
-    let effects = replica.step(NodeId(2), ack(2, None, 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 2), None, 1));
+    let effects = replica.step(NodeId(2), ack(tag_of(&replica, 2), None, 1));
     let (seqs, ..) = page(&answers(&effects)[0].1);
     assert_eq!(seqs, vec![0]);
 }
@@ -235,8 +244,8 @@ fn a_page_holds_at_most_its_limit_and_starts_at_the_position() {
 fn a_read_past_the_tail_serves_an_empty_page() {
     let mut replica = served();
     replica.read(1, Seq(5), 10);
-    replica.step(NodeId(1), ack(1, None, 1));
-    let effects = replica.step(NodeId(2), ack(1, None, 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 1), None, 1));
+    let effects = replica.step(NodeId(2), ack(tag_of(&replica, 1), None, 1));
     let (seqs, view, _) = page(&answers(&effects)[0].1);
     assert_eq!(seqs, Vec::new());
     assert_eq!(view.next_seq, Seq(2));
@@ -275,8 +284,8 @@ fn a_read_below_the_floor_is_truncated() {
     };
     replica.step(LEADER, commit(3, truncate));
     replica.read(1, Seq(0), 10);
-    replica.step(NodeId(1), ack(1, Some(3), 1));
-    let effects = replica.step(NodeId(2), ack(1, Some(3), 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 1), Some(3), 1));
+    let effects = replica.step(NodeId(2), ack(tag_of(&replica, 1), Some(3), 1));
     let answered = answers(&effects);
     assert!(
         matches!(answered[0].1, ReadAnswer::Truncated(view) if view.first_seq == Seq(1)),
@@ -317,7 +326,7 @@ fn a_replica_with_no_base_or_too_many_reads_is_unserved() {
 fn a_read_asks_again_on_a_tick_and_is_unserved_after_its_ticks() {
     let mut replica = served();
     replica.read(1, Seq(0), 1);
-    replica.step(NodeId(2), ack(1, None, 1));
+    replica.step(NodeId(2), ack(tag_of(&replica, 1), None, 1));
     let tick = replica.tick();
     assert_eq!(asked(&tick), nodes(&[1, 3]), "only the silent acceptors");
     for _ in 1..READ_TICKS - 1 {
@@ -331,8 +340,8 @@ fn a_read_asks_again_on_a_tick_and_is_unserved_after_its_ticks() {
 fn an_answer_waits_on_the_last_batch_of_the_replica() {
     let mut replica = served();
     replica.read(1, Seq(0), 1);
-    replica.step(NodeId(1), ack(1, None, 1));
-    let effects = replica.step(NodeId(2), ack(1, None, 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 1), None, 1));
+    let effects = replica.step(NodeId(2), ack(tag_of(&replica, 1), None, 1));
     let last = replica.flight.last();
     assert!(last.is_some());
     assert!(effects.iter().all(|effect| matches!(
@@ -410,8 +419,8 @@ fn a_compaction_keeps_the_records_of_a_write_that_spans_the_floor() {
         "the point is the write that spans the floor"
     );
     replica.read(1, Seq(3), 10);
-    replica.step(NodeId(1), ack(1, Some(4), 1));
-    let effects = replica.step(NodeId(2), ack(1, Some(4), 1));
+    replica.step(NodeId(1), ack(tag_of(&replica, 1), Some(4), 1));
+    let effects = replica.step(NodeId(2), ack(tag_of(&replica, 1), Some(4), 1));
     let (seqs, view, _) = page(&answers(&effects)[0].1);
     assert_eq!(
         seqs,
@@ -419,4 +428,89 @@ fn a_compaction_keeps_the_records_of_a_write_that_spans_the_floor() {
         "the records above the floor stay readable"
     );
     assert_eq!(view.first_seq, Seq(3));
+}
+
+/// The disk that `effects` leave, applied in order.
+fn persist(disk: &mut ReplicaDisk, effects: &[ReplicaEffect]) {
+    for effect in effects {
+        if let ReplicaEffect::Persist { id, ops } = effect {
+            disk.apply(*id, ops);
+        }
+    }
+}
+
+#[test]
+fn an_answer_to_a_read_of_an_earlier_incarnation_is_not_counted() {
+    // The replica of the first incarnation: it applies slots 0 to 2 and
+    // starts read 1. The acceptors answer with watermark 2, and the
+    // answers are still in flight when the replica stops.
+    let mut disk = ReplicaDisk::default();
+    let mut first = SegmentReplica::recover(
+        ME,
+        SegmentId(1),
+        nodes(&[11, 12, 13]),
+        Leader::Unset,
+        ReplicaDisk::default(),
+    );
+    persist(&mut disk, &first.observe(&one_segment()));
+    let claim = Command::SetLeader {
+        new: Leader::uuid(LeaderUuid(7)),
+        old: Leader::Unset,
+    };
+    persist(&mut disk, &first.step(LEADER, commit(0, claim)));
+    persist(&mut disk, &first.step(LEADER, commit(1, write(0, 1))));
+    persist(&mut disk, &first.step(LEADER, commit(2, write(1, 2))));
+    let started = first.read(1, Seq(0), 10);
+    persist(&mut disk, &started);
+    let stale: Vec<Message> = tags(&started)
+        .into_iter()
+        .take(2)
+        .map(|tag| stale_ack(tag, Some(2), 1))
+        .collect();
+    // A write at slot 3 is chosen and acknowledged while the replica is
+    // down: a read that starts after the restart must see it.
+    let mut second =
+        SegmentReplica::recover(ME, SegmentId(1), nodes(&[11, 12, 13]), Leader::Unset, disk);
+    second.observe(&one_segment());
+    assert_eq!(second.front(), Some(Slot(3)));
+    let restarted = second.read(1, Seq(0), 10);
+    assert_eq!(asked(&restarted), nodes(&GRID));
+    let first_boot = tags(&started)[0].boot;
+    assert!(
+        tags(&restarted).iter().all(|tag| tag.boot > first_boot),
+        "a later incarnation opens its reads above the boot of an earlier one"
+    );
+    assert!(
+        restarted.iter().all(|effect| !matches!(
+            effect,
+            ReplicaEffect::Send { message: Message::PreRead { read, .. }, after, .. }
+                if *after != Some(read.boot)
+        )),
+        "every PreRead waits on the batch that opened the reads"
+    );
+    let mut effects = second.step(NodeId(1), stale[0].clone());
+    effects.extend(second.step(NodeId(2), stale[1].clone()));
+    assert!(
+        answers(&effects).is_empty(),
+        "the answers of the first incarnation's read are no quorum for the new read: {effects:?}"
+    );
+    assert_eq!(second.reads(), 1, "the new read waits for its own answers");
+}
+
+/// The tag of each `PreRead` that `effects` send.
+fn tags(effects: &[ReplicaEffect]) -> Vec<ReadTag> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            ReplicaEffect::Send {
+                message: Message::PreRead { read, .. },
+                ..
+            } => Some(*read),
+            _ => None,
+        })
+        .collect()
+}
+
+fn stale_ack(tag: ReadTag, watermark: Option<u64>, bound: u64) -> Message {
+    ack(tag, watermark, bound)
 }

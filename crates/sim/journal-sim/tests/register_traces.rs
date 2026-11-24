@@ -7,7 +7,7 @@
 use journal_sim::campaign::try_campaign;
 use journal_sim::register::{Kind, RegisterEvent, RegisterMutant, Shape, walk};
 use journal_sim::trace::register::{EDITS, register_spec, trace};
-use journal_sim::trace::{Trace, Verdict, require_tlc};
+use journal_sim::trace::{Trace, Verdict, mutate, require_tlc};
 
 /// The value of the knob `name`, or `default`.
 fn knob(name: &str, default: u64) -> u64 {
@@ -158,39 +158,24 @@ fn the_oracles_pass_a_forged_bootstrap() {
     .expect("the oracles pass the trace control");
 }
 
-/// The least number of edits that find a place in the recorded traces.
-const MIN_EDITS: usize = 20;
-
-/// TLC refuses every edit of the recorded traces at or after the edited
-/// event (#1308 (mutate recorded traces)).
+/// Every edit finds a place in a walk, and TLC refuses it at or after the
+/// edited event (#1308 (mutate recorded traces)).
 #[test]
 fn tlc_refuses_the_edited_register_traces() {
     let check = register_spec();
     require_tlc(&check);
     let (walks, _) = checked();
     let recorded: Vec<&Trace> = walks.iter().map(|(_, _, traced)| traced).collect();
-    let mut placed = 0;
-    let mut wrong = Vec::new();
-    for edit in EDITS {
-        let Some(mutant) = recorded.iter().find_map(|traced| edit.apply(traced)) else {
-            eprintln!("edit {:?}: no place", edit.name);
-            continue;
-        };
-        placed += 1;
-        match check.check(&mutant.trace).expect("TLC gives a verdict") {
-            Verdict::Rejected(rejection) if rejection.index >= mutant.at => {}
-            Verdict::InvariantViolated { matched, .. } if matched >= mutant.at => {}
-            other => wrong.push(format!("{}: at {}, {other:?}", edit.name, mutant.at)),
-        }
-    }
-    assert!(
-        wrong.is_empty(),
-        "edits TLC did not refuse where it must: {wrong:#?}"
-    );
-    assert!(
-        placed >= MIN_EDITS,
-        "only {placed} edits found a place, {MIN_EDITS} must"
-    );
+    let from = walks
+        .iter()
+        .map(|(seed, ..)| seed + 1)
+        .max()
+        .expect("a checked walk");
+    mutate::judge(&check, EDITS, &recorded, from, |seed| {
+        replay(RegisterMutant::None, seed)
+            .expect("the walk passes")
+            .0
+    });
 }
 
 #[test]

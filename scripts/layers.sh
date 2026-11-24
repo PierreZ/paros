@@ -18,6 +18,7 @@
 # Layer  Crate
 LAYER_TABLE='
 0 paros-consensus
+0 paros-host
 1 paros-journal
 2 paros-journal-control
 2 paros-journal-io

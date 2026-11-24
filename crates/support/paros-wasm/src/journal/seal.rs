@@ -31,12 +31,12 @@
 //!
 //! # Break the rule
 //!
-//! The "Break the rule" run writes a seal that no leader computed: the end at
-//! the first slot that no replica applied, with no Phase 1 over the old grid.
-//! The register's guard takes it (the guard checks the state of the
-//! segments, not the end), and a later leader writes a second value at a slot
-//! that the old grid chose. The fault comes from the driver, never from a
-//! change of `paros-journal`.
+//! The "Break the rule" run gives a restarted leader the register value of
+//! before the reshape, in place of the value of its own bind: its ballot is
+//! bound to the sealed segment 1, its Phase 1 asks only the old grid, and it
+//! writes a second value at a slot that the grid of segment 2 chose
+//! (control `bind_stale` of `specs/tla/journal-read/`). The fault comes from
+//! the driver, never from a change of `paros-journal`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -245,7 +245,7 @@ fn slow() -> Scenario {
         .deliver("Promise", "a2", "p6")
         .deliver("Promise", "a3", "p6")
         .deliver("Promise", "a4", "p6");
-    run.beat("Proposer 6 seals segment 1 at slot 3. The vote of acceptor 1 is not below the end, so no later Phase 1 reads it in the old grid.")
+    run.beat("Proposer 6 seals segment 1 at slot 3. The vote of acceptor 1 at slot 3 stays in the old grid. A later Phase 1 reads it too, but the vote that segment 2 writes at slot 3 has a higher ballot, and it wins.")
         .ask(
             "Is it safe to leave out the vote of acceptor 1?",
             &[
@@ -281,55 +281,62 @@ fn slow() -> Scenario {
     )
 }
 
-/// Break the rule: a seal end below a chosen vote.
+/// Break the rule: a ballot bound from a stale register value.
 fn broken() -> Scenario {
     let mut run = opening();
-    run.beat("The client writes w2 at seq 2. Acceptors 2 and 3 vote, so w2 is chosen at slot 3, but the Commit to replica 7 is lost.")
-        .write("w2", 2, "p5")
-        .deliver("Write", "c", "p5")
-        .deliver("Accept", "p5", "a2")
-        .deliver("Accept", "p5", "a3")
-        .deliver("Accepted", "a2", "p5")
-        .deliver("Accepted", "a3", "p5")
-        .drop("Commit", "p5", "r7");
     reshape(&mut run);
-    run.beat("Break the rule: a sealer with no Phase 1 ends segment 1 at the first slot that no replica applied, slot 3.")
-        .forge_seal(1, 3)
+    campaign(&mut run);
+    run.beat("Acceptors 1 and 2 promise: two of three in each grid. Proposer 6 seals segment 1 at slot 3, one above w1, and opens segment 2.")
+        .deliver("Promise", "a1", "p6")
+        .deliver("Promise", "a2", "p6")
+        .drop("Promise", "a3", "p6")
+        .drop("Promise", "a4", "p6")
         .deliver("Seal", "p6", "m")
+        .holds(|run| run.end_of(1) == Some(Slot(3)), "segment 1 ends at slot 3")
         .deliver("Done", "m", "p6")
         .deliver("Boundary", "r7", "m")
         .deliver("Done", "m", "r7");
-    run.beat("Proposer 6 campaigns for segment 2, in force from slot 3. Acceptors 1, 3 and 4 promise. The vote of acceptor 3 is not below the end, so it does not count, and acceptor 2 is slow.")
-        .campaign(6, 2, 2)
-        .settle("Prepare", Some("p6"))
-        .deliver("Promise", "a1", "p6")
-        .deliver("Promise", "a3", "p6")
-        .deliver("Promise", "a4", "p6");
-    run.beat("Proposer 5 stops at the higher promise. The client gives up on w2 and writes w3 at seq 2, and proposer 6 puts it at slot 3.")
-        .deliver("Accept", "p5", "a1")
-        .deliver("Nack", "a1", "p5")
-        .deliver("Reply", "p5", "c")
-        .write("w3", 2, "p6")
+    run.beat("The client writes w2 at seq 2. Acceptors 1 and 4 of segment 2 vote, so w2 is chosen at slot 3, and replica 8 applies it.")
+        .write("w2", 2, "p6")
         .deliver("Write", "c", "p6")
         .deliver("Accept", "p6", "a1")
         .deliver("Accept", "p6", "a4")
+        .drop("Accept", "p6", "a2")
         .deliver("Accepted", "a1", "p6")
         .deliver("Accepted", "a4", "p6")
+        .deliver("Commit", "p6", "r8")
+        .deliver("Applied", "r8", "p6")
+        .deliver("Reply", "p6", "c");
+    run.beat("Break the rule: proposer 5 restarts at ballot 3.5 and takes its configuration from a register value it read before the reshape. It never writes a bind, so ballot 3.5 is bound to segment 1, and its Phase 1 asks acceptors 1, 2 and 3 only.")
+        .forge_bind(5, 3)
+        .deliver("Prepare", "p5", "a2")
+        .deliver("Prepare", "p5", "a3")
+        .drop("Prepare", "p5", "a1")
+        .deliver("Promise", "a2", "p5")
+        .deliver("Promise", "a3", "p5");
+    run.beat("Acceptors 2 and 3 hold no vote at slot 3. Proposer 5 opens, and the client's next write w3 takes slot 3 in the grid of segment 1.")
+        .write("w3", 3, "p5")
+        .deliver("Write", "c", "p5")
+        .deliver("Accept", "p5", "a2")
+        .deliver("Accept", "p5", "a3")
+        .drop("Accept", "p5", "a1")
+        .deliver("Accepted", "a2", "p5")
+        .deliver("Accepted", "a3", "p5")
         .find(
             "What went wrong?",
             &[
-                "The seal end is below a chosen vote",
-                "Proposer 6 did not fill the gap with a no-op",
-                "Acceptor 3 left the grid too early",
+                "Proposer 5 bound its ballot from a stale register value",
+                "Proposer 6 sealed segment 1 too early",
+                "Acceptor 2 promised two ballots",
             ],
             0,
-            "The end must be one above the highest vote that a Phase 1 of the old grid sees. Any two acceptors of the old column include acceptor 2 or 3, which hold w2, so that Phase 1 sees it, ends the segment at slot 4, and writes w2 again at slot 3.",
+            "A leader binds its ballot by compare-and-set on the register, and takes its configuration from that done write. The register binds ballot 3.5 to segment 2, the newest, so its Phase 1 asks a quorum of the grid of segment 2. Any two of acceptors 1, 2 and 4 include acceptor 1 or 4, which hold w2, so proposer 5 writes w2 again at slot 3.",
         )
         .holds(|run| run.broken().is_some(), "two values are chosen at slot 3");
     run.finish(
         "break-the-rule",
-        "Break the rule: seal below a vote",
-        "Slot 3 holds w2 in the grid of segment 1 and w3 in the grid of segment 2.",
+        "Break the rule: a stale bind",
+        "Slot 3 holds w2 in the grid of segment 2 and w3 in the grid of segment 1.",
     )
 }
 
@@ -377,6 +384,8 @@ struct Sent {
 /// One run of the roles, recorded as steps.
 struct Run {
     register: RegisterValue,
+    /// The register value of before the reshape: what a stale reader holds.
+    stale: Option<RegisterValue>,
     acceptors: BTreeMap<NodeId, JournalAcceptor>,
     acceptor_disks: BTreeMap<NodeId, AcceptorDisk>,
     replicas: BTreeMap<NodeId, SegmentReplica>,
@@ -414,6 +423,7 @@ impl Run {
     fn new() -> Self {
         let mut run = Self {
             register: RegisterValue::new(),
+            stale: None,
             acceptors: BTreeMap::new(),
             acceptor_disks: BTreeMap::new(),
             replicas: BTreeMap::new(),
@@ -582,6 +592,7 @@ impl Run {
     /// The controller's reshape: segment 2 with acceptors 1, 2 and 4 and
     /// replica 8. An event step.
     fn reshape(&mut self) -> &mut Self {
+        self.stale = Some(self.register.clone());
         self.reshape_to(&[1, 2, 4], 8);
         self.event(
             "the controller reshapes",
@@ -590,30 +601,37 @@ impl Run {
         self
     }
 
-    /// Proposer `p` campaigns at round `round`, bound to `segment`. An event
-    /// step.
+    /// Proposer `p` campaigns at round `round`: its bind on the register
+    /// binds the ballot to `segment`, the newest. The story shows the bind
+    /// and Phase 1 as one event step.
     fn campaign(&mut self, p: u64, round: u64, segment: u64) -> &mut Self {
-        let value = self.register.clone();
-        let from = self.applied_from(&value);
+        let from = self.applied_from(&self.register.clone());
         let ballot = Ballot {
             round,
             node: NodeId(p),
         };
-        let (leader, effects) = JournalLeader::campaign(
-            Campaign {
-                ballot,
-                segment: SegmentId(segment),
-                from,
-            },
-            &value,
-        )
-        .expect("the segment of the campaign is in the register");
+        let (mut leader, asks) = JournalLeader::campaign(Campaign { ballot, from });
+        assert_eq!(
+            asks,
+            vec![LeaderEffect::Register(Change::Bind { ballot })],
+            "a campaign asks its bind first"
+        );
+        self.register = self
+            .register
+            .apply(&Change::Bind { ballot })
+            .expect("the story binds ballots in order");
+        let effects = leader.observe(&self.register);
+        assert_eq!(
+            leader.segment(),
+            Some(SegmentId(segment)),
+            "the bind takes the newest segment"
+        );
         self.leaders.insert(NodeId(p), leader);
         self.leader_effects(NodeId(p), effects);
         self.event(
             &format!("proposer {p} campaigns"),
             &format!(
-                "Proposer {p} starts Phase 1 at ballot {}, bound to segment {segment}, from slot {}.",
+                "Proposer {p} binds ballot {} to segment {segment}, the newest, by compare-and-set on the register, and starts Phase 1 from slot {}.",
                 ballot_text(ballot),
                 from.0
             ),
@@ -647,22 +665,37 @@ impl Run {
         self
     }
 
-    /// A seal that no leader computed: the fault of the "Break the rule"
-    /// run, sent from proposer 6's lane. An event step.
-    fn forge_seal(&mut self, segment: u64, end: u64) -> &mut Self {
-        self.send(
-            "p6",
-            "m",
-            Payload::Change(Change::Seal {
-                segment: SegmentId(segment),
-                end: Slot(end),
-            }),
-            None,
+    /// A campaign that takes its configuration from the register value of
+    /// before the reshape and writes no bind: the fault of the "Break the
+    /// rule" run. Proposer `p` restarts at round `round`. An event step.
+    fn forge_bind(&mut self, p: u64, round: u64) -> &mut Self {
+        let stale = self
+            .stale
+            .clone()
+            .expect("the run reshaped, so it has a value of before the reshape");
+        let from = self.applied_from(&stale);
+        let ballot = Ballot {
+            round,
+            node: NodeId(p),
+        };
+        let (mut leader, _bind) = JournalLeader::campaign(Campaign { ballot, from });
+        let given = stale
+            .apply(&Change::Bind { ballot })
+            .expect("the value of before the reshape takes the bind");
+        let effects = leader.observe(&given);
+        assert_eq!(
+            leader.segment(),
+            Some(SegmentId(1)),
+            "the stale bind takes segment 1"
         );
+        self.leaders.insert(NodeId(p), leader);
+        self.leader_effects(NodeId(p), effects);
         self.event(
-            "a seal with no Phase 1",
+            &format!("proposer {p} binds from a stale value"),
             &format!(
-                "A seal of segment {segment} at slot {end} leaves, and no Phase 1 computed it."
+                "Proposer {p} takes ballot {} bound to segment 1 from an old register value, with no bind, and starts Phase 1 from slot {}.",
+                ballot_text(ballot),
+                from.0
             ),
         );
         self
@@ -940,7 +973,9 @@ impl Run {
                 let node = node_of(&to);
                 let leader = self.leaders.get_mut(&node).expect("a leader");
                 // The lab has no clock: the id of the delivery is its time.
-                let (proposed, effects) = leader.propose(*token, command.clone(), flight.id);
+                // The lab sends a few writes: the leader's window never fills.
+                let (proposed, effects) =
+                    leader.propose(*token, command.clone(), flight.id, usize::MAX);
                 match proposed {
                     Proposed::Slot(slot) => self.notes.push(format!(
                         "{} holds the write at slot {}.",
@@ -951,6 +986,7 @@ impl Run {
                         self.notes
                             .push(format!("{} does not write now.", party(&to)));
                     }
+                    Proposed::Busy => unreachable!("the lab's window never fills"),
                 }
                 self.leader_effects(node, effects);
                 None
@@ -1173,7 +1209,9 @@ impl Run {
                     {
                         // The leader's Phase-2 tally chose the slot in its
                         // own grid.
-                        let own = self.leaders[&node].segment();
+                        let own = self.leaders[&node]
+                            .segment()
+                            .expect("a leader that chose a slot is bound");
                         self.chosen
                             .entry(*slot)
                             .or_default()
@@ -1468,7 +1506,9 @@ impl Run {
                             format!(
                                 "ballot {} · segment {}",
                                 ballot_text(leader.ballot()),
-                                leader.segment().0
+                                leader
+                                    .segment()
+                                    .map_or("none".to_string(), |s| s.0.to_string())
                             ),
                             phase_text(leader.phase()),
                         ]

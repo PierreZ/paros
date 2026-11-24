@@ -124,7 +124,7 @@ export const LESSONS: Lesson[] = [
     path: "journal/segments/",
     runs: ["base", "slow-acceptor", "break-the-rule"],
     labs: ["records-retire", "records-trim", "records-third"],
-    tlc: { model: "journal-state", config: "register", states: 686322, date: "2026-11-22", checks: "no two values are chosen at one slot and a sealed segment never changes, with two segments, two leaders of the new grid that race to seal, and register writes that are partial or lost" },
+    tlc: { model: "journal-state", config: "register", states: 1052031, date: "2026-11-24", checks: "no two values are chosen at one slot and a sealed segment never changes, with two segments, two leaders of the new grid that race to seal, and register writes that are partial or lost" },
   },
 ];
 

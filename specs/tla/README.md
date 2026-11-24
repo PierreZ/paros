@@ -276,12 +276,15 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | CTRL across segments: the copies of a sealed segment across retire and offload, the repair of a replica log and of an object, the data-loss report | the journal steps are designed, not built | `ctrl-segments/` | #1263 (CTRL recovery in the journal), done |
 | The seal end against a CTRL faulty record: the end counts faulty votes, a later Phase 1 reads the old grid below it, with the tri-state tally over both configurations | the journal steps are designed, not built | `seal-ctrl/` | #1313 (the seal end against a CTRL faulty record), done |
 | The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None` or a multi tag of `Tags`, folded as `None`; `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the acceptor, the leader and the segment replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
+| The journal leader's Phase 1, which reads every slot of every grid that is not retired, and the bind of its ballot to the newest configuration on the register | the leader of `paros_journal::roles` and `Change::Bind` of `paros_journal::register` | `journal-read/` | the review of segments in Paxos, findings 2 and 3 |
 | The compaction of the journal roles: a replica's `Trim` and its blind fold, the acceptors' dropped ranges in their promises, a crash before the drop is durable, the laggard's jump | the replica, the leader and the acceptor of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-compact/` | #1326 (the journal roles over the core) |
 | CTRL in the journal roles: a vote damaged at a boot inside the contract, the leader's tri-state tally, a late answer that decides a blocked slot or skips a dropped one, the learn from a replica, the acceptor's repair at the higher ballot in one write | the leader, the acceptor and the replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-ctrl/` | #1326 (the journal roles over the core) |
+| The answer to a `Prepare` sent again: an acceptor answers again at a ballot it promised, with what its disk holds | the acceptor of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-repromise/` | #1326 (the journal roles over the core) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The heal when a later plan asks a node again, the network delivers a request twice and late, and a node acts on its own view of the register: the highest copy per node, the term check of the heal's compare-and-set, the heal count of the record, a sent heal that ends only on an answer, and a fresh register value before an abandon or a copy wipes a node | `paros_journal::register` (`Rereplicate`, `SegmentRecord::heals`), `SegmentReplica::join`, the controller's heal in `paros_journal_control::role`; walked by `journal-sim`'s heal walk | `heal-reuse/` | #1314 (re-replication of a sealed segment's replica set) |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
-| The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight (`docs/journal/04-roles.md` §J4.2) | not built (the journal core, step 3 of #69 (plan of record)) | `flight-rule/` | #1255 (journal sans-IO contract), done |
+| The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight; the faults of a storage (`Full`, `Lost`, `Unknown`) and their verdicts, with the list of the roles on a disk (`docs/journal/04-roles.md` §J4.2) | the generic `Driver` of `paros-host`; the typed faults are not built (#1414) | `flight-rule/` | #1255 (journal sans-IO contract), done; #1414 (Storage lists the roles on a disk and reports typed faults) |
+| Rule 2 of the journal's sans-IO contract, every input is recorded: the time and the random draws in each input, one timer for each role (`docs/journal/04-roles.md` §J4.2) | not built (`paros-host`, #1413) | `recorded-inputs/` | #1413 (the time, the timers and the draws in each role) |
 | The election over a journal: `SetLeader(new, old)` to win, renewals, the stop at the first refused write, the hand on, the fence of an order by its term (not a Paxos flavor: it runs above the journal) | not built (`paros-election`, after #1323 (build the paros journal v1)) | `election/` | #1420 (paros-election) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
@@ -3426,10 +3429,10 @@ Liveness: `Ends` (the chosen log has no hole and every chosen slot is answered).
 
 | Check | CI | Result |
 |---|---|---|
-| `chain`, `chain_none`, `chain_fresh_none`, `chain_trunc`, `chain_move` | ci | pass: three segments, one acceptor and one replica in each grid; the scripts are the claim of `u1`, its write and a resend of it (67 thousand distinct states); the claim, the write and `SetLeader(None, u1)` (68 thousand); the same on a fresh journal that is multi-writer; a `Truncate` over the write (73 thousand); the `SetLeader` that deposes `u1` and a write of `u1` (80 thousand). About 30 seconds each |
-| `register`, `register_bound_read` | ci | pass: two segments, the first grid of three acceptors, two first leaders of the second grid that race to seal, partial writes that are lost (686 and 837 thousand distinct states, about 3 minutes each). `register_bound_read`: a replica of the next segment starts from a partial boundary write |
-| `disk` | ci | pass: two segments, one crash between two writes, three ballots, any leader change (646 thousand distinct states, about 2 minutes) |
-| `order_atomic`, `order_prom_first` | ci | pass: one segment of three acceptors, two ballots, one crash; an `Accept` that raises the promise is one write, or the promise then the vote (99 and 119 thousand distinct states) |
+| `chain`, `chain_none`, `chain_fresh_none`, `chain_trunc`, `chain_move` | ci | pass: three segments, one acceptor and one replica in each grid; the scripts are the claim of `u1`, its write and a resend of it (124 thousand distinct states); the claim, the write and `SetLeader(None, u1)` (126 thousand); the same on a fresh journal that is multi-writer; a `Truncate` over the write (142 thousand); the `SetLeader` that deposes `u1` and a write of `u1` (161 thousand). About 30 seconds each |
+| `register`, `register_bound_read` | ci | pass: two segments, the first grid of three acceptors, two first leaders of the second grid that race to seal, partial writes that are lost (1.05 and 1.24 million distinct states, about 4 minutes each). `register_bound_read`: a replica of the next segment starts from a partial boundary write |
+| `disk` | ci | pass: two segments, one crash between two writes, three ballots, any leader change (847 thousand distinct states, about 3 minutes) |
+| `order_atomic`, `order_prom_first` | ci | pass: one segment of three acceptors, two ballots, one crash; an `Accept` that raises the promise is one write, or the promise then the vote (101 and 121 thousand distinct states) |
 | `order_vote_first` | ci | violation of `Readable`: the vote, then the promise. `a3` (outside ballot 2's promise quorum) takes ballot 2's `Accept`, its vote is durable and sent, so ballot 2 chooses with `a1` and `a3`; `a3` crashes before its promise is durable, starts again with its old promise, and takes ballot 1's `Accept` at the same slot over its vote. The chosen value is now on one disk only |
 | `order_atomic_nb3`, `order_prom_first_nb3`, `disk_reg` | long 40 | bounded: three ballots; and `disk` on the register's grids (more than 5 million distinct states, no violation found) |
 | `live` | ci | pass: `Ends`, two segments, weak fairness |
@@ -3470,6 +3473,28 @@ What is not in the model: the grid controller's election and a deposed controlle
 (`reads/`, `experiments/segments/reads/`), the acceptors' compaction and the trim-point jump
 (`segment-truncate/` for the rule, `journal-compact/` for the roles), offload (`offload/`), and
 the client's pipeline and resolve.
+
+### `journal-read/`: the journal leader's Phase 1 and its bind
+
+`journal-read/` checks two rules of the journal leader (§J3.1) on `Journal.tla` of
+`journal-state/`, in a folder of its own so that `journal-state/` stays inside one CI job (the
+review of segments in Paxos, findings 2 and 3, 2026-11-23). `ReadRule = "all"`: Phase 1 reads every
+slot of every grid that is not retired, so the seal end hides no vote; `"end"` is the old rule
+that reads a sealed grid only below its end. `Bind = "cas"`: a ballot binds to the newest
+configuration by its own write on the register (`Register`); `"stale"` adds `StaleRegister(b,
+g)`, a ballot bound to an older configuration that a stale register value showed as the newest.
+`RetireRule = "off"` takes the retire out, so a check judges Phase 1 alone. `SpecLate` adds
+`Reread(b)`: a bound ballot, before its Phase 1, takes a later register value than the one of its
+own done `Bind` (a value of another write, or the "ok" again of a resent `Bind`), as
+`JournalLeader::observe` does, and reads the newer ends and retires.
+
+| Check | Result | What it shows |
+|---|---|---|
+| `end_applied_safe` | pass | the end is one above the applied prefix (`EndRule = "applied"`, a wrong end) and there is no retire: Phase 1 that reads every slot keeps one value for each slot (395 thousand distinct states). With the retire, `end_applied` of `journal-state/` still breaks `SealedFrozen`: the end decides the retire |
+| `end_applied_end` | violation of `Agreement` | control: the same wrong end, and Phase 1 reads the sealed grid only below the end |
+| `bind_late` | pass | `register` of `journal-state/` with `SpecLate`: two leaders race to seal, register writes are partial and lost, and a bound leader takes a later value before its Phase 1; every invariant and property of `register` holds (1.1 million distinct states) |
+| `reach_late` | violation of `NoLateRead` | reach: such a later value changes the ends that a leader reads |
+| `bind_stale` | violation of `Agreement` | control: a ballot above a seal is bound to the sealed configuration, reads only its grid as its own, and chooses a second value at a slot that the new grid chose |
 
 ### `journal-compact/`: the compaction of the journal roles, for #1326
 
@@ -3531,10 +3556,25 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
 | `ctrl` | pass | one grid of three, two writes that race for one slot, three ballots, one rot: the safety of `Journal.tla` and `JournalCompact.tla`, `OneValueAtBallot` (two readable votes at one slot and ballot carry one value, in memory and on disk) and `NoProposeBlocked` |
 | `ctrl_g2` | pass | two segments of one acceptor each, a seal: a blocked slot of the old grid below the end |
 | `ctrl_trunc` | pass | one grid of three, a write and a `Truncate` over it, two ballots, one rot: a compaction drops the blocked slot, and the leader skips it (`SkipCompacted`) |
+| `ctrl_re` | pass | `ctrl_trunc` with `SpecRR`: an acceptor answers a `Prepare` again at a ballot it promised (`Repromise`), so the probe, the skip and the decide meet a second answer that carries what its disk holds now. CI checks the states that 7 minutes of BFS reach; `ctrl_re_full` (`--all`) checks them all |
 | `ctrl_drop` | violation | control: a damage that drops the vote (`Damage = "drop"`) breaks `Agreement` |
 | `ctrl_peer` | violation | control: a repair from a peer's vote (`Repair = "peer"`) breaks `OneValueAtBallot` |
 | `ctrl_probe_drop` | violation | control: a probe that tallies an answer that dropped the slot (`ProbeDrops = "ignore"`) chooses a `Noop` over the chosen write and breaks `Agreement` |
 | `reach_blocked`, `reach_probe`, `reach_learn`, `reach_repair`, `reach_skip` | violation | the model blocks a slot, decides one on the probe, learns one, repairs a faulty vote, and skips a dropped one |
+
+### `journal-repromise/`: the answer to a `Prepare` sent again, for #1326
+
+An acceptor that gets a `Prepare` again at a ballot it already promised answers again with no
+write; the answer waits on its last batch, so it carries what its disk holds. `Repromise(a, b)`
+of `Journal.tla` is that answer, in `NextRe` and `SpecRe` (not in `Next`, which would make every
+check of `journal-state/` six times larger). `RolesTrace` maps the roles walk's `repromise` event
+to it. The folder holds only configurations: `Journal.tla` and `MC.tla` are those of
+`journal-state/`.
+
+| Check | Result | What it shows |
+|---|---|---|
+| `repromise` | pass | `order_atomic` with `SpecRe`: one segment of three acceptors, two ballots, a crash between writes; the safety of `Journal.tla` with the second answers |
+| `reach_repromise` | violation | the model sends a second promise answer at one ballot (`OnePromise`) |
 
 ### `re-replication/`: the heal of a sealed segment's replica set, for #1314
 
@@ -3684,6 +3724,23 @@ rules, and each rule is needed. They are proposals for Pierre (PR #1470, rules t
 What is not in the model: reads, the trim and the floor (`re-replication/`), the register across a
 matchmaker handover (`segment-records/`), and a controller's own stale view of the register (the
 controller reads the current record).
+
+### `recorded-inputs/`: every input is recorded, for #1413 (the time, the timers and the draws in each role)
+
+`RecordedInputs.tla` is a host of two roles. A role asks a timer (`Arm`) at the time of its input
+plus a fixed `Delay` plus a jitter, a random draw; it may set its timer again. The host fires a
+timer that is due (`Fire`). The step of a role is a pure function `Step` of its state and its
+input, and the model records each input with the effects of its step. `Rule` selects how the host
+and the roles do it: the time and the draw in the input and one deadline for each role
+(`recorded`), or one of three controls.
+
+| Check | Result | What it shows |
+|---|---|---|
+| `recorded` | pass | every recorded run replays to the same effects at every clock and with every draw (`ReplayExact`), and a role gets a fire only at or after its own deadline (`OwnTimer`) |
+| `clock` | violation | control: a role that reads the clock of the process breaks `ReplayExact` |
+| `draw` | violation | control: a role that draws its own jitter breaks `ReplayExact` |
+| `shared` | violation | control: one timer for every role, whose fire goes to every role, breaks `OwnTimer` |
+| `reach_fire`, `reach_two` | violation | the model fires a timer, and holds two timers at once |
 
 ### `election/`: the election over a journal, for #1420 (paros-election)
 

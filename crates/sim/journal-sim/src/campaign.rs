@@ -5,6 +5,24 @@
 use moonpool_assertions::AssertKind;
 use moonpool_walk::{Model, Walk};
 
+/// The variable that names the first seed of every walk's campaign. CI runs
+/// the walks from seed 1; the `Journal nightly` workflow moves the first
+/// seed with the date, so the walks also run on seeds nobody steered for.
+pub const FROM: &str = "JOURNAL_SIM_FROM";
+
+/// The first seed of a campaign: [`FROM`], or 1 when it is not set.
+///
+/// # Panics
+///
+/// When [`FROM`] is set to a value that is not a number.
+#[must_use]
+pub fn first_seed() -> u64 {
+    std::env::var(FROM).map_or(1, |from| {
+        from.parse()
+            .unwrap_or_else(|_| panic!("{FROM} is not a number: {from:?}"))
+    })
+}
+
 /// The bytes of a site name that an assertion slot keeps.
 const SITE_LEN: usize = 63;
 

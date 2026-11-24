@@ -94,8 +94,15 @@ fn a_phase_1_that_sees_no_vote_ends_the_segment_at_its_start() {
 }
 
 #[test]
-fn a_seal_below_a_chosen_vote_chooses_two_values() {
+fn a_stale_bind_chooses_two_values() {
     let broken = run("break-the-rule");
+    assert!(
+        broken
+            .steps
+            .iter()
+            .any(|step| step.label == "proposer 5 binds from a stale value"),
+        "the fault is a bind from a stale register value"
+    );
     let last = broken.steps.last().expect("steps");
     let said = last.broken.as_deref().expect("two values at one slot");
     assert!(said.contains("slot 3"), "{said}");
