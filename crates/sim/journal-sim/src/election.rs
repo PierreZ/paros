@@ -628,8 +628,9 @@ impl ElectionModel {
                     );
                 }
                 Event::Jumped(at) => assert!(
-                    at > Seq(0) && at <= start,
-                    "{AGREE}: member {index} jumped to {at:?}, starts at {start:?}"
+                    at == start && self.truth.checkpoints.contains(&at.0),
+                    "{AGREE}: member {index} jumped to {at:?}, not a checkpoint taken \
+                     (starts at {start:?})"
                 ),
                 Event::Changed { .. } | Event::Refused(_) => {}
             }

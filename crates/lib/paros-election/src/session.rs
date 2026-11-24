@@ -107,8 +107,9 @@ pub enum Event {
     /// id to go on.
     SessionExpired(SessionId),
     /// A checkpoint that this member wrote landed and the fold took it at
-    /// `seq`, or did not: it landed behind another record, or the journal
-    /// refused it.
+    /// `seq`, or did not: it landed behind another record. A checkpoint
+    /// that the journal refused gives no event: a copy of it can still
+    /// land.
     Checkpoint {
         /// Where it landed, when the fold took it.
         taken: Option<Seq>,
@@ -149,7 +150,7 @@ pub enum State {
 enum Purpose {
     Entry,
     Expire(SessionId, Seq),
-    Checkpoint(Seq),
+    Checkpoint,
     Journal,
     Read,
 }
@@ -305,7 +306,7 @@ impl Member {
             tree: Box::new(tree.clone()),
         };
         let call = self.client.write(vec![codec::encode(&entry)]);
-        self.calls.insert(call, Purpose::Checkpoint(at));
+        self.calls.insert(call, Purpose::Checkpoint);
         self.written.insert(at);
         true
     }
@@ -519,18 +520,15 @@ impl Member {
                     self.events.push(Event::Refused(outcome));
                 }
             }
-            // A refused expiry may go again on a later tick; a refused
-            // checkpoint ends with no position.
+            // A refused expiry may go again on a later tick. A refused
+            // checkpoint stays in `written`: an older copy still in flight
+            // can land, and its fold reports it.
             Purpose::Expire(session, last) => {
                 if !matches!(outcome, Outcome::Written { .. }) {
                     self.expiring.remove(&(session, last));
                 }
             }
-            Purpose::Checkpoint(at) => {
-                if !matches!(outcome, Outcome::Written { .. }) && self.written.remove(&at) {
-                    self.events.push(Event::Checkpoint { taken: None });
-                }
-            }
+            Purpose::Checkpoint => {}
             Purpose::Journal => self.events.push(Event::Journal(outcome)),
         }
     }

@@ -101,7 +101,7 @@ jobs:
         run: |
           earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
           sudo "$earlyoom" -m 8 -s 100 -r 0 \
-            --prefer '^(paros_consensu|consensus_sim|paros_journal|paros_host|paros_election|journal_sim|flavors|walks|mutants|traces|coverage|host)' \
+            --prefer '^(paros_consensu|consensus_sim|paros_journal|paros_host|paros_election|journal_sim|flavors|walks|mutants|traces|coverage|host|election)' \
             --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
             > earlyoom.log 2>&1 &
       # `scripts/mutants.sh` (no flag) is paros-consensus; `--journal` adds the
