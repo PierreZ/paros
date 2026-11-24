@@ -87,6 +87,11 @@ struct Register {
     value: Option<RegisterValue>,
     /// Answers to lose: the change applies, the answer is lost.
     lose: usize,
+    /// Reads after a done change that give no answer, as a quorum read
+    /// that no majority answers with one write.
+    mute_after_done: usize,
+    /// The reads left that give no answer.
+    mute: usize,
     ran: Vec<Change>,
 }
 
@@ -95,6 +100,8 @@ impl Register {
         Self {
             value: Some(value),
             lose: 0,
+            mute_after_done: 0,
+            mute: 0,
             ran: Vec::new(),
         }
     }
@@ -102,6 +109,10 @@ impl Register {
 
 impl ControlRegister for Register {
     fn read(&mut self) -> Option<RegisterValue> {
+        if self.mute > 0 {
+            self.mute -= 1;
+            return None;
+        }
         self.value.clone()
     }
 
@@ -111,6 +122,7 @@ impl ControlRegister for Register {
         let outcome = match value.apply(change) {
             Ok(next) => {
                 self.value = Some(next.clone());
+                self.mute = self.mute_after_done;
                 Outcome::Done(next)
             }
             Err(refusal) => Outcome::Refused(refusal),
@@ -219,6 +231,22 @@ fn a_driver_with_no_holder_campaigns_and_a_healthy_journal_asks_nothing() {
     );
     assert_eq!(polled.sends, Vec::<Ask>::new());
     assert_eq!((cell.takes, cell.gives), (0, 1));
+}
+
+#[test]
+fn a_driver_plans_on_its_won_election_when_the_next_read_gives_no_answer() {
+    let mut register = Register::new(one_segment(ME));
+    register.mute_after_done = 1;
+    let mut cell = TestCell::new();
+    let mut d = driver(0);
+    beat_all(&mut d, 0, &[]);
+    let polled = d.poll(0, &mut register, &mut cell);
+    assert_eq!(register.ran, vec![Change::Elect { holder: ME }]);
+    assert_eq!(d.controller().term(), Some(2));
+    assert!(
+        polled.decision.is_some(),
+        "the driver plans on the value of its done election"
+    );
 }
 
 #[test]

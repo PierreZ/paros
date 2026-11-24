@@ -237,6 +237,13 @@ pub enum Lost {
     /// sees it or misses it, and a later operation that sees it carries it
     /// on.
     Half,
+    /// A majority of the members was down: the read did not close, and
+    /// nothing was written.
+    Down,
+    /// The write is in flight: it lands later ([`QuorumRegister::land`]),
+    /// at a majority, at one member, or nowhere when a later operation
+    /// came first.
+    Late,
 }
 
 /// A fault that a walk arms on a process's way to the register, for its
@@ -250,6 +257,9 @@ pub enum Fault {
     Reply,
     /// The write reaches one member only, and the process hears nothing.
     Half,
+    /// The read runs now and the write later, and the process hears
+    /// nothing: two operations interleave between a read and a write.
+    Late,
 }
 
 /// How the walk's register runs the write of one change.
@@ -261,6 +271,20 @@ enum Reach {
     Unanswered,
     /// One member takes it, and its caller hears nothing.
     Half,
+    /// The write waits in flight, and its caller hears nothing.
+    Late,
+}
+
+/// What a late write did when it landed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Landed {
+    /// A majority took it: its change is done.
+    Done,
+    /// A later operation reached a member first: the write lost there,
+    /// and at most a minority took it.
+    Conflict,
+    /// Fewer than a majority of the members were up: at most one took it.
+    Partial,
 }
 
 /// A change asked again after a write of it got no answer, and done.
@@ -280,18 +304,6 @@ pub enum Again {
 /// A refusal would tell its caller that its write lost, and a first leader
 /// would stop for good on its own seal end.
 pub const AGAIN: &str = "register: a change asked again over its own write is never refused";
-
-/// The faults armed for a process's next change.
-#[derive(Clone, Copy, Debug, Default)]
-struct RegisterFaults {
-    /// The request is lost: the change does not take place.
-    lose_request: bool,
-    /// The reply is lost: the change takes place or is refused, and the
-    /// process hears nothing.
-    lose_reply: bool,
-    /// The write reaches one member only, and the process hears nothing.
-    half: bool,
-}
 
 /// The facts that a member of a journal's register ever held, written by
 /// a done write or by a half write: the truth that a judge of a stop reads
@@ -336,6 +348,8 @@ impl Held {
 struct Members {
     at: BTreeMap<MatchmakerId, RegisterMember>,
     done: RegisterValue,
+    /// The operation of the last done write.
+    done_op: Ballot,
     /// Every fact a member ever held.
     held: Held,
     /// Each change whose write got no answer (one member took it, or a
@@ -344,13 +358,25 @@ struct Members {
     half: Vec<(Change, Ballot)>,
 }
 
+/// A write whose read closed and that waits in flight.
+struct LateWrite {
+    journal: JournalId,
+    op: Ballot,
+    call: RegisterCall,
+}
+
 struct Quorum {
     set: MatchmakerSet,
     journals: BTreeMap<JournalId, Members>,
     next: u64,
+    /// The members whose machine is down: no request reaches them.
+    down: BTreeSet<MatchmakerId>,
+    /// The writes in flight, oldest first.
+    late: Vec<LateWrite>,
     /// The register's own draw of the members that an operation reaches.
     /// It starts from the walk's seed, and then follows the order of the
-    /// changes only: the walk's other draws do not move it.
+    /// register's operations (changes, the repairs of reads and the late
+    /// writes that land): the walk's other draws do not move it.
     draw: u64,
     /// The planted bug of [`AGAIN`]: a change asked again over a value
     /// that holds it is refused.
@@ -359,6 +385,8 @@ struct Quorum {
     /// unless it is asked again after a write of it got no answer.
     refuse_seal: bool,
     again: fn(Again),
+    /// Called on each read that repaired.
+    repaired: fn(),
 }
 
 impl Quorum {
@@ -381,22 +409,29 @@ impl Quorum {
 
 /// The journal's register as the matchmakers run it, three members in one
 /// generation: each change is one [`RegisterCall`] that reads at two
-/// members, checks the guard on the highest write and writes at two
-/// members. A walk can make the write of a change reach one member only
-/// ([`LossyRegister::arm`], [`Lost::Half`]): its caller hears nothing, a
-/// later read may see the write or miss it, and a later operation that sees
-/// it carries it on (`specs/tla/segment-records/`, `Write`). A read
-/// ([`Register::read`]) gives the value of the last done write.
+/// members that are up, checks the guard on the highest write and writes
+/// at two members that are up. A member is up while its machine is
+/// ([`QuorumRegister::set_up`]): with two members down no read closes, and
+/// the register takes no change. A walk can make the write of a change
+/// reach one member only ([`LossyRegister::arm`], [`Lost::Half`]), or wait
+/// in flight and land later ([`Lost::Late`], [`QuorumRegister::land`]),
+/// after other operations ran between its read and its write: its caller
+/// hears nothing, a later read may see the write or miss it, and a later
+/// operation that sees it carries it on (`specs/tla/segment-records/`,
+/// `Write`). A read ([`Register::read`]) is a quorum read
+/// ([`QuorumRegister::quorum_read`]): it can give nothing. The walk's own
+/// truth is [`QuorumRegister::value`], the value of the last done write.
 #[derive(Clone)]
 pub struct QuorumRegister(Rc<RefCell<Quorum>>);
 
 impl QuorumRegister {
     /// A register on three members with no journal; `again` is called on
-    /// each change asked again after a half write that is done. `draw`
+    /// each change asked again after a half write that is done, `repaired`
+    /// on each read that repairs. `draw`
     /// starts the draw of the members that each operation reaches: a walk
     /// takes it from its seed, so each seed sees its own orders.
     #[must_use]
-    pub fn new(again: fn(Again), draw: u64) -> Self {
+    pub fn new(again: fn(Again), repaired: fn(), draw: u64) -> Self {
         let set = MatchmakerSet::new(
             MatchmakerGeneration(0),
             vec![MatchmakerId(1), MatchmakerId(2), MatchmakerId(3)],
@@ -405,11 +440,14 @@ impl QuorumRegister {
             set,
             journals: BTreeMap::new(),
             next: 1,
+            down: BTreeSet::new(),
+            late: Vec::new(),
             // A xorshift never leaves zero.
             draw: draw.max(1),
             refuse_again: false,
             refuse_seal: false,
             again,
+            repaired,
         })))
     }
 
@@ -463,6 +501,7 @@ impl QuorumRegister {
             Members {
                 at,
                 done: value,
+                done_op: Ballot::zero(),
                 held,
                 half: Vec::new(),
             },
@@ -480,26 +519,149 @@ impl QuorumRegister {
             .map(|members| members.done.clone())
     }
 
-    /// Run `change` on the register of `journal`, its write as `reach`
-    /// says. A write that one member takes answers
-    /// [`ChangeError::NoAnswer`].
-    ///
-    /// # Errors
-    ///
-    /// The register refused the change, holds no journal of this id, or
-    /// the write reached one member only ([`ChangeError`]).
+    /// Whether the member `id` is up: a member is up while its machine is.
+    pub fn set_up(&self, id: MatchmakerId, up: bool) {
+        let mut quorum = self.0.borrow_mut();
+        if up {
+            quorum.down.remove(&id);
+        } else {
+            quorum.down.insert(id);
+        }
+    }
+
+    /// The number of writes in flight.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.0.borrow().late.len()
+    }
+
+    /// Land the write in flight at `pick` (an index below
+    /// [`in_flight`](Self::in_flight)) at the first two members of a drawn
+    /// order that are up. It is done at a majority, loses to a later
+    /// operation that reached a member first, or reaches fewer than two
+    /// members.
     ///
     /// # Panics
     ///
-    /// On [`AGAIN`], or when an operation meets a conflict or a handover:
-    /// the walk runs one operation at a time in one generation.
+    /// When `pick` names no write in flight, or a late write is done below
+    /// a done write: two majorities always meet, so a later operation that
+    /// was done read at a member that refuses the late write.
+    #[must_use]
+    pub fn land(&self, pick: usize) -> Landed {
+        let mut quorum = self.0.borrow_mut();
+        let LateWrite {
+            journal,
+            op,
+            mut call,
+        } = quorum.late.remove(pick);
+        let writers = quorum.order();
+        let down = quorum.down.clone();
+        let register = quorum.journals.get_mut(&journal).expect("a journal");
+        let takers: Vec<MatchmakerId> = writers
+            .into_iter()
+            .filter(|m| !down.contains(m))
+            .take(2)
+            .collect();
+        match write(register, &mut call, &takers) {
+            Err(()) => Landed::Conflict,
+            Ok(None) => Landed::Partial,
+            Ok(Some(done)) => {
+                assert!(
+                    op > register.done_op,
+                    "a late write is done above every done write: {op:?} after {:?}",
+                    register.done_op
+                );
+                register.done = done;
+                register.done_op = op;
+                Landed::Done
+            }
+        }
+    }
+
+    /// A quorum read of the register of `journal`: the members that are up
+    /// answer what they hold; the top write is the answer when a majority
+    /// holds it. Else the read repairs, a choice of this fake: it runs a
+    /// `Confirm` of the newest segment's state of the top write, an
+    /// operation that reads at two members and writes the value it reads
+    /// again, so a write that a minority took is done or replaced, and the
+    /// read gives the done value. The `Confirm` can be refused (its read
+    /// missed the minority's write, and the record it names differs or is
+    /// not there), and then the read gives `None`. `None` too when fewer
+    /// than two members are up.
+    #[must_use]
+    pub fn quorum_read(&self, journal: JournalId) -> Option<RegisterValue> {
+        let confirm = {
+            let quorum = self.0.borrow();
+            let register = quorum.journals.get(&journal)?;
+            let held: Vec<&Written> = register
+                .at
+                .iter()
+                .filter(|(m, _)| !quorum.down.contains(m))
+                .map(|(_, member)| &member.state().written)
+                .collect();
+            let top = held.iter().max_by_key(|w| w.op)?;
+            let holders = held.iter().filter(|w| w.op == top.op).count();
+            if holders > register.at.len() / 2 {
+                return Some(top.value.clone());
+            }
+            let newest = top.value.newest()?;
+            Change::Confirm {
+                segment: newest.id(),
+                state: newest.state(),
+            }
+        };
+        let (result, _) = self.run(journal, &confirm, Reach::Answered);
+        if result.is_ok() {
+            (self.0.borrow().repaired)();
+        }
+        result.ok()
+    }
+
+    /// Run `change` on the register of `journal` with `fault`, if any: the
+    /// result its caller hears, and how a change that got no answer was
+    /// lost.
+    pub fn change_with(
+        &self,
+        journal: JournalId,
+        change: &Change,
+        fault: Option<Fault>,
+    ) -> (Result<RegisterValue, ChangeError>, Option<Lost>) {
+        if fault == Some(Fault::Request) {
+            return (Err(ChangeError::NoAnswer), Some(Lost::Request));
+        }
+        let reach = match fault {
+            None => Reach::Answered,
+            Some(Fault::Reply) => Reach::Unanswered,
+            Some(Fault::Half) => Reach::Half,
+            Some(Fault::Late) => Reach::Late,
+            Some(Fault::Request) => unreachable!("answered above"),
+        };
+        let (result, lost) = self.run(journal, change, reach);
+        if reach == Reach::Unanswered {
+            return (
+                Err(ChangeError::NoAnswer),
+                Some(Lost::Reply(result.is_ok())),
+            );
+        }
+        (result, lost)
+    }
+
+    /// Run `change` on the register of `journal`, its write as `reach`
+    /// says, at the members that are up. A write that one member takes, a
+    /// read that a majority of down members does not let close, and a
+    /// write left in flight answer [`ChangeError::NoAnswer`], with how.
+    ///
+    /// # Panics
+    ///
+    /// On [`AGAIN`], or when a new operation meets a conflict or a
+    /// handover: each new operation is above every earlier one, and the
+    /// walk runs one generation.
     fn run(
         &self,
         journal: JournalId,
         change: &Change,
         reach: Reach,
-    ) -> Result<RegisterValue, ChangeError> {
-        let half = reach == Reach::Half;
+    ) -> (Result<RegisterValue, ChangeError>, Option<Lost>) {
         let mut quorum = self.0.borrow_mut();
         let op = Ballot {
             round: quorum.next,
@@ -514,13 +676,15 @@ impl QuorumRegister {
             quorum.refuse_seal,
             quorum.again,
         );
+        let down = quorum.down.clone();
+        let up = |m: &&MatchmakerId| !down.contains(*m);
         let Some(register) = quorum.journals.get_mut(&journal) else {
-            return Err(ChangeError::Unknown);
+            return (Err(ChangeError::Unknown), None);
         };
         let mut call = RegisterCall::new(op, set, change.clone());
         let mut top = Ballot::zero();
         let mut read = CallStep::Pending;
-        for to in &readers {
+        for to in readers.iter().filter(up) {
             let request = call
                 .requests()
                 .into_iter()
@@ -544,38 +708,33 @@ impl QuorumRegister {
         let (seen, value) = match read {
             CallStep::Write { seen, value } => (seen, value),
             CallStep::Refused { refusal, seen } => {
-                return Err(refuse(register, change, &seen, refusal));
+                return (Err(refuse(register, change, &seen, refusal)), None);
             }
+            CallStep::Pending => return (Err(ChangeError::NoAnswer), Some(Lost::Down)),
             other => panic!("a read of the walk's register ends in {other:?}"),
         };
         if let Some(error) = plant(register, (refuse_again, refuse_seal), change, &seen, &value) {
-            return Err(error);
+            return (Err(error), None);
         }
-        let takers: &[MatchmakerId] = if half { &writers[..1] } else { &writers[..2] };
-        let mut done = None;
-        for (to, request) in call.requests() {
-            if !takers.contains(&to) {
-                continue;
-            }
-            let member = register.at.get_mut(&to).expect("a member");
-            let reply = member.step(request).reply;
-            register.held.fold(&member.state().written.value);
-            match call.on_reply(to, reply) {
-                CallStep::Pending => {}
-                CallStep::Done(value) => done = Some(value),
-                other => panic!("a write of the walk's register ends in {other:?}"),
-            }
+        if reach != Reach::Answered && !register.half.iter().any(|(c, _)| c == change) {
+            register.half.push((change.clone(), op));
         }
-        if half {
-            assert!(done.is_none(), "one member is never a majority");
-            if !register.half.iter().any(|(c, _)| c == change) {
-                register.half.push((change.clone(), op));
-            }
-            return Err(ChangeError::NoAnswer);
+        if reach == Reach::Late {
+            quorum.late.push(LateWrite { journal, op, call });
+            return (Err(ChangeError::NoAnswer), Some(Lost::Late));
         }
-        let done = done.expect("two members are a majority");
+        let width = if reach == Reach::Half { 1 } else { 2 };
+        let takers: Vec<MatchmakerId> = writers.iter().filter(up).take(width).copied().collect();
+        let done = write(register, &mut call, &takers)
+            .unwrap_or_else(|()| panic!("a new operation of the walk's register meets a conflict"));
+        let Some(done) = done else {
+            assert!(reach == Reach::Half, "two up members take a write");
+            return (Err(ChangeError::NoAnswer), Some(Lost::Half));
+        };
         assert!(done == value, "a done write is the value it wrote");
-        if let Some(at) = register.half.iter().position(|(c, _)| c == change) {
+        if reach == Reach::Answered
+            && let Some(at) = register.half.iter().position(|(c, _)| c == change)
+        {
             let (_, first) = register.half.remove(at);
             if seen == value && top >= first {
                 again(if top == first {
@@ -585,12 +744,37 @@ impl QuorumRegister {
                 });
             }
         }
-        if reach == Reach::Unanswered && !register.half.iter().any(|(c, _)| c == change) {
-            register.half.push((change.clone(), op));
-        }
         register.done = done.clone();
-        Ok(done)
+        register.done_op = op;
+        (Ok(done), None)
     }
+}
+
+/// Send the write requests of `call` to `takers`, and fold what each
+/// member holds after into the facts of the register. `Ok(Some)` when a
+/// majority took it, `Ok(None)` when fewer did, `Err` when a member had
+/// seen a later operation.
+fn write(
+    register: &mut Members,
+    call: &mut RegisterCall,
+    takers: &[MatchmakerId],
+) -> Result<Option<RegisterValue>, ()> {
+    let mut done = None;
+    for (to, request) in call.requests() {
+        if !takers.contains(&to) {
+            continue;
+        }
+        let member = register.at.get_mut(&to).expect("a member");
+        let reply = member.step(request).reply;
+        register.held.fold(&member.state().written.value);
+        match call.on_reply(to, reply) {
+            CallStep::Pending => {}
+            CallStep::Done(value) => done = Some(value),
+            CallStep::Conflict { .. } => return Err(()),
+            other => panic!("a write of the walk's register ends in {other:?}"),
+        }
+    }
+    Ok(done)
 }
 
 /// The refusal of a planted bug, if one is planted and applies:
@@ -672,23 +856,24 @@ impl Register for QuorumRegister {
         journal: JournalId,
         change: &Change,
     ) -> Result<RegisterValue, ChangeError> {
-        self.run(journal, change, Reach::Answered)
+        self.change_with(journal, change, None).0
     }
 
     fn read(&mut self, journal: JournalId) -> Option<RegisterValue> {
-        self.value(journal)
+        self.quorum_read(journal)
     }
 }
 
 /// The shared register as one process reaches it: a change whose request
 /// or reply the walk lost answers [`ChangeError::NoAnswer`], and so does a
-/// change whose write only one member took, inside the contract of
-/// `paros_journal_io::Register` (the write may or may not have taken place,
-/// and a minority may hold it). Reads are never lost.
+/// change whose write only one member took or that waits in flight, inside
+/// the contract of `paros_journal_io::Register` (the write may or may not
+/// have taken place, may take place later, and a minority may hold it).
 #[derive(Clone)]
 pub struct LossyRegister {
     register: QuorumRegister,
-    faults: Rc<RefCell<RegisterFaults>>,
+    /// The fault armed for the next change.
+    fault: Rc<RefCell<Option<Fault>>>,
     /// Called on each change that got no answer, with how it was lost.
     lost: fn(Lost),
 }
@@ -700,19 +885,14 @@ impl LossyRegister {
     pub fn new(register: QuorumRegister, lost: fn(Lost)) -> Self {
         Self {
             register,
-            faults: Rc::default(),
+            fault: Rc::default(),
             lost,
         }
     }
 
     /// Lose the next change as `fault` says.
     pub fn arm(&self, fault: Fault) {
-        let mut faults = self.faults.borrow_mut();
-        match fault {
-            Fault::Request => faults.lose_request = true,
-            Fault::Reply => faults.lose_reply = true,
-            Fault::Half => faults.half = true,
-        }
+        *self.fault.borrow_mut() = Some(fault);
     }
 }
 
@@ -722,26 +902,10 @@ impl Register for LossyRegister {
         journal: JournalId,
         change: &Change,
     ) -> Result<RegisterValue, ChangeError> {
-        let faults = std::mem::take(&mut *self.faults.borrow_mut());
-        if faults.lose_request {
-            (self.lost)(Lost::Request);
-            return Err(ChangeError::NoAnswer);
-        }
-        let reach = if faults.half {
-            Reach::Half
-        } else if faults.lose_reply {
-            Reach::Unanswered
-        } else {
-            Reach::Answered
-        };
-        let result = self.register.run(journal, change, reach);
-        if faults.half && result == Err(ChangeError::NoAnswer) {
-            (self.lost)(Lost::Half);
-            return result;
-        }
-        if faults.lose_reply {
-            (self.lost)(Lost::Reply(result.is_ok()));
-            return Err(ChangeError::NoAnswer);
+        let fault = self.fault.borrow_mut().take();
+        let (result, lost) = self.register.change_with(journal, change, fault);
+        if let Some(lost) = lost {
+            (self.lost)(lost);
         }
         result
     }

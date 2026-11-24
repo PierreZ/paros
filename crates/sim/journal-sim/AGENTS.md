@@ -72,7 +72,8 @@ Test only: `publish = false`.
   `SameCopyAgain`). `tests/heal.rs`; `tests/controller.rs` runs it in the gate of the role's probes.
 - `src/host.rs`: the driver walk (`HostModel`, #1329): three processes, each a `Driver` of
   `paros-journal-io` with a disk that fails commits inside the contract, a transport through the
-  walk's mailbox, crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
+  walk's mailbox, the register on three matchmakers (`QuorumRegister`, one matchmaker on each
+  process, with lost, half and late writes), crashes that keep the disk and restarts that read it back; its oracles (`AGREE`,
   `FLIGHT`, `ANSWER`), its reach sites and its planted mutants (`HostMutant`). `tests/host.rs`.
 - `src/client.rs`: the client walk (`ClientModel`, #1331): two programs with a `Client` of
   `paros_journal::client`, a lossy mailbox, held and lost answers, seals, `Resolve`, reads; its
@@ -82,9 +83,17 @@ Test only: `publish = false`.
 - `src/backend.rs`: the backends of the driver walk and the whole walk: `Disk`, a disk that
   survives its process and fails commits inside the contract, `Wire`, a transport that judges
   the flight rule at each send, and `QuorumRegister`, the journal's register on three
-  matchmakers (one `RegisterCall` per change, a read and a write at two members), whose write
-  `LossyRegister` can make reach one member only, with the oracle `AGAIN`: a change asked again
-  over a value that holds it is never refused (§J3.4, "a change asked again").
+  matchmakers (one `RegisterCall` per change, a read and a write at the members that are up, in
+  an order drawn from the seed). A matchmaker is down while its machine is: a change or a read
+  that no majority answers gives no answer. A read gives the top write that a majority holds,
+  or repairs a write that a minority took with a `Confirm` (a choice of this fake; the repair can
+  be refused, and the read gives no answer).
+  `LossyRegister` loses a change's request or its reply, makes its write reach one member only,
+  or holds it in flight (`Fault::Late`) while other operations run, until `QuorumRegister::land`
+  writes it at the members that are up. The oracle `AGAIN`: a change asked again over a value
+  that holds it is never refused (§J3.4, "a change asked again"). `tests/backend.rs` runs the
+  register contract suite of `paros-journal-io` (`contract::register`) on both registers: a
+  fake that breaks its trait's contract tests nothing.
 - `src/whole.rs`: the whole-journal walk (`WholeModel`, #1445): two journals on nine machines in
   three zones, a `Driver` on each machine, the controllers of each journal run by
   `paros_journal_control::ControlDriver` on the reports of the machines (the walk is its register

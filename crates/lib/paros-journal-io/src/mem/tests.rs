@@ -199,3 +199,12 @@ fn mem_register_loses_a_planted_request_or_reply() {
         "a lost reply hides a done write"
     );
 }
+
+#[test]
+fn mem_register_keeps_the_register_contract() {
+    contract::register(|journal| {
+        let register = MemRegister::new();
+        register.create(journal, RegisterValue::new());
+        register
+    });
+}

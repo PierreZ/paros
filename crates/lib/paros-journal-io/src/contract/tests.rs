@@ -116,3 +116,61 @@ impl Clock for Back {
 fn the_clock_suite_fails_a_clock_that_goes_back() {
     clock(&Back(std::cell::Cell::new(10)), || {});
 }
+
+/// A register that takes every change as done and never moves its value.
+struct Yes(RegisterValue);
+
+impl Register for Yes {
+    fn change(
+        &mut self,
+        journal: JournalId,
+        _change: &Change,
+    ) -> Result<RegisterValue, ChangeError> {
+        if journal == JournalId(7) {
+            Ok(self.0.clone())
+        } else {
+            Err(ChangeError::Unknown)
+        }
+    }
+
+    fn read(&mut self, journal: JournalId) -> Option<RegisterValue> {
+        (journal == JournalId(7)).then(|| self.0.clone())
+    }
+}
+
+#[test]
+#[should_panic(expected = "register: a change whose guard holds is done with the applied value")]
+fn the_register_suite_fails_a_register_that_never_writes() {
+    register(|_| Yes(RegisterValue::new()));
+}
+
+/// A register that refuses no change: it writes the value that its guard
+/// would refuse too.
+struct NoGuard(crate::mem::MemRegister);
+
+impl Register for NoGuard {
+    fn change(
+        &mut self,
+        journal: JournalId,
+        change: &Change,
+    ) -> Result<RegisterValue, ChangeError> {
+        match self.0.change(journal, change) {
+            Err(ChangeError::Refused(_)) => self.0.read(journal).ok_or(ChangeError::Unknown),
+            answer => answer,
+        }
+    }
+
+    fn read(&mut self, journal: JournalId) -> Option<RegisterValue> {
+        self.0.read(journal)
+    }
+}
+
+#[test]
+#[should_panic(expected = "register: a change whose guard fails is refused with its guard")]
+fn the_register_suite_fails_a_register_that_refuses_nothing() {
+    register(|journal| {
+        let mem = crate::mem::MemRegister::new();
+        mem.create(journal, RegisterValue::new());
+        NoGuard(mem)
+    });
+}

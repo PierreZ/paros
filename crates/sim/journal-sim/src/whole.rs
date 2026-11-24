@@ -38,9 +38,13 @@
 //! (every machine of it crashes at once); a disk fails a commit inside the
 //! contract (before or after its write); the network loses, repeats and
 //! reorders messages. A register change loses its request or its reply,
-//! or its write reaches one matchmaker only and no answer comes: the
-//! driver asks it again, and a later operation may carry the half write
-//! on first (a bind, an election, a boundary state over a seal). A crash drops the driver and keeps the disk; a
+//! its write reaches one matchmaker only and no answer comes, or its write
+//! waits in flight while other operations run and lands later (the move
+//! `Land`): the driver asks it again, and a later operation may carry the
+//! half write on first (a bind, an election, a boundary state over a seal).
+//! A matchmaker is down while its machine is; a read or a change that no
+//! majority answers gives no answer, and a read repairs a write that a
+//! minority took. A crash drops the driver and keeps the disk; a
 //! restart is a new driver on the same disk, and placement serves its roles
 //! again. A machine that stays down long enough is down for the controller,
 //! which heals the grid and the replica set with a reshape, or holds and
@@ -135,11 +139,11 @@ use paros_journal_io::mem::ManualClock;
 use paros_journal_io::storage::Storage as _;
 use paros_journal_io::{
     Address, Assignment, CallId, CallOutcome, ChangeError, Clock, Driver, Envelope, HostConfig,
-    JournalId, Notice, Op, Register,
+    JournalId, Notice, Op,
 };
 
 pub use crate::backend::AGAIN;
-use crate::backend::{Again, Disk, Fault, LossyRegister, Lost, QuorumRegister, Wire};
+use crate::backend::{Again, Disk, Fault, Landed, LossyRegister, Lost, QuorumRegister, Wire};
 use crate::oracle::{Truth, as_written, label};
 
 /// Oracle: one command is chosen at each slot of a journal.
@@ -179,6 +183,16 @@ pub mod reach {
     /// A machine's register change wrote at one member only, and got no
     /// answer.
     pub const HALF: &str = "whole journal: a register write reached one member only";
+    /// A register change found two matchmakers down: no read closed.
+    pub const FROZEN: &str = "whole journal: a register change found a majority down";
+    /// A register change's write waited in flight.
+    pub const LATE: &str = "whole journal: a register write waited in flight";
+    /// A write in flight landed at a majority, after other operations.
+    pub const LATE_DONE: &str = "whole journal: a write in flight landed at a majority";
+    /// A read found no majority on the top write and repaired it.
+    pub const REPAIRED: &str = "whole journal: a register read repaired a minority write";
+    /// A write in flight lost to a later operation.
+    pub const LATE_CONFLICT: &str = "whole journal: a write in flight lost to a later operation";
     /// A change asked again after no answer found its own write, and was
     /// done.
     pub const AGAIN_OWN: &str = "whole journal: a change asked again met its own half write";
@@ -275,6 +289,11 @@ pub mod reach {
         LOST_HEALED,
         LEADER_STOPPED,
         DISK_TRIM,
+        FROZEN,
+        LATE,
+        LATE_DONE,
+        LATE_CONFLICT,
+        REPAIRED,
     ];
 }
 
@@ -335,8 +354,11 @@ pub enum WholeMutant {
 const CRASH: (u32, u32) = (1, 4);
 const JOURNALS: [JournalId; 2] = [JournalId(1), JournalId(2)];
 const MACHINES: [u64; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-/// The machines of the matchmakers, one in each zone.
+/// The machines of the matchmakers, one in each zone: matchmaker `i + 1`
+/// on `MATCHMAKERS[i]`.
 const MATCHMAKERS: [u64; 3] = [1, 4, 7];
+/// The ways a register change is lost.
+const FAULTS: [Fault; 4] = [Fault::Request, Fault::Reply, Fault::Half, Fault::Late];
 const TICK: u64 = 1_000;
 /// A machine down for this many ticks is down for the controller; before,
 /// it is suspect.
@@ -405,6 +427,13 @@ fn lost_change(lost: Lost) {
         reach::LOST_UNDONE
     );
     sometimes!(lost == Lost::Half, reach::HALF);
+    sometimes!(lost == Lost::Down, reach::FROZEN);
+    sometimes!(lost == Lost::Late, reach::LATE);
+}
+
+/// [`reach::REPAIRED`] on each read that repaired a write a minority took.
+fn repaired() {
+    sometimes!(true, reach::REPAIRED);
 }
 
 /// [`reach::AGAIN_OWN`] and [`reach::AGAIN_CARRIED`] on each change asked
@@ -472,6 +501,8 @@ struct Journal {
     healed: BTreeSet<SegmentId>,
     /// The nodes that a done heal added to the set of a retired segment.
     added: BTreeSet<(SegmentId, NodeId)>,
+    /// The replica set of each segment when the walk first saw it.
+    last_replicas: BTreeMap<SegmentId, Vec<NodeId>>,
     /// The last time each machine was up when the walk published the
     /// reports to the journal's controllers: the truth of [`ALERTS`].
     heard: BTreeMap<u64, u64>,
@@ -551,6 +582,8 @@ pub enum WholeAction {
     Mute,
     /// A machine that is not a matchmaker is lost for good.
     Lose,
+    /// A register write in flight lands.
+    Land,
 }
 
 impl Model for WholeModel {
@@ -576,6 +609,7 @@ impl Model for WholeModel {
             WholeAction::Late,
             WholeAction::Mute,
             WholeAction::Lose,
+            WholeAction::Land,
         ]
     }
 
@@ -602,7 +636,7 @@ impl Model for WholeModel {
             (WholeAction::Tick | WholeAction::Campaign, _) => 8,
             (WholeAction::Write, _) => 10,
             (WholeAction::Control, _) => 4,
-            (WholeAction::Resolve, _) => 2,
+            (WholeAction::Resolve | WholeAction::Land, _) => 2,
         }
     }
 
@@ -619,6 +653,7 @@ impl Model for WholeModel {
             WholeAction::Late => self.late(cx),
             WholeAction::Mute => self.mute(cx),
             WholeAction::Lose => self.lose(cx),
+            WholeAction::Land => self.land(cx),
         }
         self.place();
         self.judge_heals();
@@ -686,6 +721,12 @@ impl Model for WholeModel {
     }
 
     fn converged(&self) -> Result<(), String> {
+        if self.register.in_flight() > 0 {
+            return Err(format!(
+                "{} register writes are in flight",
+                self.register.in_flight()
+            ));
+        }
         if let Some(m) = MACHINES
             .iter()
             .find(|m| self.machines[m].driver.is_none() && self.lost != Some(**m))
@@ -738,6 +779,16 @@ impl Model for WholeModel {
                 journal.again,
                 journal.belows.len()
             );
+            for ctl in &journal.ctls {
+                let _ = writeln!(
+                    text,
+                    "  controller {:?}: {:?}",
+                    ctl.node(),
+                    ctl.driver
+                        .as_ref()
+                        .map(|d| (d.controller().standing(), d.controller().call()))
+                );
+            }
         }
         let down: Vec<u64> = MACHINES
             .into_iter()
@@ -784,7 +835,7 @@ impl WholeModel {
     ///
     /// When a first segment cannot open.
     pub fn build(mutant: WholeMutant, cx: &mut Cx<'_, Self>) -> Self {
-        let register = QuorumRegister::new(asked_again, cx.rng().next_u64());
+        let register = QuorumRegister::new(asked_again, repaired, cx.rng().next_u64());
         if mutant == WholeMutant::RefuseAgain {
             register.plant_refuse_again();
         }
@@ -843,6 +894,7 @@ impl WholeModel {
                 sealed_at: BTreeMap::new(),
                 healed: BTreeSet::new(),
                 added: BTreeSet::new(),
+                last_replicas: BTreeMap::new(),
                 heard: BTreeMap::new(),
                 ctls,
                 claimed: false,
@@ -955,6 +1007,15 @@ impl WholeModel {
             driver.assign(assignment.clone());
         }
         machine.driver = Some(driver);
+        self.matchmaker_up(m, true);
+    }
+
+    /// A matchmaker is up while its machine is.
+    fn matchmaker_up(&self, m: u64, up: bool) {
+        if let Some(i) = MATCHMAKERS.iter().position(|mm| *mm == m) {
+            let id = MatchmakerId(u64::try_from(i).expect("three") + 1);
+            self.register.set_up(id, up);
+        }
     }
 
     /// `machine` goes down: its driver, its leaders and its controllers are
@@ -969,6 +1030,7 @@ impl WholeModel {
         machine.inbox.borrow_mut().clear();
         machine.outbox.borrow_mut().clear();
         machine.ever_down = true;
+        self.matchmaker_up(m, false);
         for journal in &mut self.journals {
             for ctl in &mut journal.ctls {
                 if ctl.machine == m {
@@ -1073,6 +1135,22 @@ impl WholeModel {
                 }
                 let journal = &mut self.journals[j];
                 journal.opened_at.entry(record.id()).or_insert(now);
+                // A segment's replica set changes only by a heal of the
+                // retired segment: a node outside the set the walk saw last
+                // was added by a done heal, whichever operation made it
+                // done (a late write too). A heal can add again a node id
+                // that an earlier heal removed, so the diff is against the
+                // last set, not the first.
+                let last = journal
+                    .last_replicas
+                    .entry(record.id())
+                    .or_insert_with(|| record.replicas().to_vec());
+                for node in record.replicas() {
+                    if !last.contains(node) {
+                        journal.added.insert((record.id(), *node));
+                    }
+                }
+                *last = record.replicas().to_vec();
                 if record.state() >= SegmentState::Sealed
                     && !journal.sealed_at.contains_key(&record.id())
                 {
@@ -2476,14 +2554,21 @@ impl WholeModel {
         if self.mutant == WholeMutant::LyingDisk {
             machine.disk.arm_lie();
         } else if cx.rng().chance(1, 3) {
-            let fault = *cx
-                .rng()
-                .pick(&[Fault::Request, Fault::Reply, Fault::Half])
-                .expect("three ways");
+            let fault = *cx.rng().pick(&FAULTS).expect("four ways");
             machine.register.arm(fault);
         } else {
             machine.disk.arm(cx.rng().chance(1, 2));
         }
+    }
+
+    /// One register write in flight lands, at the members that are up.
+    fn land(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(pick) = cx.rng().index(self.register.in_flight()) else {
+            return;
+        };
+        let landed = self.register.land(pick);
+        sometimes!(landed == Landed::Done, reach::LATE_DONE);
+        sometimes!(landed == Landed::Conflict, reach::LATE_CONFLICT);
     }
 
     /// The reports of one controller are lost for longer than the down
@@ -2543,24 +2628,38 @@ struct WalkRegister<'a, 'b> {
 
 impl ControlRegister for WalkRegister<'_, '_> {
     fn read(&mut self) -> Option<RegisterValue> {
-        self.register.value(self.id)
+        self.register.quorum_read(self.id)
     }
 
+    /// A controller's change meets the faults of a machine's change: its
+    /// request or reply is lost, its write reaches one member only or
+    /// waits in flight, and a majority of the members may be down.
     fn run(&mut self, change: &Change) -> Outcome {
-        if self.chaos && self.cx.rng().chance(1, 10) {
-            self.ran.push((change.clone(), Outcome::NoAnswer, false));
-            return Outcome::NoAnswer;
-        }
-        let result = self.register.change(self.id, change);
-        let done = result.is_ok();
-        let outcome = if self.chaos && self.cx.rng().chance(1, 8) {
-            Outcome::NoAnswer
+        // A lost request one time in ten and a lost reply one time in
+        // eight of the rest, as before the half and late writes; a half or
+        // a late write one time in eight of the rest again.
+        // In 640ths: 64 (1/10), 72 (1/8 of 576) and 63 (1/8 of 504).
+        let roll = if self.chaos {
+            self.cx.rng().index(640)
         } else {
-            match result {
-                Ok(value) => Outcome::Done(value),
-                Err(ChangeError::Refused(refusal)) => Outcome::Refused(refusal),
-                Err(other) => panic!("the walk's register holds journal {:?}: {other:?}", self.id),
-            }
+            None
+        };
+        let fault = match roll {
+            Some(0..64) => Some(Fault::Request),
+            Some(64..136) => Some(Fault::Reply),
+            Some(136..199) => self.cx.rng().pick(&[Fault::Half, Fault::Late]).copied(),
+            _ => None,
+        };
+        let (result, lost) = self.register.change_with(self.id, change, fault);
+        if let Some(lost) = lost {
+            lost_change(lost);
+        }
+        let done = result.is_ok() || lost == Some(Lost::Reply(true));
+        let outcome = match result {
+            Ok(value) => Outcome::Done(value),
+            Err(ChangeError::Refused(refusal)) => Outcome::Refused(refusal),
+            Err(ChangeError::NoAnswer) => Outcome::NoAnswer,
+            Err(other) => panic!("the walk's register holds journal {:?}: {other:?}", self.id),
         };
         self.ran.push((change.clone(), outcome.clone(), done));
         outcome
