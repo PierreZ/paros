@@ -668,10 +668,10 @@ fn tour() -> Scenario {
         .settle(move |message| of(8)(message) && phase1(message));
     run.beat("Proposer 8 must propose the value of the highest vote it heard of. This is the rule: it asks for alpha.")
         .more("fenced-out")
-        .settle(move |message| of(8)(message) && message.kind == "Accept")
-        .holds(voted(1, "alpha"), "acceptor 1 votes for alpha at ballot 1.8");
+        .holds(on_wire("Accept"), "proposer 8 asks for votes");
     run.beat("The acceptors vote for alpha at 1.8. A chosen value never changes: a later ballot finds it and keeps it.")
         .settle(any)
+        .holds(voted(1, "alpha"), "acceptor 1 votes for alpha at ballot 1.8")
         .holds(chosen("alpha"), "alpha stays chosen");
     run.beat("Now acceptor 3 stops. Proposer 5 opens a higher ballot again.")
         .more("acceptor-down")

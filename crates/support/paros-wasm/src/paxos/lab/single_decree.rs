@@ -233,10 +233,12 @@ fn holders(world: &WorldView, value: &str) -> Vec<u64> {
         .collect()
 }
 
-/// A majority of the acceptors holds no vote for the value chosen first.
+/// A majority of the acceptors holds no vote for the value chosen first, or
+/// a second value is chosen already: once two values are chosen, the
+/// exercise is done, whatever the acceptors hold after it.
 fn majority_forgot(lab: &Lab) -> bool {
     let world = lab.view_of_world();
-    first_value(&world).is_some_and(|value| holders(&world, &value).len() < 2)
+    two_chosen(lab) || first_value(&world).is_some_and(|value| holders(&world, &value).len() < 2)
 }
 
 /// Two different values are chosen.
@@ -252,7 +254,7 @@ const TWO_INTRO: &[Step] = &[Step {
 
 const TWO_PARTS: &[Part] = &[
     Part {
-        label: "A value is chosen",
+        label: "A proposer learns that a value is chosen",
         holds: |lab| lab.view_of_world().chosen.is_some(),
         idea: "A value is chosen when a majority votes for it at one ballot.",
         plan: "Deliver every message. When the wire is empty and no value is chosen, open a \
@@ -283,7 +285,7 @@ const TWO_PARTS: &[Part] = &[
         dead: |_| None,
     },
     Part {
-        label: "A second value is chosen",
+        label: "A proposer learns that a second value is chosen",
         holds: two_chosen,
         idea: "A proposer that hears of no vote is free to propose its own value.",
         plan: "Open a ballot for the other value. Keep its messages away from the acceptor that \

@@ -132,9 +132,10 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
     it). `LabView` gives `parts`, `hint` (of the first line that does not hold) and `stuck`.
     `DEAD_ENDS` in `lab/tests.rs` names the parts of each guided exercise that have a dead end
     (none for `two-values`: with the disk rule off, a wipe and a new ballot always remain), and
-    the random walk of the tests must meet exactly those. "Chosen" in a single-decree part is
-    `DecreeWorld::chosen_by_votes`: a Phase-2 quorum voted for one value at one ballot, before
-    any proposer learns it.
+    the random walk of the tests must meet exactly those. "No value is chosen" in `duel` and
+    `vote-not-chosen` is `DecreeWorld::chosen_by_votes`: a Phase-2 quorum voted for one value at
+    one ballot, before any proposer learns it. `two-values` judges what a proposer learns
+    (`chosen` of the view, `DecreeWorld::violation`), and its labels say so.
   - `guide`: the solution as `Step`s. The tests play it, and "Show me how" plays it on the page
     (`PaxosLab::guide_step(n)`). A guide step makes the lab a demo: its goal never counts as
     solved, and the reader's moves wait until Start again.

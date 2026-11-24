@@ -36564,12 +36564,12 @@
         {
           "says": "Proposer 8 must propose the value of the highest vote it heard of. This is the rule: it asks for alpha.",
           "from": 23,
-          "to": 26,
+          "to": 23,
           "more": "fenced-out"
         },
         {
           "says": "The acceptors vote for alpha at 1.8. A chosen value never changes: a later ballot finds it and keeps it.",
-          "from": 26,
+          "from": 23,
           "to": 32
         },
         {

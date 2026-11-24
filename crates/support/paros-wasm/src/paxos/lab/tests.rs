@@ -680,3 +680,32 @@ fn a_vote_above_slot_2_keeps_slot_2_alive() {
     }
     assert!(lab.view().solved, "the hints reach the goal");
 }
+
+/// Two votes at ballot 1.5 choose alpha, even when every Accepted is lost
+/// and no proposer learns it: the duel counts it as chosen, and names the
+/// dead end.
+#[test]
+fn a_majority_of_votes_is_chosen_before_a_proposer_learns_it() {
+    let mut lab = Lab::new("duel").expect("duel exists");
+    lab.extra("Proposer 5 opens a ballot for alpha");
+    lab.settle(|m| m.kind == "Prepare" || m.kind == "Promise");
+    lab.settle(|m| m.kind == "Accept" && m.to != "n3");
+    lab.drop_all(|_| true);
+    let world = lab.view_of_world();
+    assert!(world.chosen.is_none(), "no proposer learned it");
+    assert!(
+        lab.game()
+            .world()
+            .decree()
+            .expect("a single-decree world")
+            .chosen_by_votes(),
+        "two of three votes at one ballot choose alpha"
+    );
+    let view = lab.view();
+    assert!(!view.parts[2].holds, "the checklist says alpha is chosen");
+    assert!(
+        view.stuck.is_some(),
+        "a chosen value is a dead end of the duel"
+    );
+    assert!(!lab.goal());
+}

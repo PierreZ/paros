@@ -343,8 +343,9 @@ impl DecreeWorld {
         &self.decisions
     }
 
-    /// Whether a value is chosen: a Phase-2 quorum of the configuration
-    /// voted for it at one ballot, at some point of the run. This holds
+    /// Whether a value is chosen: a Phase-2 quorum of the world's acceptor
+    /// configuration (not a proposer's own, after `reconfigure`) voted for it
+    /// at one ballot, at some point of the run. This holds
     /// before any proposer learns it (`DecreeWorld::decisions`), and it stays
     /// when a voter votes again at a later ballot or loses its disk.
     #[must_use]
