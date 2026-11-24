@@ -209,6 +209,10 @@ for (const ex of EXERCISES) {
     await expect(lab.locator(".lab-tab.now")).toBeVisible();
     const done = lab.locator(".lab-done");
     await expect(done).toBeHidden();
+    // The stage of the story (public/stage.js) draws the parties from the
+    // engine's typed state: a log world names its leader.
+    await expect(lab.locator(".stage-node").first()).toBeVisible();
+    if (ex.id === "gap") await expect(lab.locator(".stage-node.leader")).toHaveCount(1);
     const problem = await page.evaluate((moves) => {
       const panel = document.getElementById("your-turn-lab");
       const matches = (li, f) => {

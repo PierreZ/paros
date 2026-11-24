@@ -18,6 +18,7 @@ use crate::paxos::lab::WireMessage;
 use crate::paxos::trace::{Lane, message_label};
 use crate::paxos::view::message_view;
 use crate::steps::LogCell;
+use crate::steps::story::NodeState;
 
 /// A move of an exercise other than deliver and drop.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,11 +80,17 @@ impl Desk {
     /// A few lines of state per lane.
     #[must_use]
     pub fn state(&self) -> Vec<Vec<String>> {
+        Self::shown_of(self.run.state())
+    }
+
+    /// Keep the shown lanes of a list in lane order: every one but the
+    /// batcher's.
+    fn shown_of<T>(all: Vec<T>) -> Vec<T> {
         parties()
             .into_iter()
-            .zip(self.run.state())
+            .zip(all)
             .filter(|(who, _)| *who != Who::Batcher)
-            .map(|(_, lines)| lines)
+            .map(|(_, item)| item)
             .collect()
     }
 
@@ -91,12 +98,15 @@ impl Desk {
     /// chosen slots of a replica.
     #[must_use]
     pub fn logs(&self) -> Vec<Vec<LogCell>> {
-        parties()
-            .into_iter()
-            .zip(self.run.logs())
-            .filter(|(who, _)| *who != Who::Batcher)
-            .map(|(_, cells)| cells)
-            .collect()
+        Self::shown_of(self.run.logs())
+    }
+
+    /// The typed state of each lane, in lane order, as the story of the
+    /// page draws it (up or down, role, ballot, promise, the holes of a
+    /// node's votes).
+    #[must_use]
+    pub fn nodes(&self) -> Vec<NodeState> {
+        Self::shown_of(self.run.lane_nodes(&self.run.durable()))
     }
 
     /// Whether each lane is up.

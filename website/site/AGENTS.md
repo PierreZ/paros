@@ -147,8 +147,8 @@ A lesson can end with exercises on the live core (`labs` in `src/course.ts`). Th
 `lab: true` in its front matter and puts `<div data-lab="id id id">` under `## Your turn`.
 `public/lab.js` loads the `paxos` wasm bundle and runs `PaxosLab` (`paros-wasm`,
 `src/paxos/lab.rs`): one tab per exercise, the goal, the parties on the stage of the story
-(`public/stage.js`: a grid lane at its cell, the log strip of each node of a log with its
-holes, and each message on the wire as an arrow that crosses when the reader delivers or
+(`public/stage.js`: a grid lane at its cell, the leader's ring, the log strip of each node
+of a log with its holes, and each message on the wire as an arrow that crosses when the reader delivers or
 drops it), the wire as a list with Deliver and Drop on each message (large buttons, for a phone), the
 extra moves of the exercise, what the core said about the last move, Deliver all (every
 message until the wire is empty, one move), Undo and Start again. When the engine says

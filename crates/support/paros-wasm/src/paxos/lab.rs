@@ -25,10 +25,11 @@ use crate::paxos::action::Action;
 use crate::paxos::level::WorldKind;
 use crate::paxos::level::common::{crash, open, propose, start_election as elect};
 use crate::paxos::trace::compart::desk::{Desk, Verb};
-use crate::paxos::trace::{lane_holes, lane_logs, lane_of, lane_state, lanes, message_label};
+use crate::paxos::trace::{lane_logs, lane_of, lane_state, lane_states, lanes, message_label};
 use crate::paxos::view::{NodeFlavour, RoleView, WorldView};
 use crate::paxos::{ActionError, Game};
 use crate::steps::LogCell;
+use crate::steps::story::NodeState;
 
 pub use crate::paxos::trace::Lane;
 
@@ -594,9 +595,9 @@ pub struct LabView {
     /// The log of each lane, in lane order, for the log strip under its
     /// node: empty in a world of one decree.
     pub logs: Vec<Vec<LogCell>>,
-    /// The holes of each lane's log: the slots below its highest record
-    /// that hold no record.
-    pub holes: Vec<Vec<u64>>,
+    /// The typed state of each lane, as the story draws it: up or down,
+    /// its role (a leader gets the accent ring), the holes of its log.
+    pub nodes: Vec<NodeState>,
     /// The messages on the wire.
     pub wire: Vec<WireMessage>,
     /// The other moves, by their button text.
@@ -917,21 +918,12 @@ impl Lab {
             Engine::Game(game) => game_parts(game),
             Engine::Compart(desk) => (Desk::lanes(), desk.state(), desk.alive(), desk.chosen()),
         };
-        let (logs, holes) = match &self.engine {
+        let (logs, nodes) = match &self.engine {
             Engine::Game(game) => {
                 let world = game.world().view();
-                (lane_logs(&world), lane_holes(&world))
+                (lane_logs(&world), lane_states(&world))
             }
-            Engine::Compart(desk) => {
-                let logs = desk.logs();
-                // The deployment of the exercises never truncates: every
-                // log starts at slot 0.
-                let holes = logs
-                    .iter()
-                    .map(|cells| crate::steps::story::holes(0, cells.iter().map(|cell| cell.slot)))
-                    .collect();
-                (logs, holes)
-            }
+            Engine::Compart(desk) => (desk.logs(), desk.nodes()),
         };
         let solved = self.solved();
         LabView {
@@ -943,7 +935,7 @@ impl Lab {
             state,
             alive,
             logs,
-            holes,
+            nodes,
             wire: self.wire(),
             extras: (self.exercise.extras)()
                 .into_iter()
@@ -1017,16 +1009,8 @@ impl Lab {
 fn game_parts(game: &Game) -> (Vec<Lane>, Vec<Vec<String>>, Vec<bool>, Vec<String>) {
     let world = game.world().view();
     let lanes = lanes(&world);
-    let alive = lanes
-        .iter()
-        .map(|lane| {
-            world
-                .nodes
-                .iter()
-                .find(|node| format!("n{}", node.id) == lane.id)
-                .is_none_or(|node| node.alive)
-        })
-        .collect();
+    // A matchmaker lane is up or down as its matchmaker is.
+    let alive = lane_states(&world).iter().map(|node| node.alive).collect();
     let chosen = match game.world() {
         WorldKind::Decree(decree) => decree
             .decisions()
@@ -1084,14 +1068,27 @@ mod tests {
     }
 
     #[test]
-    fn the_view_draws_each_log_and_its_hole() {
+    fn the_view_draws_each_log_its_hole_and_the_leader() {
         let decree = Lab::new("vote-not-chosen").expect("an exercise").view();
         assert!(decree.logs.is_empty(), "one decree has no log strip");
         let mut lab = Lab::new("gap").expect("an exercise");
         let view = lab.view();
         assert_eq!(view.logs.len(), view.lanes.len(), "one log per lane");
-        assert_eq!(view.holes.len(), view.lanes.len(), "one hole list per lane");
-        assert!(view.holes.iter().all(Vec::is_empty), "no hole at the start");
+        assert_eq!(view.nodes.len(), view.lanes.len(), "one state per lane");
+        assert!(
+            view.nodes.iter().all(|node| node.holes.is_empty()),
+            "no hole at the start"
+        );
+        let n0 = view
+            .lanes
+            .iter()
+            .position(|lane| lane.id == "n0")
+            .expect("lane n0");
+        assert_eq!(
+            view.nodes[n0].role.as_deref(),
+            Some("leader"),
+            "node 0 leads"
+        );
         lab.extra("The client writes bravo");
         lab.drop_all(|m| m.kind == "Accept");
         lab.extra("The client writes charlie");
@@ -1102,7 +1099,7 @@ mod tests {
             .iter()
             .position(|lane| lane.id == "n1")
             .expect("lane n1");
-        assert_eq!(view.holes[n1], [1], "node 1 has no vote at slot 1");
+        assert_eq!(view.nodes[n1].holes, [1], "node 1 has no vote at slot 1");
         assert!(
             view.logs[n1].iter().any(|cell| cell.slot == 2),
             "node 1 voted at slot 2: {:?}",

@@ -271,7 +271,7 @@
         }, mine);
       }
       return chain.then(function (ok) {
-        if (!ok) return false;
+        if (!ok || mine !== token) return false;
         // The receiver writes, then answers.
         var writes = move.writes || [];
         var wrote = writes.some(function (w) { return w && w.length; });

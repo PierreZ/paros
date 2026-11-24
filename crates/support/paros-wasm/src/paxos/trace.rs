@@ -801,26 +801,12 @@ pub(crate) fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
     logs
 }
 
-/// The holes of each lane's log, in lane order: the slots from its floor up
-/// to its highest record that hold no record. Empty for a world of one
-/// decree and for a lane that is down.
-pub(crate) fn lane_holes(world: &WorldView) -> Vec<Vec<u64>> {
-    let log = log_world(world);
-    let mut holes: Vec<Vec<u64>> = drawn(world)
-        .into_iter()
-        .map(|node| {
-            if log && node.alive {
-                story::holes(
-                    node.floor.unwrap_or(0),
-                    node.accepted.iter().map(|record| record.slot),
-                )
-            } else {
-                Vec::new()
-            }
-        })
-        .collect();
-    holes.extend(world.matchmakers.iter().map(|_| Vec::new()));
-    holes
+/// The typed state of each lane, in lane order, as the story draws it: up
+/// or down, its role, its ballot and promise, the holes of its log. No step
+/// ran, so no lane wrote anything.
+pub(crate) fn lane_states(world: &WorldView) -> Vec<NodeState> {
+    let durable = lane_durable(world);
+    lane_nodes(world, &durable, &durable)
 }
 
 /// A few short lines per lane: what a reader must see change.

@@ -99,7 +99,7 @@ function mountLab(mount, engine) {
 
   function sceneOf(v) {
     return {
-      nodes: v.lanes.map((_, i) => ({ alive: v.alive[i] !== false, holes: (v.holes && v.holes[i]) || [] })),
+      nodes: v.nodes,
       state: v.state,
       logs: v.logs || [],
       wire: v.wire,
