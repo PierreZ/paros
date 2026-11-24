@@ -1043,8 +1043,8 @@ impl WholeModel {
             (),
         );
         // A process that boots lists its disk first. A list that read
-        // nothing (`Full`) may be asked again; the walk's placement then
-        // serves the roles it names.
+        // nothing (`Full`) may be asked again. The walk serves the roles
+        // that its placement names.
         let listed = match driver.on_disk() {
             Err(paros_journal_io::StorageError::Full) => {
                 sometimes!(true, reach::LIST_AGAIN);
@@ -1054,9 +1054,7 @@ impl WholeModel {
         };
         let listed =
             listed.expect("a list asked again after a list that read nothing reads the disk");
-        machine
-            .disk
-            .judge_list(&listed, machine.placed.iter().map(Assignment::address));
+        machine.disk.judge_list(&listed);
         for assignment in &machine.placed {
             driver.assign(assignment.clone());
         }

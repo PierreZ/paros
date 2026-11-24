@@ -106,7 +106,7 @@ Test only: `publish = false`.
 - `src/backend.rs`: the backends of the driver walk and the whole walk: `Disk`, a disk that
   survives its process and fails calls inside the contract (`DiskFault`: a commit that fails
   `Full`, or `Unknown` after its write or with nothing written; a scan that fails `Full` or
-  `Unknown`; a list that fails `Full`; a boot lists the disk, asks a failed list again and judges the list against the records; each disk fault arms one commit fault, `Full` or `Unknown` after its write, and one more fault on top, so a new fault never takes the place of an old one), `Wire`, a transport that judges
+  `Unknown`; a list that fails `Full`; a boot lists the disk, asks a failed list again, and `LISTED` checks that the list of the store (`MemStorage::list`) names exactly the roles that the disk's own commits and losses wrote, a contract check of the backend: the walks still serve the roles that their placement names; each disk fault arms one commit fault, `Full` or `Unknown` after its write, and one more fault on top, so a new fault never takes the place of an old one), `Wire`, a transport that judges
   the flight rule at each send, and `QuorumRegister`, the journal's register on three
   matchmakers (one `RegisterCall` per change, a read and a write at the members that are up, in
   an order drawn from the seed). A matchmaker is down while its machine is: a change or a read

@@ -97,6 +97,9 @@ pub struct Disk {
     unknown: Rc<RefCell<(Vec<Op>, bool)>>,
     /// The fault of the last scan that failed.
     scan_failed: Rc<Cell<Option<StorageError>>>,
+    /// The roles that the disk holds a record of, or lost one of, as the
+    /// commits and the losses wrote them: the list at a boot names these.
+    roles: Rc<RefCell<BTreeSet<Address>>>,
     /// One more on each change of the records: a commit that writes, a
     /// wipe, a loss.
     version: Rc<Cell<u64>>,
@@ -112,6 +115,7 @@ impl Disk {
             faults: Rc::default(),
             unknown: Rc::default(),
             scan_failed: Rc::default(),
+            roles: Rc::default(),
             version: Rc::default(),
             seen,
         }
@@ -175,39 +179,23 @@ impl Disk {
         self.scan_failed.take()
     }
 
-    /// Whether the disk holds a record of the role at `address`, or lost one:
-    /// a list at a boot names exactly these roles.
-    ///
-    /// # Panics
-    ///
-    /// When a scan of the memory fails with another fault than a loss.
-    #[must_use]
-    pub fn holds(&self, address: Address) -> bool {
-        match self.store.borrow_mut().scan(address) {
-            Ok(entries) => !entries.is_empty(),
-            Err(StorageError::Lost) => true,
-            Err(fault) => panic!("a scan of memory reports only a loss: {fault}"),
-        }
-    }
-
-    /// Judge the list of a boot: it names each role of `known` that the
-    /// disk holds, and only roles that the disk holds.
+    /// Judge the list of a boot: it names each role that a commit wrote or
+    /// a loss hit, and only those. The disk keeps that set itself, so the
+    /// judge does not trust the list of the store.
     ///
     /// # Panics
     ///
     /// When the list misses a held role or names a role with no record.
-    pub fn judge_list(&self, listed: &[Address], known: impl IntoIterator<Item = Address>) {
+    pub fn judge_list(&self, listed: &[Address]) {
+        let roles = self.roles.borrow();
         for address in listed {
             assert!(
-                self.holds(*address),
+                roles.contains(address),
                 "{LISTED}: it names {address:?}, with no record"
             );
         }
-        for address in known {
-            assert!(
-                !self.holds(address) || listed.contains(&address),
-                "{LISTED}: it misses {address:?}"
-            );
+        for address in roles.iter() {
+            assert!(listed.contains(address), "{LISTED}: it misses {address:?}");
         }
     }
 
@@ -230,6 +218,7 @@ impl Disk {
     /// Lose every record: a planted bug, never a fault of the contract.
     pub fn wipe(&self) {
         *self.store.borrow_mut() = MemStorage::new();
+        self.roles.borrow_mut().clear();
         self.changed();
     }
 
@@ -261,6 +250,7 @@ impl Disk {
         }
         *store = kept;
         drop(store);
+        self.roles.borrow_mut().remove(&address);
         self.changed();
     }
 
@@ -292,6 +282,7 @@ impl Disk {
     /// (a fault of the contract: the loss is reported, never hidden).
     pub fn lose(&self, key: Key) {
         self.store.borrow_mut().lose(key);
+        self.roles.borrow_mut().insert(key.address);
         self.changed();
     }
 }
@@ -299,13 +290,13 @@ impl Disk {
 impl Storage<Journal> for Disk {
     fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
         (self.seen)(ops);
-        let (lie, commit) = {
+        let commit = {
             let mut faults = self.faults.borrow_mut();
-            (std::mem::take(&mut faults.lie), faults.commit.pop_front())
+            if std::mem::take(&mut faults.lie) {
+                return Ok(());
+            }
+            faults.commit.pop_front()
         };
-        if lie {
-            return Ok(());
-        }
         match commit {
             Some(DiskFault::CommitFull) => return Err(StorageError::Full),
             Some(DiskFault::CommitUnknownUnwritten) => {
@@ -315,6 +306,9 @@ impl Storage<Journal> for Disk {
             _ => {}
         }
         self.store.borrow_mut().commit(ops)?;
+        self.roles
+            .borrow_mut()
+            .extend(ops.iter().map(|op| op.key.address));
         self.changed();
         if commit == Some(DiskFault::CommitUnknownWritten) {
             *self.unknown.borrow_mut() = (ops.to_vec(), true);

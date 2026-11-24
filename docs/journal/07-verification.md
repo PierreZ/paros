@@ -238,7 +238,7 @@ live check fed by the port, and the torn-batch control land with the adapter.
 walks the generic driver itself: three processes, each a `Driver` with a disk that fails calls
 inside the contract (a commit that fails `Full`, or `Unknown` after its write or with nothing
 written; a scan that fails `Full` or `Unknown`; a list at a boot that fails `Full` and is asked
-again; the list must name each role that the disk holds, and only those), a transport through the walk's mailbox (lost,
+again; the list of the in-memory store must name each role that the disk's commits and losses wrote, and only those), a transport through the walk's mailbox (lost,
 repeated, reordered), the journal's register on three matchmakers (one on each process, down
 while its process is; a change can lose its request or its reply, reach one member only, or wait
 in flight), crashes that keep the disk, restarts that read it back, campaigns that depose a

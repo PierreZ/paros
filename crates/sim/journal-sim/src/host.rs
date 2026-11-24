@@ -600,9 +600,7 @@ impl HostModel {
         };
         let listed =
             listed.expect("a list asked again after a list that read nothing reads the disk");
-        process
-            .disk
-            .judge_list(&listed, [Self::acceptor(p), Self::replica(p)]);
+        process.disk.judge_list(&listed);
         driver.assign(Self::assignment(Self::acceptor(p)));
         driver.assign(Self::assignment(Self::replica(p)));
         process.driver = Some(driver);
