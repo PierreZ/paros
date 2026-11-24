@@ -75,18 +75,38 @@ pub fn try_sites<R: std::fmt::Display>(
     run: impl FnOnce() -> Result<R, String>,
     expected: &[&str],
 ) -> Result<(), String> {
-    if let Some(long) = expected.iter().find(|site| site.len() > SITE_LEN) {
+    try_kinds(run, &[(kind, expected)])
+}
+
+/// [`try_sites`] over sites of more than one kind: each list of `expected`
+/// is declared with its kind (the `Reachable` and the `Sometimes` probes of
+/// the journal roles, `tests/roles_coverage.rs`).
+///
+/// # Errors
+///
+/// As [`try_sites`].
+pub fn try_kinds<R: std::fmt::Display>(
+    run: impl FnOnce() -> Result<R, String>,
+    expected: &[(AssertKind, &[&str])],
+) -> Result<(), String> {
+    let all: Vec<&str> = expected
+        .iter()
+        .flat_map(|(_, sites)| sites.iter().copied())
+        .collect();
+    if let Some(long) = all.iter().find(|site| site.len() > SITE_LEN) {
         return Err(format!(
             "the site {long:?} is longer than the {SITE_LEN} bytes the table keeps"
         ));
     }
     let _table = Table::install();
-    for site in expected {
-        moonpool_assertions::declare_site(kind, true, false, site);
+    for (kind, sites) in expected {
+        for site in *sites {
+            moonpool_assertions::declare_site(*kind, true, false, site);
+        }
     }
     let report = run()?;
     let sites = moonpool_assertions::assertion_read_all();
-    let missed: Vec<&&str> = expected
+    let missed: Vec<&&str> = all
         .iter()
         .filter(|site| {
             !sites

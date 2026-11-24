@@ -32,6 +32,8 @@ heal-reuse 2
 health 0
 journal-compact 1
 journal-ctrl 6
+journal-ctrl-re 1
+journal-ctrl-trunc 1
 journal-ids 3
 journal-read 3
 journal-repromise 1

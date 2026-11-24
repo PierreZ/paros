@@ -20,6 +20,10 @@
 (*     replica applied, under the ballot that the faulty vote keeps        *)
 (*     (`AccRepair`).                                                      *)
 (*                                                                         *)
+(* Unchoose "any" is a control: a vote counts as unchoosable without the   *)
+(* promises above its ballot, a later `Accept` can still complete it, and  *)
+(* `BlockedChosen` breaks (`ctrl_unchoose`).                               *)
+(*                                                                         *)
 (* Damage "keep" and Repair "chosen" are the design. Damage "drop" is a    *)
 (* control: a boot that drops the damaged vote reads the slot as a slot    *)
 (* with no vote, and `Agreement` breaks. Repair "peer" is a control: the   *)
@@ -28,12 +32,13 @@
 (***************************************************************************)
 EXTENDS JournalCompact
 
-CONSTANTS MaxRot, Damage, Repair, ProbeDrops
+CONSTANTS MaxRot, Damage, Repair, ProbeDrops, Unchoose
 
 ASSUME MaxRot \in Nat
 ASSUME Damage \in {"keep", "drop"}
 ASSUME Repair \in {"chosen", "peer"}
 ASSUME ProbeDrops \in {"skip", "ignore"}
+ASSUME Unchoose \in {"promised", "any"}
 
 Faulty(x) == x[1] > 0 /\ x[2] = None
 
@@ -41,14 +46,36 @@ Faulty(x) == x[1] > 0 /\ x[2] = None
 \* value.
 Learned(s) == \E r \in Replicas : Holds(r, s)
 
+\* a's vote at s is at a ballot f that no quorum can choose at: a promise
+\* quorum of f's grid, without a, holds no vote at s, on disk or in memory,
+\* sent no vote at s and f, kept s, and promised above f on disk. Every
+\* quorum of f's grid meets it, so no quorum votes at f. A later leader's
+\* tally may read a's damaged vote with that quorum, find no readable vote,
+\* and decide a `Noop` (`ProbeDecide`).
+Unchoosable(a, s) ==
+  LET f == dvote[a][s][1]
+  IN
+  /\ f > 0
+  /\ \E Q \in QOf[bgen[f]] :
+       /\ a \notin Q
+       /\ \A x \in Q :
+            /\ dvote[x][s] = NoVote
+            /\ mvote[x][s] = NoVote
+            /\ s \notin adrop[x] \cup dadrop[x]
+            /\ Unchoose = "any" \/ dprom[x] > f
+            /\ \A v \in Cmds : <<s, f, v, x>> \notin sent2b
+
 \* The damage of a's vote at s leaves the value readable for good: a
 \* replica applied the slot, the slot chose another value, or a quorum of a
 \* grid that still runs holds the chosen value on disk without a, each copy
 \* at or above the ballot that chose it (a later `Accept` there carries the
 \* same value, P2c; a copy below it can still change). A damaged copy is one
 \* of the F failures that a grid survives; a rot of a copy that no lasting
-\* source holds is data loss, beyond the contract (`Readable`).
+\* source holds is data loss, beyond the contract (`Readable`). Or no
+\* ballot can choose the value of a's vote (`Unchoosable`): the value is not
+\* needed, and the slot may stay unchosen.
 Spare(a, s) ==
+  \/ Unchoosable(a, s)
   \/ Learned(s)
   \/ IsChosen(s) /\ dvote[a][s][2] # ChosenVal(s)
   \/ /\ IsChosen(s)
@@ -89,7 +116,8 @@ ProbePromised(b, Q) ==
 \* answer that dropped it reports no vote there, and the other answers may
 \* predate the compaction, so the tally would read a stale vote
 \* (`ProbeSkip`). The control "ignore" tallies the slot anyway, and
-\* `Agreement` breaks.
+\* `Agreement` breaks. With no readable vote the decision is a `Noop`, which
+\* the leader proposes at s (`JournalLeader`), whatever slots it saw above.
 ProbeDecide(b, s, Qs) ==
   LET hs == {h \in bH[b] : s \in ReadSet(b, h)}
       all == UNION {Qs[h] : h \in hs}
@@ -107,7 +135,7 @@ ProbeDecide(b, s, Qs) ==
      /\ ProbeDrops = "ignore" \/ \A x \in rs : s \notin x[3]
      /\ \A x \in xs : ~(Faulty(x) /\ x[1] > thr)
      /\ bsafe' = [bsafe EXCEPT ![b][s] =
-          IF rd = {} THEN None ELSE (CHOOSE x \in rd : x[1] = thr)[2]]
+          IF rd = {} THEN Noop ELSE (CHOOSE x \in rd : x[1] = thr)[2]]
      /\ bblock' = [bblock EXCEPT ![b] = @ \ {s}]
      /\ IF Direct
         THEN /\ mprom' = [a \in Acceptors |-> IF a \in all THEN b ELSE mprom[a]]
@@ -130,11 +158,11 @@ ProbeSkip(b, s, a) ==
 
 \* The leader of b learns the chosen value of its blocked slot s from a
 \* replica that applied it, and proposes it. The answer may arrive after the
-\* replica dropped the slot. A blocked slot is chosen (`BlockedChosen`: a
-\* rot needs a lasting copy of the value, `Spare`), so the step needs no
-\* guard of its own on it.
+\* replica dropped the slot. A replica applies only a chosen slot, so s is
+\* chosen; a slot that a rot of an `Unchoosable` vote blocked may be not.
 LearnChosen(b, s) ==
   /\ s \in bblock[b]
+  /\ IsChosen(s)
   /\ bsafe' = [bsafe EXCEPT ![b][s] = ChosenVal(s)]
   /\ bblock' = [bblock EXCEPT ![b] = @ \ {s}]
   /\ UNCHANGED <<reg, bst, bH, bE, bend, blo, bstart, prop, bskip, acc, rep>>
@@ -205,9 +233,28 @@ SkipCompacted == \A b \in Ballots : \A s \in bskip[b] :
   \E p \in Gens : StartKnown(p) /\ Start(p) <= s /\ CompactedTo(p, s + 1)
 NoProposeBlocked == \A b \in Ballots : \A s \in bblock[b] : prop[b][s] = None
 
-\* A blocked slot is chosen: only a damaged vote blocks a slot, and a rot
-\* needs a lasting copy of the chosen value (`Spare`).
-BlockedChosen == \A b \in Ballots : \A s \in bblock[b] : IsChosen(s)
+\* No quorum of the grid of ballot f can vote at s at f: a promise quorum of
+\* it, without a, promised above f on disk and sent no vote at s and f.
+\* Both facts last: a promise only rises, and a sent vote stays sent.
+DeadAt(a, s, f) ==
+  /\ bgen[f] # 0
+  /\ \E Q \in QOf[bgen[f]] :
+       /\ a \notin Q
+       /\ \A x \in Q : dprom[x] > f /\ \A v \in Cmds : <<s, f, v, x>> \notin sent2b
+
+\* A slot that ballot b blocked is chosen, or the highest ballot below b
+\* that voted there is a ballot that no quorum can complete: a rot needs a
+\* lasting copy of a chosen value, or a vote that no quorum can choose
+\* (`Spare`), and the blocked slot's top report is a damaged vote. Only the
+\* ballots below b count: a later leader may vote at the slot after b
+\* blocked it, and its vote says nothing of what b's Phase 1 read.
+BlockedChosen == \A b \in Ballots : \A s \in bblock[b] :
+  \/ IsChosen(s)
+  \/ \E a \in Acceptors, f \in Ballots, v \in Cmds :
+       /\ f < b
+       /\ <<s, f, v, a>> \in sent2b
+       /\ \A m \in sent2b : m[1] = s /\ m[2] < b => m[2] <= f
+       /\ DeadAt(a, s, f)
 
 (***************************************************************************)
 (* Reach: each must be violated, so that a passing check is not empty.     *)
@@ -218,12 +265,17 @@ NoSkip == \A b \in Ballots : bskip[b] = {}
 \* No blocked slot opens. With one acceptor in a grid the probe never
 \* decides (the faulty vote is the only answer), so this reaches `LearnChosen`.
 NoUnblock == [][\A b \in Ballots : bblock[b] \subseteq bblock'[b]]_vars
-\* No blocked slot opens by a step of the probe. A rot needs a lasting copy
-\* of the value (`Spare`), so every blocked slot is chosen: the step names
-\* the action, not the state.
+\* No blocked slot opens by a step of the probe: the step names the action,
+\* not the state.
 NoProbe == [][\A b \in Ballots, s \in Slots :
                s \in bblock[b] /\ s \notin bblock'[b] =>
                  ~\E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : ProbeDecide(b, s, Qs)]_vars
+\* No blocked slot that is not chosen opens with a `Noop`. Only a rot of an
+\* `Unchoosable` vote blocks a slot that is not chosen (`BlockedChosen`), so
+\* this reaches the probe that decides a `Noop` after such a rot.
+NoNoopProbe == [][\A b \in Ballots, s \in Slots :
+                  s \in bblock[b] /\ s \notin bblock'[b] /\ bsafe'[b][s] = Noop =>
+                    IsChosen(s)]_vars
 NoRepair == [][\A a \in Acceptors, s \in Slots :
                 Faulty(mvote[a][s]) => ~(mvote'[a][s][1] = mvote[a][s][1] /\ mvote'[a][s][2] # None)]_vars
 =============================================================================

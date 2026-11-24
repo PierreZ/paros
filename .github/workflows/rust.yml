@@ -23,10 +23,12 @@ env:
   CARGO_TERM_COLOR: always
   # The sets of tests that the jobs below split (nextest filter expressions).
   # Every test of the workspace runs in exactly one job: `test` runs the
-  # complement of COVERAGE and TRACES, `trace-edits` runs EDITS, which is
+  # complement of COVERAGE, ROLES_COVERAGE and TRACES, `trace-edits` runs EDITS, which is
   # inside TRACES, and the two shards of `traces` run the rest of TRACES, cut
-  # in two by REFUSALS. `coverage-shard` runs COVERAGE (`--test coverage`).
+  # in two by REFUSALS. `coverage-shard` runs COVERAGE (`--test coverage`),
+  # and `trace-edits` also runs ROLES_COVERAGE, the gate of the journal roles.
   COVERAGE: package(consensus-sim) & binary(coverage)
+  ROLES_COVERAGE: package(journal-sim) & binary(roles_coverage)
   TRACES: >-
     (package(consensus-sim) & binary(traces))
     | (package(journal-sim) & (binary(traces) | binary(register_traces) | binary(roles_traces)
@@ -215,7 +217,7 @@ jobs:
       - name: Run cargo nextest
         run: >-
           nix develop --command cargo nextest run --profile ci
-          -E "not (($COVERAGE) | ($TRACES))"
+          -E "not (($COVERAGE) | ($ROLES_COVERAGE) | ($TRACES))"
 
   # The trace checks (#1198 (trace checking)): each walk of consensus-sim and
   # journal-sim is checked against its `*Trace.tla` spec with TLC, in debug as
@@ -278,6 +280,14 @@ jobs:
         run: >-
           nix develop --command cargo nextest run --profile ci --release
           -p consensus-sim --test traces -E "$EDITS"
+      # The coverage gate of the journal roles (#1326): the roles walks and
+      # the whole journal reach every `probe!` of `paros_journal::roles`. It
+      # walks thousands of timelines, so it runs in release here, not in the
+      # `test` job; it takes about one minute in release on four cores.
+      - name: Check that the walks reach every probe of the journal roles
+        run: >-
+          nix develop --command cargo nextest run --profile ci --release
+          -p journal-sim --test roles_coverage -E "$ROLES_COVERAGE"
 
   # Coverage-driven simulation with real branch coverage (#1199): the coverage
   # gate of consensus-sim, with `paros-consensus` alone instrumented by
