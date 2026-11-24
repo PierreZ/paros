@@ -72,6 +72,14 @@
 //! - [`AGAIN`]: a change asked again after no answer is never
 //!   refused on a value that holds it (§J3.4, "a change asked again"),
 //!   judged in the register ([`QuorumRegister`]).
+//! - [`DISK`]: the disk of every replica, on every machine up or down,
+//!   holds the chosen log: each slot, its base and its compaction point
+//!   are the chosen log's, and its compaction floor is at or below the
+//!   decided floor.
+//! - [`STOPPED`]: each leader that stops on its own has a true cause: a
+//!   higher ballot bound or promised, a newer segment, a seal of its own
+//!   segment, or another end of the segment before it. Placement replaces
+//!   a stopped leader, so without this judge a wrong stop costs nothing.
 //! - [`HEAL_HELD`]: each node that a done heal added to the set of a
 //!   retired segment holds every slot of it on its disk while the set
 //!   names it, but the slots below its compaction point, each of which
@@ -157,6 +165,10 @@ pub const BOUNDED_IN_FLIGHT: &str =
 /// segment on its disk while the set names it.
 pub const HEAL_HELD: &str =
     "whole journal: a node a heal added holds the whole segment on its disk";
+/// Oracle: what every replica's disk holds is the chosen log's.
+pub const DISK: &str = "whole journal: every replica disk holds the chosen log";
+/// Oracle: each leader that stops on its own has a true cause in the walk.
+pub const STOPPED: &str = "whole journal: each leader that stops has a true cause";
 
 /// The coverage sites of the whole journal walk.
 pub mod reach {
@@ -220,6 +232,10 @@ pub mod reach {
     pub const BELOW: &str = "whole journal: a resend across a seal was answered Below";
     /// A `Resolve` gave a fate.
     pub const RESOLVED: &str = "whole journal: a Resolve at an older replica gave a fate";
+    /// A replica's disk held a compaction point that the chosen log judged.
+    pub const DISK_TRIM: &str = "whole journal: a replica disk held a judged compaction point";
+    /// A leader stopped on its own, for a true cause.
+    pub const LEADER_STOPPED: &str = "whole journal: a leader stopped for a true cause";
     /// A machine was lost for good.
     pub const LOST: &str = "whole journal: a machine was lost for good";
     /// A heal replaced a replica of a retired segment on the lost machine.
@@ -257,6 +273,8 @@ pub mod reach {
         RESOLVED,
         LOST,
         LOST_HEALED,
+        LEADER_STOPPED,
+        DISK_TRIM,
     ];
 }
 
@@ -297,14 +315,19 @@ pub enum WholeMutant {
     EarlyCopied,
     /// The network changes the command of each `Commit` of a retired
     /// segment, the copy a new replica pulls: a write loses its last
-    /// payload byte, another command becomes a `Noop`. [`HEAL_HELD`]
-    /// catches it.
+    /// payload byte, another command becomes a `Noop`. [`DISK`] catches
+    /// it.
     CorruptCopy,
     /// The register refuses a seal, a boundary state, a retire or a trim
     /// over a value that holds it, so a change asked again after its half
     /// write is refused and a first leader stops on its own end. [`AGAIN`]
     /// catches it.
     RefuseAgain,
+    /// The register refuses each seal on a value whose guard takes it,
+    /// unless it is asked again after a write of it got no answer: a
+    /// sealing leader stops with no true cause.
+    /// [`STOPPED`] catches it.
+    RefuseSeal,
 }
 
 /// The weights of the walk's crash and restart steps: a machine comes
@@ -436,6 +459,10 @@ struct Journal {
     round: u64,
     /// When each leader started.
     started: BTreeMap<NodeId, u64>,
+    /// The newest segment of the register when each leader started.
+    campaigned_on: BTreeMap<NodeId, SegmentId>,
+    /// The leaders whose stop [`STOPPED`] judged.
+    stopped: BTreeSet<NodeId>,
     /// Every command a `Commit` on the wire named, by slot.
     chosen: BTreeMap<Slot, Command>,
     /// When the walk first saw each segment, and each seal.
@@ -470,6 +497,8 @@ pub struct WholeModel {
     register: QuorumRegister,
     machines: BTreeMap<u64, Machine>,
     journals: Vec<Journal>,
+    /// The version of each machine's disk that [`DISK`] judged last.
+    disks_judged: RefCell<BTreeMap<u64, u64>>,
     /// The copy and abandon asks that the network still holds: each may
     /// arrive again, late ([`WholeAction::Late`]).
     late: Vec<(usize, Ask)>,
@@ -593,6 +622,7 @@ impl Model for WholeModel {
         }
         self.place();
         self.judge_heals();
+        self.judge_disks();
     }
 
     fn deliver(&mut self, envelope: Envelope, _cx: &mut Cx<'_, Self>) {
@@ -652,6 +682,7 @@ impl Model for WholeModel {
         for j in 0..self.journals.len() {
             self.judge(j);
         }
+        self.judge_all_stops();
     }
 
     fn converged(&self) -> Result<(), String> {
@@ -669,6 +700,7 @@ impl Model for WholeModel {
     }
 
     fn finish(&mut self) {
+        self.judge_disks();
         for j in 0..self.journals.len() {
             self.judge(j);
             let journal = &self.journals[j];
@@ -716,6 +748,16 @@ impl Model for WholeModel {
     }
 }
 
+/// The fold of the chosen log before `slot`, once it holds every slot
+/// below it.
+fn fold_before(chosen: &BTreeMap<Slot, Command>, slot: Slot) -> Option<Truth> {
+    let mut truth = Truth::new(Leader::Unset);
+    for s in 0..slot.0 {
+        truth.apply(chosen.get(&Slot(s))?);
+    }
+    Some(truth)
+}
+
 /// The first slot that no `Commit` named yet.
 fn frontier(chosen: &BTreeMap<Slot, Command>) -> Slot {
     let mut slot = Slot(0);
@@ -741,10 +783,13 @@ impl WholeModel {
     /// # Panics
     ///
     /// When a first segment cannot open.
-    pub fn build(mutant: WholeMutant, _cx: &mut Cx<'_, Self>) -> Self {
-        let register = QuorumRegister::new(asked_again);
+    pub fn build(mutant: WholeMutant, cx: &mut Cx<'_, Self>) -> Self {
+        let register = QuorumRegister::new(asked_again, cx.rng().next_u64());
         if mutant == WholeMutant::RefuseAgain {
             register.plant_refuse_again();
+        }
+        if mutant == WholeMutant::RefuseSeal {
+            register.plant_refuse_seal();
         }
         let mut journals = Vec::new();
         for (i, id) in JOURNALS.into_iter().enumerate() {
@@ -791,6 +836,8 @@ impl WholeModel {
                 id,
                 round: 0,
                 started: BTreeMap::new(),
+                campaigned_on: BTreeMap::new(),
+                stopped: BTreeSet::new(),
                 chosen: BTreeMap::new(),
                 opened_at: BTreeMap::new(),
                 sealed_at: BTreeMap::new(),
@@ -810,6 +857,7 @@ impl WholeModel {
             });
         }
         let mut model = Self {
+            disks_judged: RefCell::default(),
             mutant,
             clock: ManualClock::new(),
             register,
@@ -912,6 +960,8 @@ impl WholeModel {
     /// `machine` goes down: its driver, its leaders and its controllers are
     /// gone; its disk and its placed roles stay.
     fn down(&mut self, m: u64) {
+        // The machine's leaders go with its driver: judge their stops first.
+        self.judge_all_stops();
         let machine = self.machines.get_mut(&m).expect("a machine");
         if machine.driver.take().is_none() {
             return;
@@ -1361,6 +1411,8 @@ impl WholeModel {
     /// A new leader of the newest segment of journal `j` on a machine that
     /// is up, when none writes (and now and then in the chaos phase).
     fn campaign(&mut self, j: usize, cx: &mut Cx<'_, Self>) {
+        // The campaign may unassign stopped leaders: judge them first.
+        self.judge_all_stops();
         let value = self.value(j);
         let newest = value.newest().expect("a segment").id();
         let now = self.now();
@@ -1388,6 +1440,7 @@ impl WholeModel {
         journal.round += 1;
         let node = NodeId(LEADERS + 10 * journal.round + m);
         journal.started.insert(node, now);
+        journal.campaigned_on.insert(node, newest);
         let older: Vec<NodeId> = journal.started.keys().copied().collect();
         let machine = self.machines.get_mut(&m).expect("a machine");
         let driver = machine.driver.as_mut().expect("up");
@@ -1759,8 +1812,8 @@ impl WholeModel {
     /// retired segment holds every slot of the segment on its disk while
     /// the set names it, but the slots below its `Trim`: the compaction
     /// drops a slot only when every record it wrote is below the trim
-    /// floor, the floor is one that the chosen log decided, and the fold of
-    /// the `Trim` is the fold of the chosen log at its slot.
+    /// floor. [`DISK`] judges the bytes of each slot it holds, the fold of
+    /// the `Trim` and its floor, for every replica.
     fn judge_heals(&self) {
         for (j, journal) in self.journals.iter().enumerate() {
             let value = self.value_of(journal.id);
@@ -1793,45 +1846,14 @@ impl WholeModel {
                     missing.is_empty(),
                     "{HEAL_HELD}: {node:?} of {segment:?} misses the slots {missing:?}"
                 );
-                // Each slot it holds is the chosen command, byte for byte.
-                for (slot, command) in disk.chosen.range(below..end) {
-                    assert!(
-                        journal.chosen.get(slot) == Some(command),
-                        "{HEAL_HELD}: {node:?} of {segment:?} holds {command:?} at {slot:?}, the \
-                         chosen log has {:?}",
-                        journal.chosen.get(slot)
-                    );
-                }
+                // Each slot it holds is the chosen command, its fold at the
+                // trim is the chosen log's and its floor is at or below the
+                // decided floor: [`DISK`] judges that for every replica.
                 let Some(trim) = disk.trim.as_ref().filter(|trim| trim.slot > start) else {
                     continue;
                 };
                 sometimes!(true, reach::HEALED_TRIM);
-                let (states, _, truth) = self.truth(j);
-                // The fold that the healed node starts from at its trim is
-                // the fold of the chosen log before the trim's slot.
-                let mut before = Truth::new(Leader::Unset);
-                for slot in 0..trim.slot.0 {
-                    before.apply(&journal.chosen[&Slot(slot)]);
-                }
-                assert!(
-                    (
-                        trim.state.leader(),
-                        trim.state.next_seq().0,
-                        trim.state.first_seq().0
-                    ) == (before.leader, before.next, before.first),
-                    "{HEAL_HELD}: {node:?} of {segment:?} trims at {:?} with the fold {:?}, \
-                     the chosen log has {:?} there",
-                    trim.slot,
-                    trim.state.view(),
-                    (before.leader, before.next, before.first)
-                );
-                assert!(
-                    trim.floor.0 <= truth.first,
-                    "{HEAL_HELD}: {node:?} of {segment:?} trims at the floor {:?}, above the \
-                     decided floor {}",
-                    trim.floor,
-                    truth.first
-                );
+                let (states, ..) = self.truth(j);
                 let dropped = (0u64..)
                     .zip(&states)
                     .filter(|(slot, _)| (start.0..trim.slot.0).contains(slot));
@@ -1851,6 +1873,200 @@ impl WholeModel {
                 }
             }
         }
+    }
+
+    /// [`STOPPED`]: each leader of journal `j` that stopped on its own (a
+    /// leader that the driver unassigns or a failed commit stops leaves its
+    /// host) has a true cause for the phase it stopped from, read from facts
+    /// that only grow:
+    ///
+    /// - binding: a ballot above its own was bound, or its own ballot was
+    ///   bound and a segment newer than the newest at its campaign was
+    ///   written (its bind asked again meets a later configuration);
+    /// - Phase 1: an acceptor of the journal promised a ballot above its own
+    ///   on its disk (a `Nack`);
+    /// - sealing: a higher promise, an end of its own segment (a later
+    ///   leader sealed it), another end of the segment before its own (it
+    ///   lost the seal), or a segment newer than its own (a bind asked again
+    ///   after the newest segment moved);
+    /// - open: a higher promise, or an end of its own segment.
+    ///
+    /// The register facts include the writes that a minority took
+    /// ([`crate::backend::Held`]): a role may read one and act on it. The
+    /// walk judges the stops before it drops a leader (a campaign that
+    /// unassigns the older leaders of a machine, a machine that goes down)
+    /// and after each step, so no stop leaves the host unjudged.
+    fn judge_stops(&mut self, j: usize) {
+        let id = self.journals[j].id;
+        let mut new = Vec::new();
+        for (m, node) in self.leaders(j) {
+            if self.journals[j].stopped.contains(&node) {
+                continue;
+            }
+            let leader = self.machines[&m]
+                .driver
+                .as_ref()
+                .and_then(|d| d.host().leader(Address::new(id, node)))
+                .expect("a leader");
+            if let Some(from) = leader.stopped_from() {
+                let before = leader.segments().iter().rev().nth(1).map(|s| s.id);
+                new.push((
+                    node,
+                    from.clone(),
+                    leader.ballot(),
+                    leader.segment(),
+                    before,
+                    leader.seal_end(),
+                ));
+            }
+        }
+        if new.is_empty() {
+            return;
+        }
+        let held = self.register.held(id);
+        let promised = self.promised(id);
+        for (node, from, ballot, own, before, seal_end) in new {
+            let journal = &mut self.journals[j];
+            journal.stopped.insert(node);
+            let nack = promised > ballot;
+            let own_sealed = own.is_some_and(|own| held.sealed(own));
+            let cause = match from {
+                LeaderPhase::Binding => {
+                    let at = journal.campaigned_on.get(&node).copied();
+                    held.bound.is_some_and(|b| b > ballot)
+                        || (held.bound == Some(ballot)
+                            && held.newest.is_some_and(|n| at.is_some_and(|at| n > at)))
+                }
+                LeaderPhase::Phase1 => nack,
+                LeaderPhase::Sealing { .. } => {
+                    let lost_seal = matches!((before, seal_end), (Some(before), Some(end))
+                        if held.other_end(before, end));
+                    let newer = own.is_some_and(|own| held.newest.is_some_and(|n| n > own));
+                    nack || own_sealed || lost_seal || newer
+                }
+                LeaderPhase::Open { .. } => nack || own_sealed,
+                LeaderPhase::Stopped => unreachable!("a leader stops from a running phase"),
+            };
+            assert!(
+                cause,
+                "{STOPPED}: journal {} leader {node:?} at {ballot:?} stopped from {from:?} with \
+                 no true cause: segment {own:?}, seal end {seal_end:?} of {before:?}, register \
+                 facts {held:?}, highest promise {promised:?}",
+                id.0
+            );
+            sometimes!(true, reach::LEADER_STOPPED);
+        }
+    }
+
+    /// [`DISK`]: the disk of every replica of every journal, on every
+    /// machine, up or down, holds the chosen log: each slot it holds is the
+    /// command that a `Commit` on the wire named there, its base is the
+    /// fold of the chosen log before its slot, and its compaction point
+    /// holds the fold of the chosen log before the point, with a floor at
+    /// or below the decided floor. A replica takes a base or compacts only
+    /// once every slot below is chosen, and each chosen slot was on the
+    /// wire in a `Commit`, so the chosen log holds every slot below each
+    /// fold: a hole fails the oracle.
+    fn judge_disks(&self) {
+        for (m, machine) in &self.machines {
+            // Each check holds for good once it holds: the chosen log and
+            // the decided floor only grow, so a version of a disk is
+            // judged once.
+            let version = machine.disk.version();
+            if self.disks_judged.borrow().get(m) == Some(&version) {
+                continue;
+            }
+            self.disks_judged.borrow_mut().insert(*m, version);
+            let mut store = machine.disk.store.borrow_mut();
+            let addresses = store.list().expect("a list of memory");
+            for address in addresses.into_iter().filter(|a| a.segment.is_some()) {
+                let j = self.journal_index(address.journal);
+                let chosen = &self.journals[j].chosen;
+                let entries = store.scan(address).expect("a scan of memory");
+                let disk = paros_journal_io::layout::decode_replica(address, &entries)
+                    .expect("a replica disk the walk never damages here");
+                for (slot, command) in &disk.chosen {
+                    assert!(
+                        chosen.get(slot) == Some(command),
+                        "{DISK}: machine {m} {address:?} holds {command:?} at {slot:?}, the \
+                         chosen log has {:?}",
+                        chosen.get(slot)
+                    );
+                }
+                let mut folds = Vec::new();
+                if let Some((state, slot)) = disk.base {
+                    folds.push((
+                        "base",
+                        slot,
+                        (state.leader, state.next_seq.0, state.first_seq.0),
+                    ));
+                }
+                if let Some(trim) = &disk.trim {
+                    folds.push((
+                        "compaction point",
+                        trim.slot,
+                        (
+                            trim.state.leader(),
+                            trim.state.next_seq().0,
+                            trim.state.first_seq().0,
+                        ),
+                    ));
+                }
+                for (what, slot, held) in folds {
+                    let before = fold_before(chosen, slot).unwrap_or_else(|| {
+                        panic!(
+                            "{DISK}: machine {m} {address:?} holds a {what} at {slot:?}, and the \
+                             chosen log misses a slot below it"
+                        )
+                    });
+                    assert!(
+                        held == (before.leader, before.next, before.first),
+                        "{DISK}: machine {m} {address:?} holds the {what} {held:?} at \
+                         {slot:?}, the chosen log folds to {:?} there",
+                        (before.leader, before.next, before.first)
+                    );
+                    sometimes!(what == "compaction point", reach::DISK_TRIM);
+                }
+                if let Some(trim) = &disk.trim {
+                    let (_, _, truth) = self.truth(j);
+                    assert!(
+                        trim.floor.0 <= truth.first,
+                        "{DISK}: machine {m} {address:?} compacts at the floor {:?}, above \
+                         the decided floor {}",
+                        trim.floor,
+                        truth.first
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`STOPPED`] for every journal.
+    fn judge_all_stops(&mut self) {
+        for j in 0..self.journals.len() {
+            self.judge_stops(j);
+        }
+    }
+
+    /// The highest promise on the disk of any acceptor of journal `id`, on
+    /// every machine, up or down: a disk survives its process.
+    fn promised(&self, id: JournalId) -> Ballot {
+        let mut top = Ballot::zero();
+        for machine in self.machines.values() {
+            let mut store = machine.disk.store.borrow_mut();
+            let addresses = store.list().expect("a list of memory");
+            // An acceptor's address names no segment; a replica's does.
+            for address in addresses
+                .into_iter()
+                .filter(|a| a.journal == id && a.segment.is_none())
+            {
+                let entries = store.scan(address).expect("a scan of memory");
+                let disk = paros_journal_io::layout::decode_acceptor(address, &entries)
+                    .expect("a disk the walk never damages here");
+                top = top.max(disk.promised);
+            }
+        }
+        top
     }
 
     /// [`BOUNDED_IN_FLIGHT`]: at most one journal has an expensive action
