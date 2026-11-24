@@ -41,9 +41,9 @@ Test only: `publish = false`.
   its segment while a truncate in flight cuts it, and one campaign in three writes from the start
   of its oldest segment, so its Phase 1 reads the dropped slots. CTRL (§J5.3): a move damages a vote of an
   acceptor's disk at a boot, inside the contract (a replica applied the slot, the slot chose
-  another command, a quorum of the grid holds the chosen command, or no quorum can choose the
-  vote's command, `Unchoosable` of `journal-ctrl/`), with at most `F` damaged or lost votes of a
-  column at one slot (`within_f`); the leader's blocked slot, its probe on a late answer (which may
+  another command, a Phase 2 quorum of the slot's column holds the chosen command, or no quorum can choose the
+  vote's command, `Unchoosable` of `journal-ctrl/`; a rot of these last two keeps at most `F` damaged votes of
+  a column at one slot, `within_f`); the leader's blocked slot, its probe on a late answer (which may
   decide a `Noop`), its learn from a replica, its skip of a slot that a late answer dropped, and
   the acceptor's repair (`REPAIRED`, mutant `RepairForged`; trace events `Rot`, `Probe`, `Skip`,
   `Learn` and `Repair`). Steers bring the rare cases: a `Repair` that the network holds late and a

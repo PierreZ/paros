@@ -1739,11 +1739,16 @@ impl RolesModel {
         if live && !second && !unread && (cx.phase() != Phase::Chaos || !cx.rng().chance(1, 8)) {
             return;
         }
-        let others: Vec<u64> = PROPOSERS
+        // A second campaign runs on a proposer that does not wait on its
+        // seal; when every proposer waits, any proposer runs it.
+        let mut others: Vec<u64> = PROPOSERS
             .iter()
             .copied()
             .filter(|p| !second || !sealing.contains(&NodeId(*p)))
             .collect();
+        if others.is_empty() {
+            others = PROPOSERS.to_vec();
+        }
         let proposer = NodeId(*cx.rng().pick(&others).expect("proposers"));
         self.round += 1;
         let ballot = paros_journal::register::Ballot {
@@ -2636,8 +2641,9 @@ impl RolesModel {
             })
     }
 
-    /// Whether a majority of the grid of a segment that is not retired,
-    /// without `node`, holds on disk the command chosen at `slot`, each
+    /// Whether a majority of the column of `slot` (its Phase 2 quorums) in
+    /// the grid of a segment that is not retired, without `node`, holds on
+    /// disk the command chosen at `slot`, each
     /// vote bound to that segment and at or above the ballot that chose it
     /// (the third arm of `Spare` in `specs/tla/journal-ctrl/`): the value
     /// stays on disk elsewhere, so `node`'s vote may rot, inside `within_f`.
@@ -2657,8 +2663,11 @@ impl RolesModel {
             .values()
             .filter(|record| record.state() < SegmentState::Retired)
             .any(|record| {
-                let grid: Vec<NodeId> = record.grid().columns().iter().flatten().copied().collect();
-                let holders = grid
+                let columns = record.grid().columns();
+                let index = usize::try_from(slot.0 % u64::try_from(columns.len()).expect("few"))
+                    .expect("a column index");
+                let column = &columns[index];
+                let holders = column
                     .iter()
                     .filter(|x| **x != node)
                     .filter(|x| {
@@ -2673,7 +2682,7 @@ impl RolesModel {
                             })
                     })
                     .count();
-                2 * holders > grid.len()
+                2 * holders > column.len()
             })
     }
 

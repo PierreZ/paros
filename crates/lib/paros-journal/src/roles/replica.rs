@@ -918,18 +918,14 @@ impl SegmentReplica {
             );
             return effects;
         }
-        // A slot chosen for a segment lies inside it: a leader proposes in
-        // its own segment from the start it opened at, and the seal end
-        // counts every vote of the segment (§J3.1), so no slot at or above
-        // the end is chosen there. A `Commit` outside is a detected
-        // violation of the seal, never a late message.
+        // The compaction point is at or above the start, so a slot below
+        // the start returned above. The seal end counts every vote of the
+        // segment (§J3.1), so no slot at or above the end is chosen there:
+        // a `Commit` past the end is a detected violation of the seal,
+        // never a late message.
         assert!(
             self.end.is_none_or(|end| slot < end),
             "a slot chosen for a segment is below its seal end"
-        );
-        assert!(
-            self.start().is_none_or(|start| slot >= start),
-            "a slot chosen for a segment is at or above its start"
         );
         if let Some(held) = self.chosen.get(&slot) {
             assert!(

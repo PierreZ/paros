@@ -217,7 +217,7 @@ jobs:
       # The coverage gate of the journal roles (#1326): the roles walks and
       # the whole journal reach every `probe!` of `paros_journal::roles`. It
       # walks thousands of timelines, so it runs in release here, not in the
-      # `test` job.
+      # `test` job; it takes about one minute in release on four cores.
       - name: Check that the walks reach every probe of the journal roles
         run: >-
           nix develop --command cargo nextest run --profile ci --release

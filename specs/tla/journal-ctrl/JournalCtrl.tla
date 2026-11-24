@@ -224,6 +224,24 @@ SkipCompacted == \A b \in Ballots : \A s \in bskip[b] :
   \E p \in Gens : StartKnown(p) /\ Start(p) <= s /\ CompactedTo(p, s + 1)
 NoProposeBlocked == \A b \in Ballots : \A s \in bblock[b] : prop[b][s] = None
 
+\* No quorum of the grid of ballot f can vote at s at f: a promise quorum of
+\* it, without a, promised above f on disk and sent no vote at s and f.
+\* Both facts last: a promise only rises, and a sent vote stays sent.
+DeadAt(a, s, f) ==
+  /\ bgen[f] # 0
+  /\ \E Q \in QOf[bgen[f]] :
+       /\ a \notin Q
+       /\ \A x \in Q : dprom[x] > f /\ \A v \in Cmds : <<s, f, v, x>> \notin sent2b
+
+\* A blocked slot is chosen, or an acceptor voted there at a ballot that no
+\* quorum can complete: a rot needs a lasting copy of a chosen value, or a
+\* vote that no quorum can choose (`Spare`), and the blocked slot's top
+\* report is a damaged vote.
+BlockedChosen == \A b \in Ballots : \A s \in bblock[b] :
+  \/ IsChosen(s)
+  \/ \E a \in Acceptors, f \in Ballots, v \in Cmds :
+       <<s, f, v, a>> \in sent2b /\ DeadAt(a, s, f)
+
 (***************************************************************************)
 (* Reach: each must be violated, so that a passing check is not empty.     *)
 (***************************************************************************)
@@ -238,11 +256,12 @@ NoUnblock == [][\A b \in Ballots : bblock[b] \subseteq bblock'[b]]_vars
 NoProbe == [][\A b \in Ballots, s \in Slots :
                s \in bblock[b] /\ s \notin bblock'[b] =>
                  ~\E Qs \in [bH[b] -> UNION {QOf[h] : h \in Gens}] : ProbeDecide(b, s, Qs)]_vars
-\* The probe never decides a blocked slot with a `Noop`: only a rot of an
-\* `Unchoosable` vote leaves a blocked slot with no readable vote.
+\* No blocked slot that is not chosen opens with a `Noop`. Only a rot of an
+\* `Unchoosable` vote blocks a slot that is not chosen (`BlockedChosen`), so
+\* this reaches the probe that decides a `Noop` after such a rot.
 NoNoopProbe == [][\A b \in Ballots, s \in Slots :
-                  s \in bblock[b] /\ s \notin bblock'[b] /\ s \notin bskip'[b] =>
-                    bsafe'[b][s] # Noop]_vars
+                  s \in bblock[b] /\ s \notin bblock'[b] /\ bsafe'[b][s] = Noop =>
+                    IsChosen(s)]_vars
 NoRepair == [][\A a \in Acceptors, s \in Slots :
                 Faulty(mvote[a][s]) => ~(mvote'[a][s][1] = mvote[a][s][1] /\ mvote'[a][s][2] # None)]_vars
 =============================================================================
