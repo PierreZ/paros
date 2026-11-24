@@ -30,5 +30,24 @@ pub fn add(ranges: &mut BTreeMap<Slot, Slot>, start: Slot, below: Slot) {
     *held = (*held).max(below);
 }
 
+/// The highest slot of the `ranges`, when they hold one.
+///
+/// # Panics
+///
+/// When a range is empty: [`add`] keeps every range non-empty.
+#[must_use]
+pub fn top(ranges: &BTreeMap<Slot, Slot>) -> Option<Slot> {
+    assert!(
+        ranges.iter().all(|(start, below)| start < below),
+        "a dropped range holds a slot"
+    );
+    let top = ranges.values().max().map(|below| Slot(below.0 - 1));
+    assert!(
+        top.is_none_or(|slot| contains(ranges, slot)),
+        "the highest dropped slot is in a range"
+    );
+    top
+}
+
 #[cfg(test)]
 mod tests;

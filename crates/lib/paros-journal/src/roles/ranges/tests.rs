@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use paros_consensus::Slot;
 
-use super::{add, contains};
+use super::{add, contains, top};
 
 #[test]
 fn a_range_holds_its_start_and_not_its_end() {
@@ -38,4 +38,13 @@ fn two_segments_keep_two_ranges() {
 #[should_panic(expected = "a dropped range holds a slot")]
 fn an_empty_range_is_a_programmer_error() {
     add(&mut BTreeMap::new(), Slot(3), Slot(3));
+}
+
+#[test]
+fn the_top_of_the_ranges_is_the_last_slot_of_the_highest_range() {
+    let mut ranges = BTreeMap::new();
+    assert_eq!(top(&ranges), None);
+    add(&mut ranges, Slot(8), Slot(10));
+    add(&mut ranges, Slot(2), Slot(5));
+    assert_eq!(top(&ranges), Some(Slot(9)));
 }

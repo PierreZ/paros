@@ -29,6 +29,7 @@
 //! and #1328 (paros-journal-control).
 
 use paros_consensus::journal::Seq;
+use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
 use paros_consensus::{NodeId, Slot};
 
 use crate::codec::Release;
@@ -120,6 +121,34 @@ impl Grid {
     #[must_use]
     pub fn acks(&self) -> usize {
         usize::from(self.f) + 1
+    }
+
+    /// One configuration for each column: a majority of its `2F + 1`
+    /// acceptors (§J5.1). So `F + 1` of a column decides a slot, and `F + 1`
+    /// of every column elects. The leader's Phase 1, the replica's read and
+    /// the controller's measures all ask their quorums of these.
+    ///
+    /// # Panics
+    ///
+    /// When an assertion on its own postconditions fails: a programmer
+    /// error, never an operating condition.
+    #[must_use]
+    pub fn column_configs(&self) -> Vec<AcceptorConfig<NodeId>> {
+        let columns: Vec<AcceptorConfig<NodeId>> = self
+            .columns
+            .iter()
+            .map(|column| AcceptorConfig::new(column.clone(), QuorumSystem::Majority))
+            .collect();
+        assert!(!columns.is_empty(), "a v1 grid has a column");
+        assert!(
+            columns.len() == self.columns.len(),
+            "one configuration for each column"
+        );
+        assert!(
+            columns.iter().all(|c| c.members().len() == self.rows()),
+            "a column has 2F + 1 acceptors"
+        );
+        columns
     }
 }
 

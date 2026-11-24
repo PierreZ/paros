@@ -444,7 +444,7 @@ impl JournalAcceptor {
 
     /// The highest slot the acceptor voted in, a dropped slot included.
     fn watermark(&self) -> Option<Slot> {
-        let dropped = self.dropped.values().max().map(|below| Slot(below.0 - 1));
+        let dropped = ranges::top(&self.dropped);
         probe!(
             sometimes,
             dropped > self.acceptor.vote_watermark(),

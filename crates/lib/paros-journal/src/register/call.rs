@@ -199,13 +199,11 @@ impl RegisterCall {
                     CallStep::Pending
                 }
             }
-            Reply::Refused { set, successor, .. } => {
+            refused @ Reply::Refused { .. } => {
                 if matches!(self.phase, CallPhase::Done(_) | CallPhase::Ended) {
                     return CallStep::Pending;
                 }
-                let later = successor
-                    .filter(|next| next.generation > self.set.generation)
-                    .or_else(|| (set.generation > self.set.generation).then_some(set));
+                let later = refused.later_set(self.set.generation);
                 if later.is_some() {
                     self.phase = CallPhase::Ended;
                 }
@@ -224,18 +222,7 @@ impl RegisterCall {
         if !self.set.has_quorum(&voters) {
             return CallStep::Pending;
         }
-        let top = answers
-            .values()
-            .max_by_key(|written| written.op)
-            .expect("a quorum answered")
-            .clone();
-        assert!(
-            answers
-                .values()
-                .filter(|written| written.op == top.op)
-                .all(|written| written.value == top.value),
-            "one write generation holds one value"
-        );
+        let top = Written::highest(answers.values()).clone();
         match top.value.apply(&self.change) {
             Ok(value) => {
                 self.phase = CallPhase::Writing {

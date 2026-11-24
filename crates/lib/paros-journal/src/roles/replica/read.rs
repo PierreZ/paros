@@ -35,9 +35,8 @@ use paros_consensus::{NodeId, Slot};
 use super::{Folded, ReplicaEffect, SegmentReplica};
 use crate::command::Record;
 pub use crate::read::ReadAnswer;
-use crate::roles::leader::ReadSegment;
 use crate::roles::message::{Message, ReadTag};
-use crate::segment::SegmentId;
+use crate::segment::{Grid, SegmentId};
 
 /// The most reads one replica holds open; a read above it is
 /// [`ReadAnswer::Unserved`].
@@ -258,7 +257,7 @@ impl SegmentReplica {
             );
             return Vec::new();
         }
-        let columns = self.grid.as_ref().map(ReadSegment::columns_of);
+        let columns = self.grid.as_ref().map(Grid::column_configs);
         let ready: Vec<u64> = self
             .reads
             .iter()

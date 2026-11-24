@@ -365,13 +365,12 @@ impl Phase1 {
             .filter(|node| complete.contains(node))
             .flat_map(|node| {
                 let report = &self.reports[&node];
-                let dropped = report.dropped.values().map(|below| Slot(below.0 - 1));
                 report
                     .votes
                     .keys()
                     .chain(report.faulty.keys())
                     .copied()
-                    .chain(dropped)
+                    .chain(ranges::top(&report.dropped))
             })
             .max()
             .map(|slot| Slot(slot.0 + 1));

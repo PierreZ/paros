@@ -88,7 +88,7 @@ pub mod phase1;
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_consensus::contract::limits::RESEND_BATCH;
-use paros_consensus::membership::{AcceptorConfig, ProxyId, QuorumSystem};
+use paros_consensus::membership::{AcceptorConfig, ProxyId};
 use paros_consensus::proposer::{PromiseFold, Rounds};
 use paros_consensus::types::Fingerprint;
 use paros_consensus::{Ballot, NodeId, Slot};
@@ -99,7 +99,7 @@ use crate::command::Command;
 use crate::fold::Answer;
 use crate::held::{Held, Reply};
 use crate::register::{Change, RegisterValue};
-use crate::segment::{Grid, SegmentId, SegmentRecord, SegmentState};
+use crate::segment::{SegmentId, SegmentRecord, SegmentState};
 
 use phase1::{Phase1, Phase1Close};
 
@@ -195,8 +195,8 @@ pub enum Proposed {
 pub struct ReadSegment {
     /// The segment.
     pub id: SegmentId,
-    /// One configuration for each column of its grid: a majority of the
-    /// column's `2F + 1` acceptors.
+    /// One configuration for each column of its grid
+    /// ([`crate::segment::Grid::column_configs`]).
     pub columns: Vec<AcceptorConfig<NodeId>>,
     /// Its replica set.
     pub replicas: Vec<NodeId>,
@@ -209,32 +209,6 @@ pub struct ReadSegment {
 }
 
 impl ReadSegment {
-    /// The column configurations of `grid`: a v1 grid's column is a
-    /// majority of `2F + 1` (§J5.1), so `F + 1` of a column decides a slot
-    /// and `F + 1` of every column elects.
-    ///
-    /// # Panics
-    ///
-    /// When an assertion on its own postconditions fails: a programmer
-    /// error, never an operating condition.
-    #[must_use]
-    pub fn columns_of(grid: &Grid) -> Vec<AcceptorConfig<NodeId>> {
-        let columns: Vec<AcceptorConfig<NodeId>> = grid
-            .columns()
-            .iter()
-            .map(|column| AcceptorConfig::new(column.clone(), QuorumSystem::Majority))
-            .collect();
-        assert!(
-            columns.len() == grid.columns().len(),
-            "one configuration for each column"
-        );
-        assert!(
-            columns.iter().all(|c| c.members().len() == grid.rows()),
-            "a column has 2F + 1 acceptors"
-        );
-        columns
-    }
-
     /// The replicas of the set that must hold every slot before the retire:
     /// `F + 1`, the write quorum of a column of the grid (§J3.1).
     ///
@@ -387,7 +361,7 @@ impl<T> JournalLeader<T> {
             })
             .map(|record| ReadSegment {
                 id: record.id(),
-                columns: ReadSegment::columns_of(record.grid()),
+                columns: record.grid().column_configs(),
                 replicas: record.replicas().to_vec(),
                 start: record.start(),
                 end: record.end(),
@@ -396,6 +370,10 @@ impl<T> JournalLeader<T> {
         assert!(
             segments.last().is_some_and(|s| s.id == own),
             "the leader's own segment is the last it reads"
+        );
+        assert!(
+            segments.windows(2).all(|pair| pair[0].id < pair[1].id),
+            "the leader reads each segment once, in order"
         );
         // The driver read `from` before the bind. A segment that retired
         // since is not read, and every slot below the start of the oldest
@@ -564,14 +542,7 @@ impl<T> JournalLeader<T> {
                 match self.phase1.fold(from, at, page) {
                     PromiseFold::Continue(next) => {
                         probe!(reachable, "leader: a promise page asks for the next page");
-                        vec![LeaderEffect::Send {
-                            to: from,
-                            message: Message::Prepare {
-                                ballot: self.campaign.ballot,
-                                from: next,
-                                segment: self.own(),
-                            },
-                        }]
+                        vec![self.prepare(from, next)]
                     }
                     PromiseFold::Answered | PromiseFold::Ignored => self.after_promise(),
                 }
@@ -593,14 +564,7 @@ impl<T> JournalLeader<T> {
                     .collect();
                 self.skip_blocked(&dropped);
                 match fold {
-                    PromiseFold::Continue(next) => vec![LeaderEffect::Send {
-                        to: from,
-                        message: Message::Prepare {
-                            ballot: self.campaign.ballot,
-                            from: next,
-                            segment: self.own(),
-                        },
-                    }],
+                    PromiseFold::Continue(next) => vec![self.prepare(from, next)],
                     PromiseFold::Answered | PromiseFold::Ignored => self.probe_blocked(),
                 }
             }
@@ -924,12 +888,7 @@ impl<T> JournalLeader<T> {
                     reachable,
                     "leader: a chosen slot of a retired segment is answered Unknown"
                 );
-                self.unapplied.remove(&slot);
-                effects.extend(
-                    self.held
-                        .release(slot)
-                        .map(|(token, reply)| LeaderEffect::Reply { token, reply }),
-                );
+                effects.extend(self.forget(slot));
             }
             return effects;
         }
@@ -940,15 +899,36 @@ impl<T> JournalLeader<T> {
         self.phase1
             .wanted()
             .into_iter()
-            .map(|(to, from)| LeaderEffect::Send {
-                to,
-                message: Message::Prepare {
-                    ballot: self.campaign.ballot,
-                    from,
-                    segment: self.own(),
-                },
-            })
+            .map(|(to, from)| self.prepare(to, from))
             .collect()
+    }
+
+    /// The `Prepare` of the campaign's ballot to `to`, from slot `from`.
+    fn prepare(&self, to: NodeId, from: Slot) -> LeaderEffect<T> {
+        LeaderEffect::Send {
+            to,
+            message: Message::Prepare {
+                ballot: self.campaign.ballot,
+                from,
+                segment: self.own(),
+            },
+        }
+    }
+
+    /// The read segment `segment`, when the leader reads it.
+    fn read(&self, segment: SegmentId) -> Option<&ReadSegment> {
+        self.segments.iter().find(|s| s.id == segment)
+    }
+
+    /// Forget a chosen slot whose answer is gone: the held command of its
+    /// caller is answered `Unknown`, and the slot leaves the unapplied set.
+    fn forget(&mut self, slot: Slot) -> Option<LeaderEffect<T>> {
+        self.unapplied.remove(&slot);
+        let reply = self
+            .held
+            .release(slot)
+            .map(|(token, reply)| LeaderEffect::Reply { token, reply });
+        reply
     }
 
     /// The segment before the leader's own, when the leader's is pending.
@@ -1107,7 +1087,7 @@ impl<T> JournalLeader<T> {
             .chain(self.blocked.iter())
             .max()
             .map(|s| Slot(s.0 + 1));
-        let dropped = self.dropped.values().max().copied();
+        let dropped = ranges::top(&self.dropped).map(|s| Slot(s.0 + 1));
         let next = [Some(start), Some(from), top, dropped]
             .into_iter()
             .flatten()
@@ -1292,9 +1272,7 @@ impl<T> JournalLeader<T> {
     /// The `Commit`s of `slot`: to every replica of its segment.
     fn commits(&self, segment: SegmentId, slot: Slot, command: &Command) -> Vec<LeaderEffect<T>> {
         let replicas = &self
-            .segments
-            .iter()
-            .find(|s| s.id == segment)
+            .read(segment)
             .expect("the leader reads the segment of a slot it chose")
             .replicas;
         replicas
@@ -1351,7 +1329,7 @@ impl<T> JournalLeader<T> {
     /// The `F + 1`-th highest of `points` (the replicas that reported):
     /// the slot below which `F + 1` replicas of the set reach.
     fn quorum_point(&self, segment: SegmentId, points: impl Iterator<Item = Slot>) -> Option<Slot> {
-        let read = self.segments.iter().find(|s| s.id == segment)?;
+        let read = self.read(segment)?;
         let mut points: Vec<Slot> = points.collect();
         points.sort_unstable_by(|a, b| b.cmp(a));
         points.get(read.acks() - 1).copied()
@@ -1360,12 +1338,7 @@ impl<T> JournalLeader<T> {
     /// The `Compact` of `segment` to every acceptor that the leader reads,
     /// once `F + 1` replicas of its set compacted above its start.
     fn compact(&self, segment: SegmentId) -> Vec<LeaderEffect<T>> {
-        let Some(start) = self
-            .segments
-            .iter()
-            .find(|s| s.id == segment)
-            .and_then(|s| s.start)
-        else {
+        let Some(start) = self.read(segment).and_then(|s| s.start) else {
             return Vec::new();
         };
         let reports = self.compaction.get(&segment);
@@ -1415,9 +1388,8 @@ impl<T> JournalLeader<T> {
     ) -> Vec<LeaderEffect<T>> {
         if !matches!(self.phase, LeaderPhase::Open { .. })
             || !self
-                .segments
-                .iter()
-                .any(|s| s.id == segment && s.replicas.contains(&from))
+                .read(segment)
+                .is_some_and(|s| s.replicas.contains(&from))
         {
             return Vec::new();
         }
@@ -1462,12 +1434,7 @@ impl<T> JournalLeader<T> {
                 reachable,
                 "leader: a chosen slot whose answer is gone is answered Unknown"
             );
-            self.unapplied.remove(&slot);
-            effects.extend(
-                self.held
-                    .release(slot)
-                    .map(|(token, reply)| LeaderEffect::Reply { token, reply }),
-            );
+            effects.extend(self.forget(slot));
         }
         effects.extend(self.compact(segment));
         effects

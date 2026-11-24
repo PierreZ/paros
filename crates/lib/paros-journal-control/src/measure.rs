@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 
 use paros_consensus::NodeId;
-use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+use paros_consensus::membership::AcceptorConfig;
 use paros_journal::Grid;
 
 /// The liveness of one member (the O measure `live` of §J6.2), as the host
@@ -73,27 +73,6 @@ pub enum GridState {
     Stopped,
 }
 
-/// The configuration of each column of a v1 grid: a majority of `2F + 1`.
-///
-/// # Panics
-///
-/// When an assertion on its own postconditions fails: a programmer error,
-/// never an operating condition.
-#[must_use]
-pub fn columns(grid: &Grid) -> Vec<AcceptorConfig<NodeId>> {
-    let columns: Vec<AcceptorConfig<NodeId>> = grid
-        .columns()
-        .iter()
-        .map(|column| AcceptorConfig::new(column.clone(), QuorumSystem::Majority))
-        .collect();
-    assert!(!columns.is_empty(), "a v1 grid has a column");
-    assert!(
-        columns.iter().all(|c| c.members().len() == grid.rows()),
-        "each column has 2F + 1 members"
-    );
-    columns
-}
-
 /// How far `holds` is from failing on `config`, asked through the
 /// predicate alone: with the quorum on `live`, the number of live members
 /// that can go (one at a time, in member order) before it fails; without
@@ -139,7 +118,8 @@ fn margin(
 /// number, so a difference is a programmer error.
 #[must_use]
 pub fn column_spares(grid: &Grid, live: &BTreeSet<NodeId>) -> Vec<Spares> {
-    let spares: Vec<Spares> = columns(grid)
+    let spares: Vec<Spares> = grid
+        .column_configs()
         .iter()
         .map(|column| Spares {
             phase2: margin(column, live, AcceptorConfig::has_phase2_quorum),
@@ -162,13 +142,17 @@ pub fn column_spares(grid: &Grid, live: &BTreeSet<NodeId>) -> Vec<Spares> {
 /// `electable`: the live acceptors hold a Phase-1 quorum of every column.
 #[must_use]
 pub fn electable(grid: &Grid, live: &BTreeSet<NodeId>) -> bool {
-    columns(grid).iter().all(|c| c.has_phase1_quorum(live))
+    grid.column_configs()
+        .iter()
+        .all(|c| c.has_phase1_quorum(live))
 }
 
 /// `writable`: some column can choose a slot with the live acceptors.
 #[must_use]
 pub fn writable(grid: &Grid, live: &BTreeSet<NodeId>) -> bool {
-    columns(grid).iter().any(|c| c.has_phase2_quorum(live))
+    grid.column_configs()
+        .iter()
+        .any(|c| c.has_phase2_quorum(live))
 }
 
 /// The journal state of `grid` with the acceptors of `live`, a live leader

@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::BTreeSet;
+
 use crate::codec::RELEASE;
 use crate::command::Leader;
 
@@ -32,6 +34,24 @@ fn sealed() -> SegmentRecord {
     record.put_in_force(Slot(5)).expect("in force");
     record.seal(Slot(9)).expect("sealed");
     record
+}
+
+/// Each column is one majority configuration: `F + 1` of it is a Phase-2
+/// quorum and a Phase-1 quorum, `F` is neither.
+#[test]
+fn each_column_of_a_grid_is_a_majority_configuration() {
+    let grid = Grid::new(1, vec![nodes(&[1, 2, 3]), nodes(&[4, 5, 6])]).expect("two columns");
+    let configs = grid.column_configs();
+    assert_eq!(configs.len(), 2);
+    assert_eq!(configs[1].members(), &nodes(&[4, 5, 6])[..]);
+    let two: BTreeSet<NodeId> = nodes(&[4, 6]).into_iter().collect();
+    let one: BTreeSet<NodeId> = nodes(&[5]).into_iter().collect();
+    assert!(configs[1].has_phase2_quorum(&two) && configs[1].has_phase1_quorum(&two));
+    assert!(!configs[1].has_phase2_quorum(&one) && !configs[1].has_phase1_quorum(&one));
+    assert!(
+        !configs[0].has_phase1_quorum(&two),
+        "another column's acceptors"
+    );
 }
 
 #[test]
