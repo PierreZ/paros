@@ -7,6 +7,7 @@ import type { Chapter } from "../tour";
 export const QUORUMS_MAJORITY: Chapter = {
   lesson: "majority",
   runs: ["tour-majority"],
+  problem: "A phase cannot wait for every acceptor, because some of them are down.",
 };
 
 export const QUORUMS_GRIDS: Chapter = {

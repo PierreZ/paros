@@ -152,7 +152,9 @@ chapter names the runs it plays, in `src/tour/<page>.ts`; `src/tour.ts` lists th
 (`CHAPTERS`) and its `check()` fails the build when a chapter names a lesson or a run that
 does not exist, a run with no story, two chapters name one lesson, the chapters leave course
 order, a tour run is in no chapter, in two or in a lesson, a bridge is not the chapter's own
-flavor, or a flavor page has no chapter. Chapter 1 ("One value") and both Multi-Paxos chapters
+flavor, a chapter after the first has no bridge or has two, a chapter's own line is not one
+sentence of at most 140 characters, the problem line of a flavor (but the first) opens no
+chapter or two, or a flavor page has no chapter. Chapter 1 ("One value") and both Multi-Paxos chapters
 ("The log and its leader", "Reads") play their own tour runs; each other chapter plays runs of its lesson until a flavor's
 own tour run (`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of
 `src/steps/story.rs`: 10 to 30 beats, at most 140 characters per sentence, no question, every
@@ -162,9 +164,10 @@ accepts it).
 
 - `/paxos/tour/` (`src/pages/paxos/tour.astro`) inlines only the runs of the chapters
   (`tourTrace`, ids `<chapter>--<run>`, each with its own lanes, grid and page) and plays them
-  all: a title screen with one Play and the chapter menu, a bridge before a chapter (the
-  problem line of its flavor in `src/flavors.ts`, the text of the map of /paxos/; never on the
-  first chapter, and none where no line fits: "Who must answer" and "Reads"), the runs, then the
+  all: a title screen with one Play and the chapter menu, a bridge before each chapter but the
+  first (the problem line of its flavor in `src/flavors.ts`, the text of the map of /paxos/,
+  or the chapter's own line, `problem`, where the flavor's line opens another chapter: "Who
+  must answer" and "Reads"), the runs, then the
   end of the chapter (Next chapter, after a 5 s countdown that the reader can stop when the
   player reached it; Your turn; Go deeper). The address says only `#chapter=<id>`, never play.
 - A flavor page plays its own chapters in place: "Watch this flavor (N min)" at the top of its

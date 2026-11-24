@@ -289,8 +289,10 @@ test("/paxos/tour/: the title, the chapter menu, a bridge and a chapter", async 
   // The end of the tour has no main button: the focus is still on a button
   // of the screen, so the keys go on.
   expect(await page.evaluate(() => !!document.activeElement && !!document.activeElement.closest(".tour-screen"))).toBe(true);
-  // Chapter 2 has no bridge: it opens on its first run.
+  // Chapter 2 opens on its own bridge, then its first run.
   await chapters.nth(1).click();
+  await expect(screen.locator(".tour-bridge")).toHaveText("A phase cannot wait for every acceptor, because some of them are down.");
+  await screen.locator(".tour-next").click();
   await expect(screen).toBeHidden();
   await expect(story.locator(".tour-bar")).toContainText("Chapter 2/7");
   await expect(story.locator(".story-quiz")).toBeHidden();
@@ -353,9 +355,11 @@ test("/paxos/tour/: Play goes on to the end of a chapter, the countdown stops, a
   // Longer than the countdown: Stop stopped the timer, not only its text.
   await page.waitForTimeout(6000);
   await expect(screen.locator(".tour-done")).toBeVisible();
-  // Next chapter: "Reads" has no bridge, so its first run plays.
+  // Next chapter: "Reads" opens on its own bridge, and the bridge goes on
+  // to the run by itself after the time to read it.
   await screen.locator(".tour-next").click();
-  await expect(story.locator(".tour-bar")).toContainText("Chapter 4/7");
+  await expect(screen.locator(".tour-bridge")).toHaveText("If every read goes through the leader, the leader does all the work.");
+  await expect(story.locator(".tour-bar")).toContainText("Chapter 4/7", { timeout: 15_000 });
   await expect.poll(playing).toBe(true);
   // To its end, then a hidden page stops the countdown and its text.
   await expect(screen.locator(".tour-count")).toContainText("Next chapter in", { timeout: 30_000 });

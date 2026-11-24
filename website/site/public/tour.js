@@ -3,7 +3,7 @@
 //
 // The page /paxos/tour/ plays every chapter: a title screen with one large
 // Play and the chapter menu, then for each chapter its bridge (the problem
-// that the flavor solves), its runs, and its end (Next chapter, Your turn,
+// that the chapter solves), its runs, and its end (Next chapter, Your turn,
 // Go deeper). A flavor page plays its own chapters in place, from the button
 // "Watch this flavor" at the top of its story.
 //
