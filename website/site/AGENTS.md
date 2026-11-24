@@ -152,7 +152,8 @@ chapter names the runs it plays, in `src/tour/<page>.ts`; `src/tour.ts` lists th
 (`CHAPTERS`) and its `check()` fails the build when a chapter names a lesson or a run that
 does not exist, a run with no story, two chapters name one lesson, the chapters leave course
 order, a tour run is in no chapter, in two or in a lesson, a bridge is not the chapter's own
-flavor, or a flavor page has no chapter. Chapter 1 ("One value") plays its own tour run; each other chapter plays runs of its lesson until a flavor's
+flavor, or a flavor page has no chapter. Chapter 1 ("One value") and both Multi-Paxos chapters
+("The log and its leader", "Reads") play their own tour runs; each other chapter plays runs of its lesson until a flavor's
 own tour run (`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of
 `src/steps/story.rs`: 10 to 30 beats, at most 140 characters per sentence, no question, every
 `enter` names a lane; `check_choices` checks that every `more` names a run of the page) takes
@@ -203,7 +204,7 @@ driver (`Desk` in `src/paxos/trace/compart/desk.rs`), not a level: node 0, two p
 (lanes `p0`, `p1`) and two replicas (`r0`, `r1`).
 Without the wasm, the section says so.
 
-A guided exercise (its view has `parts`; `gap` and the three single-decree exercises today, the others as their flavor gets its
+A guided exercise (its view has `parts`; `gap`, `read` and the three single-decree exercises today, the others as their flavor gets its
 intro, parts and guide in `paros-wasm`) adds, all from the engine:
 - **An intro** that plays the setup on the stage, one sentence per step: Next, Play or Pause,
   the speed and Skip. It never starts by itself; with reduced motion there is no Play.

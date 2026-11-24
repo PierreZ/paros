@@ -544,6 +544,7 @@ const DEAD_ENDS: &[(&str, &[usize])] = &[
     ("two-values", &[]),
     ("duel", &[0, 1]),
     ("gap", &[0, 1]),
+    ("read", &[2, 3]),
     ("majority", &[0, 1, 2]),
     ("grid-column", &[0, 1]),
 ];
