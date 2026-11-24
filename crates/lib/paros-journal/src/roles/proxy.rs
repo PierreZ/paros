@@ -212,7 +212,7 @@ impl JournalProxy {
         // below it are dropped, and each of their leaders hears the ballot
         // that dropped them.
         let stale = self.rounds.close_below(ballot);
-        if !stale.is_empty() {
+        for _ in &stale {
             probe!(reachable, "proxy: a higher ballot drops the rounds below");
         }
         let leaders = self.drop_delegations(stale);
