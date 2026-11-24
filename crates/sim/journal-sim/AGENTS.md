@@ -52,7 +52,9 @@ Test only: `publish = false`.
   `Compact` until a member drops the slot; the next campaign then hears that member late, so its
   answer skips the blocked slot), and a seal whose answer is lost (the register took it; the
   leader observes no value until its seal asked again runs, which waits until a later leader
-  opens in a later segment, so that leader may seal the first leader's own segment). The
+  opens in a later segment, so that leader may seal the first leader's own segment). In chaos,
+  one register change in six goes unanswered: its request is lost and it does not run, or it
+  runs and its reply is lost (`REGISTER_REQUEST_LOST`, `REFUSAL_LOST`). The
   `Truncate` that cuts the writes in flight is the third call of a burst, so a deaf replica
   jumps to a blind point and folds blind. The client asks `Resolve` at every replica, and again
   for a `Below` it settled, and every covering answer is judged.

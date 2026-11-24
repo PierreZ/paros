@@ -20,6 +20,10 @@
 //! names, and a crash loses the batches in flight and the sends that wait
 //! on them. The register is atomic: a change queued by a role is done or
 //! refused at a `Register` move, and every role then observes the value.
+//! In the chaos phase one change in six goes unanswered: its request is
+//! lost and it does not run, or it runs and its reply is lost; the role
+//! asks it again at a tick, or a replica's trim at the next register value
+//! it observes (§J3.4, "a change asked again").
 //! The walk retires a sealed segment whose boundary state is written once
 //! `F + 1` replicas of its set hold it (the leader's retire is a later rule
 //! group of #1326).
@@ -133,6 +137,12 @@ pub mod reach {
     pub const SEALED: &str = "roles walk: a first leader sealed the segment before";
     /// A first leader lost the seal to another.
     pub const SEAL_LOST: &str = "roles walk: a first leader lost the seal to another";
+    /// A register change was lost on its way: it did not run, and its role
+    /// asks it again (at a tick, or a trim at the next value it observes).
+    pub const REGISTER_REQUEST_LOST: &str = "roles walk: a register change was lost before it ran";
+    /// A refusal whose reply was lost: the role asks again and is refused
+    /// again.
+    pub const REFUSAL_LOST: &str = "roles walk: the reply of a refused register change was lost";
     /// A `Noop` of the gap fill chosen below the start of a segment.
     pub const GAP_NOOP: &str = "roles walk: a Noop filled a slot below the segment start";
     /// A vote of an old grid chosen again in a new grid.
@@ -213,6 +223,8 @@ pub mod reach {
     pub const ALL: &[&str] = &[
         SEALED,
         SEAL_LOST,
+        REGISTER_REQUEST_LOST,
+        REFUSAL_LOST,
         GAP_NOOP,
         REPROPOSED,
         THIRD,
@@ -2812,6 +2824,83 @@ impl RolesModel {
             .map(SegmentRecord::id)
     }
 
+    /// The checks and the events of a change that ran and moved `value`.
+    fn ran(
+        &mut self,
+        change: &Change,
+        origin: Origin,
+        value: &RegisterValue,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        match (change, origin) {
+            // `judge_claim` judged the state against the segment's
+            // end, which the change does not move.
+            (Change::Boundary { .. }, _) => {
+                sometimes!(true, reach::BOUNDARY);
+                if let Origin::Replica(node) = origin {
+                    cx.record(RolesEvent::Boundary { r: node.0 });
+                }
+            }
+            (Change::Retire { segment, .. }, Origin::Leader(_, b)) => {
+                let end = value.segment(*segment).and_then(SegmentRecord::end);
+                let holders = Self::set_of(*segment)
+                    .iter()
+                    .filter(|node| end.is_some() && self.disk_front(**node) == end)
+                    .count();
+                assert!(
+                    holders > Self::set_of(*segment).len() / 2,
+                    "{RETIRE}: {segment:?} retired by ballot {b} with {holders} holders on disk"
+                );
+                cx.record(RolesEvent::Retire { p: segment.0 });
+                sometimes!(true, reach::RETIRED);
+            }
+            (Change::Trim { segment, .. }, _) => {
+                let last = self
+                    .register
+                    .segment(*segment)
+                    .and_then(SegmentRecord::boundary)
+                    .map(|b| b.next_seq.0);
+                assert!(
+                    last.is_some_and(|last| self.truth.first >= last),
+                    "{TRIM}: {segment:?} trimmed with its last seq {last:?}, the decided floor is {}",
+                    self.truth.first
+                );
+                if let Origin::Replica(node) = origin {
+                    cx.record(RolesEvent::Trim {
+                        p: segment.0,
+                        r: node.0,
+                    });
+                }
+                sometimes!(true, reach::SEGMENT_TRIMMED);
+            }
+            (Change::Bind { ballot }, Origin::Leader(node, _)) => {
+                self.bind(node, *ballot, value, cx);
+            }
+            (Change::Seal { segment, end }, _) => {
+                self.sealed(origin, *segment, *end, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Three outcomes of a change, as a register on matchmakers has: it runs
+    /// and its role hears the answer (`Some(true)`); its request is lost and
+    /// it does not run (`None`); or it runs and its reply is lost
+    /// (`Some(false)`). A role that hears nothing asks again at its next
+    /// tick, and every role reads a done value at its next observe, so a
+    /// lost reply matters for a refusal only: a done value reaches each
+    /// role, its caller too, at once.
+    fn reach_register(cx: &mut Cx<'_, Self>) -> Option<bool> {
+        if cx.phase() != Phase::Chaos || !cx.rng().chance(1, 6) {
+            return Some(true);
+        }
+        if cx.rng().chance(1, 2) {
+            sometimes!(true, reach::REGISTER_REQUEST_LOST);
+            return None;
+        }
+        Some(false)
+    }
+
     /// Whether the queued change at `index`, a seal, waits in chaos. Two
     /// steers:
     /// - a seal waits on three register steps in four while a later first
@@ -2889,6 +2978,9 @@ impl RolesModel {
             *state = base.0;
         }
         self.judge_claim(&change);
+        let Some(heard) = Self::reach_register(cx) else {
+            return;
+        };
         match self.register.apply(&change) {
             // A seal, a boundary state, a retire or a trim asked again over
             // the value that holds it is "ok" again and changes nothing
@@ -2906,57 +2998,12 @@ impl RolesModel {
                 self.observe_all(cx);
             }
             Ok(value) => {
-                match (&change, origin) {
-                    // `judge_claim` judged the state against the segment's
-                    // end, which the change does not move.
-                    (Change::Boundary { .. }, _) => {
-                        sometimes!(true, reach::BOUNDARY);
-                        if let Origin::Replica(node) = origin {
-                            cx.record(RolesEvent::Boundary { r: node.0 });
-                        }
-                    }
-                    (Change::Retire { segment, .. }, Origin::Leader(_, b)) => {
-                        let end = value.segment(*segment).and_then(SegmentRecord::end);
-                        let holders = Self::set_of(*segment)
-                            .iter()
-                            .filter(|node| end.is_some() && self.disk_front(**node) == end)
-                            .count();
-                        assert!(
-                            holders > Self::set_of(*segment).len() / 2,
-                            "{RETIRE}: {segment:?} retired by ballot {b} with {holders} holders on disk"
-                        );
-                        cx.record(RolesEvent::Retire { p: segment.0 });
-                        sometimes!(true, reach::RETIRED);
-                    }
-                    (Change::Trim { segment, .. }, _) => {
-                        let last = self
-                            .register
-                            .segment(*segment)
-                            .and_then(SegmentRecord::boundary)
-                            .map(|b| b.next_seq.0);
-                        assert!(
-                            last.is_some_and(|last| self.truth.first >= last),
-                            "{TRIM}: {segment:?} trimmed with its last seq {last:?}, the decided floor is {}",
-                            self.truth.first
-                        );
-                        if let Origin::Replica(node) = origin {
-                            cx.record(RolesEvent::Trim {
-                                p: segment.0,
-                                r: node.0,
-                            });
-                        }
-                        sometimes!(true, reach::SEGMENT_TRIMMED);
-                    }
-                    (Change::Bind { ballot }, Origin::Leader(node, _)) => {
-                        self.bind(node, *ballot, &value, cx);
-                    }
-                    (Change::Seal { segment, end }, _) => {
-                        self.sealed(origin, *segment, *end, cx);
-                    }
-                    _ => {}
-                }
+                self.ran(&change, origin, &value, cx);
                 self.register = value;
                 self.observe_all(cx);
+            }
+            Err(_) if !heard => {
+                sometimes!(true, reach::REFUSAL_LOST);
             }
             Err(_) => {
                 if let Origin::Leader(node, round) = origin
