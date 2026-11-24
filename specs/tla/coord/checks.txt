@@ -3,14 +3,19 @@
 #             violation  TLC must find that the property of the file is false
 #   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
 #             long       only `scripts/check-tla.sh --all` runs it
-# The safety checks split the faults so that each one stays small: copies
-# and losses (dup), orders and depositions (order), checkpoints, trims and
-# crashes (trim).
+# The safety checks split the faults so that each one stays small: copies,
+# expiries and a crash with one session (dup), orders and depositions
+# (order), copies of acts with a revoke and a crash (acts), a checkpoint,
+# a trim and an expiry with two sessions (trim), two checkpoints and two
+# trims in a row with a crash (chain).
 safety_dup          pass       ci
 safety_order        pass       ci
+safety_acts         pass       ci
 safety_trim         pass       ci
+safety_chain        pass       ci
 no_dedup            violation  ci
 no_void             violation  ci
+no_tomb             violation  ci
 no_guard            violation  ci
 no_fence            violation  ci
 expire_blind        violation  ci
@@ -18,6 +23,7 @@ ckpt_stale          violation  ci
 trim_any            violation  ci
 reach_dup_void      violation  ci
 reach_dead_void     violation  ci
+reach_tomb_void     violation  ci
 reach_guard_void    violation  ci
 reach_expire_void   violation  ci
 reach_new_holder    violation  ci

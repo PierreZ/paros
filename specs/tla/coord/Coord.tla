@@ -1,10 +1,8 @@
 ------------------------------- MODULE Coord --------------------------------
 (***************************************************************************)
 (* The coordination store over a journal: the election library of #1420   *)
-(* (paros-election), redesigned on the ideas of the ZooKeeper client and   *)
-(* of Apache Curator (Pierre, 2026-11-24, option B of                      *)
-(* /mnt/project-files/design/election-zookeeper-2026-11-24/proposal.md;   *)
-(* docs/architecture/03-3-coordinators-and-placement.md §3.3).             *)
+(* (paros-election), on the ideas of the ZooKeeper client and of Apache    *)
+(* Curator (docs/architecture/04-roles.md §4.4, "The coordination store"). *)
 (*                                                                         *)
 (* "The log is the server." The library owns one journal in multi-writer   *)
 (* mode (docs/journal/02-data-plane.md §J2.4). The journal arbitrates      *)
@@ -69,9 +67,20 @@
 (*                       position: ViewTrue.                               *)
 (*   TrimToCkpt = FALSE  a truncate may go to a checkpoint that the fold   *)
 (*                       did not take: ViewTrue.                           *)
-(* The checkpoint rule is a finding of this model: "truncate to a         *)
-(* checkpoint" alone loses the records that land between the read         *)
-(* position of the writer of the checkpoint and the checkpoint itself.     *)
+(*   Tomb = FALSE        the fold keeps no tombstone of an expired          *)
+(*                       session, and a late copy of its `open` brings it  *)
+(*                       back: OnceEach.                                   *)
+(* "Truncate to a checkpoint" alone loses the records that land between   *)
+(* the read position of the writer of a checkpoint and the checkpoint      *)
+(* itself: hence CkptFresh.                                                *)
+(*                                                                         *)
+(* What each property is. OnceEach, EphemeralsEnd, ViewTrue, SettledTrue  *)
+(* and TermStep follow from the rules. ActsByHolder and NoRegress state    *)
+(* the guard and the fence: their controls show that the fold and the      *)
+(* receiver carry them out. ExpireCas is an availability rule (a session   *)
+(* that keeps writing is not killed by a stale expiry): with Eager, any    *)
+(* expiry is safe, and ExpireOnSilence only shows that the fold carries    *)
+(* the rule out.                                                           *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -81,7 +90,7 @@ CONSTANTS Members,
           MaxDup, MaxCrash, MaxExpire, MaxRevoke, MaxOrders, MaxCkpt, MaxTrim,
           Kinds,        \* the kinds of record a session may send: a subset of OpKinds
           Lag,          \* TRUE: a member may read a prefix that lags
-          Dedup, VoidDead, Guard, Fence, ExpireCas, CkptFresh, TrimToCkpt,
+          Dedup, VoidDead, Tomb, Guard, Fence, ExpireCas, CkptFresh, TrimToCkpt,
           Ev            \* for the reach checks: the event that must not happen
 
 Sess == 1..MaxSess
@@ -94,7 +103,8 @@ Init0 == [live |-> {}, dead |-> {},
           last |-> [s \in Sess |-> 0], opn |-> [s \in Sess |-> 0],
           nodes |-> {}, holder |-> NoSess, term |-> 0,
           ck |-> {}, done |-> {},
-          badAct |-> FALSE, badOnce |-> FALSE, badExp |-> FALSE]
+          badAct |-> FALSE, badOnce |-> FALSE, badExp |-> FALSE,
+          badTerm |-> FALSE]
 
 \* Every record has one shape, so that TLC can compare any two.
 Rec(k, s, n, t, last, at, st) ==
@@ -133,7 +143,8 @@ HolderOf(nodes, live) ==
 \* The holder after a step; the term is the position where it changed.
 Rehold(f, p) ==
   LET h == HolderOf(f.nodes, f.live)
-  IN IF h = f.holder THEN f ELSE [f EXCEPT !.holder = h, !.term = p]
+  IN IF h = f.holder THEN f
+     ELSE [f EXCEPT !.holder = h, !.term = p, !.badTerm = @ \/ p <= f.term]
 
 \* An expiry: the session is gone, and so are its nodes and its row of the
 \* dedup table.
@@ -169,7 +180,7 @@ Apply(f, r, p) ==
            IF r.s \in f.live /\ (~ExpireCas \/ f.last[r.s] = r.last)
            THEN Kill(f, r.s, r) ELSE f
       [] r.k = "open" ->
-           IF r.s \notin f.live \cup f.dead
+           IF r.s \notin f.live /\ (~Tomb \/ r.s \notin f.dead)
            THEN [f EXCEPT !.live = @ \cup {r.s}, !.last[r.s] = p,
                           !.opn[r.s] = 0, !.nodes = @ \cup {<<r.s, p>>}]
            ELSE f
@@ -266,6 +277,7 @@ Event(f, r, p) ==
           /\ ~(f.holder = r.s /\ f.term = r.t) -> "guard_void"
        [] r.k = "expire" /\ r.s \in f.live /\ f.last[r.s] # r.last
           -> "expire_void"
+       [] r.k = "open" /\ r.s \in f.dead -> "tomb_void"
        [] r.k = "ckpt" /\ r.at # p - 1 -> "ckpt_void"
        [] f.holder # NoSess /\ g.holder # NoSess /\ g.holder # f.holder
           -> "new_holder"
@@ -420,8 +432,10 @@ ViewTrue == \A m \in Members : Sem(View(m)) = Sem(TrueFold(mread[m]))
 SettledTrue ==
   \A m \in Members :
     mst[m] = "idle" /\ mop[m].k \in OpKinds =>
-      \/ <<msess[m], mop[m].n>> \in TrueFold(mread[m]).done
-      \/ TrueFold(mread[m]).opn[msess[m]] >= mop[m].n
+      TrueFold(mread[m]).opn[msess[m]] >= mop[m].n
+
+\* The term changes with each change of holder, and it never goes down.
+TermStep == ~Cur.badTerm
 
 \* For the reach checks: the event Ev never happens.
 NotReached == ~reached

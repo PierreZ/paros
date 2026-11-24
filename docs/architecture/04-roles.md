@@ -365,40 +365,52 @@ and the model folder name are **Open** until the crate is built; the model is `s
   `<<session, op_seq>>`, and a session sends one record at a time. The fold keeps, for each live
   session, the last `op_seq` it applied: a copy at or below it does nothing (the
   `SessionOrderEngine` of Delos). The table is in the store's fold, not in the journal, so the
-  journal keeps no dedup table (§J2.4.1). A record of an expired session does nothing: its row
-  is gone, and a late copy must not apply as a new record. A member settles its record only from
-  its own fold. TLC: `OnceEach` (control `no_dedup`), `EphemeralsEnd` (control `no_void`),
-  `SettledTrue`.
+  journal keeps no dedup table (§J2.4.1). **An expired session leaves a tombstone**: its id stays
+  in the fold, in every checkpoint, and a late copy of any of its records (its `open` too) does
+  nothing. Without the tombstone, a late `open` brings the session back with an empty row, and a
+  late copy of its first write applies two times. A member settles its record only from its own
+  fold. TLC: `OnceEach` (controls `no_dedup` and `no_tomb`), `EphemeralsEnd` (control `no_void`),
+  `SettledTrue`. **Open**: the tombstones grow the state; how to drop old ones (for example a
+  session id that names the position of its `open`).
 - **Expiry is a compare-and-set on the session's last position.** The store reads no clock. A
   member that saw no record of a session since position `last` for one timeout, on the clock the
   program passes, appends `Expire(session, last)`, after a jitter. The fold applies it only if the
   last record of the session is still at `last`; the expiry deletes the session's ephemeral nodes
   in the same step (ZooKeeper's `killSession`). A slow or skewed clock can only expire a live
-  session early: that costs availability, never safety. TLC: `ExpireOnSilence` (control
-  `expire_blind`).
+  session early: that costs availability, never safety. So the compare-and-set on `last` is an
+  availability rule: a session that keeps writing is not killed by a stale expiry. TLC checks only
+  that the fold carries it out (`ExpireOnSilence`, control `expire_blind`); every safety property
+  holds without it.
 - **The latch and its term.** The recipes are pure functions of the fold, so no recipe watches
   its predecessor (there is no herd effect: every member tails the journal anyway). The leader
   latch is Curator's `LeaderLatch`: the live session whose node has the lowest position holds
   it. **The term is the position of the record at which the holder changed**: one holder for each
-  term, and the term grows. Curator's `LeaderSelector`, locks, semaphores, groups, queues,
+  term, and the term grows (TLC: `TermStep`, `OneSender`). Curator's `LeaderSelector`, locks, semaphores, groups, queues,
   counters, barriers and caches map the same way (the proposal, section 3).
 - **Two fences.** Inside the journal, a record can carry a guard ("my session holds the latch
   at term `t`", or a `check`), and the fold voids a record whose guard fails: a deposed holder can
-  still append, and its guarded writes do nothing. TLC: `ActsByHolder` (control `no_guard`; a
-  holder is deposed while its session lives when another member deletes its node). Outside the
-  journal, each order carries the term, and the receiver checks it in the same write as the effect
-  (the takeover rules below). TLC: `NoRegress` (control `no_fence`), `OneSender`. A holder that saw
+  still append, and its guarded writes do nothing. The guard is needed when the holder is deposed
+  while its session lives: another member deletes its node (ZooKeeper allows it), or the session
+  has several records in flight. Outside the journal, each order carries the term, and the
+  receiver checks it in the same write as the effect (the takeover rules below). `ActsByHolder`
+  and `NoRegress` state these two rules; their controls (`no_guard`, `no_fence`) show that the fold
+  and the receiver carry them out. A holder that saw
   none of its own records land for part of the timeout stops sending orders (Curator's
   `SUSPENDED`); this shortens the time with two active holders, and safety does not rest on it.
-- **Trim to a checkpoint only.** In multi-writer mode anyone may `Truncate` (§J2.4); the store is
-  the only one that truncates. A checkpoint record holds the whole state of the fold at the read
+- **Trim to a checkpoint only.** In multi-writer mode anyone with access may `Truncate` (§J2.4),
+  and the journal cannot refuse it. So the store's safety has a precondition: only the store
+  truncates its journal. The token at the frontend (section 3.5) must give the right to
+  truncate to the store alone; a client that truncates elsewhere breaks the fold of every new
+  member (control `trim_any`). A checkpoint record holds the whole state of the fold at the read
   position `at` of the member that wrote it. The fold takes a checkpoint only when it lands at
   `at + 1`: a checkpoint behind other records would skip them. A truncate goes only to a
   checkpoint that the fold took, so the first record above the floor gives a new member the
   whole state. TLC: `ViewTrue` (controls `ckpt_stale` and `trim_any`). The rule "the checkpoint
   lands at `at + 1`" is a finding of the model: the proposal had only "truncate to a checkpoint".
+  It can starve: under steady writes, a record often lands between the read and the checkpoint.
 - **Not proved**: the liveness of the latch (after the holder stops and faults stop, a new holder
-  leads). **Open**: who sends expiries and checkpoints (any member, or the holder of an internal
+  leads), and the liveness of the checkpoint (one checkpoint lands at `at + 1` under steady
+  writes; a design that tolerates records between the read and the checkpoint is **Open**). **Open**: who sends expiries and checkpoints (any member, or the holder of an internal
   latch), the heartbeat and timeout values, the size limit of a checkpoint, and whether `TTL` and
   `CONTAINER` nodes are in the first version.
 
