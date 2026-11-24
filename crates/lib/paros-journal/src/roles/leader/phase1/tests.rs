@@ -481,18 +481,18 @@ fn a_late_answer_that_dropped_a_blocked_slot_counts_once_complete() {
         phase1.close(&segments).expect("a quorum").blocked,
         vec![Slot(1)]
     );
-    // A continuation page is full (the core's page rule): it holds the
-    // vote at slot 0, below the dropped range's last slot.
+    // A continuation page is full (the core's page rule): it holds a vote
+    // at slot 2, past the dropped range, and the next page starts at 3.
     phase1.fold(
         NodeId(3),
         Slot(0),
         PromisePage {
-            votes: BTreeMap::from([(Slot(0), (ballot(1), noop_or(1)))]),
-            ..page_dropped(&[(0, 2)], Some(2))
+            votes: BTreeMap::from([(Slot(2), (ballot(1), noop_or(1)))]),
+            ..page_dropped(&[(0, 2)], Some(3))
         },
     );
     assert_eq!(phase1.dropped_by(Slot(1)), None, "a partial answer");
-    phase1.fold(NodeId(3), Slot(2), page(&[], &[], None));
+    phase1.fold(NodeId(3), Slot(3), page(&[], &[], None));
     assert_eq!(phase1.dropped_by(Slot(1)), Some(NodeId(3)));
     assert_eq!(phase1.dropped_by(Slot(2)), None);
     // The tally alone would decide the slot now (nodes 1 and 3 qualify):

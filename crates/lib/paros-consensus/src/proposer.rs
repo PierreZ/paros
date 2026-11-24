@@ -192,6 +192,16 @@ impl<Id: Copy + Ord> PromiseTally<Id> {
             self.answered.insert(from);
             PromiseFold::Answered
         };
+        // Postconditions, one for each outcome: a continuation leaves the
+        // sender at the new cursor, a last page counts its answer.
+        assert!(
+            !matches!(fold, PromiseFold::Continue(next) if self.promise_next.get(&from) != Some(&next)),
+            "a continuation leaves the sender at its new cursor"
+        );
+        assert!(
+            fold != PromiseFold::Answered || self.answered.contains(&from),
+            "a last page counts the sender's answer"
+        );
         self.assert_invariants();
         fold
     }
