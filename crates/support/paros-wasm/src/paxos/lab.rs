@@ -207,6 +207,12 @@ fn voters(world: &WorldView, value: &str) -> usize {
         .count()
 }
 
+/// A ballot `round.node` as a pair that orders as ballots do.
+fn ballot(text: &str) -> (u64, u64) {
+    let (round, node) = text.split_once('.').unwrap_or((text, "0"));
+    (round.parse().unwrap_or(0), node.parse().unwrap_or(0))
+}
+
 /// One move of the reader.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

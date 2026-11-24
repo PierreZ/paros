@@ -536,6 +536,41 @@ fn replay(id: &str, moves: &[Move]) -> Lab {
     lab
 }
 
+/// The parts of each guided exercise that have a dead end, by index. An
+/// exercise can have none: with the disk rule off, `two-values` can always
+/// wipe a disk and open a ballot again, so no state stops it.
+const DEAD_ENDS: &[(&str, &[usize])] = &[
+    ("vote-not-chosen", &[0, 1]),
+    ("two-values", &[]),
+    ("duel", &[0, 1]),
+    ("gap", &[0, 1]),
+    ("majority", &[0, 1, 2]),
+    ("grid-column", &[0, 1]),
+];
+
+/// The walk met the dead end of each part that has one (`DEAD_ENDS`), and
+/// only those: `judged` counts the dead ends of each part, `stuck` all of
+/// them.
+fn assert_dead_ends(id: &str, judged: &[usize], stuck: usize) {
+    let expected = DEAD_ENDS
+        .iter()
+        .find(|(known, _)| *known == id)
+        .map_or_else(
+            || panic!("{id}: DEAD_ENDS names its dead ends"),
+            |(_, parts)| *parts,
+        );
+    let met: Vec<usize> = (0..judged.len()).filter(|k| judged[*k] > 0).collect();
+    assert_eq!(
+        met, expected,
+        "{id}: the walk meets the dead ends of these parts"
+    );
+    assert_eq!(
+        stuck > 0,
+        !expected.is_empty(),
+        "{id}: random moves reach a dead end when one exists"
+    );
+}
+
 /// From any state the reader can reach, a guided exercise either names a
 /// dead end that is one (random moves from it never reach the goal), or its
 /// third hint names a move that is not refused and the hints alone reach
@@ -629,21 +664,10 @@ fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
                 exercise.id
             );
         }
-        // The walk meets the dead ends of more than one part, and the tries
-        // reach the goal from live states.
-        assert!(
-            stuck > 0,
-            "{}: some random moves reach a dead end",
-            exercise.id
-        );
+        assert_dead_ends(exercise.id, &judged, stuck);
         assert!(
             reached > 0,
             "{}: the tries reach the goal from a live state",
-            exercise.id
-        );
-        assert!(
-            judged.iter().filter(|n| **n > 0).count() >= 2,
-            "{}: dead ends of two parts are judged",
             exercise.id
         );
     }
@@ -723,4 +747,33 @@ fn two_of_three_names_each_dead_end() {
     assert_eq!(lab.view().stuck.map(|s| s.part), Some(0));
     lab.play(&Move::Undo);
     assert!(lab.view().stuck.is_none());
+}
+
+/// Two votes at ballot 1.5 choose alpha, even when every Accepted is lost
+/// and no proposer learns it: the duel counts it as chosen, and names the
+/// dead end.
+#[test]
+fn a_majority_of_votes_is_chosen_before_a_proposer_learns_it() {
+    let mut lab = Lab::new("duel").expect("duel exists");
+    lab.extra("Proposer 5 opens a ballot for alpha");
+    lab.settle(|m| m.kind == "Prepare" || m.kind == "Promise");
+    lab.settle(|m| m.kind == "Accept" && m.to != "n3");
+    lab.drop_all(|_| true);
+    let world = lab.view_of_world();
+    assert!(world.chosen.is_none(), "no proposer learned it");
+    assert!(
+        lab.game()
+            .world()
+            .decree()
+            .expect("a single-decree world")
+            .chosen_by_votes(),
+        "two of three votes at one ballot choose alpha"
+    );
+    let view = lab.view();
+    assert!(!view.parts[2].holds, "the checklist says alpha is chosen");
+    assert!(
+        view.stuck.is_some(),
+        "a chosen value is a dead end of the duel"
+    );
+    assert!(!lab.goal());
 }

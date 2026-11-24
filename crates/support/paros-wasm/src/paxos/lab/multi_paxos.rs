@@ -3,6 +3,7 @@
 use super::Extra;
 use super::LOG;
 use super::Setup;
+use super::ballot;
 use super::chosen_at;
 use super::chosen_at_any;
 use super::{Exercise, Lab, Move, NO_PARTS, NONE, Part, Step, WireMessage};
@@ -99,12 +100,6 @@ fn leads_live(lab: &Lab) -> bool {
                 .as_deref()
                 .is_none_or(|p| ballot(p) <= ballot(own))
     })
-}
-
-/// A ballot `round.node` as a pair that orders as ballots do.
-fn ballot(text: &str) -> (u64, u64) {
-    let (round, node) = text.split_once('.').unwrap_or((text, "0"));
-    (round.parse().unwrap_or(0), node.parse().unwrap_or(0))
 }
 
 /// An `Accept` of a slot that `hit` matches is on the wire to node 1 or
