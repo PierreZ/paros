@@ -60,7 +60,7 @@ use paros_journal_io::{
     Op,
 };
 
-use crate::backend::{Disk, Fault, Landed, LossyRegister, Lost, QuorumRegister, Wire};
+use crate::backend::{Disk, DiskFault, Fault, Landed, LossyRegister, Lost, QuorumRegister, Wire};
 
 use crate::oracle::{Truth, as_written, label};
 
@@ -85,6 +85,16 @@ pub mod reach {
     /// stopped.
     pub const WRITTEN_HALTED: &str =
         "driver walk: an Unknown commit wrote, and its process stopped";
+    /// A commit of unknown outcome had written nothing, and its process
+    /// stopped.
+    pub const UNWRITTEN_HALTED: &str = "driver walk: an Unknown commit wrote nothing and halted";
+    /// A scan of unknown outcome stopped its process.
+    pub const SCAN_HALTED: &str = "driver walk: an Unknown scan stopped its process";
+    /// A scan read nothing (`Full`): its role stopped unreadable, and
+    /// placement served it again.
+    pub const UNREADABLE: &str = "driver walk: a failed scan stopped its role, served again";
+    /// A list read nothing (`Full`) at a boot, and was asked again.
+    pub const LIST_AGAIN: &str = "driver walk: a failed list at a boot was asked again";
     /// A role whose disk lost a record stopped for good at its restart.
     pub const LOST: &str = "driver walk: a role whose disk lost a record stopped for good";
     /// A process restarted, and an acceptor read a vote back.
@@ -118,6 +128,10 @@ pub mod reach {
         GROUPED,
         FAILED,
         WRITTEN_HALTED,
+        UNWRITTEN_HALTED,
+        SCAN_HALTED,
+        UNREADABLE,
+        LIST_AGAIN,
         LOST,
         RESTARTED,
         DEPOSED,
@@ -567,6 +581,16 @@ impl HostModel {
             process.register.clone(),
             (),
         );
+        // A process that boots lists its disk first. A list that read
+        // nothing (`Full`) may be asked again.
+        let listed = match driver.on_disk() {
+            Err(paros_journal_io::StorageError::Full) => {
+                sometimes!(true, reach::LIST_AGAIN);
+                driver.on_disk()
+            }
+            listed => listed,
+        };
+        listed.expect("a list asked again after a list that read nothing reads the disk");
         driver.assign(Self::assignment(Self::acceptor(p)));
         driver.assign(Self::assignment(Self::replica(p)));
         process.driver = Some(driver);
@@ -620,11 +644,21 @@ impl HostModel {
             let replies = driver.take_replies();
             let reads = driver.take_reads();
             // Placement serves again a role that a commit stopped when it
-            // wrote nothing. A role whose disk lost a record stops for good.
+            // wrote nothing, or a scan when it read nothing. A role whose disk
+            // lost a record stops for good.
             for (address, why) in &stopped {
                 match why {
                     paros_journal_io::Stop::Failed => {
                         sometimes!(true, reach::FAILED);
+                        driver.assign(Self::assignment(*address));
+                    }
+                    paros_journal_io::Stop::Unreadable => {
+                        assert_eq!(
+                            process.disk.take_scan_failed(),
+                            Some(paros_journal_io::StorageError::Full),
+                            "a role stops unreadable only on a scan that read nothing"
+                        );
+                        sometimes!(true, reach::UNREADABLE);
                         driver.assign(Self::assignment(*address));
                     }
                     paros_journal_io::Stop::Lost => sometimes!(true, reach::LOST),
@@ -636,7 +670,14 @@ impl HostModel {
             // it, and a restart reads the disk again.
             let halted = driver.halted();
             if halted {
-                sometimes!(process.disk.wrote_unknown(), reach::WRITTEN_HALTED);
+                if process.disk.take_scan_failed() == Some(paros_journal_io::StorageError::Unknown)
+                {
+                    sometimes!(true, reach::SCAN_HALTED);
+                } else {
+                    let wrote = process.disk.wrote_unknown();
+                    sometimes!(wrote, reach::WRITTEN_HALTED);
+                    sometimes!(!wrote, reach::UNWRITTEN_HALTED);
+                }
             }
             let sent: Vec<Envelope> = process.outbox.borrow_mut().drain(..).collect();
             for envelope in sent {
@@ -926,7 +967,7 @@ impl HostModel {
             let fault = *cx.rng().pick(&FAULTS).expect("four ways");
             self.processes[&p].register.arm(fault);
         } else {
-            disk.arm(!cx.rng().chance(1, 2));
+            disk.arm(*cx.rng().pick(&DiskFault::ALL).expect("six faults"));
         }
     }
 

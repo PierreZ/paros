@@ -104,7 +104,9 @@ Test only: `publish = false`.
   `tests/election.rs`. `Truth` reads the entries through the store's codec. No trace check yet
   (**Open**).
 - `src/backend.rs`: the backends of the driver walk and the whole walk: `Disk`, a disk that
-  survives its process and fails commits inside the contract, `Wire`, a transport that judges
+  survives its process and fails calls inside the contract (`DiskFault`: a commit that fails
+  `Full`, or `Unknown` after its write or with nothing written; a scan that fails `Full` or
+  `Unknown`; a list that fails `Full`; a boot lists the disk and asks a failed list again), `Wire`, a transport that judges
   the flight rule at each send, and `QuorumRegister`, the journal's register on three
   matchmakers (one `RegisterCall` per change, a read and a write at the members that are up, in
   an order drawn from the seed). A matchmaker is down while its machine is: a change or a read

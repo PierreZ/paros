@@ -8,9 +8,10 @@
 //!
 //! Both are the walk's, never the driver's: a fault they inject stays inside
 //! the contract of `paros_journal_io::Storage` (a commit that fails `Full`
-//! wrote nothing; one that fails `Unknown` may have written its batch; a
-//! lost record makes each scan of its role fail `Lost`; a commit that
-//! returned `Ok` is durable).
+//! wrote nothing; one that fails `Unknown` wrote its batch or wrote nothing;
+//! a scan that fails `Full` or `Unknown` read nothing; a list that fails
+//! `Full` read nothing and may be asked again; a lost record makes each scan
+//! of its role fail `Lost`; a commit that returned `Ok` is durable).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -29,13 +30,45 @@ use paros_journal_io::{
     StorageError, Transport,
 };
 
-/// The faults that a walk arms on a disk, for its next commit.
+/// A fault of the contract that a walk arms on a disk. Each fires once, on
+/// the next call of its kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskFault {
+    /// The next commit fails `Full` and writes nothing.
+    CommitFull,
+    /// The next commit writes its batch, then fails `Unknown`.
+    CommitUnknownWritten,
+    /// The next commit writes nothing and fails `Unknown`.
+    CommitUnknownUnwritten,
+    /// The next scan fails `Full` and reads nothing.
+    ScanFull,
+    /// The next scan fails `Unknown` and reads nothing.
+    ScanUnknown,
+    /// The next list fails `Full` and reads nothing.
+    ListFull,
+}
+
+impl DiskFault {
+    /// Every fault of the contract.
+    pub const ALL: [Self; 6] = [
+        Self::CommitFull,
+        Self::CommitUnknownWritten,
+        Self::CommitUnknownUnwritten,
+        Self::ScanFull,
+        Self::ScanUnknown,
+        Self::ListFull,
+    ];
+}
+
+/// The faults armed on a disk.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Faults {
-    /// The commit fails `Full` and writes nothing.
-    pub fail_before: bool,
-    /// The commit writes its batch, then fails `Unknown`.
-    pub fail_after: bool,
+    /// The fault of the next commit.
+    pub commit: Option<DiskFault>,
+    /// The fault of the next scan: `Full` or `Unknown`.
+    pub scan: Option<StorageError>,
+    /// The next list fails `Full`.
+    pub list: bool,
     /// A planted bug: the commit writes nothing and says it is done.
     pub lie: bool,
 }
@@ -48,8 +81,11 @@ pub struct Disk {
     pub store: Rc<RefCell<MemStorage>>,
     /// The faults armed for the next commit.
     pub faults: Rc<RefCell<Faults>>,
-    /// The ops of the last commit that failed `Unknown` after its write.
-    unknown: Rc<RefCell<Vec<Op>>>,
+    /// The ops of the last commit that failed `Unknown`, and whether it
+    /// wrote them.
+    unknown: Rc<RefCell<(Vec<Op>, bool)>>,
+    /// The fault of the last scan that failed.
+    scan_failed: Rc<Cell<Option<StorageError>>>,
     /// One more on each change of the records: a commit that writes, a
     /// wipe, a loss.
     version: Rc<Cell<u64>>,
@@ -64,6 +100,7 @@ impl Disk {
             store: Rc::default(),
             faults: Rc::default(),
             unknown: Rc::default(),
+            scan_failed: Rc::default(),
             version: Rc::default(),
             seen,
         }
@@ -100,14 +137,31 @@ impl Disk {
         })
     }
 
-    /// Whether the disk holds the last op of the last commit that failed
-    /// `Unknown`: that commit wrote its batch, and only a new scan can tell.
+    /// Whether the last commit that failed `Unknown` wrote its batch: only
+    /// a new scan can tell the driver.
+    ///
+    /// # Panics
+    ///
+    /// When the disk does not hold what the commit wrote: a later commit
+    /// came from a driver that the fault halted.
     #[must_use]
     pub fn wrote_unknown(&self) -> bool {
-        self.unknown
-            .borrow()
-            .last()
-            .is_some_and(|op| self.record(op.key).as_ref() == Some(&op.value))
+        let (ops, wrote) = &*self.unknown.borrow();
+        if *wrote {
+            assert!(
+                ops.last()
+                    .is_none_or(|op| self.record(op.key).as_ref() == Some(&op.value)),
+                "a disk holds the batch of a commit that failed Unknown after its write"
+            );
+        }
+        *wrote
+    }
+
+    /// The fault of the last scan that failed, once: a walk takes it when
+    /// the driver halted or a role stopped unreadable.
+    #[must_use]
+    pub fn take_scan_failed(&self) -> Option<StorageError> {
+        self.scan_failed.take()
     }
 
     /// Lose every record: a planted bug, never a fault of the contract.
@@ -116,14 +170,16 @@ impl Disk {
         self.changed();
     }
 
-    /// Arm a fault of the contract for the next commit: it fails before or
-    /// after its write, as `after` says.
-    pub fn arm(&self, after: bool) {
+    /// Arm a fault of the contract for the next call of its kind.
+    pub fn arm(&self, fault: DiskFault) {
         let mut faults = self.faults.borrow_mut();
-        if after {
-            faults.fail_after = true;
-        } else {
-            faults.fail_before = true;
+        match fault {
+            DiskFault::CommitFull
+            | DiskFault::CommitUnknownWritten
+            | DiskFault::CommitUnknownUnwritten => faults.commit = Some(fault),
+            DiskFault::ScanFull => faults.scan = Some(StorageError::Full),
+            DiskFault::ScanUnknown => faults.scan = Some(StorageError::Unknown),
+            DiskFault::ListFull => faults.list = true,
         }
     }
 
@@ -144,27 +200,42 @@ impl Disk {
 impl Storage<Journal> for Disk {
     fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
         (self.seen)(ops);
-        let faults = std::mem::take(&mut *self.faults.borrow_mut());
-        if faults.lie {
+        let (lie, commit) = {
+            let mut faults = self.faults.borrow_mut();
+            (std::mem::take(&mut faults.lie), faults.commit.take())
+        };
+        if lie {
             return Ok(());
         }
-        if faults.fail_before {
-            return Err(StorageError::Full);
+        match commit {
+            Some(DiskFault::CommitFull) => return Err(StorageError::Full),
+            Some(DiskFault::CommitUnknownUnwritten) => {
+                *self.unknown.borrow_mut() = (ops.to_vec(), false);
+                return Err(StorageError::Unknown);
+            }
+            _ => {}
         }
         self.store.borrow_mut().commit(ops)?;
         self.changed();
-        if faults.fail_after {
-            *self.unknown.borrow_mut() = ops.to_vec();
+        if commit == Some(DiskFault::CommitUnknownWritten) {
+            *self.unknown.borrow_mut() = (ops.to_vec(), true);
             return Err(StorageError::Unknown);
         }
         Ok(())
     }
 
     fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
+        if let Some(fault) = self.faults.borrow_mut().scan.take() {
+            self.scan_failed.set(Some(fault));
+            return Err(fault);
+        }
         self.store.borrow_mut().scan(address)
     }
 
     fn list(&mut self) -> Result<Vec<Address>, StorageError> {
+        if std::mem::take(&mut self.faults.borrow_mut().list) {
+            return Err(StorageError::Full);
+        }
         self.store.borrow_mut().list()
     }
 }
