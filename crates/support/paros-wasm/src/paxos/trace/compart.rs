@@ -807,7 +807,7 @@ impl Run {
     }
 
     /// The log of each lane, in lane order.
-    fn logs(&self) -> Vec<Vec<LogCell>> {
+    pub(crate) fn logs(&self) -> Vec<Vec<LogCell>> {
         parties()
             .into_iter()
             .map(|who| match who {

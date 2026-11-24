@@ -17,6 +17,7 @@ use super::{Layout, REPLICAS, Run, TAKE_BACK_AFTER, Who, lanes, parties, says, w
 use crate::paxos::lab::WireMessage;
 use crate::paxos::trace::{Lane, message_label};
 use crate::paxos::view::message_view;
+use crate::steps::LogCell;
 
 /// A move of an exercise other than deliver and drop.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +84,18 @@ impl Desk {
             .zip(self.run.state())
             .filter(|(who, _)| *who != Who::Batcher)
             .map(|(_, lines)| lines)
+            .collect()
+    }
+
+    /// The log of each lane, in lane order: the votes of a node, the
+    /// chosen slots of a replica.
+    #[must_use]
+    pub fn logs(&self) -> Vec<Vec<LogCell>> {
+        parties()
+            .into_iter()
+            .zip(self.run.logs())
+            .filter(|(who, _)| *who != Who::Batcher)
+            .map(|(_, cells)| cells)
             .collect()
     }
 

@@ -1,7 +1,9 @@
 // "Your turn": the exercises of the Paxos course, on paros-consensus compiled
 // to wasm (`PaxosLab` in crates/support/paros-wasm/src/paxos/lab.rs).
 //
-// The reader is the network: each message on the wire has Deliver and Drop.
+// The reader is the network: each message on the wire has Deliver and Drop,
+// and a delivered or dropped message crosses the stage (public/stage.js,
+// loaded before this module).
 // An exercise can add a few more moves (a proposer opens a ballot, an
 // acceptor loses its disk). The core decides the rest, and the engine says
 // when the goal holds. No protocol logic here: the page draws the view and
@@ -12,10 +14,6 @@
 // A solved exercise is kept in the browser (public/course.js) and fires
 // "paxos:solved" on the document.
 const PAXOS = new URL("paxos/wasm/paros_paxos.js", import.meta.url);
-const SVG = "http://www.w3.org/2000/svg";
-// One row per role, top to bottom. The compartmentalized exercises add the
-// proxy leaders below the nodes and the replicas under them.
-const ROWS = ["proposer", "batcher", "node", "proxy", "acceptor", "replica", "matchmaker"];
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -23,20 +21,10 @@ function el(tag, cls, text) {
   if (text != null) e.textContent = text;
   return e;
 }
-function svg(tag, attrs, text) {
-  const e = document.createElementNS(SVG, tag);
-  for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
-  if (text != null) e.textContent = text;
-  return e;
-}
 function button(text, cls) {
   const b = el("button", "btn" + (cls ? " " + cls : ""), text);
   b.type = "button";
   return b;
-}
-function short(lane) {
-  const m = /^(\w)\w*\D*(\d+)$/.exec(lane.label.replace(/­/g, ""));
-  return m ? m[1] + m[2] : lane.id;
 }
 function nameOf(view, id) {
   const lane = view.lanes.find((l) => l.id === id);
@@ -102,59 +90,44 @@ function mountLab(mount, engine) {
 
   const titles = {};
 
-  function drawStage() {
-    // One row per role; a lane of an acceptor grid sits at its own cell, so
-    // the rows and columns of the grid show.
-    const rows = {};
-    let cols = 0;
-    view.lanes.forEach((lane, i) => {
-      const r = ROWS.indexOf(lane.role) * 10 + (lane.cell ? lane.cell.row : 0);
-      if (lane.cell) cols = Math.max(cols, lane.cell.column + 1);
-      (rows[r] = rows[r] || []).push({ lane, i });
-    });
-    const keys = Object.keys(rows).map(Number).sort((a, b) => a - b);
-    const width = (k) => (cols && rows[k][0].lane.cell ? cols : rows[k].length);
-    const w = Math.max(320, Math.max(...keys.map(width)) * 96);
-    const rowH = 104;
-    const s = svg("svg", { viewBox: `0 0 ${w} ${keys.length * rowH + 4}`, class: "lab-svg", role: "img" });
-    s.style.maxWidth = Math.min(w * 1.2, 560) + "px";
-    const at = {};
-    keys.forEach((k, r) => {
-      rows[k].forEach((entry, c) => {
-        const col = cols && entry.lane.cell ? entry.lane.cell.column : c;
-        at[entry.lane.id] = { x: ((col + 0.5) / width(k)) * w, y: r * rowH + 26 };
-      });
-    });
-    // One faint line per message on the wire, so the reader sees who waits.
-    for (const m of view.wire) {
-      const a = at[m.from], b = at[m.to];
-      if (!a || !b) continue;
-      s.append(svg("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y, class: "lab-path" }));
-    }
-    view.lanes.forEach((lane, i) => {
-      const p = at[lane.id];
-      const up = view.alive[i] !== false;
-      const g = svg("g", { class: "lab-node " + lane.role + (up ? "" : " down") });
-      g.append(svg("circle", { cx: p.x, cy: p.y, r: 17 }));
-      g.append(svg("text", { x: p.x, y: p.y + 4, class: "lab-node-id" }, short(lane)));
-      const lines = up ? (view.state[i] || []) : ["down"];
-      lines.slice(0, 2).forEach((line, k) => {
-        g.append(svg("text", { x: p.x, y: p.y + 32 + k * 12, class: "lab-node-line" }, line));
-      });
-      g.append(svg("title", {}, lane.label.replace(/­/g, "")));
-      s.append(g);
-    });
-    stage.replaceChildren(s);
+  // The parties and the wire, on the stage the story uses
+  // (public/stage.js): a grid lane at its cell, the log strip under each
+  // node of a log, and each message as an arrow on its path.
+  const scene = window.paxosStage.create(stage);
+  let staged = null;  // the exercise the stage is laid out for
+  const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function sceneOf(v) {
+    return {
+      nodes: v.lanes.map((_, i) => ({ alive: v.alive[i] !== false, holes: (v.holes && v.holes[i]) || [] })),
+      state: v.state,
+      logs: v.logs || [],
+      wire: v.wire,
+    };
   }
 
-  function draw() {
+  // Draw the stage for `view`. When the last move moved one message
+  // (`moved`, with the view before it), the message crosses first.
+  function drawStage(before, moved) {
+    if (staged !== view.id) {
+      const cols = Math.max(0, ...view.lanes.map((l) => (l.cell ? l.cell.column + 1 : 0)));
+      scene.layout(view.lanes, { grid: cols ? { cols } : null, log: (view.logs || []).length > 0 });
+      staged = view.id;
+      before = null;
+    }
+    const mine = scene.begin();
+    if (before && moved && !reduced) scene.step(sceneOf(before), sceneOf(view), moved, mine);
+    else scene.draw(sceneOf(view));
+  }
+
+  function draw(before, moved) {
     titles[view.id] = view.title;
     meta.textContent = view.moves + (view.moves === 1 ? " move" : " moves");
     drawTabs();
     task.textContent = view.task;
     ruleOff.hidden = !view.rule_off;
     ruleOff.replaceChildren(el("p", null, view.rule_off || ""));
-    drawStage();
+    drawStage(before, moved);
 
     chosen.replaceChildren();
     if (view.two_values) chosen.append(el("span", "chip-status gap", "two values chosen"));
@@ -210,20 +183,24 @@ function mountLab(mount, engine) {
     all.disabled = !view.wire.length;
   }
 
-  function show(json) {
+  function show(json, moved) {
     const next = JSON.parse(json);
     if (next.error) { said.textContent = next.error; return; }
     const was = view && view.id === next.id && view.solved;
+    const before = view && view.id === next.id ? view : null;
     view = next;
     if (view.solved && !was) {
       if (course && course.solved) course.solved(view.id);
       try { document.dispatchEvent(new CustomEvent("paxos:solved", { detail: { id: view.id } })); } catch (e) { /* old browser */ }
     }
-    draw();
+    draw(before, next.refused ? null : moved);
   }
 
   function play(move) {
-    show(lab.play(JSON.stringify(move)));
+    // A delivered or dropped message crosses the stage before the new state
+    // shows.
+    const one = move.kind === "deliver" || move.kind === "drop";
+    show(lab.play(JSON.stringify(move)), one ? { message: move.id, lost: move.kind === "drop" } : null);
   }
 
   function start(id) {

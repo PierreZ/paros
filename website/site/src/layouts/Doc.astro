@@ -67,6 +67,8 @@ const PAGES: Record<string, Sibling[]> = {
 // recorded from paros-consensus by `cargo test -p paros-wasm --test paxos_traces`.
 const traces = import.meta.glob("../traces/*.json", { eager: true, import: "default" });
 const trace = fm.trace ? traces[`../traces/${fm.trace}.json`] : undefined;
+// The exercises of the Paxos course (public/lab.js), not the Journal labs.
+const paxosLab = !!fm.lab && !["journal", "register", "live"].includes(fm.lab);
 if (fm.trace && !trace) throw new Error(`no trace src/traces/${fm.trace}.json`);
 type T = { scenarios: { id: string; label: string; beats?: unknown[] }[] };
 const byPage = Object.fromEntries(Object.entries(traces).map(([p, t]) => [p.replace(/^.*\/(.+)\.json$/, "$1"), t as T]));
@@ -133,10 +135,11 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
     {trace && <script is:inline type="application/json" id="trace" data-wasm={engine.wasm} data-call={engine.call} data-source={engine.source} set:html={JSON.stringify(trace).replace(/</g, "\\u003c")} />}
     {trace && <script is:inline type="application/json" id="course" set:html={JSON.stringify({ lessons: course, map: url("paxos/#course") }).replace(/</g, "\\u003c")} />}
     {trace && <script is:inline src={url("course.js")} />}
+    {(trace || paxosLab) && <script is:inline src={url("stage.js")} />}
     {trace && <script is:inline src={url("story.js")} />}
     {trace && <script is:inline src={url("steps.js")} />}
     {widget && <script is:inline type="module" src={url("engineering.js")} />}
-    {fm.lab && fm.lab !== "journal" && fm.lab !== "register" && fm.lab !== "live" && <script is:inline type="module" src={url("lab.js")} />}
+    {paxosLab && <script is:inline type="module" src={url("lab.js")} />}
     {(fm.lab === "journal" || fm.lab === "register") && !trace && <script is:inline src={url("course.js")} />}
     {fm.lab === "journal" && <script is:inline type="module" src={url("journal-lab.js")} />}
     {fm.lab === "register" && <script is:inline type="module" src={url("register-lab.js")} />}

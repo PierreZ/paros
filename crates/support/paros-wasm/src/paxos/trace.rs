@@ -772,7 +772,7 @@ fn grid_of(world: &WorldView) -> Option<Grid> {
 
 /// The log of each lane, in lane order: empty for a world of one decree,
 /// where a card shows the vote in its lines.
-fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
+pub(crate) fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
     if !log_world(world) {
         return Vec::new();
     }
@@ -799,6 +799,28 @@ fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
         .collect();
     logs.extend(world.matchmakers.iter().map(|_| Vec::new()));
     logs
+}
+
+/// The holes of each lane's log, in lane order: the slots from its floor up
+/// to its highest record that hold no record. Empty for a world of one
+/// decree and for a lane that is down.
+pub(crate) fn lane_holes(world: &WorldView) -> Vec<Vec<u64>> {
+    let log = log_world(world);
+    let mut holes: Vec<Vec<u64>> = drawn(world)
+        .into_iter()
+        .map(|node| {
+            if log && node.alive {
+                story::holes(
+                    node.floor.unwrap_or(0),
+                    node.accepted.iter().map(|record| record.slot),
+                )
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+    holes.extend(world.matchmakers.iter().map(|_| Vec::new()));
+    holes
 }
 
 /// A few short lines per lane: what a reader must see change.

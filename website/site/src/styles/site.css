@@ -510,27 +510,28 @@ pre {
 .story:focus { outline: none; }
 .story-run { padding: 8px 12px 0; color: var(--muted); }
 .story-stage { padding: 4px 8px; border-bottom: 1px solid var(--rule); }
-.story-svg { display: block; width: 100%; height: auto; margin: 0 auto; overflow: visible; }
-.story-node circle { fill: var(--bg); stroke: var(--rule-strong); stroke-width: 1.5; }
-.story-node.proposer circle, .story-node.leader circle { stroke: var(--accent); stroke-width: 2; }
-.story-node.down circle { fill: var(--rule); stroke: var(--rule); stroke-dasharray: 3 2; }
-.story-node.down text { fill: var(--muted); }
-.story-node text { text-anchor: middle; font-family: var(--font-mono); fill: var(--fg); }
-.story-node-id { font-size: 12px; font-weight: 600; }
-.story-node-line { font-size: 9.5px; fill: var(--muted) !important; }
-.story-slot rect { fill: var(--bg); stroke: var(--rule-strong); stroke-width: 1; }
-.story-slot.accepted rect { stroke-dasharray: 2 1.5; }
-.story-slot.chosen rect { fill: var(--done-tint); stroke: var(--done); }
-.story-slot.hole rect { fill: none; stroke: var(--gap); stroke-dasharray: 1 2; }
-.story-slot text { font-size: 8px; }
-.story-slot.control text { font-style: italic; }
-.story-disk rect { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1; }
-.story-disk text { font-size: 9px; fill: var(--accent) !important; }
-.story-path { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 2 3; }
-.story-msg { fill: currentColor; }
-.story-msg-arrow path { stroke: var(--bg); stroke-width: 1; stroke-linejoin: round; }
-.story-msg.now .story-msg-arrow path { transform: scale(1.25); }
-.story-msg-label { font-family: var(--font-mono); font-size: 9.5px; text-anchor: middle; fill: currentColor; font-weight: 600; }
+/* The stage (public/stage.js), shared by the story and the exercises. */
+.stage-svg { display: block; width: 100%; height: auto; margin: 0 auto; overflow: visible; }
+.stage-node circle { fill: var(--bg); stroke: var(--rule-strong); stroke-width: 1.5; }
+.stage-node.proposer circle, .stage-node.leader circle { stroke: var(--accent); stroke-width: 2; }
+.stage-node.down circle { fill: var(--rule); stroke: var(--rule); stroke-dasharray: 3 2; }
+.stage-node.down text { fill: var(--muted); }
+.stage-node text { text-anchor: middle; font-family: var(--font-mono); fill: var(--fg); }
+.stage-node-id { font-size: 12px; font-weight: 600; }
+.stage-node-line { font-size: 9.5px; fill: var(--muted) !important; }
+.stage-slot rect { fill: var(--bg); stroke: var(--rule-strong); stroke-width: 1; }
+.stage-slot.accepted rect { stroke-dasharray: 2 1.5; }
+.stage-slot.chosen rect { fill: var(--done-tint); stroke: var(--done); }
+.stage-slot.hole rect { fill: none; stroke: var(--gap); stroke-dasharray: 1 2; }
+.stage-slot text { font-size: 8px; }
+.stage-slot.control text { font-style: italic; }
+.stage-disk rect { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1; }
+.stage-disk text { font-size: 9px; fill: var(--accent) !important; }
+.stage-path { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 2 3; }
+.stage-msg { fill: currentColor; }
+.stage-msg-arrow path { stroke: var(--bg); stroke-width: 1; stroke-linejoin: round; }
+.stage-msg.now .stage-msg-arrow path { transform: scale(1.25); }
+.stage-msg-label { font-family: var(--font-mono); font-size: 9.5px; text-anchor: middle; fill: currentColor; font-weight: 600; }
 .story-says { margin: 0; padding: 12px 12px 4px; font-family: var(--font-sans); font-size: 16px; line-height: 1.45; color: var(--fg); min-height: 3.2em; }
 .story-says.asks { font-weight: 600; }
 .story-quiz { padding: 0 12px 10px; }
@@ -562,7 +563,7 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 .story-others-title { flex: 1 1 100%; color: var(--muted); cursor: pointer; }
 .story-others .now { border-color: var(--accent); color: var(--accent); }
 .story-foot { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rule); }
-@media (prefers-reduced-motion: reduce) { .story-msg { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .stage-msg { transition: none; } }
 
 /* The course (src/course.ts): the next run of a lesson at the end of a run. */
 .story-next { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 4px; }
@@ -597,14 +598,6 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 .lab .lab-done::before { color: var(--done); }
 .lab .lab-done .btn { margin-top: 10px; }
 .lab-stage { padding: 4px 8px; border-bottom: 1px solid var(--rule); }
-.lab-svg { display: block; width: 100%; height: auto; margin: 0 auto; overflow: visible; }
-.lab-path { stroke: var(--rule-strong); stroke-width: 1; stroke-dasharray: 2 3; }
-.lab-node circle { fill: var(--bg); stroke: var(--rule-strong); stroke-width: 1.5; }
-.lab-node.proposer circle { stroke: var(--accent); stroke-width: 2; }
-.lab-node.down circle { fill: var(--rule); stroke-dasharray: 3 2; }
-.lab-node text { text-anchor: middle; font-family: var(--font-mono); fill: var(--fg); }
-.lab-node-id { font-size: 12px; font-weight: 600; }
-.lab-node-line { font-size: 9.5px; fill: var(--muted) !important; }
 .lab .lab-chosen { margin: 0; padding: 8px 12px; font-size: 13px; color: var(--muted); }
 .lab .lab-sub { margin: 0; padding: 10px 12px 4px; color: var(--muted); border-top: 1px solid var(--rule); }
 .lab .lab-wire { list-style: none; margin: 0; padding: 0 12px 6px; display: flex; flex-direction: column; gap: 6px; }
