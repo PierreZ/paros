@@ -143,10 +143,9 @@ pub struct Part {
     /// The third hint: the move to press now, if one of the page's buttons
     /// is it.
     pub next: fn(&Lab) -> Option<Move>,
-    /// Whether it cannot hold again, whatever the reader does now.
-    pub dead: fn(&Lab) -> bool,
-    /// What the page says when it cannot hold again.
-    pub dead_says: &'static str,
+    /// Why it cannot hold again, whatever the reader does now, and what to
+    /// do (undo); none while it still can.
+    pub dead: fn(&Lab) -> Option<&'static str>,
 }
 
 /// An exercise with no intro, no parts or no guide.
@@ -363,6 +362,10 @@ pub struct Frame {
     pub message: Option<u64>,
     /// The move dropped the message.
     pub lost: bool,
+    /// The extra move it played, by its index in [`LabView::extras`]; none
+    /// for another move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<usize>,
     /// The view after the move.
     pub view: LabView,
 }
@@ -448,6 +451,10 @@ impl Lab {
                 lab.intro.push(played);
             }
         }
+        // The setup is not the reader's: no frame of the intro counts a move.
+        for frame in lab.intro.iter_mut().flat_map(|step| step.frames.iter_mut()) {
+            frame.view.moves = 0;
+        }
         lab.moves.clear();
         lab.delivered.clear();
         lab.dropped.clear();
@@ -464,15 +471,17 @@ impl Lab {
         self.game_mut()
             .act(action)
             .expect("the setup of an exercise is a run that works");
-        self.frame(None, false);
+        self.said = self.texts();
+        self.frame(None, false, None);
     }
 
     /// Keep a frame of the move just played, while a step is recorded.
-    fn frame(&mut self, message: Option<u64>, lost: bool) {
+    fn frame(&mut self, message: Option<u64>, lost: bool, extra: Option<usize>) {
         if let Some(mut frames) = self.record.take() {
             frames.push(Frame {
                 message,
                 lost,
+                extra,
                 view: self.view(),
             });
             self.record = Some(frames);
@@ -523,7 +532,8 @@ impl Lab {
         self.desk_mut()
             .act(verb)
             .expect("the setup of an exercise is a run that works");
-        self.frame(None, false);
+        self.said = self.texts();
+        self.frame(None, false, None);
     }
 
     /// Play one move. A refused move changes nothing and says why.
@@ -553,9 +563,10 @@ impl Lab {
                         self.refusal = None;
                         self.said = self.texts();
                         match other {
-                            Move::Deliver { id } => self.frame(Some(*id), false),
-                            Move::Drop { id } => self.frame(Some(*id), true),
-                            _ => self.frame(None, false),
+                            Move::Deliver { id } => self.frame(Some(*id), false, None),
+                            Move::Drop { id } => self.frame(Some(*id), true, None),
+                            Move::Extra { index } => self.frame(None, false, Some(*index)),
+                            _ => self.frame(None, false, None),
                         }
                     }
                     Err(why) => self.refusal = Some(why),
@@ -670,14 +681,15 @@ impl Lab {
     fn guided(&self) -> (Vec<PartView>, Option<HintView>, Option<StuckView>) {
         let parts = self.exercise.parts;
         let holds: Vec<bool> = parts.iter().map(|part| (part.holds)(self)).collect();
-        let stuck = parts
-            .iter()
-            .enumerate()
-            .find(|(k, part)| !holds[*k] && (part.dead)(self))
-            .map(|(k, part)| StuckView {
+        let stuck = parts.iter().enumerate().find_map(|(k, part)| {
+            if holds[k] {
+                return None;
+            }
+            (part.dead)(self).map(|says| StuckView {
                 part: k,
-                says: part.dead_says.to_string(),
-            });
+                says: says.to_string(),
+            })
+        });
         let hint = if stuck.is_some() {
             None
         } else {

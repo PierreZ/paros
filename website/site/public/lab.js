@@ -337,6 +337,7 @@ function mountLab(mount, engine) {
     // With reduced motion, Next is the main button.
     narrNext.classList.toggle("primary", reduced);
     narrSkip.textContent = what === "intro" ? "Skip" : "Stop";
+    scene.speed(narrSpeedV);
     view = startView;
     draw(null, null);
     sayStep();
@@ -364,7 +365,8 @@ function mountLab(mount, engine) {
       if (narrating !== nr || nr.run !== run) return;
       const before = view;
       // Before a move, its button gets the outline.
-      shown = frame.message != null ? { kind: frame.lost ? "drop" : "deliver", id: frame.message } : null;
+      shown = frame.message != null ? { kind: frame.lost ? "drop" : "deliver", id: frame.message }
+        : frame.extra != null ? { kind: "extra", index: frame.extra } : null;
       outline();
       if (shown && !reduced) await scene.wait(450, scene.begin());
       if (narrating !== nr || nr.run !== run) return;
@@ -412,6 +414,8 @@ function mountLab(mount, engine) {
   }
   function closeNarrator() {
     stopNarrator();
+    // The reader's own moves play at the stage's own pace.
+    scene.speed(1);
     panel.classList.remove("narrating", "demo");
     narr.hidden = true;
     narrPlay.hidden = false; narrSpeed.hidden = false; narrNext.hidden = false;
@@ -444,7 +448,7 @@ function mountLab(mount, engine) {
   narrSpeed.addEventListener("click", () => {
     narrSpeedV = SPEEDS[(SPEEDS.indexOf(narrSpeedV) + 1) % SPEEDS.length];
     narrSpeed.textContent = (narrSpeedV === 0.75 ? "0.75" : String(narrSpeedV)) + "×";
-    scene.speed(narrSpeedV);
+    if (narrating) scene.speed(narrSpeedV);
   });
   narrSkip.addEventListener("click", () => {
     const nr = narrating;

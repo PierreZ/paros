@@ -597,7 +597,8 @@ test("/paxos/multi-paxos/: the guided exercise: intro, checklist, hints, dead en
   await expect(narr).toBeVisible();
   await expect(lab.locator(".lab-narrator-play")).toBeHidden();
   await expect(lab.locator(".lab-narrator-at")).toHaveText("Intro 1/2");
-  await expect(lab.locator(".lab-deliver")).toHaveCount(0);
+  // The reader's moves wait while the intro plays.
+  await expect(lab.locator(".lab-extras .btn").first()).toBeDisabled();
   await lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ }).click();
   await expect(lab.locator(".lab-narrator-at")).toHaveText("Intro 2/2");
   await lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ }).click();
@@ -645,6 +646,47 @@ test("/paxos/multi-paxos/: the guided exercise: intro, checklist, hints, dead en
   await expect(lab.locator(".lab-parts li.holds")).toHaveCount(0);
   await expect(lab.locator(".lab-extras .btn").first()).toBeEnabled();
   w.check();
+});
+
+// "Show me how" with motion: the press plays the guide by itself, each
+// move's button is outlined before it plays, Pause stops it, and Play goes
+// on to the end; Skip during a moving intro leaves the lab set up.
+test("/paxos/multi-paxos/: Show me how plays by itself with motion, and Skip stops a moving intro", async ({ browser }) => {
+  const context = await browser.newContext({ reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const w = watch(page);
+  await page.goto("paxos/multi-paxos/#lab=gap");
+  const lab = page.locator("#your-turn-lab");
+  await expect(lab.locator(".lab-narrator")).toBeVisible();
+  // Play the intro, then Skip while its messages move.
+  await lab.locator(".lab-narrator-play").click();
+  await expect(lab.locator(".lab-narrator-at")).toHaveText("Intro 1/2");
+  await page.waitForTimeout(600);
+  await lab.locator(".lab-narrator-skip").click();
+  await expect(lab.locator(".lab-narrator")).toBeHidden();
+  await expect(lab.locator(".lab-chosen")).toContainText("slot 0 = alpha");
+  await expect(lab.locator(".lab-extras .btn").first()).toBeEnabled();
+  await expect(lab.locator(".lab-msg")).toHaveCount(0);
+  // Show me how plays by itself, at the fastest speed.
+  await lab.locator(".lab-show-btn").click();
+  await lab.locator(".lab-narrator-speed").click();
+  await expect(lab.locator(".lab-narrator-play")).toHaveText("Pause");
+  // The first move is an extra move: its button is outlined before it plays.
+  await expect(lab.locator(".lab-extras .btn.lab-next")).toHaveText("The client writes bravo");
+  await expect(lab.locator(".lab-narrator-at")).toHaveText(/^Step 2\//, { timeout: 20000 });
+  await lab.locator(".lab-narrator-play").click();
+  await expect(lab.locator(".lab-narrator-play")).toHaveText("Play");
+  const at = await lab.locator(".lab-narrator-at").textContent();
+  await page.waitForTimeout(3000);
+  await expect(lab.locator(".lab-narrator-at")).toHaveText(at);
+  await lab.locator(".lab-narrator-play").click();
+  await expect(lab.locator(".lab-narrator-skip")).toHaveText("Now you", { timeout: 90000 });
+  await expect(lab.locator(".lab-parts li.holds")).toHaveCount(4);
+  await expect(lab.locator(".lab-done")).toBeHidden();
+  await lab.locator(".lab-narrator-skip").click();
+  await expect(lab.locator(".lab-parts li.holds")).toHaveCount(0);
+  w.check();
+  await context.close();
 });
 
 const JOURNAL_EXERCISES = {

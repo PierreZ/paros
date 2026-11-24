@@ -296,6 +296,15 @@ fn a_guide_reaches_the_goal_and_never_counts_as_solved() {
                 "{}: a guide step moves",
                 exercise.id
             );
+            // Each frame names the button of its move, so the page can
+            // outline it before it plays.
+            for frame in &step.frames {
+                assert!(
+                    frame.message.is_some() || frame.extra.is_some(),
+                    "{}: a guide frame names its move",
+                    exercise.id
+                );
+            }
         }
     }
 }
@@ -338,6 +347,23 @@ fn the_intro_plays_each_move_from_the_view_before_it() {
                 exercise.id
             );
             for frame in &step.frames {
+                // The setup is not the reader's, and each frame says what the
+                // core said about its own move.
+                assert_eq!(
+                    frame.view.moves, 0,
+                    "{}: no intro frame counts a move",
+                    exercise.id
+                );
+                assert!(
+                    !frame.view.said.is_empty(),
+                    "{}: each intro frame says something",
+                    exercise.id
+                );
+                assert!(
+                    frame.message.is_some() || frame.view.said != before.said,
+                    "{}: an action's frame says what the action did",
+                    exercise.id
+                );
                 if let Some(id) = frame.message {
                     assert!(
                         before.wire.iter().any(|m| m.id == id),
@@ -417,5 +443,83 @@ fn an_exercise_with_parts_has_the_goal_of_its_parts() {
             exercise.parts.iter().all(|part| (part.holds)(&lab))
         );
         assert!(lab.solved());
+    }
+}
+
+/// From any state the reader can reach, a guided exercise either names a
+/// dead end, or its third hint names a move that is not refused, and the
+/// hints alone then reach the goal with no dead end on the way. The states
+/// come from seeded random moves (a fixed list of seeds: the run is the same
+/// each time).
+#[test]
+fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
+    for exercise in exercises().iter().filter(|e| !e.parts.is_empty()) {
+        let mut stuck = 0;
+        for seed in 0..1000_u64 {
+            let mut rng = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let mut draw = |n: usize| {
+                rng = rng
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                usize::try_from(rng >> 33).expect("31 bits fit") % n
+            };
+            let mut lab = Lab::new(exercise.id).expect("the exercise exists");
+            let prefix = draw(20);
+            for _ in 0..prefix {
+                let view = lab.view();
+                let mut open: Vec<Move> = Vec::new();
+                for m in &view.wire {
+                    open.push(Move::Deliver { id: m.id });
+                    open.push(Move::Drop { id: m.id });
+                }
+                open.extend((0..view.extras.len()).map(|index| Move::Extra { index }));
+                let pick = open[draw(open.len())].clone();
+                lab.play(&pick);
+            }
+            let start = lab.moves().to_vec();
+            if lab.view().stuck.is_some() {
+                stuck += 1;
+                continue;
+            }
+            for _ in 0..MOVES {
+                let view = lab.view();
+                if view.solved {
+                    break;
+                }
+                assert!(
+                    view.stuck.is_none(),
+                    "{} after {start:?}: the hints lead to a dead end: {:?}",
+                    exercise.id,
+                    view.stuck
+                );
+                let hint = view.hint.expect("a goal that does not hold has a hint");
+                let next = hint.next.unwrap_or_else(|| {
+                    panic!(
+                        "{} after {start:?}: the hint of part {} names no move, at {:?}",
+                        exercise.id,
+                        hint.part,
+                        lab.moves()
+                    )
+                });
+                lab.play(&next);
+                assert!(
+                    lab.view().refused.is_none(),
+                    "{} after {start:?}: the hinted move {next:?} is refused: {:?}",
+                    exercise.id,
+                    lab.view().refused
+                );
+            }
+            assert!(
+                lab.view().solved,
+                "{} after {start:?}: the hints reach the goal",
+                exercise.id
+            );
+        }
+        // The walk meets the dead ends too, not only the easy states.
+        assert!(
+            stuck > 0,
+            "{}: some random moves reach a dead end",
+            exercise.id
+        );
     }
 }

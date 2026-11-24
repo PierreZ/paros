@@ -18,11 +18,6 @@ const CHARLIE: usize = 1;
 const CRASH: usize = 2;
 const ELECT: usize = 3;
 
-/// The reader wrote `value` (extra move `index`).
-fn wrote(lab: &Lab, index: usize) -> bool {
-    lab.moves().contains(&Move::Extra { index })
-}
-
 /// Node 1 or node 2 voted for a client value (not a `Noop`) at slot 1. The
 /// vote of node 0, the leader that wrote it, does not count: node 0 crashes.
 fn client_vote_at_1(lab: &Lab) -> bool {
@@ -84,58 +79,204 @@ const GAP_INTRO: &[Step] = &[
     },
 ];
 
+/// Node 0 leads, and node 1 or node 2 is up with no promise above node 0's
+/// ballot: a write of node 0 can still get a majority of votes.
+fn leads_live(lab: &Lab) -> bool {
+    let world = lab.view_of_world();
+    let Some(own) = world
+        .nodes
+        .iter()
+        .find(|node| node.id == 0 && node.alive && node.role == Some(RoleView::Leader))
+        .and_then(|node| node.ballot.as_deref())
+    else {
+        return false;
+    };
+    world.nodes.iter().any(|node| {
+        node.id != 0
+            && node.alive
+            && node
+                .promised
+                .as_deref()
+                .is_none_or(|p| ballot(p) <= ballot(own))
+    })
+}
+
+/// A ballot `round.node` as a pair that orders as ballots do.
+fn ballot(text: &str) -> (u64, u64) {
+    let (round, node) = text.split_once('.').unwrap_or((text, "0"));
+    (round.parse().unwrap_or(0), node.parse().unwrap_or(0))
+}
+
+/// An `Accept` of slot 2 to node 1 or node 2 is on the wire, and its
+/// receiver is up and has promised no higher ballot: delivered, it is a
+/// vote.
+fn accept_2_live(lab: &Lab) -> Option<u64> {
+    let world = lab.view_of_world();
+    world
+        .wire
+        .iter()
+        .find(|m| {
+            let Some(sent) = m.ballot.as_deref() else {
+                return false;
+            };
+            m.kind == "Accept"
+                && m.slot == Some(2)
+                && m.to != 0
+                && world.nodes.iter().any(|node| {
+                    node.id == m.to
+                        && node.alive
+                        && node
+                            .promised
+                            .as_deref()
+                            .is_none_or(|p| ballot(p) <= ballot(sent))
+                })
+        })
+        .map(|m| m.id)
+}
+
+/// Node 1 or node 2 holds a vote at slot 2, or a live `Accept` of slot 2 is
+/// on its way to one of them: a value can still be chosen at slot 2 with no
+/// new write (a new leader proposes a reported vote again).
+fn slot_2_alive(lab: &Lab) -> bool {
+    let voted = lab
+        .view_of_world()
+        .nodes
+        .iter()
+        .filter(|node| node.id != 0)
+        .any(|node| node.accepted.iter().any(|vote| vote.slot == 2));
+    voted || accept_2_live(lab).is_some()
+}
+
+/// Node 0 holds a vote for bravo at slot 1.
+fn bravo_at_1(lab: &Lab) -> bool {
+    lab.view_of_world().nodes.iter().any(|node| {
+        node.id == 0
+            && node
+                .accepted
+                .iter()
+                .any(|vote| vote.slot == 1 && vote.value == "bravo")
+    })
+}
+
+/// Node 0 leads with a live ballot, and its next free slot passes `hit`.
+fn next_write(lab: &Lab, hit: impl Fn(u64) -> bool) -> bool {
+    leads_live(lab)
+        && lab
+            .view_of_world()
+            .nodes
+            .iter()
+            .any(|node| node.id == 0 && node.next_slot.is_some_and(&hit))
+}
+
+/// The next write lands at `slot`.
+fn writes_at(lab: &Lab, slot: u64) -> bool {
+    next_write(lab, |next| next == slot)
+}
+
+/// A write can still land at `slot`, now or after the writes below it.
+fn can_write_at(lab: &Lab, slot: u64) -> bool {
+    next_write(lab, |next| next <= slot)
+}
+
+/// The moves that make node 1 lead with no word from node 0: node 0
+/// crashes, node 1 opens a ballot after the crash (an election from before
+/// can carry node 0's promise, and with it bravo), then the messages of
+/// nodes 1 and 2 are delivered; a ballot whose messages were lost is opened
+/// again.
+fn elect_on(lab: &Lab) -> Option<Move> {
+    if up(lab, 0) {
+        return Some(Move::Extra { index: CRASH });
+    }
+    let last = |index| {
+        lab.moves()
+            .iter()
+            .rposition(|m| *m == Move::Extra { index })
+    };
+    let fresh = matches!((last(ELECT), last(CRASH)), (Some(elect), Some(crash)) if elect > crash);
+    if !fresh {
+        return Some(Move::Extra { index: ELECT });
+    }
+    deliver_first(lab, |m| m.to != "n0" && m.from != "n0").or(Some(Move::Extra { index: ELECT }))
+}
+
 const GAP_PARTS: &[Part] = &[
     Part {
         label: "bravo is at slot 1, with no vote from node 1 or 2",
         holds: |lab| {
-            wrote(lab, BRAVO) && !client_vote_at_1(lab) && !lab.wire().iter().any(accept_at_1)
+            bravo_at_1(lab) && !client_vote_at_1(lab) && !lab.wire().iter().any(accept_at_1)
         },
         idea: "A value is not chosen when its Accepts never arrive: only the leader votes for it.",
         plan: "Write bravo. Node 0 puts it at slot 1. Then drop each Accept of slot 1.",
         next: |lab| {
-            if !wrote(lab, BRAVO) {
-                return Some(Move::Extra { index: BRAVO });
+            if !bravo_at_1(lab) {
+                return writes_at(lab, 1).then_some(Move::Extra { index: BRAVO });
             }
             lab.wire()
                 .into_iter()
                 .find(accept_at_1)
                 .map(|m| Move::Drop { id: m.id })
         },
-        dead: client_vote_at_1,
-        dead_says: "Node 1 or node 2 voted for bravo at slot 1, so a new leader will find bravo. \
-                    Undo the move that delivered its Accept.",
+        dead: |lab| {
+            if client_vote_at_1(lab) {
+                Some(
+                    "Node 1 or node 2 voted for a value at slot 1, so a new leader will find \
+                     it. Undo the move that delivered its Accept.",
+                )
+            } else if !bravo_at_1(lab) && !can_write_at(lab, 1) {
+                Some(
+                    "No write can put bravo at slot 1 now: slot 1 holds another value, or node 0 \
+                     no longer leads. Undo to before that.",
+                )
+            } else {
+                None
+            }
+        },
     },
     Part {
         label: "A value is chosen at slot 2",
         holds: |lab| chosen_at_any(&lab.view_of_world(), 2),
-        idea: "A slot after the hole can still be chosen: it needs votes from a majority.",
+        idea: "A slot after the hole can still be chosen: it needs votes from a majority. A new \
+               leader proposes again each vote that a promise reports.",
         plan: "Write charlie. Node 0 puts it at slot 2. Deliver its Accepts and the votes, but \
                no Accept of slot 1.",
         next: |lab| {
-            if !wrote(lab, CHARLIE) {
+            if writes_at(lab, 2) {
                 return Some(Move::Extra { index: CHARLIE });
             }
-            deliver_first(lab, |m| !accept_at_1(m))
+            // The votes of slot 2 first, before a new ballot outdates them.
+            if let Some(id) = accept_2_live(lab) {
+                return Some(Move::Deliver { id });
+            }
+            // Then the rest of slot 2: its votes reach node 0.
+            if let Some(deliver) = deliver_first(lab, |m| m.slot == Some(2)) {
+                return Some(deliver);
+            }
+            // A vote at slot 2 that node 0 never counted: a new leader
+            // proposes it again.
+            if slot_2_alive(lab) {
+                elect_on(lab)
+            } else {
+                None
+            }
         },
-        dead: |_| false,
-        dead_says: "",
+        dead: |lab| {
+            if !can_write_at(lab, 2) && !slot_2_alive(lab) {
+                Some(
+                    "No node but node 0 holds a vote at slot 2, and no write can reach slot 2 \
+                     now. Undo the move that lost the votes of slot 2.",
+                )
+            } else {
+                None
+            }
+        },
     },
     Part {
         label: "Node 1 leads",
         holds: |lab| leads(lab, 1),
         idea: "A new leader runs Phase 1 at a higher ballot, and a majority must promise.",
         plan: "Crash node 0. Then node 1 starts an election: deliver its messages.",
-        next: |lab| {
-            if up(lab, 0) {
-                return Some(Move::Extra { index: CRASH });
-            }
-            if !wrote(lab, ELECT) {
-                return Some(Move::Extra { index: ELECT });
-            }
-            deliver_first(lab, |_| true)
-        },
-        dead: |_| false,
-        dead_says: "",
+        next: elect_on,
+        dead: |_| None,
     },
     Part {
         label: "Slot 1 is filled",
@@ -143,9 +284,8 @@ const GAP_PARTS: &[Part] = &[
         idea: "The promises report each vote. A new leader proposes each reported value again, \
                and puts a Noop in each slot below its frontier that no promise reports.",
         plan: "Deliver the messages of node 1 until slot 1 is chosen.",
-        next: |lab| deliver_first(lab, |_| true),
-        dead: |_| false,
-        dead_says: "",
+        next: elect_on,
+        dead: |_| None,
     },
 ];
 
