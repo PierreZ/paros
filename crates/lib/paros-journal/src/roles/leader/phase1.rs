@@ -32,6 +32,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use paros_consensus::membership::AcceptorConfig;
+use paros_consensus::proposer::{merge_report, qualifying_answers, slot_decidable};
 use paros_consensus::{Ballot, NodeId, Slot};
 
 use super::ReadSegment;
@@ -177,12 +179,9 @@ impl Phase1 {
             return None;
         }
         let complete = self.complete();
-        let covered = segments.iter().all(|segment| {
-            segment
-                .columns
-                .iter()
-                .all(|c| c.has_phase1_quorum(&complete))
-        });
+        let covered = prior(segments)
+            .iter()
+            .all(|column| column.has_phase1_quorum(&complete));
         if !covered {
             return None;
         }
@@ -195,14 +194,10 @@ impl Phase1 {
         let skip = |slot: Slot| ranges::contains(&dropped, slot);
         for node in &complete {
             let report = &self.reports[node];
-            // The highest ballot at each slot. Two votes at one ballot carry
-            // one command (P2c), so a tie keeps either.
-            for (slot, vote) in &report.votes {
-                top.entry(*slot)
-                    .and_modify(|held| {
-                        *held = std::cmp::max_by_key(held.clone(), vote.clone(), |v| v.0);
-                    })
-                    .or_insert_with(|| vote.clone());
+            // The highest ballot at each slot: the core's P2c merge, which
+            // asserts that two votes at one ballot carry one command.
+            for (slot, (ballot, command)) in &report.votes {
+                merge_report(&mut top, *slot, *ballot, command.clone());
             }
             for (slot, ballot) in &report.faulty {
                 rotted
@@ -276,8 +271,8 @@ impl Phase1 {
     /// `slot` among the complete answers. An answer qualifies unless it is
     /// a faulty vote above the threshold ([`Self::qualifying`]). The slot is
     /// decided when the qualifying answers hold a Phase-1 quorum of every
-    /// column of every segment read, as the core's tally asks a quorum of
-    /// every configuration: then the readable vote at the threshold is safe,
+    /// column of every segment read (the core's `slot_decidable`, each
+    /// column a configuration of its own): then the readable vote at the threshold is safe,
     /// or a `Noop` when no answer holds one. `None`: the slot waits for more
     /// answers, or for a replica that applied it.
     ///
@@ -287,11 +282,19 @@ impl Phase1 {
     #[must_use]
     pub fn decide(&self, segments: &[ReadSegment], slot: Slot) -> Option<Command> {
         assert!(!segments.is_empty(), "Phase 1 reads at least one segment");
-        let qualifying = self.qualifying(slot);
         let top = self.top(slot);
-        let decided = segments
-            .iter()
-            .all(|s| s.columns.iter().all(|c| c.has_phase1_quorum(&qualifying)));
+        let complete = self.complete();
+        let reporters = self.reporters(slot);
+        assert!(
+            reporters.keys().all(|node| complete.contains(node)),
+            "only a complete answer reports a faulty vote to the tally"
+        );
+        let decided = slot_decidable(
+            &prior(segments),
+            &complete,
+            Some(&reporters),
+            top.map(|(ballot, _)| *ballot),
+        );
         probe!(
             sometimes,
             decided && top.is_none(),
@@ -316,21 +319,21 @@ impl Phase1 {
     pub fn qualifying(&self, slot: Slot) -> BTreeSet<NodeId> {
         let complete = self.complete();
         let threshold = self.top(slot).map(|(ballot, _)| *ballot);
-        let qualifying: BTreeSet<NodeId> = complete
-            .iter()
-            .copied()
-            .filter(|node| {
-                self.reports[node]
-                    .faulty
-                    .get(&slot)
-                    .is_none_or(|ballot| threshold.is_some_and(|t| *ballot <= t))
-            })
-            .collect();
+        let qualifying = qualifying_answers(&complete, Some(&self.reporters(slot)), threshold);
         assert!(
             qualifying.is_subset(&complete),
             "only a complete answer qualifies"
         );
         qualifying
+    }
+
+    /// The faulty ballot at `slot` of each complete answer that holds one:
+    /// the reporters of the core's tally.
+    fn reporters(&self, slot: Slot) -> BTreeMap<NodeId, Ballot> {
+        self.complete()
+            .into_iter()
+            .filter_map(|node| Some((node, *self.reports[&node].faulty.get(&slot)?)))
+            .collect()
     }
 
     /// The highest readable vote at `slot` among the complete answers.
@@ -375,6 +378,19 @@ impl Phase1 {
         assert!(end >= start, "the end is at or above the start");
         Some(end)
     }
+}
+
+/// The configurations whose Phase-1 quorum a decision needs: each column of
+/// each segment read, as its own configuration, once. A column that two
+/// segments share is one configuration: its quorum is asked once.
+fn prior(segments: &[ReadSegment]) -> Vec<AcceptorConfig<NodeId>> {
+    let mut prior: Vec<AcceptorConfig<NodeId>> = Vec::new();
+    for column in segments.iter().flat_map(|segment| &segment.columns) {
+        if !prior.contains(column) {
+            prior.push(column.clone());
+        }
+    }
+    prior
 }
 
 #[cfg(test)]
