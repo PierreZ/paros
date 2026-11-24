@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The site's wasm tools: the Paxos step-through engine on paros-consensus (`paxos`), the journal labs on paros-journal (`journal`)"
+description = "The site's wasm tools: the Paxos step-through engine on paros-consensus (`paxos`)"
 publish = false
 
 [lib]
@@ -17,22 +17,17 @@ crate-type = ["cdylib", "rlib"]
 # (`scripts/build-wasm.sh` builds with `--no-default-features --features <tool>`).
 # The `playground` tool (paros + moonpool-sim) was removed on 2026-11-19; it is
 # at the tag `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md).
+# The `journal` tool was removed on 2026-11-24; it is at the tag
+# `journal-design-a` (docs/archive/journal-design-a/README.md).
 [features]
-default = ["paxos", "journal"]
+default = ["paxos"]
 # The Paxos step-through engine (#308, #811): `paros-consensus` driven by hand, and
 # nothing else.
 paxos = ["dep:paros-consensus", "dep:serde", "dep:serde_json"]
-# The journal labs (#1363, #1364): `paros-journal` driven by hand, and nothing
-# else.
-journal = ["dep:paros-journal", "dep:paros-journal-io", "dep:serde", "dep:serde_json"]
 
 [[test]]
 name = "paxos_traces"
 required-features = ["paxos"]
-
-[[test]]
-name = "journal_traces"
-required-features = ["journal"]
 
 [[test]]
 name = "paxos_world"
@@ -45,13 +40,6 @@ serde = { version = "1", features = ["derive"], optional = true }
 paros-consensus = { workspace = true, default-features = false, features = [
   "serde",
 ], optional = true }
-
-# `journal`: the pure journal core alone (it takes `paros-consensus` with its
-# features off).
-paros-journal = { workspace = true, optional = true }
-# `journal` too: the live journal of `/journal/live/` runs the roles on the
-# generic driver and the in-memory backends.
-paros-journal-io = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # MUST stay exactly 0.2.130: the flake pins `wasm-bindgen-cli` 0.2.130, and the

@@ -81,7 +81,7 @@ jobs:
         run: |
           earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
           sudo "$earlyoom" -m 8 -s 100 -r 0 \
-            --prefer '^(paros_consensu|consensus_sim|paros_journal|journal_sim|flavors|walks|mutants|traces|coverage)' \
+            --prefer '^(paros_consensu|consensus_sim|flavors|walks|mutants|traces|coverage)' \
             --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
             2>&1 | tee earlyoom.log > /dev/null &
           (while sleep 300; do echo "== $(date -u +%H:%M) $(free -m | awk '/Mem:/ {print "mem used " $3 " of " $2 " MB"}'), $(df -h / | awk 'NR==2 {print "disk used " $3 " of " $2}')"; done) &

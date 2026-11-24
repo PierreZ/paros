@@ -147,7 +147,7 @@ grid (#1483 (read fence on a grid whose Phase-1 quorums do not meet); the unit t
 | The sim's draw | `paros-sim/src/shape/quorum.rs`: `QuorumPolicy::Grid`, `grid_layouts` (at the tag `v0.2.0-alpha.1`) |
 | The TLA+ models | `specs/tla/grid/Grid.tla`: the quorums as sets, shared by `config-register/` and `reads/`; `grid/GridCheck.tla`: `cross_intersects` and `tolerated_failures` on every layout up to nine members (#1102 (rework 1.13)) |
 
-The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 

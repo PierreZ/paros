@@ -8,18 +8,10 @@
 //! - [`host`]: the pure host of actors: the `Role` trait, the `Host` that
 //!   serves many roles in one process, and the generic driver with group
 //!   commit and held sends (the flight rule). It knows no journal.
-//! - [`journal`]: the pure core of the journal v1 (`docs/journal/`): the fold
-//!   of the data plane, the segment record, the `Resolve` call and the codec.
-//! - [`journal_io`]: the traits that a backend of the journal implements
-//!   (storage, transport, clock, register), the journal's `Host` and its
-//!   driver, on [`host`]. No runtime: a program brings the backends.
 //!
-//! The journal layers of the old design (wire, model, storage, net, client,
-//! roles, coordinator, machine) and the `parosd` service are at the git tag
-//! `v0.2.0-alpha.1`, and `docs/archive/v0.2.0-alpha.1/` has one recap per
-//! removed crate.
+//! The journal is designed again on the consensus core. The journal layers
+//! of the earlier designs are at the git tags `v0.2.0-alpha.1` and
+//! `journal-design-a`, and `docs/archive/` has one recap per removed crate.
 
 pub use paros_consensus as consensus;
 pub use paros_host as host;
-pub use paros_journal as journal;
-pub use paros_journal_io as journal_io;

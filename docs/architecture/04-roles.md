@@ -184,7 +184,7 @@ quorum system changed.
 
 ### 4.2 The journal's sans-IO contract
 
-Moved to [docs/journal/04-roles.md](../journal/04-roles.md) §J4.2 (#1332 (journal architecture docs), 2026-11-20): the shape of `step`, the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and `Assignments` ports, and the table of differences from `ColocatedNode`.
+To be designed again (D6, 2026-11-24). Design A had moved it to `docs/journal/04-roles.md` §J4.2 at the tag `journal-design-a` (#1332 (journal architecture docs), 2026-11-20): the shape of `step`, the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and `Assignments` ports, and the table of differences from `ColocatedNode`.
 
 ### 4.3 The consensus core is a library for everyone
 
@@ -199,7 +199,7 @@ that the core cannot meet by composition is a new optional behaviour of the core
 arm stays unchanged. This extends "plain Multi-Paxos is a shape of the core" of AGENTS.md to
 every flavor.
 
-**How the journal applies the rule** (the journal fold stays out of the core; the journal's register is an optional role; Pierre, 2026-11-20, #1315 (bring docs and models in step with the v1 scope)) is in [docs/journal/04-roles.md](../journal/04-roles.md) §J4.3.
+**How the journal applies the rule** (the journal fold stays out of the core; the journal's register is an optional role; Pierre, 2026-11-20, #1315 (bring docs and models in step with the v1 scope)) is in `docs/journal/04-roles.md` §J4.3 (tag `journal-design-a`).
 
 ### 4.4 The layers of the service
 
@@ -215,12 +215,12 @@ v1)). The crate names are **Open**.
 These points are decided:
 
 - **A role is an actor.** A role (an acceptor, a leader, a coordinator, the frontend) is a pure
-  `step` under the flight rule of the journal ([docs/journal/04-roles.md](../journal/04-roles.md)
+  `step` under the flight rule of the journal (`docs/journal/04-roles.md` (tag `journal-design-a`)
   §J4.2): a send waits for the persist batch that it names, the step reads no clock and draws no
   random number, and a refusal is data. One host of actors serves every role of a process. The
   host is `paros-host` (#1410 (split the generic host of actors)): the `Role` trait, the `Host`
-  over an opaque address and the generic driver, with no journal in it; the journal roles of
-  `paros-journal-io` run on it, and its example runs a toy coordinator.
+  over an opaque address and the generic driver, with no journal in it; its example runs a toy coordinator. The journal roles of design A ran
+  on it (git tag `journal-design-a`).
 - **The frontend is a role like the others.** It has no layer and no crate of its own.
 - **The election library is its own crate: a coordination store over a journal** (Pierre,
   2026-11-24, #1420 (paros-election)). The rules are in "The coordination store" below. A user
@@ -232,11 +232,11 @@ These points are decided:
   as values. It makes no message of its own: its network is the network of the client, in memory
   or through the adapter. The fence of a term outside the journal is not in the store: each
   receiver of an order checks the term in the same write as the effect (the rules of the
-  takeover, below). So the crate depends only on `paros-journal`, and a program that has only
+  takeover, below). So the crate depends only on the journal, and a program that has only
   the journal client can elect.
 - **One crate for each control level** (universe, cell, tenant), and each coordinator is a pure
   state machine as the journal roles are.
-- **The core has no tenant.** `paros-consensus` and `paros-journal` know no tenant. A crate that
+- **The core has no tenant.** `paros-consensus` and the journal know no tenant. A crate that
   wraps them adds the tenant by composition (#1402 (remove the tenant from the core), section
   3.8).
 - **The service wire.** The pure crates define their messages as Rust types. protobuf over
@@ -312,14 +312,14 @@ These points are decided:
   build these rules (#1422).
 
 - **Everything simulates and compiles to wasm** (goal 10). Each pure layer builds for
-  `wasm32-unknown-unknown`, as `paros-consensus` and `paros-journal` do today, and the whole
+  `wasm32-unknown-unknown`, as `paros-consensus` and `paros-host` do today, and the whole
   service runs in the deterministic simulation and in a browser. A crate that cannot build for
   wasm is a finding: `paros-authz-biscuit` does not build for it today.
 
 - **The cut of the old tenant coordinator** (Pierre, 2026-11-22: "The cut is good"). The loop
   that changes the membership of one journal (book, reconfigure, wait for the GC watermark,
   release) is the work of the grid controller of that journal
-  ([docs/journal/06-controller.md](../journal/06-controller.md)). The questions that the loop
+  (`docs/journal/06-controller.md` (tag `journal-design-a`)). The questions that the loop
   asks are questions of the whole cell, and the cell answers them through a **placement port**:
   which member must leave (its machine drains, is slow, is held for maintenance or is gone),
   where a new member goes, and how many moves run at one time. A grant of the port is also the
@@ -343,11 +343,12 @@ write data to it, inspired from zookeeper client"; he chose option B of
 `/mnt/project-files/design/election-zookeeper-2026-11-24/proposal.md`, "the log is the server").
 The prior art is Zelos, the ZooKeeper clone that Facebook built over the Delos shared log
 (`docs/references/papers/delos-log-structured-protocols/`). The crate name (`paros-election` for now),
-the record header key (`paros-election` for now) and the model folder name are **Open**; the model
-is `specs/tla/coord/`.
+the record header key (`paros-election` for now) and the model folder name are **Open**. The model
+`specs/tla/coord/` and the crate were removed with the journal of design A on 2026-11-24; both
+are at the git tag `journal-design-a`, and the store is to be built again on the new journal.
 
 - **The log is the server.** The store owns one journal in multi-writer mode
-  ([docs/journal/02-data-plane.md](../journal/02-data-plane.md) §J2.4): every member appends, the
+  (`docs/journal/02-data-plane.md` §J2.4 (tag `journal-design-a`)): every member appends, the
   leader and the candidates too. The journal arbitrates nothing. Every member runs the same
   **fold**: a pure function from the records, in order, to a tree of nodes and a table of
   sessions. The fold judges each record at its position and applies it or voids it, so every
@@ -409,29 +410,10 @@ is `specs/tla/coord/`.
   whole state. TLC: `ViewTrue` (controls `ckpt_stale` and `trim_any`). The rule "the checkpoint
   lands at `at + 1`" is a finding of the model: the proposal had only "truncate to a checkpoint".
   It can starve: under steady writes, a record often lands between the read and the checkpoint.
-- **Built** (#1420 (paros-election)): `crates/lib/paros-election`, a pure crate of layer 2 on
-  `paros-journal` alone. `Tree` is the fold; `Member` is one session over one journal client;
-  `Latch`, `Group` and `Counter` are Curator's `LeaderLatch`, `GroupMember` and `SharedCount` as
-  functions of the fold. Its example `latch` elects, takes over at a higher term and starts a
-  member from a checkpoint. `journal-sim`'s election walk judges it on a lossy mailbox with
-  crashes and early expiries: each member folds the whole log, the fold is the rules written again
-  from the model, each act applies at most once and only by the holder, a settled act is as
-  reported, one session for each term, and the receiver never goes back; each oracle has a mutant
-  planted in the walk. The code adds three rules that the model does not need, each a stronger
-  form of a rule of the model: a checkpoint counts only when its state is the state of the fold
-  at its position too (a member that writes a wrong state cannot mislead a new member); a
-  transaction that fails a check or an operation still uses its `op_seq` and renews its session,
-  as the void `act` of the model does; a sequential node takes the position of its entry as its
-  name, twenty digits. Two more go past the model, with no TLA+ check of their own yet: a turn
-  and a term for each parent (the model has one latch; each parent is one latch of the model, and
-  no rule reads two parents), and a revoke that is a `Delete` in a transaction of a live session
-  (the model's `revoke` is a record of no session; the effect on the nodes is the same, and the
-  revoker's session renews). **Open**: a check of each in `specs/tla/coord/`, with a control. A
-  member that starts again from the checkpoint at the floor reports `Event::Jumped`, not each
-  change below the floor, and ends the entry in flight `Unknown` when its session is gone.
-  **Open**: a trace check of the walk against `specs/tla/coord/`, the other
-  recipes of the proposal (`LeaderSelector`, the semaphore, the read-write lock, barriers, queues,
-  `CuratorCache`), the limit of a path (`MAX_PATH`, 1024 bytes for now) and of an entry.
+- **Built, then removed** (#1420 (paros-election)): `crates/lib/paros-election` built these
+  rules on the journal of design A, with a walk in `journal-sim`. Both are at the git tag
+  `journal-design-a`, with the three rules that the code added to the model and the **Open**
+  points of the crate.
 - **Not proved**: the liveness of the latch (after the holder stops and faults stop, a new holder
   leads), and the liveness of the checkpoint (one checkpoint lands at `at + 1` under steady
   writes; a design that tolerates records between the read and the checkpoint is **Open**). **Open**: who sends expiries and checkpoints (any member, or the holder of an internal
@@ -445,8 +427,8 @@ sources, and fails when:
 1. a crate of the workspace has no row, or a row names a crate that is gone;
 2. a crate depends on a crate of the same layer or of a higher layer (normal, build and dev
    dependencies);
-3. a crate of layers 0 to 6 has the identifier of a higher crate (`paros_journal_io`) in its
-   `src/`, in code or in a doc comment. The prose name of a crate (`paros-journal-io`) is not an
+3. a crate of layers 0 to 6 has the identifier of a higher crate (`paros_wasm`, for example) in its
+   `src/`, in code or in a doc comment. The prose name of a crate (`paros-wasm`) is not an
    item, so a doc comment may cite it. The facade `paros` is not checked: it defines no item, and
    each `paros::` path is a re-export of a lower layer;
 4. a crate of layers 0 to 5 has a fault switch (`buggify!` or a fault `hint!`) outside a comment.
@@ -462,14 +444,12 @@ The table today, as a proposal (the names and the numbers are **Open**, open poi
 | Layer | Crates today | Why there |
 |---|---|---|
 | 0 | `paros-consensus`, `paros-host` | The Paxos flavors, and the pure host of actors (#1410 (split the generic host of actors)): the `Role` trait, the host of many roles and the generic driver under the flight rule. The host depends on no crate, so it sits at the bottom, below every crate whose roles run on it. |
-| 1 | `paros-journal` | The journal v1. |
-| 2 | `paros-journal-control`, `paros-journal-io` | Both depend on `paros-journal`. The table of #1409 puts the controller in layer 1, but a dependency inside one layer is sideways, so the controller is one layer up. |
 | 6 | `paros-authz-biscuit` | It implements the `Authz` port over an external crate (`biscuit-auth`, which draws on `getrandom`), so it cannot be pure. It is an adapter, as the moonpool adapters are. |
 | 7 | `paros` | The facade. It will bundle the adapters of layer 6 behind a feature. |
-| 8 | `consensus-sim`, `journal-sim`, `paros-wasm` | Crates that only test or show the others. Nothing depends on them. |
+| 8 | `consensus-sim`, `paros-wasm` | Crates that only test or show the others. Nothing depends on them. |
 
 The calls of the placement port are `standing`, `place` and `release`, and the cell places its
 own control journal through the same port (Pierre, 2026-11-22, #1421 (the placement port);
-`docs/journal/06-controller.md` §J6.3, `specs/tla/placement-port/`).
+`docs/journal/06-controller.md` §J6.3 (tag `journal-design-a`), `specs/tla/placement-port/`).
 
 **Open**: the layer table. It is a proposal until Pierre agrees.

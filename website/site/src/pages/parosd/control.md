@@ -50,7 +50,7 @@ renews the term, and the first refused write ends it. A coordinator hands on wit
 This is the same call that a tenant uses for its own journals. The control plane gets no call
 that a tenant does not have (goal 3), so the election is a library of layer 3 that any program
 can use ([Layers](../layers/)). The
-[multi-writer mode](../../journal/calls/) of a journal has no leader, so the election refuses a
+multi-writer mode of a journal has no leader, so the election refuses a
 journal in that mode (#1420 (paros-election)).
 
 Two fences, two layers: the Paxos ballot says which machine runs the consensus of the journal,

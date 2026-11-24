@@ -125,9 +125,9 @@ The compaction floor and the GC watermark never wait on each other: one is per n
 | The floor ops | `paros-consensus/src/acceptor/retention.rs`: `Acceptor::truncate`, `Acceptor::trim_to` |
 | The jump | `paros-consensus/src/node/catch_up.rs`: `serve_catchup`, `on_trimmed_to` |
 | The client | `paros-client/src/lib.rs`: `truncate`; `paros-client/src/checkpoint.rs`: `Checkpointer`, `truncate_to` |
-| The decision | `docs/journal/02-data-plane.md` §J2 |
+| The decision | `docs/journal/02-data-plane.md` §J2 (tag `journal-design-a`) |
 
-The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 

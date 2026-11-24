@@ -1,1 +1,0 @@
-../journal-ctrl/JournalCtrl.tla

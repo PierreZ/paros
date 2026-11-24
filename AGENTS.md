@@ -30,17 +30,26 @@ without breaking it, so that the work makes progress.**
 
 If you think that a case needs an exception, stop and ask Pierre. Do not add the exception.
 
-**Where paros is now (2026-11-21).** The repository holds the consensus core and its proofs:
-`paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
-models of `specs/tla/`, the Paxos and Consensus pages of the website and their wasm engine. The journal v1 has
-its pure core, `paros-journal`, and its walk crate, `journal-sim` (#1324 (paros-journal pure
-core)); its first roles (segments, the seal and writes; #1326) are built, and so are its IO
-traits, its pure `Host` and its generic driver, `paros-journal-io` (#1329). The journal
-service that sat above the core (`parosd`, `parosctl`, `paros-bench`, the library layers, the
-simulation `paros-sim`) was removed on 2026-11-19. It is at the git tag `v0.2.0-alpha.1`, and
-`docs/archive/v0.2.0-alpha.1/README.md` has one recap per removed crate: what it did, its key
-files, the ideas worth reusing, and how to read it at the tag. Read the recap before you copy
-an idea back.
+**Where paros is now (2026-11-24).** The repository holds the consensus core and its proofs:
+`paros-consensus` (the sans-IO Paxos roles and their tests), the pure host of actors
+`paros-host`, the `paros` facade, the TLA+ models of `specs/tla/`, the Paxos and Consensus pages
+of the website and their wasm engine. Two removals came before:
+
+- The journal service that sat above the core (`parosd`, `parosctl`, `paros-bench`, the library
+  layers, the simulation `paros-sim`) was removed on 2026-11-19. It is at the git tag
+  `v0.2.0-alpha.1`, and `docs/archive/v0.2.0-alpha.1/README.md` has one recap per removed crate.
+- The journal v1 of design A (`paros-journal`, `paros-journal-io`, `paros-journal-control`,
+  `paros-election`, the walks of `journal-sim`, their TLA+ models, the design `docs/journal/`
+  and the Journal pages of the site) was removed on 2026-11-24 (Pierre, D6 of
+  `docs/archive/journal-design-a/prompt.md`). It wrote consensus again beside the core: a second
+  matchmaker, a second leader, a second replica. It is at the git tag `journal-design-a`, and
+  `docs/archive/journal-design-a/README.md` lists what it held.
+
+Read the recap before you copy an idea back. **The work now** is the plan of
+`docs/archive/journal-design-a/prompt.md`: segments come down into `paros-consensus` as an
+optional behaviour, with the `Roll` cut (a segment ends at a decided command), a TLA+ model
+first. Then the journal is built again from scratch, as the final crate, on the core with
+segments; it writes no consensus of its own.
 
 **The order of work.** First, a TLA+ model for every Paxos flavor that `paros-consensus` builds
 (single decree, Multi-Paxos, leader handoff, matchmakers, grid quorums, proxy leaders,
@@ -50,7 +59,7 @@ flavor before its model. Done so far: single decree (`specs/tla/decree/`), plain
 commit and catch-up, restarts; #1185 (rework 1.14)), the cooperative leader handoff
 (`specs/tla/leader-handoff/`: one hop, the frontier guard, the durable frontier, the pending
 rounds proposed again, and the beat guard of `on_heartbeat` (#902 (node handler gaps)); #1187 (rework 2.8)), grid quorums
-(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, `proxy-leader/`, `quorum-everywhere/`, `degraded-reshape/` and `health/`; #1102 (rework 1.13)), Matchmaker
+(`specs/tla/grid/`, run by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/`, and `proxy-leader/`; #1102 (rework 1.13)), Matchmaker
 Paxos (`specs/tla/matchmaker/`: matchmaking, Phase 1 over every configuration of `H_b`, a
 reconfiguration as a round change, GC and retirement; #1200 (TLA+ model Matchmaker Paxos)), the
 matchmaker set handover (`specs/tla/handover/`: a target that the caller names, a size that
@@ -75,76 +84,11 @@ the prefix up to the election fence, with a control that forgets it at the win a
 that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold and the read prefix that it gates (#1270 (bypass read order)), GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
-more rules)), quorum everywhere (`specs/tla/quorum-everywhere/`: every step of the journal, the
-write, the election, the leaderless read, the seal, the boundary write, the retire, the offload mark, the trim, the acceptor compaction and the
-matchmaker handover, waits for a quorum only and completes with F members down in every column,
-in each matchmaker set and in the replica set, with a control that blocks each step one member
-later and a control that waits for every member as a FoundationDB TLog commit; #1257 (quorum
-everywhere)), the grid controller (`specs/tla/grid-controller/`: its election by a term in the
-matchmaker record and the fenced `reshape(expected configuration, new grid, term)` call, with two
-candidates that race, a deposed controller that keeps calling, a crash between plan and call, a
-takeover, a lost reply and the bound `F + 1 <= acks <= rows - F`; #1259 (the fenced reshape call of
-the grid controller)), segment replica sets (`specs/tla/segment-replicas/`: a write reaches only the
-replica set of its segment, the boundary state of the seal (`next_seq` in the segment record, the
-leader uuid in the journal's matchmaker record and a `Fence` at the first slot of the next
-segment; the uuid part is superseded by `seal-chain/`), reads routed to the set of the segment, retire at `F + 1` holders; #1271 (a write
-reaches only the replica set of its segment)), multi-writer mode (`specs/tla/multi-writer/`:
-`SetLeader(None)` and back, the fence judged at apply in both directions, the position of a fenced
-write judged before its uuid so a resend resolves a held write, the writer's basis from the view,
-`Truncate` in both modes, a `Fence(None)` at a seal (superseded by the uuid in the segment record of `seal-chain/`), a resend across a seal answered `below` (#1301
-(a resent write across a seal)); #1274 (multi-writer mode through SetLeader(None) and expected_seq)), a reshape when a grid column is below quorum
-(`specs/tla/degraded-reshape/`: the Phase-1 bypass, the decision hold that never acks then, the
-segment-record check and a hold before Phase 2 that stay live, the seal end of a bypass; #1258
-(reshape with a column below quorum)), segment records across a matchmaker set handover
-(`specs/tla/segment-records/`: the seal, the retire, the offload mark, the controller election and
-the reshape call as compare-and-sets on the matchmaker register while the set hands over; a
-replica drops its copy only after a write of the offload mark is done at a majority; #1275
-(segment records across a matchmaker handover)), the offload of sealed segments (`specs/tla/offload/`:
-the offloader's full copy, conditional put and compare-and-set mark, a found object read and
-marked whatever its release, the delete of the key by a mark that finds the record trimmed, the
-scrub of the objects below the trim floor, the drop after the mark; #1256 (offload races and the
-offloader role)), the health measures of the grid (`specs/tla/health/`: the spares of a column,
-electable, writable and the hold of a bypass as counts against the quorums, the seven journal
-states and their fixed actions, no placement over two zones after a zone loss; #1260 (journal
-health measures)), a user truncate across segments (`specs/tla/segment-truncate/`: the trim floor
-in the boundary state, the floor of a read from the segment in force, the floor check of an
-offloaded read, the trim of a sealed segment once the floor is decided over it, the acceptors'
-compaction after `F + 1` replicas with a floor kept for each segment (#1318), the trim-point jump; #1276 (user truncate across segments)), two seals in a row (`specs/tla/seal-chain/`: a chain of
-segments with an empty segment and a seal before the `Fence`; the whole boundary state, the
-leader uuid too, in the segment record, with no `Fence` slot; #1303 (two seals in a row)), the seal
-end against a CTRL faulty record (`specs/tla/seal-ctrl/`: the end counts faulty votes, so a Phase 1
-that reads the old grid below the end keeps one value; #1313 (the seal end against a CTRL faulty
-record)), CTRL in the journal (`specs/tla/ctrl-grid/`: the tri-state tally on a grid and across the
-configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen
-value in one write; `specs/tla/ctrl-segments/`: the copies of a sealed segment across retire and
-offload, the repair of a replica log and of an object, the data-loss report; #1263 (CTRL recovery
-in the journal); `specs/tla/journal-ctrl/`: CTRL in the composed roles model, a damaged vote at a
-boot, the leader's probe and learn of a blocked slot, the repair at the higher ballot; #1326), the journal v1 composed (`specs/tla/journal-state/`: three segments, the seal,
-register writes that are partial or done, the boundary state, a replica set per segment, the fold
-with `Below` and its `Resolve` call (#1320), retire, trim; the acceptors' state is a memory, a queue of writes and a disk, with a
-crash between two writes, and an `Accept` that raises the promise writes the promise first or in
-the same write; #1189 (the journal state model), #1309 (the state is the disk)), the heal of a sealed segment's replica set
-(`specs/tla/re-replication/`: a new replica counts only on its own complete copy from a full
-member of the set, the new set written by compare-and-set on the version of the register, a "done"
-report that belongs to one copy, the refusal of a replica that does not hold the slot, a trim and a
-removed replica that comes back during the heal; `specs/tla/heal-reuse/`: a node that a later
-plan asks again, requests delivered twice and late and a node's own view of the register, with
-the highest copy per node, the term check, the heal count of the record, a sent heal that ends
-only on an answer, and a fresh register value before an abandon or a copy wipes a node; #1314
-(re-replication of a sealed segment's replica set)), the placement port between the grid controller and the cell
-(`specs/tla/placement-port/`: `standing`, `place` all or none in one write keyed by the caller's
-request id, `release`, the limit of moves in flight, and the cell's own control journal placed
-through the same port; #1421 (the placement port)), and, above the journal, the election over a
-journal (`specs/tla/election/`: the term won by `SetLeader(new, old)`, the term number from the
-fold, the stop at the first refused write, the hand on, the fence of an order by its term, the
-interface of a term, the refusal of a multi-writer journal; #1420 (paros-election)), the
-coordination store that is the election library (`specs/tla/coord/`: a multi-writer journal that
-every member folds, sessions and the dedup of their copies, the conditional expiry, the leader
-latch, the guarded record, the term fence, the trim to a checkpoint; #1420, Pierre 2026-11-24), and the
-takeover by a new coordinator (`specs/tla/takeover/`: the view of a term from its own
-registrations, the registration that raises the fence, the order checked and done in one write, a
-reference per term, the stop of a deposed coordinator, the directory asked after a gone order;
-#1422 (the takeover by a new controller)).
+more rules)), and the boundaries of
+the service above the journal: the ids of journals (`specs/tla/journal-ids/`), the takeover by a
+new coordinator (`specs/tla/takeover/`) and the coarse control plane of a cell
+(`specs/tla/cell-control/`). The models of the journal v1 of design A are at the git tag
+`journal-design-a`.
 `specs/tla/README.md` lists every flavor with its model. `decree/` and `multi-paxos/` also have an
 inductive invariant `Inv`, which TLC checks is kept by every step (`inductive*.cfg`; exhaustive for
 the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proofs)). Both
@@ -154,45 +98,9 @@ the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proo
 workflow; LS4, built in the flake, checks the temporal last step; `specs/tla/PROVED.sha256` pins
 the proved files, and the `plan` job of the `TLA` workflow fails when one changed and the pin
 was not written again;
-`specs/tla/README.md`, "Proofs"). `docs/journal/03-segments-and-records.md` (§J3.4) lists every record of the
-journal's matchmaker register with its writer, its guard and the models that check it (#1315). Then the journal is
-designed again from the ground up, together with Pierre. Its sans-IO contract (the shape of
-`step`: the flight rule, recorded inputs, a pure `Host`, one storage trait, the `Events` and
-`Assignments` ports) is `docs/journal/04-roles.md` §J4.2 (#1255 (journal sans-IO contract)),
-and its flight rule has a model, `specs/tla/flight-rule/`. The pure journal core is
-`crates/lib/paros-journal` (the fold, the `Resolve` call, the held answers, the segment record
-and the codec; #1324 (paros-journal pure core)), walked and traced against
-`specs/tla/journal-state/FoldTrace.tla` by `crates/sim/journal-sim`. The journal's matchmaker
-register is `paros_journal::register`, an optional role by composition (the core does not
-change), walked and traced against `specs/tla/segment-records/RegisterTrace.tla` (#1325 (the
-matchmaker register as an optional role)). The first journal roles are `paros_journal::roles`
-(the acceptor, the leader with its Phase 1 over the segments and the seal, the segment replica;
-#1326 (the journal roles over the core), first rule group), walked by `journal-sim`'s roles walk
-and traced against `specs/tla/journal-ctrl/RolesTrace.tla`;
-the leader's retire at `F + 1` holders and the heal of a retired segment's replica set (the new
-replica's copy, the register's `Rereplicate`, the controller's heal) are built; the controller's
-heal and the register are walked by `journal-sim`'s heal walk, which plays the replicas itself and is traced against `specs/tla/heal-reuse/HealTrace.tla` (#1314 (re-replication of a sealed segment's replica set)); the proxy
-leader, the leaderless reads, the trim of a retired segment with the reader's floor, and the
-leader time of each write (#1299) are built and walked too; so are the compaction of the acceptors
-and the replicas on `F + 1` reports and the trim-point jump of a laggard (traced against
-`specs/tla/journal-ctrl/RolesTrace.tla`), and CTRL repair: the leader's tri-state tally, the
-learn of a blocked slot from a replica and the acceptor's repair at the higher ballot
-(`specs/tla/journal-ctrl/`, a damaged vote inside the contract in the roles walk). The roles run on the traits of `crates/lib/paros-journal-io`
-(storage, transport, clock, register), the pure `Host` that serves many journals in one process,
-and the generic driver under the flight rule (#1329 (paros-journal-io)), judged by
-`journal-sim`'s driver walk. The pure journal client is `paros_journal::client` (the four calls,
-one call in flight, exactly-once for a single writer through `expected_seq`, `Below` settled by
-`Resolve`; #1331 (the pure journal client)), walked by `journal-sim`'s client walk. The grid controller's pure decision is
-`crates/lib/paros-journal-control` (`decide`: heal, repair, re-replicate, or hold and alert, with
-a probe on every branch; #1328 (paros-journal-control), #1261 (grid controller decision tests)),
-judged by `journal-sim`'s sweep of every small view against a reference `decide` that shares no
-code with it. The controller role (`paros_journal_control::role`) is walked by `journal-sim`'s
-controller walk with two controllers and traced against `specs/tla/grid-controller/ControllerTrace.tla`;
-the controller runs in the whole journal in #1445 (the whole journal on the in-memory IO); its
-moonpool-sim version is #1417, in the layered parosd.
-**`docs/journal/` is the agents' map to the journal v1** (#1332 (journal architecture docs),
-2026-11-20): the one home of every journal rule, with its decision, its issue and its model, and
-the build steps of #1323 (build the paros journal v1). Start there for any journal work.
+`specs/tla/README.md`, "Proofs"). The host of actors, `paros-host`, has two models: the flight rule (`specs/tla/flight-rule/`) and
+recorded inputs (`specs/tla/recorded-inputs/`). Its contract is §J4.2 of
+`docs/journal/04-roles.md` at the git tag `journal-design-a`.
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
 same code: model-based trace checking (each run of the core is checked against its TLA+
@@ -223,10 +131,9 @@ unreached probes)). Every one of the 79 probes is reached in CI, with no list of
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
-of the code today: most of what it names is at the tag, not in the tree. **The first step to it
-is the journal v1, `docs/journal/`** (Pierre, 2026-11-20): the journal alone, with its data
-plane, segments, roles, quorums, controller, verification and build steps. The journal rules of
-`docs/architecture/` moved there; each moved architecture section keeps its heading and a link.
+of the code today: most of what it names is at a tag, not in the tree. The journal rules that
+design A had moved to `docs/journal/` are to be designed again; each such section of
+`docs/architecture/` keeps its heading and says so.
 
 ## The goals
 
@@ -298,26 +205,20 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
-  `-p paros-journal`, `-p paros-journal-control`, `-p paros-host`, `-p paros-journal-io` and
-  `-p paros-election`
+  `-p paros-host`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` (and its `--self-test`),
   `scripts/count-assertions.py --min <floor>` (#248 (TigerStyle assertions)) and `scripts/check-core-deps.sh`
-  (the pure crates depend on no runtime, I/O or storage crate; `docs/journal/04-roles.md` §J4.3)
+  (the pure crates depend on no runtime, I/O or storage crate; `docs/architecture/04-roles.md` §4.4)
 - `scripts/check-layers.sh` (the layers of the crates, from the table `scripts/layers.sh`;
   `docs/architecture/04-roles.md` §4.4, "How CI holds the layers"), and
   `scripts/check-layers.sh --wasm`: each pure crate (layers 0 to 5) builds for
   `wasm32-unknown-unknown`
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
-  the journal examples: `cargo run -p paros-journal --example <name>` (`fold`, `register`) and
-  `cargo run -p paros-journal-io --example <name>` (`in_memory`, `custom_storage`,
-  `single_writer`, `multi_writer`; #1370 (journal examples)), the host's example:
-  `cargo run -p paros-host --example coordinator` (#1410), the grid controller's example:
-  `cargo run -p paros-journal-control --example <name>` (`controller`, `driver`), the coordination
-  store's example: `cargo run -p paros-election --example latch`, and the facade examples:
-  `cargo run -p paros --example <name>` (`journal`, `tokio_tasks`, `full_journal`)
+  the host's example: `cargo run -p paros-host --example coordinator` (#1410), and the facade
+  example: `cargo run -p paros --example consensus`
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
   each one (the workflow rule "Composing crates have examples" below)
-- the doc examples: `cargo test --doc -p paros-consensus -p paros-journal-io` (nextest runs no
+- the doc examples: `cargo test --doc -p paros-consensus` (nextest runs no
   doc test)
 - the coverage gate of consensus-sim (`tests/coverage.rs`) in release, with `paros-consensus`
   instrumented by SanitizerCoverage (`RUSTC_WRAPPER=scripts/sancov-rustc.sh`,
@@ -329,7 +230,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the edits of recorded traces (#1308 (mutate recorded traces)), in release in the
   two `trace-edits` jobs: `cargo nextest run --release -p consensus-sim --test traces -E "$EDITS"
   --partition count:i/2`.
-- the other trace checks of consensus-sim and journal-sim (TLC on each walk), in debug in the
+- the other trace checks of consensus-sim (TLC on each walk), in debug in the
   two `traces` jobs of `rust.yml` (`refusals`: the `tlc_refuses_*` tests of consensus-sim;
   `rest`: the others). The `test` job leaves every trace check and the coverage gate out. The
   sets are nextest filters in the `env` of `rust.yml` (`COVERAGE`, `TRACES`, `EDITS`,
@@ -340,26 +241,15 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). The
-  same workflow runs the two passes on the changed lines of `crates/lib/paros-journal/src`
-  (`scripts/mutants.sh --journal`: the tests of `paros-journal` and the walks of `journal-sim`,
-  then the trace checks of `journal-sim`; `.cargo/mutants-journal.toml`,
-  `.cargo/mutants-journal-tlc.toml`), and one pass on the changed lines of
-  `crates/lib/paros-journal-control/src` (`scripts/mutants.sh --control`: its unit tests,
-  `journal-sim`'s sweep of the controller's decisions and its controller walks;
-  `.cargo/mutants-control.toml`), and one pass on the changed lines of
-  `crates/lib/paros-journal-io/src` (`scripts/mutants.sh --journal-io`: its tests and the driver
-  walk of `journal-sim`; `.cargo/mutants-journal-io.toml`), and one pass on the changed lines of
-  `crates/lib/paros-host/src` (`scripts/mutants.sh --host`: its tests, the tests of
-  `paros-journal-io` and the driver walk of `journal-sim`; `.cargo/mutants-host.toml`), and one pass on
-  the changed lines of `crates/lib/paros-election/src` (`scripts/mutants.sh --election`: its tests
-  and the election walk of `journal-sim`; `.cargo/mutants-election.toml`). Each crate whose `src/` changed
+  same workflow runs one pass on the changed lines of `crates/lib/paros-host/src`
+  (`scripts/mutants.sh --host`: its tests; `.cargo/mutants-host.toml`). Each crate whose `src/` changed
   runs in shards of its own, one job each (`--shard k/n --sharding round-robin`;
   `scripts/mutants-plan.sh` gives one shard for each 250 changed lines outside the tests, 125
   for `paros-consensus` with at least two shards, from the measures in its comment). A
   surviving mutant fails the night: add the test that sees it in a pull request; the next night
   judges those lines again. Before a pull request that changes one of these crates, run
   `git diff origin/main -- crates/lib/<crate>/src > my.diff` and
-  `scripts/mutants.sh [--journal|--control|--journal-io|--host|--election] --in-diff my.diff`. The
+  `scripts/mutants.sh [--host] --in-diff my.diff`. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
   earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit
@@ -368,16 +258,16 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `--no-default-features`, `cargo check -p paros-consensus --features serde`,
   `scripts/check-layers.sh --wasm` (each crate of layers 0 to 5), and
   `cargo check --target wasm32-unknown-unknown -p paros`
-- the `wasm` job: `cargo test -p paros-wasm --test paxos_traces --test journal_traces`, then
+- the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - the site (`.github/workflows/pages.yml`, on pull requests that touch the site, `paros-wasm`,
-  `paros-consensus`, `paros-journal`, `paros-journal-io`, `paros-host`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
+  `paros-consensus`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
   build, the link check of the built site (`npm run check-links`) and the browser smoke test
   of its live parts (`nix develop .#site --command npm test`, Playwright and Chromium;
   `website/site/AGENTS.md`, "Tests")
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ models of `specs/tla/` (CI's `TLA` workflow: the folders that the change can break, packed into `spec` jobs of at
-  most 15 minutes of measured checks (a larger folder alone, at most 22) by `scripts/ci-plan.py` and `scripts/tla-minutes.txt`, and the trace checks of consensus-sim and journal-sim, the live check of `journal-sim/tests/live.rs` too, in four
+  most 15 minutes of measured checks (a larger folder alone, at most 22) by `scripts/ci-plan.py` and `scripts/tla-minutes.txt`, and the trace checks of consensus-sim, in four
   `traces` shards, `--partition count:i/4`, #1340 (the traces job reaches its timeout)); each `spec` job also checks that
   each guard mutant of its folders parses (`scripts/mutate-tla.py --parse`)
 - the `TLA mutants` workflow, each week and on demand: `scripts/mutate-tla.py` sets each guard
@@ -397,9 +287,9 @@ and name it in the PR description.
 
 **Releases** (Pierre, 2026-11-21: release-plz back on, publish more often; he decides when).
 `release-plz.toml` and `.github/workflows/release-plz.yml`. The public crates are
-`paros-consensus`, `paros-journal` and `paros`, at one version (`version_group`), one `v{version}` tag and one
+`paros-consensus`, `paros-host` and `paros`, at one version (`version_group`), one `v{version}` tag and one
 draft GitHub release. release-plz creates and writes every changelog; none is written by hand.
-`consensus-sim`, `journal-sim`, `paros-wasm` and `paros-authz-biscuit` stay `publish = false`. A push to `main`
+`consensus-sim`, `paros-wasm` and `paros-authz-biscuit` stay `publish = false`. A push to `main`
 only opens or updates the release pull request. **Nothing publishes by itself**: only Pierre
 merges a release pull request, and only Pierre starts the `release` job (workflow_dispatch),
 which publishes. An agent never merges a release pull request and never starts that job. A new
@@ -448,8 +338,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 ## Workflow rules
 
 - **Record what the user decides, in the same session.** A design decision or preference the
-  user states (what paros is, how it behaves) goes into `docs/journal/` when it is a journal
-  rule, else into `docs/architecture/`, dated and with its issue; a preference about how to work goes into this file. Amend the section it touches, never
+  user states (what paros is, how it behaves) goes into `docs/architecture/`, dated and with its issue; a preference about how to work goes into this file. Amend the section it touches, never
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **No excuse in simulation, and no allow list**: see the absolute rule at the top of this file.
@@ -473,15 +362,14 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Composing crates have examples** (Pierre, 2026-11-21: "I really like examples to review the
   abstraction and dev experience", "Composing crates only"). A composing crate is a library
   crate of `crates/lib/` that depends on another library crate of the workspace: today `paros`
-  (the facade), `paros-journal`, `paros-journal-control`, `paros-journal-io` and `paros-election`; later the moonpool adapter (the
-  journal client is a module of `paros-journal`, #1331). A user programs against these crates, so each one has runnable examples in
+  (the facade); later the journal and the moonpool adapter. A user programs against these crates, so each one has runnable examples in
   `examples/` that use its public API as a user would (the facade's examples import `paros::`
   paths only). An example asserts what it shows, so CI runs it as a test: add each new example
   to the examples steps of the `checks` job of `.github/workflows/rust.yml`. A change that reshapes the public API of
   a composing crate updates its examples, or adds one, in the same pull request: the examples are
   how a reviewer judges the abstraction. `scripts/check-examples.sh` fails when a composing crate
   has no example or when CI does not run one. The internal crates (`consensus-sim`,
-  `journal-sim`, `paros-wasm`) need none. `paros-consensus` composes nothing, but its examples
+  `paros-wasm`) need none. `paros-consensus` composes nothing, but its examples
   stay: they are the lessons of each flavor.
 - **release-plz writes every changelog** (Pierre, 2026-11-21). Never create or edit a
   `CHANGELOG.md` by hand. release-plz creates each one from the commit messages in the release
@@ -520,8 +408,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   Say what you found, what you did, how you proved it, and what is next.
 - **Quorum everywhere** (Pierre, 2026-11-20, #1257): no step of the journal waits for every
   member of a group (no full broadcast as a FoundationDB TLog commit). A new journal step gets
-  its row in `specs/tla/quorum-everywhere/`, with a control that blocks it one member later
-  (`docs/journal/05-quorums-and-failures.md` §J5.1).
+  a TLA+ check with a control that blocks it one member later (the model of design A,
+  `specs/tla/quorum-everywhere/`, is at the git tag `journal-design-a`).
 - **When in doubt about safety, use TLA+** (Pierre, 2026-11-20): when you are not sure that a
   rule is safe, or that one rule also covers another case, write a TLA+ check (a check that
   passes with the rule and a control that fails without it). Do not argue it in prose.
@@ -559,10 +447,10 @@ borrow, so a second `ready()` before `advance()` is a compile error. Persist-bef
 ordering is documented on `Ready`/`HardState`
 (`docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`). The driver that owns the core and
 does its I/O was in the removed `paros-roles` (`docs/archive/v0.2.0-alpha.1/paros-roles.md`);
-today only the examples, the model checkers and the wasm engine drive the core. The journal's
-roles follow a different contract, the flight rule (`docs/journal/04-roles.md` §J4.2): each
-persist batch has an id and each send names the persist id it waits on, so a driver may pipeline
-and group commit. §4.2 lists every difference from `Ready`/`advance` as a change or a proposal.
+today only the examples, the model checkers and the wasm engine drive the core. The roles of
+`paros-host` follow a different contract, the flight rule (`specs/tla/flight-rule/`; §J4.2 of
+`docs/journal/04-roles.md` at the git tag `journal-design-a`): each persist batch has an id and
+each send names the persist id it waits on, so a driver may pipeline and group commit.
 
 **One file per role; `ColocatedNode` is wiring** (timers, messages, the persist-before-send
 batch) and holds **no protocol tally of its own**:
@@ -628,13 +516,13 @@ optional behaviour and software composition, never from a service concept inside
 cell, no tenant policy, no `cell init`; #1264 (remove the cell from paros-consensus)). A paros
 need that composition cannot meet is a new optional behaviour, with the plain arm unchanged.
 
-**No runtime or storage dependency** (Pierre, 2026-11-21, `docs/journal/04-roles.md` §J4.3). A
+**No runtime or storage dependency** (Pierre, 2026-11-21, `docs/architecture/04-roles.md` §4.4). A
 program uses paros by implementing its traits (storage, transport, clock). The pure crates
-(`paros-consensus`, `paros-journal`, and the journal's IO traits, controller and client crates)
+(`paros-consensus`, `paros-host`, and the journal crates to come)
 depend on no async runtime (tokio, compio, smol), no storage engine and no network or file crate,
 and their traits require no `Send` or executor. With no feature on, a pure crate depends on
 workspace crates only; its features only observe (`serde`, `tracing`, `assertions`). A crate that
-does I/O is an adapter of its own (`paros-journal-moonpool`), behind a facade feature that is off
+does I/O is an adapter of its own (a moonpool adapter, to come), behind a facade feature that is off
 by default. `scripts/check-core-deps.sh` enforces it in CI. Its pure crates are layers 0 to 5 of
 the layer table `scripts/layers.sh`: a new crate gets its row in the pull request that creates it
 (`scripts/check-layers.sh` fails on a crate with no row, on a dependency that points up or
@@ -737,7 +625,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 - **The leader uuid is the writer fence** (#241): `SetLeader(new, old)` is a compare-and-set,
   `Write` and `Truncate` carry the uuid, and the core's term counter never reaches a data-plane
   reply (a client sees `JournalView`; an operator's `Inspect` shows the term). The journal trusts its clients to draw fresh uuids (decided on
-  2026-10-09): a reinstated uuid wins (`docs/journal/02-data-plane.md` §J2.3).
+  2026-10-09): a reinstated uuid wins (`docs/architecture/02-data-plane.md`).
 - **A trim-point jump** (`Message::TrimmedTo`) recovers a below-floor node: it carries a floor
   and the journal state, no bytes and **no ballot**; the promise never moves.
 - **Cooperative handoff** (`DPaxos`, `relinquish_to`): abdication is synchronous with the
@@ -796,60 +684,17 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`src/models/`), the driver contract (`src/contract/`) and the eleven examples
   (`examples/`: seven lessons, and four that drive `ColocatedNode` as a driver does, from
   `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
-- `crates/lib/paros-journal` — the pure core of the journal v1 (`docs/journal/`): the journal
-  fold, the `Resolve` call, the held answers, the segment record, the matchmaker register, the
-  journal roles (`roles`: acceptor, leader, segment replica), the pure client (`client`, #1331)
-  and the codec. Sans-IO, wasm-safe, on `paros-consensus` with its features off; it adds no concept to the core.
-  Its examples (`examples/`): `fold` drives the fold alone, `register` the compare-and-sets of the
-  matchmaker register.
-- `crates/lib/paros-journal-control` — the grid controller of the journal v1
-  (`docs/journal/06-controller.md` §J6, #1328): the P measures of a v1 grid, the placement of a
-  heal under the zone rule, the pure `decide` of the v1 controller (heal, repair,
-  re-replicate, hold and alert), the controller role (`role`: its election by a term and
-  its fenced reshape call, as asks to a driver), the signals that the processes publish to it
-  (`signals`) and its driver (`driver`: `ControlDriver`, over a register port and a cell port),
-  with a `probe!` on every branch. Sans-IO,
-  wasm-safe, on `paros-consensus` and `paros-journal`; every **Open** number of §J6 comes from
-  the host. Not published yet, and not in the facade. Its example `controller` drives the role
-  over a register written by hand: an election, a heal, a lost reply and a takeover; its example
-  `driver` runs two `ControlDriver`s: a campaign, a heal after a process goes silent, a takeover.
 - `crates/lib/paros-host` — the pure host of actors (#1410 (split the generic host of actors)):
   the `Family` of a host's roles, the `Role` trait, the `Host` of many roles over an opaque
   address, the generic `Driver` under the flight rule (group commit, held sends and outputs,
   recovery reads, the timer), the `Storage`, `Transport` and `Clock` traits and the `Events` and
   output ports. It depends on no crate and knows no journal (layer 0). Its example `coordinator`
   runs a toy coordinator and two workers on it.
-- `crates/lib/paros-journal-io` — the journal's IO side, pure (#1329): the four traits a backend
-  implements (`Storage<Journal>`, `Transport<Journal>` and `Clock`, the host's, and `Register`),
-  the on-disk format (`layout`), the journal `Host` that serves many roles of many journals in one
-  process and its `Driver`, both on `paros-host`, the `Events` port, backends in memory (`mem`) and
-  the contract suites (`contract`). Its examples `in_memory`, `custom_storage` and `multi_writer`
-  run the roles on it.
-- `crates/lib/paros-election` — the coordination store over a journal, the election library
-  (#1420 (paros-election), `docs/architecture/04-roles.md` §4.4, "The coordination store"; model
-  `specs/tla/coord/`): `Tree`, the fold of sessions, nodes and the turn of each latch; `Member`, one
-  session over one journal client; the recipes `Latch`, `Group` and `Counter`. Pure, layer 2, on
-  `paros-journal` alone; not published yet, and not in the facade. Its example `latch` elects a
-  leader, takes over at a higher term and starts a member from a checkpoint. Walked by
-  `journal-sim`'s election walk.
-- `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`, `paros::host`,
-  `paros::journal`, `paros::journal_io`). A program depends on `paros` alone. Wasm-safe and provider-free
+- `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
+  `paros::host`). A program depends on `paros` alone. Wasm-safe and provider-free
   with its default features; it is where moonpool's storage and network get bundled, behind a
-  feature, once the adapter exists (#1417 (the moonpool adapter on the generic host), in the layered parosd). Its examples (`examples/`) run a journal through
-  `paros::` paths alone: `journal` in one process, `tokio_tasks` on three tokio tasks that talk
-  over channels (tokio is a dev-dependency only), `full_journal` every journal role (matchmakers, a
-  grid, leader, replicas, client) on six hosts of a multi-thread runtime, with a crash and a roll.
-- `crates/sim/journal-sim` — test only: the seeded walk of the journal fold over a chain of
-  segments, the walk of the matchmaker register across handovers, the walk of the journal
-  roles, the walk of the generic driver of `paros-journal-io` on three processes, the walk of the
-  whole journal on the in-memory IO (two journals, their controllers and a client; #1445), the sweep of
-  the grid controller's decisions over every small view against a reference `decide`
-  (`control`, #1261) and the walk of the controller role (`controller`), the walk of the coordination store (`election`:
-  three members of `paros-election` over a lossy mailbox, #1420), with oracles that share no
-  code with `paros-journal`, a planted mutant for each, and the trace check of each walk against
-  `specs/tla/journal-state/FoldTrace.tla`, `specs/tla/segment-records/RegisterTrace.tla` and
-  `specs/tla/journal-ctrl/RolesTrace.tla` (and of the controller walk against `specs/tla/grid-controller/ControllerTrace.tla`, and of the heal walk against `specs/tla/heal-reuse/HealTrace.tla`), and the live trace check of a long fold walk while it runs (moonpool-tla `Live`, #1310
-  (check long runs live); four hours each night in the `Journal live` workflow).
+  feature, once the adapter exists (#1417 (the moonpool adapter on the generic host), in the layered parosd). Its example `consensus` (`examples/`) drives three
+  `ColocatedNode`s of plain Multi-Paxos through `paros::` paths alone, persist before send.
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
   the core and a planted mutant that each oracle catches, and the trace check of the walks
@@ -857,8 +702,7 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (exploration with moonpool-walk, branch coverage with moonpool-explorer's sancov reader). On
   `paros-consensus` only.
 - `crates/support/paros-wasm` — the site's wasm tools (#540): feature `paxos`, the engine of the
-  step-through diagrams of the Paxos pages (#811), on `paros-consensus` only; feature `journal`,
-  the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal`, and the live journal of `/journal/live/` (every role on six hosts), on `paros-journal-io` too.
+  step-through diagrams of the Paxos pages (#811), on `paros-consensus` only.
 - `crates/support/paros-authz-biscuit` — Biscuit tokens (#245 (Biscuit tokens)): root keys,
   offline mint and derive, and the verifier of a request with one Datalog policy. It stands
   alone: no other paros crate, no runtime, and no crate of the workspace uses it yet. It came
@@ -866,17 +710,14 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   it stays out of the facade.
 
 Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`; `specs/tla/experiments/`
-holds the models that compare candidate designs before Pierre decides, such as the segments
-experiment of #1213 (segments in the protocol or in storage) and its check of leaderless reads
-across a reshape, #1254), `website/site/` (the website,
+holds the models that compare candidate designs before Pierre decides, ), `website/site/` (the website,
 Astro, one style for every page; `website/site/AGENTS.md`, the `update-the-site` skill),
 `website/shared/` (the design system: tokens, fonts, logo), `scripts/build-wasm.sh` (builds the
-two wasm bundles and stages them for the site), `docs/architecture/` (the target design of the service), `docs/journal/` (the target
-design of the journal v1: every journal rule, its model and the build steps; its `README.md`
-is the map), `docs/knowledge/`
+wasm bundle and stages it for the site), `docs/architecture/` (the target design of the service), `docs/knowledge/`
 (the Paxos knowledge base: one card per concept paros uses, #745), `docs/analysis/` (design
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
-SpecLog), `docs/archive/v0.2.0-alpha.1/` (the recaps of the removed crates), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
+SpecLog), `docs/archive/` (`v0.2.0-alpha.1/`: the recaps of the removed crates; `journal-design-a/`: what
+the second removal took, and the prompt of the work now), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
 `check-core-layers.sh`, `count-assertions.py`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutants.sh` and `mutants-plan.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

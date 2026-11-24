@@ -23,18 +23,12 @@ env:
   CARGO_TERM_COLOR: always
   # The sets of tests that the jobs below split (nextest filter expressions).
   # Every test of the workspace runs in exactly one job: `test` runs the
-  # complement of COVERAGE, ROLES_COVERAGE and TRACES, the two shards of
-  # `trace-edits` run EDITS, which is inside TRACES, cut in two by count, and
-  # the two shards of `traces` run the rest of TRACES, cut in two by
-  # REFUSALS. `coverage-shard` runs COVERAGE (`--test coverage`), and the
-  # first shard of `trace-edits` also runs ROLES_COVERAGE, the gate of the
-  # journal roles.
+  # complement of COVERAGE and TRACES, the two shards of `trace-edits` run
+  # EDITS, which is inside TRACES, cut in two by count, and the two shards of
+  # `traces` run the rest of TRACES, cut in two by REFUSALS. `coverage-shard`
+  # runs COVERAGE (`--test coverage`).
   COVERAGE: package(consensus-sim) & binary(coverage)
-  ROLES_COVERAGE: package(journal-sim) & binary(roles_coverage)
-  TRACES: >-
-    (package(consensus-sim) & binary(traces))
-    | (package(journal-sim) & (binary(traces) | binary(register_traces) | binary(roles_traces)
-    | binary(controller_traces) | binary(heal_traces) | binary(live)))
+  TRACES: package(consensus-sim) & binary(traces)
   EDITS: package(consensus-sim) & binary(traces) & (test(edited) | test(no_record) | test(driver_mutants))
   REFUSALS: package(consensus-sim) & binary(traces) & test(/^tlc_refuses_/)
 
@@ -87,7 +81,7 @@ jobs:
       # The floor is the density of main, to four places; a pull request that raises the density raises it.
       - name: Check the paros-consensus assertion density
         run: scripts/count-assertions.py --min 1.6598
-      # docs/journal/04-roles.md §J4.3: no runtime, I/O or storage dependency in the pure crates.
+      # docs/architecture/04-roles.md §4.4: no runtime, I/O or storage dependency in the pure crates.
       - name: Check the pure crates' dependencies
         run: nix develop --command scripts/check-core-deps.sh
       # docs/architecture/04-roles.md §4.4: the layer table (scripts/layers.sh), no dependency
@@ -101,29 +95,14 @@ jobs:
         run: nix develop --command cargo clippy --all-targets -- --deny warnings
       - name: Check the core's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-consensus --no-deps
-      - name: Check the journal core's rustdoc links
-        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal --no-deps
-      - name: Check the grid controller's rustdoc links
-        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal-control --no-deps
       - name: Check the host of actors' rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-host --no-deps
-      - name: Check the journal IO crate's rustdoc links
-        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-journal-io --no-deps
-      - name: Check the coordination store's rustdoc links
-        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-election --no-deps
       # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
       # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
-      # them is a test of the public API's shape as much as of the protocol. The examples of
-      # `paros-journal` (`crates/lib/paros-journal/examples/`, #1370 (journal examples)) and of
-      # `paros-journal-io` (#1329) do the same for the journal fold and for the journal roles on
-      # the traits and the driver, with backends in memory and a storage written by hand. The
-      # examples of the facade `paros` run a journal through `paros::` paths alone, in one process
-      # (`journal`), on three tokio tasks (`tokio_tasks`; tokio is a dev-dependency of the facade) and, with every
-      # journal role (matchmakers, a grid, a roll, a crash), on six hosts of a multi-thread runtime (`full_journal`). The example of
-      # `paros-host` (#1410 (split the generic host of actors)) runs roles that are not journal roles on the
-      # generic host and driver. The example of `paros-election` (#1420 (paros-election)) elects a
-      # leader with a latch over a journal in memory, takes over at a higher term and starts a
-      # member from a checkpoint. Every composing
+      # them is a test of the public API's shape as much as of the protocol. The example of the
+      # facade `paros` drives three nodes through `paros::` paths alone (`consensus`). The example of
+      # `paros-host` (#1410 (split the generic host of actors)) runs toy roles on the
+      # generic host and driver. Every composing
       # crate has examples (`scripts/check-examples.sh`). They are linted under the
       # same pedantic clippy as the crate by the clippy step's `--all-targets` above.
       - name: Run single_decree
@@ -148,35 +127,13 @@ jobs:
         run: nix develop --command cargo run -p paros-consensus --example leader_handoff
       - name: Run reconfiguration
         run: nix develop --command cargo run -p paros-consensus --example reconfiguration
-      - name: Run the journal example fold
-        run: nix develop --command cargo run -p paros-journal --example fold
-      - name: Run the journal example register
-        run: nix develop --command cargo run -p paros-journal --example register
       - name: Run the host example coordinator
         run: nix develop --command cargo run -p paros-host --example coordinator
-      - name: Run the journal example in_memory
-        run: nix develop --command cargo run -p paros-journal-io --example in_memory
-      - name: Run the journal example custom_storage
-        run: nix develop --command cargo run -p paros-journal-io --example custom_storage
-      - name: Run the journal example multi_writer
-        run: nix develop --command cargo run -p paros-journal-io --example multi_writer
-      - name: Run the journal example single_writer
-        run: nix develop --command cargo run -p paros-journal-io --example single_writer
-      - name: Run the grid controller example controller
-        run: nix develop --command cargo run -p paros-journal-control --example controller
-      - name: Run the grid controller example driver
-        run: nix develop --command cargo run -p paros-journal-control --example driver
-      - name: Run the coordination store example latch
-        run: nix develop --command cargo run -p paros-election --example latch
-      - name: Run the facade example journal
-        run: nix develop --command cargo run -p paros --example journal
-      - name: Run the facade example tokio_tasks
-        run: nix develop --command cargo run -p paros --example tokio_tasks
-      - name: Run the facade example full_journal
-        run: nix develop --command cargo run -p paros --example full_journal
+      - name: Run the facade example consensus
+        run: nix develop --command cargo run -p paros --example consensus
       # nextest runs no doc test, so the examples of the rustdoc run here.
       - name: Run the doc examples
-        run: nix develop --command cargo test --doc -p paros-consensus -p paros-journal-io
+        run: nix develop --command cargo test --doc -p paros-consensus
 
       # The sans-IO core and the library facade stay portable to wasm32: paros-consensus
       # is zero-dep/std-only. The browser build itself is the `wasm` job.
@@ -219,10 +176,10 @@ jobs:
       - name: Run cargo nextest
         run: >-
           nix develop --command cargo nextest run --profile ci
-          -E "not (($COVERAGE) | ($ROLES_COVERAGE) | ($TRACES))"
+          -E "not (($COVERAGE) | ($TRACES))"
 
-  # The trace checks (#1198 (trace checking)): each walk of consensus-sim and
-  # journal-sim is checked against its `*Trace.tla` spec with TLC, in debug as
+  # The trace checks (#1198 (trace checking)): each walk of consensus-sim
+  # is checked against its `*Trace.tla` spec with TLC, in debug as
   # in the `test` job before. The edits of recorded traces are left to
   # `trace-edits`. Two shards keep each job well inside its 30 minutes: the
   # refusals of consensus-sim (`tlc_refuses_*`, which hold the two longest
@@ -257,7 +214,7 @@ jobs:
           else
             filter="(($TRACES) & not ($EDITS)) & not ($REFUSALS)"
           fi
-          nix develop --command cargo nextest run --profile ci -p consensus-sim -p journal-sim -E "$filter"
+          nix develop --command cargo nextest run --profile ci -p consensus-sim -E "$filter"
 
   # The edits of recorded traces (#1308 (mutate recorded traces)): each trace
   # spec refuses every named edit of its recorded walks at the edited event or
@@ -290,16 +247,6 @@ jobs:
         run: >-
           nix develop --command cargo nextest run --profile ci --release
           -p consensus-sim --test traces -E "$EDITS" --partition "count:$SHARD/2"
-      # The coverage gate of the journal roles (#1326): the roles walks and
-      # the whole journal reach every `probe!` of `paros_journal::roles`. It
-      # walks thousands of timelines, so it runs in release here, not in the
-      # `test` job; it takes about one minute in release on four cores. It
-      # runs in the first shard only.
-      - name: Check that the walks reach every probe of the journal roles
-        if: ${{ matrix.shard == 1 }}
-        run: >-
-          nix develop --command cargo nextest run --profile ci --release
-          -p journal-sim --test roles_coverage -E "$ROLES_COVERAGE"
 
   # Coverage-driven simulation with real branch coverage (#1199): the coverage
   # gate of consensus-sim, with `paros-consensus` alone instrumented by
@@ -380,7 +327,7 @@ jobs:
       - uses: ./.github/actions/nix
       - name: Re-record the step-through traces of the Paxos and Segments pages and check they are committed (#811 (Paxos flavor pages), #1365 (reshape and seal step-through))
         run: |
-          nix develop --command cargo test -p paros-wasm --test paxos_traces --test journal_traces
+          nix develop --command cargo test -p paros-wasm --test paxos_traces
           git diff --exit-code -- website/site/src/traces
       - name: Build the wasm tool
         run: nix develop --command scripts/build-wasm.sh --wasm-only

@@ -17,7 +17,7 @@ place. The Paxos ballot fences machines; the leader uuid fences clients. The two
   before the request updates the database. Chubby aborts a request if mastership changed, with a
   global **epoch number**: "all DB operations are made conditional on it".
 - A lease-based fence ([MemoryDB §4.1.3]) depends on clocks. paros enforces no lease
-  (`docs/journal/02-data-plane.md` §J2.3).
+  (`docs/journal/02-data-plane.md` §J2.3 (tag `journal-design-a`)).
 
 ## 2. Model
 
@@ -119,19 +119,20 @@ sequenceDiagram
 | The state machine | `paros-consensus/src/journal/state.rs`: `JournalState`, `JournalView`, `Outcome`, `WriterMode` |
 | The fold at apply | `paros-consensus/src/replica.rs` |
 | The writer | `paros-client/src/writer.rs`: `Writer`; `paros-client/src/pipeline.rs`: `Pipeline` |
-| The decision | `docs/journal/02-data-plane.md` §J2.2–§2.4 |
+| The decision | `docs/journal/02-data-plane.md` §J2.2–§2.4 (tag `journal-design-a`) |
 
-The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 
 - `JOURNAL_FOLD` (`consensus-sim/src/oracle/journal.rs`): every party folds each slot to the
-  outcome the journal rules give, written again from `docs/journal/02-data-plane.md`; its control
+  outcome the journal rules give, written again from `docs/journal/02-data-plane.md` (tag `journal-design-a`); its control
   is `Mutant::CorruptTrimJump`. The walk's client writes under a superseded uuid on purpose
   ("cluster: a superseded writer's write was refused") and retries ("cluster: a retried write was
   acknowledged as a duplicate").
-- The models `specs/tla/multi-writer/` and `specs/tla/journal-state/`; the journal's pure fold
-  (`paros-journal`) is walked and traced against `FoldTrace.tla` by `journal-sim`.
+- The models `specs/tla/multi-writer/` and `specs/tla/journal-state/`, and the journal's pure
+  fold (`paros-journal`) walked by `journal-sim`, were removed with the journal of design A on
+  2026-11-24; they are at the git tag `journal-design-a`.
 
 **Sim gates of the removed `paros-sim`** (at the tag `v0.2.0-alpha.1`, [recap](../../archive/v0.2.0-alpha.1/paros-sim.md); the paths below are in that crate). They judged the old service and are kept as history:
 
@@ -185,7 +186,8 @@ The rows that name `paros-client` point to code at the git tag `v0.2.0-alpha.1`:
 - **One value for every multi-writer mode.** A request stays in the network, so a late copy of
   `SetLeader(u, old = Multi)` applied again after `u → Multi → … → Multi`: `u` led again with no
   call of its writer, and a fenced write of `u` that was refused (final) landed from a late copy.
-  journal-sim's client walk found it on fresh seeds 100603 and 100033 (#1495). A tag for each
+  journal-sim's client walk (at the git tag `journal-design-a`) found it on fresh seeds 100603
+  and 100033 (#1495). A tag for each
   mode closes it.
 
 ## 11. Relatives

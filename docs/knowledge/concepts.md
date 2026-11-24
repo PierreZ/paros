@@ -32,7 +32,6 @@ exists and waits for its second reviewer), **planned** (no card yet; the sources
 | Storage | Truncation, compaction floor and trim-point jump | [truncation](concepts/truncation.md) | verified | `journal/state.rs`, `acceptor/retention.rs`, `node/learn.rs`, `node/catch_up.rs` | paxos-made-live §5.5, protocol-aware-recovery §3.5.1, ceph `mon-paxos-patterns.md` §6 |
 | Storage | Boot safety (format marker, a wiped node never rejoins) | [boot-safety](concepts/boot-safety.md) | verified | `paros-storage` `boot.rs`, `paros-roles` `node/boot.rs`, `matchmaker.rs` | paxos-made-live §5.1, protocol-aware-recovery §2.3 |
 | On the log | Writer fence (leader uuid compare-and-set, judged at apply) | [writer-fence](concepts/writer-fence.md) | verified | `journal/state.rs`, `replica.rs`, `paros-client` `writer.rs`, `pipeline.rs` | amazon-memorydb §4.1, paxos-made-live §5.3 |
-| On the log | Segments and the seal (one log over a chain of configurations, the register of segment records) | [segments-and-seal](concepts/segments-and-seal.md) | verified | `paros-journal` `segment.rs`, `register.rs`, `fold.rs`, `roles/leader.rs`, `roles/replica.rs` | delos-virtual-consensus §3.1–§3.4/§4.1 |
 
 Paths in the "paros code" column are relative to `crates/lib/paros-consensus/src/` unless they name
 another crate. `paros-roles`, `paros-storage`, `paros-client`, `paros-coordinator` and

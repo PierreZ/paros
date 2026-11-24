@@ -164,7 +164,7 @@ and does not read the segment table at a matchmaker quorum on each read (decided
 | The watermark | `paros-consensus/src/acceptor.rs`: `Acceptor::vote_watermark` |
 | The cover check | `paros-consensus/src/replica.rs`: `Replica::covers` |
 | On a replica | `paros-consensus/src/replica_node.rs`: `ReplicaNode::quorum_read_in` |
-| The decision | `docs/journal/02-data-plane.md` §J2.5 |
+| The decision | `docs/journal/02-data-plane.md` §J2.5 (tag `journal-design-a`) |
 
 **Judges today:**
 

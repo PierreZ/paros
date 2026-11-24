@@ -25,8 +25,7 @@ export interface Lesson {
   /** The runs of the page, in the order of the lesson. */
   runs: string[];
   /** The exercises at the end of the lesson ("your turn"), by their id in
-   * `crates/support/paros-wasm/src/paxos/lab.rs` (or of the journal labs,
-   * `src/journal/`). The page that holds the lesson draws them under
+   * `crates/support/paros-wasm/src/paxos/lab.rs`. The page that holds the lesson draws them under
    * `## Your turn`. */
   labs?: string[];
   /** One TLC run of a model of `specs/tla/` that checks the idea of the
@@ -116,16 +115,6 @@ export const LESSONS: Lesson[] = [
     runs: ["base", "leader-crash", "replace", "retire", "break-the-rule"],
     labs: ["old-set"],
     tlc: { model: "matchmaker", config: "matchmaker", states: 1421865, checks: "two values are never chosen across a reconfiguration, with three matchmakers and two ballots" },
-  },
-  {
-    id: "seal",
-    title: "The journal: a reshape and a seal",
-    goal: "say where the first leader of a new grid ends the old segment, and why a write sent again across the seal is answered Below.",
-    page: "journal-seal",
-    path: "journal/segments/",
-    runs: ["base", "slow-acceptor", "break-the-rule"],
-    labs: ["records-retire", "records-trim", "records-third"],
-    tlc: { model: "journal-state", config: "register", states: 1052031, date: "2026-11-24", checks: "no two values are chosen at one slot and a sealed segment never changes, with two segments, two leaders of the new grid that race to seal, and register writes that are partial or lost" },
   },
 ];
 

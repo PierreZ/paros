@@ -134,7 +134,7 @@ every other role of its journal alive; the cell says where, through the placemen
    through the port, and replaces one on a machine that leaves. The counts come from the
    `Configure` of the tenant. A controller cannot book itself, so the tenant coordinator books
    the controller candidates of each journal and replaces one that is gone. **Open**: no rule
-   of `docs/journal/` says where the leader candidates of a journal run; this answer puts them
+   of `docs/journal/` (tag `journal-design-a`) says where the leader candidates of a journal run; this answer puts them
    with the stateless roles, and the issue of the port (#1421) confirms it.
 
 The live moves that v1's `decide` does not make (a drain, a slow machine, a maintenance window,

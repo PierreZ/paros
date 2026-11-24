@@ -160,7 +160,7 @@ for every other slot.
 | The record scrub | `paros-storage/src/journal/node.rs`: `JournalStorage::scrub`, `judge` |
 | The design | `docs/analysis/storage/ctrl-multipaxos-restatement.md`, `docs/analysis/storage/clstore-record-contract.md` |
 
-The rows that name `paros-roles`, `paros-storage` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal v1 (`docs/journal/`) builds their duties again.
+The rows that name `paros-roles`, `paros-storage` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
 **Judges today:**
 

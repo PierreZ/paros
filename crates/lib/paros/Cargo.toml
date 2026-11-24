@@ -1,6 +1,6 @@
 [package]
 name = "paros"
-description = "Paxos in Rust: the library. One crate a program depends on; today it holds the sans-IO consensus core (`paros::consensus`), the pure journal core (`paros::journal`) and the journal's IO traits and driver (`paros::journal_io`)"
+description = "Paxos in Rust: the library. One crate a program depends on; today it holds the sans-IO consensus core (`paros::consensus`) and the pure host of actors (`paros::host`)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,20 +14,12 @@ readme = "../../../README.md"
 exclude = ["AGENTS.md", "CLAUDE.md"]
 
 # The facade: each layer is its own crate, and this crate re-exports each one
-# as a module: the sans-IO consensus core, the pure core of the journal v1
-# (`docs/journal/`), and the journal's IO traits and generic driver. The journal layers of the old design are at the tag
-# `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/).
+# as a module: the sans-IO consensus core and the pure host of actors. The
+# journal layers of the old designs are at the tags `v0.2.0-alpha.1` and
+# `journal-design-a` (docs/archive/).
 [dependencies]
 paros-consensus = { workspace = true, features = ["tracing", "assertions", "serde"] }
-paros-journal = { workspace = true }
 paros-host = { workspace = true }
-paros-journal-io = { workspace = true }
-
-# The examples only. A program brings its own runtime; the example
-# `tokio_tasks` shows one. The library itself depends on no runtime
-# (`scripts/check-core-deps.sh` checks the facade's normal dependencies).
-[dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]
 workspace = true
