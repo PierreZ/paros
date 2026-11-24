@@ -327,7 +327,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   (`COVERAGE_FROM`). The `test` job leaves this gate out. The `Coverage nightly` workflow runs it again every night on new
   seeds (`MOONPOOL_WALK_FROM` moves with the date).
 - the edits of recorded traces (#1308 (mutate recorded traces)), in release in the
-  `trace-edits` job: `cargo nextest run --release -p consensus-sim --test traces -E "$EDITS"`.
+  two `trace-edits` jobs: `cargo nextest run --release -p consensus-sim --test traces -E "$EDITS"
+  --partition count:i/2`.
 - the other trace checks of consensus-sim and journal-sim (TLC on each walk), in debug in the
   two `traces` jobs of `rust.yml` (`refusals`: the `tlc_refuses_*` tests of consensus-sim;
   `rest`: the others). The `test` job leaves every trace check and the coverage gate out. The
