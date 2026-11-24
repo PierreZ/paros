@@ -636,8 +636,8 @@ fn a_log_node_has_a_role_and_shows_its_holes() {
 
 /// Every run of `page` but the base run and the tour runs is a story that
 /// tells every step and ends with a way back to the base run's last screen,
-/// which offers every other run. A tour run is played by the tour, not
-/// chosen from the base run (`tests/paxos_tour.rs` holds it to its rules).
+/// which offers every other run. A tour run is in no lesson: the tour plays
+/// it, and it offers no choice (`tests/paxos_tour.rs`).
 fn every_run_is_a_story_that_leads_back(page_name: &str) {
     let trace = page(page_name);
     let base = run(&trace, "base");

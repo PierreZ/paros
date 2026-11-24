@@ -438,6 +438,7 @@ const EXERCISES = [
   {
     page: "paxos/single-decree/",
     id: "vote-not-chosen",
+    intro: true,
     moves: [
       ["settle", { kind: ["Prepare", "Promise"] }],
       ["deliver", { kind: ["Accept"], to: "n1" }],
@@ -449,6 +450,7 @@ const EXERCISES = [
   {
     page: "paxos/multi-paxos/",
     id: "gap",
+    intro: true,
     moves: [
       ["extra", "The client writes bravo"],
       ["drop", { kind: ["Accept"] }],
@@ -462,6 +464,7 @@ const EXERCISES = [
   {
     page: "paxos/multi-paxos/",
     id: "read",
+    intro: true,
     moves: [
       ["extra", "A client reads from node 2"],
       ["deliver", { kind: ["PreRead"], from: "n2", to: "n1" }],
@@ -501,8 +504,8 @@ for (const ex of EXERCISES) {
     // The stage of the story (public/stage.js) draws the parties from the
     // engine's typed state: a log world names its leader.
     await expect(lab.locator(".stage-node").first()).toBeVisible();
-    // A guided exercise opens on its intro; Skip leaves it set up.
-    if (ex.id === "gap" || ex.id === "read") {
+    // A guided exercise with an intro opens on it; Skip leaves it set up.
+    if (ex.intro) {
       await expect(lab.locator(".lab-narrator")).toBeVisible();
       await lab.locator(".lab-narrator-skip").click();
       await expect(lab.locator(".lab-narrator")).toBeHidden();
@@ -716,6 +719,101 @@ test("/paxos/multi-paxos/: Show me how plays by itself with motion, and Skip sto
   await expect(lab.locator(".lab-done")).toBeHidden();
   await lab.locator(".lab-narrator-skip").click();
   await expect(lab.locator(".lab-parts li.holds")).toHaveCount(0);
+  w.check();
+  await context.close();
+});
+
+// The data walks (tour plan, step F5): every chapter of the tour plays to
+// its end with motion at speed 8, and every exercise that has a guide
+// plays "Show me how" to its end and is not solved. Both read the chapters
+// from the tour page's own data, so a new chapter, or a new guide on a
+// chapter's page, is in the walk with no change here.
+async function tourChapters(page) {
+  await page.goto("paxos/tour/");
+  return page.evaluate(() => JSON.parse(document.getElementById("tour").textContent).chapters);
+}
+
+test("/paxos/tour/: every chapter plays to its end at speed 8", async ({ browser }) => {
+  test.setTimeout(600_000);
+  const context = await browser.newContext({ reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const w = watch(page);
+  const chapters = await tourChapters(page);
+  expect(chapters.length).toBeGreaterThan(0);
+  for (const [k, chapter] of chapters.entries()) {
+    await page.goto("paxos/tour/");
+    const screen = page.locator(".tour-screen");
+    await screen.locator(".tour-chapter").nth(k).click();
+    // A bridge first, when the chapter has one.
+    if (chapter.bridge) await screen.locator(".tour-next").click();
+    const story = page.locator(".panel.story");
+    await expect(story.locator(".tour-bar")).toContainText(`Chapter ${chapter.n}/`);
+    // A press on a chapter (or on Start after its bridge) is a press to
+    // watch: the chapter plays already.
+    await page.evaluate(() => window.paxosStory.speed(8));
+    expect(await page.evaluate(() => window.paxosStory.playing())).toBe(true);
+    // Each run of the chapter plays in its order.
+    if (chapter.runs.length > 1) {
+      for (let r = 1; r <= chapter.runs.length; r++) {
+        await expect(story.locator(".tour-bar"), `chapter ${chapter.id} plays run ${r}`)
+          .toContainText(`run ${r}/${chapter.runs.length}`, { timeout: 240_000 });
+      }
+    }
+    await expect(screen.locator(".tour-done"), `chapter ${chapter.id} ends`).toBeVisible({ timeout: 240_000 });
+    expect(await page.evaluate(() => window.paxosTour.chapter())).toBe(k);
+  }
+  w.check();
+  await context.close();
+});
+
+test("every exercise with a guide plays Show me how to its end and is not solved", async ({ browser }) => {
+  test.setTimeout(300_000);
+  // With reduced motion each step of the narrator ends before the next
+  // command, so the Next loop below has no race; the walk depends on it.
+  const context = await browser.newContext({ reducedMotion: "reduce" });
+  const page = await context.newPage();
+  const w = watch(page);
+  const chapters = await tourChapters(page);
+  const pages = [...new Set(chapters.map((c) => new URL(c.deeper, "http://x").pathname.replace(/^\/paros\//, "")))];
+  let demos = 0;
+  for (const path of pages) {
+    await page.goto(path);
+    const lab = page.locator("#your-turn-lab");
+    await expect(page.locator("[data-lab]"), `${path} has its exercises`).not.toHaveCount(0);
+    const tabs = lab.locator(".lab-tab");
+    await expect(tabs.first()).toBeVisible();
+    const n = await tabs.count();
+    for (let t = 0; t < n; t++) {
+      await tabs.nth(t).click();
+      const narr = lab.locator(".lab-narrator");
+      if (await narr.isVisible()) await lab.locator(".lab-narrator-skip").click();
+      await expect(narr).toBeHidden();
+      const show = lab.locator(".lab-show-btn");
+      // A guided exercise shows its checklist; it must also show its guide.
+      if (!(await lab.locator(".lab-parts").isVisible())) continue;
+      await expect(show, `${path} tab ${t}: a guided exercise has Show me how`).toBeVisible();
+      const id = (await page.evaluate(() => /#lab=([\w-]+)/.exec(location.hash)?.[1])) || "";
+      expect(id, `${path} tab ${t}: the address names the exercise`).not.toBe("");
+      await show.click();
+      const next = lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ });
+      for (let i = 0; i < 100 && (await lab.locator(".lab-narrator-skip").textContent()) !== "Now you"; i++) await next.click();
+      await expect(lab.locator(".lab-narrator-skip"), `${path} ${id}: the demo ends`).toHaveText("Now you");
+      // Every line of the goal holds, and the demo does not count: the
+      // goal callout stays hidden (the main check), and the course keeps
+      // no "solved" mark.
+      const parts = await lab.locator(".lab-parts li").count();
+      expect(parts, `${path} ${id}: a guided exercise has a checklist`).toBeGreaterThan(0);
+      await expect(lab.locator(".lab-parts li.holds")).toHaveCount(parts);
+      await expect(lab.locator(".lab-done")).toBeHidden();
+      expect(await page.evaluate((k) => {
+        const st = JSON.parse(localStorage.getItem("paros-course-v1") || "{}");
+        return !!(st.solved && st.solved[k]);
+      }, id)).toBe(false);
+      await lab.locator(".lab-narrator-skip").click();
+      demos += 1;
+    }
+  }
+  expect(demos, "the walk meets the guided exercises").toBeGreaterThan(0);
   w.check();
   await context.close();
 });

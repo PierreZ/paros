@@ -158,7 +158,8 @@ chapter names the runs it plays, in `src/tour/<page>.ts`; `src/tour.ts` lists th
 (`CHAPTERS`) and its `check()` fails the build when a chapter names a lesson or a run that
 does not exist, a run with no story, two chapters name one lesson, the chapters leave course
 order, a tour run is in no chapter, in two or in a lesson, a bridge is not the chapter's own
-flavor, or a flavor page has no chapter. A chapter of a flavor not done yet plays runs of its lesson (both Multi-Paxos chapters play their tour runs, `tour-log` and `tour-reads`); a flavor's
+flavor, or a flavor page has no chapter. Chapter 1 ("One value") and both Multi-Paxos chapters
+("The log and its leader", "Reads") play their own tour runs; each other chapter plays runs of its lesson until a flavor's
 own tour run (`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of
 `src/steps/story.rs`: 10 to 30 beats, at most 140 characters per sentence, no question, every
 `enter` names a lane; `check_choices` checks that every `more` names a run of the page) takes
@@ -209,7 +210,7 @@ driver (`Desk` in `src/paxos/trace/compart/desk.rs`), not a level: node 0, two p
 (lanes `p0`, `p1`) and two replicas (`r0`, `r1`).
 Without the wasm, the section says so.
 
-A guided exercise (its view has `parts`; `gap` and `read` today, the others as their flavor gets its
+A guided exercise (its view has `parts`; `gap`, `read` and the three single-decree exercises today, the others as their flavor gets its
 intro, parts and guide in `paros-wasm`) adds, all from the engine:
 - **An intro** that plays the setup on the stage, one sentence per step: Next, Play or Pause,
   the speed and Skip. It never starts by itself; with reduced motion there is no Play.
@@ -295,7 +296,12 @@ Both run on the built site, so build the wasm and the site first.
   clicks on Deliver and Drop (the rows carry `data-kind`, `data-from` and `data-to`, from
   `WireMessage` in `paros-wasm`), and the page must say the goal holds. Every exercise of the
   journal fold lab is solved by clicks on its calls (`data-call`), and every exercise of the
-  register and record labs by clicks on its moves (`data-key`); Undo takes the goal back. The quorum picker,
+  register and record labs by clicks on its moves (`data-key`); Undo takes the goal back. Two walks
+  read the tour page's own data (`#tour`), so a new chapter, or a new guide on a page that a
+  chapter links (`deeper`), is in them with no change of the test: every chapter of the tour
+  plays each of its runs in order to its end with motion at speed 8, and every
+  exercise with a guide plays "Show me how" to its end, with every line of its goal marked, and
+  is not solved. The quorum picker,
   the `quorums` widget and the `Ready` widget must answer. The live journal writes, keeps
   writing with host 3 down, reads the records back and rolls to segment 2. A new live part gets its test in
   the same pull request. No test is skipped, and a red run is not run again (`AGENTS.md`).
