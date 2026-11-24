@@ -262,12 +262,14 @@ a while, register operations whose request or reply is lost, and disk faults ins
 Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
 at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
 `ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with
-its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position)
+its `expected_seq` is in the log once), `ACKED` (each acked write is in the log at its position),
 `ALERTS` (each alert of the controller is true of the machines), `DISK` (each replica's disk, on
 every machine up or down, holds the chosen log: each slot it holds, its base and its compaction
 point are the chosen log's, and its compaction floor is at or below the decided floor) and
-`STOPPED` (each leader that stops on its own has a true cause: a higher ballot bound or promised,
-a newer segment, a seal of its own segment, or another end of the segment before it; the facts
+`STOPPED` (each leader that stops on its own has a true cause for the phase it stopped from: a
+higher bound or a later segment for a bind, a higher promise in Phase 1, a seal of its own segment
+for an open leader, another end of the segment before it or a newer segment for a sealing leader;
+the facts
 include the writes that a minority of the matchmakers took, since a role may act on one). Each has
 its planted mutant (`WholeMutant`; `RefuseSeal` for `STOPPED`, `CorruptCopy` for `DISK`).
 `STOPPED` exists because the walk heals what it judges: placement replaces a stopped leader, so a

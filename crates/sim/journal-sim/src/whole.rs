@@ -323,8 +323,9 @@ pub enum WholeMutant {
     /// write is refused and a first leader stops on its own end. [`AGAIN`]
     /// catches it.
     RefuseAgain,
-    /// The register refuses each seal asked for the first time, on a value
-    /// whose guard takes it: a sealing leader stops with no true cause.
+    /// The register refuses each seal on a value whose guard takes it,
+    /// unless it is asked again after a write of it got no answer: a
+    /// sealing leader stops with no true cause.
     /// [`STOPPED`] catches it.
     RefuseSeal,
 }
@@ -619,7 +620,7 @@ impl Model for WholeModel {
         }
         self.place();
         self.judge_heals();
-        self.judge_disks(false);
+        self.judge_disks();
     }
 
     fn deliver(&mut self, envelope: Envelope, _cx: &mut Cx<'_, Self>) {
@@ -678,8 +679,8 @@ impl Model for WholeModel {
     fn check(&mut self) {
         for j in 0..self.journals.len() {
             self.judge(j);
-            self.judge_stops(j);
         }
+        self.judge_all_stops();
     }
 
     fn converged(&self) -> Result<(), String> {
@@ -697,7 +698,7 @@ impl Model for WholeModel {
     }
 
     fn finish(&mut self) {
-        self.judge_disks(true);
+        self.judge_disks();
         for j in 0..self.journals.len() {
             self.judge(j);
             let journal = &self.journals[j];
@@ -956,6 +957,8 @@ impl WholeModel {
     /// `machine` goes down: its driver, its leaders and its controllers are
     /// gone; its disk and its placed roles stay.
     fn down(&mut self, m: u64) {
+        // The machine's leaders go with its driver: judge their stops first.
+        self.judge_all_stops();
         let machine = self.machines.get_mut(&m).expect("a machine");
         if machine.driver.take().is_none() {
             return;
@@ -1405,6 +1408,8 @@ impl WholeModel {
     /// A new leader of the newest segment of journal `j` on a machine that
     /// is up, when none writes (and now and then in the chaos phase).
     fn campaign(&mut self, j: usize, cx: &mut Cx<'_, Self>) {
+        // The campaign may unassign stopped leaders: judge them first.
+        self.judge_all_stops();
         let value = self.value(j);
         let newest = value.newest().expect("a segment").id();
         let now = self.now();
@@ -1804,8 +1809,8 @@ impl WholeModel {
     /// retired segment holds every slot of the segment on its disk while
     /// the set names it, but the slots below its `Trim`: the compaction
     /// drops a slot only when every record it wrote is below the trim
-    /// floor, the floor is one that the chosen log decided, and the fold of
-    /// the `Trim` is the fold of the chosen log at its slot.
+    /// floor. [`DISK`] judges the bytes of each slot it holds, the fold of
+    /// the `Trim` and its floor, for every replica.
     fn judge_heals(&self) {
         for (j, journal) in self.journals.iter().enumerate() {
             let value = self.value_of(journal.id);
@@ -1869,18 +1874,25 @@ impl WholeModel {
 
     /// [`STOPPED`]: each leader of journal `j` that stopped on its own (a
     /// leader that the driver unassigns or a failed commit stops leaves its
-    /// host) has a true cause in the walk, read from facts that only grow:
+    /// host) has a true cause for the phase it stopped from, read from facts
+    /// that only grow:
     ///
-    /// - a ballot above its own was bound in the register, or promised on
-    ///   the disk of an acceptor of the journal (a refused bind, a `Nack`);
-    /// - a segment newer than the newest at its campaign was written (its
-    ///   bind meets a later configuration);
-    /// - an end of its own segment was written (a later leader sealed it);
-    /// - it asked a seal end, and another end of the segment before its
-    ///   own was written (it lost the seal).
+    /// - binding: a ballot above its own was bound, or its own ballot was
+    ///   bound and a segment newer than the newest at its campaign was
+    ///   written (its bind asked again meets a later configuration);
+    /// - Phase 1: an acceptor of the journal promised a ballot above its own
+    ///   on its disk (a `Nack`);
+    /// - sealing: a higher promise, an end of its own segment (a later
+    ///   leader sealed it), another end of the segment before its own (it
+    ///   lost the seal), or a segment newer than its own (a bind asked again
+    ///   after the newest segment moved);
+    /// - open: a higher promise, or an end of its own segment.
     ///
     /// The register facts include the writes that a minority took
-    /// ([`crate::backend::Held`]): a role may read one and act on it.
+    /// ([`crate::backend::Held`]): a role may read one and act on it. The
+    /// walk judges the stops before it drops a leader (a campaign that
+    /// unassigns the older leaders of a machine, a machine that goes down)
+    /// and after each step, so no stop leaves the host unjudged.
     fn judge_stops(&mut self, j: usize) {
         let id = self.journals[j].id;
         let mut new = Vec::new();
@@ -1893,11 +1905,11 @@ impl WholeModel {
                 .as_ref()
                 .and_then(|d| d.host().leader(Address::new(id, node)))
                 .expect("a leader");
-            if *leader.phase() == LeaderPhase::Stopped {
-                let segments = leader.segments();
-                let before = segments.iter().rev().nth(1).map(|s| s.id);
+            if let Some(from) = leader.stopped_from() {
+                let before = leader.segments().iter().rev().nth(1).map(|s| s.id);
                 new.push((
                     node,
+                    from.clone(),
                     leader.ballot(),
                     leader.segment(),
                     before,
@@ -1910,22 +1922,33 @@ impl WholeModel {
         }
         let held = self.register.held(id);
         let promised = self.promised(id);
-        for (node, ballot, own, before, seal_end) in new {
+        for (node, from, ballot, own, before, seal_end) in new {
             let journal = &mut self.journals[j];
             journal.stopped.insert(node);
-            let higher = held.bound.is_some_and(|b| b > ballot) || promised > ballot;
-            let newer = journal
-                .campaigned_on
-                .get(&node)
-                .is_some_and(|at| held.newest.is_some_and(|n| n > *at));
+            let nack = promised > ballot;
             let own_sealed = own.is_some_and(|own| held.sealed(own));
-            let lost_seal = matches!((before, seal_end), (Some(before), Some(end))
-                if held.other_end(before, end));
+            let cause = match from {
+                LeaderPhase::Binding => {
+                    let at = journal.campaigned_on.get(&node).copied();
+                    held.bound.is_some_and(|b| b > ballot)
+                        || (held.bound == Some(ballot)
+                            && held.newest.is_some_and(|n| at.is_some_and(|at| n > at)))
+                }
+                LeaderPhase::Phase1 => nack,
+                LeaderPhase::Sealing { .. } => {
+                    let lost_seal = matches!((before, seal_end), (Some(before), Some(end))
+                        if held.other_end(before, end));
+                    let newer = own.is_some_and(|own| held.newest.is_some_and(|n| n > own));
+                    nack || own_sealed || lost_seal || newer
+                }
+                LeaderPhase::Open { .. } => nack || own_sealed,
+                LeaderPhase::Stopped => unreachable!("a leader stops from a running phase"),
+            };
             assert!(
-                higher || newer || own_sealed || lost_seal,
-                "{STOPPED}: journal {} leader {node:?} at {ballot:?} stopped with no true \
-                 cause: segment {own:?}, seal end {seal_end:?} of {before:?}, register facts \
-                 {held:?}, highest promise {promised:?}",
+                cause,
+                "{STOPPED}: journal {} leader {node:?} at {ballot:?} stopped from {from:?} with \
+                 no true cause: segment {own:?}, seal end {seal_end:?} of {before:?}, register \
+                 facts {held:?}, highest promise {promised:?}",
                 id.0
             );
             sometimes!(true, reach::LEADER_STOPPED);
@@ -1937,10 +1960,11 @@ impl WholeModel {
     /// command that a `Commit` on the wire named there, its base is the
     /// fold of the chosen log before its slot, and its compaction point
     /// holds the fold of the chosen log before the point, with a floor at
-    /// or below the decided floor. A fold is judged once the chosen log
-    /// holds every slot below it; at the end of the run (`complete`) it
-    /// must.
-    fn judge_disks(&self, complete: bool) {
+    /// or below the decided floor. A replica takes a base or compacts only
+    /// once every slot below is chosen, and each chosen slot was on the
+    /// wire in a `Commit`, so the chosen log holds every slot below each
+    /// fold: a hole fails the oracle.
+    fn judge_disks(&self) {
         for (m, machine) in &self.machines {
             let mut store = machine.disk.store.borrow_mut();
             let addresses = store.list().expect("a list of memory");
@@ -1978,14 +2002,12 @@ impl WholeModel {
                     ));
                 }
                 for (what, slot, held) in folds {
-                    let Some(before) = fold_before(chosen, slot) else {
-                        assert!(
-                            !complete,
-                            "{DISK}: machine {m} {address:?} holds a {what} at {slot:?}, and \
-                             the chosen log misses a slot below it at the end"
-                        );
-                        continue;
-                    };
+                    let before = fold_before(chosen, slot).unwrap_or_else(|| {
+                        panic!(
+                            "{DISK}: machine {m} {address:?} holds a {what} at {slot:?}, and the \
+                             chosen log misses a slot below it"
+                        )
+                    });
                     assert!(
                         held == (before.leader, before.next, before.first),
                         "{DISK}: machine {m} {address:?} holds the {what} {held:?} at \
@@ -2005,6 +2027,13 @@ impl WholeModel {
                     );
                 }
             }
+        }
+    }
+
+    /// [`STOPPED`] for every journal.
+    fn judge_all_stops(&mut self) {
+        for j in 0..self.journals.len() {
+            self.judge_stops(j);
         }
     }
 

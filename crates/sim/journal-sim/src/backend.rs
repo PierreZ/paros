@@ -337,8 +337,8 @@ struct Quorum {
     /// The planted bug of [`AGAIN`]: a change asked again over a value
     /// that holds it is refused.
     refuse_again: bool,
-    /// A planted bug: a seal asked for the first time is refused on a
-    /// value whose guard takes it.
+    /// A planted bug: a seal is refused on a value whose guard takes it,
+    /// unless it is asked again after a write of it got no answer.
     refuse_seal: bool,
     again: fn(Again),
 }
@@ -400,9 +400,10 @@ impl QuorumRegister {
         self.0.borrow_mut().refuse_again = true;
     }
 
-    /// Plant a register that refuses each seal asked for the first time,
-    /// on a value whose guard takes it: a sealing leader stops with no
-    /// true cause (the `STOPPED` oracle of the whole walk).
+    /// Plant a register that refuses each seal on a value whose guard
+    /// takes it, unless the seal is asked again after a write of it got no
+    /// answer: a sealing leader stops with no true cause (the `STOPPED`
+    /// oracle of the whole walk).
     pub fn plant_refuse_seal(&self) {
         self.0.borrow_mut().refuse_seal = true;
     }
@@ -576,7 +577,8 @@ impl QuorumRegister {
 
 /// The refusal of a planted bug, if one is planted and applies:
 /// `refuse_again` refuses a change over a value that holds it already,
-/// `refuse_seal` refuses a seal asked for the first time.
+/// `refuse_seal` refuses a seal that is not asked again after a write of
+/// it got no answer.
 fn plant(
     register: &Members,
     (refuse_again, refuse_seal): (bool, bool),

@@ -8,8 +8,13 @@ use moonpool_walk::{Model, Walk};
 /// The seeds that each walk runs twice.
 const SEEDS: [u64; 2] = [1, 2];
 
+/// Each seed passes, and runs twice to the same log: two runs that fail
+/// the same way are equal too, so the seed must pass first.
 fn deterministic<M: Model>(name: &str, walk: &Walk<M>) {
     for seed in SEEDS {
+        if let Err(failure) = walk.replay(seed) {
+            panic!("the {name} walk fails at seed {seed}: {failure}");
+        }
         walk.check_determinism(seed).unwrap_or_else(|why| {
             panic!("the {name} walk is not deterministic at seed {seed}: {why}")
         });

@@ -264,6 +264,9 @@ pub struct JournalLeader<T> {
     /// The seal end the leader asked the register for, kept once it opens
     /// or stops: an observation for a judge of why it stopped.
     seal_end: Option<Slot>,
+    /// The phase the leader stopped from, once it stopped: an observation
+    /// for a judge of why it stopped.
+    stopped_from: Option<LeaderPhase>,
     phase1: Phase1,
     /// The votes Phase 1 found: the leader proposes each again.
     safe: BTreeMap<Slot, Command>,
@@ -313,6 +316,7 @@ impl<T> JournalLeader<T> {
             segments: Vec::new(),
             phase: LeaderPhase::Binding,
             seal_end: None,
+            stopped_from: None,
             phase1,
             safe: BTreeMap::new(),
             blocked: Vec::new(),
@@ -457,11 +461,18 @@ impl<T> JournalLeader<T> {
 
     /// The seal end the leader asked the register for, if Phase 1 closed
     /// on the segment before its own. It stays once the leader opens or
-    /// stops, so an observer can judge a stop: a sealing leader stops only
-    /// on a value that holds another end.
+    /// stops: an observer reads it to judge a stop.
     #[must_use]
     pub fn seal_end(&self) -> Option<Slot> {
         self.seal_end
+    }
+
+    /// The phase the leader was in when it stopped; `None` while it runs.
+    /// An observer reads it to judge a stop: each phase stops for its own
+    /// causes.
+    #[must_use]
+    pub fn stopped_from(&self) -> Option<&LeaderPhase> {
+        self.stopped_from.as_ref()
     }
 
     /// The leader's Phase 1: the reports it gathered.
@@ -756,6 +767,9 @@ impl<T> JournalLeader<T> {
     /// When an assertion on its own postconditions fails: a programmer
     /// error, never an operating condition.
     pub fn stop(&mut self) -> Vec<LeaderEffect<T>> {
+        if self.phase != LeaderPhase::Stopped {
+            self.stopped_from = Some(self.phase.clone());
+        }
         self.phase = LeaderPhase::Stopped;
         self.rounds.clear();
         self.unapplied.clear();
