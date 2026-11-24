@@ -44,7 +44,9 @@ pub trait Register {
     fn change(&mut self, journal: JournalId, change: &Change)
     -> Result<RegisterValue, ChangeError>;
 
-    /// The value of the last done write on the register of `journal`, if
-    /// the register exists.
+    /// The value of the last done write on the register of `journal`;
+    /// `None` when the register does not exist or the read gives no answer
+    /// (a quorum read that a majority of the matchmakers does not answer
+    /// with one write). The driver reads again at its next poll.
     fn read(&mut self, journal: JournalId) -> Option<RegisterValue>;
 }

@@ -53,7 +53,10 @@ use crate::signals::{ProcessId, Report, Signals, Windows};
 
 /// The journal's register, as the driver reaches it.
 pub trait ControlRegister {
-    /// The value of the last done write, if the register exists.
+    /// The value of the last done write; `None` when the register does
+    /// not exist or the read gives no answer (a quorum read that a majority
+    /// of the matchmakers does not answer with one write). The driver asks
+    /// again at its next step.
     fn read(&mut self) -> Option<RegisterValue>;
 
     /// Run `change` as one register operation: done, refused, or no answer.
@@ -200,7 +203,7 @@ impl ControlDriver {
                 .is_none_or(|process| process == self.process),
             "the cell places this controller on the driver's own process"
         );
-        let Some(value) = register.read() else {
+        let Some(mut value) = register.read() else {
             return Polled::default();
         };
         self.see(&value);
@@ -211,14 +214,17 @@ impl ControlDriver {
             let change = self.controller.campaign();
             let outcome = register.run(&change);
             self.controller.elected(&outcome);
+            // Plan on the value of a done `Elect`: it changed the register.
+            // A second read could give no answer (a quorum read).
+            if let Outcome::Done(done) = outcome {
+                value = done;
+                self.see(&value);
+            }
         }
         let mut polled = Polled::default();
         let Some(term) = self.controller.term() else {
             return polled;
         };
-        // Plan on a read after the election: a done `Elect` changed it.
-        let value = register.read().expect("the register exists");
-        self.see(&value);
         let (ask, decision) = self.step(term, &value, cell);
         polled.decision = decision;
         let owns = self.owns(&value);

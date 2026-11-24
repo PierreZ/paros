@@ -225,8 +225,11 @@ live check fed by the port, and the torn-batch control land with the adapter.
 **The driver walk** (#1329, `journal-sim/tests/host.rs`). Before the moonpool-sim, `journal-sim`
 walks the generic driver itself: three processes, each a `Driver` with a disk that fails commits
 inside the contract (before or after the write), a transport through the walk's mailbox (lost,
-repeated, reordered), crashes that keep the disk, restarts that read it back, campaigns that
-depose a leader, and a writer that sends a call again. Its oracles share no code with the
+repeated, reordered), the journal's register on three matchmakers (one on each process, down
+while its process is; a change can lose its request or its reply, reach one member only, or wait
+in flight), crashes that keep the disk, restarts that read it back, campaigns that depose a
+leader, and a writer that sends a call again. Each register fake keeps the register contract of
+`paros-journal-io` (`contract::register`, run on it in `journal-sim/tests/backend.rs`). Its oracles share no code with the
 driver: `AGREE` (no two `Commit`s on the wire name two commands at one slot), `FLIGHT` (an
 `Accepted` or a `Promise` leaves only once the state it reports is on the disk) and `ANSWER`
 (each answer is the whole log's at a slot of the command). Each has its planted mutant: a disk
@@ -258,7 +261,10 @@ and segment replicas of both journals), two controllers for each journal
 (`paros_journal_control::role`) that are elected, heal a column, seal and get deposed, a reshape
 token shared by the journals, a client that claims the writer, writes, sends again, resends with a
 stale position and resolves each `Below`, crashes and restarts of a machine, the loss of a zone for
-a while, register operations whose request or reply is lost, and disk faults inside the contract.
+a while, register operations whose request or reply is lost, whose write reaches one matchmaker
+only, or whose write waits in flight while other operations run and lands later, matchmakers that
+are down with their machine (a read or a change that no majority answers gives no answer, and a
+read repairs a write that a minority took), and disk faults inside the contract.
 Its oracles share no code with the code they judge: `AGREE` (no two `Commit`s name two commands
 at one slot), `SEALED` (no `Commit` of a sealed segment is at or above its end), `FLIGHT`,
 `ANSWER` (each answer and each `Resolve` of each replica is the whole log's), `ONCE` (a write with
