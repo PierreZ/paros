@@ -1,9 +1,10 @@
 // The tour of the Paxos flavors (tour plan §3.2): seven chapters, in course
 // order, on five pages. Each chapter plays its runs back to back with the
-// player of the story. Before a chapter, one screen (the bridge) can say the
-// problem that its flavor solves: the problem line of `src/flavors.ts`, the
-// same text as the map of /paxos/, never a text of its own. A chapter that
-// no problem line fits has no bridge (today: "Who must answer" and "Reads").
+// player of the story. Before each chapter but the first, one screen (the
+// bridge) says the problem that the chapter solves: the problem line of its
+// flavor in `src/flavors.ts` (the text of the map of /paxos/) for the first
+// chapter of a flavor, or the chapter's own line (`problem`) for a chapter
+// whose flavor's line opens another chapter ("Who must answer", "Reads").
 //
 // A chapter names its runs in `src/tour/<page>.ts`. Today each chapter is
 // made from the recorded runs of its lesson (the base run and the first
@@ -31,6 +32,10 @@ export interface Chapter {
   /** The bridge before the chapter: the page of the flavor whose problem
    * line (`src/flavors.ts`) the screen shows. The first chapter has none. */
   bridge?: string;
+  /** The chapter's own problem line, for a chapter whose flavor's line opens
+   * another chapter: one sentence. A chapter has `bridge` or `problem`,
+   * never both. */
+  problem?: string;
 }
 
 /** The chapters, in course order. */
@@ -67,8 +72,10 @@ export function seconds(run: Run): number {
   return s;
 }
 
-/** The text of a chapter's bridge: the problem line of its flavor. */
+/** The text of a chapter's bridge: its own problem line, or the problem
+ * line of its flavor. */
 export function bridgeOf(chapter: Chapter): string | undefined {
+  if (chapter.problem) return chapter.problem;
   if (!chapter.bridge) return undefined;
   const flavor = FLAVORS.find((f) => f.page === chapter.bridge);
   if (!flavor) throw new Error(`tour: chapter ${chapter.lesson} names no flavor ${chapter.bridge} for its bridge`);
@@ -80,7 +87,9 @@ export function bridgeOf(chapter: Chapter): string | undefined {
  * name one lesson, the chapters are not in course order, a tour run in no
  * chapter, in two or in a lesson, a tour run whose mark names another
  * chapter, a bridge that is not the problem line of the chapter's own
- * flavor, or a flavor page with no chapter. */
+ * flavor, a chapter after the first with no bridge, a chapter with two, an
+ * own problem line that is not one sentence of at most 140 characters, or a
+ * flavor page with no chapter. */
 export function check(traces: Record<string, Trace>): void {
   const placed = new Map<string, string>();
   const inLessons = new Set(LESSONS.flatMap((l) => l.runs.map((r) => `${l.page}/${r}`)));
@@ -115,7 +124,16 @@ export function check(traces: Record<string, Trace>): void {
       if (run.tour && inLessons.has(key)) throw new Error(`tour: the tour run ${key} is also in a lesson`);
       placed.set(key, chapter.lesson);
     }
-    if (chapter === CHAPTERS[0] && chapter.bridge) throw new Error(`tour: the first chapter has a bridge`);
+    if (chapter.bridge && chapter.problem) throw new Error(`tour: chapter ${lesson.id} has a flavor bridge and its own line`);
+    if (chapter.problem !== undefined) {
+      const p = chapter.problem;
+      if (p.length > 140 || !/^[A-Z][^.!?]*\.$/.test(p)) throw new Error(`tour: the line of chapter ${lesson.id} is not one sentence of at most 140 characters`);
+    }
+    if (chapter === CHAPTERS[0]) {
+      if (bridgeOf(chapter)) throw new Error(`tour: the first chapter has a bridge`);
+    } else if (!bridgeOf(chapter)) {
+      throw new Error(`tour: chapter ${lesson.id} has no bridge`);
+    }
   }
   for (const trace of Object.values(traces)) {
     for (const run of trace.scenarios) {

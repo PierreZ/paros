@@ -1,7 +1,7 @@
 // The Paxos flavors in reading order, each with the problem that it solves.
 // The map of /paxos/ (`src/pages/paxos/index.astro`) lists them, and a
-// bridge of the tour (`src/tour.ts`) is one of these problem lines, never a
-// text of its own.
+// bridge of the tour (`src/tour.ts`) opens the first chapter of each flavor
+// with its problem line.
 
 export interface Flavor {
   n: number;
