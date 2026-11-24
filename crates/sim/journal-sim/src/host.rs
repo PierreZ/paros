@@ -157,7 +157,8 @@ pub enum HostMutant {
     /// The disk says a commit is done and writes nothing. [`FLIGHT`]
     /// catches it.
     LyingDisk,
-    /// A process restarts with an empty disk. [`AGREE`] catches it.
+    /// A process restarts with its acceptor's records gone: the acceptor
+    /// forgets its promise and its votes. [`AGREE`] catches it.
     WipeDisk,
     /// The client takes a `Taken` (a write at a position that holds
     /// another write) as written. [`ANSWER`] catches it.
@@ -165,6 +166,9 @@ pub enum HostMutant {
     /// The reader takes each record of a page one position later.
     /// [`READ`] catches it.
     PageShift,
+    /// The disk's list at a boot leaves out its first role.
+    /// [`crate::backend::LISTED`] catches it.
+    HiddenRole,
 }
 
 const J: JournalId = JournalId(7);
@@ -393,7 +397,7 @@ impl Model for HostModel {
             return;
         }
         if self.mutant == HostMutant::WipeDisk {
-            self.processes[node].disk.wipe();
+            self.processes[node].disk.wipe_role(Self::acceptor(*node));
         }
         self.start(*node);
         let driver = self.processes[node].driver.as_ref().expect("started");
@@ -573,6 +577,10 @@ impl HostModel {
             disk: process.disk.clone(),
             flight: FLIGHT,
         };
+        process.disk.boot();
+        if self.mutant == HostMutant::HiddenRole {
+            process.disk.hide_a_role();
+        }
         let mut driver = Driver::new(
             CONFIG,
             process.disk.clone(),
@@ -590,7 +598,11 @@ impl HostModel {
             }
             listed => listed,
         };
-        listed.expect("a list asked again after a list that read nothing reads the disk");
+        let listed =
+            listed.expect("a list asked again after a list that read nothing reads the disk");
+        process
+            .disk
+            .judge_list(&listed, [Self::acceptor(p), Self::replica(p)]);
         driver.assign(Self::assignment(Self::acceptor(p)));
         driver.assign(Self::assignment(Self::replica(p)));
         process.driver = Some(driver);
@@ -967,7 +979,9 @@ impl HostModel {
             let fault = *cx.rng().pick(&FAULTS).expect("four ways");
             self.processes[&p].register.arm(fault);
         } else {
-            disk.arm(*cx.rng().pick(&DiskFault::ALL).expect("six faults"));
+            let after = !cx.rng().chance(1, 2);
+            let more = *cx.rng().pick(&DiskFault::MORE).expect("four faults");
+            disk.arm_drawn(after, more);
         }
     }
 

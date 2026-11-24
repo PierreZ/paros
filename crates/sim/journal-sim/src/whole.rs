@@ -1033,6 +1033,7 @@ impl WholeModel {
             disk: machine.disk.clone(),
             flight: FLIGHT,
         };
+        machine.disk.boot();
         let mut driver = Driver::new(
             CONFIG,
             machine.disk.clone(),
@@ -1051,7 +1052,11 @@ impl WholeModel {
             }
             listed => listed,
         };
-        listed.expect("a list asked again after a list that read nothing reads the disk");
+        let listed =
+            listed.expect("a list asked again after a list that read nothing reads the disk");
+        machine
+            .disk
+            .judge_list(&listed, machine.placed.iter().map(Assignment::address));
         for assignment in &machine.placed {
             driver.assign(assignment.clone());
         }
@@ -2690,9 +2695,9 @@ impl WholeModel {
             let fault = *cx.rng().pick(&FAULTS).expect("four ways");
             machine.register.arm(fault);
         } else {
-            machine
-                .disk
-                .arm(*cx.rng().pick(&DiskFault::ALL).expect("six faults"));
+            let after = cx.rng().chance(1, 2);
+            let more = *cx.rng().pick(&DiskFault::MORE).expect("four faults");
+            machine.disk.arm_drawn(after, more);
         }
     }
 

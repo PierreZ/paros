@@ -30,6 +30,11 @@ use paros_journal_io::{
     StorageError, Transport,
 };
 
+/// Oracle: the list at a boot names each role that the disk holds, and
+/// only those.
+pub const LISTED: &str =
+    "disk: a list at a boot names each role that the disk holds, and only those";
+
 /// A fault of the contract that a walk arms on a disk. Each fires once, on
 /// the next call of its kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,10 +54,13 @@ pub enum DiskFault {
 }
 
 impl DiskFault {
-    /// Every fault of the contract.
-    pub const ALL: [Self; 6] = [
-        Self::CommitFull,
-        Self::CommitUnknownWritten,
+    /// The two commit faults that a walk draws on each disk fault: one of
+    /// them, each with chance 1/2.
+    pub const COMMIT: [Self; 2] = [Self::CommitFull, Self::CommitUnknownWritten];
+    /// The other faults of the contract: a walk draws one of them too, on
+    /// each disk fault, so they add to the commit faults and never take
+    /// their place.
+    pub const MORE: [Self; 4] = [
         Self::CommitUnknownUnwritten,
         Self::ScanFull,
         Self::ScanUnknown,
@@ -61,16 +69,19 @@ impl DiskFault {
 }
 
 /// The faults armed on a disk.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Faults {
-    /// The fault of the next commit.
-    pub commit: Option<DiskFault>,
+    /// The faults of the next commits, in order: each commit takes the
+    /// first, so a fault armed on top of another never replaces it.
+    pub commit: VecDeque<DiskFault>,
     /// The fault of the next scan: `Full` or `Unknown`.
     pub scan: Option<StorageError>,
     /// The next list fails `Full`.
     pub list: bool,
     /// A planted bug: the commit writes nothing and says it is done.
     pub lie: bool,
+    /// A planted bug: each list leaves out its first role.
+    pub hide: bool,
 }
 
 /// The disk of one process: it survives the process. `seen` looks at each
@@ -164,9 +175,92 @@ impl Disk {
         self.scan_failed.take()
     }
 
+    /// Whether the disk holds a record of the role at `address`, or lost one:
+    /// a list at a boot names exactly these roles.
+    ///
+    /// # Panics
+    ///
+    /// When a scan of the memory fails with another fault than a loss.
+    #[must_use]
+    pub fn holds(&self, address: Address) -> bool {
+        match self.store.borrow_mut().scan(address) {
+            Ok(entries) => !entries.is_empty(),
+            Err(StorageError::Lost) => true,
+            Err(fault) => panic!("a scan of memory reports only a loss: {fault}"),
+        }
+    }
+
+    /// Judge the list of a boot: it names each role of `known` that the
+    /// disk holds, and only roles that the disk holds.
+    ///
+    /// # Panics
+    ///
+    /// When the list misses a held role or names a role with no record.
+    pub fn judge_list(&self, listed: &[Address], known: impl IntoIterator<Item = Address>) {
+        for address in listed {
+            assert!(
+                self.holds(*address),
+                "{LISTED}: it names {address:?}, with no record"
+            );
+        }
+        for address in known {
+            assert!(
+                !self.holds(address) || listed.contains(&address),
+                "{LISTED}: it misses {address:?}"
+            );
+        }
+    }
+
+    /// A new driver boots on the disk: the scan fault and the `Unknown`
+    /// commit of the driver before it belong to that driver, so a halt of
+    /// the new one never reads them.
+    pub fn boot(&self) {
+        self.scan_failed.set(None);
+        *self.unknown.borrow_mut() = (Vec::new(), false);
+    }
+
+    /// Arm one disk fault of a walk: one commit fault, `Full` or `Unknown`
+    /// after the write, each with chance 1/2, and one more fault of
+    /// [`DiskFault::MORE`] on top.
+    pub fn arm_drawn(&self, commit_after: bool, more: DiskFault) {
+        self.arm(DiskFault::COMMIT[usize::from(commit_after)]);
+        self.arm(more);
+    }
+
     /// Lose every record: a planted bug, never a fault of the contract.
     pub fn wipe(&self) {
         *self.store.borrow_mut() = MemStorage::new();
+        self.changed();
+    }
+
+    /// Lose every record of the role at `address`, with no report: a
+    /// planted bug, never a fault of the contract. The other roles of the
+    /// disk keep their records.
+    ///
+    /// # Panics
+    ///
+    /// When a scan of the memory fails, or the disk holds a corrupt record:
+    /// the walks that plant this bug corrupt nothing.
+    pub fn wipe_role(&self, address: Address) {
+        let mut store = self.store.borrow_mut();
+        let mut kept = MemStorage::new();
+        for other in store.list().expect("a list of memory reads it") {
+            if other == address {
+                continue;
+            }
+            let ops: Vec<Op> = store
+                .scan(other)
+                .expect("a disk with a wiped role lost no record")
+                .into_iter()
+                .map(|(key, entry)| match entry {
+                    Entry::Value(value) => Op { key, value },
+                    Entry::Corrupt => panic!("a disk with a wiped role holds no corrupt record"),
+                })
+                .collect();
+            kept.commit(&ops).expect("a commit of memory writes it");
+        }
+        *store = kept;
+        drop(store);
         self.changed();
     }
 
@@ -176,11 +270,16 @@ impl Disk {
         match fault {
             DiskFault::CommitFull
             | DiskFault::CommitUnknownWritten
-            | DiskFault::CommitUnknownUnwritten => faults.commit = Some(fault),
+            | DiskFault::CommitUnknownUnwritten => faults.commit.push_back(fault),
             DiskFault::ScanFull => faults.scan = Some(StorageError::Full),
             DiskFault::ScanUnknown => faults.scan = Some(StorageError::Unknown),
             DiskFault::ListFull => faults.list = true,
         }
+    }
+
+    /// Plant the bug of a list that leaves out its first role, for good.
+    pub fn hide_a_role(&self) {
+        self.faults.borrow_mut().hide = true;
     }
 
     /// Arm the planted bug: the next commit writes nothing and says it is
@@ -202,7 +301,7 @@ impl Storage<Journal> for Disk {
         (self.seen)(ops);
         let (lie, commit) = {
             let mut faults = self.faults.borrow_mut();
-            (std::mem::take(&mut faults.lie), faults.commit.take())
+            (std::mem::take(&mut faults.lie), faults.commit.pop_front())
         };
         if lie {
             return Ok(());
@@ -233,10 +332,18 @@ impl Storage<Journal> for Disk {
     }
 
     fn list(&mut self) -> Result<Vec<Address>, StorageError> {
-        if std::mem::take(&mut self.faults.borrow_mut().list) {
-            return Err(StorageError::Full);
+        let hide = {
+            let mut faults = self.faults.borrow_mut();
+            if std::mem::take(&mut faults.list) {
+                return Err(StorageError::Full);
+            }
+            faults.hide
+        };
+        let mut listed = self.store.borrow_mut().list()?;
+        if hide && !listed.is_empty() {
+            listed.remove(0);
         }
-        self.store.borrow_mut().list()
+        Ok(listed)
     }
 }
 
