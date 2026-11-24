@@ -661,3 +661,19 @@ button.story-answer:hover, button.story-answer:focus-visible { border-color: var
 @media (max-width: 600px) {
   .jlab .jlab-row { grid-template-columns: 1fr; }
 }
+/* The live journal (public/live-journal.js): controls, the hosts with their
+   roles, the matchmakers, the segments, the last read and the events. */
+.llab .llab-controls, .llab .llab-moves { padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.llab .llab-speed { display: flex; gap: 0; }
+.llab .llab-summary > .strip { margin: 4px 12px 8px; }
+.llab .llab-hosts, .llab .llab-mm { padding: 0 12px 8px; }
+.llab .llab-host p { margin: 0; }
+.llab .llab-role { margin: 4px 0 0; overflow-wrap: anywhere; }
+.llab .llab-host .btn { margin-top: 8px; height: 30px; }
+.llab .llab-segments { padding: 0 12px 8px; }
+.llab .llab-read { padding: 0 12px 8px; }
+.llab .llab-records { margin: 0; padding-left: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+.llab .llab-records > li::before { content: none !important; }
+.llab .llab-records li { padding: 2px 6px; border: 1px solid var(--rule); }
+.llab .llab-events li { overflow-wrap: anywhere; }
+.llab .llab-events li:first-child { color: var(--fg); }

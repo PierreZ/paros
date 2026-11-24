@@ -359,7 +359,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces --test journal_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
 - the site (`.github/workflows/pages.yml`, on pull requests that touch the site, `paros-wasm`,
-  `paros-consensus`, `paros-journal`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
+  `paros-consensus`, `paros-journal`, `paros-journal-io`, `paros-host`, the knowledge base cards or the Cargo files): `scripts/build-wasm.sh`, the Astro
   build, the link check of the built site (`npm run check-links`) and the browser smoke test
   of its live parts (`nix develop .#site --command npm test`, Playwright and Chromium;
   `website/site/AGENTS.md`, "Tests")
@@ -838,7 +838,7 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   `paros-consensus` only.
 - `crates/support/paros-wasm` — the site's wasm tools (#540): feature `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-consensus` only; feature `journal`,
-  the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal` only.
+  the fold lab, the register lab and the record lab of the Journal pages (#1363, #1364), on `paros-journal`, and the live journal of `/journal/live/` (every role on six hosts), on `paros-journal-io` too.
 - `crates/support/paros-authz-biscuit` — Biscuit tokens (#245 (Biscuit tokens)): root keys,
   offline mint and derive, and the verifier of a request with one Datalog policy. It stands
   alone: no other paros crate, no runtime, and no crate of the workspace uses it yet. It came

@@ -24,11 +24,14 @@
 //! - [`keyed`] — the shell of an exercise whose moves are named by a key.
 //! - [`register`] — two controllers and three matchmakers of the register.
 //! - [`records`] — one register value and the moves of its records.
+//! - [`live`] — the whole journal on six hosts, on the generic driver of
+//!   `paros-journal-io`, for `/journal/live/`.
 //! - [`seal`] — the step-through of a reshape and a seal on the journal
 //!   roles, for `/journal/segments/` (#1365).
 
 pub mod keyed;
 pub mod lab;
+pub mod live;
 pub mod records;
 pub mod register;
 pub mod seal;
@@ -186,6 +189,58 @@ mod wasm {
         #[must_use]
         pub fn view(&self) -> String {
             keyed_view(&self.inner)
+        }
+    }
+
+    /// The live journal of `/journal/live/`: six hosts that run every
+    /// journal role, driven by the page's clock and the reader's moves.
+    #[wasm_bindgen(js_name = LiveJournal)]
+    pub struct WasmLiveJournal {
+        inner: crate::journal::live::Live,
+    }
+
+    #[wasm_bindgen(js_class = LiveJournal)]
+    impl WasmLiveJournal {
+        /// The controller opens segment 1 and the six hosts start.
+        #[wasm_bindgen(constructor)]
+        #[must_use]
+        pub fn new() -> WasmLiveJournal {
+            console_error_panic_hook::set_once();
+            WasmLiveJournal {
+                inner: crate::journal::live::Live::new(),
+            }
+        }
+
+        /// Play one JSON `Move`; answers the `View` as JSON.
+        pub fn act(&mut self, chosen: &str) -> String {
+            match serde_json::from_str::<crate::journal::live::Move>(chosen) {
+                Ok(chosen) => self.inner.act(&chosen),
+                Err(error) => {
+                    return serde_json::json!({ "error": error.to_string() }).to_string();
+                }
+            }
+            self.view()
+        }
+
+        /// Run `ticks` ticks; answers the `View` as JSON.
+        pub fn step(&mut self, ticks: u32) -> String {
+            self.inner.step(ticks);
+            self.view()
+        }
+
+        /// The `View` as JSON.
+        #[must_use]
+        pub fn view(&self) -> String {
+            serde_json::to_string(&self.inner.view()).unwrap_or_else(|err| {
+                serde_json::json!({ "error": format!("the engine cannot encode the view: {err}") })
+                    .to_string()
+            })
+        }
+    }
+
+    impl Default for WasmLiveJournal {
+        fn default() -> Self {
+            Self::new()
         }
     }
 }

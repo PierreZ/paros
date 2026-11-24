@@ -21,7 +21,7 @@ in the repository; the old service is named only as "at the tag". No long book p
 | `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
 | `/consensus/` | `src/pages/consensus/*` | the `paros-consensus` library (#1349 (Consensus, Journal and parosd page groups)): what the crate is and each flavor with its type and example (`index.astro`), the driver loop with the `Ready` widget (`driver.md`, the former Engineering page "The sans-IO core"), the four deployments (`deployments.md`), how it is checked (`proof.md`). Each Paxos page's "In paros" section links its Consensus page, and back |
 | `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | how paros is made safe (#1361 (safety case)): the safety case (`index.astro`: one row per safety claim of `paros-consensus`, of the journal and of the layered parosd (#1444 (Engineering pages), part 1: each model of #1409 adds its row in the pull request that merges the model), with its model and invariant, trace spec, walk and oracle, the controls and mutants that must die, and its state: checked, model only or open, with the issue; the open rows stay), one page each for TLA+ models (`tla.md`), simulation (`simulation.md`) and mutants and assertions (`mutants.md`), and grid quorums with its live widget. A figure on these pages comes from a dated run, with its date |
-| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, the controller, and how it is checked (`checks.md`: every correctness technique of the journal, what it finds and the CI job that runs it; keep it in step with §J7). Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule. The calls page has the fold lab, the matchmakers page the register lab and the segments page the record lab ("Your turn", below) |
+| `/journal/` | `src/pages/journal/index.astro`, `*.md` | the journal v1 (#1349 (website page groups)): one screen of scope, roles, crates and models, then one page each for the calls, segments, the matchmakers and the register, quorums and failures, the controller, and how it is checked (`checks.md`: every correctness technique of the journal, what it finds and the CI job that runs it; keep it in step with §J7). Each page says at the top (`status: journal`, `STATUS` in `Doc.astro`) that the design is checked in TLA+ and the code is being built; it explains and links its §J sections of `docs/journal/` and never copies a rule. The calls page has the fold lab, the matchmakers page the register lab and the segments page the record lab ("Your turn", below); `live.md` runs the whole journal in the page ("The live journal", below) |
 | `/parosd/` | `src/pages/parosd/index.astro`, `*.md` | the service around the journal (#1439 (the parosd page group)): what it will be, the eleven goals of paros (`docs/architecture/01-goal.md` §1.1; keep the list in step with it), one screen of the stack of eight layers and its two joints, and how to run the version before the rewrite at the tag. Then one page each for the layers (`layers.md`, §4.4), the control levels (`control.md`, §3.1, §3.3, §4.4), machines (`machines.md`, §3.1, §3.2, §4.4, §J6), names and tokens (`names-and-tokens.md`, §3.5, §3.8) and the universe (`universe.md`, §3.7). Each page says at the top (`status: parosd`) that the design is written and the code is not built, and links #1409 (build the layered parosd); it explains and links its sections of `docs/architecture/` and never copies a rule. When a crate of #1409 lands, its pull request removes the callout of its page and adds its "In paros" links |
 
 The top bar (`src/nav.ts`) is `Paxos · Consensus · Journal · parosd · Engineering` (#1349).
@@ -177,6 +177,18 @@ dropped, and a matchmaker can stop), and `<div data-record-lab="id id">` mounts 
 (`P>m1:deliver`, `seal:1`), from the engine's list of the moves open now; a refused move shows
 the refusal of the guard.
 
+## The live journal (`public/live-journal.js`)
+
+`/journal/live/` sets `lab: live` and puts `<div data-live-journal>` in the page. The script
+loads the `journal` bundle and runs `LiveJournal` (`paros-wasm`, `src/journal/live.rs`): every
+role of the journal v1 on six hosts, each one a driver of `paros-journal-io`. A timer runs ticks
+(play, pause, step, three speeds); the reader appends, reads, rolls to a new segment, and crashes
+or restarts each host. The page draws the hosts with their roles, the matchmakers, the segments,
+the last whole read and the events, all from the engine's view; it holds no journal rule. With
+reduced motion it starts paused. Its buttons carry `data-live` (`append`, `read`, `roll`,
+`crash:3`, `restart:3`, `play`) for the smoke test. It is the same run as the facade example
+`full_journal`: change both together.
+
 ## Live widgets (#812 (website redo 3/4), #951 (live Engineering pages))
 
 The grid quorums page of Engineering and the driver page of Consensus show something live; the safety case and the technique pages hold no widget. A page sets `widget: true` in its front matter
@@ -196,7 +208,7 @@ performance numbers on the site (Pierre, 2026-10-31). The widgets that ran the p
 ## Tests (#1362 (browser smoke test and link check))
 
 `.github/workflows/pages.yml` runs both on each pull request that touches the site,
-`paros-wasm`, `paros-consensus`, `paros-journal`, the knowledge base cards (the Concepts
+`paros-wasm`, `paros-consensus`, `paros-journal`, `paros-journal-io`, `paros-host`, the knowledge base cards (the Concepts
 page is built from them) or the Cargo files, and before each deploy.
 Both run on the built site, so build the wasm and the site first.
 
@@ -220,5 +232,6 @@ Both run on the built site, so build the wasm and the site first.
   `WireMessage` in `paros-wasm`), and the page must say the goal holds. Every exercise of the
   journal fold lab is solved by clicks on its calls (`data-call`), and every exercise of the
   register and record labs by clicks on its moves (`data-key`); Undo takes the goal back. The quorum picker,
-  the `quorums` widget and the `Ready` widget must answer. A new live part gets its test in
+  the `quorums` widget and the `Ready` widget must answer. The live journal writes, keeps
+  writing with host 3 down, reads the records back and rolls to segment 2. A new live part gets its test in
   the same pull request. No test is skipped, and a red run is not run again (`AGENTS.md`).
