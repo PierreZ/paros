@@ -329,22 +329,38 @@ impl Register for Matchmakers {
         }
     }
 
-    /// The value of a done write: the highest write, when a majority of the
-    /// matchmakers holds it. A read takes no read generation: it only gives
-    /// a write that is done already (§J3.4, "act on a write seen done").
+    /// The value of a done write (§J3.4, "act on a write seen done"). The
+    /// highest write is done when a majority of the matchmakers holds it.
+    /// Else (a write reached only the members that answered first, and one
+    /// of them is down now) a `Confirm` of its newest segment reads it at a
+    /// majority and writes it again, so it is done; with no majority up,
+    /// there is no value.
     fn read(&mut self, journal: JournalId) -> Option<RegisterValue> {
         if journal != JOURNAL {
             return None;
         }
-        let members = lock(&self.members);
-        let held: Vec<_> = members
-            .values()
-            .filter(|m| m.up)
-            .map(|m| &m.member.state().written)
-            .collect();
-        let top = held.iter().max_by_key(|w| w.op)?;
-        let holders = held.iter().filter(|w| w.op == top.op).count();
-        (holders > members.len() / 2).then(|| top.value.clone())
+        let confirm = {
+            let members = lock(&self.members);
+            let held: Vec<_> = members
+                .values()
+                .filter(|m| m.up)
+                .map(|m| &m.member.state().written)
+                .collect();
+            let top = held.iter().max_by_key(|w| w.op)?;
+            let holders = held.iter().filter(|w| w.op == top.op).count();
+            if holders > members.len() / 2 {
+                return Some(top.value.clone());
+            }
+            let newest = top.value.newest()?;
+            Change::Confirm {
+                segment: newest.id(),
+                state: newest.state(),
+            }
+        };
+        match self.run(&confirm) {
+            CallStep::Done(value) => Some(value),
+            _ => None,
+        }
     }
 }
 

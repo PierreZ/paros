@@ -4,7 +4,8 @@ on:
   push:
     branches: ["main"]
   # Build and test (never deploy) a pull request that touches the site, its
-  # tooling, or a crate that its wasm or its pages show (#1362). The Concepts
+  # tooling, or a crate that its wasm or its pages show (#1362): the live journal builds
+  # on paros-journal-io and paros-host too. The Concepts
   # page is built from the knowledge base (concepts.astro reads
   # docs/knowledge/concepts.md and docs/knowledge/concepts/*.md, the only files
   # outside website/ that a page is built from), so a change there builds the
@@ -18,6 +19,8 @@ on:
       - "crates/support/paros-wasm/**"
       - "crates/lib/paros-consensus/**"
       - "crates/lib/paros-journal/**"
+      - "crates/lib/paros-journal-io/**"
+      - "crates/lib/paros-host/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"

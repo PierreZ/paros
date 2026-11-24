@@ -24,7 +24,7 @@ default = ["paxos", "journal"]
 paxos = ["dep:paros-consensus", "dep:serde", "dep:serde_json"]
 # The journal labs (#1363, #1364): `paros-journal` driven by hand, and nothing
 # else.
-journal = ["dep:paros-journal", "dep:serde", "dep:serde_json"]
+journal = ["dep:paros-journal", "dep:paros-journal-io", "dep:serde", "dep:serde_json"]
 
 [[test]]
 name = "paxos_traces"
@@ -49,6 +49,9 @@ paros-consensus = { workspace = true, default-features = false, features = [
 # `journal`: the pure journal core alone (it takes `paros-consensus` with its
 # features off).
 paros-journal = { workspace = true, optional = true }
+# `journal` too: the live journal of `/journal/live/` runs the roles on the
+# generic driver and the in-memory backends.
+paros-journal-io = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # MUST stay exactly 0.2.130: the flake pins `wasm-bindgen-cli` 0.2.130, and the

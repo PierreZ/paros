@@ -573,6 +573,7 @@ dependencies = [
  "console_error_panic_hook",
  "paros-consensus",
  "paros-journal",
+ "paros-journal-io",
  "serde",
  "serde_json",
  "wasm-bindgen",
