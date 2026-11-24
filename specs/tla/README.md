@@ -3562,8 +3562,8 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
 |---|---|---|
 | `ctrl` | pass | one grid of three, two writes that race for one slot, three ballots, one rot: the safety of `Journal.tla` and `JournalCompact.tla`, `OneValueAtBallot` (two readable votes at one slot and ballot carry one value, in memory and on disk), `NoProposeBlocked` and `BlockedChosen` |
 | `ctrl_g2` | pass | two segments of one acceptor each, a seal: a blocked slot of the old grid below the end |
-| `ctrl_trunc` | pass | one grid of three, a write and a `Truncate` over it, two ballots, one rot: a compaction drops the blocked slot, and the leader skips it (`SkipCompacted`) |
-| `ctrl_re` | pass | `ctrl_trunc` with `SpecRR`: an acceptor answers a `Prepare` again at a ballot it promised (`Repromise`), so the probe, the skip and the decide meet a second answer that carries what its disk holds now. CI checks the states that 7 minutes of BFS reach; `ctrl_re_full` (`--all`) checks them all |
+| `ctrl_trunc` (in `journal-ctrl-trunc/`) | pass | one grid of three, a write and a `Truncate` over it, two ballots, one rot: a compaction drops the blocked slot, and the leader skips it (`SkipCompacted`) |
+| `ctrl_re` (in `journal-ctrl-re/`) | pass | `ctrl_trunc` with `SpecRR`: an acceptor answers a `Prepare` again at a ballot it promised (`Repromise`), so the probe, the skip and the decide meet a second answer that carries what its disk holds now. CI checks the states that 7 minutes of BFS reach; `ctrl_re_full` (`--all`) checks them all |
 | `ctrl_drop` | violation | control: a damage that drops the vote (`Damage = "drop"`) breaks `Agreement` |
 | `ctrl_peer` | violation | control: a repair from a peer's vote (`Repair = "peer"`) breaks `OneValueAtBallot` |
 | `ctrl_probe_drop` | violation | control: a probe that tallies an answer that dropped the slot (`ProbeDrops = "ignore"`) chooses a `Noop` over the chosen write and breaks `Agreement` |
@@ -3571,6 +3571,10 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
 | `ctrl_unchoose_safe` | violation | the same control, judged by the safety invariants of `ctrl` without `BlockedChosen`: a rot then takes a vote that a chosen value still needs, and `Readable` (data loss) breaks |
 | `reach_blocked`, `reach_probe`, `reach_learn`, `reach_repair`, `reach_skip` | violation | the model blocks a slot, decides one on the probe, learns one, repairs a faulty vote, and skips a dropped one |
 | `reach_noop` | violation | the probe decides a blocked slot that is not chosen with a `Noop`, after a rot of an `Unchoosable` vote (`NoNoopProbe`) |
+
+`journal-ctrl-trunc/` and `journal-ctrl-re/` hold only links to the modules of `journal-ctrl/`
+and the configurations of their checks, so that each folder stays inside the 22 minutes of one
+`spec` job.
 
 ### `journal-repromise/`: the answer to a `Prepare` sent again, for #1326
 
