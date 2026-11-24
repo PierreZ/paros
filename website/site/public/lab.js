@@ -329,6 +329,8 @@ function mountLab(mount, engine) {
   function narrate(what, startView, fetch, n) {
     stopNarrator();
     narrating = { what, at: 0, n, fetch, playing: false, run: 0 };
+    // The narrator's outline is the only one: no hint outline under it.
+    hintLevel = 0;
     panel.classList.add("narrating");
     panel.classList.toggle("demo", what === "demo");
     narr.hidden = false;

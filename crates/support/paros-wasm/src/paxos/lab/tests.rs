@@ -462,6 +462,23 @@ impl Draw {
         usize::try_from(self.0 >> 33).expect("31 bits fit") % n
     }
 
+    /// A move that tries to reach the goal: an extra move or Deliver all as
+    /// often as one message, so a few moves go far.
+    fn goal_move(&mut self, lab: &Lab) -> Move {
+        let view = lab.view();
+        let mut open: Vec<Move> = (0..view.extras.len())
+            .map(|index| Move::Extra { index })
+            .collect();
+        if !view.wire.is_empty() {
+            open.push(Move::DeliverAll);
+            open.push(Move::DeliverAll);
+            let m = &view.wire[self.below(view.wire.len())];
+            open.push(Move::Deliver { id: m.id });
+            open.push(Move::Drop { id: m.id });
+        }
+        open.swap_remove(self.below(open.len()))
+    }
+
     /// One move of the reader's, at random: each message delivered or
     /// dropped (a delivery twice as likely), or an extra move.
     fn reader_move(&mut self, lab: &Lab) -> Move {
@@ -494,6 +511,10 @@ fn replay(id: &str, moves: &[Move]) -> Lab {
 fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
     for exercise in exercises().iter().filter(|e| !e.parts.is_empty()) {
         let mut stuck = 0;
+        // The dead ends judged so far, per part, and the tries from a live
+        // state that reached the goal.
+        let mut judged = vec![0_usize; exercise.parts.len()];
+        let mut reached = 0;
         for seed in 0..1000_u64 {
             let mut draw = Draw::new(seed);
             let mut lab = Lab::new(exercise.id).expect("the exercise exists");
@@ -504,13 +525,15 @@ fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
             let start = lab.moves().to_vec();
             if let Some(dead) = lab.view().stuck {
                 stuck += 1;
-                // A named dead end is one: random moves from it never reach
-                // the goal (the first 20 dead ends, 20 tries of 40 moves).
-                if stuck <= 20 {
-                    for _ in 0..20 {
+                // A named dead end is one: moves that try to reach the goal
+                // never do from it (the first 10 dead ends of each part, 30
+                // tries of 16 moves).
+                if judged[dead.part] < 10 {
+                    judged[dead.part] += 1;
+                    for _ in 0..30 {
                         let mut tried = replay(exercise.id, &start);
-                        for _ in 0..40 {
-                            let pick = draw.reader_move(&tried);
+                        for _ in 0..16 {
+                            let pick = draw.goal_move(&tried);
                             tried.play(&pick);
                             assert!(
                                 !tried.view().solved,
@@ -523,6 +546,20 @@ fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
                     }
                 }
                 continue;
+            }
+            // The same tries from a live state sometimes reach the goal, so a
+            // dead end that they never leave says something.
+            if seed < 100 {
+                for _ in 0..30 {
+                    let mut tried = replay(exercise.id, &start);
+                    for _ in 0..16 {
+                        let pick = draw.goal_move(&tried);
+                        tried.play(&pick);
+                    }
+                    if tried.view().solved {
+                        reached += 1;
+                    }
+                }
             }
             for _ in 0..MOVES {
                 let view = lab.view();
@@ -558,10 +595,21 @@ fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
                 exercise.id
             );
         }
-        // The walk meets the dead ends too, not only the easy states.
+        // The walk meets the dead ends of more than one part, and the tries
+        // reach the goal from live states.
         assert!(
             stuck > 0,
             "{}: some random moves reach a dead end",
+            exercise.id
+        );
+        assert!(
+            reached > 0,
+            "{}: the tries reach the goal from a live state",
+            exercise.id
+        );
+        assert!(
+            judged.iter().filter(|n| **n > 0).count() >= 2,
+            "{}: dead ends of two parts are judged",
             exercise.id
         );
     }
