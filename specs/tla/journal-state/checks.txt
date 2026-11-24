@@ -23,6 +23,7 @@ disk                pass       ci
 order_atomic        pass       ci
 order_prom_first    pass       ci
 order_vote_first    violation  ci
+repromise           pass       ci
 order_atomic_nb3    pass       long   40
 order_prom_first_nb3 pass      long   40
 disk_reg            pass       long   40
@@ -49,3 +50,4 @@ reach_lost_end      violation  ci
 reach_repropose     violation  ci
 reach_trim_retired  violation  ci
 reach_moved         violation  ci
+reach_repromise     violation  ci

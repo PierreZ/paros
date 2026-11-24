@@ -123,6 +123,7 @@ fn encode(event: &RolesEvent, sizes: &mut Sizes) -> (&'static str, Vec<(&'static
             ("register", vec![("b", int(*b)), ("from", int(*from))])
         }
         RolesEvent::Promise { a, b } => ("promise", vec![("a", int(*a)), ("b", int(*b))]),
+        RolesEvent::Repromise { a, b } => ("repromise", vec![("a", int(*a)), ("b", int(*b))]),
         RolesEvent::Accept { a, b, s } => {
             sizes.slots = sizes.slots.max(*s + 1);
             (

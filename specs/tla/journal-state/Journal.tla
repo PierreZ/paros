@@ -591,6 +591,19 @@ Promise(a, b) ==
           /\ UNCHANGED <<p1b, dprom>>
   /\ UNCHANGED <<reg, ldr, mvote, dvote, crashes, rots, sent2b, adrop, dadrop, rep>>
 
+\* An acceptor answers again a `Prepare` at the ballot it holds on disk,
+\* with no write: its reply waits on its last batch, so it carries the
+\* disk as that batch left it (the flight rule, section J4.2). It changes
+\* no state of the acceptor. As `Flush`, it needs no grid that runs: a
+\* reply that waited on a batch goes once the batch is durable. `SpecRe`
+\* adds it to `Next`: each answer sent again is one more report, so the
+\* checks of `Spec` leave it out to keep their state spaces, and the
+\* checks `repromise` and `reach_repromise` judge it.
+Repromise(a, b) ==
+  /\ dprom[a] = b
+  /\ p1b' = p1b \cup {[a |-> a, b |-> b, votes |-> dvote[a], drop |-> dadrop[a]]}
+  /\ UNCHANGED <<reg, ldr, mprom, mvote, dprom, dvote, crashes, rots, sent2b, adrop, dadrop, pend, rep>>
+
 Accept(a, b, s) ==
   LET v == prop[b][s]
       send == Reply2b = "disk"
@@ -820,6 +833,10 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+\* `Next` with the answers that acceptors send again (`Repromise`).
+NextRe == Next \/ \E a \in Acceptors, b \in Ballots : Repromise(a, b)
+SpecRe == Init /\ [][NextRe]_vars
+
 (***************************************************************************)
 (* Safety.                                                                 *)
 (***************************************************************************)
@@ -926,6 +943,9 @@ Ends == <>[](NoHole /\ \A s \in Slots : IsChosen(s) => acked[s] # None)
 (***************************************************************************)
 \* A crash between two writes of one batch, and a value chosen after it.
 NoCrashMid == ~(crashes > 0 /\ \E s \in Slots : IsChosen(s))
+\* No acceptor sent two different answers at one ballot: `SpecRe` breaks it
+\* once an answer sent again carries a vote that the first answer did not.
+OnePromise == \A m1, m2 \in p1b : m1.a = m2.a /\ m1.b = m2.b => m1 = m2
 \* Three segments: two seals done, a write acked in the third.
 NoThird == ~(G >= 3 /\ Done(rend[2]) /\ \E s \in Slots :
                s >= rend[2].v /\ acked[s] = "ok")

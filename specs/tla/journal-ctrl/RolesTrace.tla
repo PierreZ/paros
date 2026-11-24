@@ -12,6 +12,8 @@
 (*   "reshape"  `Reshape`: the controller opened segment g.               *)
 (*   "register" `RegisterFrom(b, from)`: a campaign from `from`.           *)
 (*   "promise"  `Promise(a, b)`: an acceptor queued a raised promise.      *)
+(*   "repromise" `Repromise(a, b)`: an acceptor answered a `Prepare` again *)
+(*              with no write, once its last batch was durable.           *)
 (*   "accept"   `Accept(a, b, s)`: an acceptor queued a vote.              *)
 (*   "flush"    `Flush(a)`: the acceptor's first queued batch is durable,  *)
 (*              and its reply goes.                                        *)
@@ -103,6 +105,7 @@ TraceStep ==
      /\ e.from \in LowFrom..HighFrom
      /\ RegisterFrom(e.b, e.from)
   \/ e.event = "promise" /\ Promise(e.a, e.b)
+  \/ e.event = "repromise" /\ Repromise(e.a, e.b)
   \/ e.event = "accept" /\ Accept(e.a, e.b, e.s)
   \/ e.event = "flush" /\ Flush(e.a)
   \/ e.event = "crash" /\ Crash(e.a)

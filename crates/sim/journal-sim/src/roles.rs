@@ -375,6 +375,15 @@ pub enum RolesEvent {
         /// The ballot.
         b: u64,
     },
+    /// Acceptor `a` sent again its promise at `b`, which its disk holds,
+    /// with no write: the answer to a `Prepare` it already promised, sent
+    /// once its last batch is durable (`Repromise`).
+    Repromise {
+        /// The acceptor.
+        a: u64,
+        /// The ballot.
+        b: u64,
+    },
     /// Acceptor `a` voted `b` at `s` and queued the write (`Accept`).
     Accept {
         /// The acceptor.
@@ -784,6 +793,10 @@ pub struct RolesModel {
     late: Option<(NodeId, NodeId)>,
     /// The promises that wait for `late`.
     held_promises: Vec<Envelope>,
+    /// The promises sent again with no write that wait on a batch of their
+    /// acceptor: the acceptor, the batch, the leader and the ballot. Each is
+    /// a `Repromise` event once it goes.
+    repromises: Vec<(NodeId, PersistId, NodeId, u64)>,
 }
 
 /// The walk of `shape` with `mutant` planted.
@@ -1435,6 +1448,7 @@ impl RolesModel {
             settled_served: false,
             late: None,
             held_promises: Vec::new(),
+            repromises: Vec::new(),
         };
         model.register = model
             .register
@@ -1928,11 +1942,19 @@ impl RolesModel {
                 }
             }
         }
+        // A promise in a step that writes nothing is one sent again.
+        let wrote = effects
+            .iter()
+            .any(|e| matches!(e, AcceptorEffect::Persist { .. }));
         let acceptor = self.acceptors.get_mut(&node).expect("an acceptor");
         for effect in effects {
             match effect {
                 AcceptorEffect::Persist { id, ops } => acceptor.batches.push_back((id, ops)),
                 AcceptorEffect::Send { to, message, after } => {
+                    let again = match &message {
+                        Message::Promise { ballot, .. } if !wrote => Some(ballot.round),
+                        _ => None,
+                    };
                     let envelope = Envelope {
                         from: node,
                         to,
@@ -1941,8 +1963,16 @@ impl RolesModel {
                     match after {
                         Some(id) if acceptor.disk.durable.is_none_or(|d| d < id) => {
                             acceptor.held.push((id, envelope));
+                            if let Some(b) = again {
+                                self.repromises.push((node, id, to, b));
+                            }
                         }
-                        _ => cx.send(envelope),
+                        _ => {
+                            if let Some(b) = again {
+                                cx.record(RolesEvent::Repromise { a: node.0, b });
+                            }
+                            cx.send(envelope);
+                        }
                     }
                 }
             }
@@ -2617,6 +2647,22 @@ impl RolesModel {
             .into_iter()
             .partition(|(held, _)| *held <= id);
         acceptor.held = keep;
+        // The promises sent again that waited on this batch go now, with the
+        // disk as the batch left it.
+        let (again, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.repromises)
+            .into_iter()
+            .partition(|(a, held, ..)| *a == node && *held <= id);
+        self.repromises = wait;
+        for (_, held, to, b) in again {
+            let goes = go.iter().any(|(h, envelope)| {
+                *h == held
+                    && envelope.to == to
+                    && matches!(envelope.message, Message::Promise { ballot, .. } if ballot.round == b)
+            });
+            if goes {
+                cx.record(RolesEvent::Repromise { a: node.0, b });
+            }
+        }
         for (_, envelope) in go {
             cx.send(envelope);
         }
