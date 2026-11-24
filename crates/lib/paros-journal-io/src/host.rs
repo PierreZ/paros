@@ -103,7 +103,8 @@ pub enum Assignment {
         /// The leader value of the fresh journal (`Unset` or `Multi`).
         initial: Leader,
     },
-    /// A leader of one ballot, bound to the newest segment of the journal.
+    /// A leader of one ballot. It binds its ballot to the newest segment of
+    /// the journal by a register change first (`Change::Bind`).
     Leader {
         /// The role.
         address: Address,
@@ -275,9 +276,6 @@ pub enum Stop {
     Unreadable,
     /// A storage commit of its batch failed.
     Failed,
-    /// The leader's segment is not in the register value that the `Host`
-    /// holds, or is past in force.
-    NoCampaign,
     /// A higher copy of a heal replaced the copy that the new replica ran
     /// ([`Input::Join`]): the role starts again from its records.
     Replaced,

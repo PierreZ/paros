@@ -241,7 +241,7 @@ fn start(
     let mut roles: Vec<_> = NODES[..3].iter().map(|n| acceptor(*n)).collect();
     roles.extend(NODES[3..].iter().map(|n| replica(*n, 1)));
     if lead {
-        roles.push(leader(L1, 1, 1, Slot(0)));
+        roles.push(leader(L1, 1, Slot(0)));
     }
     for role in roles {
         process.transport_mut().route(role.address());

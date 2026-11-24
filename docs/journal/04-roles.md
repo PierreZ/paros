@@ -32,9 +32,10 @@ flight rule:
 - `JournalAcceptor` (`roles/acceptor.rs`): the core's `Acceptor` over the journal's `Command`.
   One acceptor serves every segment whose grid names it, with one promise. An `Accept` that raises
   the promise writes the promise and the vote in one batch (#1309).
-- `JournalLeader` (`roles/leader.rs`, `roles/leader/phase1.rs`): the leader of one ballot, bound to
-  the newest segment. Its Phase 1 reads every segment that is not retired, a sealed one only below
-  its end, and needs `F + 1` of every column of every grid. A first leader of a pending segment
+- `JournalLeader` (`roles/leader.rs`, `roles/leader/phase1.rs`): the leader of one ballot. It
+  binds the ballot to the newest segment by a `Bind` on the register first, and takes its
+  configuration from that done write (§J3.1). Its Phase 1 reads every slot of every segment that
+  is not retired, and needs `F + 1` of every column of every grid. A first leader of a pending segment
   writes the seal end (one above the highest vote of the old grid, a faulty vote included,
   #1313) and opens only on a done write of its own end. It writes again every slot from its first
   slot: the vote its Phase 1 saw, else a `Noop` (#1233), except a slot whose top report is a

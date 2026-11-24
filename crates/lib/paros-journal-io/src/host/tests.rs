@@ -203,40 +203,46 @@ fn a_damaged_record_stops_the_role() {
 }
 
 #[test]
-fn a_leader_needs_a_register_value_and_answers_calls() {
+fn a_leader_binds_its_ballot_and_answers_calls() {
     let leader = at(J, 100);
+    let ballot = Ballot {
+        round: 1,
+        node: NodeId(100),
+    };
     let campaign = Campaign {
-        ballot: Ballot {
-            round: 1,
-            node: NodeId(100),
-        },
-        segment: SegmentId(1),
+        ballot,
         from: Slot(0),
     };
     let assign = Input::Assign(Assignment::Leader {
         address: leader,
         proxies: Vec::new(),
-        campaign: campaign.clone(),
+        campaign,
     });
     let mut host = Host::new(CONFIG);
-    let effects = host.step(Time(0), assign.clone());
-    assert_eq!(
-        effects.last(),
-        Some(&Effect::Stopped {
+    let effects = host.step(Time(0), assign);
+    assert!(
+        effects.contains(&Effect::Output {
             address: leader,
-            why: Stop::NoCampaign,
+            output: Output::Register {
+                change: Change::Bind { ballot },
+            },
+            after: None,
         }),
-        "no register value yet"
+        "the leader asks the bind of its ballot first"
     );
-    host.step(
+    assert_eq!(
+        host.leader(leader).map(|l| l.phase().clone()),
+        Some(LeaderPhase::Binding)
+    );
+    let bound = value().apply(&Change::Bind { ballot }).expect("a bind");
+    let effects = host.step(
         Time(0),
         Input::Observe {
             journal: J,
-            value: value(),
+            value: bound.clone(),
         },
     );
-    assert_eq!(host.value(J), Some(&value()));
-    let effects = host.step(Time(0), assign);
+    assert_eq!(host.value(J), Some(&bound));
     let prepares = effects
         .iter()
         .filter(|e| matches!(e, Effect::Send { envelope, after: None, .. } if matches!(envelope.message, Message::Prepare { .. })))

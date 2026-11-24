@@ -64,21 +64,33 @@ fn two_segments() -> RegisterValue {
     reshape(&one_segment(), &[&[4, 5, 6]])
 }
 
+/// A leader of `round` whose bind on `value` is done: it reads the segments
+/// of the bound value and its newest one, `segment`, is its own. Returns
+/// the leader and the effects of the done bind (the `Prepare`s).
 fn campaign(
     value: &RegisterValue,
     round: u64,
     segment: u64,
     from: u64,
 ) -> (JournalLeader<u32>, Vec<LeaderEffect<u32>>) {
-    JournalLeader::campaign(
-        Campaign {
+    let (mut leader, effects) = JournalLeader::campaign(Campaign {
+        ballot: ballot(round),
+        from: Slot(from),
+    });
+    assert_eq!(
+        effects,
+        vec![LeaderEffect::Register(Change::Bind {
+            ballot: ballot(round)
+        })]
+    );
+    let bound = value
+        .apply(&Change::Bind {
             ballot: ballot(round),
-            segment: SegmentId(segment),
-            from: Slot(from),
-        },
-        value,
-    )
-    .expect("a campaign")
+        })
+        .expect("a bind");
+    let effects = leader.observe(&bound);
+    assert_eq!(leader.segment(), Some(SegmentId(segment)));
+    (leader, effects)
 }
 
 fn page(votes: &[(u64, u64, Command)], faulty: &[(u64, u64)]) -> PromisePage {
@@ -152,7 +164,7 @@ fn a_campaign_asks_every_acceptor_from_its_first_slot() {
     let (leader, effects) = campaign(&value, 2, 1, 3);
     assert_eq!(*leader.phase(), LeaderPhase::Phase1);
     assert_eq!(leader.ballot(), ballot(2));
-    assert_eq!(leader.segment(), SegmentId(1));
+    assert_eq!(leader.segment(), Some(SegmentId(1)));
     assert_eq!(
         sends(&effects),
         nodes(&[1, 2, 3])
@@ -170,32 +182,109 @@ fn a_campaign_asks_every_acceptor_from_its_first_slot() {
 }
 
 #[test]
-fn a_campaign_on_a_missing_or_sealed_segment_is_refused() {
-    let value = one_segment();
-    let missing = JournalLeader::<u32>::campaign(
-        Campaign {
-            ballot: ballot(2),
-            segment: SegmentId(2),
-            from: Slot(0),
-        },
-        &value,
+fn a_campaign_binds_its_ballot_before_phase_one() {
+    let (mut leader, effects) = JournalLeader::<u32>::campaign(Campaign {
+        ballot: ballot(3),
+        from: Slot(0),
+    });
+    assert_eq!(
+        effects,
+        vec![LeaderEffect::Register(Change::Bind { ballot: ballot(3) })]
     );
-    assert!(missing.is_none());
-    let sealed = two_segments()
+    assert_eq!(*leader.phase(), LeaderPhase::Binding);
+    assert_eq!(leader.segment(), None);
+    // The bind is asked again at each tick until its value comes.
+    assert_eq!(
+        leader.tick(1),
+        vec![LeaderEffect::Register(Change::Bind { ballot: ballot(3) })]
+    );
+    // A promise before the bind is not folded, and a call takes no slot.
+    assert!(
+        leader
+            .step(NodeId(1), promise(3, 0, page(&[], &[])))
+            .is_empty(),
+        "a promise before the bind is not folded"
+    );
+    assert_eq!(
+        leader.propose(1, write(1), 0, WINDOW).0,
+        Proposed::NotLeader
+    );
+    // A value of another write with a lower bound ballot changes nothing.
+    let lower = one_segment()
+        .apply(&Change::Bind { ballot: ballot(2) })
+        .expect("a bind");
+    assert!(
+        leader.observe(&lower).is_empty(),
+        "a lower bound ballot changes nothing"
+    );
+    assert_eq!(*leader.phase(), LeaderPhase::Binding);
+    let bound = lower
+        .apply(&Change::Bind { ballot: ballot(3) })
+        .expect("a bind");
+    assert_eq!(sends(&leader.observe(&bound)).len(), 3);
+    assert_eq!(*leader.phase(), LeaderPhase::Phase1);
+    assert_eq!(leader.segment(), Some(SegmentId(1)));
+}
+
+#[test]
+fn a_refused_bind_or_a_higher_bound_ballot_stops_the_leader() {
+    let (mut refused, _) = JournalLeader::<u32>::campaign(Campaign {
+        ballot: ballot(2),
+        from: Slot(0),
+    });
+    refused.refused();
+    assert_eq!(*refused.phase(), LeaderPhase::Stopped);
+    let (mut late, _) = JournalLeader::<u32>::campaign(Campaign {
+        ballot: ballot(2),
+        from: Slot(0),
+    });
+    let higher = one_segment()
+        .apply(&Change::Bind { ballot: ballot(4) })
+        .expect("a bind");
+    late.observe(&higher);
+    assert_eq!(*late.phase(), LeaderPhase::Stopped);
+    assert_eq!(late.segment(), None);
+}
+
+#[test]
+fn a_ballot_bound_after_a_seal_takes_the_next_segment() {
+    // Ballot 2 sealed segment 1 at slot 0 and put segment 2 in force. A
+    // driver that still holds the value before the seal starts ballot 3:
+    // that stale value shows segment 1 in force, but it is no done value of
+    // ballot 3's bind, so the leader does not start from it. The bind on
+    // the register binds ballot 3 to segment 2, the newest, and its Phase 1
+    // reads segment 1 as the sealed grid before its own (control
+    // `bind_stale` of `specs/tla/journal-read/`: a ballot above the seal
+    // bound to segment 1 chooses a second value in the sealed grid).
+    let stale = two_segments()
+        .apply(&Change::Bind { ballot: ballot(2) })
+        .expect("a bind");
+    let sealed = stale
         .apply(&Change::Seal {
             segment: SegmentId(1),
             end: Slot(0),
         })
         .expect("a seal");
-    let old = JournalLeader::<u32>::campaign(
-        Campaign {
-            ballot: ballot(2),
-            segment: SegmentId(1),
-            from: Slot(0),
-        },
-        &sealed,
+    let (mut leader, _) = JournalLeader::<u32>::campaign(Campaign {
+        ballot: ballot(3),
+        from: Slot(0),
+    });
+    assert!(
+        leader.observe(&stale).is_empty(),
+        "a value without the leader's bind changes nothing"
     );
-    assert!(old.is_none(), "a sealed segment takes no new leader");
+    assert_eq!(*leader.phase(), LeaderPhase::Binding);
+    let bound = sealed
+        .apply(&Change::Bind { ballot: ballot(3) })
+        .expect("a bind");
+    leader.observe(&bound);
+    assert_eq!(leader.segment(), Some(SegmentId(2)));
+    let read: Vec<(SegmentId, Option<Slot>)> =
+        leader.segments().iter().map(|s| (s.id, s.end)).collect();
+    assert_eq!(
+        read,
+        vec![(SegmentId(1), Some(Slot(0))), (SegmentId(2), None)]
+    );
 }
 
 #[test]
@@ -642,9 +731,11 @@ fn the_end_is_at_least_the_first_slot_and_the_start() {
 }
 
 #[test]
-fn a_leader_of_a_sealed_chain_reads_the_old_segment_below_its_end_only() {
+fn a_leader_of_a_sealed_chain_reads_every_slot_of_the_old_grid() {
     // Segment 1 sealed at 3; segment 2 in force from 3. A vote above the end
-    // in the old grid is not a vote of segment 1.
+    // in the old grid is a report like any other: no vote of the new grid
+    // is there, so the leader proposes it again, in its own grid. The end
+    // hides nothing from Phase 1.
     let sealed = two_segments()
         .apply(&Change::Seal {
             segment: SegmentId(1),
@@ -664,6 +755,8 @@ fn a_leader_of_a_sealed_chain_reads_the_old_segment_below_its_end_only() {
             (Slot(1), write(1)),
             (Slot(2), Command::Noop),
             (Slot(3), write(3)),
+            (Slot(4), Command::Noop),
+            (Slot(5), write(5)),
         ])
     );
 }
@@ -775,6 +868,54 @@ fn a_retired_segment_is_not_read() {
         "only the grid in force is asked"
     );
     assert_eq!(leader.segments().len(), 1);
+}
+
+#[test]
+fn a_retire_between_the_campaign_and_the_bind_raises_the_first_slot() {
+    // The driver read `from` = 0, the start of segment 1, before the bind.
+    // Segment 1 (sealed at slot 3) retires before the bind is done, so the
+    // leader reads segment 2 only. Every slot below its start is in a
+    // retired segment, chosen and held by `F + 1` replicas: the leader
+    // starts at slot 3 and never fills slots 0 to 2 with a `Noop`.
+    let sealed = two_segments()
+        .apply(&Change::Seal {
+            segment: SegmentId(1),
+            end: Slot(3),
+        })
+        .expect("the seal");
+    let state = crate::fold::BoundaryState::fresh(crate::command::Leader::Unset);
+    let retired = sealed
+        .apply(&Change::Boundary {
+            segment: SegmentId(1),
+            state,
+        })
+        .and_then(|value| {
+            value.apply(&Change::Retire {
+                segment: SegmentId(1),
+                holders: 2,
+                unrepaired_damage: false,
+            })
+        })
+        .expect("the retire");
+    let (mut leader, _) = JournalLeader::<u32>::campaign(Campaign {
+        ballot: ballot(3),
+        from: Slot(0),
+    });
+    let bound = retired
+        .apply(&Change::Bind { ballot: ballot(3) })
+        .expect("a bind");
+    let effects = leader.observe(&bound);
+    assert_eq!(leader.from(), Slot(3), "the first slot is the start read");
+    assert!(
+        sends(&effects)
+            .iter()
+            .all(|(_, message)| matches!(message, Message::Prepare { from: Slot(3), .. })),
+        "Phase 1 asks from the start of segment 2"
+    );
+    for node in [4, 5, 6] {
+        leader.step(NodeId(node), promise(3, 3, page(&[], &[])));
+    }
+    assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(3) });
 }
 
 #[test]

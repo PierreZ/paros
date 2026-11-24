@@ -6,13 +6,17 @@
 //! the acceptors that answered completely hold a Phase-1 quorum of every
 //! column of every grid read (§J5.1, through `membership/`). Then:
 //!
-//! - **each slot takes the highest vote** among the reports of the
-//!   acceptors of each segment that reads the slot; a sealed segment reads
-//!   only below its end (P2c);
+//! - **each slot takes the highest vote** among the reports of every
+//!   acceptor of every segment read, sealed or not (P2c). The seal end
+//!   hides no vote: a vote of a sealed grid at or above its end has a ballot
+//!   below every ballot of the next grid, so a vote of the next grid wins
+//!   where there is one, and where there is none the old value is safe to
+//!   propose again (plain Matchmaker Paxos; `end_applied_safe` of
+//!   `specs/tla/journal-read/`);
 //! - **a slot whose top report is a faulty vote goes to the tri-state
 //!   tally** (CTRL, §J5.3, [`Phase1::decide`]): it is decided when the
 //!   answers but the faulty votes above the highest readable vote hold a
-//!   Phase-1 quorum of every column that reads it; else it is blocked, and
+//!   Phase-1 quorum of every column of every segment read; else it is blocked, and
 //!   the leader proposes nothing there until a late answer decides it or a
 //!   replica gives its chosen command;
 //! - **the seal end**, when the leader's segment is pending, is one above
@@ -69,14 +73,11 @@ pub struct Phase1 {
 }
 
 impl Phase1 {
-    /// The Phase 1 of `ballot` over `segments`, from slot `from`.
-    ///
-    /// # Panics
-    ///
-    /// When no segment is read.
+    /// The Phase 1 of `ballot` over `segments`, from slot `from`. With no
+    /// segment (a leader whose bind runs), it asks no acceptor and never
+    /// closes.
     #[must_use]
     pub fn new(ballot: Ballot, from: Slot, segments: &[ReadSegment]) -> Self {
-        assert!(!segments.is_empty(), "Phase 1 reads at least one segment");
         let acceptors: BTreeSet<NodeId> =
             segments.iter().flat_map(ReadSegment::acceptors).collect();
         let reports = acceptors
@@ -172,6 +173,9 @@ impl Phase1 {
     /// error, never an operating condition.
     #[must_use]
     pub fn close(&self, segments: &[ReadSegment]) -> Option<Phase1Close> {
+        if segments.is_empty() {
+            return None;
+        }
         let complete = self.complete();
         let covered = segments.iter().all(|segment| {
             segment
@@ -192,21 +196,16 @@ impl Phase1 {
         let skip = |slot: Slot| in_ranges(&dropped, slot);
         for node in &complete {
             let report = &self.reports[node];
-            let reads = |slot: Slot| {
-                segments
-                    .iter()
-                    .any(|segment| segment.reads(slot) && segment.acceptors().any(|a| a == *node))
-            };
             // The highest ballot at each slot. Two votes at one ballot carry
             // one command (P2c), so a tie keeps either.
-            for (slot, vote) in report.votes.iter().filter(|(slot, _)| reads(**slot)) {
+            for (slot, vote) in &report.votes {
                 top.entry(*slot)
                     .and_modify(|held| {
                         *held = std::cmp::max_by_key(held.clone(), vote.clone(), |v| v.0);
                     })
                     .or_insert_with(|| vote.clone());
             }
-            for (slot, ballot) in report.faulty.iter().filter(|(slot, _)| reads(**slot)) {
+            for (slot, ballot) in &report.faulty {
                 rotted
                     .entry(*slot)
                     .and_modify(|held| *held = (*held).max(*ballot))
@@ -252,12 +251,11 @@ impl Phase1 {
         })
     }
 
-    /// The acceptors of the segments that read `slot` whose complete
-    /// answer reports a faulty vote there: the acceptors that a CTRL repair
-    /// of the slot writes to.
+    /// The acceptors whose complete answer reports a faulty vote at
+    /// `slot`: the acceptors that a CTRL repair of the slot writes to.
     #[must_use]
-    pub fn faulty_at(&self, segments: &[ReadSegment], slot: Slot) -> Vec<NodeId> {
-        self.answers(segments, slot)
+    pub fn faulty_at(&self, slot: Slot) -> Vec<NodeId> {
+        self.complete()
             .into_iter()
             .filter(|node| self.reports[node].faulty.contains_key(&slot))
             .collect()
@@ -276,24 +274,23 @@ impl Phase1 {
     /// The tri-state tally of `slot` (CTRL, §J5.3, `specs/tla/journal-ctrl/`,
     /// `ProbeDecide`): the command to propose there, once the complete
     /// answers decide it. The threshold is the highest readable vote at
-    /// `slot` among the acceptors of the segments that read it. An answer
-    /// qualifies unless it is a faulty vote above the threshold
-    /// ([`Self::qualifying`]). The slot is decided when the qualifying
-    /// answers hold a Phase-1 quorum of every column of every segment that
-    /// reads it: then the readable vote at the threshold is safe, or a
-    /// `Noop` when no answer holds one. `None`: the slot waits for more
+    /// `slot` among the complete answers. An answer qualifies unless it is
+    /// a faulty vote above the threshold ([`Self::qualifying`]). The slot is
+    /// decided when the qualifying answers hold a Phase-1 quorum of every
+    /// column of every segment read, as the core's tally asks a quorum of
+    /// every configuration: then the readable vote at the threshold is safe,
+    /// or a `Noop` when no answer holds one. `None`: the slot waits for more
     /// answers, or for a replica that applied it.
     ///
     /// # Panics
     ///
-    /// When no segment reads `slot`.
+    /// When no segment is read.
     #[must_use]
     pub fn decide(&self, segments: &[ReadSegment], slot: Slot) -> Option<Command> {
-        let reading: Vec<&ReadSegment> = segments.iter().filter(|s| s.reads(slot)).collect();
-        assert!(!reading.is_empty(), "a decided slot is read by a segment");
-        let qualifying = self.qualifying(segments, slot);
-        let top = self.top(segments, slot);
-        let decided = reading
+        assert!(!segments.is_empty(), "Phase 1 reads at least one segment");
+        let qualifying = self.qualifying(slot);
+        let top = self.top(slot);
+        let decided = segments
             .iter()
             .all(|s| s.columns.iter().all(|c| c.has_phase1_quorum(&qualifying)));
         probe!(
@@ -309,20 +306,20 @@ impl Phase1 {
         decided.then(|| top.map_or(Command::Noop, |(_, command)| command.clone()))
     }
 
-    /// The complete answers of the acceptors of the segments that read
-    /// `slot` that qualify in its tally: each one but a faulty vote above
-    /// the highest readable vote there.
+    /// The complete answers that qualify in the tally of `slot`: each one
+    /// but a faulty vote above the highest readable vote there.
     ///
     /// # Panics
     ///
     /// When an assertion on its own postconditions fails: a programmer
     /// error, never an operating condition.
     #[must_use]
-    pub fn qualifying(&self, segments: &[ReadSegment], slot: Slot) -> BTreeSet<NodeId> {
-        let threshold = self.top(segments, slot).map(|(ballot, _)| *ballot);
-        let qualifying: BTreeSet<NodeId> = self
-            .answers(segments, slot)
-            .into_iter()
+    pub fn qualifying(&self, slot: Slot) -> BTreeSet<NodeId> {
+        let complete = self.complete();
+        let threshold = self.top(slot).map(|(ballot, _)| *ballot);
+        let qualifying: BTreeSet<NodeId> = complete
+            .iter()
+            .copied()
             .filter(|node| {
                 self.reports[node]
                     .faulty
@@ -331,28 +328,15 @@ impl Phase1 {
             })
             .collect();
         assert!(
-            qualifying.is_subset(&self.complete()),
+            qualifying.is_subset(&complete),
             "only a complete answer qualifies"
         );
         qualifying
     }
 
-    /// The complete answers of the acceptors of the segments that read
-    /// `slot`.
-    fn answers(&self, segments: &[ReadSegment], slot: Slot) -> BTreeSet<NodeId> {
+    /// The highest readable vote at `slot` among the complete answers.
+    fn top(&self, slot: Slot) -> Option<&(Ballot, Command)> {
         self.complete()
-            .into_iter()
-            .filter(|node| {
-                segments
-                    .iter()
-                    .any(|s| s.reads(slot) && s.acceptors().any(|a| a == *node))
-            })
-            .collect()
-    }
-
-    /// The highest readable vote at `slot` among those answers.
-    fn top(&self, segments: &[ReadSegment], slot: Slot) -> Option<&(Ballot, Command)> {
-        self.answers(segments, slot)
             .into_iter()
             .filter_map(|node| self.reports[&node].votes.get(&slot))
             .max_by_key(|(ballot, _)| *ballot)

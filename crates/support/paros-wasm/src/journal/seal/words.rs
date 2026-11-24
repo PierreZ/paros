@@ -108,6 +108,7 @@ pub(super) fn cell(slot: u64, command: &Command, state: &str) -> LogCell {
 
 pub(super) fn phase_text(phase: &LeaderPhase) -> String {
     match phase {
+        LeaderPhase::Binding => "binds its ballot".to_string(),
         LeaderPhase::Phase1 => "runs Phase 1".to_string(),
         LeaderPhase::Sealing { end } => format!("seals the segment before at slot {}", end.0),
         LeaderPhase::Open { start } => format!("writes, its segment from slot {}", start.0),

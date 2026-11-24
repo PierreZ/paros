@@ -9,7 +9,8 @@
 # configuration, CTRL faulty records in the old grid. One slot and three
 # ballots unless the name ends in `_ns2` (two slots) or `_nb4` (four ballots).
 #
-# The rule: the end counts faulty votes ("any").
+# The rule: the end counts faulty votes ("any"), and Phase 1 reads every
+# slot of the old grid ("all"): the end bounds nothing in Phase 1.
 safety               pass       ci
 safety_two           pass       ci
 safety_nb4           pass       ci
@@ -20,11 +21,13 @@ live_ns2             pass       ci
 live_down            pass       ci
 reach_faulty         violation  ci
 #
-# The control: the end counts readable votes only.
+# The control: Phase 1 reads the old grid below the end ("belowEnd"), and the
+# end counts readable votes only: two values. With "all", the same end keeps
+# one value (`read_all`); it only fails to cover a chosen slot.
 end_readable         violation  ci
 #
-# Rule 3 of #1313: Phase 1 reads the whole sealed grid, with the end of
-# readable votes. Agreement holds, the end is below a chosen slot.
+# Phase 1 reads the whole sealed grid, with the end of readable votes.
+# Agreement holds; the end is below a chosen slot (the retire needs it).
 read_all             pass       ci
 read_all_nb4         pass       long
 read_all_ns2         pass       long

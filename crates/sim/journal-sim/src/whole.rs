@@ -394,8 +394,6 @@ struct Call {
 struct Journal {
     id: JournalId,
     round: u64,
-    /// The segment each leader is bound to, by its node.
-    bound: BTreeMap<NodeId, SegmentId>,
     /// When each leader started.
     started: BTreeMap<NodeId, u64>,
     /// Every command a `Commit` on the wire named, by slot.
@@ -749,7 +747,6 @@ impl WholeModel {
             journals.push(Journal {
                 id,
                 round: 0,
-                bound: BTreeMap::new(),
                 started: BTreeMap::new(),
                 chosen: BTreeMap::new(),
                 opened_at: BTreeMap::new(),
@@ -1321,7 +1318,7 @@ impl WholeModel {
                 .as_ref()
                 .and_then(|d| d.host().leader(Address::new(id, node)))
                 .expect("a leader");
-            leader.segment() == newest
+            leader.segment().is_none_or(|segment| segment == newest)
                 && *leader.phase() != LeaderPhase::Stopped
                 && (matches!(leader.phase(), LeaderPhase::Open { .. })
                     || now - self.journals[j].started[&node] < STUCK * TICK)
@@ -1337,7 +1334,6 @@ impl WholeModel {
         let journal = &mut self.journals[j];
         journal.round += 1;
         let node = NodeId(LEADERS + 10 * journal.round + m);
-        journal.bound.insert(node, newest);
         journal.started.insert(node, now);
         let older: Vec<NodeId> = journal.started.keys().copied().collect();
         let machine = self.machines.get_mut(&m).expect("a machine");
@@ -1358,7 +1354,6 @@ impl WholeModel {
                     round: self.journals[j].round,
                     node,
                 },
-                segment: newest,
                 from,
             },
         });
@@ -1484,7 +1479,7 @@ impl WholeModel {
                 {
                     reports.push(Report::Writes {
                         process,
-                        segment: leader.segment(),
+                        segment: leader.segment().expect("an open leader is bound"),
                     });
                 }
             }
@@ -2149,10 +2144,16 @@ impl WholeModel {
         {
             return Err(format!("{:?} is {:?}", old.id(), old.state()));
         }
-        let Some((_, leader)) = self.open_leader(j) else {
+        let Some((m, leader)) = self.open_leader(j) else {
             return Err("no leader writes".into());
         };
-        if journal.bound.get(&leader) != Some(&newest.id()) {
+        // The segment the leader's done bind gave it, read from the leader.
+        let bound = self.machines[&m]
+            .driver
+            .as_ref()
+            .and_then(|d| d.host().leader(Address::new(journal.id, leader)))
+            .and_then(paros_journal::roles::JournalLeader::segment);
+        if bound != Some(newest.id()) {
             return Err("the leader that writes is not of the newest segment".into());
         }
         if journal.call.is_some() || journal.again.is_some() || !journal.claimed {
