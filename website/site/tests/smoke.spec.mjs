@@ -324,9 +324,14 @@ test("/paxos/tour/: Play goes on from run to run, the countdown stops, and Space
   await page.keyboard.press(" ");
   await expect.poll(playing).toBe(false);
   await story.locator(".story-play").click();
-  // Run 1 ends: run 2 plays with no press.
-  await expect(story.locator(".tour-bar")).toContainText("run 2/2", { timeout: 30_000 });
-  await expect.poll(playing).toBe(true);
+  // A chapter of more than one run: run 1 ends, and run 2 plays with no
+  // press. ("The log and its leader" is one tour run; a chapter made of the
+  // runs of its lesson has more.)
+  const runs = Number((await story.locator(".tour-bar").textContent()).match(/run \d+\/(\d+)/)?.[1] ?? 1);
+  if (runs > 1) {
+    await expect(story.locator(".tour-bar")).toContainText(`run 2/${runs}`, { timeout: 30_000 });
+    await expect.poll(playing).toBe(true);
+  }
   // The chapter ends: the countdown shows, and Stop stops it.
   await expect(screen.locator(".tour-count")).toContainText("Next chapter in", { timeout: 30_000 });
   await screen.locator(".tour-stop").click();
@@ -443,7 +448,13 @@ const EXERCISES = [
   {
     page: "paxos/multi-paxos/",
     id: "read",
-    moves: [["extra", "A client reads from node 2"], ["settle", { notTo: "n0" }], ["drop", { to: "n0" }]],
+    moves: [
+      ["extra", "A client reads from node 2"],
+      ["deliver", { kind: ["PreRead"], from: "n2", to: "n1" }],
+      ["deliver", { kind: ["PreReadAck"], from: "n1", to: "n2" }],
+      ["deliver", { kind: ["Accepted"], from: "n1", to: "n0" }],
+      ["deliver", { kind: ["Commit"], to: "n2" }],
+    ],
   },
   {
     page: "paxos/quorums/",
@@ -477,7 +488,7 @@ for (const ex of EXERCISES) {
     // engine's typed state: a log world names its leader.
     await expect(lab.locator(".stage-node").first()).toBeVisible();
     // A guided exercise opens on its intro; Skip leaves it set up.
-    if (ex.id === "gap") {
+    if (ex.id === "gap" || ex.id === "read") {
       await expect(lab.locator(".lab-narrator")).toBeVisible();
       await lab.locator(".lab-narrator-skip").click();
       await expect(lab.locator(".lab-narrator")).toBeHidden();

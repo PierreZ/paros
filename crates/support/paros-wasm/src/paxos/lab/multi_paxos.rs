@@ -1,11 +1,13 @@
-//! The exercises of Multi-Paxos: lesson 3, fill the gap (the pilot of the guided exercise), and lesson 4, a read without the leader.
+//! The exercises of Multi-Paxos, both guided: lesson 3, fill the gap (the
+//! pilot of the guided exercise), and lesson 4, a read without the leader
+//! that must not meet an open slot.
 
 use super::Extra;
 use super::LOG;
 use super::Setup;
 use super::chosen_at;
 use super::chosen_at_any;
-use super::{Exercise, Lab, Move, NO_PARTS, NONE, Part, Step, WireMessage};
+use super::{Exercise, Lab, Move, Part, Step, WireMessage};
 use crate::paxos::action::Action;
 use crate::paxos::level::common::crash;
 use crate::paxos::level::common::propose;
@@ -368,46 +370,202 @@ pub(super) const GAP: Exercise = Exercise {
     },
 };
 
+/// The extra move of `read`.
+const READ_AT_2: usize = 0;
+
+/// The reads of node 2, as `served` flags.
+fn reads_at_2(lab: &Lab) -> Vec<bool> {
+    lab.view_of_world()
+        .clients
+        .iter()
+        .flat_map(|client| client.reads.iter())
+        .filter(|read| read.node == 2)
+        .map(|read| read.served)
+        .collect()
+}
+
+/// Some read of node 2 is served.
+fn read_served(lab: &Lab) -> bool {
+    reads_at_2(lab).contains(&true)
+}
+
+/// Node `id` holds slot 1 chosen.
+fn knows_chosen_1(lab: &Lab, id: u64) -> bool {
+    lab.view_of_world().nodes.iter().any(|node| {
+        node.id == id
+            && node
+                .accepted
+                .iter()
+                .any(|vote| vote.slot == 1 && vote.chosen)
+    })
+}
+
+/// How many messages of `kind` the reader delivered to `lane`.
+fn delivered(lab: &Lab, kind: &str, lane: &str) -> usize {
+    lab.delivered
+        .get(&(kind.to_string(), lane.to_string()))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// A vote of node 1 or node 2 for slot 1, on its way to node 0.
+fn vote_to_0(message: &WireMessage) -> bool {
+    message.kind == "Accepted" && message.to == "n0" && message.slot == Some(1)
+}
+
+/// The Commit of node 0 to node 2.
+fn commit_to_2(message: &WireMessage) -> bool {
+    message.kind == "Commit" && message.from == "n0" && message.to == "n2"
+}
+
+/// A question of node 2's read, or an answer to it.
+fn read_message(message: &WireMessage) -> bool {
+    (message.kind == "PreRead" && message.from == "n2")
+        || (message.kind == "PreReadAck" && message.to == "n2")
+}
+
+const READ_INTRO: &[Step] = &[
+    Step {
+        says: "Node 0 starts an election. Nodes 1 and 2 promise, so node 0 leads.",
+        play: |lab| {
+            lab.act(&elect(0));
+            lab.settle(|_| true);
+        },
+    },
+    Step {
+        says: "A client writes alpha. Node 0 puts it at slot 0, the nodes vote, and alpha is \
+               chosen.",
+        play: |lab| {
+            lab.act(&propose(0, "alpha"));
+            lab.settle(|_| true);
+        },
+    },
+    Step {
+        says: "A client writes bravo. Node 0 puts it at slot 1, and nodes 1 and 2 vote. Their \
+               votes are still on the wire to node 0.",
+        play: |lab| {
+            lab.act(&propose(0, "bravo"));
+            lab.settle(|m| m.kind == "Accept");
+        },
+    },
+];
+
+const READ_PARTS: &[Part] = &[
+    Part {
+        label: "A client reads from node 2",
+        holds: |lab| !reads_at_2(lab).is_empty(),
+        idea: "Any node can serve a read. It need not lead.",
+        plan: "Press the move that makes a client read from node 2.",
+        next: |_| Some(Move::Extra { index: READ_AT_2 }),
+        dead: |_| None,
+    },
+    Part {
+        label: "Node 2 hears how high another node voted",
+        holds: |lab| read_served(lab) || delivered(lab, "PreReadAck", "n2") > 0,
+        idea: "Node 2 counts its own answer and needs one more: two of three is a majority. \
+               Each node answers with the highest slot that it voted in.",
+        plan: "Deliver the question of node 2 to node 1, then the answer of node 1.",
+        next: |lab| deliver_first(lab, read_message).or(Some(Move::Extra { index: READ_AT_2 })),
+        dead: |_| None,
+    },
+    Part {
+        label: "Node 0 learns that bravo is chosen",
+        holds: |lab| knows_chosen_1(lab, 0),
+        idea: "The answers say slot 1, and node 2 has not applied slot 1: bravo may be chosen. \
+               The read waits until node 2 knows.",
+        plan: "Deliver a vote for bravo to node 0. Its own vote and one more are a majority.",
+        next: |lab| deliver_first(lab, vote_to_0),
+        dead: |lab| {
+            (!knows_chosen_1(lab, 0) && !lab.wire().iter().any(vote_to_0)).then_some(
+                "Every vote for bravo on its way to node 0 is lost, so node 0 never learns \
+                 that bravo is chosen, and node 2 never applies slot 1. Undo the move that \
+                 dropped a vote.",
+            )
+        },
+    },
+    Part {
+        label: "Node 2 learns that bravo is chosen",
+        holds: |lab| knows_chosen_1(lab, 2),
+        idea: "The leader tells the others with a Commit.",
+        plan: "Deliver the Commit of node 0 to node 2.",
+        next: |lab| deliver_first(lab, commit_to_2),
+        dead: |lab| {
+            (knows_chosen_1(lab, 0)
+                && !knows_chosen_1(lab, 2)
+                && !lab.wire().iter().any(commit_to_2))
+            .then_some(
+                "The Commit to node 2 is lost, and with no clock, no heartbeat tells node 2 \
+                 again. Undo the move that dropped it.",
+            )
+        },
+    },
+    Part {
+        label: "Node 2 serves the read",
+        holds: read_served,
+        idea: "Node 2 serves a read once it applied every slot up to the highest answer.",
+        plan: "Deliver the questions and the answers of the read. If they are lost, read again.",
+        next: |lab| deliver_first(lab, read_message).or(Some(Move::Extra { index: READ_AT_2 })),
+        dead: |_| None,
+    },
+];
+
+const READ_GUIDE: &[Step] = &[
+    Step {
+        says: "A client reads from node 2. Node 2 voted at slot 1, so its own answer says slot \
+               1. It asks nodes 0 and 1 how high they voted.",
+        play: |lab| lab.extra("A client reads from node 2"),
+    },
+    Step {
+        says: "Deliver the question to node 1, then its answer: slot 1. Node 2 has not applied \
+               slot 1, and bravo may be chosen, so the read waits.",
+        play: |lab| {
+            lab.deliver(|m| m.kind == "PreRead" && m.from == "n2" && m.to == "n1");
+            lab.deliver(|m| m.kind == "PreReadAck" && m.from == "n1" && m.to == "n2");
+        },
+    },
+    Step {
+        says: "Deliver the vote of node 1 to node 0. Two votes of three choose bravo, and node \
+               0 sends a Commit.",
+        play: |lab| lab.deliver(|m| vote_to_0(m) && m.from == "n1"),
+    },
+    Step {
+        says: "Deliver the Commit to node 2. Node 2 applies bravo at slot 1, so now it serves \
+               the read.",
+        play: |lab| lab.deliver(commit_to_2),
+    },
+];
+
 pub(super) const READ: Exercise = Exercise {
     id: "read",
     title: "Read without the leader",
-    task: "alpha is chosen at slot 0. A client reads from node 2. Get the read served while \
-           node 0, the leader, gets no message.",
+    task: "alpha is chosen at slot 0. Nodes 1 and 2 voted for bravo at slot 1, and node 0, the \
+           leader, has not heard yet. A client reads from node 2. Get the read served.",
     rule_off: None,
     done: "A leaderless read asks a majority of acceptors for the highest slot that each \
-           voted in, and waits until its own log covers it. No leader confirms the read.",
+           voted in, and waits until its own node applied that far. No leader serves the read. \
+           But a vote at slot 1 means bravo may be chosen, so the read waits until node 2 \
+           learns that slot 1 is chosen.",
     setup_on: Setup::Level(LOG),
-    setup: |lab| {
-        lab.act(&elect(0));
-        lab.settle(|_| true);
-        lab.act(&propose(0, "alpha"));
-        lab.settle(|_| true);
-    },
-    intro: NONE,
-    parts: NO_PARTS,
-    guide: NONE,
+    setup: |_| {},
+    intro: READ_INTRO,
+    parts: READ_PARTS,
+    guide: READ_GUIDE,
     extras: || {
-        vec![(
+        let extras = vec![(
             "A client reads from node 2",
             Extra::Act(Action::QuorumRead {
                 node: 2,
                 client: None,
             }),
-        )]
+        )];
+        // The index that the parts name.
+        assert_eq!(extras[READ_AT_2].0, "A client reads from node 2");
+        extras
     },
-    goal: |lab| {
-        let world = lab.view_of_world();
-        lab.delivered_to(0) == 0
-            && world.clients.iter().any(|client| {
-                client
-                    .reads
-                    .iter()
-                    .any(|read| read.node == 2 && read.served)
-            })
-    },
+    goal: |lab| READ_PARTS.iter().all(|part| (part.holds)(lab)),
     solution: |lab| {
-        lab.extra("A client reads from node 2");
-        lab.settle(|m| m.to != "n0");
-        lab.drop_all(|m| m.to == "n0");
+        for step in READ_GUIDE {
+            (step.play)(lab);
+        }
     },
 };
