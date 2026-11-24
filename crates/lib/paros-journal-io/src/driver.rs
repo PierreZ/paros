@@ -370,6 +370,24 @@ where
         self.inner.take_stopped()
     }
 
+    /// Whether a storage call reported `Unknown`: the process stops. A
+    /// halted driver does nothing more; the program drops it and starts a
+    /// new one on the same storage.
+    #[must_use]
+    pub fn halted(&self) -> bool {
+        self.inner.halted()
+    }
+
+    /// The address of every role on the disk, a role that lost records too
+    /// ([`Storage::list`]).
+    ///
+    /// # Errors
+    ///
+    /// The storage cannot list its disk: the driver halts.
+    pub fn on_disk(&mut self) -> Result<Vec<Address>, crate::StorageError> {
+        self.inner.on_disk()
+    }
+
     /// One round of work: step every message that arrived, fire the timer
     /// when it is due, give the roles each new register value, then commit
     /// the batches of the round in one write and release what waited on

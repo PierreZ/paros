@@ -76,10 +76,19 @@ pub trait Family: Copy + Debug + Eq {
     /// The stop of a role that placement unassigned.
     fn unassigned() -> Self::Stop;
 
-    /// The stop of a role whose disk could not be read.
+    /// The stop of a role whose disk could not be read
+    /// ([`StorageError::Full`](crate::StorageError::Full) on its scan): it
+    /// may start again.
     fn unreadable() -> Self::Stop;
 
-    /// The stop of a role whose batch was in a storage commit that failed
-    /// (rule 4): the batch may or may not be durable.
+    /// The stop of a role whose disk lost a record
+    /// ([`StorageError::Lost`](crate::StorageError::Lost)): it stops for
+    /// good. A scan of it reports the loss each time, so it never starts
+    /// again from what the loss left.
+    fn lost() -> Self::Stop;
+
+    /// The stop of a role whose batch was in a storage commit that wrote
+    /// nothing ([`StorageError::Full`](crate::StorageError::Full), rule 4):
+    /// it may start again from a scan.
     fn failed() -> Self::Stop;
 }

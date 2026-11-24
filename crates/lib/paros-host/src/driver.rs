@@ -11,10 +11,16 @@
 //! batches in one group and commits the whole group in one storage write at
 //! the end of a [`poll`](Driver::poll) (group commit), in id order for each
 //! role. A send, or an output, that names a batch waits until that batch is
-//! durable; one that names a durable batch, or none, goes at once. A commit
-//! that fails stops every role that had a batch in it
-//! ([`Machine::failed`], rule 4): the batch may or may not be durable, so
-//! what waits on it never goes.
+//! durable; one that names a durable batch, or none, goes at once.
+//!
+//! **Storage faults** (rule 4). Each [`StorageError`] has one [`Verdict`],
+//! whatever the call. `Full`: the roles of the call stop
+//! ([`Machine::failed`] for a commit, [`Machine::unreadable`] for a scan)
+//! and placement may start them again. `Lost`: they stop for good
+//! ([`Machine::lost`]). `Unknown`: the driver halts ([`Driver::halted`]),
+//! as in a crash: it drops what was not committed and what waited on it,
+//! and steps nothing more. In every case what waited on the failed batch
+//! never goes.
 //!
 //! **Recovery** (rule 2). A role with a disk starts with a read of its
 //! records ([`Effect::Read`]). The driver gives them to the machine as an
@@ -33,7 +39,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::family::Family;
 use crate::host::Effect;
-use crate::io::{Clock, Entropy, NoDraws, Storage, Transport};
+use crate::io::{Clock, Entropy, NoDraws, Storage, StorageError, Transport, Verdict};
 use crate::machine::Machine;
 use crate::ports::{Event, Events, Ports};
 use crate::time::Time;
@@ -86,6 +92,8 @@ pub struct Driver<M: Machine, S, T, C, P, E, D = NoDraws> {
     /// The deadline of the timer of each role that set one.
     timers: BTreeMap<Address<M>, Time>,
     stopped: Vec<(Address<M>, Stop<M>)>,
+    /// A storage call reported `Unknown`: the process stops.
+    halted: bool,
 }
 
 impl<M, S, T, C, P, E> Driver<M, S, T, C, P, E>
@@ -119,6 +127,7 @@ where
             pending: VecDeque::new(),
             timers: BTreeMap::new(),
             stopped: Vec::new(),
+            halted: false,
         }
     }
 
@@ -153,6 +162,7 @@ where
             timers: self.timers,
             stopped: self.stopped,
             ended: self.ended,
+            halted: self.halted,
         }
     }
 }
@@ -232,13 +242,53 @@ where
         )
     }
 
+    /// Whether a storage call reported `Unknown`
+    /// ([`StorageError::Unknown`]): the process stops. A halted driver
+    /// steps, writes and sends nothing more; the program drops it and starts
+    /// a new driver on the same storage, which reads the disk again.
+    #[must_use]
+    pub fn halted(&self) -> bool {
+        self.halted
+    }
+
+    /// The address of every role on the disk ([`Storage::list`]), a role
+    /// that lost records too: what a process that boots serves again before
+    /// it reads its assignments.
+    ///
+    /// # Errors
+    ///
+    /// The storage cannot list its disk, so the process cannot boot: the
+    /// driver halts. A halted driver reads nothing and answers `Unknown`.
+    ///
+    /// # Panics
+    ///
+    /// When the storage lists a role twice or out of address order.
+    pub fn on_disk(&mut self) -> Result<Vec<Address<M>>, StorageError> {
+        if self.halted {
+            return Err(StorageError::Unknown);
+        }
+        let listed = self.storage.list();
+        match &listed {
+            Ok(addresses) => assert!(
+                addresses.windows(2).all(|w| w[0] < w[1]),
+                "a storage lists each role once, in address order"
+            ),
+            Err(_) => self.halt(),
+        }
+        listed
+    }
+
     /// The roles that stopped since the last take, and why.
     pub fn take_stopped(&mut self) -> Vec<(Address<M>, Stop<M>)> {
         std::mem::take(&mut self.stopped)
     }
 
-    /// Step `input`, then every input that its effects give.
+    /// Step `input`, then every input that its effects give. A halted
+    /// driver steps nothing.
     pub fn input(&mut self, input: M::Input) {
+        if self.halted {
+            return;
+        }
         self.inputs.push_back(input);
         self.drain();
     }
@@ -247,7 +297,7 @@ where
     /// that is due to its role alone (in deadline order, then address
     /// order), step the inputs of the ports, then commit the batches
     /// of the round in one write and release what waited on them. Returns
-    /// whether the round did any work.
+    /// whether the round did any work. A halted driver does none.
     ///
     /// # Panics
     ///
@@ -255,6 +305,9 @@ where
     /// output that still waits on a batch: the flight rule of the driver is
     /// broken.
     pub fn poll(&mut self) -> bool {
+        if self.halted {
+            return false;
+        }
         let mut busy = false;
         while let Some(envelope) = self.transport.receive() {
             busy = true;
@@ -311,6 +364,11 @@ where
                     batches.push((*address, *id));
                 }
                 self.apply(effect.clone());
+                if self.halted {
+                    // A read reported `Unknown`: the rest of the step and
+                    // every step after it are lost, as in a crash.
+                    return;
+                }
             }
             self.pending.push_back(Pending {
                 event: Event {
@@ -336,7 +394,11 @@ where
                     let records = self.with_group(address, records);
                     self.inputs.push_back(M::recovered(address, records));
                 }
-                Err(_) => self.inputs.push_back(M::unreadable(address)),
+                Err(fault) => match fault.verdict() {
+                    Verdict::Again => self.inputs.push_back(M::unreadable(address)),
+                    Verdict::ForGood => self.inputs.push_back(M::lost(address)),
+                    Verdict::Halt => self.halt(),
+                },
             },
             Effect::Persist { address, id, ops } => {
                 assert!(
@@ -420,22 +482,55 @@ where
             self.settled.insert(*address, *id);
         }
         let ended = std::mem::take(&mut self.ended);
-        if self.storage.commit(&ops).is_ok() {
-            // A role that ended since its batch joined the group is gone: a
-            // role at its address later starts from its own read of the disk.
-            self.durable.extend(
-                tops.into_iter()
-                    .filter(|(address, _)| !ended.contains(address)),
-            );
-            self.release();
-        } else {
+        match self.storage.commit(&ops) {
+            Ok(()) => {
+                // A role that ended since its batch joined the group is gone:
+                // a role at its address later starts from its own read of the
+                // disk.
+                self.durable.extend(
+                    tops.into_iter()
+                        .filter(|(address, _)| !ended.contains(address)),
+                );
+                self.release();
+            }
             // Each role of the group stops, and its stop drops what waited
             // on the group.
-            for address in tops.into_keys() {
-                self.input(M::failed(address));
-            }
+            Err(fault) => match fault.verdict() {
+                Verdict::Again => {
+                    for address in tops.into_keys() {
+                        self.input(M::failed(address));
+                    }
+                }
+                Verdict::ForGood => {
+                    for address in tops.into_keys() {
+                        self.input(M::lost(address));
+                    }
+                }
+                Verdict::Halt => self.halt(),
+            },
         }
         true
+    }
+
+    /// A storage call reported `Unknown`: the process stops, as in a crash.
+    /// What was not committed is lost, and so is every send, output and
+    /// input that waited; a held output goes to [`Ports::dropped`]. No step
+    /// that waited for its batches is reported: the next process reads the
+    /// disk to learn what it holds.
+    fn halt(&mut self) {
+        self.halted = true;
+        self.inputs.clear();
+        self.group.clear();
+        self.held.clear();
+        for (_, role, output) in std::mem::take(&mut self.held_outputs) {
+            self.ports.dropped(role, output);
+        }
+        self.pending.clear();
+        self.timers.clear();
+        self.durable.clear();
+        self.settled.clear();
+        self.ended.clear();
+        assert!(self.timer().is_none(), "a halted driver has no timer");
     }
 
     /// The role at `address` stopped: what waited on its batches is

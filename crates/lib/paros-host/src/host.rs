@@ -47,8 +47,15 @@ pub enum Input<F: Family> {
         /// The role.
         address: F::Address,
     },
-    /// A storage commit that held a batch of this role failed (rule 4).
+    /// A storage commit that held a batch of this role wrote nothing
+    /// (rule 4): the role stops, and may start again from a scan.
     Failed {
+        /// The role.
+        address: F::Address,
+    },
+    /// The disk lost a record of this role (rule 4): the role stops for
+    /// good, whether it reads its records or runs.
+    Lost {
         /// The role.
         address: F::Address,
     },
@@ -293,6 +300,9 @@ impl<R: Role> Host<R> {
             Input::Unreadable { address } => self.unreadable(address, &mut effects),
             Input::Failed { address } => {
                 self.stop(address, <R::Family as Family>::failed(), &mut effects);
+            }
+            Input::Lost { address } => {
+                self.stop(address, <R::Family as Family>::lost(), &mut effects);
             }
             Input::Message(envelope) => {
                 let (address, input) = <R::Family as Family>::route(envelope);

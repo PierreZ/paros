@@ -49,6 +49,10 @@ impl Storage<Journal> for Shared {
     fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
         self.0.borrow_mut().scan(address)
     }
+
+    fn list(&mut self) -> Result<Vec<Address>, StorageError> {
+        self.0.borrow_mut().list()
+    }
 }
 
 /// A transport that checks the flight rule on every send: an acceptor's
@@ -327,7 +331,7 @@ fn a_failed_commit_stops_its_roles_and_they_recover() {
     // The leader's Accepts reach the acceptors in the next poll; their
     // votes go into one commit, which fails.
     let w0 = drivers[0].call(LEADER, write(0, "a0"));
-    disk.0.borrow_mut().fail_next_commit();
+    disk.0.borrow_mut().fail_next_commit(StorageError::Full);
     drivers[0].poll();
     let stopped = drivers[0].take_stopped();
     let failed: Vec<u64> = stopped

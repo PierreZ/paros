@@ -26,7 +26,8 @@
 //! the port through which placement says which roles the process serves.
 //! A role with a disk starts with a read of its records
 //! ([`Effect::Read`]); their result comes back as [`Input::Recovered`]
-//! (rule 2), and a damaged record stops the role ([`Stop::Damaged`]).
+//! (rule 2), and a damaged record stops the role ([`Stop::Damaged`]). A
+//! record that the disk lost stops it for good ([`Stop::Lost`]).
 //!
 //! **The flight rule** (rule 1). Each [`Effect::Persist`] names the batch
 //! of its role, and each [`Effect::Send`] names the batch of its sender
@@ -158,9 +159,15 @@ pub enum Input {
         /// The role.
         address: Address,
     },
-    /// A storage commit that held a batch of this role failed: the batch
-    /// may or may not be durable, and the role stops (§J4.2, rule 4).
+    /// A storage commit that held a batch of this role wrote nothing: the
+    /// role stops, and may start again from a scan (§J4.2, rule 4).
     Failed {
+        /// The role.
+        address: Address,
+    },
+    /// The disk lost a record of this role: it stops for good (§J4.2,
+    /// rule 4).
+    Lost {
         /// The role.
         address: Address,
     },
@@ -274,8 +281,11 @@ pub enum Stop {
     Damaged(Damage),
     /// Its disk could not be read.
     Unreadable,
-    /// A storage commit of its batch failed.
+    /// A storage commit of its batch wrote nothing.
     Failed,
+    /// Its disk lost a record ([`crate::StorageError::Lost`]): it stops for
+    /// good, and each scan of it reports the loss again.
+    Lost,
     /// A higher copy of a heal replaced the copy that the new replica ran
     /// ([`Input::Join`]): the role starts again from its records.
     Replaced,
@@ -514,6 +524,7 @@ impl Host {
             }
             Input::Unreadable { address } => host.unreadable(address, &mut effects),
             Input::Failed { address } => host.stop(address, Stop::Failed, &mut effects),
+            Input::Lost { address } => host.stop(address, Stop::Lost, &mut effects),
             Input::Message(envelope) => Self::deliver(host, now, envelope, &mut effects),
             Input::Observe { journal, value } => {
                 let roles: Vec<Address> =
@@ -702,6 +713,10 @@ impl Machine for Host {
 
     fn failed(address: Address) -> Input {
         Input::Failed { address }
+    }
+
+    fn lost(address: Address) -> Input {
+        Input::Lost { address }
     }
 
     fn message(envelope: Envelope) -> Input {

@@ -6,8 +6,10 @@
 //! that loses a request or a reply.
 //!
 //! Both are the walk's, never the driver's: a fault they inject stays inside
-//! the contract of `paros_journal_io::Storage` (a failed commit may or may
-//! not have written its batch; a commit that returned `Ok` is durable).
+//! the contract of `paros_journal_io::Storage` (a commit that fails `Full`
+//! wrote nothing; one that fails `Unknown` may have written its batch; a
+//! lost record makes each scan of its role fail `Lost`; a commit that
+//! returned `Ok` is durable).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -24,9 +26,9 @@ use paros_journal_io::{
 /// The faults that a walk arms on a disk, for its next commit.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Faults {
-    /// The commit fails and writes nothing.
+    /// The commit fails `Full` and writes nothing.
     pub fail_before: bool,
-    /// The commit writes its batch, then fails.
+    /// The commit writes its batch, then fails `Unknown`.
     pub fail_after: bool,
     /// A planted bug: the commit writes nothing and says it is done.
     pub lie: bool,
@@ -54,18 +56,20 @@ impl Disk {
         }
     }
 
-    /// The value at `key`, if the disk holds one.
+    /// The value at `key`, if the disk holds one. A role whose disk lost a
+    /// record has none that can be read.
     ///
     /// # Panics
     ///
-    /// When a scan of the memory fails: a scan of memory never fails.
+    /// When a scan of the memory fails with another fault: a scan of memory
+    /// only reports a loss.
     #[must_use]
     pub fn record(&self, key: Key) -> Option<Vec<u8>> {
-        let entries = self
-            .store
-            .borrow_mut()
-            .scan(key.address)
-            .expect("a scan of memory");
+        let entries = match self.store.borrow_mut().scan(key.address) {
+            Ok(entries) => entries,
+            Err(StorageError::Lost) => return None,
+            Err(fault) => panic!("a scan of memory reports only a loss: {fault}"),
+        };
         entries.into_iter().find_map(|(k, entry)| match entry {
             Entry::Value(bytes) if k == key => Some(bytes),
             _ => None,
@@ -93,6 +97,12 @@ impl Disk {
     pub fn arm_lie(&self) {
         self.faults.borrow_mut().lie = true;
     }
+
+    /// The disk loses the record at `key`: its role is faulty from now on
+    /// (a fault of the contract: the loss is reported, never hidden).
+    pub fn lose(&self, key: Key) {
+        self.store.borrow_mut().lose(key);
+    }
 }
 
 impl Storage<Journal> for Disk {
@@ -103,19 +113,21 @@ impl Storage<Journal> for Disk {
             return Ok(());
         }
         if faults.fail_before {
-            return Err(StorageError("the walk failed the commit".into()));
+            return Err(StorageError::Full);
         }
         self.store.borrow_mut().commit(ops)?;
         if faults.fail_after {
-            return Err(StorageError(
-                "the walk failed the commit after its write".into(),
-            ));
+            return Err(StorageError::Unknown);
         }
         Ok(())
     }
 
     fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
         self.store.borrow_mut().scan(address)
+    }
+
+    fn list(&mut self) -> Result<Vec<Address>, StorageError> {
+        self.store.borrow_mut().list()
     }
 }
 

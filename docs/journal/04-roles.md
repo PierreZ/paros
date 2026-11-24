@@ -225,8 +225,11 @@ backends in memory (`mem`) and the contract suites (`contract`).
   memory)); an `Unassign` of the node with no segment stops every role of the node. The driver gives every
   send to the `Transport`, a send between two roles of one process too. One process may serve
   every role, or one role; the `Host` does not change.
-- *Rule 4.* `Storage` is one trait: `commit(ops)`, atomic and durable when it returns `Ok`, and `scan(address)`, every
-  record of one role in key order. The format is the crate's (`layout`): a `Key` is the journal,
+- *Rule 4.* `Storage` is one trait: `commit(ops)`, atomic and durable when it returns `Ok`, `scan(address)`, every
+  record of one role in key order, and `list()`, every role on the disk (a role that lost records
+  too), which a process that boots reads before its assignments (`Driver::on_disk`). A fault is a
+  typed `StorageError` (`Full`, `Lost`, `Unknown`) with one `Verdict` each (#1414, "The faults
+  of a storage" below). The format is the crate's (`layout`): a `Key` is the journal,
   the node, the segment of a replica (0 for every other role), the kind of the record and an index (a slot), and its bytes sort as the key does,
   so each op is namespaced by (journal, role). Each batch ends with the role's `Durable` record.
   `commit` has no `sync` flag (proposal of the Fable review of 2026-11-23, item 4): every batch
@@ -297,7 +300,7 @@ role never depends on being colocated with another (the colocation rule of archi
 a range read. The core defines the ops and owns the on-disk format (decided by Pierre on
 2026-11-19); each op is namespaced by (journal, role). `open()` returns a damage report: the
 records it found corrupt, so that the role can report and repair them (CTRL). An error from the
-trait means "unknown": the batch may or may not be durable, and the role of that journal stops.
+trait is a typed fault with one verdict (#1414, below).
 
 *Why.* An acceptor, a replica and a matchmaker need different storage, but one trait with typed
 ops serves all three, and one contract suite tests every backend. An atomic commit gives rule 1
@@ -308,14 +311,21 @@ crash safety is claimed only on a faultable disk (decided by Pierre on 2026-11-1
 storage lists the roles that have records on its disk, and reports each fault as a typed value
 with one verdict. `Full`: a commit wrote nothing; its roles stop (`Stop::Failed`) and start again
 from a scan. `Lost`: a disk lost a record of a role; the list still names the role (faulty, not
-empty), its scan reports `Lost`, and the role stops for good (`Stop::Damaged`). `Unknown`: a
+empty), its scan reports `Lost`, and the role stops for good (`Stop::Lost`). `Unknown`: a
 commit failed and the backend does not know what it wrote (fsyncgate); the page cache may still
-show a batch that is not durable, so the process stops and a new one reads the disk.
+show a batch that is not durable, so the process stops (`Driver::halted`, as in a crash) and a
+new one reads the disk. The verdict is the fault's, whatever the call: a scan that fails `Full`
+stops its role (`Stop::Unreadable`), which may start again; a commit that fails `Lost` stops
+its roles for good; a list or a scan that fails `Unknown` stops the process. A role that keeps no
+record (a frontend) starts with no read and needs nothing of the storage.
 `specs/tla/flight-rule/` checks these verdicts (`storage`) under single-decree Paxos, with three
 controls: a role that starts from the records that a loss left (`lost_restore`), a list that
 leaves out a damaged role so that placement starts it empty (`list_readable`), and a scan in the
-same process after `Unknown` (`unknown_rescan`). **Open** (#1414): the code; the trait still has
-one `StorageError`.
+same process after `Unknown` (`unknown_rescan`). The code: `paros_host::StorageError`,
+`Verdict` and `Storage::list`; the driver tests of `paros-host` give one test to each verdict; the
+contract suites of `paros-journal-io` check `list` fresh and after a reopen; the driver walk and
+the whole walk of `journal-sim` fail commits `Full` and `Unknown`, and the driver walk loses an
+acceptor's record while its process is down.
 
 **Rule 5: two ports.** `Events` carries the recorded (input, effects) pair of each `Host` step,
 after durability. The trace check reads it, live and chunk by chunk (moonpool-tla `Live`,

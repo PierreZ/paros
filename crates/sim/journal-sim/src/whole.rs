@@ -158,8 +158,10 @@ pub mod reach {
     pub const LOST_UNDONE: &str = "whole journal: a register change was lost before it ran";
     /// One commit held the batches of two journals.
     pub const TWO_JOURNALS: &str = "whole journal: one commit held the batches of two journals";
-    /// A commit failed and stopped its roles.
+    /// A commit wrote nothing (`Full`) and stopped its roles.
     pub const FAILED: &str = "whole journal: a failed commit stopped its roles";
+    /// A commit of unknown outcome stopped its machine's process.
+    pub const HALTED: &str = "whole journal: a commit of unknown outcome stopped its process";
     /// An acceptor read a vote back at a restart.
     pub const RESTARTED: &str = "whole journal: an acceptor read its votes back at a restart";
     /// Every machine of a zone was down at once.
@@ -211,6 +213,7 @@ pub mod reach {
         LOST_UNDONE,
         TWO_JOURNALS,
         FAILED,
+        HALTED,
         RESTARTED,
         ZONE_OUT,
         TAKEOVER,
@@ -1091,6 +1094,13 @@ impl WholeModel {
                         driver.assign(assignment.clone());
                     }
                 }
+            }
+            if driver.halted() {
+                // A commit of unknown outcome stopped the process: the walk
+                // takes the machine down, and a restart reads the disk again.
+                sometimes!(true, reach::HALTED);
+                self.down(m);
+                continue;
             }
             let replies = driver.take_replies();
             let notices = driver.take_notices();

@@ -20,12 +20,47 @@ impl Storage<Journal> for Forgetful {
     fn scan(&mut self, _address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
         Ok(Vec::new())
     }
+
+    fn list(&mut self) -> Result<Vec<Address>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 #[test]
 #[should_panic(expected = "storage: a scan gives the role's records of a commit")]
 fn the_storage_suite_fails_a_disk_that_forgets() {
     storage(|| Forgetful);
+}
+
+/// A disk that keeps its records but lists no role: a process that boots
+/// on it would serve nothing.
+#[derive(Default)]
+struct Unlisted(MemStorage);
+
+impl Storage<Journal> for Unlisted {
+    fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
+        self.0.commit(ops)
+    }
+
+    fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
+        self.0.scan(address)
+    }
+
+    fn list(&mut self) -> Result<Vec<Address>, StorageError> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+#[should_panic(expected = "storage: a list names each role that has records")]
+fn the_storage_suite_fails_a_disk_that_lists_no_role() {
+    storage(Unlisted::default);
+}
+
+#[test]
+#[should_panic(expected = "storage: a list names the one role")]
+fn the_reopen_suite_fails_a_disk_that_lists_no_role() {
+    storage_reopen(Unlisted::default, |disk| disk);
 }
 
 #[test]

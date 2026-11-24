@@ -75,10 +75,14 @@ pub const READ: &str =
 pub mod reach {
     /// One commit held the batches of two roles (group commit).
     pub const GROUPED: &str = "driver walk: one commit held the batches of two roles";
-    /// A commit failed and stopped its roles.
+    /// A commit wrote nothing (`Full`) and stopped its roles.
     pub const FAILED: &str = "driver walk: a failed commit stopped its roles";
-    /// A failed commit had written its batch.
-    pub const WRITTEN_FAILED: &str = "driver walk: a failed commit had written its batch";
+    /// A commit of unknown outcome had written its batch, and its process
+    /// stopped.
+    pub const WRITTEN_HALTED: &str =
+        "driver walk: an Unknown commit wrote, and its process stopped";
+    /// A role whose disk lost a record stopped for good at its restart.
+    pub const LOST: &str = "driver walk: a role whose disk lost a record stopped for good";
     /// A process restarted, and an acceptor read a vote back.
     pub const RESTARTED: &str = "driver walk: an acceptor read its votes back at a restart";
     /// A campaign deposed an open leader.
@@ -101,7 +105,8 @@ pub mod reach {
     pub const ALL: &[&str] = &[
         GROUPED,
         FAILED,
-        WRITTEN_FAILED,
+        WRITTEN_HALTED,
+        LOST,
         RESTARTED,
         DEPOSED,
         DUPLICATE,
@@ -207,6 +212,9 @@ pub struct HostModel {
     /// [`HostAction::Late`] delivers them, often after a restart of their
     /// replica. A late message is inside the contract of the transport.
     late: Vec<Envelope>,
+    /// The process whose acceptor's disk lost a record: one at most, so a
+    /// majority of the acceptors still runs.
+    lost: Option<u64>,
 }
 
 /// The walk with `mutant` planted.
@@ -439,6 +447,7 @@ impl HostModel {
             pages: Vec::new(),
             read_boots: BTreeMap::new(),
             late: Vec::new(),
+            lost: None,
         };
         for p in PROCESSES {
             model.processes.insert(
@@ -557,19 +566,25 @@ impl HostModel {
             let stopped = driver.take_stopped();
             let replies = driver.take_replies();
             let reads = driver.take_reads();
-            // Placement serves again a role that a failed commit stopped.
+            // Placement serves again a role that a commit stopped when it
+            // wrote nothing. A role whose disk lost a record stops for good.
             for (address, why) in &stopped {
-                if *why == paros_journal_io::Stop::Failed {
-                    sometimes!(true, reach::FAILED);
-                    sometimes!(
-                        process
-                            .disk
-                            .record(Key::new(*address, Kind::Durable, 0))
-                            .is_some(),
-                        reach::WRITTEN_FAILED
-                    );
-                    driver.assign(Self::assignment(*address));
+                match why {
+                    paros_journal_io::Stop::Failed => {
+                        sometimes!(true, reach::FAILED);
+                        driver.assign(Self::assignment(*address));
+                    }
+                    paros_journal_io::Stop::Lost => sometimes!(true, reach::LOST),
+                    _ => {}
                 }
+            }
+            if driver.halted() {
+                // A commit of unknown outcome stopped the process: the walk
+                // crashes it, and a restart reads the disk again.
+                // The walk's `Unknown` commit writes its batch first.
+                sometimes!(true, reach::WRITTEN_HALTED);
+                self.crash(&p, cx);
+                continue;
             }
             let sent: Vec<Envelope> = process.outbox.borrow_mut().drain(..).collect();
             for envelope in sent {
@@ -843,6 +858,15 @@ impl HostModel {
         let disk = &self.processes[&p].disk;
         if self.mutant == HostMutant::LyingDisk {
             disk.arm_lie();
+        } else if self.lost.is_none()
+            && self.processes[&p].driver.is_none()
+            && cx.rng().chance(1, 2)
+        {
+            // The disk of a process that is down loses its acceptor's
+            // promise: the restart finds the loss, and the acceptor stops for
+            // good.
+            disk.lose(Key::new(Self::acceptor(p), Kind::Promise, 0));
+            self.lost = Some(p);
         } else {
             disk.arm(!cx.rng().chance(1, 2));
         }

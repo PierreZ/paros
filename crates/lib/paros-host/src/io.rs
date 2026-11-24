@@ -8,14 +8,64 @@
 use crate::family::Family;
 use crate::time::Time;
 
-/// The error of a storage call. It means "unknown": the batch may or may
-/// not be durable. The roles of the batch stop (§J4.2, rule 4).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StorageError(pub String);
+/// A fault of a storage call, typed (§J4.2, rule 4). Each fault has one
+/// verdict ([`StorageError::verdict`]), the same for every call that
+/// reports it: the driver reads the verdict, never the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageError {
+    /// The call did nothing: a commit wrote no op of its batch (the disk is
+    /// full, or the backend refused the batch), a scan read nothing. The
+    /// roles of the call stop and may start again from a scan.
+    Full,
+    /// The disk lost a record of the role. Its list still names the role
+    /// (faulty, not empty), and each scan of it reports `Lost`: the role
+    /// stops for good, so placement never starts it again from what the
+    /// loss left.
+    Lost,
+    /// The backend does not know what the call did (fsyncgate): a commit
+    /// may or may not be durable, and the page cache may still show a batch
+    /// that the disk does not hold. Nothing that this process reads from
+    /// the disk can be trusted again: the process stops, and a new process
+    /// reads the disk.
+    Unknown,
+}
+
+/// What the driver does on a [`StorageError`]. `specs/tla/flight-rule/`
+/// checks each verdict (`storage`) and a control for each wrong one
+/// (`lost_restore`, `list_readable`, `unknown_rescan`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The roles of the call stop: [`Family::failed`] for a commit,
+    /// [`Family::unreadable`] for a scan. Placement may start them again,
+    /// from a scan.
+    Again,
+    /// The roles of the call stop for good ([`Family::lost`]).
+    ForGood,
+    /// The process stops: the driver halts ([`crate::Driver::halted`]),
+    /// and the program drops it and starts a new one on the same disk.
+    Halt,
+}
+
+impl StorageError {
+    /// The one verdict of this fault.
+    #[must_use]
+    pub fn verdict(self) -> Verdict {
+        match self {
+            Self::Full => Verdict::Again,
+            Self::Lost => Verdict::ForGood,
+            Self::Unknown => Verdict::Halt,
+        }
+    }
+}
 
 impl core::fmt::Display for StorageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "storage: {}", self.0)
+        let what = match self {
+            Self::Full => "the call did nothing",
+            Self::Lost => "the disk lost a record of the role",
+            Self::Unknown => "the backend does not know what the call did",
+        };
+        write!(f, "storage: {what}")
     }
 }
 
@@ -35,20 +85,42 @@ impl core::error::Error for StorageError {}
 ///   rule), so the driver has no batch that a crash may lose.
 /// - **Ranges.** [`scan`](Storage::scan) gives every record of one role,
 ///   and no record of another role.
+/// - **Listed.** [`list`](Storage::list) names every role that has a record
+///   on the disk, and every role whose records the disk lost: a damaged role
+///   is faulty, not empty, so a process that boots never starts it again
+///   empty.
+/// - **Typed faults.** A call that fails says how ([`StorageError`]). A
+///   `Full` commit wrote nothing; a scan of a role that lost a record
+///   reports `Lost` each time; a backend that does not know what it wrote
+///   reports `Unknown`.
+///
+/// A role that keeps no record (a frontend) needs nothing of the storage:
+/// it starts with no read ([`crate::Start::Running`]) and writes no batch.
 pub trait Storage<F: Family> {
     /// Make `ops` durable as one atomic batch.
     ///
     /// # Errors
     ///
-    /// The batch may or may not be durable.
+    /// `Full`: no op is durable. `Lost`: a role of the batch lost a record.
+    /// `Unknown`: the batch may or may not be durable.
     fn commit(&mut self, ops: &[F::Op]) -> Result<(), StorageError>;
 
     /// Every record of the role at `address`.
     ///
     /// # Errors
     ///
-    /// The backend cannot read the range; the role does not start.
+    /// `Lost`: the disk lost a record of the role. `Full` or `Unknown`: the
+    /// backend cannot read the range. The role does not start.
     fn scan(&mut self, address: F::Address) -> Result<F::Records, StorageError>;
+
+    /// The address of every role that has records on the disk, or lost
+    /// some, in address order: what a process that boots serves again
+    /// before it reads its assignments.
+    ///
+    /// # Errors
+    ///
+    /// The backend cannot list the disk: the process cannot boot.
+    fn list(&mut self) -> Result<Vec<F::Address>, StorageError>;
 }
 
 /// A network of the roles of one family.

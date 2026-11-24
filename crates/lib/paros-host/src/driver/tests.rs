@@ -119,7 +119,7 @@ fn a_failed_commit_stops_the_role_and_drops_what_waited_on_it() {
     let (mut driver, events) = proc(&disk, &clock);
     start(&mut driver);
     bump(&mut driver);
-    disk.fail_commit.set(true);
+    disk.fail_commit.set(Some(StorageError::Full));
     assert!(driver.poll());
     assert_eq!(driver.take_stopped(), vec![(1, Stop::Failed)]);
     assert_eq!(driver.ports().dropped, vec![(1, Out::Bumped { value: 1 })]);
@@ -213,7 +213,7 @@ fn a_restart_inside_one_round_overlays_the_group_on_the_scan() {
 fn an_unreadable_disk_stops_the_role_that_starts() {
     let (disk, clock) = (Disk::default(), Hand::default());
     let (mut driver, _) = proc(&disk, &clock);
-    disk.fail_scan.set(true);
+    disk.fail_scan.set(Some(StorageError::Full));
     start(&mut driver);
     assert_eq!(driver.take_stopped(), vec![(1, Stop::Unreadable)]);
     assert!(driver.machine().serves(2));
@@ -383,4 +383,130 @@ fn a_timer_set_again_inside_the_round_of_fires_is_kept() {
         Some(&Time(2 * TICK)),
         "the driver keeps the timer that the host keeps"
     );
+}
+
+#[test]
+fn a_disk_lists_each_role_with_records_fresh_and_after_a_restart() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, _) = proc(&disk, &clock);
+    assert_eq!(driver.on_disk(), Ok(Vec::new()), "a fresh disk lists none");
+    start(&mut driver);
+    bump(&mut driver);
+    assert!(driver.poll());
+    // The watcher keeps no record: only the counter is on the disk.
+    assert_eq!(driver.on_disk(), Ok(vec![1]));
+    drop(driver);
+    let (mut again, _) = proc(&disk, &clock);
+    assert_eq!(again.on_disk(), Ok(vec![1]));
+    assert!(!again.halted());
+}
+
+#[test]
+fn a_disk_that_cannot_list_stops_the_process() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, _) = proc(&disk, &clock);
+    disk.fail_list.set(Some(StorageError::Full));
+    assert_eq!(driver.on_disk(), Err(StorageError::Full));
+    assert!(driver.halted(), "a process that cannot list cannot boot");
+    assert_eq!(driver.on_disk(), Err(StorageError::Unknown));
+}
+
+#[test]
+fn a_lost_record_stops_its_role_for_good_and_the_list_still_names_it() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, _) = proc(&disk, &clock);
+    start(&mut driver);
+    bump(&mut driver);
+    assert!(driver.poll());
+    drop(driver);
+    disk.lose(1);
+    assert!(disk.records.borrow().is_empty(), "the one record is gone");
+    let (mut again, _) = proc(&disk, &clock);
+    // Faulty, not empty: the list names the role whose record is gone.
+    assert_eq!(again.on_disk(), Ok(vec![1]));
+    start(&mut again);
+    assert_eq!(again.take_stopped(), vec![(1, Stop::Lost)]);
+    assert!(!again.machine().serves(1));
+    assert!(again.machine().serves(2), "the other role runs");
+    // Placement asks again: the scan reports the loss again, so the role
+    // never starts from what the loss left.
+    again.input(Input::Assign(Assignment::Counter {
+        address: 1,
+        peers: vec![2],
+    }));
+    assert_eq!(again.take_stopped(), vec![(1, Stop::Lost)]);
+    assert!(!again.halted());
+}
+
+#[test]
+fn a_commit_that_finds_a_lost_record_stops_its_roles_for_good() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, _) = proc(&disk, &clock);
+    start(&mut driver);
+    bump(&mut driver);
+    disk.fail_commit.set(Some(StorageError::Lost));
+    assert!(driver.poll());
+    assert_eq!(driver.take_stopped(), vec![(1, Stop::Lost)]);
+    assert_eq!(driver.ports().dropped, vec![(1, Out::Bumped { value: 1 })]);
+    assert_eq!(driver.ports().outputs, Vec::new());
+    assert!(driver.transport_mut().queue.borrow().is_empty());
+    assert!(!driver.halted());
+}
+
+#[test]
+fn an_unknown_commit_stops_the_process() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, events) = proc(&disk, &clock);
+    start(&mut driver);
+    bump(&mut driver);
+    let reported = events.borrow().len();
+    disk.fail_commit.set(Some(StorageError::Unknown));
+    assert!(driver.poll());
+    assert!(driver.halted());
+    assert_eq!(
+        driver.take_stopped(),
+        Vec::new(),
+        "no role stops: the process does"
+    );
+    assert_eq!(driver.ports().dropped, vec![(1, Out::Bumped { value: 1 })]);
+    assert_eq!(driver.ports().outputs, Vec::new());
+    assert!(
+        driver.transport_mut().queue.borrow().is_empty(),
+        "the note never goes"
+    );
+    assert_eq!(driver.timer(), None);
+    assert_eq!(
+        events.borrow().len(),
+        reported,
+        "a step whose batch is unknown is not reported"
+    );
+    // A halted driver does nothing more.
+    bump(&mut driver);
+    assert!(!driver.poll());
+    assert!(disk.records.borrow().is_empty());
+    // A new process reads the disk: this backend wrote nothing.
+    let (mut again, _) = proc(&disk, &clock);
+    start(&mut again);
+    assert!(matches!(
+        again.machine().role(1),
+        Some(ToyRole::Counter { value: 0, .. })
+    ));
+}
+
+#[test]
+fn an_unknown_scan_stops_the_process_at_once() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, _) = proc(&disk, &clock);
+    disk.fail_scan.set(Some(StorageError::Unknown));
+    start(&mut driver);
+    assert!(driver.halted());
+    assert!(!driver.machine().serves(2), "no input steps after the halt");
+    assert_eq!(driver.take_stopped(), Vec::new());
+}
+
+#[test]
+fn each_fault_has_one_verdict() {
+    assert_eq!(StorageError::Full.verdict(), Verdict::Again);
+    assert_eq!(StorageError::Lost.verdict(), Verdict::ForGood);
+    assert_eq!(StorageError::Unknown.verdict(), Verdict::Halt);
 }
