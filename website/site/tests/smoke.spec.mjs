@@ -695,6 +695,84 @@ test("/paxos/multi-paxos/: Show me how plays by itself with motion, and Skip sto
   await context.close();
 });
 
+// The data walks (tour plan, step F5): every chapter of the tour plays to
+// its end with motion at full speed, and every exercise that has a guide
+// plays "Show me how" to its end and is not solved. Both read the chapters
+// from the tour page's own data, so a new chapter or a new guide is in the
+// walk with no change here.
+async function tourChapters(page) {
+  await page.goto("paxos/tour/");
+  return page.evaluate(() => JSON.parse(document.getElementById("tour").textContent).chapters);
+}
+
+test("/paxos/tour/: every chapter plays to its end at full speed", async ({ browser }) => {
+  test.setTimeout(600_000);
+  const context = await browser.newContext({ reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  const w = watch(page);
+  const chapters = await tourChapters(page);
+  expect(chapters.length).toBeGreaterThan(0);
+  for (const [k, chapter] of chapters.entries()) {
+    await page.goto("paxos/tour/");
+    const screen = page.locator(".tour-screen");
+    await screen.locator(".tour-chapter").nth(k).click();
+    // A bridge first, when the chapter has one.
+    if (chapter.bridge) await screen.locator(".tour-next").click();
+    const story = page.locator(".panel.story");
+    await expect(story.locator(".tour-bar")).toContainText(`Chapter ${chapter.n}/`);
+    // A press on a chapter (or on Start after its bridge) is a press to
+    // watch: the chapter plays already.
+    await page.evaluate(() => window.paxosStory.speed(8));
+    expect(await page.evaluate(() => window.paxosStory.playing())).toBe(true);
+    await expect(screen.locator(".tour-done"), `chapter ${chapter.id} ends`).toBeVisible({ timeout: 240_000 });
+    expect(await page.evaluate(() => window.paxosTour.chapter())).toBe(k);
+  }
+  w.check();
+  await context.close();
+});
+
+test("every exercise with a guide plays Show me how to its end and is not solved", async ({ page }) => {
+  test.setTimeout(300_000);
+  const w = watch(page);
+  const chapters = await tourChapters(page);
+  const pages = [...new Set(chapters.map((c) => new URL(c.deeper, "http://x").pathname.replace(/^\/paros\//, "")))];
+  let demos = 0;
+  for (const path of pages) {
+    await page.goto(path);
+    const lab = page.locator("#your-turn-lab");
+    if (!(await page.locator("[data-lab]").count())) continue;
+    const tabs = lab.locator(".lab-tab");
+    await expect(tabs.first()).toBeVisible();
+    const n = await tabs.count();
+    for (let t = 0; t < n; t++) {
+      await tabs.nth(t).click();
+      const narr = lab.locator(".lab-narrator");
+      if (await narr.isVisible()) await lab.locator(".lab-narrator-skip").click();
+      await expect(narr).toBeHidden();
+      const show = lab.locator(".lab-show-btn");
+      if (!(await show.isVisible())) continue;
+      const id = (await page.evaluate(() => /#lab=([\w-]+)/.exec(location.hash)?.[1])) || "";
+      await show.click();
+      const next = lab.locator(".lab-narrator-bar .btn", { hasText: /^Next$/ });
+      for (let i = 0; i < 100 && (await lab.locator(".lab-narrator-skip").textContent()) !== "Now you"; i++) await next.click();
+      await expect(lab.locator(".lab-narrator-skip"), `${path} ${id}: the demo ends`).toHaveText("Now you");
+      // Every line of the goal holds, and the demo does not count.
+      const parts = await lab.locator(".lab-parts li").count();
+      expect(parts, `${path} ${id}: a guided exercise has a checklist`).toBeGreaterThan(0);
+      await expect(lab.locator(".lab-parts li.holds")).toHaveCount(parts);
+      await expect(lab.locator(".lab-done")).toBeHidden();
+      expect(await page.evaluate((k) => {
+        const st = JSON.parse(localStorage.getItem("paros-course-v1") || "{}");
+        return !!(st.solved && st.solved[k]);
+      }, id)).toBe(false);
+      await lab.locator(".lab-narrator-skip").click();
+      demos += 1;
+    }
+  }
+  expect(demos, "the walk meets the guided exercises").toBeGreaterThan(0);
+  w.check();
+});
+
 const JOURNAL_EXERCISES = {
   "journal-duplicate": ["A:write-lost", "A:resend"],
   "journal-fenced": ["B:read", "B:set-leader", "A:write"],
