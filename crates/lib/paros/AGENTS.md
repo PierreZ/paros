@@ -30,7 +30,11 @@ program that depends on `paros` alone writes. `examples/journal.rs` runs one jou
 process on the in-memory backends: three acceptors, three replicas, one leader, one writer.
 `examples/tokio_tasks.rs` runs the same journal on three tokio tasks of a `LocalSet`, with a
 transport over tokio channels and a clock on `tokio::time` written in the example: it shows what a
-program writes to bring its own runtime. tokio is a dev-dependency of `paros` only; the library
+program writes to bring its own runtime. `examples/full_journal.rs` runs every journal role on six
+hosts, each a task of a multi-thread tokio runtime that share only `Arc<Mutex<..>>` state (the
+network, the disks, the matchmakers): the register on three matchmakers through `RegisterCall`, a
+grid of two columns, one leader at a time, the replicas and the pure client; then writes, reads, a
+crash and restart of a host, and a roll to a second segment. tokio is a dev-dependency of `paros` only; the library
 depends on no runtime.
 Each new example joins the `checks` job of `.github/workflows/rust.yml`.
 
