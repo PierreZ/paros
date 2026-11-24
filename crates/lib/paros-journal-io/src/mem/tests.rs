@@ -34,7 +34,7 @@ fn mem_storage_reports_a_corrupt_record_and_a_planted_failure() {
         vec![(key, Entry::Value(vec![1]))],
         "a new write heals the record"
     );
-    storage.fail_next_commit();
+    storage.fail_next_commit(StorageError::Full);
     let other = Op {
         key: Key::new(address, crate::layout::Kind::Vote, 1),
         value: vec![2],
@@ -42,13 +42,43 @@ fn mem_storage_reports_a_corrupt_record_and_a_planted_failure() {
     let error = storage
         .commit(std::slice::from_ref(&other))
         .expect_err("a planted failure");
-    assert_eq!(error.to_string(), "storage: a planted failure");
+    assert_eq!(error, StorageError::Full);
     assert_eq!(storage.len(), 1, "a failed commit writes nothing");
     storage
         .commit(&[other])
         .expect("only the next commit fails");
     assert_eq!(storage.len(), 2);
     assert!(!storage.is_empty());
+}
+
+#[test]
+fn mem_storage_lists_a_role_that_lost_a_record_and_its_scan_reports_the_loss() {
+    let address = Address::new(JournalId(1), NodeId(2));
+    let other = Address::new(JournalId(1), NodeId(3));
+    let key = Key::new(address, crate::layout::Kind::Promise, 0);
+    let mut storage = MemStorage::new();
+    storage
+        .commit(&[
+            Op {
+                key,
+                value: vec![1],
+            },
+            Op {
+                key: Key::new(other, crate::layout::Kind::Promise, 0),
+                value: vec![2],
+            },
+        ])
+        .expect("a commit");
+    storage.lose(key);
+    assert_eq!(storage.len(), 1, "the record is gone");
+    assert_eq!(
+        storage.list().expect("a list"),
+        vec![address, other],
+        "faulty, not empty: the list still names the role"
+    );
+    assert_eq!(storage.scan(address), Err(StorageError::Lost));
+    assert_eq!(storage.scan(address), Err(StorageError::Lost), "each time");
+    assert_eq!(storage.scan(other).expect("a scan").len(), 1);
 }
 
 #[test]

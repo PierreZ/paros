@@ -100,13 +100,13 @@ impl Storage<Journal> for LogStorage {
         let mut batch = Vec::new();
         for op in ops {
             batch.extend(op.key.to_bytes());
-            let len = u32::try_from(op.value.len())
-                .map_err(|_| StorageError("a value above 4 GiB".into()))?;
+            let len = u32::try_from(op.value.len()).map_err(|_| StorageError::Full)?;
             batch.extend(len.to_be_bytes());
             batch.extend(&op.value);
         }
-        let len =
-            u32::try_from(batch.len()).map_err(|_| StorageError("a batch above 4 GiB".into()))?;
+        // A batch this format cannot frame is refused whole: nothing is
+        // written, so the fault is `Full`.
+        let len = u32::try_from(batch.len()).map_err(|_| StorageError::Full)?;
         // One append; a real file would `write_all` then `sync_data` here.
         self.file.extend(len.to_be_bytes());
         self.file.extend(checksum(&batch).to_be_bytes());
@@ -128,6 +128,21 @@ impl Storage<Journal> for LogStorage {
                 (key, Entry::Value(value.clone()))
             })
             .collect())
+    }
+
+    fn list(&mut self) -> Result<Vec<Address>, StorageError> {
+        let mut roles: Vec<Address> = self
+            .index
+            .keys()
+            .map(|key| {
+                Key::from_bytes(key)
+                    .expect("the log holds keys only")
+                    .address
+            })
+            .collect();
+        roles.sort();
+        roles.dedup();
+        Ok(roles)
     }
 }
 

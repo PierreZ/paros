@@ -23,12 +23,15 @@ use crate::transport::Transport;
 use crate::wire::{Address, Envelope, Time};
 
 /// A storage in memory: sorted keys to bytes. Every commit is durable at
-/// once. A test can mark a record corrupt, or make the next commit fail.
+/// once. A test can mark a record corrupt, lose a record, or make the next
+/// commit fail with a fault of its choice.
 #[derive(Clone, Debug, Default)]
 pub struct MemStorage {
     records: BTreeMap<[u8; KEY_LEN], Vec<u8>>,
     corrupt: BTreeSet<[u8; KEY_LEN]>,
-    fail_next: bool,
+    /// The roles that lost a record: listed, and each scan reports `Lost`.
+    lost: BTreeSet<Address>,
+    fail_next: Option<StorageError>,
 }
 
 impl MemStorage {
@@ -55,16 +58,25 @@ impl MemStorage {
         self.corrupt.insert(key.to_bytes());
     }
 
-    /// The next commit fails, and writes nothing.
-    pub fn fail_next_commit(&mut self) {
-        self.fail_next = true;
+    /// The record at `key` is lost. From now on the list still names its
+    /// role, and each scan of the role reports [`StorageError::Lost`]: the
+    /// role is faulty, not empty.
+    pub fn lose(&mut self, key: Key) {
+        self.records.remove(&key.to_bytes());
+        self.corrupt.remove(&key.to_bytes());
+        self.lost.insert(key.address);
+    }
+
+    /// The next commit fails with `fault`, and writes nothing.
+    pub fn fail_next_commit(&mut self, fault: StorageError) {
+        self.fail_next = Some(fault);
     }
 }
 
 impl Storage<Journal> for MemStorage {
     fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
-        if std::mem::take(&mut self.fail_next) {
-            return Err(StorageError("a planted failure".into()));
+        if let Some(fault) = self.fail_next.take() {
+            return Err(fault);
         }
         for op in ops {
             let key = op.key.to_bytes();
@@ -75,6 +87,9 @@ impl Storage<Journal> for MemStorage {
     }
 
     fn scan(&mut self, address: Address) -> Result<Vec<(Key, Entry)>, StorageError> {
+        if self.lost.contains(&address) {
+            return Err(StorageError::Lost);
+        }
         let prefix = Key::prefix(address);
         Ok(self
             .records
@@ -90,6 +105,20 @@ impl Storage<Journal> for MemStorage {
                 (key, entry)
             })
             .collect())
+    }
+
+    fn list(&mut self) -> Result<Vec<Address>, StorageError> {
+        let mut roles: BTreeSet<Address> = self
+            .records
+            .keys()
+            .map(|bytes| {
+                Key::from_bytes(bytes)
+                    .expect("the storage holds keys only")
+                    .address
+            })
+            .collect();
+        roles.extend(self.lost.iter().copied());
+        Ok(roles.into_iter().collect())
     }
 }
 
