@@ -28,13 +28,23 @@
 //!   tombstones, the latch's candidates, its holder and term, the counter's
 //!   version, the checkpoints taken.
 //! - [`ONCE`]: each act that a program asked for applies at most once
-//!   (`OnceEach`).
-//! - [`ACTS`]: each act that applies is by the latch's holder (`ActsByHolder`).
-//! - [`SETTLED`]: an act that a member reports applied is applied, and one
-//!   it reports failed is not (`SettledTrue`).
+//!   (`OnceEach`), on [`Truth`]'s reading of the log.
+//! - [`ACTS`]: each act that applies is by the latch's holder
+//!   (`ActsByHolder`), on [`Truth`]'s reading of the log. `ONCE` and `ACTS`
+//!   judge what the programs and the journal land; a dedup or a guard bug of
+//!   the fold itself is caught by `TRUTH`.
+//! - [`SETTLED`]: an act that a member reports applied is applied once; one
+//!   it reports failed or expired is not, and never applies later; one it
+//!   reports unknown applied at most once (`SettledTrue`). Every settle is
+//!   judged.
 //! - [`ONE_HOLDER`]: each term of an order has one session (`OneSender`).
 //! - [`FENCE`]: the receiver never applies an order below one it applied
-//!   (`NoRegress`).
+//!   (`NoRegress`). It judges the walk's own receiver: how a program uses
+//!   the term that the store gives.
+//!
+//! [`Truth`] reads the entries with the store's `codec`: a codec bug that
+//! encodes and decodes the same wrong way is not seen here, and the codec's
+//! own tests judge it.
 //!
 //! The liveness claim: once the faults stop, every member has a live
 //! session, every member folds the whole log, and a live session holds the
@@ -117,6 +127,7 @@ pub mod reach {
         TRIMMED,
         JUMP,
         SESSION_EXPIRED,
+        UNKNOWN,
         ACTED,
     ];
 }
@@ -591,11 +602,17 @@ impl ElectionModel {
                             applied == 1,
                             "{SETTLED}: act {act} reported applied, applied {applied} times"
                         ),
-                        Settled::Failed(_) => assert!(
-                            applied == 0,
-                            "{SETTLED}: act {act} reported failed, applied {applied} times"
+                        Settled::Failed(_) | Settled::Expired => {
+                            assert!(
+                                applied == 0,
+                                "{SETTLED}: act {act} reported {settled:?}, applied {applied} times"
+                            );
+                            self.truth.never.insert(act);
+                        }
+                        Settled::Unknown => assert!(
+                            applied <= 1,
+                            "{SETTLED}: act {act} reported unknown, applied {applied} times"
                         ),
-                        Settled::Unknown | Settled::Expired => {}
                     }
                 }
                 Event::Unreadable(at) => panic!("{AGREE}: member {index} stops at {at:?}"),
@@ -610,6 +627,10 @@ impl ElectionModel {
                         reach::TRIMMED
                     );
                 }
+                Event::Jumped(at) => assert!(
+                    at > Seq(0) && at <= start,
+                    "{AGREE}: member {index} jumped to {at:?}, starts at {start:?}"
+                ),
                 Event::Changed { .. } | Event::Refused(_) => {}
             }
         }
@@ -761,6 +782,8 @@ pub struct Truth {
     count: u64,
     /// How many times each act applied.
     acts: BTreeMap<u64, u32>,
+    /// The acts that a member reported failed or expired: they never apply.
+    never: BTreeSet<u64>,
     /// The checkpoints taken.
     checkpoints: BTreeSet<u64>,
 }
@@ -845,6 +868,10 @@ impl Truth {
                         self.holder
                     );
                     self.count += 1;
+                    assert!(
+                        !self.never.contains(&act),
+                        "{SETTLED}: act {act} applied after a member reported it would not"
+                    );
                     let applied = self.acts.entry(act).or_insert(0);
                     *applied += 1;
                     assert!(*applied == 1, "{ONCE}: act {act} applied {applied} times");

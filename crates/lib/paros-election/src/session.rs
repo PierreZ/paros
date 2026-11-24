@@ -16,7 +16,9 @@
 //!   ([`Member::tick`] asks the next page). Each change of the fold is an
 //!   [`Event::Changed`]: a watch is a filter on these, and no change
 //!   between two events is lost. A member below the floor of the journal
-//!   starts again from the checkpoint at the floor.
+//!   starts again from the checkpoint at the floor and reports
+//!   [`Event::Jumped`]: the changes below the floor are not reported, so a
+//!   watch reads the tree again.
 //! - **It sends one entry of its session at a time**, in the order the
 //!   program asked for them, and settles each one only from its own fold
 //!   (TLC: `SettledTrue` of `specs/tla/coord/`): the journal client may land
@@ -75,8 +77,8 @@ pub enum Settled {
     /// changed.
     Failed(TxnError),
     /// It is folded below the checkpoint that the member started from: it
-    /// took its `op_seq`, and the member cannot tell whether it applied.
-    /// Read the tree.
+    /// took its `op_seq`, or its session expired, and the member cannot
+    /// tell whether it applied. Read the tree.
     Unknown,
     /// The session expired before the fold reached it: it will never
     /// apply.
@@ -105,7 +107,8 @@ pub enum Event {
     /// id to go on.
     SessionExpired(SessionId),
     /// A checkpoint that this member wrote landed and the fold took it at
-    /// `seq`, or did not.
+    /// `seq`, or did not: it landed behind another record, or the journal
+    /// refused it.
     Checkpoint {
         /// Where it landed, when the fold took it.
         taken: Option<Seq>,
@@ -118,6 +121,10 @@ pub enum Event {
     /// multi-writer, or the entry is too large. The entry stays in flight;
     /// [`Member::resend`] sends it again.
     Refused(Outcome),
+    /// The member started again from the checkpoint at `seq`, below the
+    /// floor of the journal: the changes between its old position and `seq`
+    /// are not reported. A watch reads the tree again.
+    Jumped(Seq),
     /// The record at the floor of the journal is not a checkpoint that the
     /// fold takes: something other than the store truncated the journal.
     /// The member stops reading.
@@ -141,8 +148,8 @@ pub enum State {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Purpose {
     Entry,
-    Expire,
-    Checkpoint,
+    Expire(SessionId, Seq),
+    Checkpoint(Seq),
     Journal,
     Read,
 }
@@ -298,7 +305,7 @@ impl Member {
             tree: Box::new(tree.clone()),
         };
         let call = self.client.write(vec![codec::encode(&entry)]);
-        self.calls.insert(call, Purpose::Checkpoint);
+        self.calls.insert(call, Purpose::Checkpoint(at));
         self.written.insert(at);
         true
     }
@@ -512,7 +519,18 @@ impl Member {
                     self.events.push(Event::Refused(outcome));
                 }
             }
-            Purpose::Expire | Purpose::Checkpoint => {}
+            // A refused expiry may go again on a later tick; a refused
+            // checkpoint ends with no position.
+            Purpose::Expire(session, last) => {
+                if !matches!(outcome, Outcome::Written { .. }) {
+                    self.expiring.remove(&(session, last));
+                }
+            }
+            Purpose::Checkpoint(at) => {
+                if !matches!(outcome, Outcome::Written { .. }) && self.written.remove(&at) {
+                    self.events.push(Event::Checkpoint { taken: None });
+                }
+            }
             Purpose::Journal => self.events.push(Event::Journal(outcome)),
         }
     }
@@ -544,7 +562,7 @@ impl Member {
                 return;
             };
             self.tree = Some(tree);
-            self.after_jump();
+            self.after_jump(from);
         }
         for (offset, record) in records.iter().enumerate() {
             let seq = Seq(from.0 + offset as u64);
@@ -556,14 +574,32 @@ impl Member {
         self.send_next();
     }
 
-    /// After a start from a checkpoint: the entry in flight may be folded
-    /// below it, and the session may be gone.
-    fn after_jump(&mut self) {
+    /// After the first page of a fold, from the start or from a checkpoint:
+    /// the entry in flight may be folded below it, and the session may be
+    /// gone.
+    ///
+    /// The member reports the jump ([`Event::Jumped`]): the changes between
+    /// its old position and the floor are not reported one by one. When the
+    /// tree shows the session expired, the entry in flight ends
+    /// [`Settled::Unknown`], not [`Settled::Expired`]: it may be folded below
+    /// the checkpoint and have applied before the expiry, and the session's
+    /// row is gone. The entries that wait never left, so they end
+    /// [`Settled::Expired`].
+    fn after_jump(&mut self, at: Seq) {
+        if at > Seq(0) {
+            self.events.push(Event::Jumped(at));
+        }
         let tree = self.tree.as_ref().expect("a fold");
         let Some(id) = self.session() else {
             return;
         };
+        if let State::Expired(_) = self.state {
+            return;
+        }
         if tree.expired(id) {
+            if let Some(flight) = self.flight.take() {
+                self.settle(flight.txn, Settled::Unknown);
+            }
             self.end_session(id);
             return;
         }
@@ -680,12 +716,13 @@ impl Member {
             } else if self.now - seen.1 >= self.config.timeout + jitter
                 && self.expiring.insert((session, last))
             {
-                due.push(Entry::Expire { session, last });
+                due.push((session, last));
             }
         }
-        for entry in due {
+        for (session, last) in due {
+            let entry = Entry::Expire { session, last };
             let call = self.client.write(vec![codec::encode(&entry)]);
-            self.calls.insert(call, Purpose::Expire);
+            self.calls.insert(call, Purpose::Expire(session, last));
         }
     }
 }

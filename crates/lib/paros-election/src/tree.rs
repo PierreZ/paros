@@ -561,10 +561,14 @@ impl Tree {
             return false;
         }
         for (path, node) in &self.nodes {
-            if node.created >= self.next && !path.is_root() {
+            // The root is there from the start, at or below `next`; every
+            // other node was created and modified by a record below `next`.
+            let below = |seq: Seq| seq < self.next || (path.is_root() && seq <= self.next);
+            if !below(node.created) || !below(node.modified) || node.modified < node.created {
                 return false;
             }
-            if node.modified < node.created || (node.modified >= self.next && !path.is_root()) {
+            // A version grows by one at each change: `u64::MAX` cannot grow.
+            if node.version == u64::MAX {
                 return false;
             }
             if let Some(owner) = node.owner

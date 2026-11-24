@@ -295,7 +295,7 @@ impl Reader<'_> {
 
     fn txn(&mut self) -> Option<Txn> {
         let count = self.len()?;
-        let mut checks = Vec::with_capacity(count);
+        let mut checks = Vec::new();
         for _ in 0..count {
             checks.push(match self.u8()? {
                 1 => Check::Version {
@@ -310,7 +310,7 @@ impl Reader<'_> {
             });
         }
         let count = self.len()?;
-        let mut ops = Vec::with_capacity(count);
+        let mut ops = Vec::new();
         for _ in 0..count {
             ops.push(match self.u8()? {
                 1 => Op::Create {

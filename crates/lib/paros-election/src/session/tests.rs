@@ -246,3 +246,62 @@ fn a_floor_that_is_not_a_checkpoint_stops_the_member() {
     assert_eq!(late.take_events(), [Event::Unreadable(Seq(1))]);
     assert!(late.tree().is_none());
 }
+
+#[test]
+fn an_entry_below_the_checkpoint_of_an_expired_session_ends_unknown() {
+    let mut journal = Journal::new();
+    let (mut a, mut b) = (Member::new(CONFIG), Member::new(CONFIG));
+    a.set_mode(LeaderUuid(0x3A));
+    joined(&mut a, 1);
+    pump(&mut journal, &mut [&mut a]);
+    tick(&mut journal, 0, &mut [&mut a]);
+    assert!(matches!(a.state(), State::Live(_)));
+    let _ = a.take_events();
+    // A's write lands, and A reads nothing more.
+    let acted = Path::new("/acted").unwrap();
+    let txn = a.submit(Txn::ops(vec![Op::Ensure {
+        path: acted.clone(),
+    }]));
+    pump(&mut journal, &mut [&mut a]);
+    // B expires the silent session, checkpoints and trims.
+    let mut now = 1;
+    while b.tree().is_none_or(|t| !t.expired(SessionId(1))) {
+        assert!(now < 40, "B expires A after the timeout");
+        tick(&mut journal, now, &mut [&mut b]);
+        now += 1;
+    }
+    assert!(b.checkpoint());
+    pump(&mut journal, &mut [&mut b]);
+    tick(&mut journal, now, &mut [&mut b]);
+    let at = b
+        .take_events()
+        .into_iter()
+        .find_map(|e| match e {
+            Event::Checkpoint { taken } => taken,
+            _ => None,
+        })
+        .expect("the fold took the checkpoint");
+    b.trim(at).expect("a checkpoint the fold took");
+    pump(&mut journal, &mut [&mut b]);
+    // A restarts from the checkpoint: its write applied before the expiry.
+    tick(&mut journal, now + 1, &mut [&mut a]);
+    tick(&mut journal, now + 2, &mut [&mut a]);
+    assert!(
+        a.tree().unwrap().node(&acted).is_some(),
+        "the write applied"
+    );
+    let events = a.take_events();
+    assert!(events.contains(&Event::Jumped(at)));
+    assert!(events.contains(&Event::Settled {
+        txn,
+        settled: Settled::Unknown
+    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::SessionExpired(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(a.state(), State::Expired(_)));
+}

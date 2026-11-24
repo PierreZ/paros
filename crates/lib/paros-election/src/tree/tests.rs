@@ -384,3 +384,24 @@ fn a_checkpoint_counts_only_at_its_read_position_and_with_its_state() {
     assert_eq!(Tree::from_checkpoint(at, Some(&open(B))), None);
     assert_eq!(Tree::from_checkpoint(Seq(at.0 + 1), Some(&good)), None);
 }
+
+#[test]
+fn a_forged_checkpoint_state_does_not_start_a_fold() {
+    let mut tree = Tree::new();
+    let (_, _) = tree.apply(Seq(0), Some(&open(A)));
+    let at = tree.next();
+    let start = |tree: &Tree| {
+        let entry = Entry::Checkpoint {
+            at,
+            tree: Box::new(tree.clone()),
+        };
+        Tree::from_checkpoint(at, Some(&entry)).is_some()
+    };
+    assert!(start(&tree), "the fold's own state starts a fold");
+    let mut late_root = tree.clone();
+    late_root.nodes.get_mut(&Path::root()).unwrap().created = Seq(at.0 + 5);
+    assert!(!start(&late_root), "the root is created at or below next");
+    let mut full = tree.clone();
+    full.nodes.get_mut(&Path::root()).unwrap().version = u64::MAX;
+    assert!(!start(&full), "a version that cannot grow");
+}

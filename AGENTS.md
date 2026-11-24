@@ -345,14 +345,16 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `crates/lib/paros-journal-io/src` (`scripts/mutants.sh --journal-io`: its tests and the driver
   walk of `journal-sim`; `.cargo/mutants-journal-io.toml`), and one pass on the changed lines of
   `crates/lib/paros-host/src` (`scripts/mutants.sh --host`: its tests, the tests of
-  `paros-journal-io` and the driver walk of `journal-sim`; `.cargo/mutants-host.toml`). Each crate whose `src/` changed
+  `paros-journal-io` and the driver walk of `journal-sim`; `.cargo/mutants-host.toml`), and one pass on
+  the changed lines of `crates/lib/paros-election/src` (`scripts/mutants.sh --election`: its tests
+  and the election walk of `journal-sim`; `.cargo/mutants-election.toml`). Each crate whose `src/` changed
   runs in shards of its own, one job each (`--shard k/n --sharding round-robin`;
   `scripts/mutants-plan.sh` gives one shard for each 250 changed lines outside the tests, 125
   for `paros-consensus` with at least two shards, from the measures in its comment). A
   surviving mutant fails the night: add the test that sees it in a pull request; the next night
   judges those lines again. Before a pull request that changes one of these crates, run
   `git diff origin/main -- crates/lib/<crate>/src > my.diff` and
-  `scripts/mutants.sh [--journal|--control|--journal-io|--host] --in-diff my.diff`. The
+  `scripts/mutants.sh [--journal|--control|--journal-io|--host|--election] --in-diff my.diff`. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
   earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit

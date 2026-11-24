@@ -422,7 +422,14 @@ is `specs/tla/coord/`.
   at its position too (a member that writes a wrong state cannot mislead a new member); a
   transaction that fails a check or an operation still uses its `op_seq` and renews its session,
   as the void `act` of the model does; a sequential node takes the position of its entry as its
-  name, twenty digits. **Open**: a trace check of the walk against `specs/tla/coord/`, the other
+  name, twenty digits. Two more go past the model, with no TLA+ check of their own yet: a turn
+  and a term for each parent (the model has one latch; each parent is one latch of the model, and
+  no rule reads two parents), and a revoke that is a `Delete` in a transaction of a live session
+  (the model's `revoke` is a record of no session; the effect on the nodes is the same, and the
+  revoker's session renews). **Open**: a check of each in `specs/tla/coord/`, with a control. A
+  member that starts again from the checkpoint at the floor reports `Event::Jumped`, not each
+  change below the floor, and ends the entry in flight `Unknown` when its session is gone.
+  **Open**: a trace check of the walk against `specs/tla/coord/`, the other
   recipes of the proposal (`LeaderSelector`, the semaphore, the read-write lock, barriers, queues,
   `CuratorCache`), the limit of a path (`MAX_PATH`, 1024 bytes for now) and of an entry.
 - **Not proved**: the liveness of the latch (after the holder stops and faults stop, a new holder
