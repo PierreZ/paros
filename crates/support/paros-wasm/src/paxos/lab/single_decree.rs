@@ -1,10 +1,10 @@
 //! The exercises of lesson 1, single-decree Paxos: a vote is not a choice, two values with the disk rule off, and the duel.
 
 use super::DECREE;
-use super::Exercise;
 use super::Extra;
 use super::Setup;
 use super::voters;
+use super::{Exercise, NO_PARTS, NONE};
 use crate::paxos::action::Action;
 use crate::paxos::level::WorldKind;
 use crate::paxos::level::common::open;
@@ -19,6 +19,9 @@ pub(super) const VOTE_NOT_CHOSEN: Exercise = Exercise {
            propose alpha, but it is free to choose another value when it does not hear of it.",
     setup_on: Setup::Level(DECREE),
     setup: |lab| lab.act(&open(5, "alpha")),
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: Vec::new,
     goal: |lab| {
         let world = lab.view_of_world();
@@ -46,6 +49,9 @@ pub(super) const TWO_VALUES: Exercise = Exercise {
            member whose disk is empty.",
     setup_on: Setup::Level(DECREE),
     setup: |lab| lab.act(&open(5, "alpha")),
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: || {
         vec![
             (
@@ -99,6 +105,9 @@ pub(super) const DUEL: Exercise = Exercise {
            time before it tries again.",
     setup_on: Setup::Level(DECREE),
     setup: |_| {},
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: || {
         vec![
             (

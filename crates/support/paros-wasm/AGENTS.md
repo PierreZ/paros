@@ -117,7 +117,22 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   `Extra::Compart`. A rule that an exercise turns off is a driver move the shipped code refuses
   (`Wipe`), never a change of the core, and the exercise says so (`rule_off`). Each exercise
   has a solution that a test plays, so an exercise the core no longer lets a reader solve
-  fails CI. Undo is a replay: the engine draws no randomness.
+  fails CI. Undo is a replay: the engine draws no randomness. The exercises live in one file
+  per page (`lab/single_decree.rs`, `lab/quorums.rs`, `lab/multi_paxos.rs`,
+  `lab/compartmentalized.rs`, `lab/matchmaker.rs`), their tests in `lab/tests.rs`.
+- A **guided exercise** (plan `paxos-guided-tour-2026-11-24`, step F4; `gap` is the pilot) adds
+  three lists to its `Exercise`; the others keep them empty (`NONE`, `NO_PARTS`) until their
+  flavor fills them:
+  - `intro`: the setup as `Step`s, each a sentence and the moves it plays. `Lab::start`
+    records each step's frames (one per move: the message and the `LabView` after it), and the
+    page plays them (`PaxosLab::intro_start`, `intro_step(n)`).
+  - `parts`: the goal as a checklist. A `Part` has a label, a predicate (`holds`), a hint in
+    three levels (`idea`, `plan`, `next`: the move to press now) and a dead end (`dead`,
+    `dead_says`: the line cannot hold again). The goal is that every part holds (a test checks
+    it). `LabView` gives `parts`, `hint` (of the first line that does not hold) and `stuck`.
+  - `guide`: the solution as `Step`s. The tests play it, and "Show me how" plays it on the page
+    (`PaxosLab::guide_step(n)`). A guide step makes the lab a demo: its goal never counts as
+    solved, and the reader's moves wait until Start again.
 - `src/paxos/ready_lab.rs` → `ReadyLab` (wasm `ReadyLab`) → the sans-IO page's `Ready` inspector (#951): three
   `ColocatedNode`s on the game's `Disk`, a wire driven by hand (`timeout`, `tick`, `deliver`,
   `drop`, `write`), and each `Ready` an input gave, bucket by bucket. A driver, no protocol logic.

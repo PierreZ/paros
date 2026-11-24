@@ -1,8 +1,8 @@
 //! The exercises of lesson 6, Compartmentalized Paxos: a proxy leader that stops, lost votes, a replica that waits.
 
-use super::Exercise;
 use super::Extra;
 use super::Setup;
+use super::{Exercise, NO_PARTS, NONE};
 use crate::paxos::trace::compart::desk::Verb;
 
 pub(super) const PROXY_DOWN: Exercise = Exercise {
@@ -20,6 +20,9 @@ pub(super) const PROXY_DOWN: Exercise = Exercise {
         lab.settle(|_| true);
         lab.verb(&Verb::CrashProxy(1));
     },
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: || {
         vec![
             (
@@ -56,6 +59,9 @@ pub(super) const LOST_VOTES: Exercise = Exercise {
            is always safe.",
     setup_on: Setup::Compartments,
     setup: |_| {},
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: || {
         vec![
             (
@@ -93,6 +99,9 @@ pub(super) const REPLICA_WAITS: Exercise = Exercise {
            same log.",
     setup_on: Setup::Compartments,
     setup: |_| {},
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: || {
         vec![
             (

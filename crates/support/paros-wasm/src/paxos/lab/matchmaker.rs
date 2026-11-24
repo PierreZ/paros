@@ -1,9 +1,9 @@
 //! The exercise of lesson 7, Matchmaker Paxos: the old acceptor set.
 
-use super::Exercise;
 use super::Extra;
 use super::MATCHMAKERS;
 use super::Setup;
+use super::{Exercise, NO_PARTS, NONE};
 use crate::paxos::action::Action;
 use crate::paxos::level::common::crash;
 use crate::paxos::level::common::propose;
@@ -32,6 +32,9 @@ pub(super) const OLD_SET: Exercise = Exercise {
         lab.settle(|_| true);
         lab.act(&crash(0));
     },
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: || vec![("Node 3 starts an election", Extra::Act(elect(3)))],
     goal: |lab| {
         lab.view_of_world()

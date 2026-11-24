@@ -16,6 +16,17 @@
 //!
 //! The engine draws no randomness, so a list of moves is a full replay: undo
 //! starts the exercise again and plays every move but the last.
+//!
+//! A guided exercise (`gap` is the first) also has:
+//! - an intro: the setup in [`Step`]s, each a sentence and its moves, which
+//!   the page plays on the stage before the job ([`Lab::intro_step`]);
+//! - parts: the goal as a checklist of [`Part`]s, each a predicate with two
+//!   hints (the idea, the plan), the move to press now, and a predicate that
+//!   says when it cannot hold again ([`LabView::parts`], [`LabView::hint`],
+//!   [`LabView::stuck`]); the goal is that every part holds;
+//! - a guide: a solution in [`Step`]s, which the tests play and which "Show
+//!   me how" plays on the page ([`Lab::guide_step`]). A lab that played a
+//!   guide step is a demo: its goal never counts as solved.
 
 use std::collections::BTreeMap;
 
@@ -92,6 +103,13 @@ pub struct Exercise {
     /// The moves played before the reader's first one. They are not the
     /// reader's: undo never takes one back.
     setup: fn(&mut Lab),
+    /// The moves played after `setup`, step by step, with a sentence each:
+    /// the page plays them before the job. Not the reader's either.
+    intro: &'static [Step],
+    /// The goal as a checklist; empty when the goal is one sentence.
+    parts: &'static [Part],
+    /// A solution step by step, with a sentence each, for "Show me how".
+    guide: &'static [Step],
     /// The moves other than deliver and drop, with their button text.
     extras: fn() -> Vec<(&'static str, Extra)>,
     /// Whether the goal holds.
@@ -103,6 +121,37 @@ pub struct Exercise {
     )]
     solution: fn(&mut Lab),
 }
+
+/// One step of an intro or a guide: a sentence, then the moves it plays.
+pub struct Step {
+    /// What the step does and why, in one or two sentences.
+    pub says: &'static str,
+    /// Its moves.
+    pub play: fn(&mut Lab),
+}
+
+/// One line of the goal of a guided exercise.
+pub struct Part {
+    /// The line, as the checklist shows it.
+    pub label: &'static str,
+    /// Whether it holds now.
+    pub holds: fn(&Lab) -> bool,
+    /// The first hint: the idea.
+    pub idea: &'static str,
+    /// The second hint: the plan.
+    pub plan: &'static str,
+    /// The third hint: the move to press now, if one of the page's buttons
+    /// is it.
+    pub next: fn(&Lab) -> Option<Move>,
+    /// Whether it cannot hold again, whatever the reader does now.
+    pub dead: fn(&Lab) -> bool,
+    /// What the page says when it cannot hold again.
+    pub dead_says: &'static str,
+}
+
+/// An exercise with no intro, no parts or no guide.
+const NONE: &[Step] = &[];
+const NO_PARTS: &[Part] = &[];
 
 /// Every exercise, in course order.
 #[must_use]
@@ -228,8 +277,23 @@ pub struct LabView {
     pub refused: Option<String>,
     /// How many moves the reader made.
     pub moves: usize,
-    /// Whether the goal holds.
+    /// Whether the goal holds. Never in a demo.
     pub solved: bool,
+    /// The goal as a checklist (a guided exercise); empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartView>,
+    /// The hint of the first line that does not hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<HintView>,
+    /// A line that cannot hold again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck: Option<StuckView>,
+    /// How many intro steps the exercise has.
+    pub intro: usize,
+    /// How many guide steps the exercise has ("Show me how").
+    pub guide: usize,
+    /// A guide step played: "Show me how" runs.
+    pub demo: bool,
     /// Why the goal matters, once it holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done: Option<String>,
@@ -277,6 +341,71 @@ pub struct Lab {
     dropped: BTreeMap<(String, String), usize>,
     said: Vec<String>,
     refusal: Option<String>,
+    /// The frames of the step being played, while an intro or a guide step
+    /// plays: one per move.
+    record: Option<Vec<Frame>>,
+    /// The view before the intro, and each intro step as it played.
+    intro_start: Option<LabView>,
+    intro: Vec<Played>,
+    /// A guide step played: the goal no longer counts as solved.
+    demo: bool,
+    /// A guide step plays now: its moves are not refused as the reader's.
+    guiding: bool,
+}
+
+/// One move of an intro or a guide step, as the page plays it: the message
+/// that crosses (lost or not), then the view after it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Frame {
+    /// The message that the move delivered or dropped; none for another
+    /// move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<u64>,
+    /// The move dropped the message.
+    pub lost: bool,
+    /// The view after the move.
+    pub view: LabView,
+}
+
+/// One step as it played: its sentence and its frames.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Played {
+    /// The step's sentence.
+    pub says: String,
+    /// One frame per move, in order.
+    pub frames: Vec<Frame>,
+}
+
+/// One line of the checklist, as the page draws it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PartView {
+    /// The line.
+    pub label: String,
+    /// It holds now.
+    pub holds: bool,
+}
+
+/// The hint of the first line that does not hold, in three levels.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HintView {
+    /// The line, by its index in [`LabView::parts`].
+    pub part: usize,
+    /// The idea.
+    pub idea: String,
+    /// The plan.
+    pub plan: String,
+    /// The move to press now, if a button of the page is it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Move>,
+}
+
+/// A line of the goal that cannot hold again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StuckView {
+    /// The line, by its index in [`LabView::parts`].
+    pub part: usize,
+    /// Why, and what to do (undo).
+    pub says: String,
 }
 
 impl Lab {
@@ -305,8 +434,20 @@ impl Lab {
             dropped: BTreeMap::new(),
             said: Vec::new(),
             refusal: None,
+            record: None,
+            intro_start: None,
+            intro: Vec::new(),
+            demo: false,
+            guiding: false,
         };
         (exercise.setup)(&mut lab);
+        if !exercise.intro.is_empty() {
+            lab.intro_start = Some(lab.view());
+            for step in exercise.intro {
+                let played = lab.recorded(step);
+                lab.intro.push(played);
+            }
+        }
         lab.moves.clear();
         lab.delivered.clear();
         lab.dropped.clear();
@@ -323,6 +464,54 @@ impl Lab {
         self.game_mut()
             .act(action)
             .expect("the setup of an exercise is a run that works");
+        self.frame(None, false);
+    }
+
+    /// Keep a frame of the move just played, while a step is recorded.
+    fn frame(&mut self, message: Option<u64>, lost: bool) {
+        if let Some(mut frames) = self.record.take() {
+            frames.push(Frame {
+                message,
+                lost,
+                view: self.view(),
+            });
+            self.record = Some(frames);
+        }
+    }
+
+    /// Play `step` and keep a frame of each of its moves.
+    fn recorded(&mut self, step: &Step) -> Played {
+        assert!(self.record.is_none(), "one step is recorded at a time");
+        self.record = Some(Vec::new());
+        (step.play)(self);
+        let frames = self.record.take().expect("the step was recorded");
+        Played {
+            says: step.says.to_string(),
+            frames,
+        }
+    }
+
+    /// The view before the intro, when the exercise has one.
+    #[must_use]
+    pub fn intro_start(&self) -> Option<&LabView> {
+        self.intro_start.as_ref()
+    }
+
+    /// Intro step `n` as it played at the start, if the intro has one.
+    #[must_use]
+    pub fn intro_step(&self, n: usize) -> Option<&Played> {
+        self.intro.get(n)
+    }
+
+    /// Play guide step `n` on this lab, if the guide has one. The lab is a
+    /// demo from then on: its goal never counts as solved.
+    pub fn guide_step(&mut self, n: usize) -> Option<Played> {
+        let step = self.exercise.guide.get(n)?;
+        self.demo = true;
+        self.guiding = true;
+        let played = self.recorded(step);
+        self.guiding = false;
+        Some(played)
     }
 
     /// Play `verb` as part of the setup.
@@ -334,12 +523,17 @@ impl Lab {
         self.desk_mut()
             .act(verb)
             .expect("the setup of an exercise is a run that works");
+        self.frame(None, false);
     }
 
     /// Play one move. A refused move changes nothing and says why.
     pub fn play(&mut self, chosen: &Move) {
         match chosen {
             Move::Reset => *self = Self::start(self.exercise),
+            // A demo plays its guide alone: the reader starts again first.
+            _ if self.demo && !self.guiding => {
+                self.refusal = Some("Start again to play it yourself.".to_string());
+            }
             Move::Undo => {
                 let mut moves = std::mem::take(&mut self.moves);
                 moves.pop();
@@ -358,6 +552,11 @@ impl Lab {
                         self.moves.push(other.clone());
                         self.refusal = None;
                         self.said = self.texts();
+                        match other {
+                            Move::Deliver { id } => self.frame(Some(*id), false),
+                            Move::Drop { id } => self.frame(Some(*id), true),
+                            _ => self.frame(None, false),
+                        }
                     }
                     Err(why) => self.refusal = Some(why),
                 }
@@ -449,10 +648,55 @@ impl Lab {
             .unwrap_or(0)
     }
 
-    /// Whether the goal holds.
+    /// Whether the goal holds. A demo's goal never counts.
     #[must_use]
     pub fn solved(&self) -> bool {
+        !self.demo && self.goal()
+    }
+
+    /// Whether the goal holds, demo or not.
+    #[must_use]
+    pub fn goal(&self) -> bool {
         (self.exercise.goal)(self)
+    }
+
+    /// The moves the reader played, oldest first.
+    #[must_use]
+    pub fn moves(&self) -> &[Move] {
+        &self.moves
+    }
+
+    /// The checklist, the hint and the dead end of a guided exercise.
+    fn guided(&self) -> (Vec<PartView>, Option<HintView>, Option<StuckView>) {
+        let parts = self.exercise.parts;
+        let holds: Vec<bool> = parts.iter().map(|part| (part.holds)(self)).collect();
+        let stuck = parts
+            .iter()
+            .enumerate()
+            .find(|(k, part)| !holds[*k] && (part.dead)(self))
+            .map(|(k, part)| StuckView {
+                part: k,
+                says: part.dead_says.to_string(),
+            });
+        let hint = if stuck.is_some() {
+            None
+        } else {
+            holds.iter().position(|holds| !holds).map(|k| HintView {
+                part: k,
+                idea: parts[k].idea.to_string(),
+                plan: parts[k].plan.to_string(),
+                next: (parts[k].next)(self),
+            })
+        };
+        let lines = parts
+            .iter()
+            .zip(&holds)
+            .map(|(part, holds)| PartView {
+                label: part.label.to_string(),
+                holds: *holds,
+            })
+            .collect();
+        (lines, hint, stuck)
     }
 
     fn game(&self) -> &Game {
@@ -539,6 +783,7 @@ impl Lab {
             Engine::Compart(desk) => (desk.logs(), desk.nodes()),
         };
         let solved = self.solved();
+        let (parts, hint, stuck) = self.guided();
         LabView {
             id: self.exercise.id.to_string(),
             title: self.exercise.title.to_string(),
@@ -566,6 +811,12 @@ impl Lab {
             refused: self.refusal.clone(),
             moves: self.moves.len(),
             solved,
+            parts,
+            hint,
+            stuck,
+            intro: self.exercise.intro.len(),
+            guide: self.exercise.guide.len(),
+            demo: self.demo,
             done: solved.then(|| self.exercise.done.to_string()),
         }
     }

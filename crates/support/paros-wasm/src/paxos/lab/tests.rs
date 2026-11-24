@@ -256,3 +256,166 @@ fn a_refused_move_changes_nothing_and_says_why() {
         "this exercise has no extra move"
     );
 }
+
+/// Play every guide step of `id` on a fresh lab, as "Show me how" does.
+fn demo(id: &str) -> (Lab, Vec<Played>) {
+    let mut lab = Lab::new(id).expect("the exercise exists");
+    let mut played = Vec::new();
+    let mut n = 0;
+    while let Some(step) = lab.guide_step(n) {
+        played.push(step);
+        n += 1;
+    }
+    assert_eq!(n, lab.view().guide, "every guide step plays");
+    (lab, played)
+}
+
+#[test]
+fn a_guide_reaches_the_goal_and_never_counts_as_solved() {
+    for exercise in exercises().iter().filter(|e| !e.guide.is_empty()) {
+        let (lab, played) = demo(exercise.id);
+        assert!(lab.goal(), "{}: the guide reaches the goal", exercise.id);
+        let view = lab.view();
+        assert!(view.demo);
+        assert!(!view.solved, "{}: a demo is not solved", exercise.id);
+        assert!(view.done.is_none());
+        assert!(
+            view.parts.iter().all(|part| part.holds),
+            "{}: every line holds",
+            exercise.id
+        );
+        for step in &played {
+            assert_ne!(
+                step.says.trim(),
+                "",
+                "{}: a guide step says what it does",
+                exercise.id
+            );
+            assert!(
+                !step.frames.is_empty(),
+                "{}: a guide step moves",
+                exercise.id
+            );
+        }
+    }
+}
+
+#[test]
+fn a_demo_refuses_the_readers_moves_until_it_starts_again() {
+    let (mut lab, _) = demo("gap");
+    let moves = lab.view().moves;
+    lab.play(&Move::Undo);
+    assert!(lab.view().refused.is_some());
+    assert_eq!(lab.view().moves, moves);
+    lab.play(&Move::Reset);
+    let view = lab.view();
+    assert!(!view.demo);
+    assert_eq!(view.moves, 0);
+    assert!(view.refused.is_none());
+}
+
+#[test]
+fn the_gap_guide_chooses_charlie_at_slot_2_before_node_0_crashes() {
+    let mut lab = Lab::new("gap").expect("gap exists");
+    for n in 0..3 {
+        lab.guide_step(n).expect("the guide has five steps");
+    }
+    let world = lab.view_of_world();
+    assert!(chosen_at(&world, 2, "charlie"));
+    assert!(!chosen_at_any(&world, 1));
+}
+
+#[test]
+fn the_intro_plays_each_move_from_the_view_before_it() {
+    for exercise in exercises().iter().filter(|e| !e.intro.is_empty()) {
+        let lab = Lab::new(exercise.id).expect("the exercise exists");
+        let mut before = lab.intro_start().expect("an intro has a start").clone();
+        let mut n = 0;
+        while let Some(step) = lab.intro_step(n) {
+            assert!(
+                !step.frames.is_empty(),
+                "{}: an intro step moves",
+                exercise.id
+            );
+            for frame in &step.frames {
+                if let Some(id) = frame.message {
+                    assert!(
+                        before.wire.iter().any(|m| m.id == id),
+                        "{}: a frame moves a message of the wire before it",
+                        exercise.id
+                    );
+                }
+                before = frame.view.clone();
+            }
+            n += 1;
+        }
+        assert_eq!(n, exercise.intro.len());
+        // The last frame is the state the reader starts from, with no move
+        // of the reader's.
+        let start = lab.view();
+        assert_eq!(start.moves, 0);
+        assert_eq!(before.wire.len(), start.wire.len());
+        assert_eq!(before.logs, start.logs);
+    }
+}
+
+#[test]
+fn the_third_hint_alone_solves_a_guided_exercise() {
+    for exercise in exercises().iter().filter(|e| !e.parts.is_empty()) {
+        let mut lab = Lab::new(exercise.id).expect("the exercise exists");
+        for _ in 0..MOVES {
+            let view = lab.view();
+            if view.solved {
+                break;
+            }
+            assert!(
+                view.stuck.is_none(),
+                "{}: the hints never lead to a dead end",
+                exercise.id
+            );
+            let hint = view.hint.expect("a goal that does not hold has a hint");
+            let next = hint.next.expect("each hint names a move");
+            lab.play(&next);
+            assert!(
+                lab.view().refused.is_none(),
+                "{}: the hinted move {next:?} is refused",
+                exercise.id
+            );
+        }
+        let view = lab.view();
+        assert!(view.solved, "{}: the hints reach the goal", exercise.id);
+        assert!(view.hint.is_none());
+        assert!(view.parts.iter().all(|part| part.holds));
+    }
+}
+
+#[test]
+fn a_vote_at_slot_1_is_a_dead_end_that_undo_leaves() {
+    let mut lab = Lab::new("gap").expect("gap exists");
+    lab.extra("The client writes bravo");
+    lab.deliver(|m| m.kind == "Accept" && m.slot == Some(1) && m.to != "n0");
+    let view = lab.view();
+    let stuck = view
+        .stuck
+        .expect("slot 1 has a vote: the first line cannot hold");
+    assert_eq!(stuck.part, 0);
+    assert!(view.hint.is_none());
+    lab.play(&Move::Undo);
+    let view = lab.view();
+    assert!(view.stuck.is_none());
+    assert_eq!(view.hint.map(|hint| hint.part), Some(0));
+}
+
+#[test]
+fn an_exercise_with_parts_has_the_goal_of_its_parts() {
+    for exercise in exercises().iter().filter(|e| !e.parts.is_empty()) {
+        let mut lab = Lab::start(exercise);
+        assert!(!lab.goal());
+        (exercise.solution)(&mut lab);
+        assert_eq!(
+            lab.goal(),
+            exercise.parts.iter().all(|part| (part.holds)(&lab))
+        );
+        assert!(lab.solved());
+    }
+}

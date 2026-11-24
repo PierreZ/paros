@@ -1,10 +1,10 @@
 //! The exercises of the quorums page: lesson 2, two of three, and lesson 5, a grid column.
 
 use super::DECREE;
-use super::Exercise;
 use super::Extra;
 use super::GRID;
 use super::Setup;
+use super::{Exercise, NO_PARTS, NONE};
 use crate::paxos::level::common::crash;
 use crate::paxos::level::common::open;
 use crate::paxos::level::common::propose;
@@ -20,6 +20,9 @@ pub(super) const MAJORITY: Exercise = Exercise {
            three share an acceptor: that shared acceptor is how a later ballot finds alpha.",
     setup_on: Setup::Level(DECREE),
     setup: |lab| lab.act(&open(5, "alpha")),
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: Vec::new,
     goal: |lab| {
         let world = lab.view_of_world();
@@ -45,6 +48,9 @@ pub(super) const GRID_COLUMN: Exercise = Exercise {
         lab.settle(|_| true);
         lab.act(&crash(3));
     },
+    intro: NONE,
+    parts: NO_PARTS,
+    guide: NONE,
     extras: || {
         vec![
             ("The client writes alpha", Extra::Act(propose(0, "alpha"))),
