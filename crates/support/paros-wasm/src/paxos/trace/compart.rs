@@ -202,6 +202,11 @@ struct Run {
     /// The batch on its way to the leader, and its slot once proposed.
     batch: Option<(Batch<u64>, Option<Slot>)>,
     recording: bool,
+    /// The chapter of the tour that plays the run, if it is a tour run.
+    tour: Option<story::Tour>,
+    /// Whether the replicas run. A replica that does not run yet has no
+    /// address on the wire: no message goes to it.
+    replicas_started: bool,
 }
 
 impl Run {
@@ -269,6 +274,8 @@ impl Run {
             decided: BTreeSet::new(),
             batch: None,
             recording: false,
+            tour: None,
+            replicas_started: true,
         };
         let leader = &mut run.nodes[0];
         leader.set_election_timeout(1);
@@ -300,7 +307,7 @@ impl Run {
     /// Where a message to `audience` goes. A learner is every acceptor and,
     /// in the compartmentalized deployment, every replica.
     fn learners(&self, audience: &Audience, out: &mut Vec<Who>) {
-        if *audience == Audience::Learners && self.split() {
+        if *audience == Audience::Learners && self.split() && self.replicas_started {
             out.extend((0..REPLICAS as u64).map(Who::Replica));
         }
     }
@@ -1110,6 +1117,32 @@ impl Run {
         self
     }
 
+    /// Mark the run as a tour run: chapter `chapter` of the tour plays it,
+    /// under `title` (`tests/paxos_tour.rs` holds it to the rules of the
+    /// tour).
+    fn tour(&mut self, chapter: &str, title: &str) -> &mut Self {
+        assert!(self.tour.is_none(), "a run is in one chapter");
+        self.tour = Some(story::Tour {
+            chapter: chapter.to_string(),
+            title: title.to_string(),
+        });
+        self
+    }
+
+    /// Link the open beat to `run`, the run of the page that goes deeper.
+    fn more(&mut self, run: &str) -> &mut Self {
+        self.beats.more(run);
+        self
+    }
+
+    /// Make the lanes of `who` appear at the open beat.
+    fn enter(&mut self, who: &[Who]) -> &mut Self {
+        let lanes: Vec<String> = who.iter().map(|who| who.lane()).collect();
+        let lanes: Vec<&str> = lanes.iter().map(String::as_str).collect();
+        self.beats.enter(&lanes);
+        self
+    }
+
     /// End a run: a screen that goes back to the list of runs.
     fn back(&mut self, says: &str) {
         self.story(says).choice("Choose another case", "base", TURN);
@@ -1192,7 +1225,7 @@ impl Run {
             lanes: None,
             grid: None,
             steps: self.steps,
-            tour: None,
+            tour: self.tour,
         }
     }
 }
@@ -1661,6 +1694,157 @@ fn break_the_rule() -> Scenario {
     run.finish("break-the-rule", "Break the rule: commit after one vote")
 }
 
+/// The tour run of chapter "Split the leader": one world, no restart. The
+/// leader first does all the work; then the replicas, the proxy leaders and
+/// the batcher enter one by one and take work off it; then a proxy leader
+/// crashes and the leader takes its slot back; then a replica reads with
+/// no leader.
+fn tour() -> Scenario {
+    let mut run = Run::new(Layout::Compartmentalized);
+    tour_split(&mut run);
+    tour_faults(&mut run);
+    run.finish("tour", "Split the leader")
+}
+
+/// The first half of the tour run: the leader alone, then each role enters
+/// and takes its work.
+fn tour_split(run: &mut Run) {
+    let replicas = [Who::Replica(0), Who::Replica(1)];
+    let proxies = [Who::Proxy(0), Who::Proxy(1)];
+    run.tour("compartments", "Split the leader");
+    run.replicas_started = false;
+    run.story("Node 0 leads three acceptors. It won its election, as in Multi-Paxos.");
+    run.story("A client writes alpha. Node 0 sends every Accept itself and counts every vote.");
+    let slot = run.write(&["alpha"], Delegation::Colocated);
+    run.event(
+        "the client writes alpha",
+        format!(
+            "A client writes alpha. Node 0 gives it slot {} and sends the Accepts itself.",
+            slot.0
+        ),
+    );
+    run.settle(|_, _, _| false);
+    run.holds(
+        |run| run.chosen().iter().any(|line| line == "slot 0 = alpha"),
+        "the leader alone chooses alpha",
+    );
+    run.story("Every message of the write passed node 0. One machine sets the pace of the log.")
+        .more("colocated");
+    run.story("Two replicas start. On node 0's beat, they ask it for the chosen slots they lack.")
+        .enter(&replicas);
+    run.replicas_started = true;
+    run.leader_beats();
+    run.event(
+        "node 0 beats",
+        "Node 0 beats. It tells every learner that it leads and how far the log is chosen."
+            .to_string(),
+    );
+    run.settle(|_, _, _| false);
+    run.holds(
+        |run| {
+            run.replicas
+                .iter()
+                .all(|replica| replica.replica().chosen_index() == Some(Slot(0)))
+        },
+        "both replicas learn alpha",
+    );
+    run.story("The replicas learn the log and vote on nothing. Reads can go to them.");
+    run.story("Two proxy leaders enter. Slot s goes to proxy leader s mod 2.")
+        .enter(&proxies);
+    run.story("A client writes bravo. Node 0 gives it slot 1 and hands it to proxy leader 1.");
+    run.client_writes("bravo");
+    run.settle_before(
+        |_, _, _| false,
+        |message| matches!(message, Message::Accepted { .. }),
+    );
+    run.story("Proxy leader 1 counts the votes. A majority voted, so it tells every learner.")
+        .more("base");
+    run.settle(|_, _, _| false);
+    run.holds(
+        |run| run.chosen().iter().any(|line| line == "slot 1 = bravo"),
+        "the proxy leader chooses bravo",
+    );
+    run.story("Node 0 sent one message for this write. The proxy leaders did the rest.");
+    run.story("A batcher enters. Two writers send charlie and delta to it.")
+        .enter(&[Who::Batcher]);
+    run.batch(&[(1, "charlie"), (2, "delta")]);
+    run.story("Node 0 gives both writes one slot. One round of Phase 2 chooses both.")
+        .more("batcher");
+    run.settle(|_, _, _| false);
+    run.holds(|run| run.chosen().len() == 3, "two writes take one slot");
+    run.story("The batcher cuts the answer, so each writer gets its own position.");
+    run.unbatch();
+}
+
+/// The second half of the tour run: a proxy leader crashes, and a replica
+/// reads with no leader.
+fn tour_faults(run: &mut Run) {
+    run.story("Now proxy leader 1 crashes. It holds nothing on disk, so nothing is lost.")
+        .more("proxy-crash");
+    run.proxies[1] = None;
+    run.event(
+        "proxy leader 1 crashes",
+        "Proxy leader 1 crashes. It holds nothing on disk, so nothing is lost with it.".to_string(),
+    );
+    run.story("A client writes echo. Slot 3 goes to proxy leader 1, and the hand-off is lost.");
+    let slot = run.client_writes("echo");
+    assert_eq!(slot, Slot(3), "echo takes slot 3, proxy leader 1's");
+    run.settle(|_, _, _| false);
+    run.story(&format!(
+        "Node 0 sends slot 3 again on each beat. After {TAKE_BACK_AFTER} beats with no answer, \
+         it takes the slot back."
+    ));
+    let mut beats = 0;
+    while !run.nodes[0].delegated_rounds().is_empty() {
+        beats += 1;
+        assert!(beats <= TAKE_BACK_AFTER + 1, "the take-back budget holds");
+        let taken = run.leader_beats();
+        let says = if taken.is_empty() {
+            "Node 0 beats. Slot 3 is not chosen yet, so it sends the slot to proxy leader 1 \
+             again."
+                .to_string()
+        } else {
+            format!(
+                "Node 0 beats. Proxy leader 1 did not answer {TAKE_BACK_AFTER} times, so node 0 \
+                 takes slot 3 back and sends the Accepts itself."
+            )
+        };
+        run.event("node 0 beats", says);
+        if taken.is_empty() {
+            run.settle(|_, _, _| false);
+        }
+    }
+    run.story("Node 0 sends the Accepts of slot 3 itself, and echo is chosen.");
+    run.settle(|_, _, _| false);
+    run.holds(
+        |run| run.chosen().iter().any(|line| line == "slot 3 = echo"),
+        "echo is chosen after the take-back",
+    );
+    run.story("A dead proxy leader costs a few beats, never a value.");
+    run.story(
+        "A client reads from replica 1. It asks each acceptor for the highest slot it voted in.",
+    )
+    .more("read");
+    run.replicas[1].quorum_read_in(1, None);
+    run.drain(Who::Replica(1));
+    run.event(
+        "replica 1 reads",
+        "A client reads from replica 1. The replica asks each acceptor for the highest slot \
+         that it voted in."
+            .to_string(),
+    );
+    run.settle_before(
+        |_, _, _| false,
+        |message| matches!(message, Message::PreReadAck { .. }),
+    );
+    run.story("A majority answers, and replica 1 has learned that far. It serves the read with no leader.");
+    run.settle(|_, _, _| false);
+    run.holds(|run| !run.reads[1].is_empty(), "replica 1 serves the read");
+    run.story(
+        "Node 0 now only orders the writes. The other work runs on machines that can be added.",
+    );
+}
+
 /// The page: the compartmentalized deployment and its cases.
 pub(super) fn trace() -> Trace {
     super::assemble(
@@ -1676,6 +1860,7 @@ pub(super) fn trace() -> Trace {
             lost_vote(),
             proxy_nack(),
             break_the_rule(),
+            tour(),
         ],
     )
 }

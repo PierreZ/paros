@@ -156,7 +156,7 @@ fn a_replica_that_learns_in_order_never_waits() {
         "replica 0 learns both slots"
     );
     assert!(
-        !lab.desk().waited(0) && !lab.solved(),
+        !lab.desk().held(0, 1) && !lab.solved(),
         "in order, it never waits"
     );
 }
@@ -168,7 +168,7 @@ fn a_replica_holds_a_slot_above_its_prefix_and_says_so() {
     lab.extra("The client writes bravo");
     lab.settle(|m| !(m.kind == "Commit" && m.to == "r0" && m.slot == Some(0)));
     assert_eq!(lab.desk().learned(0), None, "slot 0 is not learned yet");
-    assert!(lab.desk().waited(0));
+    assert!(lab.desk().held(0, 1));
     assert!(!lab.view().two_values, "two slots are not two values");
     let view = lab.view();
     let r0 = view
@@ -509,6 +509,8 @@ fn replay(id: &str, moves: &[Move]) -> Lab {
 /// moves (a fixed list of seeds: the run is the same each time).
 #[test]
 fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
+    let mut dead_ends = 0;
+    let mut parts_judged = 0;
     for exercise in exercises().iter().filter(|e| !e.parts.is_empty()) {
         let mut stuck = 0;
         // The dead ends judged so far, per part, and the tries from a live
@@ -595,24 +597,20 @@ fn from_any_state_the_hints_reach_the_goal_or_a_dead_end_is_named() {
                 exercise.id
             );
         }
-        // The walk meets the dead ends of more than one part, and the tries
-        // reach the goal from live states.
-        assert!(
-            stuck > 0,
-            "{}: some random moves reach a dead end",
-            exercise.id
-        );
+        // The tries reach the goal from live states. A dead end that no
+        // part names fails the hint walk above, so an exercise whose walk
+        // names no dead end has none that these moves reach.
         assert!(
             reached > 0,
             "{}: the tries reach the goal from a live state",
             exercise.id
         );
-        assert!(
-            judged.iter().filter(|n| **n > 0).count() >= 2,
-            "{}: dead ends of two parts are judged",
-            exercise.id
-        );
+        dead_ends += stuck;
+        parts_judged += judged.iter().filter(|n| **n > 0).count();
     }
+    // The walk judges named dead ends, of more than one part.
+    assert!(dead_ends > 0, "some random moves reach a dead end");
+    assert!(parts_judged >= 2, "dead ends of two parts are judged");
 }
 
 /// Slot 2 lost its Accepts, but a vote at slot 3 sets a new leader's
@@ -649,4 +647,55 @@ fn a_vote_above_slot_2_keeps_slot_2_alive() {
         lab.must(&next);
     }
     assert!(lab.view().solved, "the hints reach the goal");
+}
+
+/// Alpha is chosen before a vote is lost: proxy leader 0 closes slot 0, so
+/// no vote for it comes again, and the first line is a dead end.
+#[test]
+fn votes_that_choose_alpha_first_are_a_dead_end() {
+    let mut lab = Lab::new("lost-votes").expect("lost-votes exists");
+    lab.extra("The client writes alpha");
+    lab.settle(|_| true);
+    let stuck = lab.view().stuck.expect("no vote for slot 0 comes again");
+    assert_eq!(stuck.part, 0);
+}
+
+/// A lost hand-off of slot 0: no proxy leader counts it, and node 0 does
+/// not beat in this exercise, so alpha is never chosen.
+#[test]
+fn a_lost_hand_off_of_slot_0_is_a_dead_end() {
+    let mut lab = Lab::new("lost-votes").expect("lost-votes exists");
+    lab.extra("The client writes alpha");
+    lab.drop_all(|m| m.kind == "Accept" && m.to == "p0");
+    assert!(lab.view().stuck.is_some(), "slot 0 is never chosen");
+}
+
+/// Replica 0 learns slot 0 first: it can no longer learn slot 1 before
+/// slot 0, and the hint is gone until undo.
+#[test]
+fn a_replica_that_learns_slot_0_first_is_a_dead_end() {
+    let mut lab = Lab::new("replica-waits").expect("replica-waits exists");
+    lab.extra("The client writes alpha");
+    while !lab.desk().knows(0, 0) {
+        lab.deliver(|_| true);
+    }
+    let view = lab.view();
+    assert_eq!(view.stuck.map(|stuck| stuck.part), Some(0));
+    assert!(view.hint.is_none());
+    lab.play(&Move::Undo);
+    assert!(lab.view().stuck.is_none());
+}
+
+/// The Commit of slot 1 to replica 0 is lost after replica 0 held it: the
+/// second line is a dead end, since no proxy leader sends a Commit again.
+#[test]
+fn a_lost_commit_to_replica_0_is_a_dead_end() {
+    let mut lab = Lab::new("replica-waits").expect("replica-waits exists");
+    lab.extra("The client writes alpha");
+    lab.extra("The client writes bravo");
+    lab.settle(|m| m.slot == Some(1));
+    assert!(lab.desk().held(0, 1));
+    lab.settle(|m| m.slot == Some(0) && m.kind != "Commit");
+    lab.drop_all(|m| m.kind == "Commit" && m.to == "r0");
+    assert_eq!(lab.view().stuck.map(|stuck| stuck.part), Some(1));
 }

@@ -642,9 +642,15 @@ fn every_run_is_a_story_that_leads_back(page_name: &str) {
     let base = run(&trace, "base");
     let turn = base.beats.last().expect("the base run has beats");
     let opened: Vec<&str> = turn.choices.iter().map(|c| c.run.as_str()).collect();
-    let others: Vec<&str> = trace.scenarios[1..].iter().map(|r| r.id.as_str()).collect();
+    // A tour run is played by the tour (`src/tour.ts` of the site), not
+    // opened from the choices: it ends on the chapter's own buttons.
+    let lessons: Vec<_> = trace.scenarios[1..]
+        .iter()
+        .filter(|run| run.tour.is_none())
+        .collect();
+    let others: Vec<&str> = lessons.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(opened, others, "the last screen offers every other run");
-    for run in &trace.scenarios[1..] {
+    for run in lessons {
         assert!(run.beats.len() >= 3, "{}: a story", run.id);
         let last = run.beats.last().expect("beats");
         assert_eq!(
