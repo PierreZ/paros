@@ -23,10 +23,12 @@ env:
   CARGO_TERM_COLOR: always
   # The sets of tests that the jobs below split (nextest filter expressions).
   # Every test of the workspace runs in exactly one job: `test` runs the
-  # complement of COVERAGE, ROLES_COVERAGE and TRACES, `trace-edits` runs EDITS, which is
-  # inside TRACES, and the two shards of `traces` run the rest of TRACES, cut
-  # in two by REFUSALS. `coverage-shard` runs COVERAGE (`--test coverage`),
-  # and `trace-edits` also runs ROLES_COVERAGE, the gate of the journal roles.
+  # complement of COVERAGE, ROLES_COVERAGE and TRACES, the two shards of
+  # `trace-edits` run EDITS, which is inside TRACES, cut in two by count, and
+  # the two shards of `traces` run the rest of TRACES, cut in two by
+  # REFUSALS. `coverage-shard` runs COVERAGE (`--test coverage`), and the
+  # first shard of `trace-edits` also runs ROLES_COVERAGE, the gate of the
+  # journal roles.
   COVERAGE: package(consensus-sim) & binary(coverage)
   ROLES_COVERAGE: package(journal-sim) & binary(roles_coverage)
   TRACES: >-
@@ -263,12 +265,18 @@ jobs:
   # refuses the driver mutants of other flavors (#1198). A change of the
   # walks can change the traces they start from, so they run for a change of
   # the code. In debug they took the `test` job over its 30 minutes. The set
-  # is EDITS of the workflow's `env`.
+  # is EDITS of the workflow's `env`. In one job they took 24 minutes on main
+  # and 30 on a busy runner, so two shards cut EDITS in two by count
+  # (`--partition count:i/2`): every test of EDITS runs in exactly one shard.
   trace-edits:
     needs: scope
     if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/nix
@@ -276,15 +284,19 @@ jobs:
         with:
           key: trace-edits
           cache-on-failure: true
-      - name: Check that every trace spec refuses the edits of its walks
+      - name: Check that every trace spec refuses the edits of its walks (shard ${{ matrix.shard }} of 2)
+        env:
+          SHARD: ${{ matrix.shard }}
         run: >-
           nix develop --command cargo nextest run --profile ci --release
-          -p consensus-sim --test traces -E "$EDITS"
+          -p consensus-sim --test traces -E "$EDITS" --partition "count:$SHARD/2"
       # The coverage gate of the journal roles (#1326): the roles walks and
       # the whole journal reach every `probe!` of `paros_journal::roles`. It
       # walks thousands of timelines, so it runs in release here, not in the
-      # `test` job; it takes about one minute in release on four cores.
+      # `test` job; it takes about one minute in release on four cores. It
+      # runs in the first shard only.
       - name: Check that the walks reach every probe of the journal roles
+        if: ${{ matrix.shard == 1 }}
         run: >-
           nix develop --command cargo nextest run --profile ci --release
           -p journal-sim --test roles_coverage -E "$ROLES_COVERAGE"

@@ -125,7 +125,7 @@ Test only: `publish = false`.
   and cell ports; each controller is a process of its own, and the move `Mute` loses its reports
   so the other takes the term from a holder that runs), a shared reshape token, a client that
   writes, resends and resolves, crashes, the loss of a zone for a while, the loss of one machine
-  for good (`Lose`), lost register calls, register writes that one matchmaker only takes, and disk faults, the leader's retire and the heal of a
+  for good (`Lose`), lost register calls, register writes that one matchmaker only takes, copy asks and `Copied` notices that are lost or arrive again late (`Late`), the `Copied` notices of a deaf machine lost for a while (`Mute`), and disk faults, the leader's retire and the heal of a
   retired segment's replica set on the `Host` (#1314); its oracles (`AGREE`, `SEALED`, `FLIGHT`,
   `ANSWER`, `ONCE`, `ACKED`, `ALERTS`, `HEAL_HELD`, `BOUNDED_IN_FLIGHT`, `AGAIN`, `DISK`: every
   replica disk holds the chosen log, `STOPPED`: every leader that stops on its own has a true cause
