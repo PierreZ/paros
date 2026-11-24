@@ -940,7 +940,9 @@ impl Run {
                 let node = node_of(&to);
                 let leader = self.leaders.get_mut(&node).expect("a leader");
                 // The lab has no clock: the id of the delivery is its time.
-                let (proposed, effects) = leader.propose(*token, command.clone(), flight.id);
+                // The lab sends a few writes: the leader's window never fills.
+                let (proposed, effects) =
+                    leader.propose(*token, command.clone(), flight.id, usize::MAX);
                 match proposed {
                     Proposed::Slot(slot) => self.notes.push(format!(
                         "{} holds the write at slot {}.",
@@ -951,6 +953,7 @@ impl Run {
                         self.notes
                             .push(format!("{} does not write now.", party(&to)));
                     }
+                    Proposed::Busy => unreachable!("the lab's window never fills"),
                 }
                 self.leader_effects(node, effects);
                 None

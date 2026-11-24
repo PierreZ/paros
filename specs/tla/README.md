@@ -278,6 +278,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The journal v1 composed: Paxos inside each segment with the acceptors' disk and crashes between writes, the seal by the first leader of the next grid, the register writes that are partial or done, the boundary state, the replica set of each segment, the journal fold (`Write`, `Truncate`, `SetLeader` with `None` or a multi tag of `Tags`, folded as `None`; `Below`), retire, trim and the fenced reshape, across three segments | the fold, the `Resolve` call and the segment record in `paros-journal` (#1324 (paros-journal), traced by `FoldTrace`); the acceptor, the leader and the segment replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-state/` | #1189 (the journal state model) with #1309 (the state is the disk) |
 | The compaction of the journal roles: a replica's `Trim` and its blind fold, the acceptors' dropped ranges in their promises, a crash before the drop is durable, the laggard's jump | the replica, the leader and the acceptor of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-compact/` | #1326 (the journal roles over the core) |
 | CTRL in the journal roles: a vote damaged at a boot inside the contract, the leader's tri-state tally, a late answer that decides a blocked slot or skips a dropped one, the learn from a replica, the acceptor's repair at the higher ballot in one write | the leader, the acceptor and the replica of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-ctrl/` | #1326 (the journal roles over the core) |
+| The answer to a `Prepare` sent again: an acceptor answers again at a ballot it promised, with what its disk holds | the acceptor of `paros_journal::roles` (#1326, traced by `RolesTrace`) | `journal-repromise/` | #1326 (the journal roles over the core) |
 | Re-replication of a sealed segment: the controller's heal copies the segment from a full member of its set to a new replica, which counts only on its own complete copy, and writes the new set by compare-and-set; reads, a trim and a removed replica that comes back during the heal | not built (`paros-journal-control`, after #1189) | `re-replication/` | #1314 (re-replication of a sealed segment's replica set) |
 | The heal when a later plan asks a node again, the network delivers a request twice and late, and a node acts on its own view of the register: the highest copy per node, the term check of the heal's compare-and-set, the heal count of the record, a sent heal that ends only on an answer, and a fresh register value before an abandon or a copy wipes a node | `paros_journal::register` (`Rereplicate`, `SegmentRecord::heals`), `SegmentReplica::join`, the controller's heal in `paros_journal_control::role`; walked by `journal-sim`'s heal walk | `heal-reuse/` | #1314 (re-replication of a sealed segment's replica set) |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
@@ -3532,10 +3533,25 @@ the next slot of a client is above it. `JournalCtrl.tla` adds:
 | `ctrl` | pass | one grid of three, two writes that race for one slot, three ballots, one rot: the safety of `Journal.tla` and `JournalCompact.tla`, `OneValueAtBallot` (two readable votes at one slot and ballot carry one value, in memory and on disk) and `NoProposeBlocked` |
 | `ctrl_g2` | pass | two segments of one acceptor each, a seal: a blocked slot of the old grid below the end |
 | `ctrl_trunc` | pass | one grid of three, a write and a `Truncate` over it, two ballots, one rot: a compaction drops the blocked slot, and the leader skips it (`SkipCompacted`) |
+| `ctrl_re` | pass | `ctrl_trunc` with `SpecRR`: an acceptor answers a `Prepare` again at a ballot it promised (`Repromise`), so the probe, the skip and the decide meet a second answer that carries what its disk holds now. CI checks the states that 7 minutes of BFS reach; `ctrl_re_full` (`--all`) checks them all |
 | `ctrl_drop` | violation | control: a damage that drops the vote (`Damage = "drop"`) breaks `Agreement` |
 | `ctrl_peer` | violation | control: a repair from a peer's vote (`Repair = "peer"`) breaks `OneValueAtBallot` |
 | `ctrl_probe_drop` | violation | control: a probe that tallies an answer that dropped the slot (`ProbeDrops = "ignore"`) chooses a `Noop` over the chosen write and breaks `Agreement` |
 | `reach_blocked`, `reach_probe`, `reach_learn`, `reach_repair`, `reach_skip` | violation | the model blocks a slot, decides one on the probe, learns one, repairs a faulty vote, and skips a dropped one |
+
+### `journal-repromise/`: the answer to a `Prepare` sent again, for #1326
+
+An acceptor that gets a `Prepare` again at a ballot it already promised answers again with no
+write; the answer waits on its last batch, so it carries what its disk holds. `Repromise(a, b)`
+of `Journal.tla` is that answer, in `NextRe` and `SpecRe` (not in `Next`, which would make every
+check of `journal-state/` six times larger). `RolesTrace` maps the roles walk's `repromise` event
+to it. The folder holds only configurations: `Journal.tla` and `MC.tla` are those of
+`journal-state/`.
+
+| Check | Result | What it shows |
+|---|---|---|
+| `repromise` | pass | `order_atomic` with `SpecRe`: one segment of three acceptors, two ballots, a crash between writes; the safety of `Journal.tla` with the second answers |
+| `reach_repromise` | violation | the model sends a second promise answer at one ballot (`OnePromise`) |
 
 ### `re-replication/`: the heal of a sealed segment's replica set, for #1314
 

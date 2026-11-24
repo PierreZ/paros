@@ -284,6 +284,27 @@ fn a_stop_drops_only_the_held_outputs_of_its_role() {
 }
 
 #[test]
+fn a_role_that_ends_keeps_no_durable_entry_after_its_last_commit() {
+    let (disk, clock) = (Disk::default(), Hand::default());
+    let (mut driver, _) = proc(&disk, &clock);
+    start(&mut driver);
+    bump(&mut driver);
+    driver.input(Input::Deliver {
+        address: 1,
+        input: In::End,
+    });
+    assert_eq!(driver.take_stopped(), vec![(1, Stop::Done)]);
+    // The batch of the role that ended reaches the disk, but the role is
+    // gone: a role at its address later starts from its own read.
+    assert!(driver.poll());
+    assert_eq!(disk.records.borrow().len(), 1, "the last batch is durable");
+    assert!(
+        !driver.durable.contains_key(&1),
+        "a role that ended keeps no durable entry"
+    );
+}
+
+#[test]
 fn a_recorded_run_replays_to_the_same_effects() {
     let (disk, clock) = (Disk::default(), Hand::default());
     let (mut driver, events) = proc(&disk, &clock);

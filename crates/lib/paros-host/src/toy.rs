@@ -318,7 +318,7 @@ pub struct Disk {
 }
 
 impl Storage<Toy> for Disk {
-    fn commit(&mut self, ops: &[Op], _sync: bool) -> Result<(), StorageError> {
+    fn commit(&mut self, ops: &[Op]) -> Result<(), StorageError> {
         if self.fail_commit.replace(false) {
             return Err(StorageError("planted".into()));
         }

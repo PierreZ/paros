@@ -39,6 +39,8 @@
 (*                                                                         *)
 (* THE LOG. A slot holds a `Noop` (the election gap fill) or a command:    *)
 (*   [op "w", u, e, id]   a `Write` of one record. u is a uuid (a fenced   *)
+(*   [op "w", u, e, id, n] a `Write` of n records, at the positions e to   *)
+(*                        e + n - 1 (`RolesTrace.tla`, the wide walk).     *)
 (*                        write at the position e) or None (unfenced).     *)
 (*   [op "tr", u, up]     a `Truncate` to the position up, under u.        *)
 (*   [op "sl", new, old]  `SetLeader(new, old)`; new may be None.          *)
@@ -152,6 +154,17 @@ Ballots == 1..NB
 Replicas == UNION {RepOf[g] : g \in Gens}
 ASSUME \A g \in Gens : CfgOf[g] \subseteq Acceptors /\ QOf[g] \subseteq SUBSET CfgOf[g]
 ASSUME \A g \in Gens : \A Q1, Q2 \in QOf[g] : Q1 \cap Q2 # {}
+
+\* The Phase 2 quorums of slot s in configuration g. A grid of one column
+\* has one kind of quorum, `QOf[g]`; a grid of many columns chooses slot s
+\* in its column `s % columns`, and its Phase 1 needs a quorum of every
+\* column (section J5.1). `RolesTrace.tla` overrides this definition for the
+\* grids of two columns of the wide roles walk; every quorum of Phase 1
+\* meets every quorum of Phase 2 of each slot.
+Q2Of(g, s) == QOf[g]
+ASSUME \A g \in Gens : \A s \in 0..(NS - 1) :
+         /\ Q2Of(g, s) \subseteq SUBSET CfgOf[g]
+         /\ \A Q1 \in QOf[g] : \A Q2 \in Q2Of(g, s) : Q1 \cap Q2 # {}
 ASSUME \A g, h \in Gens : g # h => RepOf[g] \cap RepOf[h] = {}
 ASSUME \A g \in Gens : Cardinality(RepOf[g]) >= RetireAt
 ASSUME \A s \in Slots : Noop \notin Values[s]
@@ -228,7 +241,7 @@ Active == UNION {CfgOf[g] : g \in Live}
 (* Chosen values: a quorum of the ballot's grid sent its vote.             *)
 (***************************************************************************)
 ChosenAtBal(s, v, b) ==
-  bgen[b] # 0 /\ \E Q \in QOf[bgen[b]] : \A a \in Q : <<s, b, v, a>> \in sent2b
+  bgen[b] # 0 /\ \E Q \in Q2Of(bgen[b], s) : \A a \in Q : <<s, b, v, a>> \in sent2b
 Cmds == UNION {Values[s] : s \in Slots} \cup {Noop}
 Chosen(s, v) == \E b \in Ballots : ChosenAtBal(s, v, b)
 IsChosen(s) == \E v \in Cmds : Chosen(s, v)
@@ -245,6 +258,8 @@ Frontier == IF \A s \in Slots : IsChosen(s) THEN NS
 (***************************************************************************)
 Empty == [leader |-> L0, next |-> 0, first |-> 0, recs |-> {}]
 Fenced(v) == v.u # None
+\* The records of a write: n, or one when the write names no n.
+Size(v) == IF "n" \in DOMAIN v THEN v.n ELSE 1
 \* The journal is multi-writer: None, or a mode with its tag.
 IsMulti(l) == l = None \/ l \in Tags
 
@@ -270,7 +285,7 @@ Step(base, st, v) ==
   LET r == Res(base, st, v) IN
   IF r # "ok" THEN st
   ELSE CASE v.op = "w" ->
-              [st EXCEPT !.next = @ + 1,
+              [st EXCEPT !.next = @ + Size(v),
                          !.recs = @ \cup {<<st.next, v.u, v.id>>}]
          [] v.op = "tr" ->
               [st EXCEPT !.first = Max({@, Min({v.up, st.next})})]
@@ -576,6 +591,19 @@ Promise(a, b) ==
           /\ UNCHANGED <<p1b, dprom>>
   /\ UNCHANGED <<reg, ldr, mvote, dvote, crashes, rots, sent2b, adrop, dadrop, rep>>
 
+\* An acceptor answers again a `Prepare` at the ballot it holds on disk,
+\* with no write: its reply waits on its last batch, so it carries the
+\* disk as that batch left it (the flight rule, section J4.2). It changes
+\* no state of the acceptor. As `Flush`, it needs no grid that runs: a
+\* reply that waited on a batch goes once the batch is durable. `SpecRe`
+\* adds it to `Next`: each answer sent again is one more report, so the
+\* checks of `Spec` leave it out to keep their state spaces, and the
+\* checks `repromise` and `reach_repromise` judge it.
+Repromise(a, b) ==
+  /\ dprom[a] = b
+  /\ p1b' = p1b \cup {[a |-> a, b |-> b, votes |-> dvote[a], drop |-> dadrop[a]]}
+  /\ UNCHANGED <<reg, ldr, mprom, mvote, dprom, dvote, crashes, rots, sent2b, adrop, dadrop, pend, rep>>
+
 Accept(a, b, s) ==
   LET v == prop[b][s]
       send == Reply2b = "disk"
@@ -638,7 +666,7 @@ Crash(a) ==
 \* A quorum of a grid that still runs holds a chosen vote of slot s on disk.
 \* (A later ballot can only vote the chosen value again, so a quorum may hold
 \* it at several ballots of its grid.)
-OnDisk(s) == IsChosen(s) /\ \E g \in Live : \E Q \in QOf[g] : \A a \in Q :
+OnDisk(s) == IsChosen(s) /\ \E g \in Live : \E Q \in Q2Of(g, s) : \A a \in Q :
   /\ dvote[a][s][1] > 0
   /\ bgen[dvote[a][s][1]] = g
   /\ dvote[a][s][2] = ChosenVal(s)
@@ -805,6 +833,10 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+\* `Next` with the answers that acceptors send again (`Repromise`).
+NextRe == Next \/ \E a \in Acceptors, b \in Ballots : Repromise(a, b)
+SpecRe == Init /\ [][NextRe]_vars
+
 (***************************************************************************)
 (* Safety.                                                                 *)
 (***************************************************************************)
@@ -911,6 +943,9 @@ Ends == <>[](NoHole /\ \A s \in Slots : IsChosen(s) => acked[s] # None)
 (***************************************************************************)
 \* A crash between two writes of one batch, and a value chosen after it.
 NoCrashMid == ~(crashes > 0 /\ \E s \in Slots : IsChosen(s))
+\* No acceptor sent two different answers at one ballot: `SpecRe` breaks it
+\* once an answer sent again carries a vote that the first answer did not.
+OnePromise == \A m1, m2 \in p1b : m1.a = m2.a /\ m1.b = m2.b => m1 = m2
 \* Three segments: two seals done, a write acked in the third.
 NoThird == ~(G >= 3 /\ Done(rend[2]) /\ \E s \in Slots :
                s >= rend[2].v /\ acked[s] = "ok")

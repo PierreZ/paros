@@ -910,5 +910,6 @@ pub fn walk(mutant: ClientMutant, seeds: u64) -> Walk<ClientModel> {
         .seeds(seeds)
         .chaos_steps(300)
         .env_prefix(None)
+        .first_seed(crate::campaign::first_seed())
         .model(move |cx| ClientModel::build(mutant, cx))
 }

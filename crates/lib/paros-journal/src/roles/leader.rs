@@ -163,6 +163,10 @@ pub enum Proposed {
     /// The leader does not write (Phase 1, the seal, stopped): the command
     /// holds no slot, and the caller may send it elsewhere.
     NotLeader,
+    /// The leader holds `window` answers already, the most its caller allows
+    /// (decision 30: a limit on each size): the command holds no slot, and
+    /// the caller may send it again once an answer came.
+    Busy,
 }
 
 /// A segment as the leader's Phase 1 reads it.
@@ -427,20 +431,28 @@ impl<T> JournalLeader<T> {
 
     /// Propose `command` for the caller `token`, at `time`, the clock of
     /// the leader's host in nanoseconds: a write carries it as its leader
-    /// time (§J2.8, [`Command::stamped`]).
+    /// time (§J2.8, [`Command::stamped`]). The leader holds at most `window`
+    /// answers, which its driver chooses: a proposal above it is
+    /// [`Proposed::Busy`], so a leader whose rounds do not close (a column
+    /// below quorum) holds a bounded memory (decision 30).
     ///
     /// # Panics
     ///
-    /// When an assertion on its own postconditions fails: a programmer
-    /// error, never an operating condition.
+    /// When `window` is 0, or an assertion on its own postconditions fails.
     pub fn propose(
         &mut self,
         token: T,
         command: Command,
         time: u64,
+        window: usize,
     ) -> (Proposed, Vec<LeaderEffect<T>>) {
+        assert!(window > 0, "a leader holds at least one answer");
         if !matches!(self.phase, LeaderPhase::Open { .. }) {
             return (Proposed::NotLeader, Vec::new());
+        }
+        if self.held.len() >= window {
+            probe!(reachable, "leader: a full window refuses a proposal");
+            return (Proposed::Busy, Vec::new());
         }
         let command = command.stamped(time);
         let slot = self.next;
@@ -448,6 +460,10 @@ impl<T> JournalLeader<T> {
         self.held.hold(slot, token, command.clone());
         let effects = self.open_round(slot, command);
         assert!(!self.held.is_empty(), "a proposal holds its answer");
+        assert!(
+            self.held.len() <= window,
+            "the leader holds at most its window"
+        );
         assert!(self.next > slot, "the next slot moves past a proposal");
         self.assert_invariants();
         (Proposed::Slot(slot), effects)

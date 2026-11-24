@@ -80,11 +80,17 @@ fn state(fields: &mut Vec<(&'static str, Value)>, (lead, next, first): (Leader, 
     fields.push(("first", int(first)));
 }
 
+/// The fields of a write. Its id is the first byte of its first record:
+/// every write of a traced walk with the same first byte has the same
+/// records. A write of many records names its count, `n`.
 pub(crate) fn write_fields(fields: &mut Vec<(&'static str, Value)>, write: &Write) {
-    assert!(write.records.len() == 1, "a traced write holds one record");
+    assert!(!write.records.is_empty(), "a traced write holds a record");
     let id = write.records[0].payload[0];
     fields.push(("op", Value::from("w")));
     fields.push(("id", int(id)));
+    if write.records.len() > 1 {
+        fields.push(("n", int(write.records.len())));
+    }
     match write.fence {
         Fence::Leader {
             uuid: u,

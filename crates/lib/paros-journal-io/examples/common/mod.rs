@@ -171,6 +171,7 @@ impl OneProcess {
                 HostConfig {
                     tick: TICK,
                     resend_page: 16,
+                    window: 64,
                 },
                 MemStorage::new(),
                 MemNetwork::new().endpoint(),
@@ -312,7 +313,9 @@ impl Program {
                 let (_, id) = self.calls.remove(i);
                 let response = match &reply.outcome {
                     CallOutcome::Reply(reply) => Response::Reply(reply.clone()),
-                    CallOutcome::NotLeader => Response::NotLeader,
+                    // Both say that the command holds no slot: the client
+                    // sends it again.
+                    CallOutcome::NotLeader | CallOutcome::Busy => Response::NotLeader,
                 };
                 self.client.answer(id, response);
             }

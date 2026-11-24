@@ -2,7 +2,7 @@
 //! every site, and each oracle catches its mutant.
 
 use journal_sim::campaign::{campaign, try_campaign};
-use journal_sim::host::{AGREE, ANSWER, FLIGHT, HostMutant, reach, walk};
+use journal_sim::host::{AGREE, ANSWER, FLIGHT, HostMutant, READ, reach, walk};
 
 /// Three processes on the generic driver, with commit faults, crashes and
 /// a lossy network.
@@ -32,4 +32,9 @@ fn agree_catches_a_process_that_loses_its_disk() {
 #[test]
 fn answer_catches_a_taken_write_taken_as_written() {
     caught(HostMutant::TakenAsWritten, ANSWER);
+}
+
+#[test]
+fn read_catches_a_reader_that_shifts_its_page() {
+    caught(HostMutant::PageShift, READ);
 }

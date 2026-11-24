@@ -246,6 +246,7 @@ fn start(clock: TokioClock) -> Vec<(Process, Task, u64)> {
             HostConfig {
                 tick: TICK,
                 resend_page: 16,
+                window: 64,
             },
             MemStorage::new(),
             Channels {

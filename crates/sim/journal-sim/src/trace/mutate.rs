@@ -99,6 +99,78 @@ pub fn edits() -> &'static [Edit] {
     EDITS
 }
 
+/// The most seeds past the checked walks that the search for the place of
+/// an edit replays.
+pub const PLACE_SEEDS: u64 = 400;
+
+/// Judge every edit of `edits` with `check`: each edit goes at its first
+/// place in the first of `recorded` that has one. An edit with no place
+/// there takes the first trace of `more(seed)` that has one, for the seeds
+/// from `from` on, [`PLACE_SEEDS`] of them at most; TLC must accept that
+/// trace as recorded. TLC must refuse each edited trace at the edited event
+/// or after it. An edit that finds no place fails, as an edit that TLC does
+/// not refuse: a rule whose edit no walk can carry is a rule no edit tests.
+///
+/// # Panics
+///
+/// When an edit finds no place, when TLC accepts an edit or refuses it
+/// before its place, or when TLC refuses a trace of `more` as recorded.
+pub fn judge(
+    check: &super::TraceCheck,
+    edits: &[Edit],
+    recorded: &[&Trace],
+    from: u64,
+    mut more: impl FnMut(u64) -> Trace,
+) {
+    use super::Verdict;
+    let mut mutants = Vec::new();
+    let mut unplaced = Vec::new();
+    for edit in edits {
+        match recorded.iter().find_map(|traced| edit.apply(traced)) {
+            Some(mutant) => mutants.push(mutant),
+            None => unplaced.push(edit),
+        }
+    }
+    for seed in from..from + PLACE_SEEDS {
+        if unplaced.is_empty() {
+            break;
+        }
+        let traced = more(seed);
+        let before = unplaced.len();
+        unplaced.retain(|edit| match edit.apply(&traced) {
+            Some(mutant) => {
+                mutants.push(mutant);
+                false
+            }
+            None => true,
+        });
+        if unplaced.len() < before {
+            let verdict = check.check(&traced).expect("TLC gives a verdict");
+            assert!(
+                matches!(verdict, Verdict::Accepted),
+                "seed {seed}: TLC refuses the recorded trace: {verdict:?}"
+            );
+        }
+    }
+    let unplaced: Vec<&str> = unplaced.iter().map(|edit| edit.name).collect();
+    assert!(
+        unplaced.is_empty(),
+        "edits with no place in the walks of {PLACE_SEEDS} more seeds: {unplaced:#?}"
+    );
+    let mut wrong = Vec::new();
+    for mutant in &mutants {
+        match check.check(&mutant.trace).expect("TLC gives a verdict") {
+            Verdict::Rejected(rejection) if rejection.index >= mutant.at => {}
+            Verdict::InvariantViolated { matched, .. } if matched >= mutant.at => {}
+            other => wrong.push(format!("{}: at {}, {other:?}", mutant.edit, mutant.at)),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "edits TLC did not refuse where it must: {wrong:#?}"
+    );
+}
+
 pub(crate) fn fields(event: &Value) -> &BTreeMap<String, Value> {
     let Value::Record(fields) = event else {
         panic!("an event is a record");

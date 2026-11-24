@@ -12,6 +12,8 @@
 (*   "reshape"  `Reshape`: the controller opened segment g.               *)
 (*   "register" `RegisterFrom(b, from)`: a campaign from `from`.           *)
 (*   "promise"  `Promise(a, b)`: an acceptor queued a raised promise.      *)
+(*   "repromise" `Repromise(a, b)`: an acceptor answered a `Prepare` again *)
+(*              with no write, once its last batch was durable.           *)
 (*   "accept"   `Accept(a, b, s)`: an acceptor queued a vote.              *)
 (*   "flush"    `Flush(a)`: the acceptor's first queued batch is durable,  *)
 (*              and its reply goes.                                        *)
@@ -59,16 +61,25 @@ TraceTags == {x \in STRING : SubSeq(x, 1, 1) = "m"}
 
 Cmd(ev) ==
   CASE ev.op = "noop" -> Noop
+    [] ev.op = "w" /\ "n" \in DOMAIN ev ->
+         [op |-> "w", u |-> Lv(ev.u), e |-> ev.e, id |-> ev.id, n |-> ev.n]
     [] ev.op = "w" -> [op |-> "w", u |-> Lv(ev.u), e |-> ev.e, id |-> ev.id]
     [] ev.op = "tr" -> [op |-> "tr", u |-> Lv(ev.u), up |-> ev.up]
     [] ev.op = "sl" -> [op |-> "sl", new |-> Lv(ev.new), old |-> Lv(ev.old)]
 
 \* The constants of the model, from the definitions of the trace.
-TraceAcceptors == UNION {TraceGrids[g] : g \in 1..Len(TraceGrids)}
-TraceCfg == [g \in 1..Len(TraceGrids) |-> TraceGrids[g]]
-\* A grid of v1 is one column of 2F + 1: its quorums are the majorities.
+\* A grid is a sequence of columns; a column of v1 is 2F + 1 acceptors.
+Columns(g) == TraceGrids[g]
+TraceCfg == [g \in 1..Len(TraceGrids) |-> UNION {Columns(g)[i] : i \in 1..Len(Columns(g))}]
+TraceAcceptors == UNION {TraceCfg[g] : g \in 1..Len(TraceGrids)}
+Majority(Q, c) == 2 * Cardinality(Q \cap c) > Cardinality(c)
+\* Phase 1 needs a majority of every column (section J5.1).
 TraceQ == [g \in 1..Len(TraceGrids) |->
-             {Q \in SUBSET TraceGrids[g] : 2 * Cardinality(Q) > Cardinality(TraceGrids[g])}]
+             {Q \in SUBSET TraceCfg[g] : \A i \in 1..Len(Columns(g)) : Majority(Q, Columns(g)[i])}]
+\* Phase 2 of slot s needs a majority of its column, `s % columns`.
+TraceQ2(g, s) ==
+  LET c == Columns(g)[(s % Len(Columns(g))) + 1]
+  IN {Q \in SUBSET c : Majority(Q, c)}
 \* The replica set of segment g: 10g + 1 to 10g + 3.
 TraceRep == [g \in 1..Len(TraceGrids) |-> {10 * g + 1, 10 * g + 2, 10 * g + 3}]
 TraceVals == [s \in 0..(TraceSlots - 1) |-> {Cmd(x) : x \in TraceValues[s + 1]}]
@@ -94,6 +105,7 @@ TraceStep ==
      /\ e.from \in LowFrom..HighFrom
      /\ RegisterFrom(e.b, e.from)
   \/ e.event = "promise" /\ Promise(e.a, e.b)
+  \/ e.event = "repromise" /\ Repromise(e.a, e.b)
   \/ e.event = "accept" /\ Accept(e.a, e.b, e.s)
   \/ e.event = "flush" /\ Flush(e.a)
   \/ e.event = "crash" /\ Crash(e.a)
@@ -107,10 +119,13 @@ TraceStep ==
   \/ e.event = "propose" /\ Propose(e.b, e.s, Cmd(e))
   \/ e.event = "base" /\ TakeBase(e.r)
   \/ /\ e.event = "apply"
-     \* A leader's `Commit` is a source only once an acceptor dropped the
-     \* slot: before, the slot has a source of `Apply`.
+     \* A `Commit` in flight is a source only once its sender may no
+     \* longer be one: a leader's once an acceptor dropped the slot, a
+     \* peer's once that peer compacted past it. Before, the slot has a
+     \* source of `Apply`.
      /\ \/ Apply(e.r)
-        \/ /\ \E a \in Acceptors : e.s \in adrop[a] \cup dadrop[a]
+        \/ /\ \/ \E a \in Acceptors : e.s \in adrop[a] \cup dadrop[a]
+              \/ \E q \in RepOf[GenOf(e.r)] \ {e.r} : rcomp[q] > e.s
            /\ ApplyIf(e.r, TRUE)
      /\ Front(e.r) = e.s
      /\ ChosenVal(e.s) = Cmd(e)

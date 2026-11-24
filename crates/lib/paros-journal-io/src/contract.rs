@@ -12,7 +12,7 @@
 //! Each suite panics, with the rule that failed, on the first break.
 //!
 //! **A suite certifies the API only** (Pierre, 2026-11-19). That a batch is
-//! atomic across a crash, or durable once `sync` returned, a suite cannot
+//! atomic across a crash, or durable once `commit` returned, a suite cannot
 //! see on a healthy disk: crash safety is claimed only on a disk that can
 //! inject faults (the moonpool-sim of the journal, §J7.4, #1330).
 
@@ -61,9 +61,9 @@ fn scan<S: Storage<Journal>>(storage: &mut S, address: Address) -> Vec<(Key, Ent
     entries
 }
 
-fn commit<S: Storage<Journal>>(storage: &mut S, ops: &[Op], sync: bool) {
+fn commit<S: Storage<Journal>>(storage: &mut S, ops: &[Op]) {
     storage
-        .commit(ops, sync)
+        .commit(ops)
         .unwrap_or_else(|error| panic!("storage: a commit on a healthy disk fails: {error}"));
 }
 
@@ -100,7 +100,6 @@ pub fn storage<S: Storage<Journal>>(mut fresh: impl FnMut() -> S) {
             op(a, Kind::Promise, 0, b"promise"),
             op(a, Kind::Durable, 0, b"d0"),
         ],
-        true,
     );
     assert_eq!(
         values(&scan(&mut disk, a)),
@@ -131,7 +130,6 @@ pub fn storage<S: Storage<Journal>>(mut fresh: impl FnMut() -> S) {
             op(a, Kind::Vote, 2, b"two again"),
             op(a, Kind::Durable, 0, b"d2"),
         ],
-        false,
     );
     assert_eq!(
         values(&scan(&mut disk, a)),
@@ -145,7 +143,7 @@ pub fn storage<S: Storage<Journal>>(mut fresh: impl FnMut() -> S) {
     );
 
     // An empty commit changes nothing.
-    commit(&mut disk, &[], true);
+    commit(&mut disk, &[]);
     assert_eq!(
         scan(&mut disk, a).len(),
         4,
@@ -157,7 +155,6 @@ pub fn storage<S: Storage<Journal>>(mut fresh: impl FnMut() -> S) {
     commit(
         &mut disk,
         &[op(c, Kind::Base, 0, b""), op(c, Kind::Chosen, 4, &large)],
-        true,
     );
     assert_eq!(
         values(&scan(&mut disk, c)),
@@ -170,8 +167,8 @@ pub fn storage<S: Storage<Journal>>(mut fresh: impl FnMut() -> S) {
     );
 }
 
-/// The contract of [`Storage`] across a reopen: every commit made with
-/// `sync` before `reopen` is seen after it. `reopen` closes the disk and
+/// The contract of [`Storage`] across a reopen: every commit made before
+/// `reopen` is seen after it. `reopen` closes the disk and
 /// opens it again, with no crash.
 ///
 /// # Panics
@@ -190,15 +187,14 @@ pub fn storage_reopen<S: Storage<Journal>>(
             op(a, Kind::Vote, 0, b"v0"),
             op(a, Kind::Durable, 0, &PersistId(0).0.to_be_bytes()),
         ],
-        true,
     );
-    commit(&mut disk, &[op(a, Kind::Vote, 1, b"v1")], true);
+    commit(&mut disk, &[op(a, Kind::Vote, 1, b"v1")]);
     let before = values(&scan(&mut disk, a));
     let mut disk = reopen(disk);
     assert_eq!(
         values(&scan(&mut disk, a)),
         before,
-        "storage: a synced commit is seen after a reopen"
+        "storage: a commit is seen after a reopen"
     );
 }
 

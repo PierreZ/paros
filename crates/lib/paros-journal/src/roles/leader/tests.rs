@@ -5,6 +5,8 @@ use crate::roles::message::PromisePage;
 use crate::segment::OpeningCall;
 use paros_consensus::journal::{LeaderUuid, Seq};
 
+/// The answers a leader of these tests holds at most.
+const WINDOW: usize = 64;
 const LEADER: NodeId = NodeId(101);
 
 fn ballot(round: u64) -> Ballot {
@@ -285,7 +287,7 @@ fn an_open_leader_proposes_again_the_highest_vote_and_fills_the_gaps() {
             .iter()
             .all(|(_, m)| matches!(m, Message::Accept { ballot: b, .. } if *b == ballot(3)))
     );
-    let (proposed, effects) = leader.propose(7, write(9), 0);
+    let (proposed, effects) = leader.propose(7, write(9), 0, WINDOW);
     assert_eq!(
         proposed,
         Proposed::Slot(Slot(4)),
@@ -297,8 +299,14 @@ fn an_open_leader_proposes_again_the_highest_vote_and_fills_the_gaps() {
 #[test]
 fn a_proposal_is_answered_once_a_replica_applies_it() {
     let mut leader = open_leader();
-    assert_eq!(leader.propose(7, write(1), 0).0, Proposed::Slot(Slot(0)));
-    assert_eq!(leader.propose(8, write(2), 0).0, Proposed::Slot(Slot(1)));
+    assert_eq!(
+        leader.propose(7, write(1), 0, WINDOW).0,
+        Proposed::Slot(Slot(0))
+    );
+    assert_eq!(
+        leader.propose(8, write(2), 0, WINDOW).0,
+        Proposed::Slot(Slot(1))
+    );
     let accepted = |slot| Message::Accepted {
         ballot: ballot(2),
         slot: Slot(slot),
@@ -360,7 +368,7 @@ fn a_proposal_is_answered_once_a_replica_applies_it() {
 #[test]
 fn a_slot_that_applied_another_command_answers_unknown() {
     let mut leader = open_leader();
-    leader.propose(7, write(1), 0);
+    leader.propose(7, write(1), 0, WINDOW);
     let effects = leader.step(
         NodeId(11),
         Message::Applied {
@@ -377,7 +385,7 @@ fn a_slot_that_applied_another_command_answers_unknown() {
 fn a_tick_sends_at_most_a_page() {
     let mut leader = open_leader();
     for token in 0..5 {
-        leader.propose(token, write(1), 0);
+        leader.propose(token, write(1), 0, WINDOW);
     }
     assert_eq!(accepts(&leader.tick(2)).len(), 2);
 }
@@ -397,8 +405,8 @@ fn a_page_above_the_batch_is_refused() {
 #[test]
 fn a_leader_stops_on_a_higher_promise_and_answers_unknown() {
     let mut leader = open_leader();
-    leader.propose(7, write(1), 0);
-    leader.propose(8, write(2), 0);
+    leader.propose(7, write(1), 0, WINDOW);
+    leader.propose(8, write(2), 0, WINDOW);
     // A refusal of another ballot, or that names a lower promise, is not
     // for this leader.
     assert_eq!(
@@ -426,7 +434,7 @@ fn a_leader_stops_on_a_higher_promise_and_answers_unknown() {
         vec![(7, Reply::Unknown), (8, Reply::Unknown)]
     );
     assert_eq!(
-        leader.propose(9, write(3), 0),
+        leader.propose(9, write(3), 0, WINDOW),
         (Proposed::NotLeader, Vec::new())
     );
     assert!(leader.tick(4).is_empty(), "a stopped leader sends nothing");
@@ -439,8 +447,8 @@ fn a_leader_stops_on_a_higher_promise_and_answers_unknown() {
 #[test]
 fn an_open_leader_whose_segment_a_later_leader_sealed_stops_and_answers_unknown() {
     let mut leader = open_leader();
-    leader.propose(7, write(1), 0);
-    leader.propose(8, write(2), 0);
+    leader.propose(7, write(1), 0, WINDOW);
+    leader.propose(8, write(2), 0, WINDOW);
     // A value with segment 1 still open changes nothing.
     assert_eq!(replies(&leader.observe(&two_segments())), vec![]);
     assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(0) });
@@ -502,7 +510,7 @@ fn a_sealing_leader_skips_a_dropped_blocked_slot_when_it_opens() {
 fn a_leader_in_phase_one_does_not_write() {
     let (mut leader, _) = campaign(&one_segment(), 2, 1, 0);
     assert_eq!(
-        leader.propose(1, write(1), 0),
+        leader.propose(1, write(1), 0, WINDOW),
         (Proposed::NotLeader, Vec::new())
     );
     assert!(leader.segment_of(Slot(0)).is_none());
@@ -536,7 +544,10 @@ fn a_first_leader_seals_the_segment_before_above_its_highest_vote() {
     };
     assert_eq!(effects, vec![LeaderEffect::Register(seal.clone())]);
     assert_eq!(leader.blocked(), &[Slot(4)]);
-    assert_eq!(leader.propose(1, write(9), 0).0, Proposed::NotLeader);
+    assert_eq!(
+        leader.propose(1, write(9), 0, WINDOW).0,
+        Proposed::NotLeader
+    );
     assert_eq!(leader.tick(4), vec![LeaderEffect::Register(seal.clone())]);
     // A value with no end changes nothing.
     assert_eq!(leader.observe(&value).len(), 0);
@@ -577,7 +588,10 @@ fn a_first_leader_seals_the_segment_before_above_its_highest_vote() {
             .collect::<Vec<_>>(),
         nodes(&[11, 12, 13])
     );
-    assert_eq!(leader.propose(1, write(9), 0).0, Proposed::Slot(Slot(5)));
+    assert_eq!(
+        leader.propose(1, write(9), 0, WINDOW).0,
+        Proposed::Slot(Slot(5))
+    );
     // A later done value changes nothing for an open leader.
     assert_eq!(leader.observe(&sealed).len(), 0);
 }
@@ -671,8 +685,8 @@ fn a_two_column_grid_writes_each_slot_in_its_column() {
     );
     leader.step(NodeId(5), promise(2, 0, page(&[], &[])));
     assert_eq!(*leader.phase(), LeaderPhase::Open { start: Slot(0) });
-    let (_, even) = leader.propose(1, write(1), 0);
-    let (_, odd) = leader.propose(2, write(2), 0);
+    let (_, even) = leader.propose(1, write(1), 0, WINDOW);
+    let (_, odd) = leader.propose(2, write(2), 0, WINDOW);
     assert_eq!(
         sends(&even)
             .into_iter()
@@ -723,7 +737,7 @@ fn a_two_column_grid_writes_each_slot_in_its_column() {
 #[test]
 fn a_leader_stopped_by_its_driver_answers_unknown() {
     let mut leader = open_leader();
-    leader.propose(4, write(1), 0);
+    leader.propose(4, write(1), 0, WINDOW);
     let effects = leader.stop();
     assert_eq!(replies(&effects), vec![(4, Reply::Unknown)]);
     assert_eq!(*leader.phase(), LeaderPhase::Stopped);
@@ -1047,8 +1061,8 @@ fn delegating_leader() -> JournalLeader<u32> {
 #[test]
 fn a_delegating_leader_gives_each_round_to_a_proxy() {
     let mut leader = delegating_leader();
-    let (_, first) = leader.propose(1, write(1), 0);
-    let (_, second) = leader.propose(2, write(2), 0);
+    let (_, first) = leader.propose(1, write(1), 0, WINDOW);
+    let (_, second) = leader.propose(2, write(2), 0, WINDOW);
     let first = sends(&first);
     assert_eq!(first.len(), 1, "one delegation, no Accept: {first:?}");
     let (to, message) = &first[0];
@@ -1085,7 +1099,7 @@ fn a_delegating_leader_gives_each_round_to_a_proxy() {
 #[test]
 fn a_chosen_from_a_proxy_commits_the_slot_and_holds_the_answer() {
     let mut leader = delegating_leader();
-    leader.propose(1, write(1), 0);
+    leader.propose(1, write(1), 0, WINDOW);
     // A `Chosen` of another ballot changes nothing.
     assert_eq!(
         leader.step(
@@ -1130,7 +1144,7 @@ fn a_chosen_from_a_proxy_commits_the_slot_and_holds_the_answer() {
 #[test]
 fn a_stalled_delegation_moves_to_the_next_proxy() {
     let mut leader = delegating_leader();
-    leader.propose(1, write(1), 0);
+    leader.propose(1, write(1), 0, WINDOW);
     let mut proxies = Vec::new();
     for _ in 0..=MOVE_AFTER {
         let effects = leader.tick(4);
@@ -1155,7 +1169,7 @@ fn a_stalled_delegation_moves_to_the_next_proxy() {
 #[test]
 fn a_nack_that_a_proxy_relays_stops_the_leader() {
     let mut leader = delegating_leader();
-    leader.propose(1, write(1), 0);
+    leader.propose(1, write(1), 0, WINDOW);
     let effects = leader.step(
         NodeId(201),
         Message::Nack {
@@ -1171,7 +1185,7 @@ fn a_nack_that_a_proxy_relays_stops_the_leader() {
 #[should_panic(expected = "the leader delegates before it opens a round")]
 fn a_leader_delegates_only_before_its_first_round() {
     let mut leader = open_leader();
-    leader.propose(1, write(1), 0);
+    leader.propose(1, write(1), 0, WINDOW);
     leader.delegate_to(nodes(&[201]));
 }
 
@@ -1219,7 +1233,7 @@ fn a_proposal_carries_the_leader_time_of_its_write() {
         },
         records: vec![client, Record::new(vec![3])],
     });
-    let (_, effects) = leader.propose(7, given, 42);
+    let (_, effects) = leader.propose(7, given, 42, WINDOW);
     let accepted = accepts(&effects);
     let Some(Command::Write(write)) = accepted.values().next() else {
         panic!("an Accept of the write: {accepted:?}");
@@ -1233,7 +1247,7 @@ fn a_proposal_carries_the_leader_time_of_its_write() {
         vec![Some(42), Some(42)],
         "one time for the write, and the client's time is replaced"
     );
-    let (_, effects) = leader.propose(8, Command::Noop, 43);
+    let (_, effects) = leader.propose(8, Command::Noop, 43, WINDOW);
     assert_eq!(
         accepts(&effects).values().next(),
         Some(&Command::Noop),
@@ -1294,7 +1308,7 @@ fn a_blocked_slot_above_every_vote_is_never_given_to_a_new_command() {
     // The faulty vote at slot 2 may be the chosen value: the gap fill
     // writes a `Noop` below it, and the callers write above it.
     for call in 0..3 {
-        let (proposed, _) = leader.propose(call, write(9), 0);
+        let (proposed, _) = leader.propose(call, write(9), 0, WINDOW);
         assert_eq!(proposed, Proposed::Slot(Slot(3 + u64::from(call))));
     }
 }
@@ -1442,7 +1456,7 @@ fn a_replica_that_applied_a_blocked_slot_unblocks_it() {
         }
     )));
     // A slot that was never blocked sends no repair when it is chosen.
-    let (proposed, _) = leader.propose(1, write(2), 0);
+    let (proposed, _) = leader.propose(1, write(2), 0, WINDOW);
     let Proposed::Slot(slot) = proposed else {
         panic!("a slot")
     };
@@ -1466,4 +1480,28 @@ fn a_late_answer_that_does_not_decide_keeps_the_slot_blocked() {
         leader.step(NodeId(3), promise(4, 0, page(&[], &[]))).len(),
         0
     );
+}
+
+#[test]
+fn a_leader_with_its_window_full_answers_busy_and_holds_no_more() {
+    let mut leader = open_leader();
+    // No round closes (a column below quorum): each proposal holds its
+    // answer, and the window bounds what the leader holds.
+    assert_eq!(leader.propose(1, write(1), 0, 2).0, Proposed::Slot(Slot(0)));
+    assert_eq!(leader.propose(2, write(2), 0, 2).0, Proposed::Slot(Slot(1)));
+    let (proposed, effects) = leader.propose(3, write(3), 0, 2);
+    assert_eq!(proposed, Proposed::Busy, "the window is full");
+    assert!(effects.is_empty(), "a busy proposal sends nothing");
+    assert_eq!(
+        leader.propose(4, write(4), 0, 3).0,
+        Proposed::Slot(Slot(2)),
+        "a larger window takes the proposal"
+    );
+}
+
+#[test]
+#[should_panic(expected = "a leader holds at least one answer")]
+fn a_window_of_zero_is_a_programmer_error() {
+    let mut leader = open_leader();
+    let _ = leader.propose(1, write(1), 0, 0);
 }

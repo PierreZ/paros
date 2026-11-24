@@ -358,6 +358,7 @@ fn build(mutant: HealMutant, seeds: u64, steps: u64, trims: bool) -> Walk<HealMo
         .crash_weights(1, 3)
         .max_down(1)
         .env_prefix(None)
+        .first_seed(crate::campaign::first_seed())
         .model(move |cx| HealModel::build(mutant, trims, cx))
 }
 

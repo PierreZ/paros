@@ -13,6 +13,7 @@ const K: JournalId = JournalId(2);
 const CONFIG: HostConfig = HostConfig {
     tick: 10,
     resend_page: 4,
+    window: 64,
 };
 
 fn at(journal: JournalId, node: u64) -> Address {
@@ -950,12 +951,16 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
             value: value(),
         },
     );
+    let mut tags = Vec::new();
     let asked: Vec<NodeId> = host
         .step(Time(1), read(0))
         .into_iter()
         .filter_map(|effect| match effect {
             Effect::Send { envelope, .. } => {
-                assert!(matches!(envelope.message, Message::PreRead { read: 7, .. }));
+                let Message::PreRead { read: tag, .. } = envelope.message else {
+                    panic!("a PreRead: {envelope:?}");
+                };
+                tags.push(tag);
                 assert_eq!(envelope.receiver(), at(J, envelope.to.0));
                 Some(envelope.to)
             }
@@ -963,13 +968,15 @@ fn a_read_goes_to_its_replica_and_its_acks_come_back_to_it() {
         })
         .collect();
     assert_eq!(asked, vec![NodeId(1), NodeId(2), NodeId(3)]);
+    let tag = tags[0];
+    assert!(tags.iter().all(|t| *t == tag), "one read, one tag");
     let ack = |from| Envelope {
         journal: J,
         from: NodeId(from),
         to: NodeId(11),
         message: Message::PreReadAck {
             segment: SegmentId(1),
-            read: 7,
+            read: tag,
             watermark: None,
             bound: SegmentId(1),
         },

@@ -76,6 +76,10 @@ pub struct HostConfig {
     /// The rounds that a leader re-sends at most on one periodic step: a
     /// re-send of every round floods a bounded network (§J4.2).
     pub resend_page: usize,
+    /// The answers that a leader holds at most: a call above it is
+    /// [`CallOutcome::Busy`] (decision 30: a limit on each size). At least
+    /// one.
+    pub window: usize,
 }
 
 /// A role that placement asks the process to serve.
@@ -255,6 +259,9 @@ pub enum CallOutcome {
     /// The role is not a leader that writes: the command holds no slot,
     /// and the caller may send it elsewhere.
     NotLeader,
+    /// The leader holds its window of answers ([`HostConfig::window`]): the
+    /// command holds no slot, and the caller may send it again later.
+    Busy,
 }
 
 /// Why a role stopped.
@@ -331,6 +338,8 @@ pub(crate) struct Shared {
     values: BTreeMap<JournalId, RegisterValue>,
     /// The rounds that a leader or a proxy re-sends at most on one fire.
     resend_page: usize,
+    /// The answers that a leader holds at most.
+    window: usize,
     /// The nanoseconds between two fires of the timer of a role.
     tick: u64,
 }
@@ -367,6 +376,10 @@ impl Shared {
         self.resend_page
     }
 
+    pub(crate) fn window(&self) -> usize {
+        self.window
+    }
+
     /// The timer of the role at `address`, set at `now`.
     pub(crate) fn timer(&self, address: Address, now: Time) -> Effect {
         Effect::SetTimer {
@@ -388,7 +401,7 @@ impl Host {
     /// # Panics
     ///
     /// When `config.tick` is zero, or `config.resend_page` is zero or above
-    /// [`RESEND_BATCH`].
+    /// [`RESEND_BATCH`], or `config.window` is zero.
     #[must_use]
     pub fn new(config: HostConfig) -> Self {
         assert!(config.tick > 0, "the timer moves time forward");
@@ -400,10 +413,12 @@ impl Host {
             config.resend_page <= RESEND_BATCH,
             "a re-send page is at most RESEND_BATCH"
         );
+        assert!(config.window > 0, "a leader holds at least one answer");
         Self {
             inner: paros_host::Host::new(Shared {
                 values: BTreeMap::new(),
                 resend_page: config.resend_page,
+                window: config.window,
                 tick: config.tick,
             }),
         }

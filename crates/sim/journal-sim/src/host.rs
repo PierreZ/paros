@@ -13,7 +13,10 @@
 //! assigned again, as placement would.
 //!
 //! One writer claims the journal, writes, and sends a call again when its
-//! answer is lost or `Unknown`.
+//! answer is lost or `Unknown`. A reader reads at the replica of a process
+//! with [`Driver::read`]. A restarted process gets a new driver, whose read
+//! ids start again at 1, while the answers to the reads of the driver
+//! before are still on the wire.
 //!
 //! The oracles share no code with the driver or the roles:
 //!
@@ -23,9 +26,13 @@
 //!   high is (the flight rule, rule 1 of §J4.2).
 //! - [`ANSWER`]: each answer that a leader gives through the driver is the
 //!   whole log's at a slot that chose the command ([`Truth`]).
+//! - [`READ`]: each page of a leaderless read holds the whole log's records
+//!   at their positions, and its view covers every answer that the writer
+//!   had when the read started (§J2.5).
 //!
 //! The liveness claim: once the faults stop, a leader writes, every call
-//! is answered and judged, and every replica applied the whole log.
+//! is answered and judged, every replica applied the whole log, and every
+//! read is answered.
 //!
 //! The segments, the seal and the clients of many writers are the roles
 //! walk's ([`crate::roles`]); this walk judges the driver and the `Host`.
@@ -37,10 +44,11 @@ use std::rc::Rc;
 use moonpool_walk::{Cx, Model, Phase, Walk, sometimes};
 
 use paros_journal::register::{Ballot, Change, RegisterValue};
+use paros_journal::roles::PersistId;
 use paros_journal::roles::{Campaign, LeaderPhase, Message};
 use paros_journal::{
-    Answer, Command, Fence, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, Record, Reply,
-    SegmentId, Seq, Slot, Write,
+    Answer, Command, Fence, Grid, Leader, LeaderUuid, NodeId, OpeningCall, RELEASE, ReadAnswer,
+    Record, Reply, SegmentId, Seq, Slot, Write,
 };
 use paros_journal_io::mem::{ManualClock, MemRegister};
 use paros_journal_io::{
@@ -58,6 +66,10 @@ pub const AGREE: &str = "driver walk: no two Commits name two commands at one sl
 pub const FLIGHT: &str = "driver walk: a reply leaves only once the state it reports is durable";
 /// Oracle: each answer is the whole log's.
 pub const ANSWER: &str = "driver walk: each answer is the whole log's at a slot of the command";
+/// Oracle: a read page holds the whole log's records and covers what the
+/// writer knew when the read started.
+pub const READ: &str =
+    "driver walk: a read page holds the whole log's records and covers every answer before it";
 
 /// The coverage sites of the driver walk.
 pub mod reach {
@@ -77,6 +89,13 @@ pub mod reach {
     pub const UNKNOWN: &str = "driver walk: a call was answered Unknown";
     /// A send waited on a batch that was not durable yet.
     pub const HELD: &str = "driver walk: a reply waited on a batch in the group";
+    /// A leader answered a call busy.
+    pub const BUSY: &str = "driver walk: a leader answered a call busy";
+    /// A read served a page with a record.
+    pub const READ_SERVED: &str = "driver walk: a read served a page with a record";
+    /// An answer to a read of a driver before a restart reached the new
+    /// driver of the process, with the id of a read of the new driver.
+    pub const STALE_READ_ACK: &str = "driver walk: a stale read answer reached a restarted process";
 
     /// Every site of the walk.
     pub const ALL: &[&str] = &[
@@ -88,6 +107,9 @@ pub mod reach {
         DUPLICATE,
         UNKNOWN,
         HELD,
+        READ_SERVED,
+        STALE_READ_ACK,
+        BUSY,
     ];
 }
 
@@ -105,6 +127,9 @@ pub enum HostMutant {
     /// The client takes a `Taken` (a write at a position that holds
     /// another write) as written. [`ANSWER`] catches it.
     TakenAsWritten,
+    /// The reader takes each record of a page one position later.
+    /// [`READ`] catches it.
+    PageShift,
 }
 
 const J: JournalId = JournalId(7);
@@ -113,6 +138,9 @@ const TICK: u64 = 1_000;
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 4,
+    // One answer held: a call sent again while the first is still held is
+    // busy.
+    window: 1,
 };
 const A: LeaderUuid = LeaderUuid(0xA);
 
@@ -141,6 +169,14 @@ struct Call {
     resent: bool,
 }
 
+/// A read in flight: the process, and the writer's next position when it
+/// started.
+#[derive(Clone, Copy, Debug)]
+struct OpenRead {
+    from: u64,
+    need: u64,
+}
+
 /// The driver walk.
 pub struct HostModel {
     mutant: HostMutant,
@@ -160,6 +196,17 @@ pub struct HostModel {
     /// The answers not judged yet: the command, the answer.
     answers: Vec<(Command, Answer)>,
     judged: usize,
+    /// The reads in flight, by process and the id its driver gave.
+    reads: BTreeMap<(u64, CallId), OpenRead>,
+    /// The pages not judged yet: the read, and its records and view.
+    pages: Vec<(OpenRead, ReadAnswer)>,
+    /// The boot of the reads of each replica's incarnation, from its
+    /// `PreRead`s on the wire; a crash forgets it.
+    read_boots: BTreeMap<NodeId, PersistId>,
+    /// The `PreReadAck`s that the network holds back: the move
+    /// [`HostAction::Late`] delivers them, often after a restart of their
+    /// replica. A late message is inside the contract of the transport.
+    late: Vec<Envelope>,
 }
 
 /// The walk with `mutant` planted.
@@ -169,6 +216,7 @@ pub fn walk(mutant: HostMutant, seeds: u64, steps: u64) -> Walk<HostModel> {
         .seeds(seeds)
         .chaos_steps(steps)
         .env_prefix(None)
+        .first_seed(crate::campaign::first_seed())
         .model(move |cx| HostModel::build(mutant, cx))
 }
 
@@ -183,6 +231,10 @@ pub enum HostAction {
     Campaign,
     /// The writer calls.
     Write,
+    /// The reader reads at the replica of a process.
+    Read,
+    /// The network delivers the `PreReadAck`s that it held back.
+    Late,
     /// The next commit of a process fails.
     Fault,
 }
@@ -203,19 +255,22 @@ impl Model for HostModel {
             HostAction::Tick,
             HostAction::Campaign,
             HostAction::Write,
+            HostAction::Read,
+            HostAction::Late,
             HostAction::Fault,
         ]
     }
 
     fn weight(action: HostAction, phase: Phase) -> u32 {
         match (action, phase) {
-            (HostAction::Fault | HostAction::Campaign, Phase::Chaos) => 2,
-            (HostAction::Fault, _) => 0,
+            (HostAction::Fault | HostAction::Campaign, Phase::Chaos) | (HostAction::Late, _) => 2,
+            (HostAction::Fault, _) | (HostAction::Read, Phase::Settle) => 0,
             (HostAction::Poll | HostAction::Tick | HostAction::Write, Phase::Settle)
             | (HostAction::Campaign, _) => 1,
             (HostAction::Poll, _) => 30,
             (HostAction::Tick, _) => 5,
             (HostAction::Write, _) => 10,
+            (HostAction::Read, _) => 6,
         }
     }
 
@@ -225,11 +280,21 @@ impl Model for HostModel {
             HostAction::Tick => self.clock.advance(TICK),
             HostAction::Campaign => self.campaign(cx),
             HostAction::Write => self.write(cx),
+            HostAction::Read => self.read(cx),
+            HostAction::Late => self.late(cx),
             HostAction::Fault => self.fault(cx),
         }
     }
 
     fn deliver(&mut self, envelope: Envelope, _cx: &mut Cx<'_, Self>) {
+        if let Message::PreReadAck { read, .. } = &envelope.message {
+            sometimes!(
+                self.read_boots
+                    .get(&envelope.to)
+                    .is_some_and(|boot| read.boot < *boot),
+                reach::STALE_READ_ACK
+            );
+        }
         let process = Self::process_of(envelope.to);
         if let Some(process) = self.processes.get(&process)
             && process.driver.is_some()
@@ -256,6 +321,9 @@ impl Model for HostModel {
             let call = self.call.take().expect("a call");
             self.again = Some(call.command);
         }
+        // The reader of a crashed process times out.
+        self.reads.retain(|(p, _), _| p != node);
+        self.read_boots.remove(&NodeId(10 + node));
     }
 
     fn restart(&mut self, node: &u64, _cx: &mut Cx<'_, Self>) {
@@ -289,6 +357,13 @@ impl Model for HostModel {
             return Err(format!(
                 "{} answers are not judged",
                 self.answers.len() - self.judged
+            ));
+        }
+        if !self.reads.is_empty() || !self.pages.is_empty() {
+            return Err(format!(
+                "{} reads are open and {} pages are not judged",
+                self.reads.len(),
+                self.pages.len()
             ));
         }
         if self.open_leader().is_none() {
@@ -360,6 +435,10 @@ impl HostModel {
             again: None,
             answers: Vec::new(),
             judged: 0,
+            reads: BTreeMap::new(),
+            pages: Vec::new(),
+            read_boots: BTreeMap::new(),
+            late: Vec::new(),
         };
         for p in PROCESSES {
             model.processes.insert(
@@ -477,6 +556,7 @@ impl HostModel {
             );
             let stopped = driver.take_stopped();
             let replies = driver.take_replies();
+            let reads = driver.take_reads();
             // Placement serves again a role that a failed commit stopped.
             for (address, why) in &stopped {
                 if *why == paros_journal_io::Stop::Failed {
@@ -494,16 +574,99 @@ impl HostModel {
             let sent: Vec<Envelope> = process.outbox.borrow_mut().drain(..).collect();
             for envelope in sent {
                 self.on_wire(&envelope);
-                cx.send(envelope);
+                // The network holds back half of the read answers.
+                if matches!(envelope.message, Message::PreReadAck { .. })
+                    && cx.phase() == Phase::Chaos
+                    && cx.rng().chance(1, 2)
+                {
+                    self.late.push(envelope);
+                } else {
+                    cx.send(envelope);
+                }
             }
             for reply in replies {
                 self.on_reply(p, reply.call, reply.outcome);
             }
+            for reply in reads {
+                self.on_read(p, reply.read, reply.answer);
+            }
         }
     }
 
-    /// [`AGREE`] on every `Commit` that leaves.
+    /// The reader's answer to the read `id` of process `p`: a page waits
+    /// for [`READ`], any other answer ends the read.
+    fn on_read(&mut self, p: u64, id: CallId, answer: ReadAnswer) {
+        let Some(open) = self.reads.remove(&(p, id)) else {
+            return;
+        };
+        if let ReadAnswer::Page {
+            mut records,
+            view,
+            sealed,
+        } = answer
+        {
+            if self.mutant == HostMutant::PageShift {
+                for (seq, _) in &mut records {
+                    *seq = Seq(seq.0 + 1);
+                }
+            }
+            self.pages.push((
+                open,
+                ReadAnswer::Page {
+                    records,
+                    view,
+                    sealed,
+                },
+            ));
+        }
+    }
+
+    /// A read at the replica of a process that is up, at the writer's next
+    /// position or below it.
+    fn read(&mut self, cx: &mut Cx<'_, Self>) {
+        let up = self.up();
+        let Some(p) = cx.rng().pick(&up).copied() else {
+            return;
+        };
+        let from = if cx.rng().chance(1, 2) {
+            self.next
+        } else {
+            cx.rng().below(self.next + 1)
+        };
+        let process = self.processes.get_mut(&p).expect("a process");
+        let driver = process.driver.as_mut().expect("up");
+        let replica = Address::replica(J, NodeId(10 + p), SegmentId(1));
+        let id = driver.read(replica, Seq(from), 4);
+        self.reads.insert(
+            (p, id),
+            OpenRead {
+                from,
+                need: self.next,
+            },
+        );
+    }
+
+    /// The network delivers each read answer that it held back, with odds
+    /// of one half in the chaos phase. A late message is inside the contract
+    /// of the transport, and an answer held across a restart of its replica
+    /// reaches the next incarnation.
+    fn late(&mut self, cx: &mut Cx<'_, Self>) {
+        let chaos = cx.phase() == Phase::Chaos;
+        for envelope in std::mem::take(&mut self.late) {
+            if !chaos || cx.rng().chance(1, 2) {
+                cx.send(envelope);
+            } else {
+                self.late.push(envelope);
+            }
+        }
+    }
+
+    /// [`AGREE`] on every `Commit` that leaves, and the boot of each
+    /// replica's reads.
     fn on_wire(&mut self, envelope: &Envelope) {
+        if let Message::PreRead { read, .. } = &envelope.message {
+            self.read_boots.insert(envelope.from, read.boot);
+        }
         if let Message::Commit { slot, command, .. } = &envelope.message {
             let held = self.chosen.entry(*slot).or_insert_with(|| command.clone());
             assert!(
@@ -519,6 +682,10 @@ impl HostModel {
         };
         match outcome {
             CallOutcome::NotLeader => self.again = Some(call.command),
+            CallOutcome::Busy => {
+                sometimes!(true, reach::BUSY);
+                self.again = Some(call.command);
+            }
             CallOutcome::Reply(Reply::Unknown) => {
                 sometimes!(true, reach::UNKNOWN);
                 self.again = Some(call.command);
@@ -609,7 +776,14 @@ impl HostModel {
     /// The writer's next call, to a leader that writes.
     fn write(&mut self, cx: &mut Cx<'_, Self>) {
         if self.call.is_some() {
-            return;
+            // The caller times out while its call is held, and sends it
+            // again: the fate of the first call is unknown, and a leader
+            // whose window is full answers the second busy.
+            if cx.phase() != Phase::Chaos || !cx.rng().chance(1, 4) {
+                return;
+            }
+            let call = self.call.take().expect("a call");
+            self.again = Some(call.command);
         }
         let Some(p) = self.open_leader() else {
             return;
@@ -680,10 +854,16 @@ impl HostModel {
         let frontier = self.frontier();
         let mut truth = Truth::new(Leader::Unset);
         let mut states: Vec<(u64, &'static str, &Command)> = Vec::new();
+        let mut records: BTreeMap<u64, Record> = BTreeMap::new();
         for slot in 0..frontier.0 {
             let command = &self.chosen[&Slot(slot)];
             let before = truth.next;
             let verdict = truth.apply(command);
+            if let (Command::Write(write), "ok") = (command, verdict) {
+                for (at, record) in (before..).zip(&write.records) {
+                    records.insert(at, record.clone());
+                }
+            }
             states.push((before, verdict, command));
         }
         while let Some((command, answer)) = self.answers.get(self.judged) {
@@ -692,7 +872,7 @@ impl HostModel {
                 .filter(|(_, _, c)| as_written(c) == as_written(command))
                 .collect();
             if at.is_empty() {
-                return;
+                break;
             }
             let fits = at.iter().any(|(before, verdict, _)| {
                 *verdict == label(answer)
@@ -707,6 +887,42 @@ impl HostModel {
                 at.iter().map(|(b, v, _)| (*b, *v)).collect::<Vec<_>>()
             );
             self.judged += 1;
+        }
+        self.judge_pages(&records);
+    }
+
+    /// [`READ`]: each page holds the whole log's records at their
+    /// positions, and its view covers the writer's next position when the
+    /// read started.
+    fn judge_pages(&mut self, records: &BTreeMap<u64, Record>) {
+        for (open, answer) in std::mem::take(&mut self.pages) {
+            let ReadAnswer::Page {
+                records: page,
+                view,
+                ..
+            } = &answer
+            else {
+                unreachable!("only pages wait");
+            };
+            assert!(
+                view.next_seq.0 >= open.need,
+                "{READ}: a read from {} served {view:?}, the writer had position {} when it started",
+                open.from,
+                open.need
+            );
+            sometimes!(!page.is_empty(), reach::READ_SERVED);
+            for (seq, record) in page {
+                assert!(
+                    seq.0 >= open.from,
+                    "{READ}: a read from {} served position {seq:?}",
+                    open.from
+                );
+                let whole = records.get(&seq.0).map(|r| (&r.payload, &r.headers.client));
+                assert!(
+                    whole == Some((&record.payload, &record.headers.client)),
+                    "{READ}: a read served {record:?} at {seq:?}, the whole log has {whole:?}"
+                );
+            }
         }
     }
 }

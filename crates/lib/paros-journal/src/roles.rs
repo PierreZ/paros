@@ -55,7 +55,7 @@ pub mod replica;
 
 pub use acceptor::{AcceptorDisk, AcceptorEffect, AcceptorOp, JournalAcceptor};
 pub use leader::{Campaign, JournalLeader, LeaderEffect, LeaderPhase, Proposed};
-pub use message::{Message, PromisePage};
+pub use message::{Message, PromisePage, ReadTag};
 pub use paros_consensus::contract::limits::{PROMISE_BATCH, RESEND_BATCH};
 pub use paros_consensus::contract::write::AcceptorWrite;
 pub use proxy::{JournalProxy, ProxyEffect};

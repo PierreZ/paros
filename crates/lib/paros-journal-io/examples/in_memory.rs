@@ -55,6 +55,7 @@ type Process = Driver<MemStorage, Endpoint, ManualClock, MemRegister, ()>;
 const CONFIG: HostConfig = HostConfig {
     tick: TICK,
     resend_page: 16,
+    window: 64,
 };
 /// Leader L1 on process 1, then leader L2 on process 3.
 const L1: u64 = 100;

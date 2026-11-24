@@ -31,12 +31,14 @@ fn caught(mutant: WholeMutant, oracle: &str) {
         let Err(failure) = planted.replay(seed) else {
             continue;
         };
+        // A seed that fails with the mutant passes without it: the mutant
+        // made the failure.
+        if let Err(failure) = clean.replay(seed) {
+            panic!("seed {seed} fails with no mutant: {failure}");
+        }
         let text = failure.to_string();
         if text.contains(oracle) {
             return;
-        }
-        if let Err(failure) = clean.replay(seed) {
-            panic!("seed {seed} fails with no mutant: {failure}");
         }
         others.push(text);
     }
@@ -81,6 +83,16 @@ fn alerts_catches_a_machine_kept_down_in_the_view() {
 #[test]
 fn heal_held_catches_a_copy_reported_when_it_starts() {
     caught(WholeMutant::EarlyCopied, HEAL_HELD);
+}
+
+#[test]
+fn answer_catches_a_below_inside_the_segment() {
+    caught(WholeMutant::BelowInSegment, ANSWER);
+}
+
+#[test]
+fn heal_held_catches_a_corrupt_copy() {
+    caught(WholeMutant::CorruptCopy, HEAL_HELD);
 }
 
 #[test]

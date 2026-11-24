@@ -778,11 +778,15 @@ fn proxy_read_label(message: &Message) -> String {
             format!("Chosen {} · slot {}", ballot_text(*ballot), slot.0)
         }
         Message::PreRead { segment, read } => {
-            format!("PreRead {read} · segment {}", segment.0)
+            format!("PreRead {} · segment {}", read.number, segment.0)
         }
         Message::PreReadAck {
             read, watermark, ..
-        } => format!("PreReadAck {read} · watermark {}", slot_text(*watermark)),
+        } => format!(
+            "PreReadAck {} · watermark {}",
+            read.number,
+            slot_text(*watermark)
+        ),
         _ => unreachable!("a message of a proxy leader or of a read"),
     }
 }
@@ -822,9 +826,12 @@ fn proxy_read_content(message: &Message) -> (Vec<Field>, String) {
         Message::PreRead { segment, read } => (
             vec![
                 field("segment", segment.0.to_string()),
-                field("read", read.to_string()),
+                field("read", read.number.to_string()),
             ],
-            format!("Read {read}: what is your highest vote, and which segment do you know?"),
+            format!(
+                "Read {}: what is your highest vote, and which segment do you know?",
+                read.number
+            ),
         ),
         Message::PreReadAck {
             segment,
@@ -834,12 +841,13 @@ fn proxy_read_content(message: &Message) -> (Vec<Field>, String) {
         } => (
             vec![
                 field("segment", segment.0.to_string()),
-                field("read", read.to_string()),
+                field("read", read.number.to_string()),
                 field("watermark", slot_text(*watermark)),
                 field("bound", bound.0.to_string()),
             ],
             format!(
-                "Read {read}: my highest vote is at {}, and I know segment {}.",
+                "Read {}: my highest vote is at {}, and I know segment {}.",
+                read.number,
                 slot_text(*watermark),
                 bound.0
             ),

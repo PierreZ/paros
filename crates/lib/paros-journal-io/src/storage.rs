@@ -16,9 +16,9 @@
 //! - **In order.** The ops of a batch apply in order: a later op at the
 //!   same key wins. A commit that returned `Ok` is seen by every later
 //!   `scan`.
-//! - **Durable.** With `sync`, a batch that returned `Ok` survives a crash.
-//!   Without `sync`, it may be lost by a crash, but only together with every
-//!   later batch.
+//! - **Durable.** A batch that returned `Ok` survives a crash: every batch
+//!   of a role carries state that a send of the role may wait on (the flight
+//!   rule), so the driver has no batch that a crash may lose.
 //! - **Ranges.** `scan` gives every record of one role, in the order of
 //!   [`Key::to_bytes`](crate::Key::to_bytes), and no record of another
 //!   role. A record the backend finds corrupt is

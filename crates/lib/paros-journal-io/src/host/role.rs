@@ -131,11 +131,15 @@ impl Role for JournalRole {
             }
             // The leader stamps a write with its time (§J2.8).
             (Self::Leader(leader), RoleInput::Call { call, command }) => {
-                match leader.propose(call, command, now.0) {
+                match leader.propose(call, command, now.0, shared.window()) {
                     (Proposed::Slot(_), out) => leader_effects(address, out, &mut effects),
                     (Proposed::NotLeader, out) => {
                         assert!(out.is_empty(), "a refused call changes nothing");
                         effects.push(not_leader(address, call));
+                    }
+                    (Proposed::Busy, out) => {
+                        assert!(out.is_empty(), "a refused call changes nothing");
+                        effects.push(refused(address, call, CallOutcome::Busy));
                     }
                 }
             }
@@ -249,12 +253,14 @@ fn joined(
 }
 
 fn not_leader(address: Address, call: CallId) -> Effect {
+    refused(address, call, CallOutcome::NotLeader)
+}
+
+/// The answer to a call that holds no slot: it waits on no batch.
+fn refused(address: Address, call: CallId, outcome: CallOutcome) -> Effect {
     Effect::Output {
         address,
-        output: Output::Reply {
-            call,
-            outcome: CallOutcome::NotLeader,
-        },
+        output: Output::Reply { call, outcome },
         after: None,
     }
 }

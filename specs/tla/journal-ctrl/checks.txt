@@ -11,6 +11,11 @@
 ctrl                pass       ci
 ctrl_g2             pass       ci
 ctrl_trunc          pass       ci
+# ctrl_trunc with the step `Repromise`: its full state space takes more than
+# 30 minutes, so CI checks every state it reaches in 7 minutes of BFS, and
+# `--all` checks them all.
+ctrl_re             pass       ci     7
+ctrl_re_full        pass       long
 ctrl_drop           violation  ci
 ctrl_peer           violation  ci
 ctrl_probe_drop     violation  ci

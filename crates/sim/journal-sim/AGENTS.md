@@ -105,7 +105,7 @@ Test only: `publish = false`.
   `specs/tla/heal-reuse/HealTrace.tla`, and the named edits of its recorded traces.
 - `src/trace/mutate.rs`: the named edits of recorded traces (#1308 (mutate recorded traces)).
 - `tests/walks.rs`, `tests/mutants.rs`, `tests/traces.rs`; `tests/roles.rs` (the roles walks and
-  their mutants); `tests/roles_traces.rs` (the roles trace check on the narrow shape, its rules, its
+  their mutants); `tests/roles_traces.rs` (the roles trace check on the narrow and the wide shapes, its rules, its
   control `BoundaryBeforeDurable` and its edits); `tests/register.rs` (the register
   walks and their mutants) and `tests/register_traces.rs` (the register trace check, its rules,
   its control `ForgedBootstrap` and its edits); `tests/controller.rs` (the controller walks, their
@@ -138,8 +138,19 @@ The rules of `crates/sim/consensus-sim/AGENTS.md` hold here too. In short:
 - **The trace check has a control** (`BelowInSegment`; `ForgedBootstrap` for the register;
   `BoundaryBeforeDurable` for the roles; `ElectNoCas` for the controller; `SameCopyAgain` for the
   heal: the
-  oracles pass it, TLC refuses it) and **refuses the edits** of the recorded walks at the edited event or after it: at least 20 edits
-  with a place. A new event kind gets its edits in the same PR.
+  oracles pass it, TLC refuses it) and **refuses the edits** of the recorded walks at the edited event or after it.
+  **Every edit finds a place** (`mutate::judge`): an edit with no place in the checked walks
+  takes the first walk of up to `PLACE_SEEDS` more seeds that has one, and TLC must accept that
+  walk as recorded. An edit with no place fails the test. A new event kind gets its edits in the
+  same PR.
+- **TLC checks both roles shapes**: the narrow walks, and the wide walks (grids of two columns,
+  promises in pages of two). `RolesTrace` gives each slot the Phase 2 quorums of its column
+  (`Q2Of`, `slot % columns`) and Phase 1 a majority of every column.
+- **A mutant test judges the clean walk too**: each seed that fails with the mutant must pass
+  without it (`caught` in `tests/roles.rs` and `tests/whole.rs`).
+- **The walks run on fresh seeds each night** (`.github/workflows/journal-nightly.yml`): the first
+  seed of every campaign is `campaign::first_seed()`, `JOURNAL_SIM_FROM` or 1. A campaign must
+  reach its sites from any first seed: a site that only the CI seeds reach needs a walk move.
 - **The checked walks meet every rule** of `RULES` in `tests/traces.rs`,
   `tests/register_traces.rs` and `tests/roles_traces.rs` (a resend answered
   `Below`, a `Resolve` answered both ways, two seals, and more). A rule no walk meets fails the

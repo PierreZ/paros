@@ -29,7 +29,7 @@
 //! is lost, and so are the sends that waited on it. A new driver on the
 //! same storage serves the roles again from their records.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::family::Family;
 use crate::host::Effect;
@@ -75,6 +75,10 @@ pub struct Driver<M: Machine, S, T, C, P, E, D = NoDraws> {
     held_outputs: Vec<(Batch<M>, Address<M>, Output<M>)>,
     /// The highest durable batch of each role that runs.
     durable: BTreeMap<Address<M>, Batch<M>>,
+    /// The roles that ended by their own step with batches still in the
+    /// group: the group commits their batches, and keeps no durable entry
+    /// for them.
+    ended: BTreeSet<Address<M>>,
     /// The highest settled batch of each role: durable, or failed.
     settled: BTreeMap<Address<M>, Batch<M>>,
     /// The steps not reported yet.
@@ -110,6 +114,7 @@ where
             held: Vec::new(),
             held_outputs: Vec::new(),
             durable: BTreeMap::new(),
+            ended: BTreeSet::new(),
             settled: BTreeMap::new(),
             pending: VecDeque::new(),
             timers: BTreeMap::new(),
@@ -147,6 +152,7 @@ where
             pending: self.pending,
             timers: self.timers,
             stopped: self.stopped,
+            ended: self.ended,
         }
     }
 }
@@ -322,6 +328,7 @@ where
             Effect::Read { address } => match self.storage.scan(address) {
                 Ok(records) => {
                     self.durable.remove(&address);
+                    self.ended.remove(&address);
                     if let Some(id) = <Fam<M> as Family>::durable(&records) {
                         self.durable.insert(address, id);
                         self.settled.insert(address, id);
@@ -412,8 +419,14 @@ where
         for (address, id) in &tops {
             self.settled.insert(*address, *id);
         }
-        if self.storage.commit(&ops, true).is_ok() {
-            self.durable.extend(tops);
+        let ended = std::mem::take(&mut self.ended);
+        if self.storage.commit(&ops).is_ok() {
+            // A role that ended since its batch joined the group is gone: a
+            // role at its address later starts from its own read of the disk.
+            self.durable.extend(
+                tops.into_iter()
+                    .filter(|(address, _)| !ended.contains(address)),
+            );
             self.release();
         } else {
             // Each role of the group stops, and its stop drops what waited
@@ -433,7 +446,11 @@ where
         // last batches in the group, so they reach the disk; any other stop
         // takes them out of the group, settled.
         let other = |role: Address<M>| role != address;
-        if !<Fam<M> as Family>::keeps_batches(&why) {
+        if <Fam<M> as Family>::keeps_batches(&why) {
+            if self.group.iter().any(|(role, ..)| !other(*role)) {
+                self.ended.insert(address);
+            }
+        } else {
             if let Some(id) = self
                 .group
                 .iter()
@@ -452,6 +469,7 @@ where
         for (_, role, output) in stopped {
             self.ports.dropped(role, output);
         }
+        self.ports.stopped(address);
         self.durable.remove(&address);
         self.timers.remove(&address);
         self.stopped.push((address, why));

@@ -52,7 +52,7 @@ pub use events::{Event, Events};
 pub use family::{Journal, Launch, RoleInput};
 pub use host::{Assignment, CallId, CallOutcome, Effect, Host, HostConfig, Input, Output, Stop};
 pub use layout::{Damage, Entry, Key, Kind, Op};
-pub use register::Register;
+pub use register::{ChangeError, Register};
 pub use storage::{Storage, StorageError};
 pub use transport::Transport;
 pub use wire::{Address, Envelope, Time};
