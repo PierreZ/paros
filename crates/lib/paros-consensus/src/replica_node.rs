@@ -46,6 +46,18 @@
 //! - **The walk:** [`ReplicaReady::committed`] in contiguous slot order, the
 //!   slots the prefix just moved over — reported by the driver, handed to no
 //!   application (#186: the client folds what it reads).
+//! - **One segment** (R6 of `docs/architecture/04-7-segments.md`): a
+//!   replica keeps the segment of its base, the journal state at its floor.
+//!   Its walk stops after the `Roll` that ends the segment; it learns no
+//!   slot past the end, takes no trim point of another segment, pulls
+//!   nothing once sealed, and keeps the `Roll` when it compacts. A replica of
+//!   a later segment joins it fresh ([`ReplicaNode::join_segment`]) from the
+//!   boundary state the chain holds, with no record of an earlier segment.
+//!   A sealed replica answers a read past its end "sealed"
+//!   ([`LogRead::Sealed`](crate::replica::LogRead::Sealed),
+//!   [`ReplicaReady::sealed_reads`]). Its model is
+//!   `specs/tla/compartments/`. On a deployment that never rolls (every plain
+//!   one), the segment never ends.
 //! - **The reply:** [`AcceptorConfig::reply_owner`] names the one replica that owns
 //!   a slot's client reply (§3.3, `slot % replica_count`). Nothing routes on
 //!   it yet: the node a client asked keeps acking what it serves, until a
@@ -150,6 +162,19 @@ pub struct ReplicaCounters {
     /// Messages that are not a replica's to hear (`Prepare`, `Accept`, …),
     /// or a beat from outside the pool.
     pub ignored: u64,
+    /// Slots and trim points past the end of the segment this replica
+    /// keeps, or of another segment (R6): not this replica's.
+    pub past_end: u64,
+}
+
+/// Why [`ReplicaNode::join_segment`] refused a join.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinRefusal {
+    /// The replica learned or folded a slot already: only a fresh replica
+    /// joins a segment.
+    NotFresh,
+    /// The boundary state does not open a later segment at the start.
+    Boundary,
 }
 
 /// A replica that is not an acceptor: learns and serves reads, never votes. See the
@@ -203,6 +228,8 @@ pub struct ReplicaNode {
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(Audience, Message)>,
     pending_read_states: Vec<ReadState>,
+    /// The confirmed reads this sealed replica answers "sealed" (R6).
+    pending_sealed_reads: Vec<ReadState>,
     counters: ReplicaCounters,
     /// The lowest slot a `CatchUpRequest` of this replica asked from since
     /// its last trim-point jump: a `TrimmedTo` is taken only when it answers
@@ -285,6 +312,10 @@ impl ReplicaNode {
             &below,
         );
         replica.set_apply_page(limits.apply_page);
+        // A replica keeps one segment (R6): the segment of its base, the
+        // first one, or the one it joined (`join_segment`, durable as the
+        // trim point it wrote).
+        replica.bind_segment();
         let belief = Belief::new(config.bootstrap(), config.has_matchmakers());
         let mut node = Self {
             config,
@@ -301,10 +332,17 @@ impl ReplicaNode {
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
             pending_read_states: Vec::new(),
+            pending_sealed_reads: Vec::new(),
             counters: ReplicaCounters::default(),
             catchup_asked: None,
         };
         for (slot, record) in above {
+            // A record past the end of a sealed segment is not this
+            // replica's: the walk that sealed it dropped it, and a reboot
+            // leaves it too.
+            if node.replica.is_sealed() {
+                break;
+            }
             let command = record.1.clone();
             node.hold(slot, record);
             node.replica.learn(&node.records, slot, &command);
@@ -373,8 +411,10 @@ impl ReplicaNode {
                 if self.is_party_addressable(from) {
                     self.learn(slot, ballot, &command);
                     assert!(
-                        slot < self.floor || self.replica.is_chosen(slot),
-                        "a taught decision is held chosen or lies below the floor"
+                        slot < self.floor
+                            || self.replica.is_chosen(slot)
+                            || self.replica.sealed_end().is_some_and(|end| slot >= end),
+                        "a taught decision is held chosen, lies below the floor or past the end"
                     );
                 } else {
                     self.counters.ignored += 1;
@@ -583,7 +623,8 @@ impl ReplicaNode {
             self.learn_read_basis(config, ballot, fence);
         }
         self.learn_config(ballot, config);
-        if commit > self.replica.chosen_index() {
+        // A sealed replica holds its whole segment: it pulls nothing more.
+        if commit > self.replica.chosen_index() && !self.replica.is_sealed() {
             self.request_catch_up(from, self.replica.first_unchosen());
         }
     }
@@ -667,21 +708,100 @@ impl ReplicaNode {
         let _ = self.quorum_reads.fold(ctx, from, watermark, config_since);
     }
 
-    /// Serve every confirmed read this replica's applied prefix covers.
+    /// Serve every confirmed read this replica's applied prefix covers. A
+    /// sealed replica holds its whole segment, so it answers every confirmed
+    /// read: one past its end is answered "sealed" (R6), and the reader asks
+    /// the next segment for the rest.
     fn serve_quorum_reads(&mut self) {
         let replica = &self.replica;
-        let served = self.quorum_reads.serve(|index| replica.covers(index));
+        let sealed = replica.is_sealed();
+        let served = self
+            .quorum_reads
+            .serve(|index| sealed || replica.covers(index));
+        for (ctx, index) in served {
+            if self.replica.covers(index) {
+                self.pending_read_states.push(ReadState { ctx, index });
+            } else {
+                assert!(
+                    sealed,
+                    "only a sealed replica answers a read it does not cover"
+                );
+                self.pending_sealed_reads.push(ReadState { ctx, index });
+            }
+        }
         // The apply condition: this replica's own fold covers every read it
-        // answers.
+        // answers with a state.
         assert!(
-            served.iter().all(|(_, index)| self.replica.covers(*index)),
+            self.pending_read_states
+                .iter()
+                .all(|r| self.replica.covers(r.index)),
             "a served read's index is covered by the replica's fold"
         );
-        self.pending_read_states.extend(
-            served
-                .into_iter()
-                .map(|(ctx, index)| ReadState { ctx, index }),
+    }
+
+    /// Drop the records past the end of a sealed segment: the walk that
+    /// sealed the replica dropped those slots, which are not its own.
+    fn drop_past_end(&mut self) {
+        let Some(end) = self.replica.sealed_end() else {
+            return;
+        };
+        let past = self.records.split_off(&end);
+        let dropped: u64 = past.values().map(|(_, command)| command.weight()).sum();
+        assert!(
+            dropped <= self.retained_bytes,
+            "the retained bytes hold the weight of every record past the end"
         );
+        self.retained_bytes -= dropped;
+        self.faulty.retain(|slot| *slot < end);
+        assert!(
+            self.records.last_key_value().is_none_or(|(s, _)| *s < end),
+            "a sealed replica holds no record past its end"
+        );
+    }
+
+    /// Join the segment that starts at `start` with `boundary`, the journal
+    /// state at its start that the chain holds (R6 of
+    /// `docs/architecture/04-7-segments.md`): the replica jumps there as a
+    /// trim-point jump does, durably ([`WriteOp::TrimmedTo`]), holds no
+    /// record of an earlier segment, and keeps this segment from now on. A
+    /// driver calls it on a fresh replica, before it steps any message.
+    ///
+    /// # Errors
+    ///
+    /// [`JoinRefusal::NotFresh`] when the replica learned or folded a slot
+    /// already; [`JoinRefusal::Boundary`] when `boundary` does not open a
+    /// later segment at `start`.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, start = start.0)))]
+    pub fn join_segment(&mut self, start: Slot, boundary: JournalState) -> Result<(), JoinRefusal> {
+        if self.floor != Slot(0)
+            || self.replica.chosen_index().is_some()
+            || !self.records.is_empty()
+            || self.replica.folded() != Slot(0)
+        {
+            return Err(JoinRefusal::NotFresh);
+        }
+        if start.0 == 0
+            || boundary.segment.start != start
+            || boundary.segment.id <= self.replica.journal_base().segment.id
+        {
+            return Err(JoinRefusal::Boundary);
+        }
+        self.trim_to(start, boundary);
+        self.replica.bind_segment();
+        assert!(
+            self.floor == start,
+            "a join lands the floor on the segment's start"
+        );
+        assert!(
+            self.replica.segment_bound() == Some(boundary.segment.id),
+            "a joined replica keeps the segment it joined"
+        );
+        self.assert_invariants();
+        Ok(())
     }
 
     fn in_pool(&self, id: NodeId) -> bool {
@@ -703,6 +823,12 @@ impl ReplicaNode {
     fn on_trimmed_to(&mut self, from: NodeId, point: Slot, state: JournalState) {
         if !self.in_pool(from) || point <= self.floor {
             self.counters.ignored += 1;
+            return;
+        }
+        // A trim point of another segment, or one a sealed replica does not
+        // need, would carry this replica out of the segment it keeps (R6).
+        if self.replica.is_sealed() || Some(state.segment.id) != self.replica.segment_bound() {
+            self.counters.past_end += 1;
             return;
         }
         if self.open_catch_up().is_none_or(|asked| asked >= point) {
@@ -822,6 +948,11 @@ impl ReplicaNode {
         if slot < self.floor {
             return;
         }
+        // Past the end of the segment this replica keeps (R6): not its own.
+        if self.replica.sealed_end().is_some_and(|end| slot >= end) {
+            self.counters.past_end += 1;
+            return;
+        }
         if let Some(known) = self.replica.chosen_at(&self.records, slot) {
             assert!(
                 known == command,
@@ -872,6 +1003,7 @@ impl ReplicaNode {
         let truncate_up_to = self
             .replica
             .advance(&self.records, &mut self.pending_writes);
+        self.drop_past_end();
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
@@ -889,7 +1021,15 @@ impl ReplicaNode {
         let Some(target) = self.replica.compaction_target(&self.records) else {
             return;
         };
-        let highest_drop = up_to.min(target);
+        let mut highest_drop = up_to.min(target);
+        // A sealed replica keeps the `Roll` that ends its segment, so its
+        // base, the state at its floor, stays in the segment it keeps.
+        if let Some(end) = self.replica.sealed_end() {
+            let Some(below_roll) = end.0.checked_sub(2) else {
+                return;
+            };
+            highest_drop = highest_drop.min(Slot(below_roll));
+        }
         let first = Slot(highest_drop.0 + 1).max(self.floor);
         if first <= self.floor {
             return;
@@ -1242,6 +1382,7 @@ impl ReplicaNode {
         self.pending_writes.clear();
         self.pending_messages.clear();
         self.pending_read_states.clear();
+        self.pending_sealed_reads.clear();
         self.replica.clear_committed();
         assert!(
             self.pending_writes.is_empty(),

@@ -41,10 +41,20 @@ the record and the chain in the matchmaking and probe answers, which come with t
 chain (step 5); the states past `Sealed` (`Held` in step 6, `Trimmed` and `Offloaded` later; a
 record is sealed when its end is known). **Open**: the chain has no size limit; it grows by one
 record for each `Roll` until the states past `Sealed` let a matchmaker forget old segments (step 6
-decides). Not built yet: the replicas of a segment (R6) and the
-route of R4d, which need replicas to route to (step 5). The model of the replicas of a segment is
-`specs/tla/compartments/` (the join from the boundary state, the stop at the end, the "sealed"
-answer; `specs/tla/README.md`).
+decides). The model of the replicas of a segment is `specs/tla/compartments/` (the join from
+the boundary state, the stop at the end, the "sealed" answer; `specs/tla/README.md`).
+
+**What is built (step 5, first part).** A `ReplicaNode` keeps one segment (R6). Its `Replica` is
+bound to the segment of its base at boot (`Replica::bind_segment`): the walk, the refold and the
+boot stop at the `Roll` that ends it, and the replica is then sealed (`Replica::is_sealed`). A
+sealed replica keeps the `Roll`, refuses each slot past its end (the `past_end` counter), takes no
+trim point, pulls nothing, and answers a read at or past the end with `LogRead::Sealed` (the end
+and the next segment) and a quorum read there in `ReplicaReady::sealed_reads`. A fresh replica
+joins a later segment from the boundary state (`ReplicaNode::join_segment`, refused off a fresh
+replica or off a state that is not the start of a segment). Not built yet: the route of R4d
+(a `Commit` to the replicas of its segment), the catch-up between replicas, the boundary state in
+the chain record and the chain in the matchmaking and probe answers, and the walk of
+consensus-sim with replicas and rolls (step 5, second part).
 
 #### 4.7.1 The rule of the papers
 

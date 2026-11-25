@@ -50,7 +50,9 @@ fn replica(commands: &[Command]) -> Held {
 fn page(read: LogRead) -> super::LogPage {
     match read {
         LogRead::Page(page) => page,
-        LogRead::Truncated(_) | LogRead::NotHeld => panic!("expected a page"),
+        LogRead::Truncated(_) | LogRead::NotHeld | LogRead::Sealed { .. } => {
+            panic!("expected a page")
+        }
     }
 }
 
@@ -582,4 +584,60 @@ fn a_jump_past_a_roll_carries_the_tail_segment() {
     assert_eq!(r.outcome_at(Slot(3)), Some(&Outcome::Rolled(two)));
     assert_eq!(r.outcome_at(Slot(4)), Some(&Outcome::RollIgnored(two)));
     assert_eq!(r.journal(), walked.journal());
+}
+
+fn roll_to(next: u64) -> Command {
+    Command::Roll(crate::journal::Roll {
+        next: crate::journal::SegmentId(next),
+        replicas: None,
+    })
+}
+
+/// A replica sealed after the `Roll` at slot 1 that ends segment 0.
+fn sealed() -> Held {
+    let mut r = replica(&[claim(), roll_to(1)]);
+    r.bind_segment();
+    assert!(r.is_sealed());
+    r.assert_invariants(Slot(0));
+    r
+}
+
+/// A bound replica whose base left the segment it keeps fails its
+/// invariants: the base is where the kept segment is read from.
+#[test]
+#[should_panic(expected = "a bound replica's base lies in the segment it keeps")]
+fn a_bound_replica_with_a_foreign_base_fails_the_invariants() {
+    let mut r = replica(&[claim()]);
+    r.bind_segment();
+    r.replica.bound = Some(crate::journal::SegmentId(5));
+    r.assert_invariants(Slot(0));
+}
+
+/// A bound fold two segments past its base walked past the end of the
+/// segment it keeps.
+#[test]
+#[should_panic(expected = "a bound fold never passes the end of its segment")]
+fn a_bound_fold_past_two_rolls_fails_the_invariants() {
+    let mut r = replica(&[claim(), roll_to(1), roll_to(2)]);
+    r.replica.bound = Some(crate::journal::SegmentId(0));
+    r.assert_invariants(Slot(0));
+}
+
+/// A sealed replica that holds a chosen slot past its end kept a slot
+/// that is not its own.
+#[test]
+#[should_panic(expected = "a sealed replica holds no chosen slot past its end")]
+fn a_sealed_replica_with_a_slot_past_its_end_fails_the_invariants() {
+    let mut r = sealed();
+    r.replica.chosen.insert(Slot(5));
+    r.assert_invariants(Slot(0));
+}
+
+/// A sealed fold behind the chosen prefix did not stop at the `Roll`.
+#[test]
+#[should_panic(expected = "a sealed fold ends at the first unchosen slot")]
+fn a_sealed_fold_behind_the_prefix_fails_the_invariants() {
+    let mut r = sealed();
+    r.replica.chosen_index = Some(Slot(2));
+    r.assert_invariants(Slot(0));
 }
