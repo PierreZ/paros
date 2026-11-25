@@ -1,13 +1,14 @@
 //! The **matchmaker plane**: the registry tier, the candidate's matchmaking
 //! phase, the garbage-collection floor, and the generation handover.
 //!
-//! This is `crates/lib/paros-consensus/examples/matchmaker.rs` with the parts the
-//! example hard-codes turned into player choices. The example's
-//! `MatchmakerNode` — a [`Matchmaker`](paros_consensus::Matchmaker) role, the
+//! This is the matchmaker side of the toy cluster of `paros-consensus`
+//! (`crates/lib/paros-consensus/examples/common/cluster.rs`) with the parts that the
+//! examples hard-code turned into player choices. A matchmaker of that
+//! cluster — a [`Matchmaker`](paros_consensus::Matchmaker) role, the
 //! static [`MatchmakerConfig`](paros_consensus::matchmaker::MatchmakerConfig) it boots with, and
 //! a [`MemRegistry`](paros_consensus::matchmaker::MemRegistry) disk it writes to
-//! and reboots from — is [`MatchmakerProcess`] here, and its `deliver_match` /
-//! `deliver_reconfigure` are the two methods below: **step, persist, take the
+//! and reboots from — is [`MatchmakerProcess`] here, and the cluster's delivery of a match request and its
+//! `matchmaker_reconfigure` are the two methods below: **step, persist, take the
 //! reply, advance**, in that order and never another.
 //!
 //! # Where each piece lives
@@ -23,7 +24,7 @@
 //! - The **garbage-collection floor** belongs to the leader in the same way
 //!   (`Ready::gc_requests`, `on_gc_ack`).
 //! - The **reconfigurer** is a *node-side driver object*, not a role of the
-//!   core's node: the example holds one beside the pool, and
+//!   core's node: the example `matchmaker` holds one beside the cluster, and
 //!   `crates/lib/paros/src/driver/handover.rs` holds one per driver. So the world
 //!   holds one per node, and the node that drives a handover is the node the
 //!   player asked.

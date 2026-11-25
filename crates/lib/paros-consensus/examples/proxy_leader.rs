@@ -1,485 +1,253 @@
-//! **Proxy leaders: the leader sequences, somebody else broadcasts.**
+//! **Proxy leaders: the leader orders the commands, and another process
+//! sends them.**
 //!
 //! Run it: `cargo run -p paros-consensus --example proxy_leader`
 //!
-//! The lesson after `quorum_read`, and the first **second deployment** in
-//! this crate: beside the six [`ColocatedNode`]s of a `2 × 3` grid run two
-//! [`ProxyLeader`]s — processes that are neither acceptors nor replicas,
-//! hold nothing durable, and do one thing: fan a slot's `Accept` out to its
-//! column, fold the `Accepted`s, and announce the `Commit`.
+//! This example drives [`ColocatedNode`] and [`ProxyLeader`] with the toy
+//! cluster of `examples/common/cluster.rs`. Read `quickstart` first, and
+//! `acceptor_grid` for the grid.
 //!
-//! # The bottleneck (Compartmentalized Paxos §3.1)
+//! # The problem
 //!
-//! A Multi-Paxos leader does two jobs per command. It *sequences* — picks
-//! the slot — which is serial and cheap. And it *broadcasts*: sends the
-//! `Accept` to every acceptor of the column, collects their `Accepted`s,
-//! sends the `Commit` to every learner. With `f` faults to tolerate that is
-//! `3f + 4` messages through one process per command, and it is why adding
-//! acceptors or replicas makes a classic leader *slower*. Only the first
-//! job has to be the leader's.
+//! A Multi-Paxos leader does two jobs for each command. It gives the
+//! command a slot, which is cheap. Then it sends an `Accept` to each
+//! acceptor of the quorum, collects each `Accepted`, and sends a `Commit`
+//! to each learner. The second job is most of the messages, and it grows
+//! with the cluster. Only the first job must be done by the leader.
 //!
-//! # The decoupling
+//! # The technique (Compartmentalized Paxos, section 3.1)
 //!
-//! The leader still allocates the slot and still opens the round, but
-//! instead of fanning out it hands the very same `Accept` to a proxy
-//! (`reply_to` names the proxy, `leader` still names the leader), and is
-//! done until the `Commit` comes back. The proxy is a
-//! [`paros_consensus::proposer::Rounds`] plus routing — the same Phase-2 tally
-//! the proposer embeds, on another process — and it contributes nothing to
-//! the decision: it votes on nothing, orders nothing, adopts no ballot, so
-//! moving it cannot break agreement. Which proxy? `ProxyId(slot %
-//! proxy_count)`, a pure function of the slot ([`ProxyId::of`]); a proxy
-//! count of zero is exactly the colocated deployment of the other examples.
+//! The leader gives the slot and then hands the `Accept` to a **proxy
+//! leader**. The proxy leader sends it to the acceptors, counts the votes
+//! and sends the `Commit`. A proxy leader decides nothing: it does not
+//! vote, it does not order, and it holds nothing durable. To lose one costs
+//! time, never safety.
 //!
-//! # What the trace below shows
+//! # The driver's part
 //!
-//! 1. Node 1 leads. Three commands run **colocated** (the driver's
-//!    override, [`Delegation::Colocated`]): the leader's message count per
-//!    command is what a classic leader pays.
-//! 2. Three commands run **delegated** ([`Delegation::Auto`]): the leader
-//!    sends one `Accept` and receives one `Commit` per command — two
-//!    messages, whatever the grid's width — and the two proxies alternate.
-//!    (The leader is also an acceptor of two columns, and in that role it
-//!    still accepts and answers; those are the acceptor's messages, counted
-//!    apart.)
-//! 3. A proxy dies holding a round. The leader re-delegates on every beat
-//!    and, after its budget, **takes the round back** and runs it colocated:
-//!    liveness under a dead proxy is the leader's, and the fallback is
-//!    always the classic Phase 2.
-//! 4. The leader hands off mid-round. The successor **re-delegates** the
-//!    inherited round with `leader` naming itself, and the proxy — which
-//!    still holds the round — refreshes the leader hint and completes it
-//!    under the same ballot.
+//! - `Config::proxy_count` names how many proxy leaders the deployment
+//!   has. Zero is the plain deployment. [`ProxyLeader::new`] takes the same
+//!   `Config` as a node.
+//! - A proxy leader is driven like a node, with no disk: `step`, `tick`,
+//!   `ready()`, send `messages()`, `advance()`.
+//! - The core addresses the delegated `Accept` to `Audience::Proxy(id)`,
+//!   and the driver sends it to the process that has this id. A proxy
+//!   leader sends with `Audience::resolve_from_proxy`.
+//! - `propose` delegates each slot to `ProxyId(slot % proxy_count)`.
+//!   `propose_in` lets the driver choose: [`Delegation::Colocated`] keeps
+//!   the round on the leader, and [`Delegation::To`] names a proxy leader.
+//! - Liveness with a proxy leader that is down is a policy of the driver:
+//!   on a beat it calls `resend_pending`, and `take_back_delegated(n)` to
+//!   run on the leader each round that a proxy leader did not finish after
+//!   `n` resends.
 //!
-//! This example is about slots, so no client becomes the writer of the
-//! journal: Paxos chooses each write, and the journal refuses it at apply.
-//! `journal_calls` shows the calls that a journal accepts.
+//! # What the trace shows
+//!
+//! Six nodes in a grid of two rows and three columns, and two proxy
+//! leaders. Node 1 leads.
+//!
+//! 1. Three records with the rounds on the leader: the cost of a plain
+//!    leader.
+//! 2. Three records with the rounds delegated. The leader sends one
+//!    `Accept` and receives one `Commit`. It handles two more messages
+//!    when it is an acceptor of the column of the slot.
+//! 3. A proxy leader crashes with a round. The leader delegates the round
+//!    again on each beat, then takes it back and runs it.
+//! 4. The leader hands the leadership to node 4 while a delegated round is
+//!    open. Node 4 delegates the round again, and the same proxy leader
+//!    finishes it at the same ballot.
 //!
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
-//! with Compartmentalization* (2021), §3.1; the frankenpaxos `ProxyLeader`
-//! analysis in `docs/references/frankenpaxos/04-compartmentalization.md`.
+//! with Compartmentalization* (2021), section 3.1, and
+//! `specs/tla/proxy-leader/` for the model.
 
-use std::collections::BTreeMap;
+mod common;
 
-use paros_consensus::contract::MemStorage;
 use paros_consensus::contract::Party;
-use paros_consensus::journal::{Entry, LeaderUuid, Seq};
+use paros_consensus::journal::{Control, Entry, JournalIdentifier, LeaderUuid, Seq};
 use paros_consensus::membership::{ProxyId, QuorumSystem};
-use paros_consensus::node::Delegation;
-use paros_consensus::{ColocatedNode, Config, Message, NodeId, ProxyLeader, Slot, Value};
+use paros_consensus::node::{Delegation, ProposeResult};
+use paros_consensus::{Config, Message, NodeId, ProxyLeader, Slot, Value};
 
-/// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
-/// `{1, 4}` and `{2, 5}`.
-const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
-const NODES: u64 = 6;
-const PROXIES: usize = 2;
-/// The driver's take-back budget: re-delegations a proxy may swallow.
+use common::cluster::Cluster;
+
+const N1: NodeId = NodeId(1);
+const N4: NodeId = NodeId(4);
+
+const WRITER: LeaderUuid = LeaderUuid(0xA11CE);
+
+/// How many resends the driver gives a proxy leader before the leader
+/// takes a round back.
 const TAKE_BACK_AFTER: u64 = 2;
 
-/// The deployment as node `id` holds it: a proxy leader is built from the
-/// same description (its bootstrap configuration and its pool).
-fn deployment(id: NodeId) -> Config {
-    Config {
-        peers: (0..NODES).map(NodeId).collect(),
-        quorum_system: GRID,
-        proxy_count: PROXIES,
-        ..Config::new(id, paros_consensus::journal::JournalIdentifier::UNSET)
+/// Two rows of three, and two proxy leaders. The columns are `{0, 3}`,
+/// `{1, 4}` and `{2, 5}`: the leader, node 1, is an acceptor of column 1.
+fn config(id: NodeId) -> Config {
+    let mut config = Config::new(id, JournalIdentifier::UNSET).with_peers((0..6).map(NodeId));
+    config.quorum_system = QuorumSystem::grid(2, 3);
+    config.proxy_count = 2;
+    config
+}
+
+fn entry(seq: u64, text: &str) -> Entry {
+    Entry {
+        leader: WRITER,
+        seq: Seq(seq),
+        records: vec![Value::from(text.as_bytes().to_vec())],
     }
 }
 
-fn fresh(id: u64) -> ColocatedNode {
-    ColocatedNode::new(
-        &MemStorage::new(deployment(NodeId(id))),
-        paros_consensus::Limits::DEFAULT,
-    )
-}
-
-fn show_party(p: Party) -> String {
-    match p {
-        Party::Node(n) => format!("node {}", n.0),
-        Party::Proxy(p) => format!("proxy {}", p.0),
-    }
-}
-
-/// The leader's messages per command, split by the role that sent or
-/// received them.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-struct LeaderCost {
-    /// Sent or received as the *leader*: the `Accept` it hands out (to a
-    /// column or a proxy), the `Accepted`s it folds, the `Commit` it sends
-    /// or the proxy's `Commit` it learns from.
-    leader: usize,
-    /// Sent or received as an *acceptor* of its columns: a proxy's fan-out
-    /// reaching it, and the `Accepted` it answers.
-    acceptor: usize,
-}
-
-/// The deployment: six nodes, two proxies, and the messages in flight.
-struct Cluster {
-    nodes: Vec<ColocatedNode>,
-    proxies: Vec<Option<ProxyLeader>>,
-    wire: Vec<(Party, Message)>,
-    leader: NodeId,
-    cost: LeaderCost,
-}
-
-impl Cluster {
-    fn node(&mut self, id: NodeId) -> &mut ColocatedNode {
-        let i = usize::try_from(id.0).expect("small id");
-        &mut self.nodes[i]
-    }
-
-    fn proxy(&mut self, id: ProxyId) -> &mut Option<ProxyLeader> {
-        let i = usize::try_from(id.0).expect("small id");
-        &mut self.proxies[i]
-    }
-
-    /// Tally one message the leader sent or received.
-    fn charge(&mut self, party: Party, msg: &Message) {
-        if party != Party::Node(self.leader) {
-            return;
-        }
-        match msg {
-            // A proxy's fan-out reaching the leader as one of the column's
-            // acceptors.
-            Message::Accept { reply_to, .. } if *reply_to != Party::Node(self.leader) => {
-                self.cost.acceptor += 1;
-            }
-            Message::Accept { .. } | Message::Accepted { .. } | Message::Commit { .. } => {
-                self.cost.leader += 1;
-            }
-            _ => {}
-        }
-    }
-
-    /// Drain `id`'s batch onto the wire, honouring the `Ready` contract.
-    fn drain(&mut self, id: NodeId) {
-        let pool: Vec<NodeId> = (0..NODES).map(NodeId).collect();
-        let node = self.node(id);
-        let ready = node.ready();
-        let mut out = Vec::new();
-        for (audience, m) in ready.messages() {
-            if let Some(proxy) = audience.proxy() {
-                out.push((Party::Proxy(proxy), m.clone()));
-            }
-            for to in audience.resolve(&pool, id) {
-                out.push((Party::Node(to), m.clone()));
-            }
-        }
-        ready.advance();
-        node.advance_recovery();
-        for (to, m) in &out {
-            // What the leader sends: an `Accept` it hands out is the
-            // leader's; an `Accepted` it answers a proxy with is the
-            // acceptor's.
-            if id == self.leader {
-                match m {
-                    Message::Accepted { .. } if matches!(to, Party::Proxy(_)) => {
-                        self.cost.acceptor += 1;
-                    }
-                    Message::Accept { .. } | Message::Accepted { .. } | Message::Commit { .. } => {
-                        self.cost.leader += 1;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        self.wire.extend(out);
-    }
-
-    fn drain_proxy(&mut self, id: ProxyId) {
-        let pool: Vec<NodeId> = (0..NODES).map(NodeId).collect();
-        let Some(proxy) = self.proxy(id).as_mut() else {
-            return;
-        };
-        let ready = proxy.ready();
-        let mut out = Vec::new();
-        for (audience, m) in ready.messages() {
-            for to in audience.resolve_from_proxy(&pool) {
-                out.push((Party::Node(to), m.clone()));
-            }
-        }
-        ready.advance();
-        self.wire.extend(out);
-    }
-
-    /// Deliver everything in flight for which `keep` holds, to quiescence.
-    fn deliver(&mut self, keep: impl Fn(Party, &Message) -> bool) {
-        loop {
-            let Some(position) = self.wire.iter().position(|(to, m)| keep(*to, m)) else {
-                return;
-            };
-            let (to, m) = self.wire.remove(position);
-            self.charge(to, &m);
-            match to {
-                Party::Node(id) => {
-                    self.node(id).step(m);
-                    self.drain(id);
-                }
-                Party::Proxy(id) => {
-                    if let Some(proxy) = self.proxy(id).as_mut() {
-                        proxy.step(m);
-                        self.drain_proxy(id);
-                    }
-                }
-            }
-        }
-    }
-
-    fn deliver_all(&mut self) {
-        self.deliver(|_, _| true);
-    }
-
-    /// One driver beat at the leader: tick, re-send, take back.
-    fn beat(&mut self) {
-        let leader = self.leader;
-        let node = self.node(leader);
-        node.tick();
-        node.resend_pending();
-        node.take_back_delegated(TAKE_BACK_AFTER);
-        self.drain(leader);
-    }
-
-    fn chosen_everywhere(&self, slot: Slot) -> bool {
-        self.nodes.iter().all(|n| n.chosen_at(slot).is_some())
-    }
-
-    /// Propose one command at the leader under `delegation`, deliver to
-    /// quiescence, and report the leader's cost for it.
-    fn command(&mut self, seq: u64, text: &str, delegation: Delegation) -> (Slot, LeaderCost) {
-        self.cost = LeaderCost::default();
-        let leader = self.leader;
-        let result = self.node(leader).propose_in(
-            Entry {
-                leader: LeaderUuid(7),
-                seq: Seq(seq),
-                records: vec![Value::from(text.as_bytes().to_vec())],
-            },
-            None,
-            delegation,
-        );
-        let paros_consensus::node::ProposeResult::Accepted(slot) = result else {
-            panic!("the leader admits the proposal: {result:?}");
-        };
-        self.drain(leader);
-        self.deliver_all();
-        assert!(self.chosen_everywhere(slot), "slot {} is chosen", slot.0);
-        (slot, self.cost)
-    }
+/// Propose one record on the leader `id` with the delegation that the
+/// driver chose. Nothing is delivered.
+fn propose(cluster: &mut Cluster, id: NodeId, seq: u64, text: &str, how: Delegation) -> Slot {
+    let result = cluster.node(id).propose_in(entry(seq, text), None, how);
+    let ProposeResult::Accepted(slot) = result else {
+        panic!("node {id} is the leader: {result:?}");
+    };
+    slot
 }
 
 fn main() {
-    println!("== proxy leaders: the leader sequences, the proxies broadcast ==\n");
-    let mut cluster = Cluster {
-        nodes: (0..NODES).map(fresh).collect(),
-        proxies: (0..PROXIES)
-            .map(|p| {
-                Some(ProxyLeader::new(
-                    ProxyId(p as u64),
-                    &deployment(NodeId(0)),
-                    paros_consensus::Limits::DEFAULT,
-                ))
-            })
-            .collect(),
-        wire: Vec::new(),
-        leader: NodeId(1),
-        cost: LeaderCost::default(),
-    };
-    elect(&mut cluster);
-    let colocated = colocated_commands(&mut cluster);
-    let delegated = delegated_commands(&mut cluster, colocated);
-    assert!(
-        delegated.leader < colocated.leader,
-        "delegation takes the broadcast off the leader"
+    let mut cluster = Cluster::new((0..6).map(NodeId).map(config));
+    cluster.elect(N1);
+    cluster.control(
+        N1,
+        Control::SetLeader {
+            new: WRITER,
+            old: None,
+        },
     );
+
+    let colocated = colocated(&mut cluster);
+    let delegated = delegated(&mut cluster);
+    assert!(delegated < colocated);
+    println!("   the leader handled {delegated} messages, and {colocated} before");
+
     a_dead_proxy(&mut cluster);
-    a_handoff_mid_round(&mut cluster);
-    println!("\n== ok ==");
-}
-
-fn elect(cluster: &mut Cluster) {
-    println!("-- 1. node 1 campaigns; six nodes in a 2 × 3 grid, two proxies");
-    let leader = cluster.leader;
-    cluster.node(leader).campaign();
-    cluster.drain(leader);
-    cluster.deliver_all();
-    assert!(cluster.node(leader).is_leader(), "node 1 wins its election");
-    cluster.node(leader).tick();
-    cluster.drain(leader);
-    cluster.deliver_all();
-}
-
-/// Step 1: the classic leader's cost.
-fn colocated_commands(cluster: &mut Cluster) -> LeaderCost {
-    println!("\n-- 2. three commands run colocated (Delegation::Colocated)");
-    let mut total = LeaderCost::default();
-    for (seq, text) in [(1, "alpha"), (2, "bravo"), (3, "charlie")] {
-        let (slot, cost) = cluster.command(seq, text, Delegation::Colocated);
-        println!(
-            "   slot {} = {text:?}: the leader sent or received {} messages as leader, {} as acceptor",
-            slot.0, cost.leader, cost.acceptor
-        );
-        total.leader += cost.leader;
-        total.acceptor += cost.acceptor;
+    a_handoff(&mut cluster);
+    let journal = cluster.journal(N4);
+    assert_eq!(journal.len(), 8);
+    for id in cluster.running() {
+        assert_eq!(cluster.journal(id), journal);
     }
-    assert!(
-        cluster.node(cluster.leader).delegated_rounds().is_empty(),
-        "nothing was delegated"
-    );
+    println!("\neach node serves the same {} records", journal.len());
+}
+
+/// Part 1: what the leader sends and receives when it runs each round.
+fn colocated(cluster: &mut Cluster) -> usize {
+    println!("== 1. three records, each round on the leader");
+    let mut total = 0;
+    for (seq, text) in [(0, "alpha"), (1, "bravo"), (2, "charlie")] {
+        cluster.take_traffic(N1);
+        let slot = propose(cluster, N1, seq, text, Delegation::Colocated);
+        cluster.settle();
+        let cost = cluster.take_traffic(N1);
+        println!("   slot {slot}: the leader handled {cost} messages");
+        total += cost;
+    }
+    assert_eq!(cluster.node(N1).delegated_rounds(), []);
     total
 }
 
-/// Step 2: the same commands through the proxies.
-fn delegated_commands(cluster: &mut Cluster, colocated: LeaderCost) -> LeaderCost {
-    println!("\n-- 3. three commands run delegated (Delegation::Auto: ProxyId(slot % 2))");
-    let mut total = LeaderCost::default();
-    for (seq, text) in [(4, "delta"), (5, "echo"), (6, "foxtrot")] {
-        let (slot, cost) = cluster.command(seq, text, Delegation::Auto);
-        let proxy = ProxyId::of(slot, PROXIES).expect("two proxies");
-        assert_eq!(
-            cost.leader, 2,
-            "one Accept out to the proxy, one Commit back: two messages"
-        );
-        let decided = cluster
-            .proxy(proxy)
-            .as_ref()
-            .expect("up")
-            .counters()
-            .decided;
+/// Part 2: the same work with the proxy leaders.
+fn delegated(cluster: &mut Cluster) -> usize {
+    println!("\n== 2. three records, each round delegated");
+    let mut total = 0;
+    for (seq, text) in [(3, "delta"), (4, "echo"), (5, "foxtrot")] {
+        cluster.take_traffic(N1);
+        cluster.trace = seq == 3;
+        let slot = propose(cluster, N1, seq, text, Delegation::Auto);
+        cluster.settle();
+        cluster.trace = false;
+        let cost = cluster.take_traffic(N1);
+        let proxy = ProxyId::of(slot, 2).expect("the deployment has proxy leaders");
+        let acceptors = cluster.node(N1).acceptors().clone();
+        if acceptors.column_of(slot) == Some(1) {
+            // The leader is also an acceptor of this column: it gets the
+            // `Accept` of the proxy leader and answers it, as node 4 does.
+            assert_eq!(cost, 4);
+        } else {
+            assert_eq!(cost, 2, "one Accept out, one Commit in");
+        }
         println!(
-            "   slot {} = {text:?} via proxy {}: the leader sent or received {} messages as leader, {} as acceptor (proxy {} has decided {decided})",
-            slot.0, proxy.0, cost.leader, cost.acceptor, proxy.0
+            "   slot {slot} by proxy {}: the leader handled {cost} messages",
+            proxy.0
         );
-        total.leader += cost.leader;
-        total.acceptor += cost.acceptor;
+        total += cost;
     }
-    println!(
-        "   colocated: {} leader messages for three commands; delegated: {} — two per command, whatever the width",
-        colocated.leader, total.leader
-    );
+    let proxy: &ProxyLeader = cluster.proxy(ProxyId(0));
+    assert!(proxy.counters().decided > 0);
     total
 }
 
-/// Step 3: a proxy dies with a round; the leader takes it back.
+/// Part 3: the leader does not wait for ever on a proxy leader.
 fn a_dead_proxy(cluster: &mut Cluster) {
-    println!(
-        "\n-- 4. proxy 1 dies holding the next slot; the leader re-delegates, then takes it back"
-    );
-    let leader = cluster.leader;
-    let result = cluster.node(leader).propose_in(
-        Entry {
-            leader: LeaderUuid(7),
-            seq: Seq(7),
-            records: vec![Value::from(b"golf".to_vec())],
-        },
-        None,
-        Delegation::To(ProxyId(1)),
-    );
-    let paros_consensus::node::ProposeResult::Accepted(slot) = result else {
-        panic!("admitted");
-    };
-    cluster.drain(leader);
-    // The delegation is on the wire; proxy 1 dies before it lands.
-    *cluster.proxy(ProxyId(1)) = None;
-    cluster.deliver_all();
-    assert_eq!(
-        cluster.node(leader).delegated_rounds(),
-        vec![(slot, ProxyId(1))],
-        "the round is delegated and undecided"
-    );
-    println!(
-        "   slot {}: delegated to proxy 1, which is dead — nothing is chosen",
-        slot.0
-    );
+    println!("\n== 3. proxy 1 crashes with a round");
+    let slot = propose(cluster, N1, 6, "golf", Delegation::To(ProxyId(1)));
+    cluster.crash_proxy(ProxyId(1));
+    cluster.settle();
+    assert_eq!(cluster.node(N1).delegated_rounds(), [(slot, ProxyId(1))]);
+    assert!(cluster.node(N1).chosen_at(slot).is_none());
+    println!("   slot {slot} is delegated to proxy 1, and nothing is chosen");
+
+    // The beat of a driver: time, then its two policies.
     let mut beats = 0;
-    while !cluster.node(leader).delegated_rounds().is_empty() {
-        cluster.beat();
-        cluster.deliver_all();
+    cluster.take_sent();
+    while !cluster.node(N1).delegated_rounds().is_empty() {
+        cluster.node(N1).tick();
+        cluster.node(N1).resend_pending();
+        cluster.node(N1).take_back_delegated(TAKE_BACK_AFTER);
+        cluster.settle();
         beats += 1;
-        assert!(
-            beats <= TAKE_BACK_AFTER + 1,
-            "the take-back budget is honoured"
-        );
+        let sent = cluster.take_sent();
+        if !cluster.node(N1).delegated_rounds().is_empty() {
+            assert_eq!(sent.get("Accept"), Some(&1), "the round is delegated again");
+        }
     }
-    println!(
-        "   after {beats} beats (budget {TAKE_BACK_AFTER}) the leader took slot {} back and ran it colocated",
-        slot.0
-    );
-    assert!(cluster.chosen_everywhere(slot));
-    println!("   slot {} = \"golf\" chosen everywhere", slot.0);
-    // Proxy 1 comes back, empty.
-    *cluster.proxy(ProxyId(1)) = Some(ProxyLeader::new(
-        ProxyId(1),
-        &deployment(NodeId(0)),
-        paros_consensus::Limits::DEFAULT,
-    ));
+    assert_eq!(beats, TAKE_BACK_AFTER);
+    assert!(cluster.node(N4).chosen_at(slot).is_some());
+    println!("   after {beats} beats the leader took slot {slot} back, and it is chosen");
+
+    // A proxy leader that starts again is empty, and that is enough.
+    cluster.restart_proxy(ProxyId(1));
 }
 
-/// Step 4: a handoff with a delegated round in flight.
-fn a_handoff_mid_round(cluster: &mut Cluster) {
-    println!("\n-- 5. node 1 hands off to node 4 with the next slot delegated and in flight");
-    let leader = cluster.leader;
-    let result = cluster.node(leader).propose_in(
-        Entry {
-            leader: LeaderUuid(7),
-            seq: Seq(8),
-            records: vec![Value::from(b"hotel".to_vec())],
-        },
-        None,
-        Delegation::Auto,
-    );
-    let paros_consensus::node::ProposeResult::Accepted(slot) = result else {
-        panic!("admitted");
-    };
-    // The core's own rule, which a handoff successor re-derives without
-    // being told: the same proxy for the same slot.
-    let proxy_id = ProxyId::of(slot, PROXIES).expect("two proxies");
-    cluster.drain(leader);
-    // The proxy receives the delegation and fans out, but no Accepted
-    // reaches it yet: the round is open at the proxy, undecided.
-    cluster.deliver(|to, m| matches!(to, Party::Proxy(_)) && matches!(m, Message::Accept { .. }));
-    let proxy = cluster.proxy(proxy_id).as_ref().expect("up");
-    assert_eq!(proxy.delegator(slot), Some(NodeId(1)));
-    println!(
-        "   proxy {} holds slot {} for {}",
-        proxy_id.0,
-        slot.0,
-        show_party(Party::Node(proxy.delegator(slot).expect("open")))
-    );
+/// Part 4: a delegated round crosses a leader handoff.
+fn a_handoff(cluster: &mut Cluster) {
+    println!("\n== 4. node 1 hands the leadership to node 4 with a round open");
+    let slot = propose(cluster, N1, 7, "hotel", Delegation::Auto);
+    let proxy = ProxyId::of(slot, 2).expect("the deployment has proxy leaders");
+    // The proxy leader gets the round. Its `Accept`s to the column are
+    // lost, so only a new delegation can finish the round.
+    cluster.settle_where(|to, _| !matches!(to, Party::Node(_)));
+    assert_eq!(cluster.proxy(proxy).delegator(slot), Some(N1));
+    println!("   proxy {} holds slot {slot} for node 1", proxy.0);
+
+    let ballot = cluster.node(N1).ballot();
     let receipt = cluster
-        .node(leader)
-        .relinquish_to(NodeId(4))
-        .expect("a settled leader hands off");
-    assert_eq!(receipt.pending, 1, "the slot travels as a pending round");
-    cluster.drain(leader);
-    cluster.leader = NodeId(4);
-    // The Relinquish lands first; the successor re-delegates the slot to
-    // the proxy `slot % proxy_count` names — the one already holding it.
-    cluster.deliver(|_, m| matches!(m, Message::Relinquish { .. }));
-    assert!(cluster.node(NodeId(4)).is_leader());
+        .node(N1)
+        .relinquish_to(N4)
+        .expect("a settled, elected leader may relinquish");
     assert_eq!(
-        cluster.node(NodeId(4)).delegated_rounds(),
-        vec![(slot, proxy_id)],
-        "the successor re-delegated the inherited round to the same proxy"
+        receipt.pending, 1,
+        "the open round goes with the leadership"
     );
-    cluster.deliver_all();
-    let ballot = cluster.node(NodeId(4)).ballot();
-    assert_eq!(ballot.node, NodeId(1), "the same ballot, minted by node 1");
-    assert!(cluster.chosen_everywhere(slot));
-    let proxy = cluster.proxy(proxy_id).as_ref().expect("up").counters();
-    println!(
-        "   node 4 leads under ballot {}.{}; proxy {} refreshed the hint (refanned {}) and decided slot {} (decided {})",
-        ballot.round, ballot.node.0, proxy_id.0, proxy.refanned, slot.0, proxy.decided
+    cluster.settle_holding(|_, message| !matches!(message, Message::Relinquish { .. }));
+    assert!(cluster.node(N4).is_leader());
+    assert_eq!(
+        cluster.node(N4).delegated_rounds(),
+        [(slot, proxy)],
+        "node 4 delegated the round again, to the proxy leader of the slot"
     );
-    assert!(proxy.refanned >= 1, "the re-delegation re-fanned-out");
-    let (kinds, _) = summary(cluster);
-    println!("   messages left in flight: {kinds:?}");
-}
 
-fn summary(cluster: &Cluster) -> (BTreeMap<&'static str, usize>, usize) {
-    let mut kinds = BTreeMap::new();
-    for (_, m) in &cluster.wire {
-        *kinds.entry(m.kind()).or_default() += 1;
+    cluster.settle();
+    assert_eq!(cluster.node(N4).ballot(), ballot, "the same ballot");
+    assert_eq!(cluster.proxy(proxy).delegator(slot), None);
+    for id in (0..6).map(NodeId) {
+        assert!(cluster.node(id).chosen_at(slot).is_some());
     }
-    (kinds, cluster.wire.len())
+    println!(
+        "   node 4 leads at ballot {ballot}, and proxy {} finished slot {slot}",
+        proxy.0
+    );
 }

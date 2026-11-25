@@ -2,292 +2,198 @@
 //!
 //! Run it: `cargo run -p paros-consensus --example replica_tier`
 //!
-//! The lesson after `proxy_leader`, and the third deployment in this
-//! crate. Every other example colocates the roles: each node is an
-//! acceptor *and* a replica, so each node votes on the log and also learns
-//! it. Here the learning is also done by processes that never vote:
+//! This example drives [`ColocatedNode`] and [`ReplicaNode`] with the toy
+//! cluster of `examples/common/cluster.rs`. Read `quickstart` first.
 //!
-//! - three **acceptors** — [`ColocatedNode`]s — vote, learn and keep the
-//!   chosen log;
-//! - two **replicas** — [`ReplicaNode`]s — learn the chosen log from the
-//!   leader's `Commit`s and serve journal reads from it, and never vote.
+//! # The problem
 //!
-//! Neither runs an application: paros is a journal, and the application
-//! lives in the client that reads it (#186).
+//! A [`ColocatedNode`] is an acceptor and a replica: it votes on the log,
+//! and it learns the log and serves reads from it. To serve more reads you
+//! would add nodes. But one more acceptor makes each quorum larger, so each
+//! write becomes slower.
 //!
-//! # Why split them (Compartmentalized Paxos §3.3)
+//! # The technique (Compartmentalized Paxos, section 3.3)
 //!
-//! Adding an acceptor makes every quorum bigger, so it makes the protocol
-//! *slower*. Adding a replica only adds a process that learns, so it adds
-//! read capacity for free. With the two roles on
-//! the same process they cannot be scaled apart: this deployment can. It is
-//! also the shape operators know from `FoundationDB`: a small durable log
-//! tier plus a tier that serves reads.
+//! Scale the two roles apart. A [`ReplicaNode`] learns the chosen log from
+//! the `Commit`s of the leader and serves journal reads from it. It never
+//! votes, so the quorums do not change when you add one.
 //!
-//! # What an acceptor keeps
+//! The acceptors stay learners too. They keep the chosen records, because
+//! Paxos needs them: a new leader skips what is chosen, and a replica that
+//! is behind gets the slots it misses from an acceptor.
 //!
-//! It stays a **learner**. It keeps its chosen index and the chosen values,
-//! because Paxos needs them: an acceptor only truncates what is chosen, a
-//! recovering leader skips what is chosen, garbage collection counts chosen
-//! indices, and a lagging replica is healed *from* the acceptors. The full
-//! analysis is in the module doc of `paros_consensus::replica_node`.
+//! # The driver's part
 //!
-//! # What the trace below shows
+//! - `Config::replica_count` names how many replicas the deployment has. A
+//!   replica has the same `Config` under its own id, and its id is outside
+//!   the pool of the nodes.
+//! - A replica is driven like a node: `step`, `tick`, `ready()`, persist
+//!   `writes()`, send `messages()`, `advance()`. A restart is
+//!   [`ReplicaNode::new`] on its disk.
+//! - The core addresses a `Commit` and a beat to `Audience::Learners`. The
+//!   driver sends these to each node of the pool **and to each replica**:
+//!   which processes are learners is the deployment map of the driver. It
+//!   is one line in `Cluster::pump`.
+//! - `ReplicaNode::reply_owner(slot)` names the one replica that answers
+//!   the client for a slot, so the replicas share that work. It gives a
+//!   rank, `ReplicaId(0..replica_count)`, and each replica gives the same
+//!   one. Which process has a rank is the deployment map of the driver.
 //!
-//! 1. Node 0 leads. Six commands are chosen by the three acceptors alone.
-//! 2. The acceptors hold the chosen prefix.
-//! 3. One `Commit` to replica 11 is lost. Replica 11 learns up to the hole,
-//!    then the leader's next beat shows it is behind, it asks for the
-//!    missing range (`CatchUpRequest`), and the answer
-//!    (`CatchUpResponse`) lets it learn the rest in order. A journal read
-//!    on replica 11 then returns the whole log.
-//! 4. Each slot has one **reply owner**, `slot % replica_count`
-//!    ([`paros_consensus::membership::AcceptorConfig::reply_owner`]): the replica that answers the client for
-//!    that slot, so each replica sends half of the replies.
+//! # What the trace shows
+//!
+//! 1. Node 0 leads three acceptors. Five records are written, and the two
+//!    replicas learn each slot without a vote.
+//! 2. One `Commit` to replica 11 is lost. Replica 11 learns the slots after
+//!    the hole but cannot serve them. The next beat of the leader shows
+//!    that it is behind, and it asks for the slot it misses.
+//! 3. Replica 11 restarts from its disk and serves the same journal.
+//! 4. Two acceptors crash. Nothing can be written, and the replicas still
+//!    serve each read.
+//! 5. Each slot has one reply owner.
 //!
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
-//! with Compartmentalization* (2021), §2.3 and §3.3.
+//! with Compartmentalization* (2021), sections 2.3 and 3.3, and
+//! `specs/tla/compartments/` for the model.
 
-use paros_consensus::contract::Audience;
-use paros_consensus::contract::MemStorage;
-use paros_consensus::journal::{Command, Control, Entry, LeaderUuid, Seq};
+mod common;
+
+use paros_consensus::contract::Party;
+use paros_consensus::journal::{Control, JournalIdentifier, LeaderUuid, Outcome};
 use paros_consensus::membership::ReplicaId;
-use paros_consensus::replica::LogRead;
-use paros_consensus::{ColocatedNode, Config, Message, NodeId, ReplicaNode, Slot, Value};
+use paros_consensus::{ColocatedNode, Config, Message, NodeId, ReplicaNode, Slot};
 
-const ACCEPTORS: [u64; 3] = [0, 1, 2];
-const REPLICAS: [u64; 2] = [10, 11];
+use common::cluster::Cluster;
 
-/// The deployment data every process shares: the acceptors and the
-/// replica count.
-fn config(id: u64) -> Config {
-    Config {
-        peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
-        replica_count: REPLICAS.len(),
-        ..Config::new(
-            NodeId(id),
-            paros_consensus::journal::JournalIdentifier::UNSET,
-        )
-    }
-}
+const N0: NodeId = NodeId(0);
+const N1: NodeId = NodeId(1);
+const N2: NodeId = NodeId(2);
+const R10: NodeId = NodeId(10);
+const R11: NodeId = NodeId(11);
 
-/// The deployment: three acceptors, two replicas, and the slots each
-/// replica's walk moved over.
-struct Deployment {
-    acceptors: Vec<ColocatedNode>,
-    replicas: Vec<ReplicaNode>,
-    applied: Vec<Vec<(Slot, Command)>>,
-    /// Print each delivery?
-    verbose: bool,
-}
+const WRITER: LeaderUuid = LeaderUuid(0xA11CE);
 
-impl Deployment {
-    fn new() -> Self {
-        Self {
-            acceptors: ACCEPTORS
-                .iter()
-                .map(|id| {
-                    ColocatedNode::new(
-                        &MemStorage::new(config(*id)),
-                        paros_consensus::Limits::DEFAULT,
-                    )
-                })
-                .collect(),
-            replicas: REPLICAS
-                .iter()
-                .map(|id| {
-                    ReplicaNode::new(
-                        &MemStorage::new(config(*id)),
-                        paros_consensus::Limits::DEFAULT,
-                    )
-                })
-                .collect(),
-            applied: vec![Vec::new(); REPLICAS.len()],
-            verbose: false,
-        }
-    }
-
-    fn replica_index(to: NodeId) -> Option<usize> {
-        REPLICAS.iter().position(|id| NodeId(*id) == to)
-    }
-
-    /// Drain acceptor `i`. The deployment map: `Learners` reaches the other
-    /// acceptors *and* both replicas; everything else resolves as usual.
-    fn drain_acceptor(&mut self, i: usize) -> Vec<(NodeId, Message)> {
-        let pool: Vec<NodeId> = self.acceptors[i].config().pool().to_vec();
-        let me = self.acceptors[i].config().id;
-        let ready = self.acceptors[i].ready();
-        let mut out = Vec::new();
-        for (audience, msg) in ready.messages() {
-            for to in audience.resolve(&pool, me) {
-                out.push((to, msg.clone()));
-            }
-            if *audience == Audience::Learners {
-                for id in REPLICAS {
-                    out.push((NodeId(id), msg.clone()));
-                }
-            }
-        }
-        ready.advance();
-        out
-    }
-
-    /// Drain replica `r`: its writes would be persisted here, its
-    /// `committed` is the slots its walk moved over, its messages go to one
-    /// node each.
-    fn drain_replica(&mut self, r: usize) -> Vec<(NodeId, Message)> {
-        let ready = self.replicas[r].ready();
-        self.applied[r].extend(
-            ready
-                .committed()
-                .iter()
-                .map(|(slot, _, command, _)| (*slot, command.clone())),
-        );
-        let out = ready
-            .messages()
-            .iter()
-            .filter_map(|(audience, msg)| match audience {
-                Audience::Node(to) => Some((*to, msg.clone())),
-                _ => None,
-            })
-            .collect();
-        ready.advance();
-        out
-    }
-
-    /// Deliver to quiescence, dropping what `keep` refuses.
-    fn deliver(
-        &mut self,
-        mut queue: Vec<(NodeId, Message)>,
-        keep: impl Fn(NodeId, &Message) -> bool,
-    ) {
-        queue.reverse();
-        while !queue.is_empty() {
-            let (to, msg) = queue.remove(0);
-            if !keep(to, &msg) {
-                if self.verbose {
-                    println!("    x {:<15} to {:>2}  (lost)", msg.kind(), to.0);
-                }
-                continue;
-            }
-            if self.verbose {
-                println!("    > {:<15} to {:>2}", msg.kind(), to.0);
-            }
-            if let Some(r) = Self::replica_index(to) {
-                self.replicas[r].step(msg);
-                queue.extend(self.drain_replica(r));
-            } else {
-                let i = usize::try_from(to.0).expect("an acceptor index");
-                self.acceptors[i].step(msg);
-                queue.extend(self.drain_acceptor(i));
-            }
-        }
-    }
-
-    fn applied_slots(&self, r: usize) -> Vec<u64> {
-        self.applied[r].iter().map(|(s, _)| s.0).collect()
-    }
+/// Three acceptors, and two replicas beside them.
+fn config(id: NodeId) -> Config {
+    let mut config = Config::new(id, JournalIdentifier::UNSET).with_peers([N0, N1, N2]);
+    config.replica_count = 2;
+    config
 }
 
 fn main() {
-    let mut d = Deployment::new();
+    let mut cluster = Cluster::new([N0, N1, N2].map(config)).with_replicas([R10, R11]);
 
-    println!("== 1. node 0 is elected by the three acceptors");
-    d.acceptors[0].campaign();
-    let q = d.drain_acceptor(0);
-    d.deliver(q, |_, _| true);
-    assert!(d.acceptors[0].is_leader());
-    println!("   leader: node 0, ballot {:?}", d.acceptors[0].ballot());
-
-    println!("\n== 2. six commands; the Commit for slot 2 never reaches replica 11");
-    let lost = |to: NodeId, m: &Message| {
-        !(to == NodeId(11) && matches!(m, Message::Commit { slot: Slot(2), .. }))
-    };
-    for seq in 1..=6_u64 {
-        // The first command claims the journal for client 7 (generation 1);
-        // the next five are its writes, at positions 0..=4.
-        let _ = if seq == 1 {
-            d.acceptors[0].propose_control(Control::SetLeader {
-                new: LeaderUuid(7),
-                old: None,
-            })
-        } else {
-            d.acceptors[0].propose(Entry {
-                leader: LeaderUuid(7),
-                seq: Seq(seq - 2),
-                records: vec![Value::from(format!("cmd-{seq}").into_bytes())],
-            })
-        };
-        d.verbose = seq == 3;
-        if d.verbose {
-            println!("   the third command, message by message:");
-        }
-        let q = d.drain_acceptor(0);
-        d.deliver(q, lost);
+    println!("== 1. three acceptors decide, two replicas learn");
+    cluster.elect(N0);
+    cluster.control(
+        N0,
+        Control::SetLeader {
+            new: WRITER,
+            old: None,
+        },
+    );
+    cluster.write(N0, WRITER, 0, "alpha");
+    cluster.trace = true;
+    let slot = cluster.write(N0, WRITER, 1, "bravo");
+    cluster.trace = false;
+    for id in [R10, R11] {
+        let replica: &ReplicaNode = cluster.replica(id);
+        assert!(replica.chosen_at(slot).is_some());
+        // A replica judges each slot as a node does, alone.
+        assert!(matches!(
+            cluster.outcome(id, slot),
+            Some(Outcome::Accepted { .. })
+        ));
+        assert_eq!(cluster.replica_journal(id), ["alpha", "bravo"]);
     }
-    d.verbose = false;
+    println!("   slot {slot}: nodes 1 and 2 voted, replicas 10 and 11 only got the Commit");
 
-    println!("\n== 3. the acceptors: a chosen prefix");
-    for n in &d.acceptors {
-        println!(
-            "   acceptor {}: chosen index {:?}, {} records",
-            n.config().id.0,
-            n.replica().chosen_index().map(|s| s.0),
-            n.acceptor().records().len()
-        );
-        assert_eq!(n.replica().chosen_index(), Some(Slot(5)));
-        assert_eq!(n.acceptor().records().len(), 6);
-    }
+    a_lost_commit(&mut cluster);
+    restart(&mut cluster);
+    without_a_quorum(&mut cluster);
+    reply_owners(&mut cluster);
+}
 
-    println!("\n== 4. the replicas: replica 11 stops at the hole");
-    for (r, id) in REPLICAS.iter().enumerate() {
-        println!("   replica {id}: learned slots {:?}", d.applied_slots(r));
-    }
-    assert_eq!(d.applied_slots(0), vec![0, 1, 2, 3, 4, 5]);
-    assert_eq!(d.applied_slots(1), vec![0, 1]);
+/// Part 2: a replica that misses a slot asks an acceptor for it.
+fn a_lost_commit(cluster: &mut Cluster) {
+    println!("\n== 2. one Commit to replica 11 is lost");
+    let hole = cluster.propose(N0, WRITER, 2, "charlie");
+    cluster.settle_where(|to, message| {
+        !(to == Party::Node(R11) && matches!(message, Message::Commit { .. }))
+    });
+    let last = cluster.write(N0, WRITER, 3, "delta");
+    cluster.write(N0, WRITER, 4, "echo");
+
+    // Replica 11 knows the later slots are chosen, but a journal is read in
+    // order: it serves nothing past the hole.
+    let gap = cluster.replica(R11).replica().chosen_gap();
+    assert!(matches!(gap, Some((from, _)) if from == hole));
+    assert!(cluster.replica(R11).chosen_at(last).is_some());
+    assert_eq!(cluster.replica_journal(R11), ["alpha", "bravo"]);
+    assert_eq!(cluster.replica_journal(R10).len(), 5);
+    println!("   replica 11 misses slot {hole} and serves [\"alpha\", \"bravo\"]");
+
+    // The beat carries the chosen index of the leader. Replica 11 sees the
+    // hole and asks the leader for it.
+    cluster.trace = true;
+    cluster.tick();
+    cluster.trace = false;
+    assert_eq!(cluster.replica(R11).replica().chosen_gap(), None);
     assert_eq!(
-        d.replicas[1].replica().chosen_gap(),
-        Some((Slot(2), Slot(5))),
-        "replica 11 knows slots 3..=5 are chosen, above the hole at 2"
+        cluster.replica_journal(R11),
+        ["alpha", "bravo", "charlie", "delta", "echo"]
     );
-
-    println!("\n== 5. the leader beats; replica 11 sees it is behind and catches up");
-    d.verbose = true;
-    d.acceptors[0].tick();
-    let q = d.drain_acceptor(0);
-    d.deliver(q, |_, _| true);
-    d.verbose = false;
-    println!("   replica 11: learned slots {:?}", d.applied_slots(1));
-    assert_eq!(d.applied_slots(1), vec![0, 1, 2, 3, 4, 5]);
-    assert_eq!(d.applied[0], d.applied[1], "one order on every replica");
-    // A journal read served by replica 11: the whole journal, by position,
-    // from its own fold — the acceptors are not asked. The claim took a slot
-    // and no position.
-    let LogRead::Page(page) = d.replicas[1].read_log(Seq(0), usize::MAX, usize::MAX) else {
-        panic!("nothing is trimmed");
-    };
-    println!(
-        "   a journal read on replica 11: {} records, next position {}, leader {:?}",
-        page.records.len(),
-        page.next().0,
-        page.state.leader
+    assert_eq!(
+        cluster.learned(R10),
+        cluster.learned(R11),
+        "each replica learned the same slots in the same order"
     );
-    assert_eq!(page.records.len(), 5);
-    assert_eq!(page.next(), Seq(5));
-    // The one message a replica ignored: the candidate's proactive
-    // `CatchUpRequest` to every learner — a replica serves no peer.
-    assert_eq!(d.replicas[0].counters().ignored, 1);
+    println!("   replica 11 caught up and serves five records");
+}
 
-    println!("\n== 6. who replies to the client for each slot");
-    for slot in 0..6 {
-        let owner = d.replicas[0]
-            .reply_owner(Slot(slot))
-            .expect("a deployment with replicas has an owner per slot");
-        println!(
-            "   slot {slot}: {owner:?} (replica {})",
-            REPLICAS[usize::try_from(owner.0).expect("a replica rank")]
-        );
-        assert_eq!(owner, ReplicaId(slot % 2));
+/// Part 3: a replica persists what it learns.
+fn restart(cluster: &mut Cluster) {
+    println!("\n== 3. replica 11 restarts from its disk");
+    let before = cluster.replica_journal(R11);
+    assert_eq!(before.len(), 5);
+    cluster.restart_replica(R11);
+    assert_eq!(cluster.replica_journal(R11), before);
+    println!("   it serves five records before it hears from any node");
+}
+
+/// Part 4: reads do not need the acceptors.
+fn without_a_quorum(cluster: &mut Cluster) {
+    println!("\n== 4. two of the three acceptors crash");
+    cluster.crash(N1);
+    cluster.crash(N2);
+    let slot = cluster.write(N0, WRITER, 5, "foxtrot");
+    let leader: &ColocatedNode = cluster.node(N0);
+    assert!(leader.chosen_at(slot).is_none(), "one vote is not a quorum");
+    // The replicas are two more processes, and they do not help: a replica
+    // is never a member of a quorum.
+    for id in [R10, R11] {
+        assert_eq!(cluster.replica_journal(id).len(), 5);
     }
-    println!("\nEach replica answers half of the clients; the acceptors answer none.");
+    println!("   \"foxtrot\" is not chosen: the replicas do not vote");
+    println!("   replicas 10 and 11 still serve the five records");
+}
+
+/// Part 5: the replicas share the answers to the clients.
+fn reply_owners(cluster: &mut Cluster) {
+    println!("\n== 5. who answers the client of each slot");
+    // A `ReplicaId` is a rank, `0..replica_count`. Which process has a rank
+    // is the deployment map of the driver: here rank 0 is process 10.
+    let process = [R10, R11];
+    for slot in (0..4).map(Slot) {
+        let owner = cluster
+            .replica(R10)
+            .reply_owner(slot)
+            .expect("a deployment with replicas has an owner for each slot");
+        assert_eq!(owner, ReplicaId(slot.0 % 2));
+        assert_eq!(cluster.replica(R11).reply_owner(slot), Some(owner));
+        let rank = usize::try_from(owner.0).expect("a rank is small");
+        println!(
+            "   slot {slot}: rank {}, replica {}",
+            owner.0, process[rank]
+        );
+    }
 }

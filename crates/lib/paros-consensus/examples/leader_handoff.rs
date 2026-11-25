@@ -159,7 +159,7 @@ fn a_lost_handoff(cluster: &mut Cluster) {
 
     let receipt = cluster.node(N2).relinquish_to(N3);
     assert!(receipt.is_some());
-    cluster.settle_where(|_, _, message| !matches!(message, Message::Relinquish { .. }));
+    cluster.settle_where(|_, message| !matches!(message, Message::Relinquish { .. }));
     for id in [N1, N2, N3] {
         assert!(!cluster.node(id).is_leader());
     }

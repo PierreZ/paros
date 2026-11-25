@@ -682,8 +682,8 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   `default-features = false`, wasm-safe. Its optional, default-on `assertions` feature (#317)
   adds `moonpool-assertions` for coverage probes only. Its tests, the model checkers
   (`src/models/`), the driver contract (`src/contract/`) and the eleven examples
-  (`examples/`: seven lessons, and four that drive `ColocatedNode` as a driver does, from
-  `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
+  (`examples/`: `single_decree` on `Decree`, and ten that drive the deployments as a driver
+  does, from `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
 - `crates/lib/paros` — the facade: each layer as a module (today
   `paros::consensus`). A program depends on `paros` alone. Wasm-safe and provider-free
   with its default features; it is where moonpool's storage and network get bundled, behind a

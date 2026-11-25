@@ -2,8 +2,8 @@
 //!
 //! Run it: `cargo run -p paros-consensus --example reconfiguration`
 //!
-//! The lesson `matchmaker` teaches Matchmaker Paxos with the roles driven by
-//! hand. This example runs the same protocol the way a driver does: five
+//! The example `matchmaker` shows the registry of the matchmakers and the
+//! handover of their set. This example changes the acceptors: five
 //! [`ColocatedNode`]s, three [`paros_consensus::Matchmaker`]s, and the toy
 //! cluster of `examples/common/cluster.rs`. Read `quickstart` first.
 //!
@@ -91,7 +91,7 @@ fn acceptors(members: [NodeId; 3]) -> AcceptorConfig {
 }
 
 fn main() {
-    let mut cluster = Cluster::new([N1, N2, N3, N4, N5].map(config)).with_matchmakers(3);
+    let mut cluster = Cluster::new([N1, N2, N3, N4, N5].map(config));
 
     first_leader(&mut cluster);
     let ballot = reconfigure(&mut cluster);

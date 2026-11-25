@@ -2,11 +2,10 @@
 //!
 //! Run it: `cargo run -p paros-consensus --example quickstart`
 //!
-//! Start here if you want to *use* the crate. The lessons `single_decree`,
-//! `multi_paxos` and `matchmaker` teach the algorithm with the roles driven
-//! by hand. This example drives [`ColocatedNode`], the deployment that wires
-//! the roles for you, and it shows the whole contract between the core and
-//! its driver.
+//! Start here if you want to *use* the crate. This example drives
+//! [`ColocatedNode`], the deployment that wires the roles for you, and it
+//! shows the whole contract between the core and its driver. Each other
+//! example builds on this loop.
 //!
 //! # The core computes; the driver does the I/O
 //!

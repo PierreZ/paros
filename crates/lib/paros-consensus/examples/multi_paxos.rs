@@ -1,572 +1,219 @@
-//! **Multi-Paxos: one election, then a whole log of values.**
+//! **Multi-Paxos: one election for many slots, and what a new leader owes
+//! the log.**
 //!
 //! Run it: `cargo run -p paros-consensus --example multi_paxos`
 //!
-//! The second lesson, after `single_decree` and before `matchmaker`. It
-//! drives the *same* [`Proposer`] and [`Acceptor`] roles as the first
-//! example and adds the third role, the [`Replica`]: the part of a node
-//! that keeps the list of chosen values and applies them in order. There
-//! is no new algorithm in this file. Multi-Paxos is single-decree Paxos
-//! run once per position of a log, plus one shortcut that makes it cheap
-//! and one duty the shortcut creates when a leader dies.
+//! This example drives [`ColocatedNode`] with the toy cluster of
+//! `examples/common/cluster.rs`. Read `single_decree` for the two phases of
+//! Paxos, and `quickstart` for the driver loop.
 //!
-//! # What the first lesson established
+//! # A slot is a position, a ballot is an attempt
 //!
-//! Four words carry over, and everything below builds on them.
+//! Single-decree Paxos chooses one value. A log needs one chosen value for
+//! each position, and a position is a **slot**. A **ballot** names one
+//! leadership. The two are separate: one ballot chooses many slots, and one
+//! slot can be accepted under more than one ballot, always with the value
+//! that the rule P2c carries from the earlier ballot to the later one.
 //!
-//! - A **ballot** is the name of one attempt at leadership: a pair
-//!   `(round, node)`, totally ordered, so no two nodes can ever mint the
-//!   same one. Ballot 10 of node 1 is printed `10.1` in the trace below.
-//! - A **promise** is an acceptor's durable vow: "I will accept nothing at
-//!   a ballot lower than this one." An acceptor makes it in Phase 1, and
-//!   in the same reply it reports what it has already accepted.
-//! - A **quorum** is any set of acceptors large enough that two quorums
-//!   must share a node — a majority in this file: two of three.
-//! - **P2c** is the value-selection rule. Before a proposer may propose
-//!   its own value it must gather a quorum of promises, and if any promise
-//!   reports an accepted value it must propose the highest-ballot one
-//!   instead. Because every quorum overlaps every other, a value some
-//!   quorum already accepted is always reported to the next proposer, so a
-//!   **chosen** value (accepted by a quorum at one ballot) can never be
-//!   contradicted. That is Paxos safety.
+//! # One Phase 1 for each future slot
 //!
-//! # A slot is a position; a ballot is an attempt
+//! The `Prepare` of a candidate asks for a promise on *each slot from the
+//! first one that the candidate does not know is chosen*. When a quorum
+//! promised, the candidate leads. Each command then costs only Phase 2: one
+//! `Accept`, a quorum of `Accepted`, one `Commit`.
 //!
-//! Single-decree Paxos chooses one value. A replicated log needs one
-//! chosen value per *position*, and a position is called a **slot**:
-//! `Slot(4)` is the fifth entry of the log. A slot says *where* a value
-//! goes; a ballot says *which attempt at leadership* put it there. The two
-//! are independent axes, and keeping them apart is the point of this
-//! lesson:
+//! # What a new leader owes the log
 //!
-//! - one ballot chooses many slots: below, ballot `10.1` chooses slots 0,
-//!   1 and 2 one after the other, without ever changing;
-//! - one slot may see several ballots: slot 4 is accepted under ballot
-//!   `10.1` first, then accepted again under ballot `11.2` — with the
-//!   *same* value E, because P2c carried it across.
+//! A leader can crash between "a quorum accepted" and "each node was told".
+//! The promises that the next leader collects report what each acceptor
+//! holds, slot by slot, and the new leader does two things with them:
 //!
-//! The value belongs to the slot. The ballot is only the record of which
-//! leadership got it there.
+//! 1. **It proposes each reported value again** (P2c, for each slot). A
+//!    value that one acceptor reports can be chosen already, so no other
+//!    value is safe in that slot.
+//! 2. **It fills each slot that nobody reported with a `Noop`.** Slots are
+//!    given in order, so a leader can leave an empty slot below a chosen
+//!    one. Each node applies in slot order, so the log would stop at that
+//!    hole for ever. A `Noop` closes it.
 //!
-//! # The shortcut: one Phase 1 for every future slot
+//! # The driver's part
 //!
-//! Running the full two-phase protocol per slot would cost two round trips
-//! per client command. The shortcut is to make one promise cover a range
-//! of slots instead of one. The `Prepare` a candidate sends says "promise
-//! ballot `b` for every slot from `from_slot` on", and the acceptor's reply
-//! reports every value it has accepted anywhere in that range. Once a
-//! quorum has promised, the candidate is the **leader** for ballot `b`,
-//! and it knows something about every future slot at once: no lower
-//! ballot can ever get a value chosen there again, because any quorum a
-//! lower ballot would need overlaps the quorum that just vowed to refuse
-//! it.
+//! None of this is new work for a driver. [`ColocatedNode`] runs the
+//! recovery when its campaign wins, and the `Accept`s of the recovery are
+//! in `ready.messages()` like any other. A long recovery is paged: the
+//! driver calls `advance_recovery()` after each `advance()`, and
+//! `ready.recovery_batch()` shows the progress.
 //!
-//! So each new client command skips Phase 1 entirely. The leader takes the
-//! next free slot, sends one `Accept(b, slot, value)`, and the slot is
-//! chosen the moment a quorum accepts. One round trip per command instead
-//! of two, and the Phase 1 that made it possible is paid once per
-//! election, not once per value. That is what "amortizing Phase 1" means.
+//! The journal of this example is a multi-writer journal
+//! ([`WriterMode::Multi`]): a write names no writer and takes the next
+//! position, so the slots of the trace hold only what the example writes.
 //!
-//! # A Commit tells the others
+//! # What the trace shows
 //!
-//! Only the leader counts the accepts, so only the leader knows the moment
-//! a slot is chosen. It then sends a `Commit` — "slot `s` is chosen, with
-//! this value" — and every node **learns** it: the [`Replica`] files the
-//! value under its slot and, once every slot below it is chosen too,
-//! applies it. A learner needs no tally of its own; it trusts that the
-//! leader assembled the quorum, exactly as a learner does in the paper.
-//! Here is the seam the rest of the file explores: between "a quorum
-//! accepted" and "everyone was told" there is a window, and a leader can
-//! die inside it.
+//! 1. Node 1 wins an election. Three records then cost Phase 2 only.
+//! 2. Node 1 proposes D in slot 3 and E in slot 4. D reaches no other node.
+//!    E reaches node 2, so E is chosen, and only node 1 knows it. Node 1
+//!    crashes.
+//! 3. Node 2 wins an election. Its recovery fills slot 3 with a `Noop` and
+//!    proposes E again in slot 4, at the new ballot.
+//! 4. Node 1 restarts as a follower. Its disk still holds D in slot 3. It
+//!    learns the `Noop`, and its record of the slot is replaced.
 //!
-//! # The duty: what a new leader owes the log
-//!
-//! When the leader dies, some node campaigns at a higher ballot and runs
-//! Phase 1 over the whole suffix of the log it does not yet know to be
-//! chosen. Each promise reports, slot by slot, what that acceptor holds.
-//! The new leader now has two jobs, and it must do both:
-//!
-//! 1. **Re-propose every reported value** — P2c, applied to each slot on
-//!    its own. If any acceptor reports a value for slot 4, a quorum *may*
-//!    have accepted it (the reporter could be one of the two), so it may
-//!    already be chosen. The only safe move is to propose that same value
-//!    again under the new ballot. Skipping this can put **two values in
-//!    one slot**: E chosen at ballot 10, something else chosen at ballot
-//!    11, and two nodes applying different logs.
-//! 2. **Fill every unreported slot with a `Noop`.** Slots are handed out
-//!    in order, so a dying leader can leave a slot that reached nobody
-//!    (slot 3 below, where D sits on the dead node alone) *below* a slot
-//!    that reached a quorum (slot 4). If nobody proposes anything for slot
-//!    3, nothing ever will: new commands go into fresh slots above it, and
-//!    every replica applies in slot order, so the whole cluster would be
-//!    **frozen** at slot 2 forever, with slot 4 chosen and unreachable
-//!    behind a hole. A `Noop` is a command that does nothing; choosing it
-//!    at slot 3 closes the hole. It is safe for the same reason P2c is: if
-//!    slot 3 already held a chosen value, some promise in the quorum would
-//!    have reported it, and job 1 would have applied instead.
-//!
-//! Recovery, then, is not a repair procedure bolted on the side. It is the
-//! single-decree rule of the first lesson applied once per slot, plus a
-//! rule for the empty case.
-//!
-//! # Leadership is volatile; the disk is not
-//!
-//! The [`Acceptor`] and the [`Replica`] write to disk: the promise, every
-//! accepted value, the chosen prefix. The [`Proposer`] never does.
-//! Leadership lives only in memory, and that is deliberate: a node that
-//! restarts boots as a **follower** with a fresh proposer, whatever it was
-//! doing before. It cannot resume ballot 10 by mistake, and it does not
-//! need to: by the time it is back, a higher ballot has been promised by a
-//! quorum, and ballot 10 could not finish anything anyway. Its acceptor
-//! state is still on disk, D and all, and the protocol has already decided
-//! what to make of it.
-//!
-//! # Catch-up: repair, not safety
-//!
-//! The restarted node is behind. **Catch-up** is the leader re-sending it
-//! the `Commit`s for the slots it missed; it learns each one and its log
-//! matches everyone else's. Learning slot 3 as `Noop` also overwrites the
-//! stale `(10, D)` record on its disk. Keep two things apart here:
-//!
-//! - *Safety* never depended on that overwrite. `Noop` was chosen at ballot
-//!   11 by a quorum; every later Phase-1 quorum overlaps that quorum and
-//!   hears `(11, Noop)`, which outranks `(10, D)`. P2c could never pick D
-//!   again even if node 1 kept it forever.
-//! - *Repair* is what the overwrite is. The node's durable record for slot
-//!   3 is made to agree with the log it will serve to others and read back
-//!   at its next boot, so it never carries an accepted-but-unchosen value
-//!   beside the chosen one.
-//!
-//! # What the trace below shows
-//!
-//! Three nodes, each colocating all three roles, as paros's
-//! `ColocatedNode` does. Node 1 wins ballot `10.1` and chooses slots 0, 1
-//! and 2 (A, B, C) at one round trip each. Then it stumbles: the `Accept`
-//! for slot 3 (D) reaches nobody, the `Accept` for slot 4 (E) reaches node
-//! 2 — a quorum, so E *is* chosen — and node 1 dies before any `Commit`
-//! leaves. Node 2 campaigns at ballot `11.2`; its Phase 1 hears E for slot
-//! 4 (its own record) and nothing for slot 3. It fills slot 3 with a
-//! `Noop`, re-proposes E at slot 4, and the cluster chooses both under
-//! ballot 11. A fresh command F lands at slot 5. Finally node 1 restarts
-//! as a follower and catches up. Messages are direct calls; "unreachable"
-//! means the call is skipped.
-//!
-//! Further reading: Lamport, *Paxos Made Simple* (2001), whose section
-//! "Implementing a State Machine" is this file in prose; and Chandra,
-//! Griesemer & Redstone, *Paxos Made Live* (2007) for what it took to run
-//! it in production.
+//! Further reading: Lamport, *Paxos Made Simple* (2001), section 3, and
+//! `specs/tla/multi-paxos/` for the model.
 
 mod common;
 
-use std::collections::BTreeMap;
+use paros_consensus::contract::Party;
+use paros_consensus::journal::{Command, Control, JournalIdentifier, LeaderUuid, WriterMode};
+use paros_consensus::{Ballot, Config, Message, NodeId, Slot, Storage};
 
-use paros_consensus::journal::Command;
-use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
-use paros_consensus::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy, RecoveryStep};
-use paros_consensus::types::Fingerprint;
-use paros_consensus::{Ballot, NodeId, Slot};
-
-use common::{Node, assert_same_log, ballot, command, commit, node, noop, show, show_records};
+use common::cluster::Cluster;
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
 const N3: NodeId = NodeId(3);
 
-fn config() -> AcceptorConfig {
-    AcceptorConfig::new(vec![N1, N2, N3], QuorumSystem::Majority)
+fn config(id: NodeId) -> Config {
+    let mut config = Config::new(id, JournalIdentifier::UNSET).with_peers([N1, N2, N3]);
+    config.writer_mode = WriterMode::Multi;
+    config
 }
 
-fn everyone() -> Vec<NodeId> {
-    vec![N1, N2, N3]
-}
-
-/// Phase 1 at `ballot`, run by `leader`, over the whole log suffix from the
-/// first slot it does not know to be chosen. Gathers the promises, applies
-/// P2c per slot, installs the recovery (re-propose or fill, slot by slot)
-/// on the leader's proposer, and returns the `slot -> value` map of what
-/// the promises reported, for the assertions.
-fn phase1(cluster: &mut [Node], leader: NodeId, ballot: Ballot) -> BTreeMap<Slot, Command> {
-    let config = config();
-    let me = node(cluster, leader);
-    // A candidate is an acceptor too, so it promises its own ballot first:
-    // that is the first of the two promises a majority needs, and its own
-    // accepted records are the first P2c input.
-    me.acceptor.set_promise(ballot, &mut me.disk);
-    // The campaign starts where this node's applied log ends. Every slot
-    // below is chosen and known here, so there is nothing to ask about.
-    let from_slot = me.replica.first_unchosen();
-    let targets = me.proposer.open_phase1(
-        Campaign {
-            me: Some(leader),
-            ballot,
-            config: config.clone(),
-            prior: vec![config.clone()],
-            from_slot,
-        },
-        me.acceptor.records(),
-        me.acceptor.faulty(),
-    );
-    println!(
-        "ballot {0}: node {2} campaigns: \"promise me every slot from {1} on\" (one Phase 1 for all future slots)",
-        ballot, from_slot.0, leader.0
-    );
-    let own: BTreeMap<Slot, (Ballot, Command)> = me
-        .acceptor
-        .records()
-        .range(from_slot..)
-        .map(|(s, r)| (*s, r.clone()))
-        .collect();
-    println!(
-        "  node {} (self) -> promises, and its own disk reports: {}",
-        leader.0,
-        show_records(&own)
-    );
-    for peer in targets {
-        if !node(cluster, peer).alive {
-            println!("  node {} -> no answer (dead)", peer.0);
-            continue;
-        }
-        match node(cluster, peer).on_prepare(ballot, from_slot) {
-            Ok(accepted) => {
-                println!(
-                    "  node {} -> promises, and reports what it accepted: {}",
-                    peer.0,
-                    show_records(&accepted)
-                );
-                let fold = node(cluster, leader).proposer.fold_promise(
-                    peer,
-                    ballot,
-                    from_slot,
-                    accepted,
-                    BTreeMap::new(),
-                    None,
-                );
-                assert_eq!(fold, PromiseFold::Answered);
-            }
-            Err(promised) => println!(
-                "  node {} -> refuses: it already promised the higher ballot {}",
-                peer.0, promised
-            ),
-        }
+/// The text of the write that node `id` holds as chosen at `slot`.
+fn chosen(cluster: &mut Cluster, id: NodeId, slot: Slot) -> Option<String> {
+    match cluster.node(id).chosen_at(slot)? {
+        Command::Write(entry) => Some(String::from_utf8_lossy(&entry.records[0]).into_owned()),
+        other => Some(format!("{other:?}")),
     }
-    let me = node(cluster, leader);
-    assert!(
-        me.proposer.phase1_won(me.acceptor.promised()),
-        "the campaign holds a quorum"
-    );
-    println!(
-        "  a majority promised: ballot {ballot} leads, and no lower ballot can choose anything in these slots from now on"
-    );
-
-    // ---- P2c, once per slot ---------------------------------------------
-    //
-    // `recovered` holds, for every slot at least one promise reported, the
-    // highest-ballot value reported for it: the value the new leader must
-    // propose there. `highest_reported` pins the slot allocator: fresh
-    // commands go strictly above every slot any acceptor has heard of, so a
-    // new command can never land in a slot an old, unfinished round might
-    // still be fighting over.
-    let outcome = me.proposer.close_phase1(|slot| me.replica.is_chosen(slot));
-    let next_slot = outcome
-        .highest_reported
-        .map_or(from_slot, |s| Slot(s.0 + 1))
-        .max(from_slot);
-    me.proposer.set_next_slot(next_slot);
-    let recovered: BTreeMap<Slot, Command> = outcome
-        .recovered
-        .iter()
-        .map(|(slot, (_, c))| (*slot, c.clone()))
-        .collect();
-    // The recovery: every slot in `[from_slot, next_slot)` is either
-    // re-proposed with its reported value or filled with a Noop. Only a
-    // recovery backed by a Phase-1 quorum report may invent a Noop — the
-    // report is what proves the slot empty — so the policy is an explicit
-    // type rather than a flag.
-    me.proposer.open_recovery(
-        recovered.clone(),
-        outcome.blocked,
-        from_slot,
-        next_slot,
-        RecoveryPolicy::Phase1Backed,
-    );
-    recovered
-}
-
-/// Phase 2 for one slot at the leader's ballot: the leader accepts its own
-/// proposal, sends `Accept` to the acceptors in `reach` (the others never
-/// hear it), and decides when a majority has accepted. Returns whether the
-/// slot was chosen at the leader.
-fn accept_round(
-    cluster: &mut [Node],
-    leader: NodeId,
-    ballot: Ballot,
-    slot: Slot,
-    command: &Command,
-    reach: &[NodeId],
-) -> bool {
-    let config = config();
-    let me = node(cluster, leader);
-    // The leader is an acceptor too: its own vote is the first of the two
-    // a majority needs, and it lands on its disk before any Accept leaves.
-    me.acceptor.set_promise(ballot, &mut me.disk);
-    me.acceptor
-        .record_accepted(slot, ballot, command.clone(), &mut me.disk);
-    me.proposer
-        .open_round(slot, ballot, command.clone(), Some(leader), None);
-    println!(
-        "ballot {}: Phase 2 only, slot {} = {}: the leader asks the acceptors to accept",
-        ballot,
-        slot.0,
-        show(command)
-    );
-    for peer in config.phase2_addressees(None) {
-        if peer == leader {
-            continue;
-        }
-        if !reach.contains(&peer) || !node(cluster, peer).alive {
-            println!(
-                "  node {} -> the Accept never arrives (unreachable)",
-                peer.0
-            );
-            continue;
-        }
-        match node(cluster, peer).on_accept(ballot, slot, command.clone()) {
-            Ok(()) => {
-                println!("  node {} -> accepts, and records it on disk", peer.0);
-                let counted = node(cluster, leader).proposer.fold_accepted(
-                    peer,
-                    ballot,
-                    slot,
-                    command.fingerprint(),
-                );
-                assert!(counted);
-            }
-            Err(promised) => println!(
-                "  node {} -> refuses: it promised the higher ballot {}",
-                peer.0, promised
-            ),
-        }
-    }
-    let me = node(cluster, leader);
-    let Some((at, decided)) = me.proposer.decided(slot, &config) else {
-        println!(
-            "  slot {} NOT chosen: only the leader accepted, and one vote is not a majority",
-            slot.0
-        );
-        return false;
-    };
-    assert_eq!(at, ballot);
-    assert_eq!(&decided, command);
-    me.proposer.close_round(slot);
-    me.learn_chosen(slot, at, &decided);
-    println!(
-        "  slot {} chosen at ballot {}: a majority accepted, so this value is permanent",
-        slot.0, at
-    );
-    true
-}
-
-/// The steady state: one client command, one fresh slot, Phase 2 only.
-fn replicate(cluster: &mut [Node], leader: NodeId, ballot: Ballot, command: &Command) -> Slot {
-    // No Phase 1 here: the leadership's one Phase 1 already covered every
-    // slot the allocator will ever hand out, so the leader takes the next
-    // free slot and goes straight to Accept.
-    let slot = node(cluster, leader).proposer.allocate();
-    let chosen = accept_round(cluster, leader, ballot, slot, command, &everyone());
-    assert!(chosen, "a healthy cluster chooses every slot");
-    commit(cluster, slot, ballot, command, &everyone());
-    slot
-}
-
-/// Drain the new leader's recovery: for each slot in the recovered range,
-/// the proposer says whether to re-propose a reported value (P2c) or to
-/// fill an unreported hole with a Noop, and the leader runs an ordinary
-/// Phase 2 for it under its own ballot. Returns the steps, for the
-/// assertions.
-fn recover(
-    cluster: &mut [Node],
-    leader: NodeId,
-    ballot: Ballot,
-) -> Vec<(Slot, RecoveryStep<Command>)> {
-    let mut steps = Vec::new();
-    while let Some((slot, step)) = node(cluster, leader).proposer.recovery_next() {
-        let command = match &step {
-            RecoveryStep::Recovered(command) => {
-                println!(
-                    "  recovery slot {}: re-propose {} (P2c: an acceptor reported it, so it may already be chosen)",
-                    slot.0,
-                    show(command)
-                );
-                command.clone()
-            }
-            RecoveryStep::Fill => {
-                println!(
-                    "  recovery slot {}: no acceptor reported anything, fill with Noop so the log has no hole",
-                    slot.0
-                );
-                noop()
-            }
-            RecoveryStep::Undescribed => unreachable!("a Phase-1-backed recovery never skips"),
-            RecoveryStep::Blocked => unreachable!("no faulty record blocks a slot in this lesson"),
-        };
-        steps.push((slot, step));
-        let chosen = accept_round(cluster, leader, ballot, slot, &command, &everyone());
-        assert!(chosen);
-        commit(cluster, slot, ballot, &command, &everyone());
-    }
-    node(cluster, leader).proposer.close_drained_recovery();
-    steps
 }
 
 fn main() {
-    let mut cluster = vec![Node::new(N1), Node::new(N2), Node::new(N3)];
-    let b10 = ballot(10, N1);
+    let mut cluster = Cluster::new([N1, N2, N3].map(config));
 
-    println!("== 1. one Phase 1, then many slots at one round trip each ==");
-    let recovered = phase1(&mut cluster, N1, b10);
-    assert!(recovered.is_empty(), "a fresh log has nothing to recover");
-    let s0 = replicate(&mut cluster, N1, b10, &command("A", 0));
-    let s1 = replicate(&mut cluster, N1, b10, &command("B", 1));
-    let s2 = replicate(&mut cluster, N1, b10, &command("C", 2));
-    assert_eq!(
-        (s0, s1, s2),
-        (Slot(0), Slot(1), Slot(2)),
-        "slots are allocated in order"
-    );
-    assert_same_log(&cluster, &["\"A\"", "\"B\"", "\"C\""]);
-    println!();
+    let first = one_phase_1(&mut cluster);
+    let (hole, kept) = the_leader_crashes(&mut cluster);
+    let second = recovery(&mut cluster, first, hole, kept);
+    the_old_leader_returns(&mut cluster, second, hole);
+}
 
-    println!("== 2. the leader stumbles (slot 3) and dies (slot 4) ==");
-    // Slot 3: the Accept reaches nobody. D is accepted at node 1 alone —
-    // one vote of three, so it is not chosen, and it never will be under
-    // ballot 10. This is the hole the next leader must fill.
-    let s3 = node(&mut cluster, N1).proposer.allocate();
-    let chosen = accept_round(&mut cluster, N1, b10, s3, &command("D", 3), &[]);
-    assert!(!chosen, "one vote is not a choice");
-    // Slot 4: the Accept reaches node 2. Node 1 and node 2 are two of
-    // three, a majority, so E *is* chosen — permanently — but the leader
-    // dies before any Commit leaves. Node 2 holds E as an accepted record
-    // and has no idea it is chosen; node 3 has never heard of it.
-    let s4 = node(&mut cluster, N1).proposer.allocate();
-    let chosen = accept_round(&mut cluster, N1, b10, s4, &command("E", 4), &[N2]);
-    assert!(chosen, "node 1 and node 2 are a majority");
-    println!("  (node 1 crashes now: E is chosen at slot 4, and only the dead node knows it)");
-    node(&mut cluster, N1).alive = false;
-    assert_eq!(
-        node(&mut cluster, N2).acceptor.record(s4),
-        Some(&(b10, command("E", 4))),
-        "node 2 holds E accepted at ballot 10..."
-    );
+/// Part 1: Phase 1 one time, then Phase 2 for each command.
+fn one_phase_1(cluster: &mut Cluster) -> Ballot {
+    println!("== 1. one election, then three records");
+    cluster.trace = true;
+    cluster.node(N1).campaign();
+    cluster.settle();
+    assert!(cluster.node(N1).is_leader());
+    let ballot = cluster.node(N1).ballot();
+    println!("   node 1 leads at ballot {ballot}");
+    cluster.take_sent();
+
+    for text in ["A", "B", "C"] {
+        let slot = cluster.write(N1, LeaderUuid::UNSET, 0, text);
+        cluster.trace = false;
+        println!("   slot {slot}: {text:?} is chosen");
+    }
+    let sent = cluster.take_sent();
     assert!(
-        !node(&mut cluster, N2).replica.is_chosen(s4),
-        "...but does not know it is chosen"
+        !sent.contains_key("Prepare"),
+        "no Phase 1 after the election"
     );
-    assert_eq!(node(&mut cluster, N3).acceptor.record(s4), None);
-    assert_same_log(&cluster, &["\"A\"", "\"B\"", "\"C\""]);
-    println!();
+    assert_eq!(sent["Accept"], 3, "one Accept for each record");
+    for id in [N1, N2, N3] {
+        assert_eq!(cluster.journal(id), ["A", "B", "C"]);
+    }
+    println!("   three records cost {sent:?}");
+    ballot
+}
 
-    println!("== 3. a new leader recovers the log, one slot at a time ==");
-    // Node 2 campaigns at ballot 11.2, which is higher than 10.1. Every
-    // acceptor that promises it will refuse ballot 10 from now on, so even
-    // if node 1 came back this instant, it could not finish D or anything
-    // else under its old ballot: a higher ballot has fenced it out.
-    let b11 = ballot(11, N2);
-    let recovered = phase1(&mut cluster, N2, b11);
-    // The promises came from node 2 (itself) and node 3. Node 2's own disk
-    // reports E at slot 4; nobody reports anything for slot 3, because the
-    // only holder of D is dead. P2c therefore has one value to carry over
-    // and one slot to fill.
-    assert_eq!(
-        recovered,
-        BTreeMap::from([(s4, command("E", 4))]),
-        "P2c per slot: only slot 4 has a reported value"
-    );
-    let steps = recover(&mut cluster, N2, b11);
-    assert_eq!(
-        steps,
-        vec![
-            (s3, RecoveryStep::Fill),
-            (s4, RecoveryStep::Recovered(command("E", 4))),
-        ],
-        "slot 3 is a hole to fill, slot 4 is a value to preserve"
-    );
-    // Slot 4 still holds E. It was chosen under ballot 10 with nobody but
-    // the dead leader knowing; ballot 11's Phase 1 heard it from node 2,
-    // re-proposed it, and a majority chose it again. Had the new leader
-    // proposed something else there, two values would have been chosen for
-    // one slot. Slot 3, which nobody could vouch for, holds the Noop that
-    // closes the hole.
+/// Part 2: a leader that crashes with two slots open.
+fn the_leader_crashes(cluster: &mut Cluster) -> (Slot, Slot) {
+    println!("\n== 2. node 1 proposes D and E, and crashes");
+    let hole = cluster.propose(N1, LeaderUuid::UNSET, 0, "D");
+    let kept = cluster.propose(N1, LeaderUuid::UNSET, 0, "E");
+    // The network delivers one `Accept`: the one of E to node 2. No
+    // `Commit` leaves node 1.
+    cluster.settle_where(|to, message| match message {
+        Message::Accept { slot, .. } => *slot == kept && to == Party::Node(N2),
+        Message::Commit { .. } => false,
+        _ => true,
+    });
+
+    // Nodes 1 and 2 accepted E: it is chosen. Only node 1 counted the
+    // votes, and it cannot apply E, because slot 3 is not chosen.
+    assert_eq!(chosen(cluster, N1, kept).as_deref(), Some("E"));
+    assert_eq!(cluster.journal(N1), ["A", "B", "C"]);
+    assert!(cluster.node(N2).acceptor().record(kept).is_some());
+    assert!(cluster.node(N2).chosen_at(kept).is_none());
+    assert!(cluster.node(N3).acceptor().record(kept).is_none());
+    assert!(cluster.node(N2).acceptor().record(hole).is_none());
+    assert!(cluster.node(N3).acceptor().record(hole).is_none());
+    cluster.crash(N1);
+    println!("   slot {hole}: D is on node 1 only");
+    println!("   slot {kept}: E is on nodes 1 and 2. It is chosen, and no running node knows it");
+    (hole, kept)
+}
+
+/// Part 3: the new leader proposes what was reported, and fills the rest.
+fn recovery(cluster: &mut Cluster, first: Ballot, hole: Slot, kept: Slot) -> Ballot {
+    println!("\n== 3. node 2 wins an election and recovers the log");
+    cluster.trace = true;
+    cluster.node(N2).campaign();
+    cluster.settle();
+    cluster.trace = false;
+    assert!(cluster.node(N2).is_leader());
+    let second = cluster.node(N2).ballot();
+    assert!(second > first);
+
     for id in [N2, N3] {
-        let n = node(&mut cluster, id);
-        assert_eq!(n.replica.chosen_at(&n.acceptor, s4), Some(&command("E", 4)));
-        assert_eq!(n.replica.chosen_at(&n.acceptor, s3), Some(&noop()));
+        // No promise reported slot 3, so a `Noop` is chosen there.
+        let noop = Command::Control(Control::Noop);
+        assert_eq!(cluster.node(id).chosen_at(hole), Some(&noop));
+        // The promise of node 2 reported E, so E is chosen again in slot 4.
+        assert_eq!(chosen(cluster, id, kept).as_deref(), Some("E"));
+        assert_eq!(cluster.journal(id), ["A", "B", "C", "E"]);
     }
-    // Slot versus ballot, on node 2's disk: slot 0 was chosen under ballot
-    // 10 and its record still says so; slot 4's record now carries ballot
-    // 11 — the re-accept — with the same value E it first accepted under
-    // ballot 10. The value belongs to the slot; the ballot only says which
-    // leadership got it there.
-    assert_eq!(
-        node(&mut cluster, N2).acceptor.record(s0),
-        Some(&(b10, command("A", 0)))
-    );
-    assert_eq!(
-        node(&mut cluster, N2).acceptor.record(s4),
-        Some(&(b11, command("E", 4)))
-    );
-    // D is gone for good: it was accepted at one node and chosen nowhere,
-    // so the client that sent it never got an acknowledgement — only a
-    // timeout — and must retry. A retry is a new command in a fresh slot.
-    println!("  (D was never chosen: its client saw no reply and will retry it as a new command)");
-    // From here on the new leader is in the steady state again: fresh
-    // commands go straight to Phase 2, in slots above everything the
-    // recovery touched.
-    let s5 = replicate(&mut cluster, N2, b11, &command("F", 5));
-    assert_eq!(
-        s5,
-        Slot(5),
-        "fresh commands allocate above the recovered range"
-    );
-    assert_same_log(
-        &cluster,
-        &["\"A\"", "\"B\"", "\"C\"", "Noop", "\"E\"", "\"F\""],
-    );
-    println!();
+    // The value belongs to the slot, and the ballot records which
+    // leadership put it there: E is now accepted at the ballot of node 2.
+    let record = cluster.node(N2).acceptor().record(kept);
+    assert!(matches!(record, Some((ballot, _)) if *ballot == second));
+    // A slot that node 2 knew was chosen is outside the `Prepare`, and its
+    // record keeps the first ballot.
+    let record = cluster.node(N2).acceptor().record(Slot(0));
+    assert!(matches!(record, Some((ballot, _)) if *ballot == first));
+    println!("   node 2 leads at ballot {second}");
+    println!("   slot {hole}: nobody reported a value, so it is filled with a Noop");
+    println!("   slot {kept}: node 2 reported E, so E is proposed again and chosen");
 
-    println!("== 4. the old leader restarts as a follower and catches up ==");
-    // Leadership is volatile: node 1 boots as a follower with a brand-new
-    // proposer, so nothing of ballot 10 survives the crash. Its acceptor
-    // state is durable, though, and still holds D at slot 3 under ballot
-    // 10 — an accepted-but-never-chosen value.
-    let n1 = node(&mut cluster, N1);
-    n1.alive = true;
-    n1.proposer = Proposer::new();
-    assert_eq!(n1.acceptor.record(s3), Some(&(b10, command("D", 3))));
-    // Catch-up: the leader re-sends the Commits for the slots node 1
-    // missed. Learning slot 3 as Noop at ballot 11 overwrites the stale
-    // (10, D) record. Two things to keep apart here:
-    //
-    // - *Paxos safety* does not depend on that overwrite. Noop was chosen
-    //   at ballot 11 by a majority; every future leader's Phase-1 quorum
-    //   overlaps that majority, and a promise for a ballot above 11 reports
-    //   (11, Noop), which outranks (10, D) — so P2c can never select D
-    //   again, even if node 1 kept it forever.
-    // - *Implementation repair* is what the overwrite is: node 1's durable
-    //   record for slot 3 is made to agree with the decided log it will
-    //   serve to catch-up requests and read back at its next boot, rather
-    //   than carrying an accepted-but-unchosen value beside it.
-    for (slot, command) in [(s3, noop()), (s4, command("E", 4)), (s5, command("F", 5))] {
-        commit(&mut cluster, slot, b11, &command, &[N1]);
+    let slot = cluster.write(N2, LeaderUuid::UNSET, 0, "F");
+    assert!(slot > kept, "a new command goes above the recovered slots");
+    println!(
+        "   slot {slot}: \"F\" is chosen. D was never chosen: a client that wants D writes it again"
+    );
+    second
+}
+
+/// Part 4: a restart is a follower, and catch-up repairs its records.
+fn the_old_leader_returns(cluster: &mut Cluster, second: Ballot, hole: Slot) {
+    println!("\n== 4. node 1 restarts and catches up");
+    // The disk of node 1 holds what it accepted: D in slot 3.
+    let (_, command) = cluster.disk(N1).accepted(hole).expect("a record");
+    assert!(matches!(command, Command::Write(entry) if *entry.records[0] == *b"D"));
+    cluster.restart(N1);
+    assert!(!cluster.node(N1).is_leader(), "leadership is never durable");
+
+    cluster.trace = true;
+    cluster.tick();
+    cluster.trace = false;
+    // Safety never needed this: a later Phase 1 hears the `Noop` at the
+    // higher ballot from a quorum, and it outranks D. The catch-up makes
+    // the record of node 1 agree with the log that it serves.
+    let (ballot, command) = cluster.disk(N1).accepted(hole).expect("a record");
+    assert_eq!(command, Command::Control(Control::Noop));
+    assert_eq!(ballot, second);
+    for id in [N1, N2, N3] {
+        assert_eq!(cluster.journal(id), ["A", "B", "C", "E", "F"]);
     }
-    assert_eq!(
-        node(&mut cluster, N1).acceptor.record(s3),
-        Some(&(b11, noop()))
-    );
-    assert_same_log(
-        &cluster,
-        &["\"A\"", "\"B\"", "\"C\"", "Noop", "\"E\"", "\"F\""],
-    );
-    println!("  node 1 log: {}", node(&mut cluster, N1).log().join(" "));
-    println!();
-    println!("all assertions held");
+    println!("   slot {hole} on node 1: D is replaced by the Noop");
+    println!("   each node serves [\"A\", \"B\", \"C\", \"E\", \"F\"]");
 }

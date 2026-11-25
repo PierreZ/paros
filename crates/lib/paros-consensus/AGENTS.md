@@ -110,16 +110,19 @@ driver draws a new timeout per election.
 A new user reads `README.md`, then the crate root's rustdoc (`src/lib.rs`: a quick start that
 is a doc test), then `examples/quickstart.rs`. Keep the three in step with the API.
 
-- Examples: `examples/{single_decree,multi_paxos,matchmaker,acceptor_grid,quorum_read,
-  proxy_leader,replica_tier}.rs` are the lessons, and `examples/{quickstart,journal_calls,
-  leader_handoff,reconfiguration}.rs` drive `ColocatedNode` as a driver does. Each one asserts
-  the property that it shows. A new example gets a step in the CI `checks` job, a row in
-  `README.md` and in the table of `src/lib.rs`, and an item in the root `README.md`.
-- `examples/common/cluster.rs` → `Cluster`, the toy cluster of the four driver examples: the
-  nodes, one `MemStorage` for each node, optional `Matchmaker`s with a `MemRegistry` each, and a
-  wire. `Cluster::pump` is the reference driver loop (persist, send, learn, advance). A new
-  example that drives `ColocatedNode` uses it and does not write a network of its own.
-  `quorum_read`, `proxy_leader` and `replica_tier` are older and still have their own.
+- Examples: `examples/single_decree.rs` runs single-decree Paxos on `Decree` and `Acceptor`.
+  Each of the ten others drives the deployments as a driver does, on the toy cluster. Each
+  example asserts the property that it shows, and no example builds a node from the roles by
+  hand: a reader copies what an example does. A decree has no deployment, so `single_decree`
+  gives each `Acceptor` its disk itself. A new example gets a step in the CI `checks`
+  job, a row in `README.md` and in the table of `src/lib.rs`, and an item in the root
+  `README.md`.
+- `examples/common/cluster.rs` → `Cluster`, the toy cluster: the nodes with one `MemStorage`
+  each, and from the `Config` the `Matchmaker`s (a `MemRegistry` each) and the `ProxyLeader`s;
+  `with_replicas` adds `ReplicaNode`s. The wire can lose a message (`settle_where`) or hold it
+  in flight (`settle_holding`). `Cluster::pump` is the reference driver loop (persist, send,
+  learn, advance). A new example that drives a deployment uses it and does not write a
+  network of its own.
 - The small helpers of a driver, each with a doc example: `Ready::is_empty` (and the same on
   `ReplicaReady` and `ProxyReady`) ends a drain loop; `ColocatedNode::campaign` opens an election
   with no clock; `Config::with_peers` sorts and deduplicates a membership; `Message::kind`

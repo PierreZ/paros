@@ -1,9 +1,9 @@
 //! The log world: `ColocatedNode`s, their disks, the wire, and the clock the
 //! player owns.
 //!
-//! This is `crates/lib/paros-consensus/examples/quorum_read.rs` generalised. That example
-//! is 45 lines of `drain` / `deliver` around a `Vec<ColocatedNode>`; this module
-//! is the same two functions with the parts the example hard-codes turned into
+//! This is `crates/lib/paros-consensus/examples/common/cluster.rs` generalised. That toy
+//! cluster is a `pump` and a `deliver` around a map of `ColocatedNode`s; this module
+//! is the same two functions with the parts the examples hard-code turned into
 //! player choices: which message lands next, which node ticks and who crashes.
 //!
 //! # The drain contract
@@ -84,8 +84,7 @@ pub use verbs::{CompactOutcome, HandoffOutcome};
 /// `CheckQuorum` demotes a leader that spends a whole election-timeout window
 /// without hearing an ack quorum. That is correct in production, and it would
 /// end a script that delivers each heartbeat by hand. So the world parks a
-/// leader's timeout at this sentinel, exactly as `paros-consensus`'s own
-/// `examples/quorum_read.rs` does, and restores the setup's timeout when the
+/// leader's timeout at this sentinel, and restores the setup's timeout when the
 /// node stops being the leader.
 pub const NO_CHECK_QUORUM: u64 = 1_000_000;
 

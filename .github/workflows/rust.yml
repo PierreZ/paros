@@ -95,9 +95,9 @@ jobs:
         run: nix develop --command cargo clippy --all-targets -- --deny warnings
       - name: Check the core's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-consensus --no-deps
-      # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
-      # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
-      # them is a test of the public API's shape as much as of the protocol. The example of the
+      # The examples (`crates/lib/paros-consensus/examples/`) drive the deployments as a
+      # driver does (`single_decree` drives `Decree`), and assert the property each one
+      # shows, so running them is a test of the public API's shape as much as of the protocol. The example of the
       # facade `paros` drives three nodes through `paros::` paths alone (`consensus`). Every composing
       # crate has examples (`scripts/check-examples.sh`). They are linted under the
       # same pedantic clippy as the crate by the clippy step's `--all-targets` above.
