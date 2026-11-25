@@ -43,7 +43,7 @@ const A = `${REPO}/blob/main/docs/architecture`;
   <p>Eight layers. A layer depends only on the layers below it. Layers 0 to 5 are pure: no
   runtime, no I/O, and they build for wasm. Only layer 6 does I/O. The names of the crates still
   to build are <b>Open</b>.</p>
-  <div class="arch" role="img" aria-label="The stack of parosd, from the bottom. Layer 0, paros-consensus, the Paxos flavors. Layer 1, the journal v1, its grid controller and its client. Layer 2, the host of actors and the IO traits. Layer 3, a fold over a journal and the election. Layer 4, the universe, the cell and the tenant. Layer 5, the machine, the names and the tokens. Layer 6, the adapters, the only layer that does I/O. Layer 7, the programs. Layers 0 to 5 are pure.">
+  <div class="arch" role="img" aria-label="The stack of parosd, from the bottom. Layer 0, paros-consensus, the Paxos flavors. Layer 1, the journal, its controller and its client, to build again. Layer 2, the roles of the core on the host, to build. Layer 3, a fold over a journal and the election. Layer 4, the universe, the cell and the tenant. Layer 5, the machine, the names and the tokens. Layer 6, the adapters, the only layer that does I/O. Layer 7, the programs. Layers 0 to 5 are pure.">
     <div class="box">7 · the programs <small>parosd · parosctl · the bench</small></div>
     <div class="box side">6 · the adapters <small>moonpool RPC · protobuf · disks · metrics: the only I/O</small></div>
     <div class="cellframe">

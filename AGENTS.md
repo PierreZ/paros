@@ -249,8 +249,8 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `scripts/mutants-plan.sh` gives one shard for each 125 changed lines outside the tests, with
   at least two shards, from the measures in its comment). A
   surviving mutant fails the night: add the test that sees it in a pull request; the next night
-  judges those lines again. Before a pull request that changes one of these crates, run
-  `git diff origin/main -- crates/lib/<crate>/src > my.diff` and
+  judges those lines again. Before a pull request that changes `paros-consensus`, run
+  `git diff origin/main -- crates/lib/paros-consensus/src > my.diff` and
   `scripts/mutants.sh --in-diff my.diff`. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
@@ -711,6 +711,6 @@ wasm bundle and stages it for the site), `docs/architecture/` (the target design
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/` (`v0.2.0-alpha.1/`: the recaps of the removed crates; `journal-design-a/`: what
-the second removal took, and the prompt of the work now), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
+the second removal took, and the prompt of the work now; `paros-host/`: the host of actors, removed on 2026-11-25), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
 `check-core-layers.sh`, `count-assertions.py`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutants.sh` and `mutants-plan.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.

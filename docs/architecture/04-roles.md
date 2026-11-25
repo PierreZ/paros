@@ -217,7 +217,7 @@ These points are decided:
 - **A role is an actor.** A role (an acceptor, a leader, a coordinator, the frontend) is a pure
   `step` under the flight rule of the journal (`docs/journal/04-roles.md` (tag `journal-design-a`)
   §J4.2): a send waits for the persist batch that it names, the step reads no clock and draws no
-  random number, and a refusal is data. One host of actors serves every role of a process. The
+  random number, and a refusal is data. The
   host of actors of #1410 (split the generic host of actors), `paros-host`, was removed on
   2026-11-25 with the layering (`docs/archive/paros-host/README.md`); the journal roles of
   design A ran on it (git tag `journal-design-a`).
@@ -242,10 +242,10 @@ These points are decided:
 - **The service wire.** The pure crates define their messages as Rust types. protobuf over
   moonpool RPC is in the adapter only. A gRPC frontend comes later, for integrations that do not
   use the simulation.
-- **The host of actors is pure and stays in paros. moonpool gets no actor layer** (Pierre,
-  2026-11-22; it replaces the decision of 2026-11-21 that put an actor layer over the RPC in
-  moonpool). The pure host holds the role contract, the flight rule and the group commit, with no
-  runtime. moonpool RPC is enough as it is: the activation of a role registers a dynamic group
+- **moonpool gets no actor layer** (Pierre, 2026-11-22; it replaces the decision of 2026-11-21
+  that put an actor layer over the RPC in moonpool). The pure host of actors that this point
+  kept in paros, `paros-host`, was removed on 2026-11-25: Pierre dropped the layering above the
+  core from the plan, and a new plan decides where roles run. moonpool RPC is enough as it is: the activation of a role registers a dynamic group
   of endpoints, and its deactivation drops the group (a role that placement released stays
   active until its protocol guard holds: a released acceptor answers until `may_retire` holds).
   The paros adapter keeps the map from the id of a role to its group.
