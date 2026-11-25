@@ -167,8 +167,15 @@ pub fn node_lines(node: &NodeView) -> Vec<String> {
                 Some(RoleView::Candidate) => format!("candidate {ballot}"),
                 Some(RoleView::Follower) | None => promise_line(node),
             };
-            // The slots are in the card's log strip (`Step::logs`).
-            vec![first]
+            // The slots are in the card's log strip (`Step::logs`). The
+            // segment shows once the log has rolled: a log that never rolls
+            // stays in its first segment (R11), and says nothing of it. Its
+            // first slot is the slot after the `R` of the log strip.
+            let mut lines = vec![first];
+            if let Some(segment) = node.segment.filter(|segment| segment.id > 0) {
+                lines.push(format!("segment {}", segment.id));
+            }
+            lines
         }
     }
 }

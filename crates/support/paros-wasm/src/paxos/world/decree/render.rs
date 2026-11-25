@@ -145,6 +145,7 @@ impl DecreeWorld {
             handover: None,
             retired: false,
             wiped: false,
+            segment: None,
         }
     }
 }

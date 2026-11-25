@@ -2101,6 +2101,72 @@ fn a_refused_reconfiguration_is_narrated_with_its_reason() {
     assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NotLeader);
 }
 
+// ---- the roll ------------------------------------------------------------------
+
+/// The tail segment of `node`, as its view gives it: `(id, start)`.
+fn segment_of(world: &World, node: u64) -> Option<(u64, u64)> {
+    world
+        .view()
+        .nodes
+        .iter()
+        .find(|view| view.id == node)
+        .and_then(|view| view.segment)
+        .map(|segment| (segment.id, segment.start))
+}
+
+#[test]
+fn a_roll_is_refused_with_no_matchmakers_and_off_the_leader() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    let err = world
+        .roll(NodeId(0))
+        .expect_err("a plain deployment refuses a roll");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NoMatchmakers);
+    assert!(world.wire().is_empty(), "a refused roll sends nothing");
+    assert_eq!(
+        segment_of(&world, 0),
+        Some((0, 0)),
+        "the log stays in segment 0"
+    );
+
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    let err = world.roll(NodeId(1)).expect_err("a follower redirects");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NotLeader);
+}
+
+#[test]
+fn a_chosen_roll_opens_the_next_segment_on_every_node() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("the leader takes alpha");
+    deliver_everything(&mut world);
+    world.clear_narration();
+    world.roll(NodeId(0)).expect("the leader takes the roll");
+    assert!(
+        said(&world, "proposes a Roll to segment 1 at slot 1"),
+        "{:?}",
+        world.narration()
+    );
+    assert_eq!(
+        segment_of(&world, 0),
+        Some((0, 0)),
+        "nothing moves before the Roll is chosen"
+    );
+    deliver_everything(&mut world);
+    for node in 0..3 {
+        assert_eq!(
+            segment_of(&world, node),
+            Some((1, 2)),
+            "node {node} applied the Roll"
+        );
+    }
+}
+
 #[test]
 fn a_matchmaker_handover_is_refused_without_a_set_twice_or_empty() {
     let mut world = cluster(3);
