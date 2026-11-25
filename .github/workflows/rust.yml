@@ -123,6 +123,8 @@ jobs:
         run: nix develop --command cargo run -p paros-consensus --example leader_handoff
       - name: Run reconfiguration
         run: nix develop --command cargo run -p paros-consensus --example reconfiguration
+      - name: Run segments
+        run: nix develop --command cargo run -p paros-consensus --example segments
       - name: Run the facade example consensus
         run: nix develop --command cargo run -p paros --example consensus
       # nextest runs no doc test, so the examples of the rustdoc run here.

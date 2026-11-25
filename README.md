@@ -63,7 +63,7 @@ To use the crate, start with its [README](crates/lib/paros-consensus/README.md) 
 [`quickstart.rs`](crates/lib/paros-consensus/examples/quickstart.rs): three nodes, the driver loop, a
 crash and a restart.
 
-Eleven small, deterministic, runnable examples are in
+Twelve small, deterministic, runnable examples are in
 [`paros-consensus`](crates/lib/paros-consensus). Each one prints a trace and asserts the property
 that it shows. The first runs single-decree Paxos on the public `Decree`. Each other example
 drives the deployments (`ColocatedNode`, `ProxyLeader`, `ReplicaNode`, `Matchmaker`) as a driver
@@ -103,6 +103,10 @@ by hand: what an example does is what a program does. A decree has no deployment
 11. [`reconfiguration.rs`](crates/lib/paros-consensus/examples/reconfiguration.rs) — five nodes and three matchmakers:
     `{1, 2, 3}` becomes `{1, 4, 5}`, the matchmakers forget the old configuration, and a
     removed node retires.
+12. [`segments.rs`](crates/lib/paros-consensus/examples/segments.rs) — three nodes and three matchmakers: the leader
+    cuts the log with `roll`, twice with no wait and once onto new replicas, each node folds
+    each cut at the same slot, the matchmakers hold the same chain of segments, and a new
+    leader rolls from the tail it knows.
 
 ```sh
 cargo run -p paros-consensus --example single_decree
@@ -116,6 +120,7 @@ cargo run -p paros-consensus --example proxy_leader
 cargo run -p paros-consensus --example replica_tier
 cargo run -p paros-consensus --example matchmaker
 cargo run -p paros-consensus --example reconfiguration
+cargo run -p paros-consensus --example segments
 ```
 
 ## Build and test

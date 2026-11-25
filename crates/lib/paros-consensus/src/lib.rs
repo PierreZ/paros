@@ -159,6 +159,7 @@
 //! | `replica_tier` | [`ReplicaNode`]s beside the acceptors |
 //! | `matchmaker` | the registry of the [`Matchmaker`]s, and the handover of their set ([`MatchmakerReconfigurer`]) |
 //! | `reconfiguration` | [`ColocatedNode::reconfigure`] with three [`Matchmaker`]s, garbage collection, a retirement |
+//! | `segments` | [`ColocatedNode::roll`]: the cut of the log into segments, and the chain at the [`Matchmaker`]s |
 //!
 //! # Features
 //!

@@ -111,7 +111,7 @@ A new user reads `README.md`, then the crate root's rustdoc (`src/lib.rs`: a qui
 is a doc test), then `examples/quickstart.rs`. Keep the three in step with the API.
 
 - Examples: `examples/single_decree.rs` runs single-decree Paxos on `Decree` and `Acceptor`.
-  Each of the ten others drives the deployments as a driver does, on the toy cluster. Each
+  Each of the eleven others drives the deployments as a driver does, on the toy cluster. Each
   example asserts the property that it shows, and no example builds a node from the roles by
   hand: a reader copies what an example does. A decree has no deployment, so `single_decree`
   gives each `Acceptor` its disk itself. A new example gets a step in the CI `checks`
@@ -161,7 +161,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
 - Model-checker env vars (the only ones this crate reads): `HANDOVER_MODEL_SEEDS`,
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` (`models/support.rs`, `env_or`).
-- `cargo run -p paros-consensus --example <name>` for each of the eleven examples, and
+- `cargo run -p paros-consensus --example <name>` for each of the twelve examples, and
   `cargo test --doc -p paros-consensus` for the doc examples (CI `checks` job).
 - `cargo check --target wasm32-unknown-unknown -p paros-consensus` with and without
   `--no-default-features`; `cargo check -p paros-consensus --features serde` (CI `portability`).
