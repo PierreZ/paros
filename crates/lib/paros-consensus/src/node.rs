@@ -805,7 +805,7 @@ impl ColocatedNode {
     /// chosen prefix (see `ColocatedNode::advance_chosen_index`).
     ///
     /// A [`Control`] cannot name a `Roll`: the cut is
-    /// [`Command::Roll`](crate::journal::Command::Roll), proposed only by
+    /// [`Command::Roll`], proposed only by
     /// [`ColocatedNode::roll`], which refuses it on a deployment with no
     /// matchmakers.
     ///
