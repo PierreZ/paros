@@ -14,8 +14,6 @@ reach_laggard_win  violation  ci
 held_f             violation  ci
 held_log           violation  ci
 floor_any          violation  ci
-held               pass       ci
-held_loss          pass       ci
 floor_prefix       pass       ci
 held_laggard       pass       long  60
 two_leaders        pass       long  60

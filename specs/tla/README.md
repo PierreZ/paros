@@ -226,7 +226,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
-| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, which extends `truncation/`; `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
+| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/` and `held-floor-pass/`, which extend `truncation/`; `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2731,14 +2731,18 @@ replica holds only chosen slots of its own segments).
 | `held_f` | ci | violation of `RecordKept`: `Held` at `F = 1` replica; the acceptors drop slot 0, and the one replica that holds it loses its disk (0.40 million states) |
 | `held_log` | ci | violation of `FloorTruncatedOrHeld`: the floor rises to an end that the chain does not publish |
 | `floor_any` | ci | violation of `FloorTruncatedOrHeld`: segment 2 is held and segment 1 is not; the floor rises to the end of segment 2 over slot 0 |
-| `held` | ci | pass: every invariant, two ballots of one leader, `a2` catches up and jumps, `F = 0` and one replica (2.4 million states, 10 minutes with 4 workers) |
-| `held_loss` | ci | pass: every invariant, `F = 1` with two replicas and one lost disk, one ballot (14 thousand) |
+| `held` (in `held-floor-pass/`) | ci | pass: every invariant, two ballots of one leader, `a2` catches up and jumps, `F = 0` and one replica (2.4 million states, 10 minutes with 4 workers) |
+| `held_loss` (in `held-floor-pass/`) | ci | pass: every invariant, `F = 1` with two replicas and one lost disk, one ballot (14 thousand) |
 | `floor_prefix` | ci | pass: every invariant, two `Roll`s, one ballot (0.21 million) |
 | `held_laggard` | long | `Ends` (`HeldLiveSpec`) with the constants of `reach_laggard_win`: the laggard is refused by the held floor, jumps and wins |
 | `two_leaders` | long | pass: `held` with the owners `a1`, `a2` and `a3`, and `a1` and `a2` catch up |
 | `one_leader_f1` | long | pass: `held` with `F = 1`, two replicas and a lost disk |
 | `full` | long | pass: three owners, `F = 1`, two replicas and a lost disk |
 | `three_slots` | long | pass: a command in segment 2 (`CmdPlan3`), so slot 2 is above the held floor while it rises |
+
+`held-floor-pass/` links `HeldFloor.tla`, `MC.tla` and `Truncation.tla` and runs `held` and
+`held_loss`, so that each of the two jobs stays inside its minutes. The guard mutation of
+`HeldFloor.tla` runs the checks of both folders.
 
 What is not in the model: the chain at a matchmaker quorum (one variable here; step 4), the
 replicas that a `Roll` names (the sets are fixed, D4), the heal and the trim of a sealed segment

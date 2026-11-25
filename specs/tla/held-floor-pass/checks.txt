@@ -1,0 +1,10 @@
+# The passes of the held floor (R7 of docs/architecture/04-7-segments.md) on
+# the model of held-floor/ (HeldFloor.tla and MC.tla are linked here, so that
+# the held-floor job stays inside its minutes).
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant or the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+held               pass       ci
+held_loss          pass       ci

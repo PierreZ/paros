@@ -23,6 +23,7 @@ handover-chain 1
 handover-gc 1
 handover-scalars 2
 held-floor 2
+held-floor-pass 0
 held-floor-reconfig 1
 journal-ids 3
 leader-handoff 12
