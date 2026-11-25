@@ -632,6 +632,19 @@ impl JournalState {
         current
     }
 
+    /// Whether the state keeps its own ordering (the checks of
+    /// [`Self::assert_invariants`], as a value): the gate of a state that
+    /// comes from outside the core, such as the boundary state a driver
+    /// hands a joining replica.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.first_seq <= self.next_seq
+            && self.leader.is_some() == (self.term > 0)
+            && self.leader.is_none_or(LeaderUuid::is_set)
+            && (self.segment.id == SegmentId::FIRST) == (self.segment.start == Slot(0))
+            && self.segment.start.0 >= self.segment.id.0
+    }
+
     /// The state's own ordering.
     ///
     /// # Panics

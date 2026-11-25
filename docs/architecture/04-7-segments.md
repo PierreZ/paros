@@ -54,7 +54,14 @@ joins a later segment from the boundary state (`ReplicaNode::join_segment`, refu
 replica or off a state that is not the start of a segment). Not built yet: the route of R4d
 (a `Commit` to the replicas of its segment), the catch-up between replicas, the boundary state in
 the chain record and the chain in the matchmaking and probe answers, and the walk of
-consensus-sim with replicas and rolls (step 5, second part).
+consensus-sim with replicas and rolls (step 5, second part). Two limits of a bound replica wait
+for step 6. **Open** (step 6): the acceptors may compact past the `Roll` of a segment before its
+replicas hold it, since the floor at `Held` (R7) is not built; a replica of that segment that
+lags below the `Roll` then gets only trim points of a later segment, refuses each one, and never
+seals. **Open** (step 6): a slot past the end that a replica learned before its seal (above a
+hole below the `Roll`) stays in its durable store; the seal drops it from memory and the boot
+skips it, and no `WriteOp` deletes a record above the floor. The states past `Sealed` decide
+what a sealed replica's store keeps.
 
 #### 4.7.1 The rule of the papers
 

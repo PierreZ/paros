@@ -1,6 +1,6 @@
 # Segments in the core
 
-Group: On the log. Status: written 2026-11-25 (design; not built).
+Group: On the log. Status: written 2026-11-25 (built in part: the cut, the chain, the replica of one segment).
 
 A **segment** is a range of slots of one Multi-Paxos log and the replicas that keep that range.
 A segment ends at a decided command, the `Roll`. The acceptors do not change at the boundary, so
@@ -114,8 +114,17 @@ function of the chosen log, so a record merges field by field with no compare-an
 handover carries the chain by the same merge. The read of the chain over a quorum is that merge
 too; its reader comes in step 5. A node publishes an end only after its fold applied the `Roll`
 (`node/chain.rs`), on every path that folds a slot (the walk, a refold past a healed hole, a
-trim-point jump, the boot), and a publish completes at a majority (`publisher.rs`). The model is the chain of `specs/tla/handover-scalars/`. The replicas of a
-segment and the route of a `Commit` come in step 5 (§4.7 of `docs/architecture/`).
+trim-point jump, the boot), and a publish completes at a majority (`publisher.rs`). The model is the chain of `specs/tla/handover-scalars/`.
+
+The replica of one segment is built (step 5, first part; the model `specs/tla/compartments/`). A
+`ReplicaNode` is bound to the segment of its base (`Replica::bind_segment`). Its walk stops at the
+`Roll` that ends that segment, and the replica is then sealed: it keeps the `Roll` when it
+compacts, takes no slot past the end and no trim point, and answers a read past the end
+`LogRead::Sealed` (the end and the next segment), so the reader knows that its chain is stale and
+asks the next segment, as a Delos client that gets a "sealed" error refetches the chain
+([Delos §3.2]). A fresh replica joins a later segment from the boundary state
+(`ReplicaNode::join_segment`). The route of a `Commit` to the replicas of its segment comes in the
+second part of step 5 (§4.7 of `docs/architecture/`).
 
 Divergences from the sources (each a departure of §4.7.4, with its check):
 

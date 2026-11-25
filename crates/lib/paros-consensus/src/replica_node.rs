@@ -769,7 +769,8 @@ impl ReplicaNode {
     /// # Errors
     ///
     /// [`JoinRefusal::NotFresh`] when the replica learned or folded a slot
-    /// already; [`JoinRefusal::Boundary`] when `boundary` does not open a
+    /// already; [`JoinRefusal::Boundary`] when `boundary` is not a well
+    /// formed state ([`JournalState::is_well_formed`]) or does not open a
     /// later segment at `start`.
     ///
     /// # Panics
@@ -785,11 +786,13 @@ impl ReplicaNode {
             return Err(JoinRefusal::NotFresh);
         }
         if start.0 == 0
+            || !boundary.is_well_formed()
             || boundary.segment.start != start
             || boundary.segment.id <= self.replica.journal_base().segment.id
         {
             return Err(JoinRefusal::Boundary);
         }
+        self.replica.unbind_segment();
         self.trim_to(start, boundary);
         self.replica.bind_segment();
         assert!(
@@ -1021,15 +1024,7 @@ impl ReplicaNode {
         let Some(target) = self.replica.compaction_target(&self.records) else {
             return;
         };
-        let mut highest_drop = up_to.min(target);
-        // A sealed replica keeps the `Roll` that ends its segment, so its
-        // base, the state at its floor, stays in the segment it keeps.
-        if let Some(end) = self.replica.sealed_end() {
-            let Some(below_roll) = end.0.checked_sub(2) else {
-                return;
-            };
-            highest_drop = highest_drop.min(Slot(below_roll));
-        }
+        let highest_drop = up_to.min(target);
         let first = Slot(highest_drop.0 + 1).max(self.floor);
         if first <= self.floor {
             return;

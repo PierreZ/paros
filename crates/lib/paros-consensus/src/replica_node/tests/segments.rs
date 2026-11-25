@@ -220,6 +220,15 @@ fn a_join_is_refused_off_a_fresh_replica_or_a_true_boundary() {
         replica.join_segment(Slot(2), first),
         Err(JoinRefusal::Boundary)
     );
+    let ahead = JournalState {
+        first_seq: Seq(2),
+        ..boundary()
+    };
+    assert_eq!(
+        replica.join_segment(Slot(2), ahead),
+        Err(JoinRefusal::Boundary),
+        "a state whose first position passed its next one is no boundary"
+    );
     replica.step(commit(0, write(7)));
     assert_eq!(
         replica.join_segment(Slot(2), boundary()),
@@ -396,4 +405,31 @@ fn a_roll_at_slot_zero_is_never_compacted() {
     let _ = drain(&mut replica, &mut disk);
     assert!(replica.replica().is_sealed());
     assert_eq!(replica.first_slot(), Slot(0));
+}
+
+/// A `Truncate` of every record and the `Roll` after it fold in one walk
+/// when the `Roll` is learned first: the compaction stops at the `Roll`
+/// (its slot is the floor), never past it, and the floor it leaves passes
+/// the judge of a compaction.
+#[test]
+fn a_full_truncation_folded_with_the_roll_keeps_the_roll() {
+    let mut disk = MemStorage::new(multi());
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, write(7)));
+    replica.step(commit(1, write(8)));
+    replica.step(commit(3, roll(1)));
+    replica.step(commit(
+        2,
+        Command::Control(Control::Truncate {
+            leader: LeaderUuid(0),
+            up_to: Seq(2),
+        }),
+    ));
+    let _ = drain(&mut replica, &mut disk);
+    assert!(replica.replica().is_sealed());
+    assert_eq!(replica.first_slot(), Slot(3), "the floor is the `Roll`");
+    assert_eq!(replica.replica().journal_base().segment.id, SegmentId(0));
+    let rebooted = ReplicaNode::new(&disk, Limits::DEFAULT);
+    assert!(rebooted.replica().is_sealed());
+    assert_eq!(rebooted.first_slot(), Slot(3));
 }

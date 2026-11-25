@@ -842,6 +842,12 @@ impl Replica {
             );
             first = needed;
         }
+        // A sealed replica keeps the `Roll` that ends its segment (R6): its
+        // base, the state at its floor, stays in the segment it keeps.
+        if let Some(end) = self.sealed_end() {
+            assert!(end.0 >= 1, "a sealed end lies past the `Roll`");
+            first = first.min(Slot(end.0 - 1));
+        }
         assert!(
             first >= self.floor,
             "a compaction floor lies at or above the floor"
@@ -1068,6 +1074,24 @@ impl Replica {
         );
     }
 
+    /// Keep the whole log again, before a fresh replica jumps to the start
+    /// of the segment it joins (`ReplicaNode::join_segment`), which binds it
+    /// to that segment next: the jump never sees a bound that its new base
+    /// left.
+    ///
+    /// # Panics
+    ///
+    /// If the replica holds a chosen slot: only a fresh replica unbinds.
+    pub(crate) fn unbind_segment(&mut self) {
+        assert!(self.chosen.is_empty(), "only a fresh replica unbinds");
+        assert!(
+            self.folded == self.floor,
+            "an unbound replica walked nothing"
+        );
+        self.bound = None;
+        assert!(!self.is_sealed(), "an unbound replica is never sealed");
+    }
+
     /// The segment this replica keeps, or `None` when it keeps the whole log.
     #[must_use]
     pub fn segment_bound(&self) -> Option<SegmentId> {
@@ -1124,7 +1148,8 @@ impl Replica {
     /// # Panics
     ///
     /// If `slot` is already known chosen, or `log` does not hold `command`
-    /// at `slot`.
+    /// at `slot`, or the replica is sealed (its caller refuses a slot past
+    /// the end of the segment it keeps).
     pub fn learn<L: ChosenLog + ?Sized>(&mut self, log: &L, slot: Slot, command: &Command) {
         assert!(
             !self.chosen.contains(&slot),
@@ -1324,7 +1349,8 @@ impl Replica {
     ///   shape.
     /// - **Progress.** The floor slot is needed: it is the fold's head, or
     ///   it holds the journal's first record, or it holds a record a
-    ///   retained retry read. A floor that stays below the slots a decided
+    ///   retained retry read, or it holds the `Roll` that ends a sealed
+    ///   replica's segment. A floor that stays below the slots a decided
     ///   truncation released never compacts (the mutants
     ///   `compaction_target -> None`, `-> Some(Default)` and
     ///   `slot_holding -> Default` of the first mutation run, #269).
@@ -1354,6 +1380,11 @@ impl Replica {
         // next one, past the base and past every record the folded floor
         // slot accepted.
         let mut pinned = self.floor == self.folded || at_floor(self.state.first_seq);
+        // The `Roll` that ends a sealed replica's segment pins its slot: the
+        // base stays in the segment the replica keeps.
+        pinned |= self
+            .sealed_end()
+            .is_some_and(|end| self.floor.0 + 1 == end.0);
         if self.mode == WriterMode::Single {
             for slot in self.chosen.range(self.floor..self.folded) {
                 let Some(entry) = chosen_command(log, *slot).1.write() else {
