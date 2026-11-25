@@ -92,7 +92,7 @@ The stages of `grow`:
    which learn the log and answer the clients of their slots.
 6. The matchmaker set hands over to a new set (`MatchmakerReconfigurer`).
 7. The leader hands its ballot to another node with no election (`relinquish_to`), one hop.
-8. The leader cuts the log into a new segment (`roll`), and the matchmakers hold the chain.
+8. The leader cuts the log into a new segment (`roll`), and the matchmakers hold the chain. The replicas keep segment 0: they seal at its end.
 9. The leader crashes in the full deployment. A new leader takes over, and garbage collection
    lets the matchmakers forget the old configurations.
 

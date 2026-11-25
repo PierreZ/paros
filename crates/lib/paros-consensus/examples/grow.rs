@@ -56,7 +56,8 @@
 //!    the clients.
 //! 6. The matchmaker set hands over to a new set.
 //! 7. The leader hands its ballot to another node, with no election.
-//! 8. The leader cuts the log into a new segment.
+//! 8. The leader cuts the log into a new segment. The replicas keep the
+//!    segment they hold, and seal at its end.
 //! 9. The leader crashes in the full deployment. A new leader takes over,
 //!    and the matchmakers forget the configurations that no leader needs.
 //!
@@ -139,7 +140,7 @@ fn main() {
     roll_a_segment(&mut cluster, leader);
     crash_in_the_full_deployment(&mut cluster, leader);
 
-    println!("\neach node and each replica serves the same ten records");
+    println!("\neach node serves the ten records; each replica serves segment 0");
 }
 
 // ---- 1. three nodes ---------------------------------------------------------
@@ -589,9 +590,26 @@ fn roll_a_segment(cluster: &mut Cluster, leader: NodeId) {
         "   m1, m2 and m3 hold the chain: segment 0 ends at {}, segment 1 is open",
         opened.start
     );
+    // A replica keeps one segment. Replicas 10 and 11 hold segment 0: their
+    // walk stops after the `Roll` that ends it, and they still serve it.
+    for id in [R10, R11] {
+        assert_eq!(
+            cluster.replica(id).replica().sealed_end(),
+            Some(opened.start)
+        );
+        assert_eq!(cluster.replica_journal(id), RECORDS[..8]);
+    }
+    println!(
+        "   replicas 10 and 11 keep segment 0: sealed at slot {}",
+        opened.start
+    );
+
     // The roll took a slot and no position: the next write is position 8.
     write(cluster, leader, 8);
     check(cluster, 9);
+    for id in [R10, R11] {
+        assert_eq!(cluster.replica_journal(id), RECORDS[..8], "sealed");
+    }
 }
 
 // ---- 9. a crash in the full deployment ----------------------------------------
@@ -707,13 +725,14 @@ fn write(cluster: &mut Cluster, leader: NodeId, seq: usize) -> Slot {
     slot
 }
 
-/// The last write, then the check of every node and replica.
+/// The last write, then the check of every node. The replicas of segment 0
+/// still serve segment 0.
 fn write_and_check(cluster: &mut Cluster, leader: NodeId) -> Slot {
     let slot = write(cluster, leader, RECORDS.len() - 1);
     cluster.tick();
     check(cluster, RECORDS.len());
     for id in [R10, R11] {
-        assert_eq!(cluster.replica_journal(id), RECORDS);
+        assert_eq!(cluster.replica_journal(id), RECORDS[..8]);
     }
     slot
 }
