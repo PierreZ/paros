@@ -93,7 +93,10 @@ more rules)), the `Roll` cut of segments
 prefix, the tail segment from the chosen prefix; PR #1540 (segment-roll); and the `Roll` as a
 plain command of the Multi-Paxos model, `specs/tla/multi-paxos-roll/`), the chain of segments
 at the matchmakers (`specs/tla/handover-scalars/`: an add-only map read by a quorum, a publish
-that only a minority took is already true, the map across a handover), and the boundaries of
+that only a minority took is already true, the map across a handover), the floor at the end of a
+held segment (`specs/tla/held-floor/`, on the model of `truncation/`: `Held` at `F + 1` replicas,
+the floor that follows the chain, the jump of a laggard; `specs/tla/held-floor-reconfig/`, on the
+model of `truncation-reconfig/`: a reconfiguration onto an empty member after the drop), and the boundaries of
 the service above the journal: the ids of journals (`specs/tla/journal-ids/`), the takeover by a
 new coordinator (`specs/tla/takeover/`) and the coarse control plane of a cell
 (`specs/tla/cell-control/`). The models of the journal v1 of design A are at the git tag

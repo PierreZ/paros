@@ -1,0 +1,16 @@
+# The held floor of segments across a reconfiguration onto empty stores:
+# HeldFloorReconfig.tla extends the model of truncation-reconfig/
+# (TruncationReconfig.tla is a link).
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+# One slot: segment 1 is the `Roll` alone, at slot 0.
+reach_held_join   violation  ci
+reach_held_win    violation  ci
+held_log          violation  ci
+held              pass       ci
+held_wipe         pass       ci
+# Two slots: a command, then the `Roll`.
+held_cmd          pass       long  60

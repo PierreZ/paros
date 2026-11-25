@@ -59,16 +59,20 @@
 (*           slot up to `F` (it learned it, or the slot is below its       *)
 (*           floor). "joined": a control, a new member counts too, with    *)
 (*           floor 0 and no record.                                        *)
+(*                                                                         *)
+(* `Rolls` are the `Roll` values of segments, control values that weigh   *)
+(* nothing. Only `held-floor-reconfig/` (`HeldFloorReconfig.tla`) gives    *)
+(* them a meaning; every check of this folder has none.                    *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Cuts, Noop,
           NB, NS, Owner, C1, C2, R, C3, R2,
-          GcRule, Cover, Wipes, Identity
+          GcRule, Cover, Wipes, Identity, Rolls
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
-Proposals == Commands \cup Cuts
+Proposals == Commands \cup Cuts \cup Rolls
 Values == Proposals \cup {Noop}
 None == "none"
 
@@ -80,7 +84,8 @@ ASSUME C1 \subseteq Acceptors /\ C2 \subseteq Acceptors /\ C1 # {} /\ C2 # {}
 ASSUME R \in Ballots
 ASSUME C3 \subseteq Acceptors /\ C3 # {} /\ R2 \in R..(NB + 1)
 ASSUME Noop \notin Proposals
-ASSUME Cuts # {} /\ Cuts \cap Commands = {}
+ASSUME (Cuts # {} \/ Rolls # {}) /\ Cuts \cap Commands = {}
+ASSUME Rolls \cap (Commands \cup Cuts) = {}
 ASSUME Owner \in [Ballots -> Acceptors]
 Vote == [bal : 0..NB, val : Values \cup {None}]
 NoVote == [bal |-> 0, val |-> None]
