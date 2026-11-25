@@ -91,6 +91,7 @@ that can lose or hold a message.
 | `replica_tier` | replicas that learn and serve reads beside the acceptors |
 | `matchmaker` | the registry of the matchmakers, and the handover of the matchmaker set |
 | `reconfiguration` | `reconfigure` with three matchmakers, garbage collection, a retirement |
+| `segments` | `roll`: the cut of the log into segments, and the chain at the matchmakers |
 
 ## Features
 
