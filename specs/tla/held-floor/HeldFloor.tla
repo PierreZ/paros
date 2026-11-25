@@ -143,15 +143,16 @@ MarkHeld(k) ==
 
 \* The floor that the held segment k gives: its end, when every segment up
 \* to k is held (with `FloorTo = "any"`, whatever the segments before it).
-HeldEndOf(k) == IF FloorTo = "any" \/ \A j \in 1..k : j \in held THEN End(k) ELSE 0
+\* It is 0 otherwise, and then HeldFloor changes nothing.
+HeldEndOf(k) ==
+  IF k \in held /\ (FloorTo = "any" \/ \A j \in 1..k : j \in held) THEN End(k) ELSE 0
 
 \* Acceptor a raises its floor to the end of the held segment k, and drops
 \* the records below it in the same write (`WriteOp::Truncate`). A floor
 \* never goes down.
 HeldFloor(a, k) ==
   LET f == IF HeldEndOf(k) > floor[a] THEN HeldEndOf(k) ELSE floor[a]
-  IN /\ k \in held
-     /\ floor' = [floor EXCEPT ![a] = f]
+  IN /\ floor' = [floor EXCEPT ![a] = f]
      /\ dfloor' = [dfloor EXCEPT ![a] = f]
      /\ vote' = [vote EXCEPT ![a] = DropVotes(a, f)]
      /\ learned' = [learned EXCEPT ![a] = DropLearned(a, f)]
