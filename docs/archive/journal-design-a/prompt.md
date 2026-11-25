@@ -52,6 +52,12 @@ does not change.
 
 ## 2. Decisions
 
+**Since this plan (Pierre, 2026-11-25).** The desired state is §4.7 of
+`docs/architecture/04-7-segments.md`, and it wins where this plan differs: the pause (R4a) is
+dropped and nothing builds it (a `Commit` leaves on a known chosen prefix, R4d); D4 is
+`Roll { next, replicas: Option<..> }`, where `None` keeps the replicas of the segment that the
+`Roll` ends; D5 is confirmed. The text below keeps the plan as it was written.
+
 | # | Decision | Status |
 |---|---|---|
 | D0 | The chain of segments lives in the matchmakers | Pierre, 2026-11-24 |
@@ -461,6 +467,8 @@ later) and D6.
 
 ### Step 3. The cut
 
+The pause of this step is dropped (R4a, Pierre 2026-11-25; see the note of section 2).
+
 - Model: put the model of step 1 on `multi-paxos/`: the `Roll`, the pause, and a recovery
   through a `Roll`. The `Roll` is a value, so the inductive invariant of `MultiPaxosProof.tla`
   must not change; check that it does not.
@@ -505,6 +513,14 @@ heal again on the `Decree`.
 
 A twelfth example `segments.rs`, its rows in the two READMEs and in `src/lib.rs`, its CI step,
 the knowledge card, the site page.
+
+### Step 9. The website
+
+Added by Pierre on 2026-11-25 ("add a step 9 to do the website like we did yesterday"). Done
+as the guided Paxos tour of 2026-11-24 (`/paxos/tour/`, the plan
+`/mnt/project-files/plans/paxos-guided-tour-2026-11-24.md`): the chapter of the tour on
+matchmakers and segments, which waited for segments, with its guided exercises on the wasm
+engine, and the pages of the site that segments change (`update-the-site` skill).
 
 ## 7. Later, not in this work
 
