@@ -10,10 +10,10 @@
 # 2. A crate depends only on crates of a strictly lower layer: no dependency
 #    points up or sideways. Normal, build and dev dependencies all count.
 # 3. A crate of layers 0 to 6 never names an item of a higher crate in its
-#    `src/`: the crate's identifier (`paros_host`, as in a `use`, a path
+#    `src/`: the crate's identifier (`paros_consensus`, as in a `use`, a path
 #    or a doc link) does not appear. The facade `paros` is not checked: it
 #    defines no item of its own, so every `paros::` path is a re-export of a
-#    lower layer. The prose name of a crate (`paros-host`) is not an
+#    lower layer. The prose name of a crate (`paros-consensus`) is not an
 #    item, so a doc comment may cite it.
 # 4. No fault switch in a pure crate (layers 0 to 5): no `buggify!` and no
 #    fault `hint!` outside a comment. Faults come from the walk, from moonpool

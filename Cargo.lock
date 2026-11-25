@@ -499,7 +499,6 @@ name = "paros"
 version = "0.2.0"
 dependencies = [
  "paros-consensus",
- "paros-host",
 ]
 
 [[package]]
@@ -520,10 +519,6 @@ dependencies = [
  "serde",
  "tracing",
 ]
-
-[[package]]
-name = "paros-host"
-version = "0.2.0"
 
 [[package]]
 name = "paros-wasm"

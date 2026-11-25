@@ -1,9 +1,8 @@
 # paros
 
 The facade. It bundles every library crate of paros into one crate, so a program (and the
-binaries to come) depends on `paros` alone. Today there are two layers: `paros::consensus` (the
-sans-IO consensus core, `crates/lib/paros-consensus`) and `paros::host` (the pure host of actors
-and its generic driver, `crates/lib/paros-host`). It stays wasm-checkable and provider-free.
+binaries to come) depends on `paros` alone. Today there is one layer: `paros::consensus` (the
+sans-IO consensus core, `crates/lib/paros-consensus`). It stays wasm-checkable and provider-free.
 
 Three rules (Pierre, 2026-11-19):
 

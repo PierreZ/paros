@@ -224,8 +224,6 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Truncation across a reconfiguration onto empty stores: the GC of the old configuration only once a Phase-2 quorum of the new one holds the prefix up to the election fence, a new member that gets its floor from `TrimmedTo` or catches up | `node/gc.rs`, `collector.rs` (`covered`), `node/learn.rs` (`mark_chosen`), `node/reconfigure.rs` | `truncation-reconfig/` | #1218 (truncation model, part 3), done |
 | CTRL on a grid: the tri-state tally on a grid and across the configurations of `H_b`, a scrub and a boot that give one faulty record, the repair of a chosen value in one write | `proposer.rs` (`slot_decidable`), `acceptor.rs`; the scrub and the repair are designed, not built | `ctrl-grid/` | #1263 (CTRL recovery in the journal), done |
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
-| The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight; the faults of a storage (`Full`, `Lost`, `Unknown`) and their verdicts, with the list of the roles on a disk (`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)) | the generic `Driver` of `paros-host`, its `StorageError`, `Verdict` and `Storage::list` | `flight-rule/` | #1255 (journal sans-IO contract), done; #1414 (Storage lists the roles on a disk and reports typed faults) |
-| Rule 2 of the journal's sans-IO contract, every input is recorded: the time and the random draws in each input, one timer for each role (`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)) | not built (`paros-host`, #1413) | `recorded-inputs/` | #1413 (the time, the timers and the draws in each role) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
@@ -2373,23 +2371,6 @@ chosen value.
 | `damage_drop` | ci | violation of `Agreement`: a scrub drops the damaged record, and the slot reads as a slot with no vote |
 | `repair_peer` | ci | violation of `Agreement`: the repair writes the value of a peer's vote under its own ballot, not a chosen value |
 | `drop_first` | ci | violation of `NoFillChosen`: the repair deletes the record, the node restarts before it writes the new one, and the slot reads as a slot with no vote |
-
-### `recorded-inputs/`: every input is recorded, for #1413 (the time, the timers and the draws in each role)
-
-`RecordedInputs.tla` is a host of two roles. A role asks a timer (`Arm`) at the time of its input
-plus a fixed `Delay` plus a jitter, a random draw; it may set its timer again. The host fires a
-timer that is due (`Fire`). The step of a role is a pure function `Step` of its state and its
-input, and the model records each input with the effects of its step. `Rule` selects how the host
-and the roles do it: the time and the draw in the input and one deadline for each role
-(`recorded`), or one of three controls.
-
-| Check | Result | What it shows |
-|---|---|---|
-| `recorded` | pass | every recorded run replays to the same effects at every clock and with every draw (`ReplayExact`), and a role gets a fire only at or after its own deadline (`OwnTimer`) |
-| `clock` | violation | control: a role that reads the clock of the process breaks `ReplayExact` |
-| `draw` | violation | control: a role that draws its own jitter breaks `ReplayExact` |
-| `shared` | violation | control: one timer for every role, whose fire goes to every role, breaks `OwnTimer` |
-| `reach_fire`, `reach_two` | violation | the model fires a timer, and holds two timers at once |
 
 ### `journal-ids/`: one id names at most one journal, forever, for #1419
 

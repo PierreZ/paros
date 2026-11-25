@@ -38,8 +38,10 @@ and the `paros-sim` simulation) is at the git tag
 The journal v1 of design A (`paros-journal`, its IO crate, its controller, the election library and
 the `journal-sim` walks, with their TLA+ models and the `docs/journal/` design) was removed on
 2026-11-24. It is at the git tag `journal-design-a`, and
-[`docs/archive/journal-design-a/`](docs/archive/journal-design-a) lists what it held. The journal
-is built again from scratch on the consensus core, once the core has segments.
+[`docs/archive/journal-design-a/`](docs/archive/journal-design-a) lists what it held. The pure host of
+actors `paros-host` was removed on 2026-11-25
+([`docs/archive/paros-host/`](docs/archive/paros-host)). The work now brings segments into the
+consensus core; a new plan for what comes above the core follows.
 
 👉 **[Read the site](https://pierrez.github.io/paros/)**
 
@@ -48,7 +50,6 @@ is built again from scratch on the consensus core, once the core has segments.
 | Path | What it is |
 |------|------------|
 | [`crates/lib/paros-consensus`](crates/lib/paros-consensus) | the sans-IO Paxos roles (proposer, acceptor, replica, matchmaker, proxy leader, quorum reads) and `ColocatedNode`; std-only, wasm-safe, zero deps with `default-features = false` |
-| [`crates/lib/paros-host`](crates/lib/paros-host) | the pure host of actors: the `Role` trait, the `Host` and the generic driver under the flight rule |
 | [`crates/lib/paros`](crates/lib/paros) | the facade a program depends on |
 | [`crates/support/paros-wasm`](crates/support/paros-wasm) | the engine of the step-through diagrams of the site's Paxos pages |
 | [`crates/support/paros-authz-biscuit`](crates/support/paros-authz-biscuit) | Biscuit tokens: root keys, offline mint and derive, the verifier of a request |

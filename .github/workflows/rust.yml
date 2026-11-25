@@ -95,14 +95,10 @@ jobs:
         run: nix develop --command cargo clippy --all-targets -- --deny warnings
       - name: Check the core's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-consensus --no-deps
-      - name: Check the host of actors' rustdoc links
-        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-host --no-deps
       # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
       # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
       # them is a test of the public API's shape as much as of the protocol. The example of the
-      # facade `paros` drives three nodes through `paros::` paths alone (`consensus`). The example of
-      # `paros-host` (#1410 (split the generic host of actors)) runs toy roles on the
-      # generic host and driver. Every composing
+      # facade `paros` drives three nodes through `paros::` paths alone (`consensus`). Every composing
       # crate has examples (`scripts/check-examples.sh`). They are linted under the
       # same pedantic clippy as the crate by the clippy step's `--all-targets` above.
       - name: Run single_decree
@@ -127,8 +123,6 @@ jobs:
         run: nix develop --command cargo run -p paros-consensus --example leader_handoff
       - name: Run reconfiguration
         run: nix develop --command cargo run -p paros-consensus --example reconfiguration
-      - name: Run the host example coordinator
-        run: nix develop --command cargo run -p paros-host --example coordinator
       - name: Run the facade example consensus
         run: nix develop --command cargo run -p paros --example consensus
       # nextest runs no doc test, so the examples of the rustdoc run here.

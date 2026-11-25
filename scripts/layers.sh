@@ -18,7 +18,6 @@
 # Layer  Crate
 LAYER_TABLE='
 0 paros-consensus
-0 paros-host
 6 paros-authz-biscuit
 7 paros
 8 consensus-sim

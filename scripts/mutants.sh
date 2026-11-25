@@ -2,11 +2,6 @@
 # Mutation testing of paros-consensus, in two passes (`.cargo/mutants.toml`).
 #
 #   scripts/mutants.sh [ARGS...]
-#   scripts/mutants.sh --host [ARGS...]
-#
-# `--host` runs one pass on paros-host, judged by its unit tests
-# (`.cargo/mutants-host.toml`). The host has no trace check yet, so there is
-# no second pass: a mutant that the first pass misses survives.
 #
 # ARGS go to the first pass and cut the set of mutants, for example
 # `--shard 3/48 --sharding round-robin`, `--in-diff pr.diff` or `-f <file>`.
@@ -39,12 +34,6 @@ second=.cargo/mutants-tlc.toml
 # unmutated tree. Their filter is read from the second pass's config below, so
 # the baseline runs every test that the second pass runs.
 baseline_args=(--features paros-consensus/serde -p paros-consensus -p consensus-sim)
-if [ "${1:-}" = "--host" ]; then
-  shift
-  crate=paros-host
-  first=.cargo/mutants-host.toml
-  second=
-fi
 
 # cargo-mutants exits with 2 when a mutant is missed and 3 on a timeout; both
 # are results, not errors.
@@ -69,25 +58,9 @@ fi
 rm -rf mutants.first
 cp -r mutants.out mutants.first
 
-if [ -z "$second" ]; then
-  cp mutants.first/missed.txt survivors.txt 2>/dev/null || true
-  echo "Survivors: $(wc -l < survivors.txt)."
-  cat survivors.txt
-  if [ -s survivors.txt ]; then
-    exit 2
-  fi
-  exit 0
-fi
-
 if [ ! -s mutants.first/missed.txt ]; then
   echo "First pass: no mutant missed. The second pass has nothing to run."
   exit 0
-fi
-if [ -z "$second" ]; then
-  cp mutants.first/missed.txt survivors.txt
-  echo "Survivors: $(wc -l < survivors.txt)."
-  cat survivors.txt
-  exit 2
 fi
 
 # One anchored regex for each missed mutant, matched on its whole name

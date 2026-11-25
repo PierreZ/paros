@@ -20,7 +20,6 @@ config-register 14.5
 ctrl-grid 12
 decree 8.5
 experiments/stale-stopped/restart 13.5
-flight-rule 2.5
 generations 17
 grid 0.5
 handover 10
@@ -37,7 +36,6 @@ proxy-leader 2
 read-replica 1
 reads 22
 reads-rows4 9
-recorded-inputs 0.1
 retire-fence 16
 segment-roll 7.5
 takeover 6.5

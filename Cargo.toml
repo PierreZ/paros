@@ -2,14 +2,13 @@
 members = ["crates/*/*"]
 resolver = "3"
 
-# One line per dependency the workspace shares. `paros-consensus`,
-# `paros-host` and `paros` are published to crates.io by release-plz (`release-plz.toml`), at one
+# One line per dependency the workspace shares. `paros-consensus`
+# and `paros` are published to crates.io by release-plz (`release-plz.toml`), at one
 # version; the `version` below is what a published `paros` resolves, and
 # release-plz moves it with each release. The code removed on 2026-11-19 is at
 # the tag `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/).
 [workspace.dependencies]
 paros-consensus = { path = "crates/lib/paros-consensus", version = "0.2.0", default-features = false }
-paros-host = { path = "crates/lib/paros-host", version = "0.2.0" }
 
 
 [workspace.package]

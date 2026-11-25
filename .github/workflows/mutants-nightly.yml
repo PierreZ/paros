@@ -1,7 +1,7 @@
 # Mutation testing of the lines that main changed since the last green night
 # (Pierre, 2026-11-23: mutation testing moved off pull requests). A pull
 # request runs no mutant; this workflow runs, each night, the mutants of
-# the lines of paros-consensus and paros-host that main changed since the
+# the lines of paros-consensus that main changed since the
 # head of the last successful
 # scheduled run of this workflow (before the first green night: since the
 # head of the first night; with no night at all: the last 24 hours).
@@ -101,22 +101,19 @@ jobs:
         run: |
           earlyoom=$(nix build --inputs-from . 'nixpkgs#earlyoom^out' --print-out-paths --no-link)/bin/earlyoom
           sudo "$earlyoom" -m 8 -s 100 -r 0 \
-            --prefer '^(paros_consensu|consensus_sim|paros_host|flavors|walks|mutants|traces|coverage|host)' \
+            --prefer '^(paros_consensu|consensus_sim|flavors|walks|mutants|traces|coverage)' \
             --avoid '^(java|cargo|rustc|nix|node|Runner\.|earlyoom)' \
             > earlyoom.log 2>&1 &
-      # `scripts/mutants.sh` (no flag) is paros-consensus, in two passes;
-      # `--host` runs one pass.
+      # `scripts/mutants.sh` runs paros-consensus, in two passes.
       - name: Run the mutants of the lines main changed
         env:
           BASE: ${{ needs.plan.outputs.base }}
           CRATE: ${{ matrix.crate }}
-          FLAG: ${{ matrix.flag }}
           SHARD: ${{ matrix.shard }}/${{ matrix.of }}
         run: |
           set -euo pipefail
           git diff "$BASE" HEAD -- "crates/lib/$CRATE/src" > crate.diff
-          # shellcheck disable=SC2086 # FLAG is empty or one word.
-          nix develop --command scripts/mutants.sh $FLAG --in-diff crate.diff \
+          nix develop --command scripts/mutants.sh --in-diff crate.diff \
             --shard "$SHARD" --sharding round-robin
       - name: Show the survivors
         if: failure()

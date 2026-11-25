@@ -1,9 +1,8 @@
 # Release-plz configuration.
 #
-# Three crates are public: `paros-consensus` (the sans-IO Paxos core, a library
-# for everyone, docs/architecture/04-roles.md §4.3), `paros-host` (the pure
-# host of actors and its driver) and `paros` (the facade a program depends
-# on). They share one version (`version_group`), one tag and
+# Two crates are public: `paros-consensus` (the sans-IO Paxos core, a library
+# for everyone, docs/architecture/04-roles.md §4.3) and `paros` (the facade a
+# program depends on). They share one version (`version_group`), one tag and
 # one GitHub release, `v{{ version }}`, on the `paros` package.
 #
 # Nothing publishes by itself. A push to `main` only opens or updates the
@@ -32,13 +31,13 @@ semver_check = false
 features_always_increment_minor = true
 
 # The changelog of `paros` is the repository's CHANGELOG.md and takes the
-# commits of `paros-consensus` and `paros-host` too. release-plz creates every changelog; none
+# commits of `paros-consensus` too. release-plz creates every changelog; none
 # is written by hand.
 [[package]]
 name = "paros"
 version_group = "paros"
 changelog_path = "CHANGELOG.md"
-changelog_include = ["paros-consensus", "paros-host"]
+changelog_include = ["paros-consensus"]
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 git_release_enable = true
@@ -47,12 +46,6 @@ git_release_name = "v{{ version }}"
 # release-plz writes crates/lib/paros-consensus/CHANGELOG.md at the first release.
 [[package]]
 name = "paros-consensus"
-version_group = "paros"
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-host"
 version_group = "paros"
 git_tag_enable = false
 git_release_enable = false

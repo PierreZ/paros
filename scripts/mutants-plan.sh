@@ -17,8 +17,6 @@
 #   a sealed segment's replica set)): 536 such lines gave 133 mutants, and the
 #   first pass took 85 minutes, about 0.16 minutes for each line (0.64 for each
 #   mutant). With 250 lines, the first pass of a shard takes about 40 minutes.
-#   paros-host uses the same number; its shard of that PR took 8 to 16
-#   minutes.
 # - paros-consensus (the comment of the old job): 70 mutants took 88 minutes,
 #   about 1.26 minutes for each mutant, twice as slow. Its number is half of
 #   the journal's, 125 lines, on the reading (not a measure) that its lines
@@ -34,9 +32,9 @@ cd "$(dirname "$0")/.."
 base=${1:?usage: scripts/mutants-plan.sh <base>}
 
 entries=()
-# crate:flag:lines:min
-for row in paros-consensus::125:2 paros-host:--host:250:1; do
-  IFS=: read -r crate flag per min <<< "$row"
+# crate:lines:min
+for row in paros-consensus:125:2; do
+  IFS=: read -r crate per min <<< "$row"
   src=crates/lib/$crate/src
   if git diff --quiet "$base" HEAD -- "$src"; then
     continue
@@ -47,7 +45,7 @@ for row in paros-consensus::125:2 paros-host:--host:250:1; do
     of=$min
   fi
   for ((shard = 0; shard < of; shard++)); do
-    entries+=("{\"crate\":\"$crate\",\"flag\":\"$flag\",\"shard\":$shard,\"of\":$of}")
+    entries+=("{\"crate\":\"$crate\",\"shard\":$shard,\"of\":$of}")
   done
 done
 

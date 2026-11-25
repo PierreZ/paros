@@ -31,7 +31,7 @@ the exact table, are **Open** (§4.4).
 
 | Layer | What it is | Today |
 |---|---|---|
-| 0 | The Paxos flavors, and the host of actors (the role contract, the flight rule, group commit, the IO traits). No tenant, no cell. | `paros-consensus`, `paros-host` |
+| 0 | The Paxos flavors. No tenant, no cell. | `paros-consensus` |
 | 1 | The journal, its controller, and the client | to build again (the first design is at the tag `journal-design-a`) |
 | 2 | The roles of the core on the host: addresses, the message envelope, the disk layout, recovery | to build |
 | 3 | A fold over a journal, and the election by `SetLeader` | to build |

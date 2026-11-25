@@ -91,8 +91,9 @@ driver transmits a send only once that batch is durable. The driver may then pip
 commit. A reply that writes nothing (a second copy of a `Prepare` at the promised ballot) waits
 on the **last** batch the role emitted, not on a batch of its own step. etcd-raft states the same
 rule: no message is sent until "all Entries written by any previous Ready batch" are persisted
-([etcd-raft replication §1], `doc.go:79`). `specs/tla/flight-rule/` checks the rule, and its
-`own_batch` control shows the bug when a reply waits only on its own step's batch.
+([etcd-raft replication §1], `doc.go:79`). The model `specs/tla/flight-rule/` checked the rule,
+and its `own_batch` control showed the bug when a reply waits only on its own step's batch; it
+was removed with `paros-host` on 2026-11-25 (`docs/archive/paros-host/README.md`).
 
 ## 5. Recovery flow
 
@@ -141,7 +142,7 @@ crash. paros quarantines a journal on a storage fault and re-opens it later
 | The durable scalars and their contract | `paros-consensus/src/contract/hard_state.rs`: `HardState` |
 | The write ops and the fsync rule | `paros-consensus/src/contract/write.rs`: `WriteOp`, `AcceptorWrite`, `MustSync::for_batch`, `WriteOp::needs_sync` |
 | The leader's early send | `paros-roles/src/node/ready.rs`: `split_early`, `send_early` |
-| The journal's flight rule (not built) | `docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`); the model `specs/tla/flight-rule/` |
+| The journal's flight rule (not built) | `docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`); the model `specs/tla/flight-rule/` (removed, `docs/archive/paros-host/README.md`) |
 
 The rows that name `paros-roles` point to code at the git tag `v0.2.0-alpha.1`: those crates were removed on 2026-11-19, and [`docs/archive/v0.2.0-alpha.1/`](../../archive/v0.2.0-alpha.1/README.md) has one recap per crate. The journal is designed again on the core with segments; the journal v1 of design A is at the git tag `journal-design-a`.
 
@@ -164,7 +165,7 @@ etcd-raft's.
   its batch was durable", "cluster: a node crashed between persist and send"), and a crash may
   lose a write that no fsync covered ("cluster: a crash lost a write no fsync covered"), with
   `PREFIX_SHRINKS` as the oracle and `Mutant::LoseChosenIndex` as its control.
-- The flight rule of `paros-host` has its own model, `specs/tla/flight-rule/`, and the journal state
+- The journal state
   model treats the acceptor's state as memory, a queue of writes and a disk
   (`specs/tla/journal-state/`, #1309 (the state is the disk) (at the git tag `journal-design-a`)).
 
