@@ -77,6 +77,7 @@ fn flavors() -> Vec<(String, Flavor)> {
         Flavor::retirement(),
         Flavor::handover(),
         Flavor::lagging_reads(),
+        Flavor::segments(),
     ];
     let paged = [
         Flavor::multi_paxos_five(),

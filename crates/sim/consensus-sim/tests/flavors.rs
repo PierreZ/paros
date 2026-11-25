@@ -96,6 +96,7 @@ fn segments_steered() {
             reach::ROLL_PIPELINED,
             reach::ROLL_JUMP,
             reach::ROLL_IN_RECOVERY,
+            reach::CHAIN_PUBLISHED,
             reach::RECONFIGURED,
         ],
     );

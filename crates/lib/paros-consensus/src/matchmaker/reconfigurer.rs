@@ -65,6 +65,7 @@ use super::{Retirement, SuccessorDecree};
 use crate::contract::limits::Limits;
 use crate::decree::{AcceptFold, DecreePromise};
 use crate::journal::JournalId;
+use crate::journal::chain::merge_chain;
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::{Ballot, NodeId};
 
@@ -837,6 +838,10 @@ impl MatchmakerReconfigurer {
                 // only once every member of the old set holds it, so every
                 // frozen quorum reports it.
                 Retirement::merge_all(&mut held.retired, &registry.retired);
+                // The chain of segments merges over the frozen members (R5):
+                // a publish completed at a majority of the old set, which
+                // meets every frozen quorum.
+                merge_chain(&mut held.segments, &registry.segments);
             }
         }
         let mut disagreements: u64 = 0;

@@ -16,7 +16,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use paros_consensus::contract::MemStorage;
 use paros_consensus::journal::{Command, Control, Entry, JournalId, LeaderUuid, Outcome, Seq};
 use paros_consensus::matchmaker::{
-    GcAck, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MemRegistry,
+    GcAck, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MemRegistry, SegmentAck,
+    SegmentPublish,
 };
 use paros_consensus::membership::MatchmakerId;
 use paros_consensus::node::ProposeResult;
@@ -42,6 +43,8 @@ enum Packet {
     MatchReply(MatchReply),
     Gc(MatchmakerId, GcRequest),
     GcAck(NodeId, GcAck),
+    Publish(MatchmakerId, SegmentPublish),
+    PublishAck(NodeId, SegmentAck),
 }
 
 /// One matchmaker and its registry on disk.
@@ -184,6 +187,9 @@ impl Cluster {
             for (to, request) in ready.gc_requests() {
                 self.wire.push_back(Packet::Gc(*to, *request));
             }
+            for (to, request) in ready.segment_publishes() {
+                self.wire.push_back(Packet::Publish(*to, request.clone()));
+            }
             // 3. Learn. A driver answers here the clients that wait on
             //    these slots.
             self.learned.entry(id).or_default().extend(
@@ -255,6 +261,13 @@ impl Cluster {
                         self.pump(to);
                     }
                 }
+                Packet::Publish(to, request) => self.matchmaker_publish(to, &request),
+                Packet::PublishAck(to, ack) => {
+                    if self.nodes.contains_key(&to) && !self.isolated.contains(&to) {
+                        let _ = self.node(to).on_segment_ack(&ack);
+                        self.pump(to);
+                    }
+                }
             }
         }
         panic!("the cluster did not become quiet");
@@ -314,6 +327,24 @@ impl Cluster {
         ready.advance();
         let ack = registry.matchmaker.gc_ack(&request, outcome);
         self.wire.push_back(Packet::GcAck(request.from, ack));
+    }
+
+    /// One publish of the chain of segments at matchmaker `to`: merge it,
+    /// persist, then ack.
+    fn matchmaker_publish(&mut self, to: MatchmakerId, request: &SegmentPublish) {
+        if self.isolated.contains(&request.from) {
+            return;
+        }
+        let index = usize::try_from(to.0).expect("a small matchmaker id");
+        let registry = &mut self.registries[index];
+        let outcome = registry.matchmaker.publish_segment(request);
+        let ready = registry.matchmaker.ready();
+        for write in ready.writes() {
+            registry.disk.apply(write);
+        }
+        ready.advance();
+        let ack = registry.matchmaker.segment_ack(request, outcome);
+        self.wire.push_back(Packet::PublishAck(request.from, ack));
     }
 
     /// One tick of logical time on every running node, then

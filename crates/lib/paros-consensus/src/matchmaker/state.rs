@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::journal::JournalId;
+use crate::journal::{Chain, JournalId};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, NodeId};
 
@@ -124,6 +124,10 @@ pub struct JournalRegistry {
     /// merge over the frozen quorum, see [`JournalScalars::retired`]).
     #[cfg_attr(feature = "serde", serde(default))]
     pub retired: BTreeMap<NodeId, Retirement>,
+    /// The chain of segments of the journal (for a reconstruction: the merge
+    /// over the frozen quorum, see [`JournalScalars::segments`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub segments: Chain,
 }
 
 impl JournalRegistry {
@@ -136,6 +140,7 @@ impl JournalRegistry {
             && self.history.is_empty()
             && self.effective.is_none()
             && self.retired.is_empty()
+            && self.segments.is_empty()
     }
 }
 
@@ -310,6 +315,14 @@ pub struct JournalScalars {
     /// later registration can make a Phase 1 need its promise.
     #[cfg_attr(feature = "serde", serde(default))]
     pub retired: BTreeMap<NodeId, Retirement>,
+    /// The chain of segments of the journal (R5 of §4.7,
+    /// [`crate::journal::chain`]): an add-only map that a node's
+    /// [`SegmentPublish`](super::SegmentPublish) grows by a merge. Written
+    /// before the ack, carried into every successor generation
+    /// ([`crate::journal::chain::merge_chain`] over the frozen quorum), and
+    /// never collected by the GC watermark.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub segments: Chain,
 }
 
 /// The small, persisted-whole durable scalars of a matchmaker set — the

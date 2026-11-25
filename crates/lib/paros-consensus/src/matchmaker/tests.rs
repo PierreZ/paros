@@ -1,7 +1,10 @@
 use super::*;
+use crate::journal::Chain;
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::NodeId;
 use std::collections::BTreeMap;
+
+mod chain;
 
 /// Review 3 of #133: a member whose own GC floor sits *above* the
 /// reconstructed one activates with the higher floor, and its registry is
@@ -53,6 +56,7 @@ fn activation_applies_the_higher_of_the_local_and_reconstructed_floors() {
                     history,
                     effective: None,
                     retired: BTreeMap::new(),
+                    segments: Chain::new(),
                 },
             )]),
             complete: true,
@@ -125,6 +129,7 @@ fn journal_registries(
             history,
             effective,
             retired: BTreeMap::new(),
+            segments: Chain::new(),
         },
     )])
 }
@@ -573,6 +578,7 @@ fn a_registry_below_its_watermark_refuses_to_boot() {
                 gc_watermark: ballot(2, 0),
                 effective: None,
                 retired: BTreeMap::new(),
+                segments: Chain::new(),
             },
         )]),
         ..Default::default()
@@ -1279,6 +1285,7 @@ fn two_journal_bootstrap(successor: &MatchmakerSet) -> PendingBootstrap {
         history: BTreeMap::from([(ballot(round, 1), Registration::belief(config(&[0, 1, 2])))]),
         effective: None,
         retired: BTreeMap::new(),
+        segments: Chain::new(),
     };
     PendingBootstrap {
         set: successor.clone(),

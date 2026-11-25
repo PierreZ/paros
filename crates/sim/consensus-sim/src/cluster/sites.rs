@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, Matchmaker, MatchmakerConfig, MatchmakerHardState, MemRegistry,
-    ReconfigureReply, ReconfigureRequest,
+    ReconfigureReply, ReconfigureRequest, SegmentAck, SegmentPublish,
 };
 use paros_consensus::membership::{MatchmakerId, ProxyId};
 use paros_consensus::{ColocatedNode, Config, Limits, NodeId, ProxyLeader, ReplicaNode, WriteOp};
@@ -256,6 +256,16 @@ impl MatchmakerSite {
         );
         ready.advance();
         Some(replies)
+    }
+
+    /// Merge a publish of the chain, persist it, and build the ack.
+    pub(super) fn publish(&mut self, request: &SegmentPublish) -> Option<SegmentAck> {
+        let outcome = self.live.as_mut()?.publish_segment(request);
+        self.persist();
+        let matchmaker = self.live.as_mut()?;
+        let ack = matchmaker.segment_ack(request, outcome);
+        matchmaker.ready().advance();
+        Some(ack)
     }
 
     /// Raise the GC watermark, persist it, and build the ack.

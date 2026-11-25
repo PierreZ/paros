@@ -105,9 +105,17 @@ the model `specs/tla/segment-roll/` (PR #1540 (segment-roll)), step 3 the model
 The cut is built: `Command::Roll` (`journal/command.rs`) and the types of
 `journal/segment.rs` (`Roll { next, replicas }`), the fold of the tail segment in `JournalState::apply` (`journal/state.rs`;
 the segment is part of the journal state, so the floor seals it and `TrimmedTo` carries it), and
-`ColocatedNode::roll` (`node/roll.rs`), refused with no matchmakers. The replicas of a segment,
-the route of a `Commit` and the chain at the matchmakers come in later steps (§4.7 of
-`docs/architecture/`).
+`ColocatedNode::roll` (`node/roll.rs`), refused with no matchmakers.
+
+The chain at the matchmakers is built too (step 4): an add-only map from a segment id to its
+record (`journal/chain.rs`), held per journal beside the registry of the matchmaker
+(`JournalScalars::segments`), as [MMP §3.2] holds its registry. Each field of a record is a
+function of the chosen log, so a record merges field by field with no compare-and-set, and the
+handover carries the chain by the same merge. The read of the chain over a quorum is that merge
+too; its reader comes in step 5. A node publishes an end only after its fold applied the `Roll`
+(`node/chain.rs`), on every path that folds a slot (the walk, a refold past a healed hole, a
+trim-point jump, the boot), and a publish completes at a majority (`publisher.rs`). The model is the chain of `specs/tla/handover-scalars/`. The replicas of a
+segment and the route of a `Commit` come in step 5 (§4.7 of `docs/architecture/`).
 
 Divergences from the sources (each a departure of §4.7.4, with its check):
 

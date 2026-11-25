@@ -547,6 +547,11 @@ pub enum Mutant {
     /// folds the next `Roll` another way than the rules give. Caught by
     /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
     CorruptTrimSegment,
+    /// The driver of a leader publishes the end of the tail segment as soon
+    /// as the leader admits a `Roll`, before the log chooses it: a publish on
+    /// a proposal (`Source = "proposed"` of `specs/tla/handover-scalars/`).
+    /// Caught by [`CHAIN_TRUE`](crate::oracle::ledger::CHAIN_TRUE).
+    EarlyPublish,
     /// The driver drops the faulty records from every `Promise` it sends:
     /// a lost value reads as no vote (`Tally = "none"` of `truncation/`).
     /// A value is lost only when the candidate fills a chosen slot with a

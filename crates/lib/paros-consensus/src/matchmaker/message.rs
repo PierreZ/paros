@@ -1,18 +1,21 @@
 //! The matchmaker's **wire contract**: the matchmaking round trip
 //! (`MatchRequest` / `MatchReply` and its refusals), the garbage-collection
-//! pair (`GcRequest` / `GcAck`), and the five-step generation handover
+//! pair (`GcRequest` / `GcAck`), the publish of a segment's end
+//! (`SegmentPublish` / `SegmentAck`), and the five-step generation handover
 //! (`ReconfigureRequest` / `ReconfigureReply`).
 //!
 //! Types only. What a matchmaker *does* with them is
 //! [`Matchmaker::step`](super::Matchmaker::step),
-//! [`Matchmaker::advance_gc_watermark`](super::Matchmaker::advance_gc_watermark)
+//! [`Matchmaker::advance_gc_watermark`](super::Matchmaker::advance_gc_watermark),
+//! [`Matchmaker::publish_segment`](super::Matchmaker::publish_segment)
 //! and the generation machine in [`super::generation`].
 
 use std::collections::BTreeMap;
 
 use super::{BootstrapPage, JournalRegistry, MatchmakerPhase, Registration, RegistrationKind};
-use crate::journal::JournalId;
+use crate::journal::{Chain, JournalId, Opening, SegmentId, SegmentRecord};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use crate::types::Slot;
 use crate::types::{Ballot, NodeId};
 
 /// A proposer's matchmaking request: "register `config` for `ballot`, and tell
@@ -503,6 +506,81 @@ pub struct GcAck {
     /// None }`). A stable leader meets an abandoned handover only here: it
     /// finishes it, as a refused campaign does.
     pub stopped: bool,
+}
+
+/// A node's publish of the end of one segment (R5 of §4.7): its walk applied
+/// the chosen `Roll` that ends segment `sealed`, so the chain may hold
+/// `sealed` from `start` to `end` and the next segment open from `end`, with
+/// the replicas that the `Roll` named. Every field is a function of the chosen
+/// log (R3), so every node that publishes one segment sends the same values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SegmentPublish {
+    /// The publishing node.
+    pub from: NodeId,
+    /// The journal whose chain grows (#190).
+    pub journal: JournalId,
+    /// The generation addressed.
+    pub generation: MatchmakerGeneration,
+    /// The segment that the `Roll` ended.
+    pub sealed: SegmentId,
+    /// The first slot of `sealed`.
+    pub start: Slot,
+    /// The slot after the `Roll`: the end of `sealed` and the start of the
+    /// next segment.
+    pub end: Slot,
+    /// How the next segment opened: what the `Roll` says of its replicas.
+    pub opening: Opening,
+}
+
+impl SegmentPublish {
+    /// The two records the publish writes: `sealed` from its start to its
+    /// end, and the next segment open from that end.
+    ///
+    /// # Panics
+    ///
+    /// If the publish does not describe a sealed segment (an end at or below
+    /// its start) or the next id overflows: a node builds a publish from its
+    /// own walk, so this is a programmer error.
+    #[must_use]
+    pub fn records(&self) -> Chain {
+        assert!(self.end > self.start, "a sealed segment holds its Roll");
+        let sealed = SegmentRecord {
+            start: self.start,
+            opening: None,
+            end: Some(self.end),
+        };
+        let next = SegmentRecord {
+            start: self.end,
+            opening: Some(self.opening.clone()),
+            end: None,
+        };
+        let chain: Chain = [(self.sealed, sealed), (self.sealed.successor(), next)]
+            .into_iter()
+            .collect();
+        assert!(chain.len() == 2, "a publish writes two records");
+        chain
+    }
+}
+
+/// A matchmaker's answer to a [`SegmentPublish`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SegmentAck {
+    /// The answering matchmaker.
+    pub matchmaker: MatchmakerId,
+    /// The request's journal, echoed.
+    pub journal: JournalId,
+    /// The request's generation, echoed.
+    pub generation: MatchmakerGeneration,
+    /// The request's sealed segment, echoed.
+    pub sealed: SegmentId,
+    /// Whether the chain of that generation holds the publish now, durably
+    /// (a matchmaker not active for it refuses).
+    pub applied: bool,
+    /// On a refusal, the later set the node should address instead, as a
+    /// [`GcAck`] names it.
+    pub newer: Option<MatchmakerSet>,
 }
 
 /// A reconfigurer's message to a matchmaker (#125): one step of the

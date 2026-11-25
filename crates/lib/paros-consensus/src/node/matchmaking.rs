@@ -1842,6 +1842,7 @@ impl ColocatedNode {
             self.become_follower(None);
         }
         self.reset_gc_for_generation();
+        self.reset_publishes_for_generation();
         // The belief moved forward to exactly the set handed in.
         assert!(
             self.matchmakers

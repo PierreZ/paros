@@ -14,7 +14,7 @@ The modules make three layers that point down only (#730 (paros-consensus rework
 - **Foundations**: `probe`, `types`, `membership`, `journal`, `contract`, `retained`. A
   foundation uses only foundations.
 - **Roles**: `acceptor`, `proposer`, `replica`, `belief`, `quorum_read`, `batcher`, `collector`,
-  `decree`, `matchmaking`, `matchmaker`. A role uses foundations and roles, never a deployment.
+  `decree`, `matchmaking`, `matchmaker`, `publisher`. A role uses foundations and roles, never a deployment.
 - **Deployments**: `node`, `proxy_leader`, `replica_node`. A deployment wires roles and owns
   one `Ready`. It never uses another deployment.
 
@@ -38,6 +38,7 @@ Foundations:
   - `ids.rs` → `TenantId`, `JournalId`, `JournalIdentifier` (the identifier, #235), `LeaderUuid`, `Seq`.
   - `command.rs` → `Command`, `Control`, `Entry`, `command_fingerprint`.
   - `segment.rs` → `Roll` (the cut, `Command::Roll`), `SegmentId`, `Segment` (the tail segment: id and first slot), `ReplicaSet`, `ReplicaSetError` → the segments of the log (`docs/architecture/04-7-segments.md` §4.7).
+  - `chain.rs` → `Chain`, `SegmentRecord`, `Opening`, `merge_chain` → the chain of segments at the matchmakers (R5): an add-only map, each field written once and merged field by field; two values of one field are a detected safety violation. Its model is the chain of `specs/tla/handover-scalars/`.
   - `state.rs` → `JournalState` (leader uuid, hidden term, positions), `JournalView` (what a client sees: no term), `Outcome` → the journal-control state machine; pure `apply` judges `Write`/`SetLeader`/`Truncate`/`Roll` (#204, #241; a `Roll` to the tail plus one moves the tail `segment`, any other is `RollIgnored`); `Write` and `Truncate` share the writer fence `is_current` (#228). `WriterMode` (`Single`, `Multi`, in `Config.writer_mode`) is judged at apply: a call of the other mode is `Outcome::WrongMode`; a multi-writer `Write` is unfenced and takes `next_seq`.
 - `contract.rs` + `contract/` → what a driver must honor: persist before send.
   - `message.rs` → `Message`, `Audience`, `Party`.
@@ -62,12 +63,14 @@ Roles (pure tallies, no deployment knowledge):
 - `belief.rs` → `Belief`, `Judgement` → the configuration a deployment believes in force, its ballot and the read basis (#1101 (one Belief role)): the follower rule (`judge`, `learn`: matchmakers, a strictly newer ballot, a configuration drawn from the pool), `bind` for a reason the deployment owns, and the read basis (`learn_read_basis`, `read_basis`). `ColocatedNode`, `ProxyLeader` and `ReplicaNode` each hold one and call `Belief::assert_invariants` in their own.
 - `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold`, `ReadBasis`, `ReadState` → the leaderless read tally (#143) and the won leadership's configuration and fence it is judged over (#260).
 - `batcher.rs` → `Batcher`, `BatchLimits`, `Batch`, `Unbatcher` → the batcher's pure lanes (#145 (batchers)): one lane per journal, flushed at `flush_records`, before it would pass the limits, or at a tick; an empty or over-limit write goes alone; `Unbatcher::scatter` cuts a merged write's range into each write's own, densely and in order.
+- `publisher.rs` → `Publisher` → the node-side tally of the chain's publishes (R5): each `SegmentPublish` until a majority of one matchmaker generation acked it; reset at a new generation.
 - `collector.rs` → `Collector`, `GcStep` → the leader-side GC tally (#123): chosen-index reports, matchmaker acks, the effective floor. Its rule across a reconfiguration onto empty stores (`covered`: a Phase-2 quorum of `C_b` at or past the fence) has its TLA+ model in `specs/tla/truncation-reconfig/` (#1218 (truncation model, part 3)).
 - `decree.rs` → `Decree<Id, V>`, `DecreePromise`, `AcceptFold`, `DECREE_SLOT` → single-decree Paxos over the shared `Proposer` and `Acceptor` at slot zero: the matchmaker handover's successor decree (`SuccessorDecree`), and any one-shot decision a caller above the core runs. Its TLA+ model is `specs/tla/decree/` (#1186 (rework 1.15)).
 - `matchmaking.rs` → `Matchmaking` → the candidate's matchmaking phase; `matchmaking/probe.rs` → `MembershipProbe` (#173: at boot; #270: re-probed from outside a heard belief; #278: against a matched fact or a won leadership, late answers folded).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below); a history page (`history_page`) leaves out a belief a later registration repeats (#570 (election duel outlasts the recovery tail)), but keeps each owner's lowest registration of each configuration (PR #1064 (gone-node gap)).
 - `matchmaker/{generation,reconfigurer}.rs` → the generation machine, `MatchmakerReconfigurer`; a `Stop` and a `Bootstrap` are paged (`BootstrapPage`, #439).
-- `matchmaker/{message,state,storage}.rs` → wire contract, durable state, `RegistryStorage` + `MemRegistry` (the reference registry); `matchmaker/ready.rs` → `MatchmakerWriteOp` + `MatchmakerReady`.
+- `matchmaker/chain.rs` → `Matchmaker::publish_segment`, `segment_ack`, `chain`, `PublishOutcome` → a publish merged into the journal's chain (`JournalScalars::segments`), refused off its generation; the handover merges the chains of the stop quorum (`reconfigurer.rs`) and the activation merges the result into the member's own (`generation.rs`).
+- `matchmaker/{message,state,storage}.rs` → wire contract (`SegmentPublish`, `SegmentAck` too), durable state, `RegistryStorage` + `MemRegistry` (the reference registry); `matchmaker/ready.rs` → `MatchmakerWriteOp` + `MatchmakerReady`.
 
 Deployments (each wires roles and owns one `Ready`):
 
@@ -80,6 +83,7 @@ Deployments (each wires roles and owns one `Ready`):
 - `node/{authority,quorum_reads}.rs` → `CheckQuorum`; the read path (`PreRead` wiring, `serve_quorum_reads`/`tick_quorum_reads`).
 - `node/{handoff,gc,matchmaking,reconfigure}.rs` → `DPaxos` handoff, GC wiring, matchmaking wiring, online reconfiguration (`relinquish_to`, `reconfigure`, `quorum_read`).
 - `node/roll.rs` → `roll`, `RollResult`, `RollRefusal` → the `Roll` cut (§4.7): refused with no matchmakers; the tail segment from the chosen prefix and the open rounds (`tail_segment`). A `Roll` is its own `Command` variant, not a `Control`, so only `roll` proposes one; the tail also counts the `Roll`s a paged recovery has not proposed yet.
+- `node/chain.rs` → `note_rolls`, `resend_segment_publishes`, `segment_publish_pending`, `on_segment_ack` → the publish of the chain: after the walk applied a `Roll`, every node of a matchmaker deployment publishes its end (`Ready::segment_publishes`) until a majority acks it; the plain arm has no publisher.
 - `node/{boot,acceptor,helpers,invariants}.rs` → boot path, acceptor wiring, `adopt_configuration`, `assert_invariants`.
 - `node/tests.rs` + `node/tests/*.rs` → unit tests, one file per concern.
 - `proxy_leader.rs` → `ProxyLeader` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, and the beat `tick` (re-send page and bounded retention, both from its `Limits`); `proxy_leader/ready.rs` → `ProxyReady`. Its TLA+ model is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): a `Commit` only on a Phase-2 quorum of the round's own configuration. `ProxyLeader::new(id, &Config, limits)` reads the bootstrap configuration, the pool and the matchmakers from the deployment's `Config`; a delegation whose configuration it cannot run (outside its pool, or none after a restart) is ignored, and the leader moves the round.
@@ -88,7 +92,7 @@ Deployments (each wires roles and owns one `Ready`):
 Test-only:
 
 - `test_support.rs` → the shared builders (`MemStorage::for_node`, `from_node`).
-- `models.rs` + `models/` → the model checkers: `handover.rs` (the matchmaker handover; half its seeds page by one or two journals, #439), `proxy.rs` (the proxy leader), `support.rs` (the seeded RNG and lossy mailbox both share).
+- `models.rs` + `models/` → the model checkers: `handover.rs` (the matchmaker handover; half its seeds page by one or two journals, #439; claim 11: the chain of segments crosses a handover and only grows on a disk), `proxy.rs` (the proxy leader), `support.rs` (the seeded RNG and lossy mailbox both share).
 
 ## Public surface
 

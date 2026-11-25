@@ -345,6 +345,7 @@ fn step_at(nodes: &mut [ColocatedNode], to: NodeId, msg: Message) {
 mod acceptor;
 mod bounds;
 mod catch_up;
+mod chain;
 mod decide_apply;
 mod election;
 mod gc;
