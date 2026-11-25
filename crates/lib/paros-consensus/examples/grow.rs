@@ -399,7 +399,11 @@ fn add_proxies_and_replicas(cluster: &mut Cluster, leader: NodeId) {
         Some(&1),
         "the leader sends one Accept, to the proxy leader"
     );
-    assert_eq!(cluster.node(leader).delegated_rounds(), [], "the round came back");
+    assert_eq!(
+        cluster.node(leader).delegated_rounds(),
+        [],
+        "the round came back"
+    );
     println!("   slot {slot}: the leader sent one Accept, to a proxy leader, which ran Phase 2");
 
     // A replica that joins late learns the whole log from the beat.
