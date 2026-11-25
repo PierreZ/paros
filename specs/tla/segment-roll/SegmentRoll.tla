@@ -94,7 +94,6 @@ SegOf(r) == r[1]
 VARIABLES prom,     \* prom[a]: the highest ballot that acceptor a promised
           voted,    \* every vote ever cast: [a, b, s, v]
           prop,     \* every proposal: [b, s, v, k], k the segment it routes to
-          started,  \* started[b]: ballot b won its Phase 1
           forced,   \* forced[b][s]: the value that Phase 1 forces at s, or None
           front,    \* front[b]: one past the highest slot that Phase 1 reported
           low,      \* low[b]: the first slot that ballot b recovers (`lo`), or 0
@@ -105,7 +104,7 @@ VARIABLES prom,     \* prom[a]: the highest ballot that acceptor a promised
           rstart, rnext, rend,  \* each replica: its start, next slot, end (0: none)
           chain     \* chain[k]: [start, end] (0: none)
 
-vars == <<prom, voted, prop, started, forced, front, low, eff, next, tail, pend,
+vars == <<prom, voted, prop, forced, front, low, eff, next, tail, pend,
           rstart, rnext, rend, chain>>
 
 -----------------------------------------------------------------------------
@@ -156,7 +155,6 @@ Init ==
   /\ prom = [a \in Acceptors |-> 0]
   /\ voted = {}
   /\ prop = {}
-  /\ started = [b \in Ballot |-> FALSE]
   /\ forced = [b \in Ballot |-> [s \in Slot |-> None]]
   /\ front = [b \in Ballot |-> 0]
   /\ low = [b \in Ballot |-> 0]
@@ -175,9 +173,9 @@ Report(Q, s) ==
   IN  IF vs = {} THEN None
       ELSE (CHOOSE x \in vs : \A y \in vs : y.b <= x.b).v
 
-\* Ballot b wins its Phase 1 at quorum Q, from slot lo.
+\* Ballot b wins its Phase 1 at quorum Q, from slot lo. It wins at most once:
+\* each quorum meets Q, whose promises are at b or above for ever.
 Phase1(b, Q, lo) ==
-  /\ ~started[b]
   /\ \A a \in Q : prom[a] < b
   /\ PrefixChosen(lo)
   /\ LET f  == [s \in Slot |-> IF s >= lo THEN Report(Q, s) ELSE None]
@@ -187,7 +185,6 @@ Phase1(b, Q, lo) ==
      IN  /\ forced' = [forced EXCEPT ![b] = f]
          /\ front' = [front EXCEPT ![b] = fr]
   /\ prom' = [a \in Acceptors |-> IF a \in Q THEN b ELSE prom[a]]
-  /\ started' = [started EXCEPT ![b] = TRUE]
   /\ next' = [next EXCEPT ![b] = lo]
   /\ low' = [low EXCEPT ![b] = lo]
   /\ LET k  == IF Base = "prefix" THEN TailAt(lo) ELSE ChainTail
@@ -220,8 +217,8 @@ OwnPrefix(b, s) ==
 \* chosen, so no `Roll` that is not chosen can change the segment of s.
 InWindow(b, s) == OwnPrefix(b, s + 1 - Alpha)
 
+\* A ballot that did not win its Phase 1 has next[b] = 0, outside Slot.
 Propose(b) ==
-  /\ started[b]
   /\ next[b] \in Slot
   /\ Free(b)
   /\ ~Window \/ InWindow(b, next[b])
@@ -236,14 +233,14 @@ Propose(b) ==
            /\ eff' = [eff EXCEPT ![b] = IF valid /\ Alpha > 1 THEN s + Alpha
                                         ELSE IF Before(b, s + 1) THEN eff[b] ELSE 0]
            /\ pend' = [pend EXCEPT ![b] = IF valid THEN s ELSE pend[b]]
-  /\ UNCHANGED <<prom, voted, started, forced, front, low, rstart, rnext, rend, chain>>
+  /\ UNCHANGED <<prom, voted, forced, front, low, rstart, rnext, rend, chain>>
 
+\* A vote cast again changes nothing: it is a stutter.
 Accept(a, p) ==
   /\ prom[a] <= p.b
-  /\ [a |-> a, b |-> p.b, s |-> p.s, v |-> p.v] \notin voted
   /\ voted' = voted \cup {[a |-> a, b |-> p.b, s |-> p.s, v |-> p.v]}
   /\ prom' = [prom EXCEPT ![a] = p.b]
-  /\ UNCHANGED <<prop, started, forced, front, low, eff, next, tail, pend, rstart, rnext, rend, chain>>
+  /\ UNCHANGED <<prop, forced, front, low, eff, next, tail, pend, rstart, rnext, rend, chain>>
 
 -----------------------------------------------------------------------------
 (* Routing: the `Commit`s that go to the replicas of a segment. *)
@@ -263,32 +260,33 @@ Learnable(s) ==
   IF ActOn = "chosen" THEN {v \in Val : Chosen(s, v)}
   ELSE {x.v : x \in {y \in voted : y.s = s}}
 
+\* A replica with no start has rnext[r] = 0, and a replica past the last
+\* slot has rnext[r] = NS + 1: no value is learnable at either.
 Apply(r) ==
-  /\ rstart[r] # 0
   /\ rend[r] = 0 \/ rnext[r] < rend[r]
-  /\ rnext[r] \in Slot
   /\ \E v \in Learnable(rnext[r]) :
        /\ rnext' = [rnext EXCEPT ![r] = rnext[r] + 1]
        /\ rend' = [rend EXCEPT ![r] = IF rend[r] = 0 /\ v = SegOf(r) + 1
                                      THEN rnext[r] + Alpha ELSE rend[r]]
-  /\ UNCHANGED <<prom, voted, prop, started, forced, front, low, eff, next, tail, pend, rstart, chain>>
+  /\ UNCHANGED <<prom, voted, prop, forced, front, low, eff, next, tail, pend, rstart, chain>>
 
+\* The write of the chain is a merge into the add-only map (R5): a field
+\* that holds a value keeps it. A replica with no end writes nothing.
 Publish(r) ==
-  /\ rend[r] # 0
-  /\ chain[SegOf(r)].end = 0
   /\ chain' = [k \in Seg |->
-                 IF k = SegOf(r) THEN [chain[k] EXCEPT !.end = rend[r]]
+                 IF k = SegOf(r) /\ chain[k].end = 0
+                 THEN [chain[k] EXCEPT !.end = rend[r]]
                  ELSE IF k = SegOf(r) + 1 /\ chain[k].start = 0
                       THEN [chain[k] EXCEPT !.start = rend[r]]
                  ELSE chain[k]]
-  /\ UNCHANGED <<prom, voted, prop, started, forced, front, low, eff, next, tail, pend, rstart, rnext, rend>>
+  /\ UNCHANGED <<prom, voted, prop, forced, front, low, eff, next, tail, pend, rstart, rnext, rend>>
 
+\* A replica starts once; a chain with no start gives it none (a stutter).
 Start(r) ==
   /\ rstart[r] = 0
-  /\ chain[SegOf(r)].start # 0
   /\ rstart' = [rstart EXCEPT ![r] = chain[SegOf(r)].start]
   /\ rnext' = [rnext EXCEPT ![r] = chain[SegOf(r)].start]
-  /\ UNCHANGED <<prom, voted, prop, started, forced, front, low, eff, next, tail, pend, rend, chain>>
+  /\ UNCHANGED <<prom, voted, prop, forced, front, low, eff, next, tail, pend, rend, chain>>
 
 Next ==
   \/ \E b \in Ballot, Q \in Quorum, lo \in 1..(NS + 1) : Phase1(b, Q, lo)
@@ -339,6 +337,16 @@ ChainTrue == \A k \in Seg :
         /\ Known(chain[k].end)
         /\ SegAt(chain[k].end) = k + 1
         /\ SegAt(chain[k].end - 1) = k
+
+\* A replica keeps its start and never goes back.
+ReplicaForward == [][\A r \in SegReplica :
+                       rstart[r] # 0 => /\ rstart'[r] = rstart[r]
+                                        /\ rnext'[r] >= rnext[r]]_vars
+
+\* The chain is add-only: a start or an end, once written, never changes.
+ChainAddOnly == [][\A k \in Seg :
+                     /\ chain[k].start # 0 => chain'[k].start = chain[k].start
+                     /\ chain[k].end # 0 => chain'[k].end = chain[k].end]_vars
 
 \* Routing: a slot chosen at ballot b went to the replicas of its true
 \* segment. The true segment of a slot exists once the prefix below it is

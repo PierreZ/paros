@@ -2593,7 +2593,9 @@ Invariants: `Agreement`; `OneEnd` (two replicas of one segment never hold two en
 `ReplicaTrue` (a replica applies only chosen slots of its own segment, and its start and end are
 the true ones); `ChainTrue` (the chain says what the log decided); `NoStray` (a `Commit` goes to
 the replicas of the true segment of its slot); `RouteKnown` (under `Route = "commit"` the true
-segment exists when the `Commit` leaves).
+segment exists when the `Commit` leaves). Action properties, checked by `safety_small`, `safety_bare` and the
+long passes: `ReplicaForward` (a replica keeps its start and never goes back) and `ChainAddOnly`
+(a start or an end of the chain, once written, never changes: the write is a merge, R5).
 
 | Check | CI | Result |
 |---|---|---|
