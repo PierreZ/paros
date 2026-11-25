@@ -6,8 +6,8 @@
 at a decided command, the `Roll`** (Pierre, 2026-11-24, the plan
 [`docs/archive/journal-design-a/prompt.md`](../archive/journal-design-a/prompt.md)). Segments are
 an optional behaviour of `paros-consensus`, like the matchmakers, the proxy leaders and the
-replica tier (§4.3): the `Some` arm of the same state machine. The plain arm does not change. The
-journal that comes later composes them and writes no consensus of its own.
+replica tier (§4.3): the `Some` arm of the same state machine. The plain arm does not change. A
+journal above the core would compose them and write no consensus of its own (a later plan, D7).
 
 This section is the desired state; the order of work is §6 of the plan. The model of the cut is
 `specs/tla/segment-roll/` (step 1, PR #1540 (segment-roll)), and `specs/tla/multi-paxos-roll/`
@@ -62,7 +62,7 @@ journal of design A (tag `journal-design-a`); it applies to the whole core.
 | D3 | The matchmakers store the chain as the paper stores its registry: an add-only map, merged like `history`. A change of the replicas of a sealed segment (a heal) is one `Decree` | Pierre, 2026-11-24 |
 | D4 | The `Roll` carries an optional new location: `replicas: Option<..>`. `None` keeps the replicas of the segment that it ends, so the next segment lives on the same machines; `Some` names the `NodeId`s of the next segment. The caller of `roll` chooses; balancing the load is for later, above the core | Pierre, 2026-11-25 ("keep simple, we will load balance afterwards"; "an optional new location passed as an option during roll") |
 | D5 | A `roll` on a deployment with no matchmakers is refused, as `reconfigure` is (`ReconfigureRefusal::NoMatchmakers`): a roll needs healthy matchmakers | Pierre, 2026-11-25 |
-| D6 | The journal of design A (its crates, walks, docs and TLA+ models) is removed. The journal is built again later, from scratch, on the core with segments | Pierre, 2026-11-24; done in PR #1538 (remove the journal of design A), at the tag `journal-design-a` |
+| D6 | The journal of design A (its crates, walks, docs and TLA+ models) is removed. A journal above the core is for a later plan (D7) | Pierre, 2026-11-24, changed 2026-11-25; done in PR #1538 (remove the journal of design A), at the tag `journal-design-a` |
 | D7 | The layering above the core and the journal built again on the core are dropped from this plan; a new plan comes after this work. `paros-host` is removed | Pierre, 2026-11-24; changed 2026-11-25 ("keep only 1271, and drop the layering and the new journal", "Remove Paros host too") |
 
 #### 4.7.3 Rules

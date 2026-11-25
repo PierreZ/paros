@@ -3,7 +3,7 @@
 You work in the repository `PierreZ/paros`. This prompt is from Pierre. It was written in a
 design session on 2026-11-24, against commit `a2ab2eb`.
 
-**Do two things, in this order, and nothing else.**
+**Do three things, in this order, and nothing else.**
 
 1. **Remove the journal work** (step 0 of section 6).
 2. **Add segments to `paros-consensus`**, with the `Roll` cut (steps 1 to 7 of section 6).
@@ -68,7 +68,7 @@ dropped and nothing builds it (a `Commit` leaves on a known chosen prefix, R4d);
 | D4 | The replicas of a segment are `NodeId`s that the `Roll` names | Proposed in the session; Pierre did not object. Confirm in step 2 |
 | D5 | A `roll` on a deployment with no matchmakers is refused, as `reconfigure` is (`ReconfigureRefusal::NoMatchmakers`) | Proposed in the session; Pierre did not object. Confirm in step 2 |
 | D2 | Acceptors stay learners until step 8: a chosen write goes to every acceptor and to the replica set of its segment. Step 8 makes the acceptors pure voters (#1271 (pure voters)): a write then goes to the replica set of its segment only | Pierre, 2026-11-24 ("Keep"); changed 2026-11-25: pure voters are part of this work ("keep only 1271", "Later as now as part of the consensus work") |
-| D6 | The journal crates, their walks, their docs and their TLA+ models are removed. The journal is built again later, from scratch, on the core with segments | Pierre, 2026-11-24 |
+| D6 | The journal crates, their walks, their docs and their TLA+ models are removed. A journal above the core is for a later plan (D7) | Pierre, 2026-11-24; changed 2026-11-25 (D7) |
 | D7 | The layering above the core and the journal built again on the core are dropped from this plan; a new plan comes afterwards. `paros-host` is removed with its two models | Pierre, 2026-11-24 ("we will do the rest later"); changed 2026-11-25 ("keep only 1271, and drop the layering and the new journal", "Remove Paros host too") |
 
 Pierre's rule of 2026-11-24 applies: the agreement on each slot follows the papers, a rule that
@@ -464,8 +464,8 @@ guard that the mutation needed.
 
 Write the rules of section 4.1 into the docs before any code: where the segments of the core
 live in `docs/architecture/` (§4), a knowledge card for segments in the core, and the list of
-departures (two: R2, R7). Confirm D4 and D5. Record D2 (acceptors stay learners; pure voters
-later) and D6.
+departures (two: R2, R7). Confirm D4 and D5. Record D2 (acceptors stay learners until step 8,
+pure voters) and D6.
 
 ### Step 3. The cut
 
@@ -493,8 +493,9 @@ The pause of this step is dropped (R4a, Pierre 2026-11-25; see the note of secti
 
 - Model: extend `compartments/` and `reads/`: a replica that starts from the boundary state, a
   read across a roll with an old chain.
-- Code: `replica_node.rs` as a replica of one segment, `Audience::ReplicasOf`, the proxy's
-  `Commit`, catch-up between replicas, the "sealed" answer.
+- Code: `replica_node.rs` as a replica of one segment, `Audience::ReplicasOf` (a `Commit` goes
+  to the learners and to the replicas of its segment), the proxy's `Commit`, catch-up between
+  replicas, the "sealed" answer.
 
 ### Step 6. Held, and the floor
 
@@ -527,8 +528,14 @@ acceptor is a learner (D2).
   a configuration is forgotten once the replicas hold the prefix up to the fence. Extend
   `truncation-reconfig/` and `compartments/`. Controls: an acceptor that drops a vote that no
   replica holds; a GC that counts the acceptors only.
-- Code: `Audience::ReplicasOf` takes the place of `Audience::Learners` for a `Commit` on a
-  deployment with segments; the acceptor role without a chosen prefix (the plain arm keeps its
+- The read of the chosen prefix: with pure voters, the acceptors no longer know which slots are
+  chosen. A new leader learns the chosen prefix from the replicas (a quorum of replicas whose
+  read intersects every set of replicas that holds a write) before it proposes in a slot below
+  its frontier, and the repair probe and the recovery skip those slots. An acceptor's floor
+  moves only with the held floor of step 6. Controls: a leader that proposes before it read
+  the replicas; a write held by fewer replicas than the read needs to meet it.
+- Code: a `Commit` on a deployment with segments goes to `Audience::ReplicasOf` only, no longer
+  to `Audience::Learners`; the acceptor role without a chosen prefix (the plain arm keeps its
   learners, R10); the GC tally of `collector.rs` over the replicas.
 - Judge: a walk with pure voters, an oracle that a chosen write is on `F + 1` replicas before
   any acceptor drops it, a mutant that routes a `Commit` to the acceptors only, and the trace
