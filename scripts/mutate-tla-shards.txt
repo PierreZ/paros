@@ -16,7 +16,6 @@ compartments 3
 config-register 8
 ctrl-grid 18
 decree 2
-flight-rule 2
 generations 8
 grid 0
 handover 5
@@ -33,7 +32,6 @@ proxy-leader 1
 read-replica 0
 reads 40
 reads-rows4 0
-recorded-inputs 1
 retire-fence 18
 segment-roll 2
 takeover 3

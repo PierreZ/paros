@@ -217,10 +217,10 @@ These points are decided:
 - **A role is an actor.** A role (an acceptor, a leader, a coordinator, the frontend) is a pure
   `step` under the flight rule of the journal (`docs/journal/04-roles.md` (tag `journal-design-a`)
   §J4.2): a send waits for the persist batch that it names, the step reads no clock and draws no
-  random number, and a refusal is data. One host of actors serves every role of a process. The
-  host is `paros-host` (#1410 (split the generic host of actors)): the `Role` trait, the `Host`
-  over an opaque address and the generic driver, with no journal in it; its example runs a toy coordinator. The journal roles of design A ran
-  on it (git tag `journal-design-a`).
+  random number, and a refusal is data. The
+  host of actors of #1410 (split the generic host of actors), `paros-host`, was removed on
+  2026-11-25 with the layering (`docs/archive/paros-host/README.md`); the journal roles of
+  design A ran on it (git tag `journal-design-a`).
 - **The frontend is a role like the others.** It has no layer and no crate of its own.
 - **The election library is its own crate: a coordination store over a journal** (Pierre,
   2026-11-24, #1420 (paros-election)). The rules are in "The coordination store" below. A user
@@ -242,10 +242,10 @@ These points are decided:
 - **The service wire.** The pure crates define their messages as Rust types. protobuf over
   moonpool RPC is in the adapter only. A gRPC frontend comes later, for integrations that do not
   use the simulation.
-- **The host of actors is pure and stays in paros. moonpool gets no actor layer** (Pierre,
-  2026-11-22; it replaces the decision of 2026-11-21 that put an actor layer over the RPC in
-  moonpool). The pure host holds the role contract, the flight rule and the group commit, with no
-  runtime. moonpool RPC is enough as it is: the activation of a role registers a dynamic group
+- **moonpool gets no actor layer** (Pierre, 2026-11-22; it replaces the decision of 2026-11-21
+  that put an actor layer over the RPC in moonpool). The pure host of actors that this point
+  kept in paros, `paros-host`, was removed on 2026-11-25: Pierre dropped the layering above the
+  core from the plan, and a new plan decides where roles run. moonpool RPC is enough as it is: the activation of a role registers a dynamic group
   of endpoints, and its deactivation drops the group (a role that placement released stays
   active until its protocol guard holds: a released acceptor answers until `may_retire` holds).
   The paros adapter keeps the map from the id of a role to its group.
@@ -312,7 +312,7 @@ These points are decided:
   build these rules (#1422).
 
 - **Everything simulates and compiles to wasm** (goal 10). Each pure layer builds for
-  `wasm32-unknown-unknown`, as `paros-consensus` and `paros-host` do today, and the whole
+  `wasm32-unknown-unknown`, as `paros-consensus` does today, and the whole
   service runs in the deterministic simulation and in a browser. A crate that cannot build for
   wasm is a finding: `paros-authz-biscuit` does not build for it today.
 
@@ -443,7 +443,7 @@ The table today, as a proposal (the names and the numbers are **Open**, open poi
 
 | Layer | Crates today | Why there |
 |---|---|---|
-| 0 | `paros-consensus`, `paros-host` | The Paxos flavors, and the pure host of actors (#1410 (split the generic host of actors)): the `Role` trait, the host of many roles and the generic driver under the flight rule. The host depends on no crate, so it sits at the bottom, below every crate whose roles run on it. |
+| 0 | `paros-consensus` | The Paxos flavors. The pure host of actors `paros-host` sat here too until 2026-11-25 (`docs/archive/paros-host/README.md`). |
 | 6 | `paros-authz-biscuit` | It implements the `Authz` port over an external crate (`biscuit-auth`, which draws on `getrandom`), so it cannot be pure. It is an adapter, as the moonpool adapters are. |
 | 7 | `paros` | The facade. It will bundle the adapters of layer 6 behind a feature. |
 | 8 | `consensus-sim`, `paros-wasm` | Crates that only test or show the others. Nothing depends on them. |

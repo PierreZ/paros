@@ -101,10 +101,6 @@ Try this: press **timeout** on node 0, and see its promise in bucket 1, marked S
   public API: lost, late and repeated messages, crashes between buckets. See
   [How it is checked](../proof/).
 
-The host of actors, `paros-host`, drives its roles with a different contract, the flight rule:
-each persist batch has an id, and each send names the batch it waits on, so a driver can pipeline
-and group commit (§J4.2 of the first journal design, at the tag `journal-design-a`).
-
 ## In paros
 
 - [`node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/node.rs): `ColocatedNode`, with `step`, `tick`, `propose` and `ready`.

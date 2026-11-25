@@ -30,10 +30,9 @@ without breaking it, so that the work makes progress.**
 
 If you think that a case needs an exception, stop and ask Pierre. Do not add the exception.
 
-**Where paros is now (2026-11-24).** The repository holds the consensus core and its proofs:
-`paros-consensus` (the sans-IO Paxos roles and their tests), the pure host of actors
-`paros-host`, the `paros` facade, the TLA+ models of `specs/tla/`, the Paxos and Consensus pages
-of the website and their wasm engine. Two removals came before:
+**Where paros is now (2026-11-25).** The repository holds the consensus core and its proofs:
+`paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+ models of `specs/tla/`, the Paxos and Consensus pages
+of the website and their wasm engine. Three removals came before:
 
 - The journal service that sat above the core (`parosd`, `parosctl`, `paros-bench`, the library
   layers, the simulation `paros-sim`) was removed on 2026-11-19. It is at the git tag
@@ -44,6 +43,9 @@ of the website and their wasm engine. Two removals came before:
   `docs/archive/journal-design-a/prompt.md`). It wrote consensus again beside the core: a second
   matchmaker, a second leader, a second replica. It is at the git tag `journal-design-a`, and
   `docs/archive/journal-design-a/README.md` lists what it held.
+- The pure host of actors `paros-host` and its two TLA+ models (`flight-rule/`,
+  `recorded-inputs/`) were removed on 2026-11-25 (Pierre: the layering above the core is
+  dropped from the plan). `docs/archive/paros-host/README.md` says what it held and where it is.
 
 Read the recap before you copy an idea back. **The work now** is the plan of
 `docs/archive/journal-design-a/prompt.md`: segments come down into `paros-consensus` as an
@@ -104,9 +106,7 @@ the decree, drawn states for Multi-Paxos; #1307 (inductive invariants, then proo
 workflow; LS4, built in the flake, checks the temporal last step; `specs/tla/PROVED.sha256` pins
 the proved files, and the `plan` job of the `TLA` workflow fails when one changed and the pin
 was not written again;
-`specs/tla/README.md`, "Proofs"). The host of actors, `paros-host`, has two models: the flight rule (`specs/tla/flight-rule/`) and
-recorded inputs (`specs/tla/recorded-inputs/`). Its contract is §J4.2 of
-`docs/journal/04-roles.md` at the git tag `journal-design-a`.
+`specs/tla/README.md`, "Proofs").
 
 **The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
 same code: model-based trace checking (each run of the core is checked against its TLA+
@@ -210,8 +210,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo nextest run` (CI: `--profile ci`; fall back to `cargo test`)
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
-- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`, and the same with
-  `-p paros-host`
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`
 - `scripts/check-module-style.sh`, `scripts/check-core-layers.sh` (and its `--self-test`),
   `scripts/count-assertions.py --min <floor>` (#248 (TigerStyle assertions)) and `scripts/check-core-deps.sh`
   (the pure crates depend on no runtime, I/O or storage crate; `docs/architecture/04-roles.md` §4.4)
@@ -220,8 +219,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `scripts/check-layers.sh --wasm`: each pure crate (layers 0 to 5) builds for
   `wasm32-unknown-unknown`
 - the eleven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
-  the host's example: `cargo run -p paros-host --example coordinator` (#1410), and the facade
-  example: `cargo run -p paros --example consensus`
+  and the facade example: `cargo run -p paros --example consensus`
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
   each one (the workflow rule "Composing crates have examples" below)
 - the doc examples: `cargo test --doc -p paros-consensus` (nextest runs no
@@ -247,15 +245,13 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   Two passes, built in the `mutants` profile: the tests of `paros-consensus` and of
   `consensus-sim` without the coverage gate and the trace checks (`.cargo/mutants.toml`), then
   the trace checks on the mutants that the first pass missed (`.cargo/mutants-tlc.toml`). The
-  same workflow runs one pass on the changed lines of `crates/lib/paros-host/src`
-  (`scripts/mutants.sh --host`: its tests; `.cargo/mutants-host.toml`). Each crate whose `src/` changed
-  runs in shards of its own, one job each (`--shard k/n --sharding round-robin`;
-  `scripts/mutants-plan.sh` gives one shard for each 250 changed lines outside the tests, 125
-  for `paros-consensus` with at least two shards, from the measures in its comment). A
+  lines run in shards, one job each (`--shard k/n --sharding round-robin`;
+  `scripts/mutants-plan.sh` gives one shard for each 125 changed lines outside the tests, with
+  at least two shards, from the measures in its comment). A
   surviving mutant fails the night: add the test that sees it in a pull request; the next night
-  judges those lines again. Before a pull request that changes one of these crates, run
-  `git diff origin/main -- crates/lib/<crate>/src > my.diff` and
-  `scripts/mutants.sh [--host] --in-diff my.diff`. The
+  judges those lines again. Before a pull request that changes `paros-consensus`, run
+  `git diff origin/main -- crates/lib/paros-consensus/src > my.diff` and
+  `scripts/mutants.sh --in-diff my.diff`. The
   `Mutants` workflow runs every mutant of the core (about 2,850) in 48 shards each Sunday and on
   demand, and fails on any survivor. A timeout counts as caught, and so does a test that
   earlyoom stops when the runner is short of memory. An `exclude_re` entry is only for an edit
@@ -293,7 +289,7 @@ and name it in the PR description.
 
 **Releases** (Pierre, 2026-11-21: release-plz back on, publish more often; he decides when).
 `release-plz.toml` and `.github/workflows/release-plz.yml`. The public crates are
-`paros-consensus`, `paros-host` and `paros`, at one version (`version_group`), one `v{version}` tag and one
+`paros-consensus` and `paros`, at one version (`version_group`), one `v{version}` tag and one
 draft GitHub release. release-plz creates and writes every changelog; none is written by hand.
 `consensus-sim`, `paros-wasm` and `paros-authz-biscuit` stay `publish = false`. A push to `main`
 only opens or updates the release pull request. **Nothing publishes by itself**: only Pierre
@@ -453,10 +449,7 @@ borrow, so a second `ready()` before `advance()` is a compile error. Persist-bef
 ordering is documented on `Ready`/`HardState`
 (`docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`). The driver that owns the core and
 does its I/O was in the removed `paros-roles` (`docs/archive/v0.2.0-alpha.1/paros-roles.md`);
-today only the examples, the model checkers and the wasm engine drive the core. The roles of
-`paros-host` follow a different contract, the flight rule (`specs/tla/flight-rule/`; §J4.2 of
-`docs/journal/04-roles.md` at the git tag `journal-design-a`): each persist batch has an id and
-each send names the persist id it waits on, so a driver may pipeline and group commit.
+today only the examples, the model checkers and the wasm engine drive the core.
 
 **One file per role; `ColocatedNode` is wiring** (timers, messages, the persist-before-send
 batch) and holds **no protocol tally of its own**:
@@ -524,7 +517,7 @@ need that composition cannot meet is a new optional behaviour, with the plain ar
 
 **No runtime or storage dependency** (Pierre, 2026-11-21, `docs/architecture/04-roles.md` §4.4). A
 program uses paros by implementing its traits (storage, transport, clock). The pure crates
-(`paros-consensus`, `paros-host`, and the journal crates to come)
+(`paros-consensus`, and the crates to come)
 depend on no async runtime (tokio, compio, smol), no storage engine and no network or file crate,
 and their traits require no `Send` or executor. With no feature on, a pure crate depends on
 workspace crates only; its features only observe (`serde`, `tracing`, `assertions`). A crate that
@@ -690,16 +683,10 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
   (`src/models/`), the driver contract (`src/contract/`) and the eleven examples
   (`examples/`: seven lessons, and four that drive `ColocatedNode` as a driver does, from
   `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
-- `crates/lib/paros-host` — the pure host of actors (#1410 (split the generic host of actors)):
-  the `Family` of a host's roles, the `Role` trait, the `Host` of many roles over an opaque
-  address, the generic `Driver` under the flight rule (group commit, held sends and outputs,
-  recovery reads, the timer), the `Storage`, `Transport` and `Clock` traits and the `Events` and
-  output ports. It depends on no crate and knows no journal (layer 0). Its example `coordinator`
-  runs a toy coordinator and two workers on it.
-- `crates/lib/paros` — the facade: each layer as a module (`paros::consensus`,
-  `paros::host`). A program depends on `paros` alone. Wasm-safe and provider-free
+- `crates/lib/paros` — the facade: each layer as a module (today
+  `paros::consensus`). A program depends on `paros` alone. Wasm-safe and provider-free
   with its default features; it is where moonpool's storage and network get bundled, behind a
-  feature, once the adapter exists (#1417 (the moonpool adapter on the generic host), in the layered parosd). Its example `consensus` (`examples/`) drives three
+  feature, once an adapter exists. Its example `consensus` (`examples/`) drives three
   `ColocatedNode`s of plain Multi-Paxos through `paros::` paths alone, persist before send.
 - `crates/sim/consensus-sim` — test only: the seeded random walks over the sans-IO roles
   (moonpool-walk), one walk for each Paxos flavor, with safety oracles that share no code with
@@ -724,6 +711,6 @@ wasm bundle and stages it for the site), `docs/architecture/` (the target design
 notes), `docs/references/` (papers and source references; `docs/references/CLAUDE.md` indexes
 them, with the shared-log prior art of the journal design: Delos, Northguard, LazyLog,
 SpecLog), `docs/archive/` (`v0.2.0-alpha.1/`: the recaps of the removed crates; `journal-design-a/`: what
-the second removal took, and the prompt of the work now), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
+the second removal took, and the prompt of the work now; `paros-host/`: the host of actors, removed on 2026-11-25), `scripts/` (`build-wasm.sh`, `check-module-style.sh`,
 `check-core-layers.sh`, `count-assertions.py`, `check-core-deps.sh`, `check-layers.sh` and its table `layers.sh`, `check-examples.sh`, `check-tla.sh`, `mutants.sh` and `mutants-plan.sh`, `mutate-tla.py`, `sancov-rustc.sh`), `REVIEW.md` (what a reviewer checks for each kind of
 diff), `.claude/skills/` and `.claude/agents/`.
