@@ -50,7 +50,7 @@ src="${1:-$here/../crates/lib/paros-consensus/src}"
 layer() {
   case "$1" in
     probe | types | membership | journal | contract | retained) echo 0 ;;
-    acceptor | belief | proposer | replica | quorum_read | batcher | collector | decree | matchmaking | matchmaker) echo 1 ;;
+    acceptor | belief | proposer | replica | quorum_read | batcher | collector | decree | matchmaking | matchmaker | publisher) echo 1 ;;
     node | proxy_leader | replica_node) echo 2 ;;
     *) echo "unknown" ;;
   esac

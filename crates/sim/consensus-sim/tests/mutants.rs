@@ -6,7 +6,8 @@ use consensus_sim::campaign::try_campaign;
 use consensus_sim::cluster::{Cluster, Flavor, Mutant};
 use consensus_sim::oracle::journal::JOURNAL_FOLD;
 use consensus_sim::oracle::ledger::{
-    COMMIT_BACKED, LEARNED_CHOSEN, ONE_PROPOSAL, ONE_VALUE, PERSIST_BEFORE_SEND, PREFIX_SHRINKS,
+    CHAIN_TRUE, COMMIT_BACKED, LEARNED_CHOSEN, ONE_PROPOSAL, ONE_VALUE, PERSIST_BEFORE_SEND,
+    PREFIX_SHRINKS,
 };
 use consensus_sim::oracle::reads::READ_SEES_WRITES;
 use moonpool_walk::Walk;
@@ -89,6 +90,11 @@ fn a_corrupt_segment_in_a_trim_jump_is_caught_by_the_journal_rules() {
         400,
         JOURNAL_FOLD,
     );
+}
+
+#[test]
+fn a_publish_on_a_proposal_is_caught_by_the_chain_oracle() {
+    caught(Flavor::segments(), Mutant::EarlyPublish, 400, CHAIN_TRUE);
 }
 
 #[test]

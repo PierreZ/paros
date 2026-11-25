@@ -206,6 +206,15 @@ impl ColocatedNode {
     /// check the same, but only when a driver calls them.
     fn assert_plain_arm_invariants(&self) {
         if self.config.has_matchmakers() {
+            // A matchmaker deployment counts the acks of its publishes for
+            // the set it believes in force.
+            assert!(
+                self.publisher
+                    .as_ref()
+                    .map(crate::publisher::Publisher::generation)
+                    == self.matchmakers.as_ref().map(|set| set.generation),
+                "the publisher counts acks for the believed matchmaker set"
+            );
             return;
         }
         assert!(
@@ -219,6 +228,14 @@ impl ColocatedNode {
         assert!(
             self.pending_gc_requests.is_empty(),
             "a plain deployment queues no GC request"
+        );
+        assert!(
+            self.publisher.is_none(),
+            "a plain deployment publishes no chain"
+        );
+        assert!(
+            self.pending_segment_publishes.is_empty(),
+            "a plain deployment queues no publish"
         );
     }
 

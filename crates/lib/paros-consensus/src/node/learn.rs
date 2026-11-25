@@ -183,6 +183,7 @@ impl ColocatedNode {
         let truncate_up_to = self
             .replica
             .advance(&self.acceptor, &mut self.pending_writes);
+        self.note_rolls();
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }

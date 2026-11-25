@@ -213,7 +213,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | Plain Multi-Paxos, with the majority, the partitioned grid and the full grid | `node.rs`, `proposer/`, `acceptor.rs`, `replica.rs`, `membership/` | `multi-paxos/` | #1185 (rework 1.14), done |
 | The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` | #1187 (rework 2.8), done |
 | Matchmaker Paxos | `matchmaking.rs`, `matchmaker.rs`, `collector.rs` | `matchmaker/` | #1200 (TLA+ model Matchmaker Paxos), done |
-| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time; `handover-scalars/` for the retirement records and the effective configuration; `generations/` for the chain of handovers that the code runs, with the registrations and the floor of a journal | #1097 (rework 1.8), done |
+| The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/`; `handover-chain/` for three generations and clients that reach one member at a time; `handover-scalars/` for the retirement records, the effective configuration and the chain of segments; `generations/` for the chain of handovers that the code runs, with the registrations and the floor of a journal | #1097 (rework 1.8), done |
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/`, `compartments/` and `proxy-leader/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/`; `batcher/` for the batcher walk | #1190 (rework 6.10), done |
@@ -750,7 +750,7 @@ configuration and the retirement records (`handover-scalars/`), the size of the 
 more than one journal. `handover/` (#1097
 (rework 1.8)) extends this model with the target, the size and the register.
 
-### `handover-scalars/`: the retirement records and the effective configuration across a handover, for #1230 (rules no check tests)
+### `handover-scalars/`: the retirement records, the effective configuration and the chain of segments across a handover, for #1230 (rules no check tests)
 
 `handover-gc/` carries the GC floor and the registrations across one handover of a matchmaker
 set. A journal's scalars (`JournalScalars`, `matchmaker/state.rs`) hold two more things that
@@ -769,6 +769,14 @@ of reports (`close_stop`), and a member of `M1` activates with that state merged
 - **The effective configuration**: the highest ballot of a reconfiguration registration that a
   matchmaker took. The GC floor drops registrations but never this scalar, and the close takes
   the maximum of the reports. Two ballots; ballot 1 reconfigures.
+- **The chain of segments** (R5 of §4.7 of `docs/architecture/`, step 4 of the segments plan): an
+  add-only map from a segment id to its record (a start, an end, a state that only grows). The
+  log chooses `NS` `Roll` commands in order; a node whose walk applied the `k`-th publishes one
+  write, segment `k` sealed at its end and `k + 1` open from there, to a matchmaker of one
+  generation, which merges it; a publish completes when a majority of one generation took it. The
+  close merges the chains of the stop quorum, and an activation merges the result into the
+  member's own chain. The start and the end stand for every field that the log gives (the
+  replicas too).
 
 | Constant | Values |
 |---|---|
@@ -776,13 +784,20 @@ of reports (`close_stop`), and a member of `M1` activates with that state merged
 | `Frozen` | `FALSE`: a frozen member answers no check (`generation_refusal`, the code). `TRUE`: it answers, after its report left. |
 | `Close` | `merge`: the records of every report of the stop quorum, merged (the code). `one`: the records of one report. |
 | `Eff` | `scalar`: the successor's effective configuration is the maximum of the reports' scalars (the code). `history`: it is the highest reconfiguration among the registrations carried above the floor. |
+| `Source` | `applied`: a node publishes the end of a segment only after its walk applied the chosen `Roll` (R3, the code). `proposed`: it publishes on a proposal, with an end the log may not choose. |
+| `Grow` | `max`: an activation merges the reconstructed chain into its own, field by field (the code). `overwrite`: it replaces its chain with the reconstruction. |
 
 The invariants: `RetireHeld` (a completed retirement of `i` is held by every member that serves
 its generation or a later one, unless a later incarnation came back), `RetireCarried` (the same,
 for the later generation only), `RejoinHeld` (after a completed rejoin of `j`, no serving member
 holds an earlier incarnation) and `EffCarried` (a reconfiguration registered at a majority is
 the effective configuration, or a later one, at each member of a later generation and at a
-member of each serving majority of its own generation). The `pass` checks also check
+member of each serving majority of its own generation). For the chain: `ChainTrue` (every
+record at every matchmaker is the one the chosen log gives, so a read, a merge over any
+matchmakers, is true, and a publish that only a minority took is already true), `ChainCarried`
+(a seal a majority of `g` took is in the chain of each member of a later generation and of a
+member of each serving majority of `g`) and `ChainGrows` (at each matchmaker a record never goes
+away and its state never falls). The `pass` checks also check
 `RegsAboveFloor`, `ActiveInSet` and `ChosenOnce`, which make each guard of the model necessary
 (#1345 (guards that survive mutation)).
 
@@ -798,6 +813,12 @@ Results (`handover-scalars/checks.txt`):
 | `reach_retire`, `reach_rejoin` | reachability: a retirement, then a rejoin, completes at generation 0 and every member of `M1` is active | violation (reached) |
 | `effective` | the code | `EffCarried` pass (246 thousand states) |
 | `eff_history` | the successor rebuilds the effective configuration from the registrations | `EffCarried` violation |
+| `chain` | the code, two rolls | `ChainTrue`, `ChainCarried`, `ChainGrows` pass (21 thousand states) |
+| `chain_proposed` | a node publishes on a proposal | `ChainTrue` violation |
+| `chain_one` | the close takes the chain of one report | `ChainCarried` violation |
+| `chain_frozen` | a frozen member takes a publish | `ChainCarried` violation |
+| `chain_overwrite` | an activation replaces its chain | `ChainGrows` violation |
+| `reach_minority`, `reach_chain` | reachability: a seal that only a minority took crosses the handover; two seals cross it | violation (reached) |
 | `reach_eff` | reachability: a report whose floor passed the matched reconfiguration | violation (reached) |
 
 What the model finds: no rule of the code is refuted. The record crosses the handover because

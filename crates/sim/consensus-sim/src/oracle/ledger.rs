@@ -38,10 +38,20 @@
 //!    a fresh acceptor does not have. A ballot handed on by a `Relinquish`
 //!    keeps this rule across the handoff, a restart of the successor and a
 //!    duplicated payload (#1292 (duplicated Relinquish)).
+//! 8. **The chain is true** ([`CHAIN_TRUE`]): every record of the chain of
+//!    segments that a matchmaker holds (R5 of §4.7) is the one the chosen
+//!    log gives: a segment `k > 0` starts at the slot after a chosen `Roll`
+//!    that the journal rules fold into `k`, with the replicas that `Roll`
+//!    named, and a sealed segment ends at the slot after a chosen `Roll`
+//!    that they fold into `k + 1`. A node publishes only what its walk
+//!    applied (R3), so a record is true from the moment one matchmaker
+//!    holds it (`ChainTrue` of `specs/tla/handover-scalars/`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_consensus::journal::{Command, JournalView, Outcome, command_fingerprint};
+use paros_consensus::journal::{
+    Chain, Command, JournalView, Outcome, Segment, SegmentId, command_fingerprint,
+};
 use paros_consensus::{Ballot, NodeId, Slot};
 
 pub use super::journal::JOURNAL_FOLD;
@@ -60,6 +70,8 @@ pub const LEARNED_CHOSEN: &str = "a learned value is the chosen value";
 pub const PREFIX_SHRINKS: &str = "the durable chosen prefix never shrinks";
 /// Oracle 7.
 pub const ONE_PROPOSAL: &str = "a ballot proposes one command per slot";
+/// Oracle 8.
+pub const CHAIN_TRUE: &str = "the chain of segments is the one the chosen log gives";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -278,6 +290,77 @@ impl Ledger {
             "{LEARNED_CHOSEN}: {who} holds {print:#x} at slot {}, a durable quorum chose {chosen:?}",
             slot.0
         );
+    }
+
+    /// The segment that the chosen `Roll` at `slot` opens, as the journal
+    /// rules fold the chosen log, with the command chosen there. `None` when
+    /// a slot at or below `slot` is not chosen, or the rules do not fold
+    /// `slot` into a new segment.
+    fn opened_at(&mut self, slot: Slot) -> Option<(Segment, Command)> {
+        if (0..=slot.0).any(|s| !self.chosen.contains_key(&Slot(s))) {
+            return None;
+        }
+        let (chosen, commands) = (&self.chosen, &self.commands);
+        let lookup = |s: Slot| chosen.get(&s).and_then(|(_, print)| commands.get(print));
+        let command = lookup(slot)?.clone();
+        let (_, outcome) = self.journal.judge(slot, lookup);
+        match outcome {
+            Outcome::Rolled(tail) => Some((*tail, command)),
+            _ => None,
+        }
+    }
+
+    /// Oracle 8: the chain that `who` holds is the one the chosen log gives.
+    ///
+    /// # Panics
+    ///
+    /// If a record of the chain names a start, an opening or an end that the
+    /// chosen log does not give.
+    pub fn chain_holds(&mut self, who: &str, chain: &Chain) {
+        for (id, record) in chain {
+            if *id == SegmentId::FIRST {
+                assert!(
+                    record.start == Slot(0) && record.opening.is_none(),
+                    "{CHAIN_TRUE}: {who} holds the first segment as {record:?}"
+                );
+            } else {
+                let roll = record.start.0.checked_sub(1).map(Slot);
+                let opened = roll.and_then(|slot| self.opened_at(slot));
+                let expected = Segment {
+                    id: *id,
+                    start: record.start,
+                };
+                assert!(
+                    opened.as_ref().is_some_and(|(tail, _)| *tail == expected),
+                    "{CHAIN_TRUE}: {who} holds segment {} from slot {}, and the chosen log opens {opened:?} there",
+                    id.0,
+                    record.start.0,
+                );
+                if let (Some(opening), Some((_, Command::Roll(roll)))) = (&record.opening, &opened)
+                {
+                    assert!(
+                        opening.replicas == roll.replicas,
+                        "{CHAIN_TRUE}: {who} holds segment {} opened with {opening:?}, and the chosen Roll names {:?}",
+                        id.0,
+                        roll.replicas,
+                    );
+                }
+            }
+            if let Some(end) = record.end {
+                let roll = end.0.checked_sub(1).map(Slot);
+                let opened = roll.and_then(|slot| self.opened_at(slot));
+                let expected = Segment {
+                    id: id.successor(),
+                    start: end,
+                };
+                assert!(
+                    opened.as_ref().is_some_and(|(tail, _)| *tail == expected),
+                    "{CHAIN_TRUE}: {who} holds segment {} sealed at slot {}, and the chosen log opens {opened:?} there",
+                    id.0,
+                    end.0,
+                );
+            }
+        }
     }
 
     /// Oracles 4 and 5: `who` applied `command` at `slot` with `outcome`.

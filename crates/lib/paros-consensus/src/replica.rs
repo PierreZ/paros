@@ -55,6 +55,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contract::write::WriteOp;
+use crate::journal::segment::Segment;
 use crate::journal::state::{JournalState, JournalView, Outcome, WriterMode};
 use crate::journal::{Command, Entry, Seq};
 use crate::types::{Ballot, Slot, Value};
@@ -580,6 +581,37 @@ impl Replica {
             );
         }
         hole
+    }
+
+    /// Each `Roll` this fold applied at slot `from` or later, in slot
+    /// order: its slot, the first slot of the segment it sealed, and the
+    /// tail segment it opened. Both are read from the fold itself, so they
+    /// are functions of the chosen log whatever path folded the slot (the
+    /// walk, the refold past a healed hole, the fold at boot or after a
+    /// trim-point jump).
+    ///
+    /// # Panics
+    ///
+    /// If a folded `Roll` does not end its segment at the slot after it, or
+    /// the segment it sealed does not start below it.
+    #[must_use]
+    pub fn rolls_from(&self, from: Slot) -> Vec<(Slot, Slot, Segment)> {
+        let rolls: Vec<(Slot, Slot, Segment)> = self
+            .outcomes
+            .range(from..)
+            .filter_map(|(slot, outcome)| match outcome {
+                Outcome::Rolled(tail) => Some((*slot, self.state_at(*slot).segment.start, *tail)),
+                _ => None,
+            })
+            .collect();
+        for (slot, start, tail) in &rolls {
+            assert!(
+                tail.start.0 == slot.0 + 1,
+                "R2: a Roll ends its segment at the slot after it"
+            );
+            assert!(*start <= *slot, "a Roll lies inside the segment it seals");
+        }
+        rolls
     }
 
     /// The outcome of the folded slot `slot`, if it is retained and was not

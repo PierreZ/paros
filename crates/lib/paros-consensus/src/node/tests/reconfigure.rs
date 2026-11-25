@@ -23,7 +23,7 @@ pub(super) fn deployed_cluster() -> ([ColocatedNode; 5], Vec<Matchmaker>) {
 }
 
 /// [`deployed_cluster`] with `matchmakers` matchmakers in the set.
-fn deployed_cluster_with(matchmakers: u64) -> ([ColocatedNode; 5], Vec<Matchmaker>) {
+pub(super) fn deployed_cluster_with(matchmakers: u64) -> ([ColocatedNode; 5], Vec<Matchmaker>) {
     let pool = [0, 1, 2, 3, 4];
     let mut nodes = [
         deployed_node(0, &[0, 1, 2], &pool, matchmakers),

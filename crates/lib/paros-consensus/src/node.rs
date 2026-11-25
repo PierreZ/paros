@@ -10,6 +10,7 @@ mod acceptor;
 mod authority;
 mod boot;
 mod catch_up;
+mod chain;
 mod counters;
 mod election;
 mod gc;
@@ -50,11 +51,12 @@ use crate::contract::message::{Audience, Message, Party};
 use crate::contract::storage::Storage;
 use crate::contract::write::{RetireMark, WriteOp};
 use crate::journal::{Command, Control, Entry, Seq, command_fingerprint};
-use crate::matchmaker::{GcRequest, MatchRequest};
+use crate::matchmaker::{GcRequest, MatchRequest, SegmentPublish};
 use crate::matchmaking::retire_check::RejoinCheck;
 use crate::matchmaking::{Matchmaking, MembershipProbe, RetireCheck};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
 use crate::proposer::{Proposer, Round};
+use crate::publisher::Publisher;
 use crate::quorum_read::{QuorumReads, ReadBasis, ReadState};
 use crate::replica::Replica;
 use crate::types::{Ballot, NodeId, Slot};
@@ -460,6 +462,17 @@ pub struct ColocatedNode {
     /// Garbage-collection requests to send this batch (#123), drained via
     /// [`Ready::gc_requests`] over the same matchmaker wire.
     pending_gc_requests: Vec<(MatchmakerId, GcRequest)>,
+    /// The publishes of the chain of segments (R5 of §4.7) that no majority
+    /// of the believed matchmaker set acked yet: one for each `Roll` this
+    /// node's walk applied. `None` on plain Multi-Paxos, always.
+    publisher: Option<Publisher>,
+    /// The first slot whose `Roll`, once folded, the publisher has not
+    /// noted yet: every path that folds (the walk, a refold past a healed
+    /// hole, a trim-point jump, the boot) notes from here up to the fold.
+    rolls_noted: Slot,
+    /// Publishes to send this batch, drained via
+    /// [`Ready::segment_publishes`] over the matchmaker wire.
+    pending_segment_publishes: Vec<(MatchmakerId, SegmentPublish)>,
     /// The matchmaker set this node believes authoritative (#125): the
     /// bootstrap set at generation 0 on boot, moved forward by a refusal
     /// naming a successor, by a matchmaker-set reconfiguration this node
@@ -1409,6 +1422,7 @@ impl ColocatedNode {
         self.pending_read_states.clear();
         self.pending_match_requests.clear();
         self.pending_gc_requests.clear();
+        self.pending_segment_publishes.clear();
         self.pending_recovery_batch = None;
         // An acknowledged batch leaves nothing to persist, send or apply.
         assert!(

@@ -17,6 +17,7 @@ use crate::contract::limits::Limits;
 use crate::contract::write::RetireMark;
 use crate::matchmaking::retire_check::RejoinCheck;
 use crate::membership::{MatchmakerGeneration, MatchmakerSet};
+use crate::publisher::Publisher;
 use crate::quorum_read::QuorumReads;
 
 impl ColocatedNode {
@@ -108,7 +109,7 @@ impl ColocatedNode {
         assert_read_back(first_slot, first_unchosen, next_slot, &accepted, &faulty);
 
         let pool = config.pool().to_vec();
-        let node = Self {
+        let mut node = Self {
             config,
             belief: Belief::new(acceptors, matchmakers.is_some()),
             belief_source: BeliefSource::Bootstrap,
@@ -164,6 +165,9 @@ impl ColocatedNode {
             probe: None,
             pending_match_requests: Vec::new(),
             pending_gc_requests: Vec::new(),
+            publisher: Publisher::for_set(matchmakers.as_ref()),
+            rolls_noted: Slot(0),
+            pending_segment_publishes: Vec::new(),
             matchmakers,
             matchmaker_pool,
             gc: None,
@@ -175,7 +179,14 @@ impl ColocatedNode {
             flight: None,
             flights: 0,
         };
-        if node.replica.fold_hole().is_some() {
+        node.finish_boot();
+        node
+    }
+
+    /// The last steps of a boot, once every field is read back: note the
+    /// `Roll`s the retained fold holds, then check the invariants.
+    fn finish_boot(&mut self) {
+        if self.replica.fold_hole().is_some() {
             // A faulty record under the durable chosen index (#343): the fold
             // stops at its hole until a peer brings the value back.
             probe!(
@@ -183,8 +194,16 @@ impl ColocatedNode {
                 "boot: the fold stops at a hole under the chosen prefix"
             );
         }
-        node.assert_invariants();
-        node
+        self.note_rolls_at_boot();
+        assert!(
+            self.rolls_noted == self.replica.folded(),
+            "the boot notes every Roll of the retained fold"
+        );
+        assert!(
+            self.publisher.is_some() == self.config.has_matchmakers(),
+            "only a matchmaker deployment boots a publisher"
+        );
+        self.assert_invariants();
     }
 }
 

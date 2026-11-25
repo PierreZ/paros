@@ -41,7 +41,8 @@ use paros_consensus::journal::{
     Command, Control, Entry, LeaderUuid, Outcome, ReplicaSet, Seq, command_fingerprint,
 };
 use paros_consensus::matchmaker::{
-    GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
+    GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest, SegmentAck,
+    SegmentPublish,
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::node::{
@@ -76,6 +77,9 @@ pub mod reach {
     /// values to propose again (`Recovery::pending`), which its tail reads
     /// (R4c).
     pub const ROLL_IN_RECOVERY: &str = "cluster: a leader rolled during a paged recovery";
+    /// A majority of the matchmakers holds a node's publish of the end of a
+    /// segment (R5): the chain grows.
+    pub const CHAIN_PUBLISHED: &str = "cluster: a majority holds a published segment end";
     /// A durable quorum chose a slot.
     pub const CHOSEN: &str = "cluster: a durable quorum chose a slot";
     /// A second leadership was elected after the first.
@@ -216,6 +220,10 @@ pub enum Wire {
     Gc(GcRequest),
     /// A matchmaker's answer to it.
     GcAck(GcAck),
+    /// A node's publish of the chain of segments, to a matchmaker.
+    Publish(SegmentPublish),
+    /// A matchmaker's answer to it.
+    PublishAck(SegmentAck),
     /// A handover's request, to a matchmaker.
     Reconfigure(ReconfigureRequest),
     /// A matchmaker's answer to it, to the node whose reconfigurer asked.
@@ -452,8 +460,13 @@ impl Model for Cluster {
                     Wire::GcAck(ack) => {
                         let _ = node.on_gc_ack(&ack);
                     }
+                    Wire::PublishAck(ack) => {
+                        let completed = node.on_segment_ack(&ack);
+                        sometimes!(completed.is_some(), reach::CHAIN_PUBLISHED);
+                    }
                     Wire::Match(_)
                     | Wire::Gc(_)
+                    | Wire::Publish(_)
                     | Wire::Reconfigure(_)
                     | Wire::ReconfigureReply(_) => {
                         unreachable!("a node gets no matchmaker request")
@@ -478,6 +491,9 @@ impl Model for Cluster {
             }
             (Party::Matchmaker(id), Wire::Match(request)) => self.match_request(id, request, cx),
             (Party::Matchmaker(id), Wire::Gc(request)) => self.gc_request(id, &request, cx),
+            (Party::Matchmaker(id), Wire::Publish(request)) => {
+                self.publish_request(id, &request, cx);
+            }
             (Party::Matchmaker(id), Wire::Reconfigure(request)) => {
                 self.reconfigure_request(id, request, cx);
             }
@@ -1159,6 +1175,7 @@ impl Cluster {
             let matchmaking = requests_of(ready.match_requests());
             let mut gc: Vec<(MatchmakerId, GcRequest)> = ready.gc_requests().to_vec();
             out.extend(to_matchmakers(ready.match_requests(), &gc));
+            out.extend(publishes_of(ready.segment_publishes()));
             // The batch flies until its persist below (`Cluster::land`).
             let flight = ready.release();
             self.fold_digest(digest);
@@ -1717,6 +1734,7 @@ impl Cluster {
                 if matchmaking {
                     node.resend_matchmaking();
                     node.resend_gc();
+                    node.resend_segment_publishes();
                 }
             }
             let taken = node.take_back_delegated(after);
@@ -1917,8 +1935,30 @@ impl Cluster {
             .proposer()
             .recovery()
             .is_some_and(|recovery| recovery.pending().next().is_some());
-        let result = node.roll(replicas);
+        let tail = node.replica().journal().segment;
+        let set = node.matchmaker_set().cloned();
+        let result = node.roll(replicas.clone());
         let accepted = matches!(result, RollResult::Accepted { .. });
+        if self.flavor.mutant == Some(Mutant::EarlyPublish)
+            && let (RollResult::Accepted { slot, next }, Some(set)) = (&result, set)
+            && next.0 == tail.id.0 + 1
+        {
+            let publish = SegmentPublish {
+                from: leader,
+                journal: paros_consensus::journal::JournalIdentifier::UNSET.journal,
+                generation: set.generation,
+                sealed: tail.id,
+                start: tail.start,
+                end: Slot(slot.0 + 1),
+                opening: paros_consensus::journal::Opening { replicas },
+            };
+            for to in set.members() {
+                cx.send(Envelope {
+                    to: Party::Matchmaker(*to),
+                    msg: Wire::Publish(publish.clone()),
+                });
+            }
+        }
         sometimes!(open && accepted, reach::ROLL_PIPELINED);
         sometimes!(recovering && accepted, reach::ROLL_IN_RECOVERY);
         self.held_recovery.remove(&leader);
@@ -2210,6 +2250,41 @@ impl Cluster {
         });
     }
 
+    /// A matchmaker merges a publish of the chain: persist, judge the chain
+    /// it now holds, then ack.
+    fn publish_request(
+        &mut self,
+        id: MatchmakerId,
+        request: &SegmentPublish,
+        cx: &mut Cx<'_, Self>,
+    ) {
+        let site = self.matchmaker_mut(id);
+        let Some(ack) = site.publish(request) else {
+            return;
+        };
+        self.judge_chain(id);
+        cx.send(Envelope {
+            to: Party::Node(request.from),
+            msg: Wire::PublishAck(ack),
+        });
+    }
+
+    /// [`CHAIN_TRUE`](crate::oracle::ledger::CHAIN_TRUE): every record of
+    /// the chain that matchmaker `id` holds is the one the chosen log gives.
+    pub(super) fn judge_chain(&mut self, id: MatchmakerId) {
+        let journal = paros_consensus::journal::JournalIdentifier::UNSET.journal;
+        let Some(chain) = self
+            .matchmaker(id)
+            .live
+            .as_ref()
+            .and_then(|matchmaker| matchmaker.chain(journal).cloned())
+        else {
+            return;
+        };
+        self.ledger
+            .chain_holds(&format!("matchmaker {}", id.0), &chain);
+    }
+
     /// Every configuration a matchmaker holds is bound to its ballot in
     /// the ledger, before any vote at that ballot is judged.
     fn bind_registrations(&mut self, id: MatchmakerId) {
@@ -2466,6 +2541,16 @@ fn plant(mutant: Option<Mutant>, batch: &mut [(Audience, Message)]) {
 }
 
 /// The envelopes of a node's requests to the matchmakers.
+/// The envelopes of a batch's publishes of the chain of segments.
+fn publishes_of(
+    publishes: &[(MatchmakerId, SegmentPublish)],
+) -> impl Iterator<Item = Envelope> + '_ {
+    publishes.iter().map(|(to, request)| Envelope {
+        to: Party::Matchmaker(*to),
+        msg: Wire::Publish(request.clone()),
+    })
+}
+
 fn to_matchmakers<'a>(
     matches: &'a [(MatchmakerId, MatchRequest)],
     gc: &'a [(MatchmakerId, GcRequest)],
@@ -2501,9 +2586,12 @@ fn requests_of(requests: &[(MatchmakerId, MatchRequest)]) -> Vec<MatchRequest> {
         .collect()
 }
 
-/// The digest of one batch of node `id` ([`digest_of`]).
+/// The digest of one batch of node `id` ([`digest_of`]). A batch with no
+/// publish of the chain digests as it did before the chain existed, so the
+/// recorded digests of every walk that rolls nothing prove that it behaves
+/// as before.
 fn node_digest(id: NodeId, ready: &paros_consensus::Ready<'_>) -> u64 {
-    digest_of(&(
+    let batch = (
         id,
         ready.writes(),
         ready.messages(),
@@ -2512,7 +2600,12 @@ fn node_digest(id: NodeId, ready: &paros_consensus::Ready<'_>) -> u64 {
         ready.recovery_batch(),
         ready.match_requests(),
         ready.gc_requests(),
-    ))
+    );
+    if ready.segment_publishes().is_empty() {
+        digest_of(&batch)
+    } else {
+        digest_of(&(batch, ready.segment_publishes()))
+    }
 }
 
 fn route(

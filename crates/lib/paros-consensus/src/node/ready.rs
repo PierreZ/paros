@@ -4,7 +4,7 @@
 use crate::contract::message::{Audience, Message};
 use crate::contract::write::{AcceptorWrite, WriteOp};
 use crate::journal::{Command, JournalIdentifier};
-use crate::matchmaker::{GcRequest, MatchRequest};
+use crate::matchmaker::{GcRequest, MatchRequest, SegmentPublish};
 use crate::membership::MatchmakerId;
 use crate::node::ColocatedNode;
 use crate::quorum_read::ReadState;
@@ -236,6 +236,22 @@ impl<'a> Ready<'a> {
         self.node.pending_gc_requests()
     }
 
+    /// The publishes of the chain of segments to send this batch (R5 of
+    /// §4.7), one per addressed matchmaker, over the matchmaker RPC service:
+    /// a matchmaker merges each with
+    /// [`Matchmaker::publish_segment`](crate::Matchmaker::publish_segment),
+    /// and the acks come back through [`ColocatedNode::on_segment_ack`].
+    /// Always empty on plain Multi-Paxos.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn segment_publishes(&self) -> &[(MatchmakerId, SegmentPublish)] {
+        self.node.queued_segment_publishes()
+    }
+
     /// Whether the batch holds no work: nothing to persist, send, learn or
     /// answer. A driver loop drains a node until its batch is empty:
     ///
@@ -275,6 +291,7 @@ impl<'a> Ready<'a> {
             && self.recovery_batch().is_none()
             && self.match_requests().is_empty()
             && self.gc_requests().is_empty()
+            && self.segment_publishes().is_empty()
     }
 
     /// Acknowledge the batch: clears the pending buckets and releases the unique

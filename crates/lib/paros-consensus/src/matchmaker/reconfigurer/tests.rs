@@ -1,4 +1,5 @@
 use super::*;
+use crate::journal::Chain;
 use crate::matchmaker::MatchmakerPhase;
 use crate::matchmaker::{MatchRequest, Matchmaker, MatchmakerConfig, MemRegistry, Registration};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, QuorumSystem};
@@ -976,6 +977,7 @@ fn one_registration(round: u64) -> JournalRegistry {
         )]),
         effective: None,
         retired: BTreeMap::new(),
+        segments: Chain::new(),
     }
 }
 

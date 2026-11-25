@@ -194,6 +194,7 @@ mod models;
 pub mod node;
 pub mod proposer;
 pub mod proxy_leader;
+pub mod publisher;
 pub mod quorum_read;
 pub mod replica;
 pub mod replica_node;

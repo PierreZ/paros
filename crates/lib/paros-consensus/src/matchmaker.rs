@@ -115,6 +115,7 @@
 //! messages; its trust boundary is the wire contract, documented on
 //! [`ReconfigureRequest::Chosen`].
 
+mod chain;
 mod generation;
 mod message;
 pub mod ready;
@@ -129,9 +130,10 @@ use std::collections::BTreeMap;
 
 /// The handover's decree: the successor set, over the matchmakers of `M_g`.
 pub type SuccessorDecree = crate::decree::Decree<MatchmakerId, Vec<MatchmakerId>>;
+pub use self::chain::PublishOutcome;
 pub use self::message::{
     GcAck, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest,
-    ReconfigureReply, ReconfigureRequest,
+    ReconfigureReply, ReconfigureRequest, SegmentAck, SegmentPublish,
 };
 pub use self::ready::{MatchmakerReady, MatchmakerWriteOp};
 pub use self::reconfigurer::{
@@ -1228,6 +1230,7 @@ impl Matchmaker {
                             .journals
                             .get(&journal)
                             .map_or_default(|scalars| scalars.retired.clone()),
+                        segments: self.chain(journal).cloned().unwrap_or_default(),
                     },
                 )
             })
@@ -1340,6 +1343,10 @@ impl Matchmaker {
             self.set == self.derive_set(),
             "the materialized set is the one the durable scalars describe"
         );
+        // The chain of each journal keeps its shape, and its neighbours meet.
+        for scalars in self.hard_state.journals.values() {
+            crate::journal::chain::assert_chain(&scalars.segments);
+        }
         // The effective configuration is a *scalar*, not a record: it may
         // legitimately sit below the watermark (its record was collected),
         // but it never disagrees with a record the registry still holds.

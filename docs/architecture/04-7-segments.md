@@ -20,8 +20,29 @@ puts the `Roll` on the Multi-Paxos model (step 3).
 The tail segment is a field of `JournalState`, so it is sealed at the floor and carried by
 `TrimmedTo` with the rest of that state; the plan's separate `WriteOp` for the segment cursor is
 not needed. The `segments` flavor of consensus-sim rolls, with the `Roll` rule in its journal
-oracle and a mutant on the trim jump. Not built yet: the replicas of a segment (R6) and the route
-of R4d, which need replicas to route to (step 5), and the chain at the matchmakers (R5, step 4).
+oracle and a mutant on the trim jump.
+
+**What is built (step 4).** The chain at the matchmakers (R5): `journal/chain.rs` has the record
+of a segment (`SegmentRecord`: a start, an opening with the replicas that the `Roll` named, an
+end) and its merge, field by field, where two values of one field are a detected safety violation.
+`JournalScalars::segments` holds the chain of each journal. A node publishes the end of a segment
+after its own fold applied the `Roll` (`SegmentPublish`, `node/chain.rs`): the walk, a refold
+past a healed hole, a trim-point jump and the boot each publish the `Roll`s they fold, so an end
+reaches the matchmakers even when every node that walked it restarted. It publishes to every matchmaker
+of the set it believes in force, and the `Publisher` role (`publisher.rs`) counts the acks
+(`SegmentAck`) until a majority holds it. A matchmaker merges the publish
+(`Matchmaker::publish_segment`) and refuses it when it is not active for the generation. The
+handover merges the chains of the stop quorum, and an activation merges the result into the
+member's own chain. The model is the chain of `specs/tla/handover-scalars/` (`ChainTrue`,
+`ChainCarried`, `ChainGrows`, with a control for each rule). The judges: the oracle
+`CHAIN_TRUE` of consensus-sim with the mutant `EarlyPublish` (a publish on a proposal), and claim
+11 of the handover model checker (`models/handover.rs`). Not in step 4: the boundary state in
+the record and the chain in the matchmaking and probe answers, which come with the reader of the
+chain (step 5); the states past `Sealed` (`Held` in step 6, `Trimmed` and `Offloaded` later; a
+record is sealed when its end is known). **Open**: the chain has no size limit; it grows by one
+record for each `Roll` until the states past `Sealed` let a matchmaker forget old segments (step 6
+decides). Not built yet: the replicas of a segment (R6) and the
+route of R4d, which need replicas to route to (step 5).
 
 #### 4.7.1 The rule of the papers
 

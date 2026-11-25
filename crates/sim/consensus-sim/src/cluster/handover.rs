@@ -118,6 +118,7 @@ impl Cluster {
             }
         }
         self.bind_registrations(id);
+        self.judge_chain(id);
         for reply in replies {
             cx.send(Envelope {
                 to: Party::Node(from),

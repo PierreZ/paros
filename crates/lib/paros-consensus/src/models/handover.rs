@@ -52,7 +52,12 @@
 //!    registration are durable at the seam the reply leaves through;
 //! 10. **a journal's GC watermark never moves because of a sibling journal**
 //!     (#190) — a raise writes one journal's floor, and every other
-//!     journal's floor on that disk is what it was.
+//!     journal's floor on that disk is what it was;
+//! 11. **the chain of segments crosses a generation boundary** (R5 of §4.7)
+//!     — every seal that a majority of `M_g` durably holds is sealed in the
+//!     chain the successor activates, and on every disk the chain only
+//!     grows: no record and no end ever goes away (`ChainCarried` and
+//!     `ChainGrows` of `specs/tla/handover-scalars/`).
 //!
 //! The set holds [`JOURNALS`] journals (#190): every registration, campaign
 //! and GC raise names one, and every claim above is judged per journal.
@@ -79,12 +84,12 @@ use std::fmt::Write as _;
 
 use super::support::{Mailbox, Rng, env_or};
 use crate::contract::limits::Limits;
-use crate::journal::JournalId;
+use crate::journal::{JournalId, Opening, SegmentId};
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
     MatchmakerHardState, MatchmakerPhase, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry,
     ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep, Registration,
-    RegistrationKind,
+    RegistrationKind, SegmentPublish,
 };
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, QuorumSystem};
@@ -100,6 +105,10 @@ const SEEDS: u64 = 400;
 const JOURNALS: u64 = 3;
 /// The journal the directed cases address.
 const J: JournalId = JournalId(1);
+/// The segments a node publishes the end of: segment `k` ends at slot
+/// `2 * (k + 1)`, a chain every publisher agrees on (each field of a record
+/// is a function of the chosen log).
+const SEGMENTS: u64 = 4;
 /// Chaotic steps per seed.
 const CHAOS_STEPS: usize = 700;
 /// Quiet steps per seed after the faults stop (run twice: once to settle,
@@ -306,6 +315,11 @@ enum Envelope {
         to: NodeId,
         reply: MatchReply,
     },
+    /// A node's publish of the chain of segments, modelled as a direct call.
+    Publish {
+        to: MatchmakerId,
+        request: SegmentPublish,
+    },
     /// A leader's GC request, modelled as a direct call.
     Gc {
         to: MatchmakerId,
@@ -348,6 +362,9 @@ struct Reach {
     /// A generation was activated carrying an effective configuration
     /// inherited from the one it replaced (review finding P1).
     inherited_effective: u64,
+    /// A generation was activated carrying a sealed segment of the chain
+    /// inherited from the one it replaced.
+    inherited_chain: u64,
     /// A `finish` closed its freeze with fewer members than the generation
     /// it replaces — the ratchet review finding P5 is about, now bounded by
     /// the driver's cadence instead of by the quorum-completing ack.
@@ -419,6 +436,7 @@ impl Reach {
             ("killed_deciding", self.killed_deciding),
             ("pruned_losing_bootstrap", self.pruned_losing_bootstrap),
             ("inherited_effective", self.inherited_effective),
+            ("inherited_chain", self.inherited_chain),
             ("finish_shrank_the_set", self.finish_shrank_the_set),
             ("crash_torn_prefix", self.crash_torn_prefix),
             (
@@ -476,6 +494,9 @@ struct Ledger {
     /// never collects).
     effectives:
         BTreeMap<(MatchmakerGeneration, JournalId), BTreeMap<Ballot, BTreeSet<MatchmakerId>>>,
+    /// Per generation and journal: every sealed segment of the chain durably
+    /// held as that generation's, and by whom.
+    seals: BTreeMap<(MatchmakerGeneration, JournalId), BTreeMap<SegmentId, BTreeSet<MatchmakerId>>>,
 }
 
 impl Ledger {
@@ -562,6 +583,41 @@ impl Ledger {
             successor.members(),
             by_ballot
         );
+    }
+
+    /// Claim 11: every seal of the chain that a majority of
+    /// `M_generation` durably holds is sealed in the chain the successor
+    /// activated: the stop quorum meets that majority, and the
+    /// reconstruction merges the chains it reports.
+    fn assert_chain_preserved(
+        &self,
+        generation: MatchmakerGeneration,
+        journal: JournalId,
+        activated: Option<&crate::journal::Chain>,
+    ) {
+        let old = self
+            .members_of(generation)
+            .expect("a succeeded generation was authoritative");
+        let Some(held) = self.seals.get(&(generation, journal)) else {
+            return;
+        };
+        for (segment, holders) in held {
+            let held_by_members = holders.iter().filter(|m| old.contains(**m)).count();
+            if held_by_members < old.quorum_size() {
+                continue;
+            }
+            assert!(
+                activated
+                    .and_then(|chain| chain.get(segment))
+                    .is_some_and(crate::journal::SegmentRecord::is_sealed),
+                "an activated generation inherits the chain: generation {} journal {} sealed segment {} held by {:?}, activated {:?}",
+                generation.0,
+                journal.0,
+                segment.0,
+                holders,
+                activated
+            );
+        }
     }
 
     /// Invariant: **the effective configuration crosses a generation
@@ -731,6 +787,17 @@ impl World {
             .collect()
     }
 
+    /// Every journal's chain on `id`'s disk.
+    fn chains_on_disk(&mut self, id: MatchmakerId) -> BTreeMap<JournalId, crate::journal::Chain> {
+        self.site(id)
+            .disk
+            .hard_state()
+            .journals
+            .iter()
+            .map(|(journal, scalars)| (*journal, scalars.segments.clone()))
+            .collect()
+    }
+
     /// Every journal's watermark on `id`'s disk.
     fn floors_on_disk(&mut self, id: MatchmakerId) -> BTreeMap<JournalId, Ballot> {
         self.site(id)
@@ -803,7 +870,9 @@ impl World {
             };
             let effective_before = self.effective_ballots_on_disk(id);
             let floors_before = self.floors_on_disk(id);
+            let chains_before = self.chains_on_disk(id);
             self.site(id).disk.apply(op);
+            self.check_chain_grows(id, &chains_before, op);
             // Claim 5, the disk half: every journal's effective
             // configuration is a monotone scalar — a GC raise, a freeze, a
             // vote, an activation (which takes the maximum of the local and
@@ -872,6 +941,7 @@ impl World {
                             scalars.effective(journal),
                         );
                     }
+                    self.check_activated_chain(succeeded, scalars);
                     if scalars.journals.values().any(|j| j.effective.is_some()) {
                         self.reach.inherited_effective += 1;
                     }
@@ -885,6 +955,55 @@ impl World {
             }
         }
         self.check_disk(id);
+    }
+
+    /// Claim 11 at an activation of the successor of `succeeded` with
+    /// `scalars`: every journal's chain inherits every seal a majority held.
+    fn check_activated_chain(
+        &mut self,
+        succeeded: MatchmakerGeneration,
+        scalars: &MatchmakerHardState,
+    ) {
+        for journal in (1..=JOURNALS).map(JournalId) {
+            self.ledger.assert_chain_preserved(
+                succeeded,
+                journal,
+                scalars.journals.get(&journal).map(|j| &j.segments),
+            );
+        }
+        if scalars.journals.values().any(|j| {
+            j.segments
+                .values()
+                .any(crate::journal::SegmentRecord::is_sealed)
+        }) {
+            self.reach.inherited_chain += 1;
+        }
+    }
+
+    /// Claim 11, the disk half, after one write `op` at `id`: the chain only
+    /// grows, and no record and no end goes away.
+    fn check_chain_grows(
+        &mut self,
+        id: MatchmakerId,
+        chains_before: &BTreeMap<JournalId, crate::journal::Chain>,
+        op: &MatchmakerWriteOp,
+    ) {
+        let chains_after = self.chains_on_disk(id);
+        for (journal, before) in chains_before {
+            for (segment, record) in before {
+                let after = chains_after
+                    .get(journal)
+                    .and_then(|chain| chain.get(segment));
+                assert!(
+                    after.is_some_and(|after| after.end >= record.end
+                        && (record.opening.is_none() || after.opening.is_some())),
+                    "the chain never loses a record on a disk: mm{} journal {} segment {} held {record:?}, {op:?} left {after:?}",
+                    id.0,
+                    journal.0,
+                    segment.0,
+                );
+            }
+        }
     }
 
     /// Claim 10 after one raise of `journal` at `id`: its own floor moved,
@@ -931,6 +1050,28 @@ impl World {
                 scalars.effective.as_ref().map(|(b, _)| (*journal, *b))
             })
             .collect();
+        let seals: Vec<(JournalId, SegmentId)> = site
+            .disk
+            .hard_state()
+            .journals
+            .iter()
+            .flat_map(|(journal, scalars)| {
+                scalars
+                    .segments
+                    .iter()
+                    .filter(|(_, record)| record.is_sealed())
+                    .map(|(segment, _)| (*journal, *segment))
+            })
+            .collect();
+        for (journal, segment) in seals {
+            self.ledger
+                .seals
+                .entry((set.generation, journal))
+                .or_default()
+                .entry(segment)
+                .or_default()
+                .insert(id);
+        }
         for (journal, ballot) in effectives {
             self.ledger
                 .effectives
@@ -1037,6 +1178,15 @@ impl World {
                             })
                             .collect()
                     },
+                );
+            }
+            Envelope::Publish { to, request } => {
+                self.at_matchmaker(
+                    to,
+                    |mm| {
+                        mm.publish_segment(&request);
+                    },
+                    |_| Vec::new(),
                 );
             }
             Envelope::Gc {
@@ -1224,7 +1374,10 @@ impl World {
                 }
                 ReconfigureReply::Nacked { .. } | ReconfigureReply::Refused { .. } => {}
             },
-            Envelope::Reconfigure { .. } | Envelope::Register { .. } | Envelope::Gc { .. } => {
+            Envelope::Reconfigure { .. }
+            | Envelope::Register { .. }
+            | Envelope::Publish { .. }
+            | Envelope::Gc { .. } => {
                 unreachable!("a matchmaker sends replies only")
             }
         }
@@ -1685,6 +1838,32 @@ impl World {
         }
     }
 
+    /// A node publishes the end of one segment of one journal to every
+    /// member of the set it believes in force (`SegmentPublish`): the same
+    /// record whoever publishes it.
+    fn publish(&mut self, node: NodeId) {
+        let (generation, members) = {
+            let n = self.node(node);
+            (n.believed.generation, n.believed.members().to_vec())
+        };
+        let k = self.rng.below(SEGMENTS);
+        let request = SegmentPublish {
+            from: node,
+            journal: JournalId(1 + self.rng.below(JOURNALS)),
+            generation,
+            sealed: SegmentId(k),
+            start: crate::types::Slot(if k == 0 { 0 } else { 2 * k }),
+            end: crate::types::Slot(2 * (k + 1)),
+            opening: Opening { replicas: None },
+        };
+        for m in members {
+            self.send(Envelope::Publish {
+                to: m,
+                request: request.clone(),
+            });
+        }
+    }
+
     fn gc(&mut self, node: NodeId) {
         let (generation, next_round, members) = {
             let n = self.node(node);
@@ -1783,11 +1962,12 @@ impl World {
     fn chaos_step(&mut self) {
         let node = NodeId(self.rng.below(NODES));
         match self.rng.below(100) {
-            0..=59 => {
+            0..=57 => {
                 for _ in 0..3 {
                     self.deliver_random();
                 }
             }
+            58..=59 => self.publish(node),
             60..=64 => self.start_handover(node),
             65..=72 => self.register(node),
             73..=74 => self.gc(node),
@@ -2183,6 +2363,7 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.killed_deciding += reach.killed_deciding;
         total.pruned_losing_bootstrap += reach.pruned_losing_bootstrap;
         total.inherited_effective += reach.inherited_effective;
+        total.inherited_chain += reach.inherited_chain;
         total.finish_shrank_the_set += reach.finish_shrank_the_set;
         total.crash_torn_prefix += reach.crash_torn_prefix;
         total.activated_with_local_floor += reach.activated_with_local_floor;

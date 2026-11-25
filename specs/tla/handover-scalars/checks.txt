@@ -19,3 +19,13 @@ reach_rejoin    violation  ci
 effective       pass       ci
 eff_history     violation  ci
 reach_eff       violation  ci
+# The chain of segments across a handover (R5 of §4.7): the code's rules, then
+# a publish on a proposal, a close that takes one report, a frozen member that
+# takes a publish, and an activation that replaces the chain.
+chain           pass       ci
+chain_proposed  violation  ci
+chain_one       violation  ci
+chain_frozen    violation  ci
+chain_overwrite violation  ci
+reach_minority  violation  ci
+reach_chain     violation  ci

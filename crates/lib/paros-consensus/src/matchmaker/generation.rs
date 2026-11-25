@@ -25,6 +25,7 @@ use super::{
 use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use crate::contract::write::AcceptorWrite;
 use crate::journal::JournalId;
+use crate::journal::chain::merge_chain;
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
 use crate::types::{Ballot, Slot};
@@ -619,6 +620,16 @@ impl Matchmaker {
             assert!(
                 held.retired.len() >= retired_before,
                 "an activation never forgets a retirement record"
+            );
+            // The chain crosses it merged too (R5): it is add-only, so the
+            // member keeps every record it took and adds the reconstruction's
+            // (the control `chain_overwrite` of `specs/tla/handover-scalars/`
+            // replaces it, and loses a seal that only a minority took).
+            let chain_before = held.segments.len();
+            merge_chain(&mut held.segments, &reconstructed.segments);
+            assert!(
+                held.segments.len() >= chain_before,
+                "an activation never forgets a segment of the chain"
             );
             let registry: BTreeMap<Ballot, Registration> = reconstructed
                 .history

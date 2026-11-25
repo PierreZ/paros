@@ -205,6 +205,9 @@ impl ColocatedNode {
         let old_floor = self.acceptor.first_slot();
         let old_chosen_index = self.replica.chosen_index();
         let sealed = self.replica.trim_to(&self.acceptor, point, state);
+        // The jump folds the retained slots past the point: a `Roll` among
+        // them is published like one the walk applied.
+        self.note_rolls();
         self.acceptor
             .trim_to(point, sealed, &mut self.pending_writes);
         // The jump answers every request open below the point.

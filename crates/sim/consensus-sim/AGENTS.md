@@ -94,7 +94,10 @@ Test only: `publish = false`, never a dependency of another crate.
     chosen prefix never shrinks: a crash may take back only what no fsync covered),
     `ONE_PROPOSAL` (every `Accept` that a node or a proxy sends at one `(slot, ballot)` carries
     one command, across a handoff, a restart and a duplicated `Relinquish`; #1292 (duplicated
-    Relinquish)).
+    Relinquish)), `CHAIN_TRUE` (every record of the chain of segments that a matchmaker holds is
+    the one the chosen log gives: a start and an end each at the slot after a chosen `Roll` that
+    the journal rules fold into the next segment, and the replicas that `Roll` named; judged after
+    each publish and each handover step at a matchmaker).
   - `journal.rs` → `JournalSpec`: the single-writer journal contract
     (`docs/journal/02-data-plane.md` §J2.1-§J2.3, §J2.6 (tag `journal-design-a`)) written again, folded over the
     commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
@@ -194,11 +197,14 @@ Test only: `publish = false`, never a dependency of another crate.
   in the chaos phase a slow driver holds back the recovery pages of half the leaders that still
   have values to propose again, until the next roll, which goes to such a leader first; it must
   reach a valid `Roll`, two `Roll` rounds open at once, a trim jump past a `Roll`, and a `Roll`
-  admitted while the recovery still holds values to propose again). 60 seeds each in CI; `lagging-reads`
+  admitted while the recovery still holds values to propose again, and a publish of a segment's
+  end that a majority of the matchmakers holds). 60 seeds each in CI; `lagging-reads`
   takes 120. The `lagging-reads` walk is steered (`Steer::LaggingReader`) and is the control of
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.
-- `tests/mutants.rs` → each oracle catches its mutant (`Mutant::CorruptTrimSegment`: a trim jump
+- `tests/mutants.rs` → each oracle catches its mutant (`Mutant::EarlyPublish`: a leader's driver
+  publishes the end of the tail segment as the leader admits a `Roll`, caught by `CHAIN_TRUE`;
+  `Mutant::CorruptTrimSegment`: a trim jump
   that carries the next segment, caught by the journal rules, whose spec folds the `Roll`).
 - `tests/differential.rs` → the differential check of the core (#1101 (one Belief role, one
   copy of the retained log)): every flavor walks 12 fixed seeds, and the cluster folds every
