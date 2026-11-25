@@ -10,7 +10,14 @@
 //! later ballot never chose (the check `route_propose` of
 //! `specs/tla/segment-roll/`). The walk is the only source: a slot this node
 //! folded while it was not the leader is not routed, and its replicas pull
-//! it. The plain deployment names no replicas, and routes nothing.
+//! it. Segments exist only with matchmakers (R10, D5), so a deployment
+//! without them routes nothing, whatever its configuration names.
+//!
+//! A slot that a follower folded and the leader of its time never routed is
+//! not routed by the next leader either: today the `Commit` to the learners
+//! (D2) reaches every replica, and a replica pulls what it missed. With pure
+//! voters (step 8) that `Commit` goes away; **Open** (step 8): who routes such
+//! a slot.
 
 use super::ColocatedNode;
 use crate::contract::{Audience, Message, Party};
@@ -21,6 +28,7 @@ impl ColocatedNode {
     /// Route the `Commit` of each slot the fold applied since the last
     /// route to the replicas of its segment, when this node leads, and
     /// move the mark to the fold.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn route_to_segment_replicas(&mut self) {
         let folded = self.replica.folded();
         let from = self.segment_routed.max(self.acceptor.first_slot());
@@ -29,7 +37,7 @@ impl ColocatedNode {
             "the route mark never passes the fold"
         );
         self.segment_routed = folded;
-        if !self.is_leader() {
+        if !self.config.has_matchmakers() || !self.is_leader() {
             return;
         }
         let me = self.config.id;

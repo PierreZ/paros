@@ -96,8 +96,11 @@ Test only: `publish = false`, never a dependency of another crate.
     one command, across a handoff, a restart and a duplicated `Relinquish`; #1292 (duplicated
     Relinquish)), `CHAIN_TRUE` (every record of the chain of segments that a matchmaker holds is
     the one the chosen log gives: a start and an end each at the slot after a chosen `Roll` that
-    the journal rules fold into the next segment, and the replicas that `Roll` named; judged after
-    each publish and each handover step at a matchmaker).
+    the journal rules fold into the next segment, the replicas that `Roll` named, and the boundary
+    state, term included, that the journal rules fold after it; judged after each publish and each
+    handover step at a matchmaker), `ROUTE_TRUE` (a `Commit` that a leader sends to the replicas of
+    a segment names a slot whose every slot below is chosen, and the segment and replicas that the
+    journal rules fold the chosen log below it into: R4d and R6 of §4.7; judged on each batch).
   - `journal.rs` → `JournalSpec`: the single-writer journal contract
     (`docs/journal/02-data-plane.md` §J2.1-§J2.3, §J2.6 (tag `journal-design-a`)) written again, folded over the
     commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
@@ -204,6 +207,8 @@ Test only: `publish = false`, never a dependency of another crate.
   `READ_SEES_WRITES` catches.
 - `tests/mutants.rs` → each oracle catches its mutant (`Mutant::EarlyPublish`: a leader's driver
   publishes the end of the tail segment as the leader admits a `Roll`, caught by `CHAIN_TRUE`;
+  `Mutant::RouteFromTail`: a leader's driver routes each `Commit` to the replicas of the tail
+  segment of the leader's fold, caught by `ROUTE_TRUE`;
   `Mutant::CorruptTrimSegment`: a trim jump
   that carries the next segment, caught by the journal rules, whose spec folds the `Roll`).
 - `tests/differential.rs` → the differential check of the core (#1101 (one Belief role, one

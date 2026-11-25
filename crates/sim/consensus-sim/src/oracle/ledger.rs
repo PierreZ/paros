@@ -45,7 +45,14 @@
 //!    named, and a sealed segment ends at the slot after a chosen `Roll`
 //!    that they fold into `k + 1`. A node publishes only what its walk
 //!    applied (R3), so a record is true from the moment one matchmaker
-//!    holds it (`ChainTrue` of `specs/tla/handover-scalars/`).
+//!    holds it (`ChainTrue` of `specs/tla/handover-scalars/`). The record
+//!    of a segment also holds its boundary state: the journal state after
+//!    the `Roll`, term included, that the journal rules fold, with the
+//!    replicas the chosen log names for the segment.
+//! 9. **The route is true** ([`ROUTE_TRUE`]): a `Commit` that a leader
+//!    sends to the replicas of a segment (R6, R4d of §4.7) names a slot
+//!    whose every slot below is chosen, and the segment and the replicas
+//!    that the journal rules fold the chosen log below it into.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,6 +79,9 @@ pub const PREFIX_SHRINKS: &str = "the durable chosen prefix never shrinks";
 pub const ONE_PROPOSAL: &str = "a ballot proposes one command per slot";
 /// Oracle 8.
 pub const CHAIN_TRUE: &str = "the chain of segments is the one the chosen log gives";
+/// Oracle 9.
+pub const ROUTE_TRUE: &str =
+    "a Commit goes to the replicas of the segment that the chosen log gives its slot";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -310,24 +320,71 @@ impl Ledger {
         }
     }
 
+    /// Oracle 9: `who` routed the `Commit` of `slot` to `replicas` as the
+    /// replicas of `segment`, in a deployment whose first segment `first`
+    /// names.
+    ///
+    /// # Panics
+    ///
+    /// If a slot below `slot` is not chosen (R4d), or the chosen log below
+    /// `slot` folds it into another segment or names other replicas.
+    pub fn route_holds(
+        &mut self,
+        who: &str,
+        slot: Slot,
+        segment: SegmentId,
+        replicas: &ReplicaSet,
+        first: Option<&ReplicaSet>,
+    ) {
+        if let Some(hole) = (0..slot.0).find(|s| !self.chosen.contains_key(&Slot(*s))) {
+            panic!(
+                "{ROUTE_TRUE}: {who} routed slot {} while slot {hole} below it is not chosen",
+                slot.0
+            );
+        }
+        let (chosen, commands) = (&self.chosen, &self.commands);
+        let lookup = |s: Slot| chosen.get(&s).and_then(|(_, print)| commands.get(print));
+        let mut expected = (SegmentId::FIRST, first.cloned());
+        for s in 0..slot.0 {
+            let (_, outcome) = self.journal.judge(Slot(s), lookup);
+            if let (Outcome::Rolled(tail), Some(Command::Roll(roll))) = (outcome, lookup(Slot(s))) {
+                expected.0 = tail.id;
+                if roll.replicas.is_some() {
+                    expected.1.clone_from(&roll.replicas);
+                }
+            }
+        }
+        assert!(
+            expected.0 == segment && expected.1.as_ref() == Some(replicas),
+            "{ROUTE_TRUE}: {who} routed slot {} to {replicas:?} of segment {}, and the chosen log gives {expected:?}",
+            slot.0,
+            segment.0,
+        );
+    }
+
     /// The journal view after the chosen `Roll` at `slot`, and the replicas
     /// the chosen log names for the segment it opens: those of the last
     /// valid `Roll` at or below `slot` that named a set. The caller knows
     /// every slot up to `slot` is chosen.
-    fn boundary_after(&mut self, slot: Slot) -> (JournalView, Option<ReplicaSet>) {
+    fn boundary_after(&mut self, slot: Slot) -> (JournalView, u64, Option<ReplicaSet>) {
         let (chosen, commands) = (&self.chosen, &self.commands);
         let lookup = |s: Slot| chosen.get(&s).and_then(|(_, print)| commands.get(print));
         let view = self.journal.view_after(slot, lookup);
         let mut replicas = None;
+        let mut term = 0;
         for s in 0..=slot.0 {
             let (_, outcome) = self.journal.judge(Slot(s), lookup);
+            // The hidden term counts every won `SetLeader`.
+            if matches!(outcome, Outcome::Leader(_)) {
+                term += 1;
+            }
             if let (Outcome::Rolled(_), Some(Command::Roll(roll))) = (outcome, lookup(Slot(s)))
                 && roll.replicas.is_some()
             {
                 replicas.clone_from(&roll.replicas);
             }
         }
-        (view, replicas)
+        (view, term, replicas)
     }
 
     /// Oracle 8: the chain that `who` holds is the one the chosen log gives.
@@ -365,9 +422,10 @@ impl Ledger {
                         roll.replicas,
                     );
                     let at = Slot(record.start.0 - 1);
-                    let (view, replicas) = self.boundary_after(at);
+                    let (view, term, replicas) = self.boundary_after(at);
                     assert!(
                         opening.boundary.view() == view
+                            && opening.boundary.term == term
                             && opening.boundary.segment == expected
                             && opening.boundary.replicas == replicas,
                         "{CHAIN_TRUE}: {who} holds segment {} from the boundary {:?}, and the chosen log folds to {view:?} with replicas {replicas:?} in segment {expected:?}",

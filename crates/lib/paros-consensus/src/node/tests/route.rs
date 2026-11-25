@@ -78,16 +78,34 @@ fn the_leader_routes_each_walked_slot_to_the_replicas_of_its_segment() {
 }
 
 /// With the replicas of the first segment in the configuration, a leader
-/// routes every slot it walks to them; without them it routes nothing.
+/// of a matchmaker deployment routes every slot it walks to them; without
+/// them, or without matchmakers (R10), it routes nothing.
 #[test]
 fn the_first_segment_takes_the_replicas_of_the_configuration() {
-    for first in [None, Some(ReplicaSet::new([NodeId(9)]))] {
+    let set = ReplicaSet::new([NodeId(9)]);
+    for (first, matchmakers) in [(None, 3), (Some(set.clone()), 3), (Some(set), 0)] {
+        let pool = [0, 1, 2];
         let mut nodes: [ColocatedNode; 3] = std::array::from_fn(|i| {
-            let mut storage = MemStorage::for_node(i as u64, &[0, 1, 2]);
+            let mut storage = MemStorage::for_node(i as u64, &pool);
+            storage.config.nodes = pool.iter().copied().map(NodeId).collect();
+            storage.config.matchmakers = (0..matchmakers).map(MatchmakerId).collect();
             storage.config.segment_replicas.clone_from(&first);
             ColocatedNode::new(&storage, Limits::DEFAULT)
         });
-        make_leader(&mut nodes, 0);
+        let mut mms = registries(matchmakers);
+        if matchmakers == 0 {
+            make_leader(&mut nodes, 0);
+        } else {
+            campaign(&mut nodes[0]);
+            let requests = drain_match_requests(&mut nodes[0]);
+            for reply in matchmake(&mut mms, requests) {
+                nodes[0].on_match_reply(reply);
+            }
+            let q = drain(&mut nodes[0]);
+            deliver_all(&mut nodes, q);
+            assert!(nodes[0].is_leader());
+        }
+        let first = first.filter(|_| matchmakers > 0);
         let mut routed = Vec::new();
         for seq in 1..=2 {
             nodes[0].propose(entry(1, seq, 10));

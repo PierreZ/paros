@@ -62,7 +62,11 @@ that slot (`Audience::ReplicasOf`, `node/route.rs`), so the route is a fold of a
 `Commit` to the learners does not change (D2). A proxy leader keeps its `Commit` to the learners:
 the leader's walk routes every slot, delegated or not. The chain record holds the boundary state
 (`Opening::boundary`, the journal state after the `Roll`), which the oracle `CHAIN_TRUE` of
-consensus-sim judges against its own fold of the chosen log. Not built yet: the catch-up between
+consensus-sim judges against its own fold of the chosen log; the oracle `ROUTE_TRUE` judges each
+routed `Commit` (its control is the mutant `RouteFromTail`). Segments exist only with matchmakers,
+so a deployment without them routes nothing. **Open** (step 8): a slot that a follower folded and
+the leader of its time never routed is not routed by the next leader; today the `Commit` to the
+learners reaches every replica, and with pure voters that `Commit` goes away. Not built yet: the catch-up between
 replicas, the chain in the matchmaking and probe answers, and the walk of consensus-sim with
 replicas of segments that join from the chain. Two limits of a bound replica wait
 for step 6. **Open** (step 6): the acceptors may compact past the `Roll` of a segment before its

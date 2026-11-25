@@ -82,7 +82,9 @@ pub struct Config {
     /// by id, that keep the slots of the log from slot 0 until a `Roll` names
     /// another set ([`crate::journal::JournalState::replicas`]). **`None` is
     /// the plain arm**: the deployment has no replicas of a segment, and a
-    /// leader routes no `Commit` to one. Fixed when the journal is created and
+    /// leader routes no `Commit` to one. Segments exist only with
+    /// matchmakers (R10, D5): a deployment without them routes nothing,
+    /// whatever this names. Fixed when the journal is created and
     /// recorded in the format marker with the rest, so a restart never changes
     /// it.
     #[cfg_attr(feature = "serde", serde(default))]
