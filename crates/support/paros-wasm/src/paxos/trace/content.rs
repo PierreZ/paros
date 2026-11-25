@@ -50,6 +50,36 @@ pub fn content(entry: &InFlight, log: bool) -> Content {
             ),
         },
         Envelope::GcAck(ack) => gc_ack(ack),
+        Envelope::SegmentPublish(publish) => Content {
+            fields: vec![
+                field("segment", publish.sealed.0.to_string()),
+                field(
+                    "slots",
+                    format!("{} to {}", publish.start.0, publish.end.0 - 1),
+                ),
+            ],
+            voice: format!(
+                "My log applied the Roll at slot {}. Segment {} holds slots {} to {}, and \
+                 segment {} starts at slot {}. Write it in the chain.",
+                publish.end.0 - 1,
+                publish.sealed.0,
+                publish.start.0,
+                publish.end.0 - 1,
+                publish.sealed.0 + 1,
+                publish.end.0
+            ),
+        },
+        Envelope::SegmentAck(ack) => Content {
+            fields: vec![
+                field("answer", if ack.applied { "done" } else { "refused" }),
+                field("segment", ack.sealed.0.to_string()),
+            ],
+            voice: if ack.applied {
+                format!("Done. Segment {} is in my chain.", ack.sealed.0)
+            } else {
+                "No. I am not active for that generation.".to_string()
+            },
+        },
         Envelope::Reconfigure(request) => reconfigure(request),
         Envelope::ReconfigureReply(answer) => reconfigure_reply(answer),
     }

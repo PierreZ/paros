@@ -558,6 +558,19 @@ pub struct MatchmakerView {
     pub registrations: Vec<RegistrationView>,
     /// The chosen successor of its generation, once it has learned one.
     pub successor: Option<MatchmakerSetView>,
+    /// Its chain of segments, in id order: what it heard of each segment.
+    pub chain: Vec<ChainEntryView>,
+}
+
+/// One record of a matchmaker's chain of segments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainEntryView {
+    /// The id of the segment.
+    pub id: u64,
+    /// Its first slot.
+    pub start: u64,
+    /// Its last slot (the slot of the `Roll` that ends it), once it is sealed.
+    pub last: Option<u64>,
 }
 
 /// A candidate's open matchmaking phase: what it is registering, and how many

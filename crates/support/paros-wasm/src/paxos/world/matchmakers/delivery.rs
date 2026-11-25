@@ -8,7 +8,8 @@
 //! the reconstruction, exactly as `paros::roles::node::run_node` has it.
 
 use paros_consensus::matchmaker::{
-    MatchOutcome, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
+    MatchOutcome, MatchReply, MatchRequest, PublishOutcome, ReconfigureReply, ReconfigureRequest,
+    ReconfigurerStep,
 };
 use paros_consensus::membership::{MatchmakerId, MatchmakerSet};
 use paros_consensus::node::MatchStep;
@@ -169,6 +170,39 @@ impl World {
                     self.send(entry.to, entry.from, Envelope::GcAck(ack));
                 }
             }
+            Envelope::SegmentPublish(publish) => {
+                if let Some((outcome, ack)) = self.matchmakers[index].deliver_segment(&publish) {
+                    self.narrate(
+                        NarrationKind::Matchmaking,
+                        match outcome {
+                            PublishOutcome::Merged => format!(
+                                "{} writes in its chain that segment {} holds slots {} to {}, \
+                                 and that segment {} starts at slot {}. It answers after the \
+                                 write.",
+                                which(to),
+                                publish.sealed.0,
+                                publish.start.0,
+                                publish.end.0 - 1,
+                                publish.sealed.0 + 1,
+                                publish.end.0
+                            ),
+                            PublishOutcome::Unchanged => format!(
+                                "{} already holds the end of segment {} in its chain, so it \
+                                 writes nothing and answers at once.",
+                                which(to),
+                                publish.sealed.0
+                            ),
+                            PublishOutcome::Refused => format!(
+                                "{} refuses the end of segment {}: it is not active for that \
+                                 generation.",
+                                which(to),
+                                publish.sealed.0
+                            ),
+                        },
+                    );
+                    self.send(entry.to, entry.from, Envelope::SegmentAck(ack));
+                }
+            }
             Envelope::Reconfigure(request) => {
                 let reply = self.matchmakers[index].deliver_reconfigure(request);
                 if let Some(reply) = reply {
@@ -179,6 +213,7 @@ impl World {
             Envelope::Node(_)
             | Envelope::MatchReply(_)
             | Envelope::GcAck(_)
+            | Envelope::SegmentAck(_)
             | Envelope::ReconfigureReply(_) => {}
         }
     }
@@ -260,6 +295,20 @@ impl World {
                     self.narrate_gc_step(to, &step);
                 }
             }
+            Envelope::SegmentAck(ack) => {
+                let completed = self.drive(to, index, move |node| node.on_segment_ack(&ack));
+                if let Some(Some(sealed)) = completed {
+                    self.narrate(
+                        NarrationKind::Matchmaking,
+                        format!(
+                            "A majority of the matchmakers now holds the end of segment {}, so {} \
+                             stops sending it.",
+                            sealed.0,
+                            who(to)
+                        ),
+                    );
+                }
+            }
             Envelope::ReconfigureReply(reply) => {
                 let step = self.reconfigurers[index].on_reply(reply);
                 self.narrate_reconfigurer_step(to, index, &step);
@@ -270,8 +319,11 @@ impl World {
                 // `resend_due` for the same reason.
                 self.queue_reconfigurer(index);
             }
-            Envelope::Node(_) | Envelope::Match(_) | Envelope::Gc(_) | Envelope::Reconfigure(_) => {
-            }
+            Envelope::Node(_)
+            | Envelope::Match(_)
+            | Envelope::Gc(_)
+            | Envelope::SegmentPublish(_)
+            | Envelope::Reconfigure(_) => {}
         }
     }
 

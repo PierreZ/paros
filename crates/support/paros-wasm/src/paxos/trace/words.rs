@@ -74,6 +74,11 @@ pub fn stage_of(message: &MessageView, log: bool) -> Option<Stage> {
             format!("Clean-up · ballot {ballot}"),
             "The matchmakers forget the configurations below this ballot.",
         ),
+        "chain" => (
+            "The chain of segments".to_string(),
+            "Each node tells the matchmakers where a segment ends, after its log applied \
+             the Roll.",
+        ),
         "handoff" => (
             "Hand-off".to_string(),
             "The leader gives its ballot to the next leader. The next leader does not \

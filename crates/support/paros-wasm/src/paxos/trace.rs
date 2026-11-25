@@ -871,6 +871,15 @@ pub(crate) fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
         if matchmaker.gc_watermark != "0.0" {
             lines.push(format!("forgot < {}", matchmaker.gc_watermark));
         }
+        // The chain: the slots of each segment whose end it holds.
+        let sealed: Vec<String> = matchmaker
+            .chain
+            .iter()
+            .filter_map(|entry| entry.last.map(|last| format!("{}–{}", entry.start, last)))
+            .collect();
+        if !sealed.is_empty() {
+            lines.push(format!("chain {}", sealed.join(", ")));
+        }
         if lines.is_empty() {
             lines.push("no record".to_string());
         }

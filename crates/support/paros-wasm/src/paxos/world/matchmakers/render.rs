@@ -2,7 +2,7 @@
 //! clause a refusal carries, and which tier each end of the wire belongs to.
 
 use paros_consensus::NodeId;
-use paros_consensus::matchmaker::{MatchOutcome, ReconfigureReply, ReconfigureRequest};
+use paros_consensus::matchmaker::{MatchOutcome, ReconfigureReply, ReconfigureRequest, SegmentAck};
 
 use crate::paxos::narration::many;
 use crate::paxos::view::{MessageView, PartyView, show_ballot};
@@ -75,6 +75,18 @@ pub(crate) fn plane_view(entry: &InFlight) -> Option<MessageView> {
             },
             true,
         ),
+        Envelope::SegmentPublish(publish) => (
+            "SegmentPublish",
+            "chain",
+            None,
+            format!(
+                "Segment {} ends at slot {}",
+                publish.sealed.0,
+                publish.end.0 - 1
+            ),
+            false,
+        ),
+        Envelope::SegmentAck(ack) => ("SegmentAck", "chain", None, ack_summary(ack), true),
         Envelope::Reconfigure(request) => {
             let (kind, summary) = reconfigure_request_summary(request);
             (kind, "reconfigure", None, summary, false)
@@ -99,6 +111,15 @@ pub(crate) fn plane_view(entry: &InFlight) -> Option<MessageView> {
         reply,
         sent_at: entry.sent_at,
     })
+}
+
+/// The summary line of a matchmaker's answer to a publish of the chain.
+fn ack_summary(ack: &SegmentAck) -> String {
+    if ack.applied {
+        format!("Segment {} is in the chain", ack.sealed.0)
+    } else {
+        format!("Refused: segment {}", ack.sealed.0)
+    }
 }
 
 /// The kind and summary line of a handover request.
