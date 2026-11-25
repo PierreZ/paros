@@ -319,3 +319,60 @@ fn a_roll_is_judged_alike_under_both_writer_modes_and_with_new_replicas() {
         assert_eq!(state.segment.start, Slot(1));
     }
 }
+
+/// A state from outside the core is judged by `is_well_formed`, one check
+/// for each ordering that `assert_invariants` asserts.
+#[test]
+fn a_state_out_of_order_is_not_well_formed() {
+    use crate::journal::segment::{Segment, SegmentId};
+    let good = JournalState::default();
+    assert!(good.is_well_formed());
+    let tail = JournalState {
+        segment: Segment {
+            id: SegmentId(2),
+            start: Slot(5),
+        },
+        ..good
+    };
+    assert!(tail.is_well_formed());
+    let bad = [
+        JournalState {
+            first_seq: Seq(1),
+            ..good
+        },
+        JournalState { term: 1, ..good },
+        JournalState {
+            leader: Some(LeaderUuid(1)),
+            ..good
+        },
+        JournalState {
+            leader: Some(LeaderUuid::UNSET),
+            term: 1,
+            ..good
+        },
+        JournalState {
+            segment: Segment {
+                id: SegmentId(1),
+                start: Slot(0),
+            },
+            ..good
+        },
+        JournalState {
+            segment: Segment {
+                id: SegmentId(0),
+                start: Slot(3),
+            },
+            ..good
+        },
+        JournalState {
+            segment: Segment {
+                id: SegmentId(4),
+                start: Slot(3),
+            },
+            ..good
+        },
+    ];
+    for state in bad {
+        assert!(!state.is_well_formed(), "{state:?}");
+    }
+}

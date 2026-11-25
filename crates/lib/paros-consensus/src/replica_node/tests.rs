@@ -1379,3 +1379,5 @@ fn a_replica_request_answered_by_entries_closes_the_trim_point_gate() {
         "the replica asks from the first slot it misses: {asked:?}"
     );
 }
+
+mod segments;

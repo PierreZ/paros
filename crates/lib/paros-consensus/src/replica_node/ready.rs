@@ -85,6 +85,32 @@ impl ReplicaReady<'_> {
         reads
     }
 
+    /// Quorum reads this sealed replica answers "sealed" (R6 of
+    /// `docs/architecture/04-7-segments.md`): the row confirmed an index
+    /// past the end of its segment. The driver answers each one with the
+    /// records of the segment from the read's position
+    /// ([`ReplicaNode::read_log`](super::ReplicaNode::read_log), which ends
+    /// with [`LogRead::Sealed`](crate::replica::LogRead::Sealed)), and the
+    /// reader asks a replica of the next segment for the rest.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn sealed_reads(&self) -> &[ReadState] {
+        let reads = &self.node.pending_sealed_reads;
+        assert!(
+            reads.is_empty() || self.node.replica.is_sealed(),
+            "only a sealed replica answers a read sealed"
+        );
+        assert!(
+            reads.iter().all(|r| !self.node.replica.covers(r.index)),
+            "a read answered sealed asks past the end of the segment"
+        );
+        reads
+    }
+
     /// The `(slot, ballot, command, outcome)` entries the prefix just
     /// walked over, in contiguous slot order, after the writes are durable —
     /// the node's [`crate::Ready::committed`] contract. `ballot` is the one
@@ -116,6 +142,7 @@ impl ReplicaReady<'_> {
         self.writes().is_empty()
             && self.messages().is_empty()
             && self.read_states().is_empty()
+            && self.sealed_reads().is_empty()
             && self.committed().is_empty()
     }
 
