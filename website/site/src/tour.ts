@@ -6,10 +6,8 @@
 // one chapter of that flavor, the one that the line fits (`bridge`); every
 // other chapter has its own line (`problem`): "Who must answer" and "Reads".
 //
-// A chapter names its runs in `src/tour/<page>.ts`. Today each chapter is
-// made from the recorded runs of its lesson (the base run and the first
-// fault). A flavor's own tour run (one world, no restart; `Recorder::tour` in
-// paros-wasm) takes their place, one chapter at a time.
+// A chapter names its run in `src/tour/<page>.ts`: the flavor's own tour run,
+// one world with no restart (`Recorder::tour` in paros-wasm).
 //
 // `/paxos/tour/` plays every chapter (`src/pages/paxos/tour.astro`, `tourTrace`), and each
 // flavor page plays its own chapters in place ("Watch this flavor").
@@ -27,7 +25,8 @@ export interface Chapter {
   /** The lesson of `src/course.ts` that the chapter shows: its title, its
    * page, its exercises ("Your turn") and its runs ("Go deeper"). */
   lesson: string;
-  /** The runs of the page that the chapter plays, in order. */
+  /** The run of the page that the chapter plays: exactly one, a tour run
+   * (one world). A list, so the address and the saved place keep one shape. */
   runs: string[];
   /** The bridge before the chapter: the page of the flavor whose problem
    * line (`src/flavors.ts`) the screen shows. The first chapter has none. */
@@ -84,7 +83,8 @@ export function bridgeOf(chapter: Chapter): string | undefined {
 
 /** Fail the build when the chapters and the traces disagree: a chapter names
  * a lesson or a run that does not exist, a run with no beats, two chapters
- * name one lesson, the chapters are not in course order, a tour run in no
+ * name one lesson, a chapter that plays other than one tour run, the
+ * chapters are not in course order, a tour run in no
  * chapter, in two or in a lesson, a tour run whose mark names another
  * chapter, a bridge that is not the problem line of the chapter's own
  * flavor, a chapter after the first with no bridge, a chapter with two, an
@@ -109,14 +109,12 @@ export function check(traces: Record<string, Trace>): void {
     bridgeOf(chapter);
     const trace = traces[lesson.page];
     if (!trace) throw new Error(`tour: chapter ${chapter.lesson} names no trace ${lesson.page}`);
-    if (!chapter.runs.length) throw new Error(`tour: chapter ${chapter.lesson} plays no run`);
-    if (new Set(chapter.runs).size !== chapter.runs.length) {
-      throw new Error(`tour: chapter ${chapter.lesson} names one run twice`);
-    }
+    if (chapter.runs.length !== 1) throw new Error(`tour: chapter ${chapter.lesson} plays ${chapter.runs.length} runs, not one tour run`);
     for (const id of chapter.runs) {
       const run = trace.scenarios.find((s) => s.id === id);
       if (!run) throw new Error(`tour: chapter ${chapter.lesson} names no run ${lesson.page}/${id}`);
       if (!run.beats?.length) throw new Error(`tour: ${lesson.page}/${id} has no story`);
+      if (!run.tour) throw new Error(`tour: ${lesson.page}/${id} is not a tour run`);
       if (run.tour && run.tour.chapter !== chapter.lesson) {
         throw new Error(`tour: ${lesson.page}/${id} is marked for chapter ${run.tour.chapter}, not ${chapter.lesson}`);
       }

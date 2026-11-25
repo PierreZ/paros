@@ -148,18 +148,16 @@ new names its own day (`date` of its `tlc`).
 
 The tour (plan `paxos-guided-tour-2026-11-24`, decided by Pierre on 2026-11-24) plays the Paxos
 flavors in seven chapters, in course order: one chapter per lesson 1 to 7, on five pages. A
-chapter names the runs it plays, in `src/tour/<page>.ts`; `src/tour.ts` lists the chapters
+chapter names the one run it plays, in `src/tour/<page>.ts`; `src/tour.ts` lists the chapters
 (`CHAPTERS`) and its `check()` fails the build when a chapter names a lesson or a run that
-does not exist, a run with no story, two chapters name one lesson, the chapters leave course
+does not exist, a run with no story, a chapter that plays other than one tour run, two chapters name one lesson, the chapters leave course
 order, a tour run is in no chapter, in two or in a lesson, a bridge is not the chapter's own
 flavor, a chapter after the first has no bridge or has two, a chapter's own line is not one
 sentence of at most 140 characters, the problem line of a flavor (but the first) opens no
-chapter or two, or a flavor page has no chapter. Chapter 1 ("One value") and both Multi-Paxos chapters
-("The log and its leader", "Reads") play their own tour runs; each other chapter plays runs of its lesson until a flavor's
-own tour run (`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of
+chapter or two, or a flavor page has no chapter. Every chapter plays its flavor's own tour run, one world
+with no restart (`Recorder::tour` in `paros-wasm`, with its rules in `tour_problems` of
 `src/steps/story.rs`: 10 to 30 beats, at most 140 characters per sentence, no question, every
-`enter` names a lane; `check_choices` checks that every `more` names a run of the page) takes
-their place, one chapter at a time. A run marked `tour` is in no lesson (`src/course.ts`
+`enter` names a lane; `check_choices` checks that every `more` names a run of the page). A run marked `tour` is in no lesson (`src/course.ts`
 accepts it).
 
 - `/paxos/tour/` (`src/pages/paxos/tour.astro`) inlines only the runs of the chapters

@@ -39,8 +39,9 @@ configuration chose, and writes do not stop during the change.
 
 A log grows for ever, so the leader can cut it into **segments**. A segment is a range of
 slots. The cut is a command of the log, the `Roll`: `ColocatedNode::roll` proposes it like a
-write, and the leader does not wait for it. When a `Roll` is chosen at slot `s`, slot `s` is the
-last slot of its segment, and the next segment starts at `s + 1`. Paxos chooses one value for
+write, and the leader does not wait for it. When a valid `Roll` is chosen at slot `s`, slot `s` is
+the last slot of its segment, and the next segment starts at `s + 1`. A `Roll` is valid when it
+names the segment after the tail; any other `Roll` changes nothing. Paxos chooses one value for
 each slot, so every node ends a segment at the same slot. A roll needs matchmakers: a deployment
 without them refuses it. A change of the acceptors is a new ballot, and it cuts no segment.
 

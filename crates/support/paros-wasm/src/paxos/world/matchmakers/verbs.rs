@@ -285,8 +285,9 @@ impl World {
         let text = match self.drive(id, index, |node| node.roll(None)) {
             Some(RollResult::Accepted { slot, next }) => format!(
                 "A client asks {} to cut the log. The leader proposes a Roll to segment {} at \
-                 slot {}, like any other command. When the Roll is chosen, the segment before \
-                 it ends at slot {}, and segment {} starts at slot {}, on the same machines.",
+                 slot {}, like any other command. If the Roll is valid when it is chosen, the \
+                 segment before it ends at slot {}, and segment {} starts at slot {}, on the \
+                 same machines.",
                 who(id),
                 next.0,
                 slot.0,
@@ -308,7 +309,9 @@ impl World {
             }
             None => format!("{} is not running.", who(id)),
         };
-        let opening = crate::paxos::narration::say(NarrationKind::Reconfigure, text);
+        // A roll is a client's ask, not a change of the acceptors: it cuts no
+        // configuration (R9), so it is narrated as a client request.
+        let opening = crate::paxos::narration::say(NarrationKind::Client, text);
         self.narration.insert(mark, opening);
         Ok(())
     }

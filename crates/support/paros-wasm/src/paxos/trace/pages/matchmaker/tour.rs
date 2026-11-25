@@ -78,7 +78,7 @@ pub(super) fn tour() -> Scenario {
     .beat("Phase 1 runs again, and node 0 leads at ballot 3.0 with acceptors 0, 1 and 3.")
     .settle(any)
     .holds(leads(0), "node 0 leads again")
-    .beat("bravo is chosen at slot 1 by the new set.")
+    .beat("The new set chooses bravo at slot 1.")
     .play(propose(0, "bravo"), "the client writes bravo")
     .settle(any)
     .holds(chosen_at(1, "bravo"), "bravo is chosen at slot 1");
@@ -124,10 +124,10 @@ fn crash_and_retire(run: &mut Recorder) {
         .settle_dropping(touches(0))
         .holds(leads(1), "node 1 leads")
         .beat(
-            "Phase 1 needs a majority of each set. Node 2 left the new set, but its promise still \
+            "Phase 1 needs a majority of each set. Node 2 is not in the new set, but its promise still \
              counts for the old one.",
         )
-        .beat("Node 1 takes its segment from its own chosen log, not from the matchmakers: segment 1, from slot 3.")
+        .beat("Node 1 takes its segment from its own chosen log: segment 1, from slot 3.")
         .holds(in_segment(1, 1, 3), "node 1 is in segment 1 from slot 3")
         .beat("Node 1 rolls again, at slot 4. Segment 1 ends there, and segment 2 starts at slot 5.")
         .play(Action::Roll { node: 1 }, "the client asks node 1 to roll")

@@ -40403,7 +40403,7 @@
           },
           "says": "The client asks node 0 to roll.",
           "notes": [
-            "A client asks node 0 to cut the log. The leader proposes a Roll to segment 1 at slot 2, like any other command. When the Roll is chosen, the segment before it ends at slot 2, and segment 1 starts at slot 3, on the same machines.",
+            "A client asks node 0 to cut the log. The leader proposes a Roll to segment 1 at slot 2, like any other command. If the Roll is valid when it is chosen, the segment before it ends at slot 2, and segment 1 starts at slot 3, on the same machines.",
             "Node 0 records slot 2 = Roll to segment 1 at ballot 3.0. The vote is durable before the Accepted that reports it leaves.",
             "Node 0 proposes Roll to segment 1 for slot 2 at ballot 3.0, to 2 acceptors. No second Phase 1 is needed. The ballot it holds already covers the whole log suffix."
           ],
@@ -46526,7 +46526,7 @@
           },
           "says": "The client asks node 1 to roll.",
           "notes": [
-            "A client asks node 1 to cut the log. The leader proposes a Roll to segment 2 at slot 4, like any other command. When the Roll is chosen, the segment before it ends at slot 4, and segment 2 starts at slot 5, on the same machines.",
+            "A client asks node 1 to cut the log. The leader proposes a Roll to segment 2 at slot 4, like any other command. If the Roll is valid when it is chosen, the segment before it ends at slot 4, and segment 2 starts at slot 5, on the same machines.",
             "Node 1 records slot 4 = Roll to segment 2 at ballot 4.1. The vote is durable before the Accepted that reports it leaves.",
             "Node 1 proposes Roll to segment 2 for slot 4 at ballot 4.1, to 2 acceptors. No second Phase 1 is needed. The ballot it holds already covers the whole log suffix."
           ],
@@ -51050,7 +51050,7 @@
           "to": 42
         },
         {
-          "says": "bravo is chosen at slot 1 by the new set.",
+          "says": "The new set chooses bravo at slot 1.",
           "from": 42,
           "to": 50
         },
@@ -51091,12 +51091,12 @@
           "to": 80
         },
         {
-          "says": "Phase 1 needs a majority of each set. Node 2 left the new set, but its promise still counts for the old one.",
+          "says": "Phase 1 needs a majority of each set. Node 2 is not in the new set, but its promise still counts for the old one.",
           "from": 80,
           "to": 80
         },
         {
-          "says": "Node 1 takes its segment from its own chosen log, not from the matchmakers: segment 1, from slot 3.",
+          "says": "Node 1 takes its segment from its own chosen log: segment 1, from slot 3.",
           "from": 80,
           "to": 80
         },
