@@ -1200,7 +1200,6 @@ impl Cluster {
             // The batch flies until its persist below (`Cluster::land`).
             let flight = ready.release();
             self.fold_digest(digest);
-            self.judge_routes(id, &batch, known.first.as_ref());
             if mutant == Some(Mutant::EarlyGc) {
                 self.early_gc(id, &seen, &mut gc, &mut out);
             }
@@ -1251,6 +1250,7 @@ impl Cluster {
             for envelope in &out {
                 self.judge_sent(&format!("node {}", id.0), envelope);
             }
+            self.judge_routes(id, &batch, known.first.as_ref());
             self.send_from(id, out, cx);
             for (slot, _, command, outcome) in &committed {
                 self.applied(&format!("node {}", id.0), *slot, command, outcome, cx);

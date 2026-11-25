@@ -51,7 +51,8 @@
 //!    replicas the chosen log names for the segment.
 //! 9. **The route is true** ([`ROUTE_TRUE`]): a `Commit` that a leader
 //!    sends to the replicas of a segment (R6, R4d of §4.7) names a slot
-//!    whose every slot below is chosen, and the segment and the replicas
+//!    whose every slot below is chosen ([`ROUTE_ON_PREFIX`]), and the
+//!    segment and the replicas
 //!    that the journal rules fold the chosen log below it into.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,6 +83,9 @@ pub const CHAIN_TRUE: &str = "the chain of segments is the one the chosen log gi
 /// Oracle 9.
 pub const ROUTE_TRUE: &str =
     "a Commit goes to the replicas of the segment that the chosen log gives its slot";
+/// Oracle 9, its first half: R4d alone.
+pub const ROUTE_ON_PREFIX: &str =
+    "a Commit goes to the replicas of a segment only once every slot below it is chosen";
 
 /// The durable facts of one run.
 #[derive(Debug)]
@@ -338,7 +342,7 @@ impl Ledger {
     ) {
         if let Some(hole) = (0..slot.0).find(|s| !self.chosen.contains_key(&Slot(*s))) {
             panic!(
-                "{ROUTE_TRUE}: {who} routed slot {} while slot {hole} below it is not chosen",
+                "{ROUTE_ON_PREFIX}: {who} routed slot {} while slot {hole} below it is not chosen",
                 slot.0
             );
         }
