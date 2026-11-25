@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::journal::Command;
 use crate::journal::state::JournalState;
+use crate::journal::{Command, ReplicaSet, SegmentId};
 use crate::membership::{AcceptorConfig, ProxyId};
 use crate::types::{Ballot, NodeId, Slot};
 
@@ -100,6 +100,17 @@ pub enum Audience {
     /// catch-up), which reaches spares and removed members too so every
     /// replica keeps the chosen log.
     Learners,
+    /// The replicas of one segment (R6 of `docs/architecture/04-7-segments.md`
+    /// §4.7): the `Commit` of a slot of `segment`, which a leader sends once
+    /// its own fold applied every slot below it (R4d), so the segment is the
+    /// true one. The [`crate::ReplicaNode`]s it names are outside the pool;
+    /// the driver's deployment map resolves each id as it resolves a node.
+    ReplicasOf {
+        /// The segment of the slot.
+        segment: SegmentId,
+        /// The replicas that keep it.
+        replicas: ReplicaSet,
+    },
 }
 
 impl Audience {
@@ -169,6 +180,12 @@ impl Audience {
                 .filter(|p| Some(*p) != me)
                 .collect(),
             Audience::Learners => pool.iter().copied().filter(|p| Some(*p) != me).collect(),
+            Audience::ReplicasOf { replicas, .. } => replicas
+                .members()
+                .iter()
+                .copied()
+                .filter(|p| Some(*p) != me)
+                .collect(),
         }
     }
 
@@ -177,7 +194,10 @@ impl Audience {
     pub fn proxy(&self) -> Option<ProxyId> {
         match self {
             Audience::Proxy(proxy) => Some(*proxy),
-            Audience::Node(_) | Audience::AcceptorsOf { .. } | Audience::Learners => None,
+            Audience::Node(_)
+            | Audience::AcceptorsOf { .. }
+            | Audience::Learners
+            | Audience::ReplicasOf { .. } => None,
         }
     }
 }

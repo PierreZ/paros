@@ -79,8 +79,9 @@ fn a_jumped_fold_behind_its_truncation_does_not_hold_the_base_records() {
         next_seq: Seq(1),
         first_seq: Seq(0),
         segment: crate::journal::Segment::default(),
+        replicas: None,
     };
-    assert_eq!(r.trim_to(Slot(2), base), base);
+    assert_eq!(r.trim_to(Slot(2), base.clone()), base);
     r.learn(Slot(2), &commands[2]);
     r.advance(&mut Vec::new());
     assert_eq!(r.journal().first_seq, Seq(0));
@@ -144,6 +145,7 @@ fn a_truncation_below_a_jumped_floor_keeps_the_floor() {
         next_seq: Seq(2),
         first_seq: Seq(0),
         segment: crate::journal::Segment::default(),
+        replicas: None,
     };
     let commands = [
         claim(),
@@ -402,6 +404,7 @@ fn a_trim_point_below_the_fold_keeps_the_own_state() {
         next_seq: Seq(50),
         first_seq: Seq(40),
         segment: crate::journal::Segment::default(),
+        replicas: None,
     };
     let base = r.trim_to(Slot(2), peer);
     assert_eq!(
@@ -573,7 +576,7 @@ fn a_jump_past_a_roll_carries_the_tail_segment() {
         }
     );
     let mut r = replica(&commands[..1]);
-    assert_eq!(r.trim_to(Slot(3), at_three), at_three);
+    assert_eq!(r.trim_to(Slot(3), at_three.clone()), at_three);
     r.learn(Slot(3), &commands[3]);
     r.learn(Slot(4), &commands[4]);
     r.advance(&mut Vec::new());

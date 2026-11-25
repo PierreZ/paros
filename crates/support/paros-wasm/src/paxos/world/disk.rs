@@ -226,13 +226,13 @@ impl Disk {
                 self.hard_state.chosen_index = Some(*slot);
             }
             WriteOp::Truncate { first, sealed } => {
-                self.seal(*first, *sealed);
+                self.seal(*first, sealed.clone());
                 self.first_slot = self.first_slot.max(*first);
                 self.records.retain(|slot, _| *slot >= self.first_slot);
                 self.faulty.retain(|slot, _| *slot >= self.first_slot);
             }
             WriteOp::TrimmedTo { point, state } => {
-                self.seal(*point, *state);
+                self.seal(*point, state.clone());
                 let boundary = Slot(point.0.saturating_sub(1));
                 if self.hard_state.chosen_index.is_none_or(|ci| ci < boundary) {
                     self.hard_state.chosen_index = Some(boundary);
@@ -302,7 +302,7 @@ impl Storage for Disk {
     }
 
     fn sealed_state(&self) -> JournalState {
-        self.sealed
+        self.sealed.clone()
     }
 
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {

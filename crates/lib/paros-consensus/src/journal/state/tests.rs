@@ -332,47 +332,88 @@ fn a_state_out_of_order_is_not_well_formed() {
             id: SegmentId(2),
             start: Slot(5),
         },
-        ..good
+        ..good.clone()
     };
     assert!(tail.is_well_formed());
     let bad = [
         JournalState {
             first_seq: Seq(1),
-            ..good
+            ..good.clone()
         },
-        JournalState { term: 1, ..good },
+        JournalState {
+            term: 1,
+            ..good.clone()
+        },
         JournalState {
             leader: Some(LeaderUuid(1)),
-            ..good
+            ..good.clone()
         },
         JournalState {
             leader: Some(LeaderUuid::UNSET),
             term: 1,
-            ..good
+            ..good.clone()
         },
         JournalState {
             segment: Segment {
                 id: SegmentId(1),
                 start: Slot(0),
             },
-            ..good
+            ..good.clone()
         },
         JournalState {
             segment: Segment {
                 id: SegmentId(0),
                 start: Slot(3),
             },
-            ..good
+            ..good.clone()
         },
         JournalState {
             segment: Segment {
                 id: SegmentId(4),
                 start: Slot(3),
             },
-            ..good
+            ..good.clone()
         },
     ];
     for state in bad {
         assert!(!state.is_well_formed(), "{state:?}");
     }
+}
+
+/// A valid `Roll` that names replicas gives them to the segment it opens; a
+/// valid `Roll` with none keeps the set before it (D4); a `Roll` that is not
+/// valid changes no set.
+#[test]
+fn a_roll_names_or_keeps_the_replicas_of_the_tail() {
+    use crate::journal::segment::{ReplicaSet, Roll, SegmentId};
+    let roll = |next: u64, replicas: Option<ReplicaSet>| {
+        Command::Roll(Roll {
+            next: SegmentId(next),
+            replicas,
+        })
+    };
+    let named = ReplicaSet::new([NodeId(3), NodeId(4)]);
+    let other = ReplicaSet::new([NodeId(5)]);
+    let mut state = JournalState::default();
+    assert_eq!(state.replicas, None);
+    let _ = state.apply(
+        WriterMode::Multi,
+        Slot(0),
+        &roll(1, Some(named.clone())),
+        |_| None,
+    );
+    assert_eq!(state.replicas.as_ref(), Some(&named));
+    let _ = state.apply(WriterMode::Multi, Slot(1), &roll(2, None), |_| None);
+    assert_eq!(
+        state.replicas.as_ref(),
+        Some(&named),
+        "a Roll with no set keeps it"
+    );
+    let _ = state.apply(WriterMode::Multi, Slot(2), &roll(2, Some(other)), |_| None);
+    assert_eq!(
+        state.replicas.as_ref(),
+        Some(&named),
+        "an ignored Roll names nothing"
+    );
+    assert_eq!(state.segment.id, SegmentId(2));
 }

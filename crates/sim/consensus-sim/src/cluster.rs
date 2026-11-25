@@ -1859,7 +1859,7 @@ impl Cluster {
             .expect("a leader is up")
             .replica()
             .journal();
-        let entry = self.client.write(journal, cx);
+        let entry = self.client.write(&journal, cx);
         let delegation = match cx.rng().below(10) {
             0..=5 => Delegation::Auto,
             6..=7 if self.flavor.proxies > 0 => {
@@ -1935,7 +1935,9 @@ impl Cluster {
             .proposer()
             .recovery()
             .is_some_and(|recovery| recovery.pending().next().is_some());
-        let tail = node.replica().journal().segment;
+        let boundary_base = node.replica().journal();
+        let boundary_replicas = boundary_base.replicas.clone();
+        let tail = boundary_base.segment;
         let set = node.matchmaker_set().cloned();
         let result = node.roll(replicas.clone());
         let accepted = matches!(result, RollResult::Accepted { .. });
@@ -1950,7 +1952,19 @@ impl Cluster {
                 sealed: tail.id,
                 start: tail.start,
                 end: Slot(slot.0 + 1),
-                opening: paros_consensus::journal::Opening { replicas },
+                opening: paros_consensus::journal::Opening {
+                    // The mutant guesses the boundary from the leader's fold
+                    // at the proposal, before the Roll is chosen.
+                    boundary: paros_consensus::journal::JournalState {
+                        segment: paros_consensus::journal::Segment {
+                            id: *next,
+                            start: Slot(slot.0 + 1),
+                        },
+                        replicas: replicas.clone().or(boundary_replicas),
+                        ..boundary_base
+                    },
+                    replicas,
+                },
             };
             for to in set.members() {
                 cx.send(Envelope {
@@ -2378,7 +2392,7 @@ impl Client {
     /// The next write, against the `journal` that the leader folds.
     fn write(
         &mut self,
-        journal: paros_consensus::journal::state::JournalState,
+        journal: &paros_consensus::journal::state::JournalState,
         cx: &mut Cx<'_, Cluster>,
     ) -> Entry {
         let draw = cx.rng().below(10);
@@ -2621,6 +2635,25 @@ fn route(
                 to: Party::Proxy(proxy),
                 msg: Wire::Paxos(msg.clone()),
             });
+            continue;
+        }
+        // The replicas of a segment are replica sites, or nodes of the pool
+        // when a `Roll` named nodes.
+        if let Audience::ReplicasOf {
+            replicas: named, ..
+        } = audience
+        {
+            for to in named.members().iter().filter(|to| Some(**to) != me) {
+                let to = if replicas.contains(to) {
+                    Party::Replica(*to)
+                } else {
+                    Party::Node(*to)
+                };
+                out.push(Envelope {
+                    to,
+                    msg: Wire::Paxos(msg.clone()),
+                });
+            }
             continue;
         }
         if let Audience::Node(to) = audience

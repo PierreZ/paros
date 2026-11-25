@@ -797,6 +797,7 @@ impl ReplicaNode {
         {
             return Err(JoinRefusal::Boundary);
         }
+        let joined = boundary.segment.id;
         self.replica.unbind_segment();
         self.trim_to(start, boundary);
         self.replica.bind_segment();
@@ -805,7 +806,7 @@ impl ReplicaNode {
             "a join lands the floor on the segment's start"
         );
         assert!(
-            self.replica.segment_bound() == Some(boundary.segment.id),
+            self.replica.segment_bound() == Some(joined),
             "a joined replica keeps the segment it joined"
         );
         self.assert_invariants();

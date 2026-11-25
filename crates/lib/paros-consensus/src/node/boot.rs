@@ -167,6 +167,7 @@ impl ColocatedNode {
             pending_gc_requests: Vec::new(),
             publisher: Publisher::for_set(matchmakers.as_ref()),
             rolls_noted: Slot(0),
+            segment_routed: Slot(0),
             pending_segment_publishes: Vec::new(),
             matchmakers,
             matchmaker_pool,
@@ -195,6 +196,9 @@ impl ColocatedNode {
             );
         }
         self.note_rolls_at_boot();
+        // A rebooted node routes nothing it folded before: it is no leader
+        // yet, and a replica pulls what it missed.
+        self.segment_routed = self.replica.folded();
         assert!(
             self.rolls_noted == self.replica.folded(),
             "the boot notes every Roll of the retained fold"

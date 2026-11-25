@@ -78,7 +78,9 @@
 //! own ordering (`first_seq <= next_seq`) and its monotonicity are pinned at
 //! every transition.
 
-use crate::journal::{Command, Control, Entry, LeaderUuid, Roll, Segment, SegmentId, Seq};
+use crate::journal::{
+    Command, Control, Entry, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
+};
 use crate::types::Slot;
 
 /// Who may write a journal (`docs/architecture/02-data-plane.md` §2, decided on
@@ -100,7 +102,7 @@ pub enum WriterMode {
 /// The per-journal control state (#204, #241): who may write, and where the
 /// journal's dense positions stand. Folded from the log in slot order; the
 /// same prefix folds to the same state on every node.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournalState {
     /// The leader uuid that may write in the current term, `None` until the
@@ -121,6 +123,17 @@ pub struct JournalState {
     /// ever chosen in it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub segment: Segment,
+    /// The replicas of the tail segment that the last valid `Roll` naming a
+    /// set named (R6, D4 of §4.7): a `Roll` with no set keeps the set of the
+    /// segment before it. `None` until a `Roll` named one: the replicas of
+    /// the first segment, which the bootstrap configuration names
+    /// ([`crate::contract::Config::segment_replicas`]), keep every segment
+    /// until then. A function of the chosen prefix like the rest of the
+    /// state, so the floor seals it and a trim-point jump carries it: a
+    /// leader routes the `Commit` of a slot to the replicas of its segment
+    /// from its own fold (R4c, R4d), never from the chain.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub replicas: Option<ReplicaSet>,
 }
 
 /// What a client learns of a journal's state (#241): the [`JournalState`]
@@ -231,7 +244,7 @@ impl JournalState {
                 "a multi-writer journal never has a leader"
             );
         }
-        let before = *self;
+        let before = self.clone();
         let outcome = self.judge(mode, slot, command, accepted_at);
         self.assert_mode(mode, &outcome);
         self.assert_transition(&before, slot, &outcome);
@@ -442,6 +455,13 @@ impl JournalState {
         }
         let before = self.segment;
         self.segment = before.rolled_at(slot);
+        if let Some(named) = &roll.replicas {
+            self.replicas = Some(named.clone());
+        }
+        assert!(
+            roll.replicas.is_none() || self.replicas == roll.replicas,
+            "a valid Roll that names replicas gives them to the segment it opens"
+        );
         assert!(
             self.segment.id == next,
             "a valid Roll opens the segment it names"

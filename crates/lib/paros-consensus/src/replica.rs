@@ -257,7 +257,7 @@ impl Replica {
             chosen_index,
             advance_pending: false,
             floor,
-            base: sealed,
+            base: sealed.clone(),
             folded: floor,
             state: sealed,
             history: BTreeMap::new(),
@@ -569,7 +569,7 @@ impl Replica {
             self.state.first_seq <= self.state.next_seq,
             "the head's positions are ordered"
         );
-        self.state
+        self.state.clone()
     }
 
     /// The journal state at the retention floor (sealed with the last
@@ -585,7 +585,7 @@ impl Replica {
             self.base.first_seq <= self.state.first_seq,
             "the base lies behind the head"
         );
-        self.base
+        self.base.clone()
     }
 
     /// The first slot the fold has not applied.
@@ -628,6 +628,24 @@ impl Replica {
             );
         }
         hole
+    }
+
+    /// The journal state the fold judged `slot` against: the state after
+    /// every slot below it. Its tail segment is the segment of `slot`, and
+    /// its replicas name who keeps it (R6), both functions of the chosen
+    /// prefix below `slot` (R4d).
+    ///
+    /// # Panics
+    ///
+    /// If `slot` lies below the floor or past the fold.
+    #[must_use]
+    pub fn journal_at(&self, slot: Slot) -> JournalState {
+        let state = self.state_at(slot);
+        assert!(
+            state.segment.start <= slot,
+            "a slot lies inside the segment it was judged in"
+        );
+        state
     }
 
     /// Each `Roll` this fold applied at slot `from` or later, in slot
@@ -784,7 +802,7 @@ impl Replica {
         self.history
             .range(..slot)
             .next_back()
-            .map_or(self.base, |(_, state)| *state)
+            .map_or_else(|| self.base.clone(), |(_, state)| state.clone())
     }
 
     /// The highest slot a decided truncation lets this replica drop. `None`
@@ -1186,8 +1204,8 @@ impl Replica {
             slot == self.folded,
             "the journal fold advances one slot at a time"
         );
-        let before = self.state;
-        let mut state = self.state;
+        let before = self.state.clone();
+        let mut state = self.state.clone();
         let outcome = state.apply(self.mode, slot, command, |seq| self.accepted_at(log, seq));
         self.state = state;
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
@@ -1210,7 +1228,7 @@ impl Replica {
             self.truncate_due = true;
         }
         if self.state != before {
-            self.history.insert(slot, self.state);
+            self.history.insert(slot, self.state.clone());
         }
         if outcome != Outcome::Noop {
             self.outcomes.insert(slot, outcome.clone());
@@ -1430,7 +1448,7 @@ impl Replica {
             "a truncation drops no record at or past first_seq"
         );
         let chosen_index = self.chosen_index;
-        self.drop_prefix(first, base);
+        self.drop_prefix(first, base.clone());
         self.advance_pending = self.chosen.contains(&self.first_unchosen());
         assert!(
             self.floor == first,
@@ -1470,11 +1488,11 @@ impl Replica {
             self.history.clear();
             self.outcomes.clear();
             self.positions.clear();
-            self.state = sealed;
+            self.state = sealed.clone();
             self.folded = point;
             sealed
         };
-        self.drop_prefix(point, base);
+        self.drop_prefix(point, base.clone());
         self.refold(log);
         self.advance_pending = self.chosen.contains(&self.first_unchosen());
         self.drop_past_end();

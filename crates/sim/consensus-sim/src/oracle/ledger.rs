@@ -50,7 +50,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_consensus::journal::{
-    Chain, Command, JournalView, Outcome, Segment, SegmentId, command_fingerprint,
+    Chain, Command, JournalView, Outcome, ReplicaSet, Segment, SegmentId, command_fingerprint,
 };
 use paros_consensus::{Ballot, NodeId, Slot};
 
@@ -310,6 +310,26 @@ impl Ledger {
         }
     }
 
+    /// The journal view after the chosen `Roll` at `slot`, and the replicas
+    /// the chosen log names for the segment it opens: those of the last
+    /// valid `Roll` at or below `slot` that named a set. The caller knows
+    /// every slot up to `slot` is chosen.
+    fn boundary_after(&mut self, slot: Slot) -> (JournalView, Option<ReplicaSet>) {
+        let (chosen, commands) = (&self.chosen, &self.commands);
+        let lookup = |s: Slot| chosen.get(&s).and_then(|(_, print)| commands.get(print));
+        let view = self.journal.view_after(slot, lookup);
+        let mut replicas = None;
+        for s in 0..=slot.0 {
+            let (_, outcome) = self.journal.judge(Slot(s), lookup);
+            if let (Outcome::Rolled(_), Some(Command::Roll(roll))) = (outcome, lookup(Slot(s)))
+                && roll.replicas.is_some()
+            {
+                replicas.clone_from(&roll.replicas);
+            }
+        }
+        (view, replicas)
+    }
+
     /// Oracle 8: the chain that `who` holds is the one the chosen log gives.
     ///
     /// # Panics
@@ -343,6 +363,16 @@ impl Ledger {
                         "{CHAIN_TRUE}: {who} holds segment {} opened with {opening:?}, and the chosen Roll names {:?}",
                         id.0,
                         roll.replicas,
+                    );
+                    let at = Slot(record.start.0 - 1);
+                    let (view, replicas) = self.boundary_after(at);
+                    assert!(
+                        opening.boundary.view() == view
+                            && opening.boundary.segment == expected
+                            && opening.boundary.replicas == replicas,
+                        "{CHAIN_TRUE}: {who} holds segment {} from the boundary {:?}, and the chosen log folds to {view:?} with replicas {replicas:?} in segment {expected:?}",
+                        id.0,
+                        opening.boundary,
                     );
                 }
             }
