@@ -804,12 +804,15 @@ impl ColocatedNode {
     /// is judged and applied by every node when the slot enters its contiguous
     /// chosen prefix (see `ColocatedNode::advance_chosen_index`).
     ///
+    /// A [`Control`] cannot name a `Roll`: the cut is
+    /// [`Command::Roll`](crate::journal::Command::Roll), proposed only by
+    /// [`ColocatedNode::roll`], which refuses it on a deployment with no
+    /// matchmakers.
+    ///
     /// # Panics
     ///
-    /// If `control` is a [`Control::Roll`]: a `Roll` goes through
-    /// [`ColocatedNode::roll`], which refuses it on a deployment with no
-    /// matchmakers. Also if an internal invariant is broken (a programmer
-    /// error, never an operating condition).
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control)))]
     pub fn propose_control(&mut self, control: Control) -> ProposeResult {
         self.assert_landed();
@@ -834,31 +837,26 @@ impl ColocatedNode {
     ///
     /// # Panics
     ///
-    /// If `control` is a [`Control::Roll`] (see
-    /// [`ColocatedNode::propose_control`]), if `delegation` names a proxy the
-    /// deployment does not have, or if an internal invariant is broken (a
-    /// programmer error, never an operating condition).
+    /// If `delegation` names a proxy the deployment does not have, or if an
+    /// internal invariant is broken (a programmer error, never an operating
+    /// condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control, delegation = ?delegation)))]
     pub fn propose_control_in(
         &mut self,
         control: Control,
         delegation: Delegation,
     ) -> ProposeResult {
+        self.propose_command_at(Command::Control(control), delegation)
+    }
+
+    /// The leader half of [`ColocatedNode::propose_control_in`] and of
+    /// [`ColocatedNode::roll`]: open a round for a command that is not a
+    /// client write.
+    fn propose_command_at(&mut self, command: Command, delegation: Delegation) -> ProposeResult {
         assert!(
-            !matches!(control, Control::Roll { .. }),
-            "a Roll is proposed by ColocatedNode::roll, which refuses it without matchmakers"
+            command.write().is_none(),
+            "a client write goes through propose"
         );
-        self.propose_control_at(control, delegation)
-    }
-
-    /// [`ColocatedNode::propose_control_in`] for any control command, a
-    /// `Roll` too: [`ColocatedNode::roll`] checks a `Roll` before it comes
-    /// here.
-    fn propose_control_unchecked(&mut self, control: Control) -> ProposeResult {
-        self.propose_control_at(control, Delegation::Auto)
-    }
-
-    fn propose_control_at(&mut self, control: Control, delegation: Delegation) -> ProposeResult {
         if self.role != NodeRole::Leader {
             assert!(
                 self.proposer.rounds().is_empty(),
@@ -871,7 +869,7 @@ impl ColocatedNode {
             return ProposeResult::NotLeader(None);
         }
         let marks = self.durable_marks();
-        let result = self.open_proposal(None, delegation, Command::Control(control));
+        let result = self.open_proposal(None, delegation, command);
         self.assert_marks_monotone(marks);
         result
     }

@@ -9,5 +9,5 @@ pub mod state;
 
 pub use command::{Command, Control, Entry, command_fingerprint};
 pub use ids::{JournalId, JournalIdentifier, LeaderUuid, Seq, TenantId};
-pub use segment::{ReplicaSet, ReplicaSetError, Segment, SegmentId};
+pub use segment::{ReplicaSet, ReplicaSetError, Roll, Segment, SegmentId};
 pub use state::{JournalState, JournalView, Outcome, WriterMode};

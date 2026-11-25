@@ -553,9 +553,9 @@ fn a_chosen_slot_with_no_record_fails_its_read() {
 /// whole log does: the same end for each segment.
 #[test]
 fn a_jump_past_a_roll_carries_the_tail_segment() {
-    use crate::journal::{Outcome, Segment, SegmentId};
+    use crate::journal::{Outcome, Roll, Segment, SegmentId};
     let roll = |next| {
-        Command::Control(Control::Roll {
+        Command::Roll(Roll {
             next: SegmentId(next),
             replicas: None,
         })

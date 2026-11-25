@@ -4,7 +4,8 @@
 
 use super::reconfigure::deployed_cluster;
 use super::*;
-use crate::journal::{Outcome, ReplicaSet, Segment, SegmentId};
+use crate::contract::limits::Limits;
+use crate::journal::{Command, Outcome, ReplicaSet, Roll, Segment, SegmentId};
 use crate::node::{RollRefusal, RollResult};
 
 /// A plain deployment refuses a roll (D5), and a follower of a matchmaker
@@ -24,19 +25,6 @@ fn a_roll_is_refused_without_matchmakers_and_off_the_leader() {
 
     let (mut nodes, _) = deployed_cluster();
     assert_eq!(nodes[1].roll(None), RollResult::NotLeader(Some(NodeId(0))));
-}
-
-/// `propose_control` never carries a `Roll`: it would skip the refusal of a
-/// plain deployment.
-#[test]
-#[should_panic(expected = "a Roll is proposed by ColocatedNode::roll")]
-fn a_roll_through_propose_control_is_a_driver_bug() {
-    let mut nodes = cluster::<3>();
-    make_leader(&mut nodes, 0);
-    let _ = nodes[0].propose_control(Control::Roll {
-        next: SegmentId(1),
-        replicas: None,
-    });
 }
 
 /// The leader rolls twice without waiting (no pause): the second `Roll`
@@ -80,4 +68,54 @@ fn every_node_folds_a_pipelined_pair_of_rolls_at_the_same_slots() {
         panic!("the leader admits a third roll");
     };
     assert_eq!(next, SegmentId(3));
+}
+
+/// A leader whose bounded recovery has not yet opened the round of a
+/// recovered `Roll` still counts it in the tail (R4c): the values its
+/// Phase 1 recovered hold it until the pump proposes them again.
+#[test]
+fn the_tail_counts_a_roll_that_a_paged_recovery_has_not_opened_yet() {
+    let limits = Limits {
+        recovery_page: 1,
+        ..Limits::DEFAULT
+    };
+    let mut candidate = ColocatedNode::new(&MemStorage::for_node(1, &[0, 1, 2]), limits);
+    campaign(&mut candidate);
+    let ballot = candidate.ballot();
+    let _ = drain(&mut candidate);
+
+    let mut storage = MemStorage::for_node(0, &[0, 1, 2]);
+    let roll = Command::Roll(Roll {
+        next: SegmentId(1),
+        replicas: None,
+    });
+    for (slot, command) in [ucmd(7, 0, 1), roll, ucmd(7, 1, 2)].into_iter().enumerate() {
+        let slot = Slot(u64::try_from(slot).expect("fits"));
+        storage.accepted.insert(slot, (Ballot::zero(), command));
+    }
+    let mut acceptor = ColocatedNode::new(&storage, Limits::DEFAULT);
+    acceptor.step(Message::Prepare {
+        reply_to: NodeId(1),
+        ballot,
+        from_slot: Slot(0),
+        config: None,
+    });
+    for (_, message) in drain(&mut acceptor) {
+        if matches!(message, Message::Promise { .. }) {
+            candidate.step(message);
+        }
+    }
+    assert!(candidate.is_leader(), "one promise and its own elect it");
+    let _ = drain(&mut candidate);
+
+    let recovery = candidate
+        .proposer
+        .recovery()
+        .expect("a paged recovery stays open");
+    assert!(
+        recovery.recovered().contains_key(&Slot(1)),
+        "the Roll waits in the recovery, not in a round"
+    );
+    assert!(!candidate.proposer.rounds().contains_key(&Slot(1)));
+    assert_eq!(candidate.tail_segment(), SegmentId(1));
 }

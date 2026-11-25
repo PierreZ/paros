@@ -270,8 +270,12 @@ fn tlc_accepts_the_matchmaker_walks() {
     accepts(Spec::Matchmaker, &Flavor::matchmakers());
 }
 
-/// The walks that roll: a `Roll` is a command of the model like any other
-/// (`specs/tla/multi-paxos-roll/`), so the matchmaker spec follows them.
+/// The walks that roll: the matchmaker spec follows them with each `Roll` as
+/// an opaque fresh command, so it checks the votes and choices around the
+/// cut. The node model has no segments: the rule of one end for each segment
+/// (`SegsAgree` of `specs/tla/multi-paxos-roll/`) is judged on these walks by
+/// the journal oracle (`JOURNAL_FOLD`), and the trace model gains the fold of
+/// the `Roll` with the routing of a later step (step 5 of the plan).
 #[test]
 fn tlc_accepts_the_segment_walks() {
     accepts(Spec::Matchmaker, &Flavor::segments());

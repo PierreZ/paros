@@ -3,7 +3,7 @@
 use crate::types::{FNV_OFFSET, Fingerprint, Value, Weigh, fnv1a};
 
 use super::ids::{LeaderUuid, Seq};
-use super::segment::{ReplicaSet, SegmentId};
+use super::segment::{ReplicaSet, Roll};
 
 /// A journal **`Write`** as it is decided into one slot (#204): the batch
 /// `records`, to be accepted at position `seq` iff `leader` is the
@@ -90,28 +90,10 @@ pub enum Control {
     /// consumes a slot and no position. Applying it advances the applied prefix
     /// and nothing else.
     Noop,
-    /// **Roll** the log to its next segment (`docs/architecture/04-7-segments.md`
-    /// §4.7, R2): a decided cut. Judged at apply in slot order: it is valid
-    /// when `next` is the tail segment plus one, and a valid `Roll` chosen at
-    /// slot `s` ends the tail at `s + 1` and opens `next` there. Any other
-    /// `Roll` changes nothing. Only [`crate::ColocatedNode::roll`] proposes
-    /// one, and only on a deployment with matchmakers (D5), so a plain
-    /// deployment never decides one (R10).
-    ///
-    /// Like a `Noop` it consumes a slot and no position, and the consensus
-    /// paths carry it opaquely.
-    Roll {
-        /// The segment this `Roll` opens: valid only as the tail plus one.
-        next: SegmentId,
-        /// Where `next` lives (D4): `None` keeps the replicas of the segment
-        /// the `Roll` ends, `Some` names new ones. The fold judges `next`
-        /// alone; the replicas are carried for the routing of later steps.
-        replicas: Option<ReplicaSet>,
-    },
 }
 
 /// What a single log slot decides: a client's [`Entry`] (a journal `Write`)
-/// or a paros-interpreted [`Control`] command.
+/// a paros-interpreted [`Control`] command, or a [`Roll`].
 ///
 /// This is the per-slot value the whole protocol carries (in `Accept`,
 /// `Promise`, `Commit`, catch-up, and the durable accepted log). Only the
@@ -124,6 +106,10 @@ pub enum Command {
     Write(Entry),
     /// A paros-interpreted control command (interpreted only at apply time).
     Control(Control),
+    /// The cut of the log into its next segment (§4.7, R2), proposed only by
+    /// [`crate::ColocatedNode::roll`]. Its own variant, not a [`Control`], so
+    /// that a driver that forwards a client's `Control` can never propose one.
+    Roll(Roll),
 }
 
 impl Fingerprint for Command {
@@ -150,7 +136,7 @@ impl Weigh for Command {
                 );
                 bytes
             }
-            Self::Control(_) => 0,
+            Self::Control(_) | Self::Roll(_) => 0,
         }
     }
 }
@@ -188,7 +174,7 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             // `None` folds as the unset uuid, which no `new` can be.
             fnv1a(hash, &old.map_or(0, |old| old.0).to_le_bytes())
         }
-        Command::Control(Control::Roll { next, replicas }) => {
+        Command::Roll(Roll { next, replicas }) => {
             let hash = fnv1a(FNV_OFFSET, &[4]);
             let mut hash = fnv1a(hash, &next.0.to_le_bytes());
             // `None` and `Some` fold apart: the count of a set is never zero.
@@ -208,7 +194,7 @@ impl Command {
     pub fn write(&self) -> Option<&Entry> {
         match self {
             Command::Write(entry) => Some(entry),
-            Command::Control(_) => None,
+            Command::Control(_) | Command::Roll(_) => None,
         }
     }
 }

@@ -222,6 +222,13 @@ impl Replica {
         sealed: JournalState,
         records: &BTreeMap<Slot, (Ballot, Command)>,
     ) -> Self {
+        // The pair of the seal (`WriteOp::Truncate`, `WriteOp::TrimmedTo`):
+        // the sealed tail segment opened at a `Roll` below the floor, or is
+        // the first segment.
+        assert!(
+            sealed.segment.start <= floor,
+            "the sealed tail segment opens at or below the sealed floor"
+        );
         let chosen: BTreeSet<Slot> = records
             .keys()
             .filter(|slot| chosen_index.is_some_and(|ci| **slot <= ci))

@@ -46,6 +46,11 @@ pub trait Storage {
     /// restart after truncation reaches the state of a node that never
     /// restarted. A storage that has never truncated has nothing sealed: it
     /// returns the journal's birth, `JournalState::default()`.
+    ///
+    /// Every field comes back as it was written, the tail segment
+    /// (`JournalState::segment`) too: a node that lost it would fold the
+    /// next `Roll` another way than its peers, and a segment would have two
+    /// ends. The tail opens at or below [`Storage::first_slot`].
     fn sealed_state(&self) -> JournalState;
 
     /// The **recoverable faulty entries** the boot scan classified (Stage 8,

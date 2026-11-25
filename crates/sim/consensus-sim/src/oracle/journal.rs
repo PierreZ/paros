@@ -102,7 +102,7 @@ impl JournalSpec {
     fn step(&mut self, slot: Slot, command: &Command) -> Outcome {
         match command {
             Command::Control(Control::Noop) => Outcome::Noop,
-            Command::Control(Control::Roll { next, .. }) => self.roll(slot, *next),
+            Command::Roll(roll) => self.roll(slot, roll.next),
             Command::Write(entry) => self.write(entry),
             Command::Control(Control::SetLeader { new, old }) => self.set_leader(*new, *old),
             Command::Control(Control::Truncate { leader, up_to }) => self.truncate(*leader, *up_to),
@@ -178,6 +178,7 @@ impl JournalSpec {
 #[cfg(test)]
 mod tests {
     use paros_consensus::Value;
+    use paros_consensus::journal::Roll;
 
     use super::*;
 
@@ -204,7 +205,7 @@ mod tests {
     }
 
     fn roll(next: u64) -> Command {
-        Command::Control(Control::Roll {
+        Command::Roll(Roll {
             next: SegmentId(next),
             replicas: None,
         })

@@ -117,6 +117,7 @@ fn applied_text(world: &World, node: u64) -> Vec<String> {
                 format!("{}:{}", slot.0, String::from_utf8_lossy(&entry.records[0]))
             }
             Command::Control(control) => format!("{}:{control:?}", slot.0),
+            Command::Roll(roll) => format!("{}:{roll:?}", slot.0),
         })
         .collect()
 }

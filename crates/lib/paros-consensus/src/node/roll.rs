@@ -1,13 +1,13 @@
 //! **The `Roll`** (`docs/architecture/04-7-segments.md` §4.7): a driver call
 //! that cuts the log into a new segment.
 //!
-//! [`ColocatedNode::roll`] proposes a [`Control::Roll`] to the tail segment
+//! [`ColocatedNode::roll`] proposes a [`Roll`] to the tail segment
 //! plus one. The judgement is the apply path's (R2, R3): the `Roll` takes
 //! effect only when the fold of the chosen prefix finds it valid, so a
 //! proposal that guessed the tail wrong changes nothing and costs one slot.
 //! The leader takes the tail from what it knows of the log (R4c): its own
-//! fold, the chosen slots above that fold, and the `Roll`s of its open rounds,
-//! which hold the values its Phase 1 recovered. It never takes it from the
+//! fold, the chosen slots above that fold, the `Roll`s of its open rounds,
+//! and the values its Phase 1 recovered that it has not proposed again. It never takes it from the
 //! chain at the matchmakers, which is behind the log.
 //!
 //! A roll needs matchmakers (D5): on a plain deployment it is refused, so a
@@ -17,8 +17,8 @@
 
 use std::collections::BTreeMap;
 
-use super::{ColocatedNode, NodeRole, ProposeResult};
-use crate::journal::{Command, Control, ReplicaSet, SegmentId};
+use super::{ColocatedNode, Delegation, NodeRole, ProposeResult};
+use crate::journal::{Command, ReplicaSet, Roll, SegmentId};
 use crate::types::{NodeId, Slot};
 
 /// The answer to [`ColocatedNode::roll`].
@@ -57,6 +57,20 @@ impl ColocatedNode {
     /// does a node that is not the leader. Nothing waits on the `Roll`: the
     /// leader goes on proposing above it (no pause).
     ///
+    /// ```
+    /// use paros_consensus::contract::MemStorage;
+    /// use paros_consensus::journal::JournalIdentifier;
+    /// use paros_consensus::node::{RollRefusal, RollResult};
+    /// use paros_consensus::{ColocatedNode, Config, Limits, NodeId};
+    ///
+    /// // Plain Multi-Paxos: no matchmakers, so no segment but the first.
+    /// let config = Config::new(NodeId(1), JournalIdentifier::UNSET).with_peers([NodeId(1)]);
+    /// let mut node = ColocatedNode::new(&MemStorage::new(config), Limits::DEFAULT);
+    /// node.campaign();
+    /// assert!(node.is_leader());
+    /// assert_eq!(node.roll(None), RollResult::Refused(RollRefusal::NoMatchmakers));
+    /// ```
+    ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
@@ -70,7 +84,8 @@ impl ColocatedNode {
         let next = self.tail_segment().successor();
         let tail = self.replica.journal().segment.id;
         assert!(next > tail, "a roll names a segment past the folded tail");
-        let result = self.propose_control_unchecked(Control::Roll { next, replicas });
+        let result =
+            self.propose_command_at(Command::Roll(Roll { next, replicas }), Delegation::Auto);
         let answer = match result {
             ProposeResult::NotLeader(hint) => RollResult::NotLeader(hint),
             ProposeResult::Accepted(slot) => {
@@ -87,9 +102,12 @@ impl ColocatedNode {
     }
 
     /// The tail segment as this node knows the log (R4c): the fold of its
-    /// chosen prefix, then each later `Roll` it knows chosen or holds in an
-    /// open round, in slot order, when it names the tail plus one. A guess
-    /// that is wrong costs a `Roll` the fold ignores, never safety.
+    /// chosen prefix, then each later `Roll` it knows, in slot order, when it
+    /// names the tail plus one ([`SegmentId::after`]). It knows a `Roll`
+    /// chosen, in an open round, or recovered by its Phase 1 and not yet
+    /// proposed again (a bounded recovery opens its rounds a page at a
+    /// time). A guess that is wrong costs a `Roll` the fold ignores, never
+    /// safety.
     pub(super) fn tail_segment(&self) -> SegmentId {
         let folded = self.replica.journal().segment.id;
         let after = self.replica.folded();
@@ -104,16 +122,22 @@ impl ColocatedNode {
             .iter()
             .filter(|(slot, _)| **slot >= after)
             .map(|(slot, round)| (*slot, round.command()));
-        // A chosen value wins over an open round at the same slot.
-        let mut later: BTreeMap<Slot, &Command> = open.collect();
+        let recovered = self
+            .proposer
+            .recovery()
+            .into_iter()
+            .flat_map(|recovery| recovery.recovered().range(after..))
+            .map(|(slot, command)| (*slot, command));
+        // A chosen value wins over an open round at the same slot, and an
+        // open round over a recovered value it has not proposed yet.
+        let mut later: BTreeMap<Slot, &Command> = recovered.collect();
+        later.extend(open);
         later.extend(chosen);
         let known = later.len();
         let mut tail = folded;
         for command in later.into_values() {
-            if let Command::Control(Control::Roll { next, .. }) = command
-                && *next == tail.successor()
-            {
-                tail = *next;
+            if let Command::Roll(roll) = command {
+                tail = tail.after(roll);
             }
         }
         assert!(

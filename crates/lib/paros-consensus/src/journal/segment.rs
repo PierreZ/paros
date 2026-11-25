@@ -1,6 +1,6 @@
 //! **Segments** (`docs/architecture/04-7-segments.md` §4.7): a segment is a
 //! range of slots of the log and the replicas that keep it, and it ends at a
-//! decided command, the [`Control::Roll`](crate::journal::Control::Roll).
+//! decided command, the [`Roll`].
 //!
 //! The log starts in segment [`SegmentId::FIRST`] at slot 0. A `Roll` chosen
 //! at slot `s` whose `next` is the tail segment plus one ends the tail at
@@ -25,6 +25,30 @@ impl SegmentId {
     /// The segment that holds slot 0.
     pub const FIRST: Self = Self(0);
 
+    /// The tail after `roll` when this is the tail: `roll.next` when it is
+    /// this segment plus one (a valid `Roll`, R2), and this segment for any
+    /// other `Roll`. The one rule of validity: the fold of the journal
+    /// ([`crate::journal::JournalState`]) and the leader's guess of the tail
+    /// both ask it.
+    ///
+    /// # Panics
+    ///
+    /// If the id is `u64::MAX` (see [`SegmentId::successor`]).
+    #[must_use]
+    pub fn after(self, roll: &Roll) -> Self {
+        let after = if roll.next == self.successor() {
+            roll.next
+        } else {
+            self
+        };
+        assert!(after >= self, "a Roll never moves the tail back");
+        assert!(
+            after == self || after == self.successor(),
+            "a Roll moves the tail by one segment at most"
+        );
+        after
+    }
+
     /// The segment after this one: the only `next` a `Roll` from this
     /// segment may name.
     ///
@@ -38,6 +62,29 @@ impl SegmentId {
         assert_eq!(next.0 - self.0, 1, "segment ids are dense");
         next
     }
+}
+
+/// **The cut** (R2): a command of the log that ends the tail segment and
+/// opens `next`. It is a [`Command::Roll`](crate::journal::Command::Roll),
+/// beside the client's `Write` and the `Control` commands, so no call that
+/// proposes a `Control` can carry it: only [`crate::ColocatedNode::roll`]
+/// proposes one, and it refuses on a deployment with no matchmakers (D5).
+/// A plain deployment so never decides one (R10).
+///
+/// Judged at apply in slot order: it is valid when `next` is the tail
+/// segment plus one ([`SegmentId::after`]), and a valid `Roll` chosen at
+/// slot `s` ends the tail at `s + 1` and opens `next` there. Any other
+/// `Roll` changes nothing. Like a `Noop` it consumes a slot and no position,
+/// and the consensus paths carry it opaquely.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Roll {
+    /// The segment this `Roll` opens: valid only as the tail plus one.
+    pub next: SegmentId,
+    /// Where `next` lives (D4): `None` keeps the replicas of the segment the
+    /// `Roll` ends, `Some` names new ones. The fold judges `next` alone; the
+    /// replicas are carried for the routing of later steps.
+    pub replicas: Option<ReplicaSet>,
 }
 
 /// Where the tail segment of the log stands, as the fold of the chosen prefix

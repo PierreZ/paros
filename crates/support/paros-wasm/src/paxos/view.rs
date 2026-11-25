@@ -65,7 +65,7 @@ pub fn value_text(command: &Command) -> String {
             Some(old) => format!("SetLeader {new} after {old}"),
             None => format!("SetLeader {new}"),
         },
-        Command::Control(Control::Roll { next, .. }) => format!("Roll to segment {}", next.0),
+        Command::Roll(roll) => format!("Roll to segment {}", roll.next.0),
     }
 }
 
@@ -79,7 +79,7 @@ pub fn control_kind(command: &Command) -> Option<String> {
         Command::Control(Control::Noop) => Some("noop".to_string()),
         Command::Control(Control::Truncate { .. }) => Some("truncate".to_string()),
         Command::Control(Control::SetLeader { .. }) => Some("set_leader".to_string()),
-        Command::Control(Control::Roll { .. }) => Some("roll".to_string()),
+        Command::Roll(_) => Some("roll".to_string()),
     }
 }
 

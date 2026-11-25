@@ -45,6 +45,7 @@ pub fn show(command: &Command) -> String {
     match command {
         Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0])),
         Command::Control(control) => format!("{control:?}"),
+        Command::Roll(roll) => format!("{roll:?}"),
     }
 }
 

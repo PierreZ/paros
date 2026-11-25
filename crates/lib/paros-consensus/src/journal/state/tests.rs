@@ -1,5 +1,7 @@
 use super::{JournalState, Outcome, WriterMode};
-use crate::journal::{Command, Control, Entry, LeaderUuid, ReplicaSet, Segment, SegmentId, Seq};
+use crate::journal::{
+    Command, Control, Entry, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
+};
 use crate::types::{NodeId, Slot, Value};
 
 fn write(leader: u128, seq: u64, records: &[&[u8]]) -> Command {
@@ -264,7 +266,7 @@ fn a_multi_writer_journal_with_a_leader_fails_its_mode() {
 }
 
 fn roll(next: u64) -> Command {
-    Command::Control(Control::Roll {
+    Command::Roll(Roll {
         next: SegmentId(next),
         replicas: None,
     })
@@ -307,7 +309,7 @@ fn a_roll_that_skips_or_repeats_a_segment_changes_nothing() {
 
 #[test]
 fn a_roll_is_judged_alike_under_both_writer_modes_and_with_new_replicas() {
-    let named = Command::Control(Control::Roll {
+    let named = Command::Roll(Roll {
         next: SegmentId(1),
         replicas: Some(ReplicaSet::new([NodeId(4), NodeId(5)])),
     });

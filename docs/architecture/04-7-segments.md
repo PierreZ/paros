@@ -13,8 +13,8 @@ This section is the desired state; the order of work is §6 of the plan. The mod
 `specs/tla/segment-roll/` (step 1, PR #1540 (segment-roll)), and `specs/tla/multi-paxos-roll/`
 puts the `Roll` on the Multi-Paxos model (step 3).
 
-**What is built (step 3).** `paros-consensus` has the cut: `Control::Roll` and the types of
-`journal/segment.rs` (`SegmentId`, `Segment`, `ReplicaSet`), the fold of R2 in
+**What is built (step 3).** `paros-consensus` has the cut: `Command::Roll` and the types of
+`journal/segment.rs` (`Roll`, `SegmentId`, `Segment`, `ReplicaSet`), the fold of R2 in
 `JournalState::apply` (`Outcome::Rolled`, `Outcome::RollIgnored`), and the driver call
 `ColocatedNode::roll` (`node/roll.rs`), refused with no matchmakers (D5) and with the tail of R4c.
 The tail segment is a field of `JournalState`, so it is sealed at the floor and carried by
@@ -58,8 +58,9 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   no replica set unless a `Roll` names it. A segment has an id, a start, an end once it is sealed, its replicas and a
   state: `Open`, `Sealed`, `Held`, `Offloaded`, `Trimmed`. The grid is not part of a segment: a
   grid belongs to a round (Matchmaker Paxos §4.2).
-- **R2. The cut is a command.** `Control::Roll { next, replicas: Option<..> }` is a control command of the
-  core, like `Noop`. Only the apply path reads it. It is valid when `next` is the tail segment
+- **R2. The cut is a command.** `Command::Roll(Roll { next, replicas: Option<..> })` is a command of the
+  core, beside `Write` and `Control`, so that no call that proposes a `Control` can carry it: only
+  `ColocatedNode::roll` proposes one. Only the apply path reads it. It is valid when `next` is the tail segment
   plus one. A valid `Roll` chosen at slot `s` ends the tail segment at `s + 1` and opens `next`
   at `s + 1`. A `Roll` that is not valid changes nothing. **Departure 1** (§4.7.4).
 - **R3. A node acts on the chosen prefix only.** A replica applies only the contiguous chosen

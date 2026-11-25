@@ -708,6 +708,19 @@ impl ColocatedNode {
                 self.proposer.next_slot() >= self.first_unchosen(),
                 "a leader's next slot never falls inside the chosen prefix"
             );
+            // The same bound past the contiguous prefix: a slot chosen at a
+            // lower ballot was accepted by a quorum that meets the leader's
+            // Phase-1 quorum, so it was reported and the allocator starts
+            // past it; one chosen at a higher ballot raised the promise. So
+            // a leader never opens a round, a `Roll` above all, at a slot
+            // it knows chosen (`ColocatedNode::roll` rests on it).
+            assert!(
+                self.replica
+                    .chosen()
+                    .last()
+                    .is_none_or(|slot| *slot < self.proposer.next_slot()),
+                "a leader's next slot lies past every slot it knows chosen"
+            );
         }
         assert!(
             self.proposer

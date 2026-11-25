@@ -133,6 +133,32 @@ impl<V> Recovery<V> {
         );
         self.end
     }
+
+    /// The values Phase 1 recovered that the pump has not handed out yet,
+    /// by slot: each lies at or past the cursor and below the end.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn recovered(&self) -> &BTreeMap<Slot, V> {
+        assert!(
+            self.recovered
+                .keys()
+                .next()
+                .is_none_or(|first| *first >= self.cursor),
+            "a recovered value the pump handed out leaves the map"
+        );
+        assert!(
+            self.recovered
+                .keys()
+                .next_back()
+                .is_none_or(|last| *last < self.end),
+            "a recovered value lies inside the range"
+        );
+        &self.recovered
+    }
 }
 
 /// One step of a recovery pump ([`Proposer::recovery_next`]).

@@ -56,7 +56,7 @@
 //! and leadership changes consume a slot and no position: positions are
 //! dense.
 //!
-//! - **`Roll(next, replicas)`** ([`Control::Roll`], §4.7 of
+//! - **`Roll(next, replicas)`** ([`Command::Roll`], §4.7 of
 //!   `docs/architecture/04-7-segments.md`) moves the tail [`Segment`]: it is
 //!   valid iff `next` is the tail plus one, and then the tail becomes `next`,
 //!   from the slot after the `Roll` ([`Outcome::Rolled`]). Any other `Roll`
@@ -78,7 +78,7 @@
 //! own ordering (`first_seq <= next_seq`) and its monotonicity are pinned at
 //! every transition.
 
-use crate::journal::{Command, Control, Entry, LeaderUuid, Segment, SegmentId, Seq};
+use crate::journal::{Command, Control, Entry, LeaderUuid, Roll, Segment, SegmentId, Seq};
 use crate::types::Slot;
 
 /// Who may write a journal (`docs/architecture/02-data-plane.md` §2, decided on
@@ -116,7 +116,10 @@ pub struct JournalState {
     pub first_seq: Seq,
     /// The tail segment of the log: raised by every valid `Roll`. A client
     /// never sees it ([`JournalState::view`] drops it); it is the log's, not
-    /// the journal's.
+    /// the journal's. A sealed state written before segments existed reads
+    /// as the first segment, which is where its log stands: no `Roll` was
+    /// ever chosen in it.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub segment: Segment,
 }
 
@@ -207,8 +210,9 @@ impl JournalState {
     ///
     /// # Panics
     ///
-    /// If a transition breaks the state's own ordering or monotonicity (a
-    /// programmer error, never an operating condition).
+    /// If `slot` lies below the start of the tail segment (a fold never goes
+    /// back), or a transition breaks the state's own ordering or
+    /// monotonicity (a programmer error, never an operating condition).
     pub fn apply<'a>(
         &mut self,
         mode: WriterMode,
@@ -426,13 +430,14 @@ impl JournalState {
         }
     }
 
-    /// A `Roll` to `next`, chosen at `slot`: valid iff `next` is the tail
-    /// segment plus one (R2 of §4.7). The fold of the chosen prefix is the
+    /// A `Roll`, chosen at `slot`: valid iff its `next` is the tail segment
+    /// plus one (R2 of §4.7, [`SegmentId::after`]). The fold of the chosen prefix is the
     /// same on every node, so the first valid `Roll` of a segment is the
     /// same slot everywhere, and a segment has one end (R3; `SegsAgree` of
     /// `specs/tla/multi-paxos-roll/`).
-    fn apply_roll(&mut self, slot: Slot, next: SegmentId) -> Outcome {
-        if next != self.segment.id.successor() {
+    fn apply_roll(&mut self, slot: Slot, roll: &Roll) -> Outcome {
+        let next = self.segment.id.after(roll);
+        if next == self.segment.id {
             return Outcome::RollIgnored(self.segment);
         }
         let before = self.segment;
@@ -468,7 +473,7 @@ impl JournalState {
     ) -> Outcome {
         match (mode, command) {
             (_, Command::Control(Control::Noop)) => Outcome::Noop,
-            (_, Command::Control(Control::Roll { next, .. })) => self.apply_roll(slot, *next),
+            (_, Command::Roll(roll)) => self.apply_roll(slot, roll),
             (WriterMode::Single, Command::Write(entry)) if !entry.leader.is_set() => {
                 Outcome::WrongMode(self.view())
             }
@@ -632,7 +637,9 @@ impl JournalState {
     /// # Panics
     ///
     /// If `first_seq` passed `next_seq`, or a journal with a term has no
-    /// leader (or the reverse), or the unset uuid leads.
+    /// leader (or the reverse), or the unset uuid leads, or the tail segment
+    /// does not fit its id (the first segment starts at slot 0, and segment
+    /// `k` at slot `k` or later: each `Roll` before it took a slot).
     pub fn assert_invariants(&self) {
         assert!(
             self.first_seq <= self.next_seq,
@@ -645,6 +652,14 @@ impl JournalState {
         assert!(
             self.leader.is_none_or(LeaderUuid::is_set),
             "the unset uuid never leads"
+        );
+        assert!(
+            (self.segment.id == SegmentId::FIRST) == (self.segment.start == Slot(0)),
+            "only the first segment starts at slot 0"
+        );
+        assert!(
+            self.segment.start.0 >= self.segment.id.0,
+            "each segment before the tail ended at a Roll of its own slot"
         );
     }
 }

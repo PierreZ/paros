@@ -1860,7 +1860,7 @@ impl Cluster {
             .proposer()
             .rounds()
             .values()
-            .any(|round| matches!(round.command(), Command::Control(Control::Roll { .. })));
+            .any(|round| matches!(round.command(), Command::Roll(_)));
         let result = node.roll(replicas);
         sometimes!(
             open && matches!(result, RollResult::Accepted { .. }),
@@ -2306,8 +2306,12 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
         (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
             state.next_seq = Seq(state.next_seq.0 + 1);
         }
-        (Some(Mutant::CorruptTrimSegment), Message::TrimmedTo { state, .. }) => {
-            state.segment.id = state.segment.id.successor();
+        // A tail one segment ahead, shaped as a real one: segment `k + 1`
+        // opened at the slot after the start of `k`, still below the point.
+        (Some(Mutant::CorruptTrimSegment), Message::TrimmedTo { point, state, .. })
+            if state.segment.start < *point =>
+        {
+            state.segment = state.segment.rolled_at(state.segment.start);
         }
         _ => {}
     }
