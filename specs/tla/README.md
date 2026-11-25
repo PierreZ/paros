@@ -227,6 +227,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight; the faults of a storage (`Full`, `Lost`, `Unknown`) and their verdicts, with the list of the roles on a disk (`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)) | the generic `Driver` of `paros-host`, its `StorageError`, `Verdict` and `Storage::list` | `flight-rule/` | #1255 (journal sans-IO contract), done; #1414 (Storage lists the roles on a disk and reports typed faults) |
 | Rule 2 of the journal's sans-IO contract, every input is recorded: the time and the random draws in each input, one timer for each role (`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)) | not built (`paros-host`, #1413) | `recorded-inputs/` | #1413 (the time, the timers and the draws in each role) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
+| Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/` | step 1 of the segments in the core |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2521,3 +2522,88 @@ here), the ack of a registration (a registration is never lost), and the birth n
 that `Assign` carries (#1419 (the tenancy wrapper and paros-names), `journal-ids/`). The model
 does not check a machine reference that survives a restart: the reference of moonpool RPC changes
 at each incarnation.
+
+### `segment-roll/`: the `Roll` cut of a segment, for step 1 of the segments in the core
+
+The plan is `docs/archive/journal-design-a/prompt.md` (Pierre, 2026-11-24): segments come down
+into `paros-consensus` as an optional behaviour, and a segment ends at a decided command, the
+`Roll` (rules R2 to R5 of the prompt). The model is one Multi-Paxos log on one fixed set of three
+acceptors with majorities. A value is `0` (a `Noop`), `1` (a client command) or `k >= 2` (a
+`Roll` to segment `k`). A `Roll` to `k` is valid at the first slot of segment `k - 1` that holds
+one; it ends segment `k - 1` at its slot plus `Alpha`, and any other `Roll` changes nothing. Each
+segment has its own replicas (two in segment 1, so that two of them can disagree on an end). A
+replica applies the chosen prefix of its segment, a `Roll` sets its end, and a replica with an
+end writes the end and the next start into the chain (the add-only map of R5, here one map).
+
+Each proposal carries the segment that its leader believes for the slot (`k`), and the `Commit`
+of the slot goes to the replicas of that segment (`Sent`). The leader takes its belief from its
+chosen prefix and from its own proposals. It can be wrong: a later ballot can choose, below the
+slot, the `Roll` of an older ballot that the leader's Phase 1 did not see. TLC found this with
+three ballots, against the prediction of the prompt (the stop point of step 1): ballot 1 votes a
+`Roll` at slot 1 at one acceptor; ballot 2 does not see it, proposes commands at slots 1 and 2,
+and slot 2 is chosen and routed to segment 1; ballot 3 sees the vote of ballot 1 and chooses the
+`Roll` at slot 1, so slot 2 is in segment 2. No replica applies the wrong value (R3 holds), but a
+`Commit` goes to the wrong replicas.
+
+**The rule, `Route = "commit"`**: a leader sends the `Commit` of slot `s` only when it knows that
+every slot below `s` is chosen (R3 for the leader). Its belief is then a fold of a chosen prefix,
+so it is the true segment. The leader still pipelines its proposals; only the `Commit` waits.
+Two other candidates were compared (Pierre, 2026-11-24): the window of Paxos Made Simple §3
+(`Window`, a leader proposes at `s` only once the slots below `s + 1 - Alpha` are chosen; the
+`Roll` takes effect `Alpha` slots later), and a heal (a replica that holds its end answers
+"sealed" to a stray `Commit`, and the leader sends it again to the next segment). The window
+passes with `Alpha = 1`, which is no pipeline at all, and the check with `Alpha = 2` was too large
+to finish; the heal passed, but it adds a message and a repair. The rule at the `Commit` adds
+neither.
+
+**What the rule makes unneeded.** With `Route = "commit"`, the pause (R4a, `Barrier`) and the
+`Noop` of a hole (R4b, `HoleFill`) are no longer needed for routing: `barrier_off_commit`,
+`hole_any_commit` and `barrier_off_full` pass. They stay as switches, and the controls
+`barrier_off` and `hole_any` show what they do under `Route = "propose"`. Whether R4a stays in
+the design is Pierre's call (asked on 2026-11-25). R4b is the gap fill of the core today, so it
+stays.
+
+**The handoff** (DPaxos `relinquish_to`, Pierre 2026-11-24): the successor keeps the ballot and
+runs no Phase 1, so it recovers nothing. With `Handoff = "keep"` the handoff carries the whole
+state of the ballot, its pending `Roll` too, and the successor is the minter under another name:
+the model needs no step for it. `Handoff = "drop"` is the control: the successor forgets the
+pending `Roll`, believes the segment before it, and routes a later slot to the wrong replicas.
+
+| Constant | Values (first: the design that passes) |
+|---|---|
+| `Route` | `"commit"`: the `Commit` waits for the chosen prefix below its slot. `"propose"`: it leaves when its slot is chosen at the ballot. |
+| `Window`, `Alpha` | `FALSE`: a leader proposes at any slot. `TRUE`: only inside the window of `Alpha` slots. `Alpha` is 1 but in `window_off_alpha2`. |
+| `ActOn` | `"chosen"`: a replica applies the chosen value at its next slot (R3). `"vote"`: any voted value. |
+| `Base` | `"prefix"`: a new leader takes its tail segment from its chosen prefix and its Phase 1 (R4c). `"chain"`: from the chain alone. |
+| `Barrier` | `TRUE`: a leader proposes nothing above its own pending `Roll` until it is chosen at its ballot (R4a). `FALSE`. |
+| `HoleFill` | `"noop"`: a hole below the frontier gets a `Noop` (R4b). `"any"`: any value. |
+| `Handoff` | `"keep"`: the handoff carries the pending `Roll`. `"drop"`: the successor forgets it. |
+
+Invariants: `Agreement`; `OneEnd` (two replicas of one segment never hold two ends);
+`ReplicaTrue` (a replica applies only chosen slots of its own segment, and its start and end are
+the true ones); `ChainTrue` (the chain says what the log decided); `NoStray` (a `Commit` goes to
+the replicas of the true segment of its slot); `RouteKnown` (under `Route = "commit"` the true
+segment exists when the `Commit` leaves).
+
+| Check | CI | Result |
+|---|---|---|
+| `safety_small` | ci | pass: every invariant, every rule on, 2 slots, 2 ballots, 2 replicas in segment 1 (65,096 distinct states) |
+| `route_commit` | ci | pass: `NoStray` and `RouteKnown` with 3 ballots, the case that TLC found (1.0 million, about 2 minutes with 4 workers) |
+| `barrier_off_commit`, `hole_any_commit` | ci | pass: `NoStray` with `Route = "commit"` and no pause, or any value in a hole, 3 slots (0.73 and 0.72 million) |
+| `route_propose_nb2` | ci | pass: with two ballots the belief at the proposal is right (0.46 million) |
+| `window_alpha1` | ci | pass: `Route = "propose"` with the window of one slot (0.23 million) |
+| `route_propose` | ci | violation of `NoStray`: the case of three ballots above |
+| `route_commit_base_chain` | ci | violation of `NoStray`: a new leader takes its tail segment from the chain, which is behind the log by one `Roll` (R4c) |
+| `handoff_drop` | ci | violation of `NoStray`: the successor of a handoff forgets the pending `Roll` and routes the next slot to the old segment |
+| `act_vote` | ci | violation of `OneEnd`: two replicas of segment 1 apply two voted `Roll`s at two slots (R3) |
+| `barrier_off`, `hole_any`, `base_chain` | ci | violation of `NoStray` under `Route = "propose"`: without the pause, with a command in a hole, with the tail segment from the chain |
+| `reach_two_rolls`, `reach_roll_again`, `reach_roll_lost`, `reach_seg2_apply`, `reach_route_seg2`, `reach_route_stale` | ci | violation: two segments end; a later ballot chooses again a `Roll` that an earlier ballot chose; a voted `Roll` loses to a `Noop`; a replica of segment 2 applies a slot; a `Commit` goes to segment 2; a belief at a proposal is stale, and under `Route = "commit"` no `Commit` carries it |
+| `safety_nb2` | long | pass: every invariant, 3 slots, 2 ballots (5.1 million, 23 minutes) |
+| `barrier_off_full` | long | pass: the same with no pause (7.4 million, 36 minutes) |
+| `safety` | long | pass: every invariant, 2 slots, 3 ballots (9.4 million, 43 minutes) |
+| `window_off_alpha2` | long | violation of `NoStray`: with `Alpha = 2` and no window, the stray of three ballots comes back |
+
+What is not in the model: a change of the acceptors (a grid change is a round change and cuts no
+segment, R9), a restart or a lost disk, the chain at a matchmaker quorum (step 4), `Held`, the
+floor and the heal of a segment (steps 6 and 7), and the replicas that a `Roll` names (the sets are
+fixed).
