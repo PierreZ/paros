@@ -10,11 +10,11 @@ use paros_consensus::matchmaker::ReconfigurerPhase;
 use paros_consensus::membership::QuorumSystem;
 
 use crate::paxos::view::{
-    AttemptView, ChosenView, ClientView, ElectionView, GapView, GcView, GridCellView,
-    HandoverPhaseView, MatchmakerView, MatchmakingView, NodeFlavour, NodeView, ProposalView,
-    ReachView, ReadView, SegmentView, SlotView, WorldFlavour, WorldView, matchmaker_phase_view,
-    matchmaker_set_view, quorum_view, registration_kind_view, registration_view, show_ballot,
-    show_role,
+    AttemptView, ChainEntryView, ChosenView, ClientView, ElectionView, GapView, GcView,
+    GridCellView, HandoverPhaseView, MatchmakerView, MatchmakingView, NodeFlavour, NodeView,
+    ProposalView, ReachView, ReadView, SegmentView, SlotView, WorldFlavour, WorldView,
+    matchmaker_phase_view, matchmaker_set_view, quorum_view, registration_kind_view,
+    registration_view, show_ballot, show_role,
 };
 use crate::paxos::world::history::Client;
 use crate::paxos::world::matchmakers::{self, MatchmakerProcess};
@@ -240,6 +240,20 @@ fn matchmaker_view(process: &MatchmakerProcess) -> MatchmakerView {
             .map(|(ballot, registration)| registration_view(*ballot, registration))
             .collect(),
         successor,
+        chain: scalars
+            .journals
+            .get(&matchmakers::JOURNAL)
+            .map_or_else(Vec::new, |journal| {
+                journal
+                    .segments
+                    .iter()
+                    .map(|(id, record)| ChainEntryView {
+                        id: id.0,
+                        start: record.start.0,
+                        last: record.end.map(|end| end.0 - 1),
+                    })
+                    .collect()
+            }),
     }
 }
 

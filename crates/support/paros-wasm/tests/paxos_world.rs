@@ -13,6 +13,7 @@ use paros_consensus::membership::{MatchmakerId, QuorumSystem};
 use paros_consensus::node::NodeRole;
 use paros_consensus::{Ballot, Config, Message, NodeId, Slot};
 use paros_wasm::paxos::action::Seam;
+use paros_wasm::paxos::view::ChainEntryView;
 use paros_wasm::paxos::world::matchmakers::MatchmakerProcess;
 use paros_wasm::paxos::world::{Disk, InFlight, NO_CHECK_QUORUM, Party, World};
 
@@ -2165,6 +2166,42 @@ fn a_chosen_roll_opens_the_next_segment_on_every_node() {
             "node {node} applied the Roll"
         );
     }
+    // Each node publishes the end of segment 0 to the matchmakers, and stops
+    // once a majority of them holds it.
+    for matchmaker in &world.view().matchmakers {
+        assert!(
+            matchmaker.chain.contains(&ChainEntryView {
+                id: 0,
+                start: 0,
+                last: Some(1),
+            }),
+            "matchmaker {} holds segment 0 as slots 0 to 1: {:?}",
+            matchmaker.id,
+            matchmaker.chain
+        );
+    }
+    assert!(
+        said(
+            &world,
+            "matchmaker 0 writes in its chain that segment 0 holds slots 0 to 1, and that segment \
+             1 starts at slot 2. It answers after the write."
+        ),
+        "{:?}",
+        world.narration()
+    );
+    assert!(
+        said(
+            &world,
+            "A majority of the matchmakers now holds the end of segment 0, so node 0 stops \
+             sending it."
+        ),
+        "{:?}",
+        world.narration()
+    );
+    assert!(
+        world.view().wire.is_empty(),
+        "no publish is left on the wire"
+    );
 }
 
 #[test]

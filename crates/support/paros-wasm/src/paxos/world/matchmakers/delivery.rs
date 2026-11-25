@@ -169,6 +169,34 @@ impl World {
                     self.send(entry.to, entry.from, Envelope::GcAck(ack));
                 }
             }
+            Envelope::SegmentPublish(publish) => {
+                if let Some(ack) = self.matchmakers[index].deliver_segment(&publish) {
+                    self.narrate(
+                        NarrationKind::Matchmaking,
+                        if ack.applied {
+                            format!(
+                                "{} writes in its chain that segment {} holds slots {} to {}, \
+                                 and that segment {} starts at slot {}. It answers after the \
+                                 write.",
+                                which(to),
+                                publish.sealed.0,
+                                publish.start.0,
+                                publish.end.0 - 1,
+                                publish.sealed.0 + 1,
+                                publish.end.0
+                            )
+                        } else {
+                            format!(
+                                "{} refuses the end of segment {}: it is not active for that \
+                                 generation.",
+                                which(to),
+                                publish.sealed.0
+                            )
+                        },
+                    );
+                    self.send(entry.to, entry.from, Envelope::SegmentAck(ack));
+                }
+            }
             Envelope::Reconfigure(request) => {
                 let reply = self.matchmakers[index].deliver_reconfigure(request);
                 if let Some(reply) = reply {
@@ -179,6 +207,7 @@ impl World {
             Envelope::Node(_)
             | Envelope::MatchReply(_)
             | Envelope::GcAck(_)
+            | Envelope::SegmentAck(_)
             | Envelope::ReconfigureReply(_) => {}
         }
     }
@@ -260,6 +289,20 @@ impl World {
                     self.narrate_gc_step(to, &step);
                 }
             }
+            Envelope::SegmentAck(ack) => {
+                let completed = self.drive(to, index, move |node| node.on_segment_ack(&ack));
+                if let Some(Some(sealed)) = completed {
+                    self.narrate(
+                        NarrationKind::Matchmaking,
+                        format!(
+                            "A majority of the matchmakers now holds the end of segment {}, so {} \
+                             stops sending it.",
+                            sealed.0,
+                            who(to)
+                        ),
+                    );
+                }
+            }
             Envelope::ReconfigureReply(reply) => {
                 let step = self.reconfigurers[index].on_reply(reply);
                 self.narrate_reconfigurer_step(to, index, &step);
@@ -270,8 +313,11 @@ impl World {
                 // `resend_due` for the same reason.
                 self.queue_reconfigurer(index);
             }
-            Envelope::Node(_) | Envelope::Match(_) | Envelope::Gc(_) | Envelope::Reconfigure(_) => {
-            }
+            Envelope::Node(_)
+            | Envelope::Match(_)
+            | Envelope::Gc(_)
+            | Envelope::SegmentPublish(_)
+            | Envelope::Reconfigure(_) => {}
         }
     }
 

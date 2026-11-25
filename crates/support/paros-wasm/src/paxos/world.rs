@@ -59,7 +59,8 @@ mod verbs;
 
 use paros_consensus::journal::Command;
 use paros_consensus::matchmaker::{
-    GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
+    GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest, SegmentAck,
+    SegmentPublish,
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, QuorumSystem};
 use paros_consensus::{
@@ -120,6 +121,10 @@ pub enum Envelope {
     Gc(GcRequest),
     /// A matchmaker's answer to a garbage-collection request.
     GcAck(GcAck),
+    /// A node publishes the end of a segment its walk applied (R5 of §4.7).
+    SegmentPublish(SegmentPublish),
+    /// A matchmaker's answer to a publish.
+    SegmentAck(SegmentAck),
     /// One step of a matchmaker-set handover.
     Reconfigure(ReconfigureRequest),
     /// A matchmaker's answer to a handover step.

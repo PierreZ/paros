@@ -18,7 +18,7 @@
 //! 6. `advance_recovery()`, and drain again until the node is quiet.
 
 use paros_consensus::journal::Command;
-use paros_consensus::matchmaker::{GcRequest, MatchRequest};
+use paros_consensus::matchmaker::{GcRequest, MatchRequest, SegmentPublish};
 use paros_consensus::membership::MatchmakerId;
 use paros_consensus::quorum_read::ReadState;
 use paros_consensus::{Message, NodeId, Slot, WriteOp};
@@ -46,6 +46,10 @@ pub(super) struct Batch {
     /// The garbage-collection requests this batch owes the matchmakers.
     /// Always empty on plain Multi-Paxos.
     gc_requests: Vec<(MatchmakerId, GcRequest)>,
+    /// The publishes of the chain of segments this batch owes the
+    /// matchmakers: one for each `Roll` the walk applied. Always empty on
+    /// plain Multi-Paxos.
+    segment_publishes: Vec<(MatchmakerId, SegmentPublish)>,
 }
 
 impl Batch {
@@ -56,6 +60,7 @@ impl Batch {
             && self.read_states.is_empty()
             && self.match_requests.is_empty()
             && self.gc_requests.is_empty()
+            && self.segment_publishes.is_empty()
     }
 }
 
@@ -183,6 +188,7 @@ impl World {
             read_states: ready.read_states().to_vec(),
             match_requests: ready.match_requests().to_vec(),
             gc_requests: ready.gc_requests().to_vec(),
+            segment_publishes: ready.segment_publishes().to_vec(),
         };
         ready.advance();
         if let Some(seam) = self.armed_seams[index].take() {
@@ -249,6 +255,13 @@ impl World {
                 Party::Node(id),
                 Party::Matchmaker(to),
                 Envelope::Gc(request),
+            );
+        }
+        for (to, publish) in batch.segment_publishes {
+            self.send(
+                Party::Node(id),
+                Party::Matchmaker(to),
+                Envelope::SegmentPublish(publish),
             );
         }
         for (slot, command) in batch.committed {

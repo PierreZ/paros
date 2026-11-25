@@ -112,6 +112,7 @@
   --phase-handoff: #7a5f28;
   --phase-match: #4a6b8a;
   --phase-gc: #63633f;
+  --phase-chain: var(--phase-match);
   --phase-reconfigure: #9a4c28;
   --phase-other: #5a5a5a;
   --column-0: #2f5d8a;

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use paros_consensus::journal::JournalId;
 use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MatchmakerHardState, MemRegistry,
-    ReconfigureReply, ReconfigureRequest, Registration,
+    ReconfigureReply, ReconfigureRequest, Registration, SegmentAck, SegmentPublish,
 };
 use paros_consensus::membership::MatchmakerId;
 use paros_consensus::{Ballot, Limits, Matchmaker};
@@ -203,6 +203,17 @@ impl MatchmakerProcess {
         self.persist();
         let role = self.role.as_mut()?;
         let ack = role.gc_ack(&request, outcome);
+        role.ready().advance();
+        Some(ack)
+    }
+
+    /// Deliver one publish of the chain of segments: merge, persist, ack,
+    /// advance. The ack leaves only after the merged chain is on the disk.
+    pub(super) fn deliver_segment(&mut self, publish: &SegmentPublish) -> Option<SegmentAck> {
+        let outcome = self.role.as_mut()?.publish_segment(publish);
+        self.persist();
+        let role = self.role.as_mut()?;
+        let ack = role.segment_ack(publish, outcome);
         role.ready().advance();
         Some(ack)
     }
