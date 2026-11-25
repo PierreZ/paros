@@ -15,7 +15,7 @@ batcher 1
 campaign-discovery 1.5
 cas-register 19
 cell-control 5
-compartments 2.5
+compartments 8.5
 config-register 14.5
 ctrl-grid 12
 decree 8.5

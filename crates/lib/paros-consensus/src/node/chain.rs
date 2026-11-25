@@ -178,9 +178,11 @@ impl ColocatedNode {
         if !believed.contains(ack.matchmaker) || ack.journal != self.config.journal.journal {
             return None;
         }
+        // A matchmaker names only a set later than the generation it
+        // refused (`Matchmaker::newer_set`), and `learn_matchmakers` takes
+        // only a set later than the believed one: it alone decides.
         if !ack.applied
             && let Some(newer) = &ack.newer
-            && newer.generation > ack.generation
             && self.learn_matchmakers(newer)
         {
             assert!(

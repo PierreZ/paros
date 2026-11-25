@@ -42,7 +42,9 @@ chain (step 5); the states past `Sealed` (`Held` in step 6, `Trimmed` and `Offlo
 record is sealed when its end is known). **Open**: the chain has no size limit; it grows by one
 record for each `Roll` until the states past `Sealed` let a matchmaker forget old segments (step 6
 decides). Not built yet: the replicas of a segment (R6) and the
-route of R4d, which need replicas to route to (step 5).
+route of R4d, which need replicas to route to (step 5). The model of the replicas of a segment is
+`specs/tla/compartments/` (the join from the boundary state, the stop at the end, the "sealed"
+answer; `specs/tla/README.md`).
 
 #### 4.7.1 The rule of the papers
 

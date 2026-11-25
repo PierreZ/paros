@@ -1986,6 +1986,58 @@ question. The rule for held answers (#1232) is the decision of 2026-11-20 (`Unkn
 through `expected_seq`). The read replica's rule is the rule of `reads/`, and the walk's rule is the module doc
 of `replica.rs` ("the fold is contiguous or it stops").
 
+**The replicas of a segment** (R6 of `docs/architecture/04-7-segments.md`, step 5 of the
+segments plan). The leader may propose a `Roll` at its frontier (`Rolls`). A chosen `Roll` at slot
+`s` ends a segment at `s + 1` and takes no seq. Once the chosen prefix reaches a `Roll`, the chain
+gets the start of the next segment and the boundary state, the fold at the `Roll` (`Publish`; the
+chain itself is `handover-scalars/`). A replica of segment `k > 0` (`SegOf`) walks nothing before
+it joins. It joins once the chain holds `k`: it jumps to the start of `k` with the boundary state
+of the chain, as the trim-point jump does (`Join`). It then holds the scalars of that state and
+no record of an earlier segment (its `base` is the first seq it holds). It walks its segment and
+stops after the `Roll` that ends it. A read at a replica covers the writes of its segment and of
+the later ones; a write below its base is read from an earlier segment. A sealed replica answers
+a read with the records of its segment and "sealed" (`ReadSealed`), and the reader asks the
+replica of the next segment, whose own read covers the rest.
+
+The invariants judge a replica that started at its segment: `InOrder` (the fold of the prefix
+above the base), `Dense` (the ranges cover `[base, next)`), `AnswerAgrees`, and `ReadFresh` (a
+served read holds each complete write at or above the base; a "sealed" answer comes only from a
+segment that ended, and holds each such write below its end). `InSegment` says that no slot a
+replica walked comes after the `Roll` that ends its segment. `ChainTrue` says that each segment
+of the chain starts after a chosen `Roll`, with every slot below chosen, and that its boundary
+state is the fold below its start. `BaseTrue` says that the base of a replica is the next seq of
+the boundary state of its segment, also after a restart, so that a replica drops no record of its
+own segment. `Ends` also judges the segments: each replica walks to the end
+of its segment, or to the frontier.
+
+| Check | Result | What it shows |
+|---|---|---|
+| `segments_walk`, `segments_restart` | pass | `r2` keeps segment 1 and joins from the chain; with a restart |
+| `segments_stop` | pass | `r1` stops at the end of segment 0 |
+| `segments_restart_read` | pass | a read at the replica of segment 1, with a restart |
+| `segments_read`, `segments_read_sealed` | pass | a read at the replica of segment 1, and at the sealed replica of segment 0 |
+| `live_segments` | pass | the chain gets the segment, `r2` joins, and each replica walks to the end of its segment |
+| `segments_empty` (control) | `InOrder` fails | the joining replica starts from the empty state, not the boundary state |
+| `segments_early` (control) | `InOrder` fails | the chain holds the fold one slot before the `Roll` |
+| `segments_rebase` (control) | `BaseTrue` fails | the boot folds again from the next seq of its refold, and drops the records of its segment |
+| `segments_nostop` (control) | `InSegment` fails | the replica walks on past the `Roll` that ends its segment |
+| `segments_serve` (control) | `ReadFresh` fails | a sealed replica serves a read past its end as if it were the tail: a write of segment 1 that was complete is missing |
+| `reach_segment_read`, `reach_segment_sealed`, `reach_segment_sealed_answer` | violation | a replica of segment 1 serves a read after a write; a sealed replica and a joined one at once; a "sealed" answer to a read after a write |
+
+The pass checks are small (one or two writes, one `Roll`, at most one restart, no leader change,
+segments 0 and 1), so that the folder stays inside its CI budget. With two writes and both
+replicas reading, the state space passed 79 million distinct states without an end; the checks
+split the readers instead.
+
+Not in the model for segments: a leader change with a `Roll` (a `Noop` that fills a `Roll` slot);
+the route of a `Commit` to the replicas of its segment (R4d; `Learn` reaches every replica, and
+`segment-roll/` checks the route) and the catch-up from a peer replica; a reader that walks the
+chain across several answers (each read is judged at one replica, and a "sealed" answer sends
+the reader on). The read in this folder has no ballots and no promise fence: the fences of a
+leaderless read are `reads/`, which the segments leave as they are (2026-11-25): a read at a
+replica of a segment takes the same quorum of watermarks, and the fences of `reads/` do not
+depend on segments. The plan named `reads/` too for the read across a roll.
+
 Not in the model: the log itself (`multi-paxos/`), the proxy leader (`proxy-leader/`), more
 than one journal (a lane never mixes journals, so one lane is enough), the `NotLeader` refusal at
 the edge (it takes no slot, so it is the same case as `TooLarge`; this is a reading of the code,

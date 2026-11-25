@@ -81,6 +81,8 @@
 (*   Boot      "refold": the boot folds the state again (the code).        *)
 (*             "keep": a control, the state survives the restart and the   *)
 (*             walk starts again at the chosen index on disk.              *)
+(*             "rebase": a control, the boot folds again from the next seq *)
+(*             of its refold, so it drops the records of its segment.      *)
 (*   Read      "quorum": the leaderless read (the code).                   *)
 (*             "local": a control, the replica serves from its prefix.     *)
 (*   Copies    how many times in a run the transport may deliver a batch   *)
@@ -96,20 +98,52 @@
 (*             outcome of the slot, whatever command the slot chose.       *)
 (*             "notleader": a control, it answers `NotLeader`, and the     *)
 (*             batcher follows the hint and sends the batch again.         *)
+(*                                                                         *)
+(* The replicas of a segment (R6 of docs/architecture/04-7-segments.md,   *)
+(* step 5 of the segments plan). The leader may propose a `Roll` at its    *)
+(* frontier. A chosen `Roll` at slot s ends a segment at s + 1 and opens   *)
+(* the next one there; it takes no seq. Once the chosen prefix reaches a   *)
+(* `Roll`, a node that walked it publishes the start of the next segment  *)
+(* and the boundary state, its fold at the `Roll`, to the chain (R3, R5;   *)
+(* `handover-scalars/` checks the chain itself). A replica of segment      *)
+(* k > 0 walks nothing before it joins. It joins once the chain holds k:   *)
+(* it jumps to the start with the boundary state of the chain (the trim-   *)
+(* point jump, `Replica::trim_to`): the scalars, no record of an earlier   *)
+(* segment. Then it walks its segment and stops after the `Roll` that ends *)
+(* it. A read at a replica covers the writes of its segment and of the     *)
+(* later ones: a write below its base is read from an earlier segment. A   *)
+(* reader whose chain is old can reach a sealed replica: the replica       *)
+(* answers "sealed" when the read asks past its end, and the reader asks   *)
+(* the replica of the next segment, whose own read covers the rest.        *)
+(*   Rolls     how many `Roll`s the leader may propose (0: no segments).   *)
+(*   SegOf     the segment that each replica keeps.                        *)
+(*   Start     "boundary": the chain holds the fold at the `Roll`, and a   *)
+(*             joining replica takes it (the rule). "empty": a control,    *)
+(*             the replica starts from the empty state. "early": a         *)
+(*             control, the chain holds the fold one slot before the       *)
+(*             `Roll`.                                                     *)
+(*   Stop      TRUE: a replica stops at the end of its segment (the rule). *)
+(*             FALSE: a control, it walks on.                              *)
+(*   Sealed    "answer": a replica serves a read only when its prefix      *)
+(*             covers the read; a sealed one answers "sealed" (the rule).  *)
+(*             "serve": a control, a sealed replica serves its segment.    *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Writes, Count, BatchMax, LeaderMax, Acceptors, Replicas, Readers,
           NS, MaxSends, Leaders, Restarts, Q2, RQ,
-          Resend, Accepts, Walk, Boot, Read, Held, Copies
+          Resend, Accepts, Walk, Boot, Read, Held, Copies,
+          Rolls, SegOf, Start, Stop, Sealed
 
 Slots == 0..(NS - 1)
 Ids == 1..MaxSends
 Noop == 0
 None == MaxSends + 1
+\* A chosen `Roll`: it ends a segment and takes no seq.
+RollV == MaxSends + 2
 \* No open read, no served read.
 NoRead == [on |-> FALSE, acks |-> {}, max |-> 0, must |-> {}]
-NoServe == [on |-> FALSE, must |-> {}, got |-> {}]
+NoServe == [on |-> FALSE, sealed |-> FALSE, base |-> 0, must |-> {}, got |-> {}]
 \* A read may ask an acceptor or, in a control, a replica.
 Voters == UNION RQ
 
@@ -122,10 +156,15 @@ ASSUME Voters \subseteq Acceptors \cup Replicas
 ASSUME Resend \in {"never", "ambiguous"}
 ASSUME Accepts \in BOOLEAN
 ASSUME Walk \in {"prefix", "skip"}
-ASSUME Boot \in {"refold", "keep"}
+ASSUME Boot \in {"refold", "keep", "rebase"}
 ASSUME Read \in {"quorum", "local"}
 ASSUME Copies \in Nat
 ASSUME Held \in {"unknown", "slot", "notleader"}
+ASSUME Rolls \in Nat
+ASSUME SegOf \in [Replicas -> 0..Rolls]
+ASSUME Start \in {"boundary", "empty", "early"}
+ASSUME Stop \in BOOLEAN
+ASSUME Sealed \in {"answer", "serve"}
 
 VARIABLES
   \* The batcher.
@@ -156,11 +195,15 @@ VARIABLES
   disk,     \* each replica's chosen index on disk
   restarts, \* the replica restarts so far
   reading,  \* each replica's open read, or None
-  served    \* each replica's last served read, or None
+  served,   \* each replica's last served read, or None
+  \* The segments.
+  rolls,    \* the `Roll`s the leader proposed so far
+  chain     \* each segment after the first, as published: its start and
+            \* the next seq of the boundary state
 
 vars == <<lane, pushed, limit, batches, reqs, replies, prop, open, chosen,
           frontier, held, deposed, copies, changes, wm, ranges, ambiguous, learned, walked,
-          state, disk, restarts, reading, served>>
+          state, disk, restarts, reading, served, rolls, chain>>
 
 Max(a, b) == IF a > b THEN a ELSE b
 
@@ -175,17 +218,19 @@ RECURSIVE SumAt(_)
 SumAt(at) == IF at = {} THEN 0
              ELSE LET x == CHOOSE y \in at : TRUE IN x[3] + SumAt(at \ {x})
 
-EmptyState == [next |-> 0, at |-> {}]
+\* A journal state: the next seq, the ranges of the writes it holds, and its
+\* base, the first seq it holds (the next seq of its boundary state).
+EmptyState == [next |-> 0, at |-> {}, base |-> 0]
 
 \* The fold of one chosen value (`JournalState`): each write of a batch
 \* gets its records at the next positions, in batch order.
 Apply(st, v) ==
-  IF v = Noop THEN st
+  IF v \in {Noop, RollV} THEN st
   ELSE LET ws == batches[v].ws
-       IN [next |-> st.next + SumOf(ws),
-           at |-> st.at \cup
-                  {<<ws[i], st.next + SumOf(SubSeq(ws, 1, i - 1)), Count[ws[i]]>> :
-                     i \in DOMAIN ws}]
+       IN [st EXCEPT !.next = st.next + SumOf(ws),
+                     !.at = st.at \cup
+                            {<<ws[i], st.next + SumOf(SubSeq(ws, 1, i - 1)), Count[ws[i]]>> :
+                               i \in DOMAIN ws}]
 
 RECURSIVE FoldFrom(_, _)
 \* The fold of the chosen values of a sequence of slots.
@@ -193,6 +238,12 @@ FoldFrom(st, sq) == IF sq = <<>> THEN st ELSE FoldFrom(Apply(st, chosen[Head(sq)
 
 \* The slots 0 .. n - 1, in order.
 Prefix(n) == [i \in 1..n |-> i - 1]
+
+\* The fold of the slots of sq from the boundary state whose next seq is b:
+\* the records below b are in an earlier segment.
+FoldAbove(b, sq) ==
+  LET f == FoldFrom(EmptyState, sq)
+  IN [next |-> f.next, at |-> {x \in f.at : x[2] >= b}, base |-> b]
 
 \* What the unbatcher gives each write of batch id answered at `seq`.
 Scatter(id, seq) ==
@@ -224,8 +275,11 @@ Init ==
   /\ restarts = 0
   /\ reading = [r \in Replicas |-> NoRead]
   /\ served = [r \in Replicas |-> NoServe]
+  /\ rolls = 0
+  /\ chain = <<>>
 
-Unchanged_log == UNCHANGED <<prop, open, chosen, frontier, held, deposed, copies, changes, wm>>
+Unchanged_log == UNCHANGED <<prop, open, chosen, frontier, held, deposed, copies, changes, wm,
+                             rolls, chain>>
 Unchanged_replicas == UNCHANGED <<learned, walked, state, disk, restarts, reading, served>>
 
 \* Send the writes `ws` as one batch.
@@ -325,6 +379,7 @@ Receive(id) ==
             /\ frontier' = frontier + 1
             /\ UNCHANGED <<replies, chosen, deposed, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, batches, ranges, ambiguous>>
+  /\ UNCHANGED <<rolls, chain>>
   /\ Unchanged_replicas
 
 \* A Phase-2 quorum votes for the proposal at slot s: it is chosen. An open
@@ -339,6 +394,7 @@ Choose(s) ==
   /\ open' = open \ {s}
   /\ UNCHANGED <<prop, frontier, held, deposed, copies, changes>>
   /\ UNCHANGED <<lane, pushed, limit, batches, reqs, replies, ranges, ambiguous>>
+  /\ UNCHANGED <<rolls, chain>>
   /\ Unchanged_replicas
 
 \* The Accepts of slot s are lost (nothing changes when none is on the way).
@@ -346,6 +402,7 @@ LoseAccepts(s) ==
   /\ open' = open \ {s}
   /\ UNCHANGED <<prop, chosen, frontier, held, deposed, copies, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, batches, reqs, replies, ranges, ambiguous>>
+  /\ UNCHANGED <<rolls, chain>>
   /\ Unchanged_replicas
 
 \* The leader sends the Accepts of slot s again (`resend_pending`), also when
@@ -357,6 +414,7 @@ ResendAccepts(s) ==
   /\ open' = open \cup {s}
   /\ UNCHANGED <<prop, chosen, frontier, held, deposed, copies, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, batches, reqs, replies, ranges, ambiguous>>
+  /\ UNCHANGED <<rolls, chain>>
   /\ Unchanged_replicas
 
 \* A new leader wins Phase 1. Each open slot below its frontier keeps its
@@ -379,10 +437,43 @@ NewLeader ==
   /\ changes' = changes + 1
   /\ UNCHANGED <<chosen, copies, wm>>
   /\ UNCHANGED <<lane, pushed, limit, batches, reqs, replies, ranges, ambiguous>>
+  /\ UNCHANGED <<rolls, chain>>
   /\ Unchanged_replicas
 
 \* The slot and every slot below it are chosen.
 PrefixChosen(s) == \A k \in 0..s : chosen[k] # None
+
+\* The leader proposes a `Roll` at its frontier (`ColocatedNode::roll`). It
+\* holds no answer for it. NS covers every batch and every `Roll` that a
+\* check sends (`TypeOK`).
+ProposeRoll ==
+  /\ rolls < Rolls
+  /\ rolls' = rolls + 1
+  /\ prop' = [prop EXCEPT ![frontier] = RollV]
+  /\ open' = open \cup {frontier}
+  /\ frontier' = frontier + 1
+  /\ UNCHANGED <<chosen, held, deposed, copies, changes, wm, chain>>
+  /\ UNCHANGED <<lane, pushed, limit, batches, reqs, replies, ranges, ambiguous>>
+  /\ Unchanged_replicas
+
+\* The `Roll`s among the slots of a sequence.
+RollsIn(sq) == Cardinality({i \in DOMAIN sq : chosen[sq[i]] = RollV})
+
+\* A node whose walk applied the next `Roll` publishes the start of the
+\* segment it opens and its fold at the `Roll` (R3, R5): every slot up to
+\* the `Roll` is chosen, and the chain holds every `Roll` below it.
+Publish ==
+  /\ \E s \in Slots :
+       /\ chosen[s] = RollV
+       /\ PrefixChosen(s)
+       /\ RollsIn(Prefix(s)) = Len(chain)
+       /\ chain' = Append(chain, [start |-> s + 1,
+                                  next |-> IF Start = "early"
+                                             THEN FoldFrom(EmptyState, Prefix(s - 1)).next
+                                             ELSE FoldFrom(EmptyState, Prefix(s + 1)).next])
+  /\ UNCHANGED <<prop, open, chosen, frontier, held, deposed, copies, changes, wm, rolls>>
+  /\ UNCHANGED <<lane, pushed, limit, batches, reqs, replies, ranges, ambiguous>>
+  /\ Unchanged_replicas
 
 \* The answer `ok` to the batch of held answer h: the fold of the chosen
 \* prefix below its slot gives the batch its seq.
@@ -399,6 +490,7 @@ Answer(h) ==
   /\ replies' = replies \cup {OkReply(h, "leader")}
   /\ UNCHANGED <<prop, open, chosen, frontier, deposed, copies, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, batches, reqs, ranges, ambiguous>>
+  /\ UNCHANGED <<rolls, chain>>
   /\ Unchanged_replicas
 
 \* A deposed leader answers the batch of held answer h (#1232).
@@ -412,6 +504,7 @@ AnswerDeposed(h) ==
              /\ replies' = replies \cup {OkReply(h, "deposed")}
   /\ UNCHANGED <<prop, open, chosen, frontier, held, copies, changes, wm>>
   /\ UNCHANGED <<lane, pushed, limit, batches, reqs, ranges, ambiguous>>
+  /\ UNCHANGED <<rolls, chain>>
   /\ Unchanged_replicas
 
 \* An answer is lost.
@@ -434,6 +527,31 @@ Learn(r, s) ==
   /\ UNCHANGED <<walked, state, disk, restarts, reading, served>>
   /\ Unchanged_rest
 
+\* Whether replica r holds the start of its segment: it keeps the first
+\* segment, or it joined.
+\* (An IF, since TLC splits a disjunction of an action into two branches.)
+Joined(r) == IF SegOf[r] = 0 THEN TRUE
+             ELSE Len(chain) >= SegOf[r] /\ Len(walked[r]) >= chain[SegOf[r]].start
+
+\* Replica r of segment k > 0 joins once the chain holds k: it jumps to the
+\* start of k with the boundary state of the chain (`Replica::trim_to`,
+\* durable as `WriteOp::TrimmedTo`), as if it had walked every slot below.
+\* It holds the scalars of the boundary state and no record below it.
+Join(r) ==
+  /\ ~Joined(r)
+  /\ Len(chain) >= SegOf[r]
+  /\ LET b == chain[SegOf[r]]
+     IN /\ walked' = [walked EXCEPT ![r] = Prefix(b.start)]
+        /\ state' = [state EXCEPT ![r] = IF Start = "empty"
+                                           THEN EmptyState
+                                           ELSE [next |-> b.next, at |-> {}, base |-> b.next]]
+        /\ disk' = [disk EXCEPT ![r] = IF Restarts > 0 THEN b.start ELSE 0]
+  /\ UNCHANGED <<learned, restarts, reading, served>>
+  /\ Unchanged_rest
+
+\* Whether replica r walked the `Roll` that ends its segment.
+IsSealed(r) == RollsIn(walked[r]) > SegOf[r]
+
 \* The slot that replica r may fold next.
 NextSlots(r) ==
   IF Walk = "prefix"
@@ -442,6 +560,8 @@ NextSlots(r) ==
 
 \* Replica r folds one slot (`Replica::advance`).
 WalkStep(r) ==
+  /\ Joined(r)
+  /\ ~Stop \/ ~IsSealed(r)
   /\ \E s \in NextSlots(r) :
        /\ walked' = [walked EXCEPT ![r] = Append(@, s)]
        /\ state' = [state EXCEPT ![r] = Apply(@, chosen[s])]
@@ -461,9 +581,10 @@ Restart(r) ==
   /\ restarts < Restarts
   /\ restarts' = restarts + 1
   /\ walked' = [walked EXCEPT ![r] = SubSeq(@, 1, disk[r])]
-  /\ IF Boot = "refold"
-       THEN state' = [state EXCEPT ![r] = FoldFrom(EmptyState, SubSeq(walked[r], 1, disk[r]))]
-       ELSE UNCHANGED state
+  /\ LET sq == SubSeq(walked[r], 1, disk[r])
+     IN CASE Boot = "refold" -> state' = [state EXCEPT ![r] = FoldAbove(@.base, sq)]
+          [] Boot = "rebase" -> state' = [state EXCEPT ![r] = FoldAbove(FoldFrom(EmptyState, sq).next, sq)]
+          [] Boot = "keep" -> UNCHANGED state
   /\ reading' = [reading EXCEPT ![r] = NoRead]
   /\ UNCHANGED <<learned, disk, served>>
   /\ Unchanged_rest
@@ -473,6 +594,8 @@ Complete == {w \in Writes : ranges[w] # {}}
 
 \* Replica r opens a read. A read that is open is dropped, as a restart
 \* drops it.
+\* A replica of a later segment that did not join yet walked nothing, so
+\* its read closes only on a quorum of watermarks 0 (`ReadServe`).
 ReadStart(r) ==
   /\ r \in Readers
   /\ reading' = [reading EXCEPT ![r] = [on |-> TRUE, acks |-> {}, max |-> 0, must |-> Complete]]
@@ -497,8 +620,24 @@ ReadAck(r, v) ==
 ReadServe(r) ==
   /\ \/ Read = "local"
      \/ /\ \E Q \in RQ : Q \subseteq reading[r].acks
-        /\ Len(walked[r]) >= reading[r].max
-  /\ served' = [served EXCEPT ![r] = [on |-> TRUE, must |-> reading[r].must,
+        /\ \/ Len(walked[r]) >= reading[r].max
+           \* A control: a sealed replica serves the whole of its segment.
+           \/ Sealed = "serve" /\ IsSealed(r)
+  /\ served' = [served EXCEPT ![r] = [on |-> TRUE, sealed |-> FALSE, base |-> state[r].base,
+                                      must |-> reading[r].must,
+                                      got |-> {x[1] : x \in state[r].at}]]
+  /\ reading' = [reading EXCEPT ![r] = NoRead]
+  /\ UNCHANGED <<learned, walked, state, disk, restarts>>
+  /\ Unchanged_rest
+
+\* Sealed replica r answers its read with the records of its segment and
+\* "sealed": the reader asks the replica of the next segment for the rest.
+\* A sealed replica holds its whole segment, so it needs no quorum of
+\* watermarks.
+ReadSealed(r) ==
+  /\ IsSealed(r)
+  /\ served' = [served EXCEPT ![r] = [on |-> TRUE, sealed |-> TRUE, base |-> state[r].base,
+                                      must |-> reading[r].must,
                                       got |-> {x[1] : x \in state[r].at}]]
   /\ reading' = [reading EXCEPT ![r] = NoRead]
   /\ UNCHANGED <<learned, walked, state, disk, restarts>>
@@ -513,10 +652,12 @@ Next ==
   \/ \E h \in held : Answer(h)
   \/ \E h \in deposed : AnswerDeposed(h)
   \/ NewLeader
+  \/ ProposeRoll \/ Publish
+  \/ \E r \in Replicas : Join(r)
   \/ \E r \in Replicas :
        \/ \E s \in Slots : Learn(r, s)
        \/ WalkStep(r) \/ Persist(r) \/ Restart(r)
-       \/ ReadStart(r) \/ ReadServe(r)
+       \/ ReadStart(r) \/ ReadServe(r) \/ ReadSealed(r)
        \/ \E v \in Voters : ReadAck(r, v)
 
 Spec == Init /\ [][Next]_vars
@@ -530,14 +671,27 @@ LiveSpec ==
   /\ \A id \in Ids : WF_vars(Receive(id))
   /\ \A s \in Slots : SF_vars(Choose(s)) /\ WF_vars(ResendAccepts(s))
   /\ \A r \in Replicas : WF_vars(WalkStep(r)) /\ \A s \in Slots : WF_vars(Learn(r, s))
+  /\ WF_vars(Publish) /\ \A r \in Replicas : WF_vars(Join(r))
+
+\* The chosen `Roll`s below the frontier.
+RollSlots == {s \in 0..(frontier - 1) : chosen[s] = RollV}
+
+\* How far replica r walks once the log below the frontier is chosen: to the
+\* `Roll` that ends its segment, else to the frontier; nowhere when its
+\* segment never opens.
+Reach(r) ==
+  IF Cardinality(RollSlots) < SegOf[r] THEN 0
+  ELSE IF \E s \in RollSlots : Cardinality({t \in RollSlots : t < s}) = SegOf[r]
+       THEN 1 + CHOOSE s \in RollSlots : Cardinality({t \in RollSlots : t < s}) = SegOf[r]
+       ELSE frontier
 
 \* Ends: every batch that the batcher sent reaches the log, and every slot
-\* below the frontier is chosen and folded at every replica, also when the
-\* batcher stopped after it sent the batch.
+\* below the frontier is chosen and folded at every replica of its segment,
+\* also when the batcher stopped after it sent the batch.
 Ends ==
   <>[](/\ reqs = {}
        /\ \A s \in 0..(frontier - 1) : chosen[s] # None
-       /\ \A r \in Replicas : Len(walked[r]) = frontier)
+       /\ \A r \in Replicas : Len(walked[r]) = Reach(r))
 
 (***************************************************************************)
 (* Safety.                                                                 *)
@@ -553,6 +707,7 @@ TypeOK ==
   /\ held \subseteq [s : Slots, id : Ids]
   /\ deposed \subseteq [s : Slots, id : Ids]
   /\ copies \in 0..Copies
+  /\ rolls \in 0..Rolls
   \* An open slot holds a proposal and is not chosen yet.
   /\ \A s \in open : prop[s] # None /\ chosen[s] = None
 
@@ -595,25 +750,74 @@ AckedChosen ==
        \E x \in at : x[1] = w /\ x[2] = rg[1] /\ x[3] = rg[2]
 
 \* InOrder: a replica folds the chosen log in slot order with no gap, and
-\* its state is the fold of that prefix.
+\* its state is the fold of that prefix above its base. A replica of a
+\* later segment holds the next seq of the whole prefix: its boundary state
+\* is the fold at the `Roll`.
 InOrder ==
   \A r \in Replicas :
     /\ walked[r] = Prefix(Len(walked[r]))
     /\ \A s \in Range(walked[r]) : chosen[s] # None
-    /\ state[r] = FoldFrom(EmptyState, walked[r])
+    /\ state[r] = FoldAbove(state[r].base, walked[r])
+
+\* BaseTrue: the base of a replica is the next seq of the boundary state of
+\* its segment (0 for the first segment and before a join), so a replica
+\* drops no record of its own segment.
+BaseTrue ==
+  \A r \in Replicas :
+    state[r].base = IF SegOf[r] = 0 THEN 0
+                    ELSE IF Joined(r) THEN chain[SegOf[r]].next ELSE 0
 
 \* Dense: the ranges of a replica's state are disjoint and cover
-\* [0, next).
+\* [base, next).
 Dense ==
   \A r \in Replicas :
     LET at == state[r].at
     IN /\ \A x, y \in at : x # y => (x[2] + x[3] <= y[2] \/ y[2] + y[3] <= x[2])
-       /\ SumAt(at) = state[r].next
+       /\ \A x \in at : x[2] >= state[r].base
+       /\ SumAt(at) = state[r].next - state[r].base
+
+\* The chosen `Roll`s.
+AllRolls == {s \in Slots : chosen[s] = RollV}
+
+\* Whether the `Roll` that ends segment k is chosen.
+Ended(k) == Cardinality(AllRolls) > k
+
+\* The next seq at the end of segment k, once it ended.
+EndSeq(k) ==
+  LET s == CHOOSE x \in AllRolls : Cardinality({t \in AllRolls : t < x}) = k
+  IN FoldFrom(EmptyState, Prefix(s + 1)).next
 
 \* ReadFresh: a read that a replica serves holds each write that was
-\* complete before the read started.
+\* complete before the read started, at or above its base (a write below
+\* it is in an earlier segment). A "sealed" answer comes only from a
+\* segment that ended, and holds each such write below the end: the reader
+\* asks the next segment for the rest.
 ReadFresh ==
-  \A r \in Replicas : served[r].on => served[r].must \subseteq served[r].got
+  \A r \in Replicas :
+    served[r].on =>
+      /\ served[r].sealed => Ended(SegOf[r])
+      /\ {w \in served[r].must :
+           \E rg \in ranges[w] :
+             /\ rg[1] >= served[r].base
+             /\ served[r].sealed => rg[1] < EndSeq(SegOf[r])}
+         \subseteq served[r].got
+
+\* InSegment: a replica walks no slot past the end of its segment: no slot
+\* that it walked comes after the `Roll` that ends its segment.
+InSegment ==
+  \A r \in Replicas : \A i \in DOMAIN walked[r] :
+    RollsIn(SubSeq(walked[r], 1, i - 1)) <= SegOf[r]
+
+\* ChainTrue: each segment of the chain starts at the slot after a chosen
+\* `Roll`, in order, with every slot below chosen, and its boundary state
+\* is the fold of every slot below its start.
+ChainTrue ==
+  \A k \in DOMAIN chain :
+    LET st == chain[k].start
+    IN /\ chosen[st - 1] = RollV
+       /\ PrefixChosen(st - 1)
+       /\ RollsIn(Prefix(st - 1)) = k - 1
+       /\ chain[k].next = FoldFrom(EmptyState, Prefix(st)).next
 
 \* Reachability controls: each must be violated.
 NoMergedChosen == \A s \in Slots : chosen[s] \notin {id \in DOMAIN batches : Len(batches[id].ws) > 1}
@@ -621,4 +825,12 @@ NoSplit == \A id \in DOMAIN batches : batches[id].st # "refused" \/ \E w \in Wri
 \* A deposed leader answers a held batch ok, and a write gets its range from it.
 NoDeposedOk == \A rp \in replies : ~(rp.kind = "ok" /\ rp.from = "deposed")
 NoReadAfterWrite == \A r \in Replicas : ~served[r].on \/ served[r].must = {}
+\* A sealed replica answers "sealed" to a read after a write.
+NoSealedAnswer == \A r \in Replicas : ~(served[r].sealed /\ served[r].must # {})
+\* A replica of a later segment serves a read after a write.
+NoLaterRead == \A r \in Replicas : SegOf[r] > 0 => (~served[r].on \/ served[r].must = {})
+\* A replica of the first segment is sealed and a later one joined.
+NoSealedJoin == ~\E r1x, r2x \in Replicas :
+                  IsSealed(r1x) /\ SegOf[r2x] > 0 /\ Len(chain) >= SegOf[r2x]
+                  /\ Len(walked[r2x]) > chain[SegOf[r2x]].start
 =============================================================================
