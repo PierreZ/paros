@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 use super::{ColocatedNode, Delegation, NodeRole, ProposeResult};
 use crate::journal::{Command, ReplicaSet, Roll, SegmentId};
+use crate::proposer::Recovery;
 use crate::types::{NodeId, Slot};
 
 /// The answer to [`ColocatedNode::roll`].
@@ -104,9 +105,9 @@ impl ColocatedNode {
     /// The tail segment as this node knows the log (R4c): the fold of its
     /// chosen prefix, then each later `Roll` it knows, in slot order, when it
     /// names the tail plus one ([`SegmentId::after`]). It knows a `Roll`
-    /// chosen, in an open round, or recovered by its Phase 1 and not yet
-    /// proposed again (a bounded recovery opens its rounds a page at a
-    /// time). A guess that is wrong costs a `Roll` the fold ignores, never
+    /// chosen, in an open round, or recovered by its Phase 1 and still
+    /// pending (a bounded recovery opens its rounds a page at a time;
+    /// [`Recovery::pending`] leaves out the slots the repair probe owns). A guess that is wrong costs a `Roll` the fold ignores, never
     /// safety.
     pub(super) fn tail_segment(&self) -> SegmentId {
         let folded = self.replica.journal().segment.id;
@@ -126,7 +127,8 @@ impl ColocatedNode {
             .proposer
             .recovery()
             .into_iter()
-            .flat_map(|recovery| recovery.recovered().range(after..))
+            .flat_map(Recovery::pending)
+            .filter(|(slot, _)| **slot >= after)
             .map(|(slot, command)| (*slot, command));
         // A chosen value wins over an open round at the same slot, and an
         // open round over a recovered value it has not proposed yet.

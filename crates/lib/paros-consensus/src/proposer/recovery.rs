@@ -134,30 +134,24 @@ impl<V> Recovery<V> {
         self.end
     }
 
-    /// The values Phase 1 recovered that the pump has not handed out yet,
-    /// by slot: each lies at or past the cursor and below the end.
+    /// The values the pump will still re-propose, by slot: each recovered
+    /// value in `[cursor, end)` at a slot the repair probe does not own. A
+    /// report below the cursor (a slot the node learned chosen before it
+    /// won, or one below a handoff's start) is not pending, and neither is a
+    /// blocked slot, which the probe may settle on another value.
     ///
     /// # Panics
     ///
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
-    #[must_use]
-    pub fn recovered(&self) -> &BTreeMap<Slot, V> {
+    pub fn pending(&self) -> impl Iterator<Item = (&Slot, &V)> {
         assert!(
-            self.recovered
-                .keys()
-                .next()
-                .is_none_or(|first| *first >= self.cursor),
-            "a recovered value the pump handed out leaves the map"
+            self.cursor <= self.end,
+            "a recovery's cursor never passes its end"
         );
-        assert!(
-            self.recovered
-                .keys()
-                .next_back()
-                .is_none_or(|last| *last < self.end),
-            "a recovered value lies inside the range"
-        );
-        &self.recovered
+        self.recovered
+            .range(self.cursor..self.end)
+            .filter(|(slot, _)| !self.blocked.contains(*slot))
     }
 }
 

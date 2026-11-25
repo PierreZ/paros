@@ -120,8 +120,9 @@ impl Fingerprint for Command {
 
 impl Weigh for Command {
     /// A write weighs its records' bytes, the measure of a read's
-    /// `max_bytes`. A control command carries no client bytes and weighs
-    /// nothing.
+    /// `max_bytes`. A control command and a `Roll` carry no client bytes
+    /// and weigh nothing: the weight bounds what clients put in the log,
+    /// and a `Roll` is an operator's call whose replica set is a few ids.
     fn weight(&self) -> u64 {
         match self {
             Self::Write(entry) => {

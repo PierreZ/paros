@@ -72,6 +72,9 @@ pub mod reach {
     /// A node jumped to a trim point past a `Roll`: the jump carried the
     /// tail segment.
     pub const ROLL_JUMP: &str = "cluster: a node jumped to a trim point past a Roll";
+    /// A leader admitted a `Roll` while its bounded recovery still held
+    /// values to propose again: the tail counts them (R4c).
+    pub const ROLL_IN_RECOVERY: &str = "cluster: a leader rolled during a paged recovery";
     /// A durable quorum chose a slot.
     pub const CHOSEN: &str = "cluster: a durable quorum chose a slot";
     /// A second leadership was elected after the first.
@@ -1215,7 +1218,12 @@ impl Cluster {
                 self.reads
                     .answered(&format!("node {}", id.0), state.ctx, state.index);
             }
-            if !self.after_batch(id) {
+            // A slow driver (`Steer::Rolling`, in the chaos phase): it
+            // holds back the next recovery page for a while, so a leader
+            // rolls while its recovery still holds values to propose again.
+            let hold =
+                chaos && more && self.flavor.steer == Steer::Rolling && cx.rng().chance(1, 2);
+            if !self.after_batch(id, hold) {
                 return;
             }
         }
@@ -1279,13 +1287,16 @@ impl Cluster {
         }
     }
 
-    /// After a batch of node `id`: advance its recovery and note the
-    /// ballot of a leader. Returns whether the node still runs.
-    fn after_batch(&mut self, id: NodeId) -> bool {
+    /// After a batch of node `id`: advance its recovery (unless the driver
+    /// `hold`s it back, which a later batch releases) and note the ballot of
+    /// a leader. Returns whether the node still runs.
+    fn after_batch(&mut self, id: NodeId, hold: bool) -> bool {
         let Some(node) = self.node_mut(id).live.as_mut() else {
             return false;
         };
-        node.advance_recovery();
+        if !hold {
+            node.advance_recovery();
+        }
         if node.is_leader() {
             let ballot = node.ballot();
             sometimes!(
@@ -1861,11 +1872,14 @@ impl Cluster {
             .rounds()
             .values()
             .any(|round| matches!(round.command(), Command::Roll(_)));
+        let recovering = node
+            .proposer()
+            .recovery()
+            .is_some_and(|recovery| recovery.remaining() > 0);
         let result = node.roll(replicas);
-        sometimes!(
-            open && matches!(result, RollResult::Accepted { .. }),
-            reach::ROLL_PIPELINED
-        );
+        let accepted = matches!(result, RollResult::Accepted { .. });
+        sometimes!(open && accepted, reach::ROLL_PIPELINED);
+        sometimes!(recovering && accepted, reach::ROLL_IN_RECOVERY);
         self.drain_node(leader, cx);
     }
 

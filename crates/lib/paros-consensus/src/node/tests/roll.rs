@@ -75,6 +75,19 @@ fn every_node_folds_a_pipelined_pair_of_rolls_at_the_same_slots() {
 /// Phase 1 recovered hold it until the pump proposes them again.
 #[test]
 fn the_tail_counts_a_roll_that_a_paged_recovery_has_not_opened_yet() {
+    paged_recovery_holds_the_roll(false);
+}
+
+/// The same with a report below the recovery's cursor: the candidate learned
+/// slot 0 chosen before it won, so its recovery starts at slot 1 and the
+/// report of slot 0 stays behind in the recovered values. Asking the tail
+/// then is a correct driver's call, not a broken invariant.
+#[test]
+fn the_tail_skips_a_report_below_the_recovery_cursor() {
+    paged_recovery_holds_the_roll(true);
+}
+
+fn paged_recovery_holds_the_roll(learned_first: bool) {
     let limits = Limits {
         recovery_page: 1,
         ..Limits::DEFAULT
@@ -89,9 +102,23 @@ fn the_tail_counts_a_roll_that_a_paged_recovery_has_not_opened_yet() {
         next: SegmentId(1),
         replicas: None,
     });
-    for (slot, command) in [ucmd(7, 0, 1), roll, ucmd(7, 1, 2)].into_iter().enumerate() {
+    let commands = [ucmd(7, 0, 1), ucmd(7, 1, 2), roll, ucmd(7, 2, 3)];
+    for (slot, command) in commands.iter().enumerate() {
         let slot = Slot(u64::try_from(slot).expect("fits"));
-        storage.accepted.insert(slot, (Ballot::zero(), command));
+        storage
+            .accepted
+            .insert(slot, (Ballot::zero(), command.clone()));
+    }
+    if learned_first {
+        candidate.step(Message::Commit {
+            from: Party::Node(NodeId(0)),
+            ballot: Ballot::zero(),
+            slot: Slot(0),
+            command: commands[0].clone(),
+        });
+        let _ = drain(&mut candidate);
+        assert!(!candidate.is_leader(), "the campaign is still open");
+        assert!(candidate.replica.chosen().contains(&Slot(0)));
     }
     let mut acceptor = ColocatedNode::new(&storage, Limits::DEFAULT);
     acceptor.step(Message::Prepare {
@@ -113,9 +140,13 @@ fn the_tail_counts_a_roll_that_a_paged_recovery_has_not_opened_yet() {
         .recovery()
         .expect("a paged recovery stays open");
     assert!(
-        recovery.recovered().contains_key(&Slot(1)),
+        recovery.cursor() <= Slot(2),
+        "the recovery has not handed out the Roll's slot"
+    );
+    assert!(
+        recovery.pending().any(|(slot, _)| *slot == Slot(2)),
         "the Roll waits in the recovery, not in a round"
     );
-    assert!(!candidate.proposer.rounds().contains_key(&Slot(1)));
+    assert!(!candidate.proposer.rounds().contains_key(&Slot(2)));
     assert_eq!(candidate.tail_segment(), SegmentId(1));
 }

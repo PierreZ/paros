@@ -391,6 +391,13 @@ impl Flavor {
             name: "segments",
             steer: Steer::Rolling,
             options: &[Action::Reconfigure, Action::Truncate],
+            // Recovery pages of one: with the slow driver of the steer, a
+            // leader often rolls while its recovery still holds values to
+            // propose again, which the tail must count.
+            limits: Limits {
+                recovery_page: 1,
+                ..Limits::DEFAULT
+            },
             ..Self::matchmakers()
         }
     }

@@ -1307,6 +1307,12 @@ impl Replica {
         // and the transport proves the bytes. A broken state is a detected
         // corruption of a peer's fold.
         base.assert_invariants();
+        // The write half of the pair `from_boot` reads back: the sealed tail
+        // segment opens at or below the new floor.
+        assert!(
+            base.segment.start <= first,
+            "the sealed tail segment opens at or below the sealed floor"
+        );
         self.base = base;
         self.floor = first;
         self.chosen = self.chosen.split_off(&first);
