@@ -257,6 +257,14 @@ pub enum Action {
         #[serde(default)]
         quorum: Option<QuorumSpec>,
     },
+    /// A client asks the leader at `node` to cut the log: a `Roll` to the
+    /// next segment, which keeps the replicas of the segment it ends
+    /// (`ColocatedNode::roll(None)`, `docs/architecture/04-7-segments.md`
+    /// §4.7, D4).
+    Roll {
+        /// The node the client asks (must be the leader).
+        node: u64,
+    },
     /// An operator asks `target` to shut down for good, showing the effective
     /// garbage-collection watermark read from `node`'s report.
     Retire {
@@ -391,6 +399,7 @@ impl Action {
             Action::Reconfigure { node, members, .. } => {
                 format!("ask node {node} to make {members:?} the acceptors")
             }
+            Action::Roll { node } => format!("ask node {node} to cut the log"),
             Action::Retire {
                 target,
                 gc_watermark,
@@ -659,6 +668,7 @@ mod tests {
                 },
                 "ask node 1 to make [1, 2, 3] the acceptors",
             ),
+            (Action::Roll { node: 1 }, "ask node 1 to cut the log"),
             (
                 Action::Retire {
                     node: 1,

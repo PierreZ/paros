@@ -48,7 +48,7 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
 - `src/paxos/world/disk.rs` → `Disk` → the game's `Storage` impl, the trim-point jump, and the `applied` log.
 - `src/paxos/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held.
 - `src/paxos/world/render.rs` → the log world's view; a crashed node renders from its disk.
-- `src/paxos/world/matchmakers/{mod,process,verbs,delivery,render}.rs` → the matchmaker plane: `MatchmakerProcess`, operator verbs (`retire` needs `reports_gc_floor`), beat-driven freeze/abandon.
+- `src/paxos/world/matchmakers/{mod,process,verbs,delivery,render}.rs` → the matchmaker plane: `MatchmakerProcess`, operator verbs (`retire` needs `reports_gc_floor`; `roll`, `Action::Roll`, asks the leader for `ColocatedNode::roll(None)`, refused with no matchmakers), beat-driven freeze/abandon. `NodeView::segment` is a node's tail segment, and a node's card says `segment k` once its log has rolled.
 - `src/paxos/narration.rs` → narration derived from the transition.
 - `src/paxos/level.rs` → `Level`, `levels()`, `level(id)` → a setup a trace runs on: an id and a
   world to build. `src/paxos/level/common.rs` → shared
@@ -90,6 +90,10 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   (`Delegation::Colocated`; the replicas do not run yet, so no message goes to them), then
   the replicas start and catch up on node 0's beat, the proxy leaders and the batcher enter, a proxy leader crashes and a
   replica reads with no leader.
+  The matchmaker page's tour run, `tour` (chapter "Change the acceptors",
+  `trace/pages/matchmaker/tour.rs`), is one world too: the matchmakers before Phase 1, a new
+  set of acceptors as a new ballot, two `Roll`s that cut the log into segments, the leader's
+  crash and a Phase 1 over the old set and the new one, then the retirement of node 2.
   `trace/compart/desk.rs` → `Desk`, `Verb` → the same deployment driven by hand, the world of
   the lesson 6 exercises (deliver or lose each message, a client write, a beat of node 0 or of
   a proxy leader, a proxy leader crash). The guided lines of those exercises read it through

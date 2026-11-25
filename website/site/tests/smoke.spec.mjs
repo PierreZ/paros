@@ -305,28 +305,6 @@ test("/paxos/tour/: the title, the chapter menu, a bridge and a chapter", async 
   w.check();
 });
 
-// Play goes on from one run of a chapter to the next with no press. The
-// chapter "Change the acceptors" still plays two runs of its lesson.
-test("/paxos/tour/: Play goes on from run to run", async ({ browser }) => {
-  const context = await browser.newContext({ reducedMotion: "no-preference" });
-  const page = await context.newPage();
-  const w = watch(page);
-  await page.goto("paxos/tour/#chapter=matchmakers");
-  const screen = page.locator(".tour-screen");
-  const story = page.locator(".panel.story");
-  const playing = () => page.evaluate(() => window.paxosStory.playing());
-  await expect(screen.locator(".tour-bridge")).toBeVisible();
-  await page.evaluate(() => window.paxosStory.speed(20));
-  await page.keyboard.press(" ");
-  await expect(story).toBeVisible();
-  await expect(story.locator(".tour-bar")).toContainText("run 1/2");
-  await expect.poll(playing).toBe(true);
-  await expect(story.locator(".tour-bar")).toContainText("run 2/2", { timeout: 30_000 });
-  await expect.poll(playing).toBe(true);
-  w.check();
-  await context.close();
-});
-
 // The tour with motion: Play goes from a chapter to its
 // end, the countdown shows and Stop stops it, the keys work, a hidden page
 // stops the countdown, and a chapter opened from the address does not move.

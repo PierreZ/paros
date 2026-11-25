@@ -109,6 +109,7 @@ impl Game {
             Action::CrashMatchmaker { .. }
             | Action::RestartMatchmaker { .. }
             | Action::Reconfigure { .. }
+            | Action::Roll { .. }
             | Action::Retire { .. }
             | Action::ReconfigureMatchmakers { .. }
             | Action::ResendMatchmaking { .. }
@@ -182,7 +183,7 @@ impl Game {
     }
 
     /// Run an action on the membership: the matchmakers, a reconfiguration,
-    /// a retirement, and the re-sends of their requests.
+    /// a roll, a retirement, and the re-sends of their requests.
     fn apply_membership(&mut self, action: &Action) -> Result<(), ActionError> {
         match action {
             Action::CrashMatchmaker { matchmaker } => {
@@ -210,6 +211,7 @@ impl Game {
                     world.reconfigure(NodeId(*node), &config)?;
                 }
             }
+            Action::Roll { node } => self.log_world()?.roll(NodeId(*node))?,
             Action::Retire {
                 node,
                 target,

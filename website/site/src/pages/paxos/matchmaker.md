@@ -35,6 +35,20 @@ Now you are the network. Deliver or drop each message, and reach the goal.
 ballot, and Phase 2 writes only to the new one.** So Phase 1 finds any value that an old
 configuration chose, and writes do not stop during the change.
 
+## Segments
+
+A log grows for ever, so the leader can cut it into **segments**. A segment is a range of
+slots. The cut is a command of the log, the `Roll`: `ColocatedNode::roll` proposes it like a
+write, and the leader does not wait for it. When a valid `Roll` is chosen at slot `s`, slot `s` is
+the last slot of its segment, and the next segment starts at `s + 1`. A `Roll` is valid when it
+names the segment after the tail; any other `Roll` changes nothing. Paxos chooses one value for
+each slot, so every node ends a segment at the same slot. A roll needs matchmakers: a deployment
+without them refuses it. A change of the acceptors is a new ballot, and it cuts no segment.
+
+The replicas that keep a sealed segment, and the chain of segments at the matchmakers, are not
+built yet. The design is
+[§4.7 Segments in the core](https://github.com/PierreZ/paros/blob/main/docs/architecture/04-7-segments.md).
+
 ## In paros
 
 - `paros-consensus`: `Matchmaker` ([`matchmaker/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-consensus/src/matchmaker)) and the matchmaking phase
@@ -48,4 +62,6 @@ configuration chose, and writes do not stop during the change.
   registration that names it (`MatchRefusal::Retired`). A handover carries these records to
   the successor set. When placement books the node on that journal again, the node first
   rejoins: at a new incarnation, it asks every matchmaker to drop its record.
+- Segments: `Roll` and `Segment` ([`journal/segment.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/journal/segment.rs)) and
+  the driver call `ColocatedNode::roll` ([`node/roll.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/node/roll.rs)).
 - Consensus: [the deployments](../../consensus/deployments/#matchmaker-and-matchmakerreconfigurer) show how a node and its matchmakers are driven together.

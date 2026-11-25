@@ -1,11 +1,11 @@
 //! The operator's matchmaker-plane verbs, and the reads a goal makes of them:
 //! crashing and restarting a matchmaker, asking a leader to change the acceptor
-//! set, retiring a released acceptor on the evidence, driving a matchmaker-set
-//! handover, and the three re-sends.
+//! set, cutting the log into a new segment, retiring a released acceptor on
+//! the evidence, driving a matchmaker-set handover, and the three re-sends.
 
 use paros_consensus::matchmaker::StartRefusal;
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId};
-use paros_consensus::node::{ReconfigureRefusal, ReconfigureResult};
+use paros_consensus::node::{ReconfigureRefusal, ReconfigureResult, RollRefusal, RollResult};
 use paros_consensus::{Ballot, ColocatedNode, NodeId};
 
 use crate::paxos::action::{ActionError, ActionErrorCode};
@@ -265,6 +265,53 @@ impl World {
             None => format!("{} is not running.", who(id)),
         };
         let opening = crate::paxos::narration::say(NarrationKind::Reconfigure, text);
+        self.narration.insert(mark, opening);
+        Ok(())
+    }
+
+    /// A client asks the leader `id` to cut the log: a `Roll` to the next
+    /// segment, on the same replicas (`ColocatedNode::roll(None)`, D4 of
+    /// `docs/architecture/04-7-segments.md`). The core judges the `Roll` when
+    /// its walk of the chosen prefix reaches the slot; this verb only asks.
+    ///
+    /// # Errors
+    ///
+    /// `NodeCrashed` or `UnknownNode` for a node that cannot be asked,
+    /// `NotLeader` when `id` does not lead, and `NoMatchmakers` on a plain
+    /// deployment, which refuses a roll (D5).
+    pub fn roll(&mut self, id: NodeId) -> Result<(), ActionError> {
+        let index = self.require_live(id)?;
+        let mark = self.narration.len();
+        let text = match self.drive(id, index, |node| node.roll(None)) {
+            Some(RollResult::Accepted { slot, next }) => format!(
+                "A client asks {} to cut the log. The leader proposes a Roll to segment {} at \
+                 slot {}, like any other command. If the Roll is valid when it is chosen, the \
+                 segment before it ends at slot {}, and segment {} starts at slot {}, on the \
+                 same machines.",
+                who(id),
+                next.0,
+                slot.0,
+                slot.0,
+                next.0,
+                slot.0 + 1
+            ),
+            Some(RollResult::NotLeader(hint)) => {
+                self.narration.truncate(mark);
+                return Err(not_leader(id, hint, "a roll goes to"));
+            }
+            Some(RollResult::Refused(RollRefusal::NoMatchmakers)) => {
+                self.narration.truncate(mark);
+                return Err(ActionError::new(
+                    ActionErrorCode::NoMatchmakers,
+                    "the roll is refused: this deployment has no matchmakers to keep the \
+                     segments",
+                ));
+            }
+            None => format!("{} is not running.", who(id)),
+        };
+        // A roll is a client's ask, not a change of the acceptors: it cuts no
+        // configuration (R9), so it is narrated as a client request.
+        let opening = crate::paxos::narration::say(NarrationKind::Client, text);
         self.narration.insert(mark, opening);
         Ok(())
     }

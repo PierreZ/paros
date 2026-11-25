@@ -167,8 +167,14 @@ pub fn node_lines(node: &NodeView) -> Vec<String> {
                 Some(RoleView::Candidate) => format!("candidate {ballot}"),
                 Some(RoleView::Follower) | None => promise_line(node),
             };
-            // The slots are in the card's log strip (`Step::logs`).
-            vec![first]
+            // The slots are in the card's log strip (`Step::logs`). The
+            // segment shows once the log has rolled: a log that never rolls
+            // stays in its first segment (R11), and says nothing of it.
+            let mut lines = vec![first];
+            if let Some(segment) = node.segment.filter(|segment| segment.id > 0) {
+                lines.push(format!("segment {}", segment.id));
+            }
+            lines
         }
     }
 }
@@ -595,4 +601,58 @@ fn matchmaker_changed(before: &WorldView, after: &WorldView, party: PartyView, i
             .map_or(0, |matchmaker| matchmaker.registrations.len())
     };
     count(before) != count(after)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::node_lines;
+    use crate::paxos::Game;
+    use crate::paxos::action::Action;
+
+    /// Deliver every message on the wire, oldest first, until it is empty.
+    fn settle(game: &mut Game) {
+        for _ in 0..500 {
+            let Some(id) = game
+                .world()
+                .log()
+                .and_then(|log| log.wire().first())
+                .map(|m| m.id)
+            else {
+                return;
+            };
+            game.act(&Action::Deliver { id })
+                .expect("a message on the wire");
+        }
+        panic!("the wire does not empty");
+    }
+
+    /// The card lines of node `id`.
+    fn lines(game: &Game, id: u64) -> Vec<String> {
+        let view = game.world().log().expect("a log world").view();
+        let node = view
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .expect("the node");
+        node_lines(node)
+    }
+
+    #[test]
+    fn a_card_names_the_segment_only_once_the_log_has_rolled() {
+        let mut game = Game::new("act4/reconfigure").expect("the level");
+        game.act(&Action::StartElection { node: 0 })
+            .expect("node 0 campaigns");
+        settle(&mut game);
+        assert_eq!(lines(&game, 0), vec!["leader 2.0".to_string()]);
+        game.act(&Action::Roll { node: 0 })
+            .expect("the leader rolls");
+        settle(&mut game);
+        for id in 0..3 {
+            assert!(
+                lines(&game, id).contains(&"segment 1".to_string()),
+                "node {id}: {:?}",
+                lines(&game, id)
+            );
+        }
+    }
 }

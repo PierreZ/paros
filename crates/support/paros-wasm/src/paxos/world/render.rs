@@ -12,7 +12,7 @@ use paros_consensus::membership::QuorumSystem;
 use crate::paxos::view::{
     AttemptView, ChosenView, ClientView, ElectionView, GapView, GcView, GridCellView,
     HandoverPhaseView, MatchmakerView, MatchmakingView, NodeFlavour, NodeView, ProposalView,
-    ReachView, ReadView, SlotView, WorldFlavour, WorldView, matchmaker_phase_view,
+    ReachView, ReadView, SegmentView, SlotView, WorldFlavour, WorldView, matchmaker_phase_view,
     matchmaker_set_view, quorum_view, registration_kind_view, registration_view, show_ballot,
     show_role,
 };
@@ -85,6 +85,7 @@ impl World {
             handover: handover_view(&self.reconfigurers[index]),
             retired: self.retired[index],
             wiped,
+            segment: None,
         }
     }
 
@@ -170,6 +171,10 @@ impl World {
             handover: handover_view(&self.reconfigurers[index]),
             retired: self.retired[index],
             wiped,
+            segment: Some(SegmentView {
+                id: node.replica().journal().segment.id.0,
+                start: node.replica().journal().segment.start.0,
+            }),
         }
     }
 }

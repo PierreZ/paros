@@ -170,22 +170,20 @@
     screen.hidden = true;
     story.panel.hidden = false;
     bar.hidden = false;
-    where.textContent = "Chapter " + ch.n + "/" + (onTourPage ? chapters.length : tour.of) + " · " + ch.title +
-      (ch.runs.length > 1 ? " · run " + (r + 1) + "/" + ch.runs.length : "");
+    where.textContent = "Chapter " + ch.n + "/" + (onTourPage ? chapters.length : tour.of) + " · " + ch.title;
     if (progress) progress.tourAt(ch.id, r);
     story.start(ch.runs[r], playing);
     // The keys go on: Space plays or pauses the story.
     story.panel.focus({ preventScroll: true });
   }
 
-  // The end of a run: the next run of the chapter, or the end of the chapter.
+  // The end of a run: the end of its chapter (a chapter plays one run).
   function ended(run, how) {
     if (current < 0) return false;
     var ch = chapters[current];
     // The player reached the end: it played, whoever pressed Play.
     if (how === "auto") playing = !reduced;
     if (how === "play" || how === "next") playing = how === "play" && !reduced;
-    if (runAt < ch.runs.length - 1) { runs(current, runAt + 1); return true; }
     if (progress) {
       progress.tourDone(ch.id);
       // The next place to continue from: the next chapter of the whole

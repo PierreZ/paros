@@ -8,6 +8,8 @@
 //! The base run ends with a screen of choices; every other run ends with a
 //! way back to it.
 
+mod tour;
+
 use super::{any, decree_outcome, kind, log_outcome, touches, voted};
 use crate::paxos::action::{Action, BallotSpec};
 use crate::paxos::level::common::{crash, open, propose, start_election as elect};
@@ -76,7 +78,14 @@ pub(super) fn matchmaker() -> Trace {
     trace(
         "matchmaker",
         LEVEL,
-        vec![base(), leader_crash(), replace(), retire(), skipped()],
+        vec![
+            base(),
+            leader_crash(),
+            replace(),
+            retire(),
+            skipped(),
+            tour::tour(),
+        ],
     )
 }
 

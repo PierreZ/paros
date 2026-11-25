@@ -273,6 +273,21 @@ pub struct NodeView {
     /// own record: the identity was provisioned once, and the store no longer
     /// carries the marker that says so. The library refuses such a boot.
     pub wiped: bool,
+    /// The tail segment of the log, as the walk of this node's chosen prefix
+    /// gives it (`JournalState::segment`). `None` for a crashed node and for
+    /// the single-decree world, which has no log.
+    pub segment: Option<SegmentView>,
+}
+
+/// The tail segment of a log (`docs/architecture/04-7-segments.md` §4.7):
+/// its id and its first slot. A valid `Roll` chosen at slot `s` opens the
+/// next segment at `s + 1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentView {
+    /// The id of the segment: 0 for the first, one more at each valid `Roll`.
+    pub id: u64,
+    /// Its first slot.
+    pub start: u64,
 }
 
 /// Which family of quorums a configuration counts with.
