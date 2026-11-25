@@ -38,6 +38,7 @@ reads 22
 reads-rows4 9
 recorded-inputs 0.1
 retire-fence 16
+segment-roll 7.5
 takeover 6.5
 truncation 7.5
 truncation-reconfig 12.5
