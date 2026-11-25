@@ -227,7 +227,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The flight rule of the journal's sans-IO contract: persist ids, a send that names the persist id it waits on, group commit, a crash that drops the batches in flight; the faults of a storage (`Full`, `Lost`, `Unknown`) and their verdicts, with the list of the roles on a disk (`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)) | the generic `Driver` of `paros-host`, its `StorageError`, `Verdict` and `Storage::list` | `flight-rule/` | #1255 (journal sans-IO contract), done; #1414 (Storage lists the roles on a disk and reports typed faults) |
 | Rule 2 of the journal's sans-IO contract, every input is recorded: the time and the random draws in each input, one timer for each role (`docs/journal/04-roles.md` §J4.2 (tag `journal-design-a`)) | not built (`paros-host`, #1413) | `recorded-inputs/` | #1413 (the time, the timers and the draws in each role) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
-| Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)) |
+| Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2262,7 +2262,6 @@ workers):
 | `gc_won_fill` | ci | the GC at the win; two slots, no node catches up | `NoFillChosen` violation (1.4 million states, 73 s) |
 | `safety` | ci | the rules of the code; two ballots, one slot | pass (302 thousand states, 20 s) |
 | `cover_joined_fill` | long | the new member counts with no record; two slots, `a3` alone catches up | `NoFillChosen` violation (4.8 million states, 4.5 min) |
-| `three_ballots` | long | the rules of the code; one slot | pass (41.5 million states, 54 min) |
 | `two_slots` | long | the rules of the code; two ballots | no violation in 43.8 million distinct states (bounded: stopped after 63 min, 21.2 million states left on the queue) |
 | `reach_fill_gc` | ci | `NoGc` on the shape of `fill_code`: the GC fires there | violation (302 thousand states, 27 s) |
 | `fill_code` | long | the rules of the code; three ballots and two slots, `a2` alone catches up: the smallest shape where the two `*_fill` controls find a `Noop` over a chosen slot | no violation in 8.2 million distinct states (bounded: 50 minutes, 1 worker) |
@@ -2567,8 +2566,8 @@ of the chosen prefix whatever a leader proposes: `barrier_off_commit`, `hole_any
 still needed (R4c): it is the start of the fold, and `route_commit_base_chain` strays when it
 comes from the chain. R3 alone keeps `OneEnd`, `ReplicaTrue` and `ChainTrue` with every routing
 rule off (`safety_bare`). They stay as switches, and the controls
-`barrier_off` and `hole_any` show what they do under `Route = "propose"`. Whether R4a stays in
-the design is Pierre's call (asked on 2026-11-25). R4b is the gap fill of the core today, so it
+`barrier_off` and `hole_any` show what they do under `Route = "propose"`. Pierre dropped the pause
+(R4a) on 2026-11-25 (`docs/architecture/04-7-segments.md` §4.7.3). R4b is the gap fill of the core today, so it
 stays.
 
 **The handoff** (DPaxos `relinquish_to`, Pierre 2026-11-24): the successor keeps the ballot and
@@ -2619,3 +2618,40 @@ What is not in the model: a change of the acceptors (a grid change is a round ch
 segment, R9), a restart or a lost disk, the chain at a matchmaker quorum (step 4), `Held`, the
 floor and the heal of a segment (steps 6 and 7), and the replicas that a `Roll` names (the sets are
 fixed).
+
+### `multi-paxos-roll/`: the `Roll` on the Multi-Paxos model, for step 3 of the segments in the core
+
+Step 3 of `docs/archive/journal-design-a/prompt.md` puts the `Roll` on the model of plain
+Multi-Paxos before the code. `MultiPaxosRoll.tla` extends `MultiPaxos.tla` (a link to
+`multi-paxos/`) and changes no action of it: a `Roll` is a command, so Phase 1 recovers it, the
+gap fill gives a hole a `Noop` and never a `Roll` (R4b), and a learner learns it as any other value.
+The spec is `Spec` of `MultiPaxos`: there is no pause (R4a, dropped by Pierre on 2026-11-25), and
+`MultiPaxos.tla`, pinned in `PROVED.sha256`, does not change. The constant `RollTo` gives each
+command its target: 0 for a client command, `k >= 2` for a `Roll` to segment `k`.
+
+A node folds its segments from the prefix that it learned (R3, `SegFold`): a `Roll` to its
+segment plus one ends the segment at the next slot, and any other `Roll` changes nothing (R2).
+`SegsAgree` says that two nodes that learned a prefix fold the same segment at each slot of it,
+so each segment has one end. `Inv`, the inductive invariant of `multi-paxos/` that TLAPS proves
+for any set of commands, is checked on every reachable state too: the `Roll` changes no
+argument of the proof. The control `act_vote` folds the votes in place of the learned prefix
+(`VoteSegsAgree`), and two nodes fold two segments.
+
+| Check | CI | Result |
+|---|---|---|
+| `roll` | ci | pass: `TypeOK`, `Agreement`, `LearnedChosen`, `Inv` and `SegsAgree`; one client command and one `Roll` to segment 2, 2 slots, 2 ballots (2.27 million distinct states, about 5 minutes with 4 workers) |
+| `act_vote` | ci | violation of `VoteSegsAgree`: a fold of the votes, 3 ballots (R3) |
+| `reach_seg2`, `reach_recovered`, `reach_lost` | ci | violation: a node folds segment 2; a later ballot recovers, from its Phase 1, a `Roll` that an earlier ballot proposed, and it is learned; a proposed `Roll` is lost, and its slot is learned as another value |
+| `segs3` | long | pass: `TypeOK`, `Agreement` and `SegsAgree` with two `Roll`s, to segments 2 and 3, and one client command (6.2 million, 13 minutes with 4 workers) |
+| `roll_restart` | long | pass: the invariants of `roll` with one restart: the node goes back to its disk and keeps a prefix of what it learned (11.1 million, 25 minutes with 4 workers) |
+| `three_ballots` | long | pass: `Agreement` and `SegsAgree` with 3 ballots; stopped by hand above 5.7 million distinct states and 3 million on the queue with no error, too large to finish here |
+
+Three ballots are not checked here: with one `Roll` alone, TLC passed 87 million distinct
+states in two hours with 34 million on the queue, and it was stopped. The argument does not need
+them: `SegsAgree` follows from `Agreement` and `LearnedChosen`, since two nodes that learned a
+prefix learned the same value at each slot of it, and `Inv` implies both at every number of
+ballots (`MultiPaxosProof.tla`). The checks with two ballots show that the `Roll` changes no step
+of that proof.
+
+What is not in this model: the replicas of a segment and the route of a `Commit` (they are in
+`segment-roll/`), the chain, and a grid.

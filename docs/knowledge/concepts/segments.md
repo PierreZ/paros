@@ -43,7 +43,7 @@ sequenceDiagram
     participant R1 as replicas of k
     participant R2 as replicas of k+1
     participant M as matchmakers
-    D->>L: roll(replicas)
+    D->>L: roll(replicas: None or Some)
     L->>A: Accept(s, Roll{next: k+1, replicas})
     A-->>L: Accepted (a quorum)
     L->>R1: Commit(s) (every slot below s is chosen)
@@ -90,8 +90,9 @@ it; the replicas apply in slot order anyway.
 ## 8. Costs
 
 One log entry for each roll, and one write of the chain record for each segment, by any node
-whose walk applied the `Roll`. No extra round trip on the write path. A roll on size or on age
-keeps the same replicas, so the next segment starts at once.
+whose walk applied the `Roll`. No extra round trip on the write path. A `Roll` with no new
+location keeps the replicas of the segment that it ends (D4 of §4.7.2), so the next segment
+starts at once.
 
 ## 9. In paros
 
@@ -110,8 +111,9 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
 - [Stoppable] decides the end in the log too, but it stops the instance: after a stop at `i`, a
   leader sends nothing above `i`, and a new leader voids a stop at `i` when an instance above `i`
   has a vote at a ballot at least as high as the stop's ([Stoppable §3], `sval2a`).
-  The `Roll` stops nothing: the same log goes on. The pause of R4a is the rule of [Stoppable §3]
-  for one ballot; with R4d the model shows that routing does not need it (§4.7.3, **Open**).
+  The `Roll` stops nothing: the same log goes on. The plan's pause (a leader sends
+  nothing above its own `Roll` until it is chosen) was the rule of [Stoppable §3] for one
+  ballot; with R4d routing does not need it, and paros has no pause (Pierre, 2026-11-25, §4.7.3).
 - The floor at `Held` (R7) uses Scenario 3 of Matchmaker Paxos for the compaction floor
   (departure 2), to check in step 6.
 

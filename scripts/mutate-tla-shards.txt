@@ -27,6 +27,7 @@ journal-ids 3
 leader-handoff 12
 matchmaker 3
 multi-paxos 14
+multi-paxos-roll 0
 node 42
 proxy-leader 1
 read-replica 0

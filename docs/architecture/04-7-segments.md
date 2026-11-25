@@ -28,8 +28,8 @@ journal of design A (tag `journal-design-a`); it applies to the whole core.
 | D1 | A segment ends at a decided command, the `Roll`. It is not computed from votes and raced at a register, as in design A | Pierre, 2026-11-24 ("Go roll") |
 | D2 | Acceptors stay learners: a chosen write goes to every acceptor and to the replicas of its segment. Acceptors that only vote (#1271) are a later piece of work | Pierre, 2026-11-24 ("Keep") |
 | D3 | The matchmakers store the chain as the paper stores its registry: an add-only map, merged like `history`. A change of the replicas of a sealed segment (a heal) is one `Decree` | Pierre, 2026-11-24 |
-| D4 | The replicas of a segment are the `NodeId`s that its `Roll` names | **Open**: proposed in the session of 2026-11-24, Pierre did not object; he confirms it on this section |
-| D5 | A `roll` on a deployment with no matchmakers is refused, as `reconfigure` is (`ReconfigureRefusal::NoMatchmakers`) | **Open**: as D4 |
+| D4 | The `Roll` carries an optional new location: `replicas: Option<..>`. `None` keeps the replicas of the segment that it ends, so the next segment lives on the same machines; `Some` names the `NodeId`s of the next segment. The caller of `roll` chooses; balancing the load is for later, above the core | Pierre, 2026-11-25 ("keep simple, we will load balance afterwards"; "an optional new location passed as an option during roll") |
+| D5 | A `roll` on a deployment with no matchmakers is refused, as `reconfigure` is (`ReconfigureRefusal::NoMatchmakers`): a roll needs healthy matchmakers | Pierre, 2026-11-25 |
 | D6 | The journal of design A (its crates, walks, docs and TLA+ models) is removed. The journal is built again later, from scratch, on the core with segments | Pierre, 2026-11-24; done in PR #1538 (remove the journal of design A), at the tag `journal-design-a` |
 | D7 | The layering above the core (the journal as the final crate, the roles of the core on `paros-host`, storage and network as adapters) comes after this work | Pierre, 2026-11-24 |
 
@@ -59,23 +59,23 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   the replica rule of the core (`replica.rs`: the fold is contiguous or it stops).
 - **R4. Routing.** These rules keep a `Commit` away from the wrong replicas. Without them a
   `Commit` can go astray, and two ends still cannot exist.
-  - **R4a. The pause.** A leader proposes nothing above a `Roll` of its own ballot until that
-    `Roll` is chosen at its ballot, a `Roll` that its Phase 1 recovered and proposes again too.
-    **Open**: with R4d the model shows that the pause is not needed for routing
-    (`barrier_off_commit`, `barrier_off_full`); whether it stays is Pierre's call, asked on
-    2026-11-25, and it is decided before step 3 builds the routing.
+  - **R4a. No pause** (Pierre, 2026-11-25). The plan had a pause: a leader proposes nothing
+    above a `Roll` of its own ballot until that `Roll` is chosen at its ballot. With R4d the
+    model shows that routing does not need it (`barrier_off_commit`, `barrier_off_full`), so
+    it is dropped: a leader pipelines across a `Roll`. The switch `Barrier` of
+    `specs/tla/segment-roll/` keeps the pause as a control.
   - **R4b. A hole takes a `Noop`.** The election gap fill never writes a `Roll` into a hole. This
     is the rule of the core today. With R4d it is not needed for routing either
     (`hole_any_commit`), and it stays because the core has it.
   - **R4c. A new leader takes its tail segment from its own chosen prefix** and from the values
     that its Phase 1 recovered, in slot order, never from the chain alone: the chain is behind
     the log by up to one roll. The model needs it (`route_commit_base_chain`).
-  - **R4d. A `Commit` leaves on a known prefix** (**Open**: proposed by the model of step 1;
-    Pierre decides it with R4a, before step 3). A leader sends the `Commit` of slot `s` to the
-    replicas of a segment only once it knows that every slot below `s` is chosen. Its route is
-    then a fold of a chosen prefix, so it is the true segment. Proposals still pipeline; only
-    the `Commit` waits. This is R3 applied to the leader. It was found by the model of step 1:
-    with three ballots and R4a to R4c on, a later ballot can choose, below a slot that a middle
+  - **R4d. A `Commit` leaves on a known prefix** (Pierre, 2026-11-25, with R4a). A leader
+    sends the `Commit` of slot `s` to the replicas of a segment only once it knows that every
+    slot below `s` is chosen. Its route is then a fold of a chosen prefix, so it is the true
+    segment. Proposals still pipeline; only the `Commit` waits. This is R3 applied to the
+    leader. It was found by the model of step 1: with three ballots, the pause on and R4b and
+    R4c on, a later ballot can choose, below a slot that a middle
     ballot chose and routed, the `Roll` of an older ballot that the middle ballot's Phase 1 did
     not see (`route_propose`). Two other candidates were compared: the window of Paxos Made
     Simple §3 (a `Roll` at `s` takes effect at `s + α`, and a leader proposes only `α` slots
@@ -83,8 +83,9 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
     (a "sealed" answer and a resend), which adds a message and a repair.
 - **R5. The chain is an add-only map at the matchmakers.** The matchmaker registry gets a map of
   segment records beside `history`. Each field that comes from the log (the start, the end, the
-  replicas that the `Roll` named, the boundary state) is written once, and every writer writes
-  the same value, because each is a function of the chosen log. The state only grows
+  replicas, which the `Roll` names or keeps from the segment before (D4), the boundary state) is written once, and
+  every writer writes the same value, because each is a function of the chosen log. The state
+  only grows
   (`Open` < `Sealed` < `Held` < `Offloaded` < `Trimmed`). A read is
   a merge over a matchmaker quorum, and a handover carries the map by the same merge, as it
   carries `history` and the retirement records. There is no compare-and-set. Source: the
@@ -109,7 +110,7 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   whose records are all below the trim floor. Source: Delos `reconfigModify`.
 - **R9. The grid does not change here.** A grid change is `ColocatedNode::reconfigure`, a round
   change, as today. It cuts no segment. What the removed journal called a reshape is two calls:
-  `reconfigure(config)` and `roll(replicas)`.
+  `reconfigure(config)` and `roll(Some(replicas))` (D4).
 - **R10. Opt-in.** With no matchmakers a `roll` is refused (D5), no `Roll` is ever chosen, and no
   new message, `HardState` field or round trip enters the plain path. The bootstrap `Config`
   names the replicas of the first segment; with none, the deployment has no segments.

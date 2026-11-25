@@ -506,6 +506,14 @@ heal again on the `Decree`.
 A twelfth example `segments.rs`, its rows in the two READMEs and in `src/lib.rs`, its CI step,
 the knowledge card, the site page.
 
+### Step 9. The website
+
+Added by Pierre on 2026-11-25 ("add a step 9 to do the website like we did yesterday"). Done
+as the guided Paxos tour of 2026-11-24 (`/paxos/tour/`, the plan
+`/mnt/project-files/plans/paxos-guided-tour-2026-11-24.md`): the chapter of the tour on
+matchmakers and segments, which waited for segments, with its guided exercises on the wasm
+engine, and the pages of the site that segments change (`update-the-site` skill).
+
 ## 7. Later, not in this work
 
 Start none of this. It is here so that this work leaves room for it.

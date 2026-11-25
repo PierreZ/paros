@@ -87,7 +87,8 @@ reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold an
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
 more rules)), the `Roll` cut of segments
 (`specs/tla/segment-roll/`: one end for each segment, the route of a `Commit` on a known chosen
-prefix, the tail segment from the chosen prefix; PR #1540 (segment-roll)), and the boundaries of
+prefix, the tail segment from the chosen prefix; PR #1540 (segment-roll); and the `Roll` as a
+plain command of the Multi-Paxos model, `specs/tla/multi-paxos-roll/`), and the boundaries of
 the service above the journal: the ids of journals (`specs/tla/journal-ids/`), the takeover by a
 new coordinator (`specs/tla/takeover/`) and the coarse control plane of a cell
 (`specs/tla/cell-control/`). The models of the journal v1 of design A are at the git tag
