@@ -49,7 +49,8 @@ Read the recap before you copy an idea back. **The work now** is the plan of
 `docs/archive/journal-design-a/prompt.md`: segments come down into `paros-consensus` as an
 optional behaviour, with the `Roll` cut (a segment ends at a decided command), a TLA+ model
 first. Then the journal is built again from scratch, as the final crate, on the core with
-segments; it writes no consensus of its own.
+segments; it writes no consensus of its own. The desired state of segments, with its decisions,
+rules and departures, is `docs/architecture/04-7-segments.md` (§4.7).
 
 **The order of work.** First, a TLA+ model for every Paxos flavor that `paros-consensus` builds
 (single decree, Multi-Paxos, leader handoff, matchmakers, grid quorums, proxy leaders,
@@ -84,7 +85,9 @@ the prefix up to the election fence, with a control that forgets it at the win a
 that counts an empty new member; #1218 (truncation model, part 3)), the Phase-1 bypass of a
 reconfiguration (`specs/tla/zero-stall/`: the bypass check, the decision hold and the read prefix that it gates (#1270 (bypass read order)), GC after the fence
 Phase 1, the handoff of a ballot that bypassed, two bypasses in a row; #1018 (zero-stall model,
-more rules)), and the boundaries of
+more rules)), the `Roll` cut of segments
+(`specs/tla/segment-roll/`: one end for each segment, the route of a `Commit` on a known chosen
+prefix, the tail segment from the chosen prefix; PR #1540 (segment-roll)), and the boundaries of
 the service above the journal: the ids of journals (`specs/tla/journal-ids/`), the takeover by a
 new coordinator (`specs/tla/takeover/`) and the coarse control plane of a cell
 (`specs/tla/cell-control/`). The models of the journal v1 of design A are at the git tag
