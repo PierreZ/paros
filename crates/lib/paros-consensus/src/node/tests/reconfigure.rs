@@ -18,7 +18,7 @@ fn accept_targets(msgs: &[(NodeId, Message)]) -> Vec<NodeId> {
 
 /// A three-node matchmaker deployment over a five-node pool with one
 /// registry, node 0 elected leader through a real matchmaking round.
-fn deployed_cluster() -> ([ColocatedNode; 5], Vec<Matchmaker>) {
+pub(super) fn deployed_cluster() -> ([ColocatedNode; 5], Vec<Matchmaker>) {
     deployed_cluster_with(1)
 }
 

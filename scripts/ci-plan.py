@@ -22,7 +22,10 @@ SANY read the modules of the folder, and a folder shares a module with another
 one only through a symlink (`grid/Grid.tla`). So the inputs of a folder are its
 files, the targets of its symlinks, and the tools (`TLA_TOOLS`). A folder runs
 when one of its inputs changed, or when a file under it changed (a file added
-or deleted). A change of a tool runs every folder.
+or deleted). A change of a tool runs every folder. No check reads a Markdown
+file (TLC, SANY, the guard mutants and the proofs read `.tla`, `.cfg` and
+`checks.txt`), so a changed `.md` file runs no folder, and the TLA workflow
+does not start on one (`!**.md` in its `paths`).
 
 The folders that run are packed into groups, each at most `GROUP_MINUTES` of
 checks (`scripts/tla-minutes.txt`), largest first, so that a job of the TLA
@@ -202,6 +205,8 @@ def plan_tla(changed: list[str] | None) -> dict[str, str]:
     all_folders = folders()
     table = minutes(all_folders)
     shards(all_folders)
+    if changed is not None:
+        changed = [f for f in changed if not f.endswith(".md")]
     tools = changed is None or any(f in TLA_TOOLS for f in changed)
     selected = []
     for folder in all_folders:

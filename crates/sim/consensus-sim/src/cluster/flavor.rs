@@ -85,6 +85,12 @@ pub enum Steer {
     /// settles, and a round it delegates, which a plain walk of 150 steps
     /// seldom gathers.
     Reconfiguring,
+    /// Steered toward segments: a quarter of the client moves are rolls
+    /// (`ColocatedNode::roll`), half of them naming new replicas. A roll
+    /// across a leader change and a trim jump over a roll need many rolls
+    /// among the writes and truncations, which a walk of 150 steps with no
+    /// roll move never makes.
+    Rolling,
 }
 
 impl Flavor {
@@ -375,6 +381,20 @@ impl Flavor {
         }
     }
 
+    /// Segments (§4.7 of `docs/architecture/04-7-segments.md`): the
+    /// matchmaker flavor with truncation, steered toward rolls
+    /// ([`Steer::Rolling`]). The `Roll` is folded by every node, at the same
+    /// slot, and a trim jump carries the tail segment.
+    #[must_use]
+    pub fn segments() -> Self {
+        Self {
+            name: "segments",
+            steer: Steer::Rolling,
+            options: &[Action::Reconfigure, Action::Truncate],
+            ..Self::matchmakers()
+        }
+    }
+
     /// Matchmakers with reconfiguration and the matchmaker set handover
     /// (`MatchmakerReconfigurer`) over a matchmaker pool of five.
     #[must_use]
@@ -515,6 +535,11 @@ pub enum Mutant {
     /// another way than the rules give. Caught by
     /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
     CorruptTrimJump,
+    /// The network moves the tail segment of the journal state that a
+    /// trim-point jump carries one segment on. The node that jumps then
+    /// folds the next `Roll` another way than the rules give. Caught by
+    /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
+    CorruptTrimSegment,
     /// The driver drops the faulty records from every `Promise` it sends:
     /// a lost value reads as no vote (`Tally = "none"` of `truncation/`).
     /// A value is lost only when the candidate fills a chosen slot with a

@@ -97,11 +97,17 @@ starts at once.
 
 ## 9. In paros
 
-Not built yet. The order of work is §6 of
+The order of work is §6 of
 [`docs/archive/journal-design-a/prompt.md`](../../archive/journal-design-a/prompt.md): step 1 is
 the model `specs/tla/segment-roll/` (PR #1540 (segment-roll)), step 3 the model
-`specs/tla/multi-paxos-roll/` and then the cut in
-`paros-consensus` (`Control::Roll`, a segment cursor in `replica.rs`, `roll()` on the node).
+`specs/tla/multi-paxos-roll/` and then the cut in `paros-consensus`.
+
+The cut is built: `Control::Roll { next, replicas }` (`journal/command.rs`), the types of
+`journal/segment.rs`, the fold of the tail segment in `JournalState::apply` (`journal/state.rs`;
+the segment is part of the journal state, so the floor seals it and `TrimmedTo` carries it), and
+`ColocatedNode::roll` (`node/roll.rs`), refused with no matchmakers. The replicas of a segment,
+the route of a `Commit` and the chain at the matchmakers come in later steps (§4.7 of
+`docs/architecture/`).
 
 Divergences from the sources (each a departure of §4.7.4, with its check):
 

@@ -26,11 +26,21 @@
 //!   `up_to`, clamped to `next_seq`, never lowered. From anyone else it is
 //!   `TruncateRefused`.
 //! - Every refusal names the view it was judged against.
+//! - `Roll(next)` (§4.7 of `docs/architecture/04-7-segments.md`, R2) is
+//!   valid when `next` is the tail segment plus one: the tail becomes `next`
+//!   from the slot after the `Roll`, and the outcome names the new tail. Any
+//!   other `Roll` moves nothing and names the tail it was judged against. A
+//!   `Roll` moves no position and no leader, under the same rule in both
+//!   writer modes. So every party that folds a slot to these outcomes ends
+//!   each segment at the same slot: one end for each segment (`SegsAgree` of
+//!   `specs/tla/multi-paxos-roll/`).
 
 use std::collections::BTreeMap;
 
 use paros_consensus::Slot;
-use paros_consensus::journal::{Command, Control, Entry, JournalView, LeaderUuid, Outcome, Seq};
+use paros_consensus::journal::{
+    Command, Control, Entry, JournalView, LeaderUuid, Outcome, Segment, SegmentId, Seq,
+};
 
 /// The oracle: every party folds a slot to the outcome the journal rules
 /// give, whatever the core computes.
@@ -42,6 +52,9 @@ pub struct JournalSpec {
     leader: Option<LeaderUuid>,
     next: u64,
     first: u64,
+    /// The tail segment's id and its first slot.
+    segment: u64,
+    segment_start: u64,
     /// Every accepted write, by the position of its first record.
     accepted: BTreeMap<u64, Entry>,
     /// Per folded slot: the view before it and the outcome it gets.
@@ -72,7 +85,7 @@ impl JournalSpec {
                 )
             });
             let before = self.view();
-            let outcome = self.step(command);
+            let outcome = self.step(at, command);
             self.folded.push((before, outcome));
         }
         &self.folded[index]
@@ -86,9 +99,10 @@ impl JournalSpec {
         }
     }
 
-    fn step(&mut self, command: &Command) -> Outcome {
+    fn step(&mut self, slot: Slot, command: &Command) -> Outcome {
         match command {
             Command::Control(Control::Noop) => Outcome::Noop,
+            Command::Control(Control::Roll { next, .. }) => self.roll(slot, *next),
             Command::Write(entry) => self.write(entry),
             Command::Control(Control::SetLeader { new, old }) => self.set_leader(*new, *old),
             Command::Control(Control::Truncate { leader, up_to }) => self.truncate(*leader, *up_to),
@@ -133,6 +147,22 @@ impl JournalSpec {
         Outcome::Leader(self.view())
     }
 
+    fn tail(&self) -> Segment {
+        Segment {
+            id: SegmentId(self.segment),
+            start: Slot(self.segment_start),
+        }
+    }
+
+    fn roll(&mut self, slot: Slot, next: SegmentId) -> Outcome {
+        if next.0 != self.segment + 1 {
+            return Outcome::RollIgnored(self.tail());
+        }
+        self.segment = next.0;
+        self.segment_start = slot.0 + 1;
+        Outcome::Rolled(self.tail())
+    }
+
     fn truncate(&mut self, leader: LeaderUuid, up_to: Seq) -> Outcome {
         if leader == LeaderUuid::UNSET {
             return Outcome::WrongMode(self.view());
@@ -171,6 +201,27 @@ mod tests {
             leader: LeaderUuid(uuid),
             up_to: Seq(up_to),
         })
+    }
+
+    fn roll(next: u64) -> Command {
+        Command::Control(Control::Roll {
+            next: SegmentId(next),
+            replicas: None,
+        })
+    }
+
+    #[test]
+    fn a_roll_opens_the_next_segment_after_its_slot_and_any_other_moves_nothing() {
+        let outcomes = fold(&[roll(2), claim(1, None), roll(1), roll(1), write(1, 0, b"a")]);
+        let first = Segment::default();
+        let second = Segment {
+            id: SegmentId(1),
+            start: Slot(3),
+        };
+        assert_eq!(outcomes[0], Outcome::RollIgnored(first));
+        assert_eq!(outcomes[2], Outcome::Rolled(second));
+        assert_eq!(outcomes[3], Outcome::RollIgnored(second));
+        assert!(matches!(outcomes[4], Outcome::Accepted { .. }));
     }
 
     /// The outcomes of `log`, folded from slot zero.

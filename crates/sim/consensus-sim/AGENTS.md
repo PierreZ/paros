@@ -188,11 +188,15 @@ Test only: `publish = false`, never a dependency of another crate.
   (`retiring`, `Steer::Retiring`: half the client moves are operator moves, and the operator
   retries the node it asked the matchmakers to check), and every compartment with matchmakers
   steered toward reconfigurations (`reconfiguring`, `Steer::Reconfiguring`: a quarter of the
-  client moves are reconfigurations). 60 seeds each in CI; `lagging-reads`
+  client moves are reconfigurations), and matchmakers steered toward the `Roll` (`segments`,
+  `Steer::Rolling`: a quarter of the proposals are `ColocatedNode::roll`, with the same replicas
+  or two pool nodes; it must reach a valid `Roll`, two `Roll` rounds open at once, and a trim jump
+  past a `Roll`). 60 seeds each in CI; `lagging-reads`
   takes 120. The `lagging-reads` walk is steered (`Steer::LaggingReader`) and is the control of
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.
-- `tests/mutants.rs` → each oracle catches its mutant.
+- `tests/mutants.rs` → each oracle catches its mutant (`Mutant::CorruptTrimSegment`: a trim jump
+  that carries the next segment, caught by the journal rules, whose spec folds the `Roll`).
 - `tests/differential.rs` → the differential check of the core (#1101 (one Belief role, one
   copy of the retained log)): every flavor walks 12 fixed seeds, and the cluster folds every
   batch that a node, a proxy leader or a replica hands its driver into one FNV-1a digest

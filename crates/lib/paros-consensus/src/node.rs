@@ -24,6 +24,7 @@ mod quorum_reads;
 pub mod ready;
 mod reconfigure;
 mod replication;
+mod roll;
 mod view;
 
 pub(crate) use self::quorum_reads::READ_TTL_TICKS;
@@ -38,6 +39,7 @@ pub use self::matchmaking::MatchStep;
 pub use self::ready::{Flight, Ready};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
+pub use self::roll::{RollRefusal, RollResult};
 use crate::acceptor::Acceptor;
 use crate::belief::Belief;
 use crate::collector::Collector;
@@ -804,8 +806,10 @@ impl ColocatedNode {
     ///
     /// # Panics
     ///
-    /// If an internal invariant is broken (a programmer error, never an
-    /// operating condition).
+    /// If `control` is a [`Control::Roll`]: a `Roll` goes through
+    /// [`ColocatedNode::roll`], which refuses it on a deployment with no
+    /// matchmakers. Also if an internal invariant is broken (a programmer
+    /// error, never an operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control)))]
     pub fn propose_control(&mut self, control: Control) -> ProposeResult {
         self.assert_landed();
@@ -830,15 +834,31 @@ impl ColocatedNode {
     ///
     /// # Panics
     ///
-    /// If `delegation` names a proxy the deployment does not have, or an
-    /// internal invariant is broken (a programmer error, never an operating
-    /// condition).
+    /// If `control` is a [`Control::Roll`] (see
+    /// [`ColocatedNode::propose_control`]), if `delegation` names a proxy the
+    /// deployment does not have, or if an internal invariant is broken (a
+    /// programmer error, never an operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control, delegation = ?delegation)))]
     pub fn propose_control_in(
         &mut self,
         control: Control,
         delegation: Delegation,
     ) -> ProposeResult {
+        assert!(
+            !matches!(control, Control::Roll { .. }),
+            "a Roll is proposed by ColocatedNode::roll, which refuses it without matchmakers"
+        );
+        self.propose_control_at(control, delegation)
+    }
+
+    /// [`ColocatedNode::propose_control_in`] for any control command, a
+    /// `Roll` too: [`ColocatedNode::roll`] checks a `Roll` before it comes
+    /// here.
+    fn propose_control_unchecked(&mut self, control: Control) -> ProposeResult {
+        self.propose_control_at(control, Delegation::Auto)
+    }
+
+    fn propose_control_at(&mut self, control: Control, delegation: Delegation) -> ProposeResult {
         if self.role != NodeRole::Leader {
             assert!(
                 self.proposer.rounds().is_empty(),

@@ -76,6 +76,7 @@ fn a_jumped_fold_behind_its_truncation_does_not_hold_the_base_records() {
         term: 1,
         next_seq: Seq(1),
         first_seq: Seq(0),
+        segment: crate::journal::Segment::default(),
     };
     assert_eq!(r.trim_to(Slot(2), base), base);
     r.learn(Slot(2), &commands[2]);
@@ -140,6 +141,7 @@ fn a_truncation_below_a_jumped_floor_keeps_the_floor() {
         term: 1,
         next_seq: Seq(2),
         first_seq: Seq(0),
+        segment: crate::journal::Segment::default(),
     };
     let commands = [
         claim(),
@@ -397,6 +399,7 @@ fn a_trim_point_below_the_fold_keeps_the_own_state() {
         term: 7,
         next_seq: Seq(50),
         first_seq: Seq(40),
+        segment: crate::journal::Segment::default(),
     };
     let base = r.trim_to(Slot(2), peer);
     assert_eq!(
@@ -543,4 +546,40 @@ fn a_chosen_slot_with_no_record_fails_its_read() {
     let r = replica(&[claim(), write(0, &[b"a"])]);
     let log = records(&[claim()]);
     let _ = r.replica.chosen_at(&log, Slot(1));
+}
+
+/// A trim-point jump past a `Roll` carries the tail segment in its state,
+/// so the jumped fold judges the next `Roll` as a node that walked the
+/// whole log does: the same end for each segment.
+#[test]
+fn a_jump_past_a_roll_carries_the_tail_segment() {
+    use crate::journal::{Outcome, Segment, SegmentId};
+    let roll = |next| {
+        Command::Control(Control::Roll {
+            next: SegmentId(next),
+            replicas: None,
+        })
+    };
+    let commands = [claim(), roll(1), write(0, &[b"a"]), roll(2), roll(2)];
+    let walked = replica(&commands);
+    let at_three = replica(&commands[..3]).journal();
+    assert_eq!(
+        at_three.segment,
+        Segment {
+            id: SegmentId(1),
+            start: Slot(2),
+        }
+    );
+    let mut r = replica(&commands[..1]);
+    assert_eq!(r.trim_to(Slot(3), at_three), at_three);
+    r.learn(Slot(3), &commands[3]);
+    r.learn(Slot(4), &commands[4]);
+    r.advance(&mut Vec::new());
+    let two = Segment {
+        id: SegmentId(2),
+        start: Slot(4),
+    };
+    assert_eq!(r.outcome_at(Slot(3)), Some(&Outcome::Rolled(two)));
+    assert_eq!(r.outcome_at(Slot(4)), Some(&Outcome::RollIgnored(two)));
+    assert_eq!(r.journal(), walked.journal());
 }

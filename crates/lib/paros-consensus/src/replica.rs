@@ -991,7 +991,7 @@ impl Replica {
         );
         let before = self.state;
         let mut state = self.state;
-        let outcome = state.apply(self.mode, command, |seq| self.accepted_at(log, seq));
+        let outcome = state.apply(self.mode, slot, command, |seq| self.accepted_at(log, seq));
         self.state = state;
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
             // The index stays monotone: the head's write starts past every

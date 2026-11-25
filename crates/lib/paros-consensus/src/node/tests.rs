@@ -359,4 +359,5 @@ mod reconfigure;
 mod recovery;
 mod replication;
 mod retire_fence;
+mod roll;
 mod wire_hygiene;

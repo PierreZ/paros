@@ -270,6 +270,13 @@ fn tlc_accepts_the_matchmaker_walks() {
     accepts(Spec::Matchmaker, &Flavor::matchmakers());
 }
 
+/// The walks that roll: a `Roll` is a command of the model like any other
+/// (`specs/tla/multi-paxos-roll/`), so the matchmaker spec follows them.
+#[test]
+fn tlc_accepts_the_segment_walks() {
+    accepts(Spec::Matchmaker, &Flavor::segments());
+}
+
 #[test]
 fn tlc_accepts_the_reconfigured_compartment_walks() {
     accepts(Spec::MatchmakerGrid, &Flavor::reconfiguring());

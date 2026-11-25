@@ -9,9 +9,19 @@ an optional behaviour of `paros-consensus`, like the matchmakers, the proxy lead
 replica tier (§4.3): the `Some` arm of the same state machine. The plain arm does not change. The
 journal that comes later composes them and writes no consensus of its own.
 
-This section is the desired state. None of it is built yet; the order of work is §6 of the plan.
-The model of the cut is `specs/tla/segment-roll/` (step 1, PR #1540 (segment-roll)), and
-`specs/tla/multi-paxos-roll/` puts the `Roll` on the Multi-Paxos model (step 3).
+This section is the desired state; the order of work is §6 of the plan. The model of the cut is
+`specs/tla/segment-roll/` (step 1, PR #1540 (segment-roll)), and `specs/tla/multi-paxos-roll/`
+puts the `Roll` on the Multi-Paxos model (step 3).
+
+**What is built (step 3).** `paros-consensus` has the cut: `Control::Roll` and the types of
+`journal/segment.rs` (`SegmentId`, `Segment`, `ReplicaSet`), the fold of R2 in
+`JournalState::apply` (`Outcome::Rolled`, `Outcome::RollIgnored`), and the driver call
+`ColocatedNode::roll` (`node/roll.rs`), refused with no matchmakers (D5) and with the tail of R4c.
+The tail segment is a field of `JournalState`, so it is sealed at the floor and carried by
+`TrimmedTo` with the rest of that state; the plan's separate `WriteOp` for the segment cursor is
+not needed. The `segments` flavor of consensus-sim rolls, with the `Roll` rule in its journal
+oracle and a mutant on the trim jump. Not built yet: the replicas of a segment (R6) and the route
+of R4d, which need replicas to route to (step 5), and the chain at the matchmakers (R5, step 4).
 
 #### 4.7.1 The rule of the papers
 

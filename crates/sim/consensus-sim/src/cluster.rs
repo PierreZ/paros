@@ -38,13 +38,15 @@ use paros_consensus::Limits;
 use paros_consensus::contract::message::Audience;
 use paros_consensus::contract::write::{AcceptorWrite, MustSync};
 use paros_consensus::journal::{
-    Command, Control, Entry, LeaderUuid, Outcome, Seq, command_fingerprint,
+    Command, Control, Entry, LeaderUuid, Outcome, ReplicaSet, Seq, command_fingerprint,
 };
 use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
-use paros_consensus::node::{BeliefSource, Delegation, ProposeResult, ReconfigureResult};
+use paros_consensus::node::{
+    BeliefSource, Delegation, ProposeResult, ReconfigureResult, RollResult,
+};
 use paros_consensus::quorum_read::ReadOpen;
 use paros_consensus::{
     Ballot, ColocatedNode, Config, MatchmakerReconfigurer, Message, NodeId, ProxyLeader,
@@ -62,6 +64,14 @@ pub use trace::{ClusterEvent, Cmd, OwnAnswer, Rule, Spec};
 /// The coverage sites of the cluster. A walk names the ones its flavor must
 /// reach with [`moonpool_walk::Walk::expect_sometimes`].
 pub mod reach {
+    /// A party applied a valid `Roll`: the log entered a new segment.
+    pub const ROLLED: &str = "cluster: a party applied a valid Roll";
+    /// A leader admitted a `Roll` while an earlier one was still open: no
+    /// pause (R4a dropped).
+    pub const ROLL_PIPELINED: &str = "cluster: a leader rolled above an open Roll";
+    /// A node jumped to a trim point past a `Roll`: the jump carried the
+    /// tail segment.
+    pub const ROLL_JUMP: &str = "cluster: a node jumped to a trim point past a Roll";
     /// A durable quorum chose a slot.
     pub const CHOSEN: &str = "cluster: a durable quorum chose a slot";
     /// A second leadership was elected after the first.
@@ -376,6 +386,9 @@ impl Model for Cluster {
                 if self.flavor.steer == Steer::Reconfiguring && cx.rng().chance(1, 4) =>
             {
                 self.reconfigure(cx);
+            }
+            Action::Propose if self.flavor.steer == Steer::Rolling && cx.rng().chance(1, 4) => {
+                self.roll(cx);
             }
             Action::Propose => self.propose(cx),
             Action::Claim => self.claim(cx),
@@ -1387,7 +1400,10 @@ impl Cluster {
                     }
                 }
                 WriteOp::Truncate { .. } => sometimes!(true, reach::COMPACTED),
-                WriteOp::TrimmedTo { .. } => sometimes!(true, reach::TRIM_JUMP),
+                WriteOp::TrimmedTo { state, .. } => {
+                    sometimes!(true, reach::TRIM_JUMP);
+                    sometimes!(state.segment.id.0 > 0, reach::ROLL_JUMP);
+                }
                 _ => {}
             }
         }
@@ -1514,6 +1530,7 @@ impl Cluster {
             reach::TRUNCATE_MOVED
         );
         sometimes!(matches!(outcome, Outcome::Leader(_)), reach::SET_LEADER);
+        sometimes!(matches!(outcome, Outcome::Rolled(_)), reach::ROLLED);
     }
 
     fn drain_proxy(&mut self, id: ProxyId, cx: &mut Cx<'_, Self>) {
@@ -1821,6 +1838,34 @@ impl Cluster {
         let new = LeaderUuid(self.next_uuid);
         let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
         let _ = node.propose_control(Control::SetLeader { new, old });
+        self.drain_node(leader, cx);
+    }
+
+    /// The operator cuts the log at a leader (`ColocatedNode::roll`): half
+    /// the rolls keep the replicas (`None`), half name two nodes of the pool.
+    fn roll(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(leader) = self.pick_leader(cx) else {
+            return;
+        };
+        let replicas = if cx.rng().chance(1, 2) {
+            let mut pool = self.pool.clone();
+            let first = pool.remove(Self::index(cx.rng().below(pool.len() as u64)));
+            let second = pool[Self::index(cx.rng().below(pool.len() as u64))];
+            Some(ReplicaSet::new([first, second]))
+        } else {
+            None
+        };
+        let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
+        let open = node
+            .proposer()
+            .rounds()
+            .values()
+            .any(|round| matches!(round.command(), Command::Control(Control::Roll { .. })));
+        let result = node.roll(replicas);
+        sometimes!(
+            open && matches!(result, RollResult::Accepted { .. }),
+            reach::ROLL_PIPELINED
+        );
         self.drain_node(leader, cx);
     }
 
@@ -2260,6 +2305,9 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
         }
         (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
             state.next_seq = Seq(state.next_seq.0 + 1);
+        }
+        (Some(Mutant::CorruptTrimSegment), Message::TrimmedTo { state, .. }) => {
+            state.segment.id = state.segment.id.successor();
         }
         _ => {}
     }
