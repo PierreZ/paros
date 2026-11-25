@@ -12,7 +12,7 @@ batcher 1
 campaign-discovery 1
 cas-register 4
 cell-control 2
-compartments 3
+compartments 12
 config-register 8
 ctrl-grid 18
 decree 2

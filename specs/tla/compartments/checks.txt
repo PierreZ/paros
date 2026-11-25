@@ -34,3 +34,24 @@ live              pass       ci
 live_split        pass       ci
 live_noresend     violation  ci
 safety            pass       long
+# The replicas of a segment (R6, step 5 of the segments plan). A replica of
+# a later segment jumps to its start with the boundary state of the chain
+# (the scalars, no record), walks its segment and stops after the Roll that
+# ends it. A read covers the writes of the replica's segment and of the
+# later ones; a sealed replica answers "sealed" with the records of its
+# segment, and the reader asks the next segment.
+segments_walk                 pass       ci
+segments_stop                 pass       ci
+segments_restart              pass       ci
+segments_restart_read         pass       ci
+segments_read                 pass       ci
+segments_read_sealed          pass       ci
+live_segments                 pass       ci
+segments_empty                violation  ci
+segments_early                violation  ci
+segments_rebase               violation  ci
+segments_nostop               violation  ci
+segments_serve                violation  ci
+reach_segment_read            violation  ci
+reach_segment_sealed          violation  ci
+reach_segment_sealed_answer   violation  ci

@@ -17,4 +17,8 @@ Majorities == MajorityQuorums(Acceptors)
 \* own folded prefix.
 WithReplicas == {Q \in SUBSET (Acceptors \cup Replicas) :
                    2 * Cardinality(Q) > Cardinality(Acceptors)}
+\* Every replica keeps the first segment.
+AllFirst == [r \in Replicas |-> 0]
+\* Replica r2 keeps the second segment, the others the first.
+R2Second == [r \in Replicas |-> IF r = r2 THEN 1 ELSE 0]
 =============================================================================

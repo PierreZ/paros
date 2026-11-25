@@ -281,3 +281,32 @@ fn a_refold_past_a_healed_hole_publishes_each_end_with_its_own_start() {
         ]
     );
 }
+
+/// A refusal of another journal teaches nothing, even when it names a later
+/// matchmaker set: the publish stays asked of the set it was.
+#[test]
+fn a_refusal_of_another_journal_teaches_no_set() {
+    let (mut nodes, mut mms, _) = rolled(None);
+    nodes[1].resend_segment_publishes();
+    let requests = drain_publishes(&mut nodes[1]);
+    let ack = publish(&mut mms, &requests[..1]).remove(0);
+    let generation = requests[0].1.generation;
+    let successor = MatchmakerSet::new(
+        MatchmakerGeneration(generation.0 + 1),
+        vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(2)],
+    );
+    let foreign = SegmentAck {
+        journal: crate::journal::JournalId(ack.journal.0 + 1),
+        applied: false,
+        newer: Some(successor),
+        ..ack
+    };
+    assert_eq!(nodes[1].on_segment_ack(&foreign), None);
+    nodes[1].resend_segment_publishes();
+    let again = drain_publishes(&mut nodes[1]);
+    assert!(!again.is_empty(), "the publish is still pending");
+    assert!(
+        again.iter().all(|(_, r)| r.generation == generation),
+        "the publish is still asked of the same set"
+    );
+}
