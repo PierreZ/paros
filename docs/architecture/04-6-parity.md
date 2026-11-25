@@ -1,4 +1,4 @@
-[← 04-5-old-duties.md](04-5-old-duties.md) · [Index](README.md) · [05-failure-model-and-zones.md →](05-failure-model-and-zones.md)
+[← 04-5-old-duties.md](04-5-old-duties.md) · [Index](README.md) · [04-7-segments.md →](04-7-segments.md)
 
 ### 4.6 The features of the tag and their home
 
