@@ -2737,7 +2737,9 @@ slot or choose a second value? The new member holds nothing below the held floor
 `TrimmedTo`, or never holds the slots. The GC of `node/gc.rs` counts a member toward the fence when
 it holds each slot up to the fence, and a slot below its floor counts, so a member that raised its
 floor to a held end counts. `truncation-reconfig/` has one new constant, `Rolls`, `{}` in every
-check of that folder.
+check of that folder. No replica loses its disk here, and `Held` always needs `F + 1` replicas:
+that count is the question of `held-floor/`. `HeldTrue` says that a held segment is held (its end
+is in the chain, and `F + 1` of its replicas hold every slot of it).
 
 The CI checks have one slot: segment 1 is the `Roll` alone at slot 0 (`RollPlan1`), so
 `RecordKept` has no command to judge, and the question is Phase 1, the GC and the floor. `a4`
@@ -2749,9 +2751,8 @@ command at slot 0 and the `Roll` at slot 1 are long.
 | `reach_held_join` | ci | violation of `NoHeldJoin`: the GC forgets `C1` while `a4` jumped over the held segment and holds no slot of it |
 | `reach_held_win` | ci | violation of `NoHeldWin`: a ballot of `C2` wins Phase 1 from at or above the held floor |
 | `held_log` | ci | violation of `FloorTruncatedOrHeld`: the floor passes an end that the chain does not publish |
-| `held` | ci | pass: `Agreement`, `LearnedChosen`, `NoFillChosen`, `FloorChosen`, `RecordChosen`, `Recoverable`, `FloorTruncatedOrHeld`, `RecordKept`, `ChainTrue` (0.61 million states, 1.5 minutes) |
+| `held` | ci | pass: `Agreement`, `LearnedChosen`, `NoFillChosen`, `FloorChosen`, `RecordChosen`, `Recoverable`, `FloorTruncatedOrHeld`, `RecordKept`, `ChainTrue`, `HeldTrue` (0.61 million states, 1.5 minutes) |
 | `held_wipe` | ci | pass: the same with one wipe of an acceptor (2.4 million states, 5 minutes) |
-| `held_f` | long | violation of `RecordKept`: two slots, `Held` at `F = 1` replica, which loses its disk (1.9 million states before the violation, 7 minutes) |
 | `held_cmd` | long | pass: two slots, a command and the `Roll`, `F = 0` |
 
 What is not in the model: a third configuration, the restart and the faulty record of

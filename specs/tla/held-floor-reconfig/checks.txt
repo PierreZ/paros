@@ -13,5 +13,4 @@ held_log          violation  ci
 held              pass       ci
 held_wipe         pass       ci
 # Two slots: a command, then the `Roll`.
-held_f            violation  long
 held_cmd          pass       long  60
