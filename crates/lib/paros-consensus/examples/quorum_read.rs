@@ -1,39 +1,46 @@
-//! **Leaderless reads: a row of acceptors answers, one replica serves, and
-//! neither the leader nor a clock is involved.**
+//! **Leaderless reads: a row of acceptors answers, the reader serves, and
+//! neither the leader nor a clock takes part.**
 //!
 //! Run it: `cargo run -p paros-consensus --example quorum_read`
 //!
-//! The lesson after `acceptor_grid`. Same six nodes under
-//! [`QuorumSystem::Grid`] `{ rows: 2, cols: 3 }`, and this time the wiring
-//! is not done by hand: each node is a [`ColocatedNode`], the deployment
-//! that colocates the three roles, and the example only delivers its
-//! messages. What is new is a **read** that never goes near the leader.
+//! This example drives [`ColocatedNode`] with the toy cluster of
+//! `examples/common/cluster.rs`. Read `quickstart` first, and `acceptor_grid`
+//! for the grid.
 //!
-//! # Where `acceptor_grid` left off
+//! # The problem
 //!
-//! Every slot's Phase 2 goes to one column, so an acceptor sees a third of
-//! the writes. A read that went to the leader — which would confirm it
-//! was still leader with a beat-ack quorum before serving — would load the
-//! leader, the bottleneck the grid had just taken the writes off.
+//! A read is linearizable when it shows each write that was acknowledged
+//! before the read began. The usual way is to ask the leader, and the leader
+//! must first prove that it still leads. That puts each read on the one
+//! process that already orders each write. A lease removes the proof, but a
+//! lease trusts the clocks.
 //!
-//! # Paxos Quorum Reads (Compartmentalized Paxos §3.4)
+//! # The technique (Compartmentalized Paxos, section 3.4)
 //!
-//! Ask a **row** of the grid — a Phase-1 quorum — one question: *what is
-//! the highest slot you have voted in?* (the acceptor's **vote watermark**,
-//! [`paros_consensus::acceptor::Acceptor::vote_watermark`]). Take the maximum,
-//! `i`. Then have **any one replica** serve the read once it has applied
-//! slot `i`. No leader, no beat, no ack, and — the point of this rung — no
-//! clock: the paper's read leases assume clock synchrony, and paros refuses
-//! exactly that.
+//! Any node can serve a read. The node asks a **row** of the grid one
+//! question: *what is the highest slot that you voted in?* The answer is
+//! the **vote watermark** of the acceptor. The reader takes the maximum,
+//! `i`, and serves the read when it has learned each slot up to `i`.
 //!
-//! Why it is linearizable, in one sentence: a write acked before the read
-//! began was chosen by a full **column**, every row meets every column in
-//! one acceptor, so some member of the row voted that slot, and the maximum
-//! watermark is at least it. The replica then waits until it has applied
-//! that far. (§3.5 does the case analysis; the same argument, written on
-//! [`paros_consensus::quorum_read`], is the module's contract.)
+//! Why it is correct: a write that was acknowledged was accepted by a full
+//! **column**. Each row has one acceptor of each column. Thus one member of
+//! the row voted in the slot of that write, and the maximum is at or past
+//! it.
 //!
-//! # What the trace below shows
+//! # The driver's part
+//!
+//! - `node.quorum_read(ctx)` opens a read, on any node. `ctx` is a token of
+//!   the driver. `quorum_read_in(ctx, Some(row))` names the row.
+//! - The node sends `PreRead` and gets `PreReadAck` through the usual
+//!   `ready.messages()` and `step`.
+//! - `ready.read_states()` gives a [`ReadState`] when the read can be
+//!   served: the token, and the slot `index`. The driver then reads the
+//!   journal of this node (`read_log`), which holds each slot up to `index`.
+//!
+//! A read that cannot complete gives nothing, and the core drops it after a
+//! number of ticks. The driver owns the timeout of its client.
+//!
+//! # What the trace shows
 //!
 //! ```text
 //!          col 0   col 1   col 2
@@ -41,326 +48,168 @@
 //! row 1  [  3   |   4   |   5  ]
 //! ```
 //!
-//! 1. Node 5 leads and streams three commands; every node applies slots
-//!    0, 1 and 2.
-//! 2. Node 5 proposes a fourth command. Slot 3 goes to column 0 =
-//!    `{0, 3}`; node 3's copy lands, node 0's copy is **in flight**. The
-//!    column is half full: nothing is chosen, nothing is acked.
-//! 3. Node 4 (a follower in row 1) opens a quorum read. Its row `{3, 4, 5}`
-//!    answers `3, 2, 3` — node 3 has voted the in-flight slot, and node 5,
-//!    the leader, recorded the round it opened (a leader's own log holds
-//!    every round it opens, whichever column it went to) — so the read
-//!    settles on `i = 3` and **waits**: node 4's replica has applied up to
-//!    slot 2. This is the safety trade: a watermark raised by a vote that
-//!    has not decided costs the reader a wait, never a stale answer.
-//! 4. Node 2 (row 0) opens a quorum read at the same moment. Its row
-//!    `{0, 1, 2}` answers `2, 2, 2` — nobody there has voted slot 3 — so
-//!    that read is served **now**, at slot 2. Both reads are linearizable:
-//!    slot 3 is neither chosen nor acked, so a read that does not see it
-//!    is as correct as one that will.
-//! 5. Node 0's copy of the `Accept` arrives; column 0 is whole; slot 3 is
-//!    chosen and committed everywhere; node 4's replica applies it and the
-//!    waiting read is served at slot 3 — showing the fourth value.
-//!
-//! Throughout, the leader broadcast no beat for either read and could have
-//! been dead for step 3 onward.
-//!
-//! This example is about slots, so no client becomes the writer of the
-//! journal: Paxos chooses each write, and the journal refuses it at apply.
-//! `journal_calls` shows the calls that a journal accepts.
+//! 1. Node 5 leads, and three records are written.
+//! 2. A fourth record goes to column 1. Node 4 accepts it. The `Accept` to
+//!    node 1 is still in flight, so the record is not chosen.
+//! 3. Node 3 reads through row 1. Node 4 voted in the new slot, so the read
+//!    waits: a vote that did not decide yet costs the reader a wait, never
+//!    a stale answer.
+//! 4. Node 2 reads through row 0 at the same time. No member of row 0 voted
+//!    in the new slot, so the read is served at once, with three records.
+//!    That is correct too: the fourth write was not acknowledged.
+//! 5. The `Accept` arrives. The slot is chosen, and the read of node 3 is
+//!    served with four records.
+//! 6. The leader crashes. Node 0 still serves a read through row 0.
 //!
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
-//! with Compartmentalization* (2021), §3.4–3.5.
+//! with Compartmentalization* (2021), sections 3.4 and 3.5, and
+//! `specs/tla/reads/` for the model.
 
-use std::collections::BTreeMap;
+mod common;
 
-use paros_consensus::contract::MemStorage;
-use paros_consensus::journal::{Command, Entry, LeaderUuid, Seq};
+use paros_consensus::contract::Party;
+use paros_consensus::journal::{Control, JournalIdentifier, LeaderUuid};
 use paros_consensus::membership::QuorumSystem;
-use paros_consensus::quorum_read::ReadState;
-use paros_consensus::{ColocatedNode, Config, Message, NodeId, Slot, Value};
+use paros_consensus::quorum_read::{ReadOpen, ReadState};
+use paros_consensus::{Config, Message, NodeId, Slot};
 
-/// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
-/// `{1, 4}` and `{2, 5}`.
-const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
+use common::cluster::Cluster;
 
-fn fresh(id: u64) -> ColocatedNode {
-    let config = Config {
-        peers: (0..6).map(NodeId).collect(),
-        quorum_system: GRID,
-        ..Config::new(
-            NodeId(id),
-            paros_consensus::journal::JournalIdentifier::UNSET,
-        )
-    };
-    ColocatedNode::new(&MemStorage::new(config), paros_consensus::Limits::DEFAULT)
+const N0: NodeId = NodeId(0);
+const N1: NodeId = NodeId(1);
+const N2: NodeId = NodeId(2);
+const N3: NodeId = NodeId(3);
+const N5: NodeId = NodeId(5);
+
+const WRITER: LeaderUuid = LeaderUuid(0xA11CE);
+
+/// The grid is data of the configuration: two rows of three.
+fn config(id: NodeId) -> Config {
+    let mut config = Config::new(id, JournalIdentifier::UNSET).with_peers((0..6).map(NodeId));
+    config.quorum_system = QuorumSystem::grid(2, 3);
+    config
 }
 
-fn command(text: &str, seq: u64) -> Value {
-    let _ = seq;
-    Value::from(text.as_bytes().to_vec())
-}
-
-fn show(command: &Command) -> String {
-    match command {
-        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0])),
-        Command::Control(control) => format!("{control:?}"),
-        Command::Roll(roll) => format!("{roll:?}"),
-    }
-}
-
-/// The cluster: six nodes and the messages in flight between them.
-struct Cluster {
-    nodes: Vec<ColocatedNode>,
-    /// Messages a node queued, addressed and not yet delivered.
-    wire: Vec<(NodeId, Message)>,
-    /// Read states each node surfaced, by node.
-    served: BTreeMap<NodeId, Vec<ReadState>>,
-    /// How many messages of each kind the leader sent — the trace's tally.
-    sent_by_leader: BTreeMap<&'static str, usize>,
-    leader: NodeId,
-}
-
-impl Cluster {
-    fn node(&mut self, id: NodeId) -> &mut ColocatedNode {
-        let i = usize::try_from(id.0).expect("small id");
-        &mut self.nodes[i]
-    }
-
-    /// Drain `id`'s batch onto the wire, honouring the `Ready` contract:
-    /// its writes are "persisted" (this example has no disk), its messages
-    /// are resolved to addresses, its read states are collected, and the
-    /// batch is acknowledged.
-    fn drain(&mut self, id: NodeId) {
-        let pool: Vec<NodeId> = (0..6).map(NodeId).collect();
-        let leader = self.leader;
-        let node = self.node(id);
-        let ready = node.ready();
-        let mut out = Vec::new();
-        for (audience, m) in ready.messages() {
-            for to in audience.resolve(&pool, id) {
-                out.push((to, m.clone()));
-            }
-        }
-        let states = ready.read_states().to_vec();
-        ready.advance();
-        node.advance_recovery();
-        if id == leader {
-            for (_, m) in &out {
-                *self.sent_by_leader.entry(m.kind()).or_default() += 1;
-            }
-        }
-        self.wire.extend(out);
-        self.served.entry(id).or_default().extend(states);
-    }
-
-    /// Deliver everything in flight for which `keep` holds, to quiescence;
-    /// what `keep` refuses stays in flight.
-    fn deliver(&mut self, keep: impl Fn(NodeId, &Message) -> bool) {
-        loop {
-            let Some(position) = self.wire.iter().position(|(to, m)| keep(*to, m)) else {
-                return;
-            };
-            let (to, m) = self.wire.remove(position);
-            self.node(to).step(m);
-            self.drain(to);
-        }
-    }
-
-    fn deliver_all(&mut self) {
-        self.deliver(|_, _| true);
-    }
-
-    fn take_served(&mut self, id: NodeId) -> Vec<ReadState> {
-        self.served.remove(&id).unwrap_or_default()
-    }
-
-    fn watermarks(&self, row: &[u64]) -> String {
-        let each: Vec<String> = row
-            .iter()
-            .map(|id| {
-                let i = usize::try_from(*id).expect("small id");
-                let w = self.nodes[i].acceptor().vote_watermark();
-                format!(
-                    "node {id} → {}",
-                    w.map_or("nothing voted".to_string(), |s| format!("slot {}", s.0))
-                )
-            })
-            .collect();
-        each.join(", ")
-    }
-
-    fn applied(&self, id: u64) -> String {
-        let i = usize::try_from(id).expect("small id");
-        self.nodes[i]
-            .replica()
-            .chosen_index()
-            .map_or("nothing".to_string(), |s| format!("slot {}", s.0))
-    }
+/// The `Accept` that node 1 has not received yet.
+fn in_flight(to: Party, message: &Message) -> bool {
+    to == Party::Node(N1) && matches!(message, Message::Accept { .. })
 }
 
 fn main() {
-    println!("== quorum reads: a row answers, one replica serves, no leader, no clock ==\n");
-    let mut cluster = Cluster {
-        nodes: (0..6).map(fresh).collect(),
-        wire: Vec::new(),
-        served: BTreeMap::new(),
-        sent_by_leader: BTreeMap::new(),
-        leader: NodeId(5),
-    };
+    let mut cluster = Cluster::new((0..6).map(NodeId).map(config));
 
-    let leader = cluster.leader;
-    elect_and_stream(&mut cluster, leader);
-    half_a_column(&mut cluster, leader);
-    a_read_that_waits(&mut cluster);
-    a_read_served_now(&mut cluster);
-    the_column_completes(&mut cluster);
-    the_leaders_part(&mut cluster, leader);
-}
-
-/// Step: see the module doc.
-fn elect_and_stream(cluster: &mut Cluster, leader: NodeId) {
-    // ---- 1. node 5 leads and streams three commands ------------------------
-    println!("-- 1. node 5 campaigns and streams three commands");
-    cluster.node(leader).campaign();
-    cluster.drain(leader);
-    cluster.deliver_all();
-    assert!(cluster.node(leader).is_leader(), "node 5 wins its election");
-    cluster.node(leader).tick(); // one beat, so every follower adopts the leader
-    cluster.drain(leader);
-    cluster.deliver_all();
-    for (seq, text) in [(1, "alpha"), (2, "bravo"), (3, "charlie")] {
-        let _ = cluster.node(leader).propose(Entry {
-            leader: LeaderUuid(7),
-            seq: Seq(seq),
-            records: vec![command(text, seq)],
-        });
-        cluster.drain(leader);
-        cluster.deliver_all();
-    }
-    for id in 0..6 {
-        assert_eq!(
-            cluster.applied(id),
-            "slot 2",
-            "node {id} applied slots 0..=2"
-        );
-    }
-    println!("   every node has applied slots 0, 1 and 2");
-    cluster.sent_by_leader.clear();
-}
-
-/// Step: see the module doc.
-fn half_a_column(cluster: &mut Cluster, leader: NodeId) {
-    // ---- 2. a fourth command, half-way through its column -------------------
-    println!("\n-- 2. node 5 proposes \"delta\" for slot 3 → column 0 = {{0, 3}}");
-    let _ = cluster.node(leader).propose(Entry {
-        leader: LeaderUuid(7),
-        seq: Seq(4),
-        records: vec![command("delta", 4)],
-    });
-    cluster.drain(leader);
-    // Node 3's copy of the Accept lands; node 0's stays in flight.
-    cluster.deliver(|to, m| !(to == NodeId(0) && matches!(m, Message::Accept { .. })));
-    assert!(
-        cluster.node(leader).chosen_at(Slot(3)).is_none(),
-        "half a column decides nothing"
+    println!("== 1. node 5 leads, and three records are written");
+    cluster.elect(N5);
+    cluster.control(
+        N5,
+        Control::SetLeader {
+            new: WRITER,
+            old: None,
+        },
     );
-    println!("   node 3 accepted slot 3; node 0's copy is in flight; nothing is chosen");
-    println!("   row 1 watermarks: {}", cluster.watermarks(&[3, 4, 5]));
-    println!("   row 0 watermarks: {}", cluster.watermarks(&[0, 1, 2]));
+    for (seq, text) in [(0, "alpha"), (1, "bravo"), (2, "charlie")] {
+        cluster.write(N5, WRITER, seq, text);
+    }
+    assert_eq!(cluster.journal(N3), ["alpha", "bravo", "charlie"]);
+    cluster.take_sent();
+
+    let slot = half_a_column(&mut cluster);
+    a_read_that_waits(&mut cluster, slot);
+    a_read_served_now(&mut cluster, slot);
+    the_column_completes(&mut cluster, slot);
+    without_the_leader(&mut cluster, slot);
 }
 
-/// Step: see the module doc.
-fn a_read_that_waits(cluster: &mut Cluster) {
-    // ---- 3. a read from row 1 settles past the prefix and waits ------------
-    println!("\n-- 3. node 4 opens a quorum read (ctx 1 → row 1 = {{3, 4, 5}})");
-    cluster.node(NodeId(4)).quorum_read(1);
-    cluster.drain(NodeId(4));
-    cluster.deliver(|to, m| !(to == NodeId(0) && matches!(m, Message::Accept { .. })));
-    let pending = cluster.node(NodeId(4)).quorum_reads().pending().to_vec();
-    assert_eq!(pending.len(), 1, "the read is still open");
+/// Part 2: a write that only one acceptor of its column holds.
+fn half_a_column(cluster: &mut Cluster) -> Slot {
+    println!("\n== 2. \"delta\" goes to column 1, and reaches node 4 only");
+    let slot = cluster.propose(N5, WRITER, 3, "delta");
+    cluster.settle_holding(in_flight);
+    assert!(cluster.node(N5).chosen_at(slot).is_none());
+    println!("   slot {slot}: node 4 accepted, node 1 did not yet. Nothing is chosen");
+    slot
+}
+
+/// Part 3: a row that saw the vote makes the reader wait.
+fn a_read_that_waits(cluster: &mut Cluster, slot: Slot) {
+    println!("\n== 3. node 3 reads through row 1 = {{3, 4, 5}}");
+    assert_eq!(
+        cluster.node(N3).quorum_read_in(1, Some(1)),
+        ReadOpen::Opened
+    );
+    cluster.trace = true;
+    cluster.settle_holding(in_flight);
+    cluster.trace = false;
+
+    let pending = cluster.node(N3).quorum_reads().pending();
+    assert_eq!(pending.len(), 1, "the read is open");
     assert_eq!(
         pending[0].confirmed_index(),
-        Some(Some(Slot(3))),
-        "the row answered whole and settled on node 3's watermark"
+        Some(Some(slot)),
+        "the row answered, and its maximum is the vote of node 4"
     );
-    assert!(
-        cluster.take_served(NodeId(4)).is_empty(),
-        "node 4 has applied only up to slot 2: the read waits"
-    );
-    println!(
-        "   the row answered; max watermark = slot 3; node 4 has applied {} → the read WAITS",
-        cluster.applied(4)
-    );
+    assert_eq!(cluster.take_reads(N3), []);
+    println!("   the maximum watermark is slot {slot}. Node 3 did not learn it: the read waits");
 }
 
-/// Step: see the module doc.
-fn a_read_served_now(cluster: &mut Cluster) {
-    // ---- 4. a read from row 0 is served now -------------------------------
-    println!("\n-- 4. node 2 opens a quorum read (ctx 2 → row 0 = {{0, 1, 2}})");
-    cluster.node(NodeId(2)).quorum_read(2);
-    cluster.drain(NodeId(2));
-    cluster.deliver(|to, m| !(to == NodeId(0) && matches!(m, Message::Accept { .. })));
-    let served = cluster.take_served(NodeId(2));
+/// Part 4: a row that did not see the vote serves at once.
+fn a_read_served_now(cluster: &mut Cluster, slot: Slot) {
+    println!("\n== 4. node 2 reads through row 0 = {{0, 1, 2}}");
     assert_eq!(
-        served,
-        vec![ReadState {
-            ctx: 2,
-            index: Some(Slot(2)),
-        }],
-        "row 0 has not voted slot 3: served at slot 2, now"
+        cluster.node(N2).quorum_read_in(2, Some(0)),
+        ReadOpen::Opened
     );
-    println!("   the row answered; max watermark = slot 2; served NOW at slot 2");
-    println!("   (both reads are linearizable: slot 3 is neither chosen nor acked)");
+    cluster.settle_holding(in_flight);
+
+    let served = cluster.take_reads(N2);
+    let [ReadState { ctx: 2, index }] = served[..] else {
+        panic!("the read of node 2 is served: {served:?}");
+    };
+    assert!(index < Some(slot), "no member of row 0 voted in the slot");
+    // The driver now serves the read from the journal of node 2.
+    assert_eq!(cluster.journal(N2), ["alpha", "bravo", "charlie"]);
+    println!("   no member voted in slot {slot}: served now, with three records");
+    println!("   \"delta\" was not acknowledged, so a read without it is correct");
 }
 
-/// Step: see the module doc.
-fn the_column_completes(cluster: &mut Cluster) {
-    // ---- 5. the column completes; the waiting read is served -------------
-    println!("\n-- 5. node 0's copy of the Accept arrives: column 0 is whole");
-    cluster.deliver_all();
-    for id in 0..6 {
-        assert_eq!(cluster.applied(id), "slot 3", "node {id} applied slot 3");
-    }
-    let served = cluster.take_served(NodeId(4));
+/// Part 5: the waiting read is served when its node learns the slot.
+fn the_column_completes(cluster: &mut Cluster, slot: Slot) {
+    println!("\n== 5. the Accept reaches node 1: column 1 is complete");
+    cluster.settle();
     assert_eq!(
-        served,
-        vec![ReadState {
+        cluster.take_reads(N3),
+        [ReadState {
             ctx: 1,
-            index: Some(Slot(3)),
-        }],
-        "the waiting read is served once the replica covers slot 3"
+            index: Some(slot),
+        }]
     );
-    let value = cluster
-        .node(NodeId(4))
-        .chosen_at(Slot(3))
-        .map(show)
-        .expect("slot 3 is chosen at node 4");
-    println!(
-        "   slot 3 = {value} chosen and applied everywhere; node 4's read is served at slot 3"
-    );
+    assert_eq!(cluster.journal(N3), ["alpha", "bravo", "charlie", "delta"]);
+    println!("   slot {slot} is chosen. The read of node 3 is served, with four records");
+
+    // The leader did nothing for the two reads: it answered `PreRead` as a
+    // member of row 1, and it sent no beat.
+    let sent = cluster.take_sent();
+    assert!(!sent.contains_key("Heartbeat"));
+    assert!(cluster.node(N5).quorum_reads().is_empty());
+    println!("   messages since part 1: {sent:?}");
 }
 
-/// Step: see the module doc.
-fn the_leaders_part(cluster: &mut Cluster, leader: NodeId) {
-    // ---- the leader's part in the two reads: none ---------------------------
-    let beats = cluster
-        .sent_by_leader
-        .get("Heartbeat")
-        .copied()
-        .unwrap_or(0);
+/// Part 6: a read needs a row, not the leader.
+fn without_the_leader(cluster: &mut Cluster, slot: Slot) {
+    println!("\n== 6. the leader crashes, and node 0 reads through row 0");
+    cluster.crash(N5);
     assert_eq!(
-        beats, 0,
-        "no beat was broadcast for either read (the election's beat came before)"
+        cluster.node(N0).quorum_read_in(3, Some(0)),
+        ReadOpen::Opened
     );
-    assert!(
-        cluster.node(leader).quorum_reads().is_empty(),
-        "the leader holds no read of its own: both reads ran on followers"
+    cluster.settle();
+    assert_eq!(
+        cluster.take_reads(N0),
+        [ReadState {
+            ctx: 3,
+            index: Some(slot),
+        }]
     );
-    println!(
-        "\n   the leader sent {} messages after step 1, none of them a beat: {:?}",
-        cluster.sent_by_leader.values().sum::<usize>(),
-        cluster.sent_by_leader
-    );
-    println!("\n== ok ==");
+    assert_eq!(cluster.journal(N0), ["alpha", "bravo", "charlie", "delta"]);
+    println!("   served at slot {slot}, with four records and no leader");
 }

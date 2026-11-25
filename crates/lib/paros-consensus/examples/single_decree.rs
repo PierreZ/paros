@@ -1,718 +1,413 @@
-//! **Single-decree Paxos: three machines agree on one value, and never
-//! change their minds.**
+//! **Single-decree Paxos: three machines agree on one value, and the value
+//! never changes.**
 //!
 //! Run it: `cargo run -p paros-consensus --example single_decree`
 //!
-//! This is the first of four executable lessons
-//! (`single_decree` → `multi_paxos` → `matchmaker` → `acceptor_grid`).
-//! Each one drives the *real* composable roles of `paros-consensus` — here
-//! [`Proposer`] and [`Acceptor`] — by hand, with direct function calls
-//! standing in for the network and a `Vec` standing in for the disk. There
-//! is no second Paxos implementation here: the code that decides is the
-//! library's; this file only delivers messages and prints what happened.
-//! No prior reading is assumed: every term is defined the first time it is
-//! used, and the paper is only a pointer at the end.
+//! Start here if you want to learn the algorithm. This example needs no
+//! other one, and no paper.
+//!
+//! It also shows a use of the crate without a log: [`Decree`] is the
+//! proposer of one decision, [`Acceptor`] is its voter, and the value is a
+//! type of the caller. The core chooses its next matchmaker set this way,
+//! and a program above the core can choose anything that it must decide one
+//! time: here, which machine is the primary.
 //!
 //! # The problem
 //!
-//! Several machines must agree on **one** value — say, "which of us is the
-//! primary" — and once they agree, the answer must never change, even
-//! though any machine may crash at any moment, any message may be lost or
-//! arrive late, and no clock can be trusted. The obvious design, "one
-//! machine decides and tells the others", breaks the moment that machine
-//! crashes half-way through telling them: some know the answer, some do
-//! not, and whoever takes over may decide differently. Paxos is the
-//! protocol that makes agreement survive all of that. The version in this
-//! file decides a single value once — hence *single-decree*; the next
-//! lesson repeats it slot by slot to build a log.
+//! Some machines must agree on **one** value. When they agree, the answer
+//! must not change, although a machine can crash at any time and a message
+//! can be lost or late. "One machine decides and tells the others" fails
+//! when that machine crashes after it told only some of them: the machine
+//! that takes over can decide differently.
 //!
 //! # The parties
 //!
-//! - A **proposer** wants a value chosen. It starts the protocol, sends the
-//!   messages and counts the replies. Any machine may be a proposer, several
-//!   may try at the same time, and a proposer may crash at any point. Two
-//!   appear in this file, numbered 5 and 8.
-//! - An **acceptor** votes. It keeps two things on disk: the highest ballot
-//!   it has *promised* and the value it has *accepted* (both defined
-//!   below). Acceptors are the memory of the protocol — whatever must
-//!   survive a crash lives there. There are three, `A`, `B` and `C`, so a
-//!   **majority** is any two of them.
-//! - A **learner** is whoever needs to know the outcome. Here the proposer
-//!   is also the learner: it counts the votes and announces "chosen".
+//! - A **proposer** wants a value chosen. It sends the messages and counts
+//!   the answers. Two proposers can try at the same time, and a proposer
+//!   can crash.
+//! - An **acceptor** votes. It keeps two things on its disk: the highest
+//!   ballot that it promised, and the value that it accepted. It answers
+//!   only after the write is durable.
 //!
-//! In a real cluster one machine usually plays every role at once (the
-//! next lesson does that); keeping them apart here makes each step easier
-//! to see.
+//! A **ballot** names one attempt of one proposer. A [`Ballot`] is the pair
+//! `(round, node)`, printed `3.5` for round 3 of proposer 5. Two proposers
+//! never share a ballot, and any two ballots compare.
 //!
-//! # Ballots: naming an attempt so attempts can be compared
+//! # The two phases
 //!
-//! Every attempt a proposer makes is tagged with a **ballot** (the papers
-//! say *proposal number* or *round*). A ballot is not the value being
-//! proposed: it is the *name* of one attempt to propose. Two properties
-//! carry the whole protocol:
+//! **Phase 1.** The proposer sends `Prepare(ballot)`. An acceptor that did
+//! not promise a higher ballot answers with a **promise**: it will accept
+//! nothing at a lower ballot. The promise also reports the value that the
+//! acceptor accepted before, with its ballot. An acceptor that promised a
+//! higher ballot refuses, and names that ballot.
 //!
-//! - **Unique.** No two attempts, by the same proposer or by different
-//!   ones, may share a ballot. Paros's [`Ballot`] is the pair
-//!   `(round, node)`: the ballot printed as `3.5` is round 3 minted by
-//!   proposer 5, and `7.8` is round 7 minted by proposer 8. Two proposers
-//!   can never collide, because the second half always differs. Without
-//!   uniqueness an acceptor could not tell two attempts apart, and a vote
-//!   cast for one could be counted for the other.
-//! - **Totally ordered.** Any two ballots compare: `7.8` is higher than
-//!   `3.5` (rounds compare first, the proposer id breaks ties). Every rule
-//!   below says "higher" or "lower" ballot, so this ordering is what lets
-//!   an acceptor say "I ignore anything older than this" and a proposer
-//!   say "this is the newest thing anyone told me".
+//! **The rule P2c.** With promises from a majority, the proposer selects
+//! its value. If a promise reported a value, the proposer **must** propose
+//! the reported value of the highest ballot. It proposes its own value only
+//! if no promise reported one. A reported value can be chosen already, and
+//! the proposer cannot know: the acceptors that did not answer can hold it
+//! too.
 //!
-//! # Phase 1: ask permission, and learn the past
+//! **Phase 2.** The proposer sends `Accept(ballot, value)`. An acceptor
+//! accepts unless it promised a higher ballot. A value is **chosen** when a
+//! majority accepted it at one ballot.
 //!
-//! The proposer sends `Prepare(ballot)` to every acceptor. An acceptor
-//! that has not already promised a higher ballot answers with a
-//! **promise**: a durable commitment never to accept a value at any
-//! *lower* ballot from now on. The promise is what fences out older
-//! attempts — once `B` has promised `7.8`, the crashed-and-revived
-//! proposer 5 can no longer get `B`'s vote at `3.5` (scenario 3 shows that
-//! very refusal).
+//! Why the chosen value never changes: a later proposer needs promises from
+//! a majority, two majorities share an acceptor, that acceptor reports the
+//! chosen value, and P2c makes the later proposer propose it again.
 //!
-//! The promise also carries a report: **the value this acceptor has
-//! already accepted, and at which ballot**, if any. It has to, because a
-//! proposer cannot see the whole cluster. A value may already have been
-//! chosen (defined below) under an earlier ballot without this proposer
-//! ever hearing of it — the earlier proposer may have crashed after the
-//! votes were cast and before it told anyone. Asking the acceptors what
-//! they voted for is the only way to find out.
+//! # The caller's part
 //!
-//! An acceptor that already promised a higher ballot refuses (a `Nack`)
-//! and says which ballot it promised, so the refused proposer can retry
-//! above it. The proposer needs promises from a **majority** — two of
-//! three — before it may go on; why a majority is the right number is the
-//! subject of the last section.
+//! [`Decree`] and [`Acceptor`] send nothing and store nothing. The caller:
 //!
-//! # P2c: the rule that makes it safe
+//! - opens a proposal with [`Decree::new`], sends a `Prepare` to each
+//!   acceptor of [`Decree::unanswered`], and gives each answer to
+//!   [`Decree::on_promise`] or [`Decree::on_nack`];
+//! - on [`DecreePromise::Quorum`], sends an `Accept` with the value that the
+//!   decree selected, and gives each answer to [`Decree::on_accepted`];
+//! - on the acceptor, persists the [`AcceptorWrite`]s of a call before it
+//!   answers.
 //!
-//! With a majority of promises in hand the proposer picks the value it will
-//! propose, and this is the one rule everything rests on (the paper calls
-//! it *P2c*):
-//!
-//! - If **any** promise reported an accepted value, the proposer **must**
-//!   propose the reported value with the **highest ballot**; its own value
-//!   is set aside.
-//! - Only if **no** promise reported anything may it propose its own value.
-//!
-//! What breaks without it, in the numbers of scenario 2: proposer 5 at
-//! ballot `3.5` proposed `"old-value"`, `A` accepted it, and proposer 5
-//! crashed. Proposer 8 at ballot `7.8` wants `"new-value"` and gets
-//! promises from `A` and `B`; `A` reports `"old-value"` at `3.5`. From
-//! where proposer 8 stands, "`A` accepted it and nobody else did" looks
-//! *identical* to "`A` and `C` both accepted it" — `C` did not answer, and
-//! in the second world `"old-value"` is already chosen. If proposer 8 went
-//! ahead with `"new-value"`, `A` and `B` would accept it at `7.8` and the
-//! cluster would have chosen two different values. Adopting `"old-value"`
-//! is safe in both worlds: if it was chosen, re-proposing it changes
-//! nothing; if it was not, choosing it now is as good as any value. The
-//! "highest ballot" part matters when two promises report *different*
-//! values: the higher-ballot one is the more recent attempt, which by the
-//! same argument is the only one that could have been chosen.
-//!
-//! # Phase 2: cast the votes
-//!
-//! The proposer sends `Accept(ballot, value)` to every acceptor. An
-//! acceptor **accepts** — writes the value and the ballot to disk and
-//! replies `Accepted` — unless it has meanwhile promised a *higher*
-//! ballot, in which case it refuses. Accepting is a vote, and one vote
-//! proves nothing: in scenario 2, `A` holds an accepted value that was
-//! never chosen.
-//!
-//! # Chosen: the point of no return
-//!
-//! A value is **chosen** the moment a majority of acceptors have accepted
-//! it *at the same ballot*. Nobody may know yet — the replies may still be
-//! in flight, the proposer may have crashed — but the fact is now written
-//! on a majority of disks, and that is what makes it permanent:
-//!
-//! - Any later proposer needs a majority of promises before it proposes.
-//! - Any two majorities of three share at least one acceptor (pick any two
-//!   of `A`, `B`, `C`, then any other two: they always overlap).
-//! - So at least one acceptor in the later proposer's promise majority was
-//!   in the accepting majority, and its promise reports the chosen value.
-//! - P2c then forces the later proposer to re-propose that value.
-//!
-//! That chain is the whole safety argument, and the majority is what holds
-//! it together: a proposer that closed Phase 1 on one promise, or declared
-//! a value chosen on one vote, could miss the acceptors that know. Once
-//! chosen, a value cannot change, because every future ballot is bound to
-//! re-propose it. (A majority is only *one* way to get the overlap; the
-//! `acceptor_grid` lesson shows that the overlap, not the count, is what
-//! matters.)
+//! The value type implements [`Fingerprint`] and [`Weigh`].
 //!
 //! # What the three scenarios show
 //!
-//! 1. **The happy path.** Three fresh acceptors; proposer 5 at ballot
-//!    `1.5` wants `"alpha"`. No promise reports anything, P2c lets it
-//!    propose its own value, all three accept, `"alpha"` is chosen.
-//! 2. **A higher ballot must adopt a value it finds accepted.** Proposer 5
-//!    at `3.5` gets one accept (`A`) and dies. Proposer 8 at `7.8` wants
-//!    `"new-value"`, hears from `A` and `B`, and is made to propose
-//!    `"old-value"` instead. Exactly one value ends up chosen.
-//! 3. **A value the majority never saw is fenced out.** Same start, but
-//!    proposer 8's promises come from `B` and `C`, neither of which ever
-//!    saw `"old-value"`. P2c finds nothing and `"new-value"` is chosen —
-//!    and when proposer 5 wakes up and retries its `Accept` at `3.5`, `B`
-//!    refuses: it promised `7.8`. `"old-value"` stays accepted at `A`
-//!    alone, forever one vote short.
+//! 1. **No conflict.** Proposer 5 proposes "ada". No promise reports a
+//!    value, and "ada" is chosen.
+//! 2. **A later proposer adopts an accepted value.** Proposer 5 gets one
+//!    vote for "ada" on acceptor A and crashes. Proposer 8 wants "bob". Its
+//!    promises come from A and B, A reports "ada", and proposer 8 must
+//!    propose "ada".
+//! 3. **A value that the majority did not see is fenced.** The same start,
+//!    but the promises of proposer 8 come from B and C. "bob" is chosen.
+//!    Acceptor B restarts. Proposer 5 comes back, and B refuses its old
+//!    ballot: the promise was on the disk. Proposer 5 tries again at a
+//!    higher ballot and must propose "bob".
 //!
-//! Scenarios 2 and 3 start identically and end with different values, and
-//! both are correct: Paxos promises that a value once chosen stays chosen,
-//! never that any particular proposer wins.
+//! Scenarios 2 and 3 start the same and choose different values. Both are
+//! correct: Paxos guarantees one chosen value, not which one.
 //!
-//! Further reading: Lamport, *Paxos Made Simple* (2001) — the two phases,
-//! the promise and the P2c rule, stated in a few pages.
-
-mod common;
+//! Further reading: Lamport, *Paxos Made Simple* (2001), section 2, and
+//! `specs/tla/decree/` for the model.
 
 use std::collections::BTreeMap;
 
 use paros_consensus::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_consensus::contract::AcceptorWrite;
-use paros_consensus::journal::Command;
+use paros_consensus::decree::{AcceptFold, DECREE_SLOT, Decree, DecreePromise};
 use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
-use paros_consensus::proposer::{Campaign, PromiseFold, Proposer};
-use paros_consensus::types::Fingerprint;
-use paros_consensus::{Ballot, NodeId, Slot};
+use paros_consensus::types::{FNV_OFFSET, Fingerprint, Weigh, fnv1a};
+use paros_consensus::{Ballot, NodeId};
 
-use common::{ballot, command, show};
+/// The value to agree on: the name of the primary. A decree chooses any
+/// type that can say what it is ([`Fingerprint`]: a vote names the value
+/// that it is for) and how large it is ([`Weigh`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Primary(&'static str);
 
-/// The one decision. Paros's roles are written over a *log* of numbered
-/// slots (the next lesson fills many); single-decree Paxos is the same
-/// roles over a log with exactly one slot, number 0.
-const DECREE: Slot = Slot(0);
+impl Fingerprint for Primary {
+    fn fingerprint(&self) -> u64 {
+        fnv1a(FNV_OFFSET, self.0.as_bytes())
+    }
+}
 
-/// The three acceptors. The proposers are separate parties (numbered 5 and
-/// 8 below) that hold no vote of their own; a machine that is *both* a
-/// proposer and an acceptor is the Multi-Paxos lesson's business.
+impl Weigh for Primary {
+    fn weight(&self) -> u64 {
+        self.0.len() as u64
+    }
+}
+
+/// The three acceptors. The proposers, 5 and 8, are other processes.
 const A: NodeId = NodeId(1);
 const B: NodeId = NodeId(2);
 const C: NodeId = NodeId(3);
 
-/// A client value: the thing the cluster is agreeing on. Paros's log value
-/// type is [`Command`]; a client's command is an [`Entry`] whose
-/// `(client, seq)` fields exist so Multi-Paxos can execute each request at
-/// most once, and play no part here. An acceptor never looks inside a
-/// value; a proposer only ever compares values by their [`Fingerprint`].
-fn value(text: &str) -> Command {
-    command(text, 0)
+/// The acceptors, and their quorum rule: a majority, two of three. A decree
+/// never counts votes against a number: it asks this configuration.
+fn acceptors() -> AcceptorConfig {
+    AcceptorConfig::new(vec![A, B, C], QuorumSystem::Majority)
+}
+
+/// What one acceptor keeps on its disk.
+#[derive(Default)]
+struct Disk {
+    promised: Option<Ballot>,
+    accepted: Option<(Ballot, Primary)>,
+}
+
+/// One acceptor machine: the [`Acceptor`] role and its disk.
+struct Machine {
+    id: NodeId,
+    acceptor: Acceptor<Primary>,
+    disk: Disk,
+}
+
+impl Machine {
+    fn new(id: NodeId) -> Self {
+        let mut machine = Self {
+            id,
+            acceptor: Acceptor::new(
+                Ballot::zero(),
+                BTreeMap::new(),
+                DECREE_SLOT,
+                BTreeMap::new(),
+            ),
+            disk: Disk::default(),
+        };
+        machine.restart();
+        machine
+    }
+
+    /// A restart: a new [`Acceptor`] from what the disk holds. What the
+    /// machine did not persist is gone.
+    fn restart(&mut self) {
+        let promised = self.disk.promised.unwrap_or_else(Ballot::zero);
+        let records = self.disk.accepted.iter().cloned();
+        let records = records.map(|record| (DECREE_SLOT, record)).collect();
+        self.acceptor = Acceptor::new(promised, records, DECREE_SLOT, BTreeMap::new());
+    }
+
+    /// Persist the writes of one call. The machine answers only after this:
+    /// a promise that left before its write would be forgotten by a crash,
+    /// and the acceptor could then accept a ballot that it promised to
+    /// refuse.
+    fn persist(&mut self, writes: Vec<AcceptorWrite<Primary>>) {
+        for write in writes {
+            match write {
+                AcceptorWrite::SetPromise(ballot) => self.disk.promised = Some(ballot),
+                AcceptorWrite::AppendAccepted { ballot, value, .. } => {
+                    self.disk.accepted = Some((ballot, value));
+                }
+            }
+        }
+    }
+
+    /// `Prepare(ballot)` arrived. The answer is a promise with the vote of
+    /// this acceptor, or a refusal with the ballot that it promised.
+    fn on_prepare(&mut self, ballot: Ballot) -> Result<Option<(Ballot, Primary)>, Ballot> {
+        let mut writes = Vec::new();
+        let outcome = self.acceptor.prepare(ballot, DECREE_SLOT, &mut writes);
+        self.persist(writes);
+        match outcome {
+            PrepareOutcome::Promised { .. } => Ok(self.acceptor.record(DECREE_SLOT).cloned()),
+            PrepareOutcome::Refused | PrepareOutcome::BelowFloor => Err(self.acceptor.promised()),
+        }
+    }
+
+    /// `Accept(ballot, value)` arrived. The acceptor votes unless it
+    /// promised a higher ballot. A vote at a ballot is also a promise at
+    /// that ballot, and the promise is written first.
+    fn on_accept(&mut self, ballot: Ballot, value: Primary) -> Result<(), Ballot> {
+        match self.acceptor.admit(ballot, DECREE_SLOT) {
+            AcceptOutcome::Admitted => {
+                let mut writes = Vec::new();
+                self.acceptor.set_promise(ballot, &mut writes);
+                self.acceptor
+                    .record_accepted(DECREE_SLOT, ballot, value, &mut writes);
+                self.persist(writes);
+                Ok(())
+            }
+            AcceptOutcome::Refused | AcceptOutcome::BelowFloor => Err(self.acceptor.promised()),
+        }
+    }
 }
 
 fn name(id: NodeId) -> &'static str {
     match id {
         A => "A",
         B => "B",
-        C => "C",
-        _ => "?",
+        _ => "C",
     }
 }
 
-/// One acceptor machine: the [`Acceptor`] role plus the disk it writes to.
-///
-/// The role never touches storage itself. Every durable change it makes —
-/// a raised promise, an accepted value — is pushed into the `Vec` the
-/// caller hands it, as an [`AcceptorWrite`]. A real node flushes that batch
-/// to disk *before* the reply leaves the machine. The order is essential:
-/// a promise that was sent but not written could be forgotten by a crash,
-/// and the rebooted acceptor could then accept a lower ballot it had sworn
-/// to refuse — breaking the fence P2c relies on. Here memory stands in for
-/// the disk, and the order is the same: write, then reply.
-struct AcceptorNode {
-    id: NodeId,
-    role: Acceptor<Command>,
-    disk: Vec<AcceptorWrite<Command>>,
+fn machine(machines: &mut [Machine], id: NodeId) -> &mut Machine {
+    machines.iter_mut().find(|m| m.id == id).expect("a machine")
 }
 
-impl AcceptorNode {
-    fn new(id: NodeId) -> Self {
-        Self {
-            id,
-            // An acceptor is born empty: nothing promised (ballot zero is
-            // below every real ballot), nothing accepted, and none of the
-            // later lessons' baggage (no compaction floor, no damaged
-            // records).
-            role: Acceptor::new(Ballot::zero(), BTreeMap::new(), DECREE, BTreeMap::new()),
-            disk: Vec::new(),
-        }
-    }
-
-    /// Phase 1, acceptor side: `Prepare(ballot)` arrived. Either promise —
-    /// raise the durable promise to this ballot and report the value this
-    /// acceptor has already accepted, if any — or refuse, telling the
-    /// proposer which higher ballot is already promised (paros calls the
-    /// refusal a `Nack`).
-    fn on_prepare(&mut self, ballot: Ballot) -> Result<Option<(Ballot, Command)>, Ballot> {
-        match self.role.prepare(ballot, DECREE, &mut self.disk) {
-            // The promise is what makes P2c trustworthy: from now on this
-            // acceptor refuses every lower ballot, so the value it reports
-            // here is the *last word* it will ever say about ballots below
-            // this one. Nothing older can sneak in after the report.
-            PrepareOutcome::Promised { .. } => Ok(self.role.record(DECREE).cloned()),
-            PrepareOutcome::Refused | PrepareOutcome::BelowFloor => Err(self.role.promised()),
-        }
-    }
-
-    /// Phase 2, acceptor side: `Accept(ballot, value)` arrived. Vote for it
-    /// unless a higher ballot has been promised in the meantime.
-    fn on_accept(&mut self, ballot: Ballot, value: Command) -> Result<(), Ballot> {
-        match self.role.admit(ballot, DECREE) {
-            AcceptOutcome::Admitted => {
-                // Accepting at a ballot is also promising it: an acceptor
-                // that votes at ballot 7 must refuse ballot 5 afterwards,
-                // exactly as if it had promised 7 — otherwise a slow
-                // proposer 5 could still collect votes behind ballot 7's
-                // back. The role keeps the two scalars separate and the
-                // caller raises the promise first, so the durable batch
-                // always carries the promise ahead of the vote it covers.
-                self.role.set_promise(ballot, &mut self.disk);
-                self.role
-                    .record_accepted(DECREE, ballot, value, &mut self.disk);
-                Ok(())
-            }
-            AcceptOutcome::Refused | AcceptOutcome::BelowFloor => Err(self.role.promised()),
-        }
-    }
-}
-
-fn fresh_acceptors() -> Vec<AcceptorNode> {
-    vec![
-        AcceptorNode::new(A),
-        AcceptorNode::new(B),
-        AcceptorNode::new(C),
-    ]
-}
-
-fn acceptor(acceptors: &mut [AcceptorNode], id: NodeId) -> &mut AcceptorNode {
-    acceptors
-        .iter_mut()
-        .find(|a| a.id == id)
-        .expect("a known acceptor")
-}
-
-/// What one proposer's attempt produced: the value it ended up proposing
-/// (its own, or the one P2c made it adopt) and the value chosen, if any.
-struct Attempt {
-    proposed: Command,
-    chosen: Option<Command>,
-}
-
-/// One proposer runs one ballot from start to finish. `phase1_reach` and
-/// `phase2_reach` list which acceptors each phase's messages reach — the
-/// only "network" this example has, and how a scenario makes a proposer
-/// crash half-way (its `Accept` reaches one acceptor and then nobody).
-fn run_proposer(
+/// One proposer runs one ballot. `phase_1` and `phase_2` name the acceptors
+/// that its messages reach: this is the network of the example, and a
+/// proposer that reaches nobody in a phase has crashed. Returns the decree,
+/// and the value if this proposer saw it chosen.
+fn propose(
     ballot: Ballot,
-    my_value: &Command,
-    acceptors: &mut [AcceptorNode],
-    phase1_reach: &[NodeId],
-    phase2_reach: &[NodeId],
-) -> Attempt {
-    // The membership and its quorum rule: three acceptors, and "a quorum"
-    // means a majority of them, two. Every quorum question in paros-consensus
-    // crosses this one boundary: the proposer never compares a count
-    // against a number, it asks the configuration whether the set of
-    // acceptors that answered is a quorum.
-    let config = AcceptorConfig::new(vec![A, B, C], QuorumSystem::Majority);
-    let mut proposer: Proposer<NodeId, Command> = Proposer::new();
-    let Some(candidate) = phase1(
-        &mut proposer,
-        ballot,
-        my_value,
-        &config,
-        acceptors,
-        phase1_reach,
-    ) else {
-        return Attempt {
-            proposed: my_value.clone(),
-            chosen: None,
-        };
-    };
-    let chosen = phase2(
-        &mut proposer,
-        ballot,
-        &candidate,
-        &config,
-        acceptors,
-        phase2_reach,
-    );
-    Attempt {
-        proposed: candidate,
-        chosen,
-    }
-}
-
-/// Phase 1 plus P2c: start the ballot, send `Prepare`, collect promises
-/// until a majority holds, then pick the value. Returns the value Phase 2
-/// must propose, or `None` when the attempt had to give up.
-fn phase1(
-    proposer: &mut Proposer<NodeId, Command>,
-    ballot: Ballot,
-    my_value: &Command,
-    config: &AcceptorConfig,
-    acceptors: &mut [AcceptorNode],
-    reach: &[NodeId],
-) -> Option<Command> {
-    // ---- Start the ballot and send Prepare -------------------------------
-    //
-    // `me: None`: this proposer is not itself an acceptor, so it casts no
-    // vote of its own and its Prepare goes to all three. `prior` is the list
-    // of configurations whose quorum Phase 1 needs: with a fixed membership
-    // that is the one configuration (the matchmaker lesson is where it
-    // grows). `from_slot` is the first slot the attempt asks about — the
-    // only slot, here. The two empty maps are what this proposer already
-    // knows about its own log: nothing, since it is not an acceptor.
-    let targets = proposer.open_phase1(
-        Campaign {
-            me: None,
-            ballot,
-            config: config.clone(),
-            prior: vec![config.clone()],
-            from_slot: DECREE,
-        },
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-    );
-    assert_eq!(targets, vec![A, B, C], "Phase 1 addresses every acceptor");
+    value: &Primary,
+    machines: &mut [Machine],
+    phase_1: &[NodeId],
+    phase_2: &[NodeId],
+) -> (Decree<NodeId, Primary>, Option<Primary>) {
     println!(
-        "ballot {}: Prepare goes to every acceptor; the proposer hopes to choose {}",
-        ballot,
-        show(my_value)
+        "   proposer {} proposes {:?} at ballot {ballot}",
+        ballot.node, value.0
     );
+    let mut decree = Decree::new(ballot, acceptors(), value.clone());
 
-    // ---- Collect promises; note the moment a majority holds --------------
-    let mut quorum = false;
-    for id in targets {
-        if !reach.contains(&id) {
-            println!("  {} -> (unreachable: the Prepare never arrives)", name(id));
+    // Phase 1: a `Prepare` to each acceptor, and the answers.
+    for to in decree.unanswered() {
+        if !phase_1.contains(&to) {
             continue;
         }
-        match acceptor(acceptors, id).on_prepare(ballot) {
+        match machine(machines, to).on_prepare(ballot) {
             Ok(vote) => {
                 match &vote {
-                    Some((b, v)) => println!(
-                        "  {} -> promise; reports it already accepted {} at ballot {}",
-                        name(id),
-                        show(v),
-                        *b
-                    ),
-                    None => println!("  {} -> promise; it has accepted nothing yet", name(id)),
+                    Some((at, value)) => {
+                        println!(
+                            "     {}: promise, it accepted {:?} at {at}",
+                            name(to),
+                            value.0
+                        );
+                    }
+                    None => println!("     {}: promise, it accepted nothing", name(to)),
                 }
-                // The promise is folded into the tally as a one-slot
-                // "page": the accepted value (if any) keyed by its slot, no
-                // damaged records, and no continuation cursor, because a
-                // one-slot log always fits in one page.
-                let accepted = vote.map_or_default(|record| BTreeMap::from([(DECREE, record)]));
-                let fold =
-                    proposer.fold_promise(id, ballot, DECREE, accepted, BTreeMap::new(), None);
-                assert_eq!(
-                    fold,
-                    PromiseFold::Answered,
-                    "a promise page is counted once"
-                );
+                if let DecreePromise::Quorum(selected) = decree.on_promise(to, vote) {
+                    let why = if decree.adopted_prior_vote() {
+                        "a promise reported it"
+                    } else {
+                        "no promise reported a value"
+                    };
+                    println!("     a majority promised: propose {:?}, {why}", selected.0);
+                }
             }
             Err(promised) => {
-                // A refusal means some acceptor already promised a higher
-                // ballot. This proposer gives up at once — paros's node does
-                // the same on a `Nack`: it steps down and retries above the
-                // refuser's ballot after a randomized pause. Safety does not
-                // demand giving up: the remaining acceptors might still form
-                // a majority for this ballot ({B, C} is a majority even if A
-                // refused). Giving up is a liveness policy: work at this
-                // ballot is likely to be overtaken by the higher one, and
-                // retrying above it is what ends a duel between proposers.
-                println!(
-                    "  {} -> nack: it already promised the higher ballot {}; this attempt gives up",
-                    name(id),
-                    promised
-                );
-                return None;
+                println!("     {}: refused, it promised {promised}", name(to));
+                decree.on_nack(promised);
             }
         }
-        // `phase1_won` takes the proposer's own promise so a proposer that
-        // is also an acceptor cannot win below a promise it made meanwhile;
-        // a proposer that is not an acceptor has only its own ballot.
-        //
-        // A majority means Phase 1 *may* close: there are enough answers to
-        // run P2c safely. It does not make later promises meaningless. The
-        // Prepare went to everyone at once, and a promise that arrives after
-        // the majority can report an accepted value at a *higher* ballot
-        // than any seen so far; folded before P2c runs, it changes the value
-        // P2c selects (P2c takes the highest ballot reported). This proposer
-        // keeps folding every promise that reaches it and runs P2c only
-        // after the loop; paros's `ColocatedNode` instead closes Phase 1 on
-        // the very fold that completes the majority. Both are safe — a value
-        // that is actually chosen is reported by some member of *every*
-        // majority — and once Phase 1 is closed, further promises are
-        // irrelevant to this attempt.
-        if !quorum && proposer.phase1_won(ballot) {
-            println!("  two promises: a majority of the three acceptors, Phase 1 may close");
-            quorum = true;
-        }
     }
-    if !proposer.phase1_won(ballot) {
-        println!("  fewer than two promises: no majority, this attempt gives up");
-        return None;
-    }
+    // Phase 2 is open when Phase 1 selected a value.
+    let Some(selected) = decree.value().cloned() else {
+        println!("     no majority: the proposal stops");
+        return (decree, None);
+    };
 
-    // ---- P2c: pick the value -----------------------------------------------
-    //
-    // Closing Phase 1 hands back the highest-ballot accepted value reported
-    // per slot. The predicate answers "is this slot already known chosen
-    // here?" — nothing is, in a fresh proposer. If the majority reported a
-    // value, the proposer's own value is set aside: some earlier ballot may
-    // already have *chosen* that value (a majority of accepts at that ballot
-    // would share an acceptor with this promise majority, so at least one
-    // promise would report it), and proposing anything else could choose a
-    // second value.
-    let outcome = proposer.close_phase1(|_| false);
-    if let Some((reported_at, reported)) = outcome.recovered.get(&DECREE) {
-        println!(
-            "  P2c: a promise reported {} accepted at ballot {}, so that is what must be proposed; {} is set aside",
-            show(reported),
-            *reported_at,
-            show(my_value)
-        );
-        Some(reported.clone())
-    } else {
-        println!(
-            "  P2c: no promise reported a value accepted below ballot {}, so the proposer may propose its own {}",
-            ballot,
-            show(my_value)
-        );
-        Some(my_value.clone())
-    }
-}
-
-/// Phase 2: send `Accept`, collect votes until a majority holds, and report
-/// the chosen value — or `None` when the votes never reached a majority.
-fn phase2(
-    proposer: &mut Proposer<NodeId, Command>,
-    ballot: Ballot,
-    candidate: &Command,
-    config: &AcceptorConfig,
-    acceptors: &mut [AcceptorNode],
-    reach: &[NodeId],
-) -> Option<Command> {
-    // One voting round per slot per ballot. `own_vote: None`, again because
-    // this proposer is no acceptor. Each `Accepted` reply carries the
-    // value's fingerprint, so a vote for a different value at the same
-    // ballot could never be miscounted as a vote for this one.
-    proposer.open_round(DECREE, ballot, candidate.clone(), None, None);
-    println!(
-        "ballot {}: Accept goes to every acceptor, asking for a vote on {}",
-        ballot,
-        show(candidate)
-    );
+    // Phase 2: an `Accept` to each acceptor, and the votes.
     let mut chosen = None;
-    for id in config.phase2_addressees(None) {
-        if !reach.contains(&id) {
-            println!("  {} -> (unreachable: the Accept never arrives)", name(id));
+    for to in decree.unanswered() {
+        if !phase_2.contains(&to) {
             continue;
         }
-        match acceptor(acceptors, id).on_accept(ballot, candidate.clone()) {
+        match machine(machines, to).on_accept(ballot, selected.clone()) {
             Ok(()) => {
-                println!(
-                    "  {} -> accepted (one vote; not chosen until a majority has voted)",
-                    name(id)
-                );
-                let counted = proposer.fold_accepted(id, ballot, DECREE, candidate.fingerprint());
-                assert!(counted, "an accept at the round's ballot and value counts");
+                println!("     {}: accepted {:?}", name(to), selected.0);
+                // A vote after the majority changes nothing.
+                if let (AcceptFold::Chosen(value), None) = (decree.on_accepted(to), &chosen) {
+                    println!("     a majority accepted: {:?} is chosen", value.0);
+                    chosen = Some(value);
+                }
             }
-            Err(promised) => println!(
-                "  {} -> nack: it promised the higher ballot {} and refuses this vote",
-                name(id),
-                promised
-            ),
-        }
-        // ---- Chosen ----------------------------------------------------
-        //
-        // The decision fires the instant a majority has voted; the `Accept`
-        // already went to every acceptor, so the remaining replies arrive
-        // afterwards and are simply counted.
-        if chosen.is_none()
-            && let Some((at, decided)) = proposer.decided(DECREE, config)
-        {
-            assert_eq!(
-                at, ballot,
-                "a decision is counted at the round's own ballot"
-            );
-            println!(
-                "  chosen: {} at ballot {} -- a majority voted for it, and it can never change now",
-                show(&decided),
-                at
-            );
-            chosen = Some(decided);
+            Err(promised) => {
+                println!("     {}: refused, it promised {promised}", name(to));
+                decree.on_nack(promised);
+            }
         }
     }
-    if chosen.is_some() {
-        proposer.close_round(DECREE);
-    } else {
-        println!(
-            "  fewer than two votes: {} is accepted somewhere, but chosen nowhere",
-            show(candidate)
-        );
+    if chosen.is_none() {
+        println!("     no majority accepted: nothing is chosen by this ballot");
     }
-    chosen
+    (decree, chosen)
 }
 
-/// The agreement property, read off the acceptors' disks: once `chosen` is
-/// chosen at ballot `at`, every acceptor that holds a value at a ballot at
-/// or above `at` holds `chosen`. (An acceptor may still hold some *other*
-/// value at a ballot *below* the choosing one — scenario 3 ends that way —
-/// and that is fine: the older value can never gain a majority, because a
-/// majority of acceptors promised past its ballot.)
-fn assert_agreement(acceptors: &[AcceptorNode], at: Ballot, chosen: &Command) {
-    for acceptor in acceptors {
-        if let Some((recorded_at, recorded)) = acceptor.role.record(DECREE)
-            && *recorded_at >= at
-        {
-            assert_eq!(
-                recorded,
-                chosen,
-                "{} holds a different value at ballot {}",
-                name(acceptor.id),
-                *recorded_at
-            );
-        }
+fn ballot(round: u64, node: u64) -> Ballot {
+    Ballot {
+        round,
+        node: NodeId(node),
     }
 }
 
-/// The happy path: three empty acceptors, one proposer, one value. Nothing
-/// has been accepted anywhere, so P2c lets the proposer keep its own value,
-/// and all three acceptors vote for it.
-fn scenario_empty_state() {
-    println!("== 1. the happy path: fresh acceptors, one proposer, one value ==");
-    let mut acceptors = fresh_acceptors();
-    let attempt = run_proposer(
-        ballot(1, NodeId(5)),
-        &value("alpha"),
-        &mut acceptors,
+/// Scenario 1: no promise reports a value, so the proposer keeps its own.
+fn no_conflict() {
+    println!("== 1. no conflict");
+    let mut machines = [A, B, C].map(Machine::new);
+    let (decree, chosen) = propose(
+        ballot(1, 5),
+        &Primary("ada"),
+        &mut machines,
         &[A, B, C],
         &[A, B, C],
     );
-    assert_eq!(attempt.proposed, value("alpha"));
-    assert_eq!(attempt.chosen, Some(value("alpha")));
-    assert_agreement(&acceptors, ballot(1, NodeId(5)), &value("alpha"));
-    println!();
+    assert!(!decree.adopted_prior_vote());
+    assert_eq!(chosen, Some(Primary("ada")));
 }
 
-/// The crucial scenario. Proposer 5 at ballot `3.5` got as far as one vote
-/// (at `A`) and died. Proposer 8 at ballot `7.8` arrives with a *different*
-/// client value, and its promise majority includes `A`. It must adopt
-/// `"old-value"`: it cannot know whether ballot `3.5`'s `Accept` also
-/// reached `B` or `C` before the crash (it did not, here — but a promise
-/// from `A` alone reads the same in "accepted at `A` only" and in "chosen
-/// by `A` and `C`"), so proposing `"new-value"` could choose a second
-/// value.
-fn scenario_adopt_prior_accept() {
-    println!("== 2. a higher ballot must adopt a value it finds accepted ==");
-    let mut acceptors = fresh_acceptors();
-    let first = run_proposer(
-        ballot(3, NodeId(5)),
-        &value("old-value"),
-        &mut acceptors,
-        &[A, B, C],
-        &[A],
-    );
-    assert!(first.chosen.is_none(), "one accept is not a choice");
-    assert_eq!(
-        acceptor(&mut acceptors, A).role.record(DECREE),
-        Some(&(ballot(3, NodeId(5)), value("old-value"))),
-        "A holds the old proposer's accept"
-    );
-    println!(
-        "  (proposer 5 crashes here: A holds one vote for \"old-value\", and nobody else knows)"
-    );
+/// Proposer 5 gets one vote, on acceptor A, and stops.
+fn one_vote_for_ada(machines: &mut [Machine]) -> Decree<NodeId, Primary> {
+    let (decree, chosen) = propose(ballot(3, 5), &Primary("ada"), machines, &[A, B, C], &[A]);
+    assert_eq!(chosen, None, "one vote is not a majority");
+    let vote = machine(machines, A).acceptor.record(DECREE_SLOT).cloned();
+    assert_eq!(vote, Some((ballot(3, 5), Primary("ada"))));
+    decree
+}
 
-    let second = run_proposer(
-        ballot(7, NodeId(8)),
-        &value("new-value"),
-        &mut acceptors,
+/// Scenario 2: proposer 8 cannot know if "ada" is chosen. Acceptor C did
+/// not answer, and "A and C accepted it" looks the same from here. So it
+/// proposes "ada".
+fn adopt_an_accepted_value() {
+    println!("\n== 2. a later proposer adopts an accepted value");
+    let mut machines = [A, B, C].map(Machine::new);
+    one_vote_for_ada(&mut machines);
+    println!("   proposer 5 crashes with one vote, on A");
+
+    let (decree, chosen) = propose(
+        ballot(7, 8),
+        &Primary("bob"),
+        &mut machines,
         &[A, B],
         &[A, B, C],
     );
-    assert_eq!(
-        second.proposed,
-        value("old-value"),
-        "P2c: the new proposer adopted the accepted value"
-    );
-    assert_eq!(second.chosen, Some(value("old-value")));
-    assert_ne!(
-        second.chosen,
-        Some(value("new-value")),
-        "the new client value was never proposed"
-    );
-    assert_agreement(&acceptors, ballot(7, NodeId(8)), &value("old-value"));
-    for acceptor in &acceptors {
-        assert_eq!(
-            acceptor.role.record(DECREE),
-            Some(&(ballot(7, NodeId(8)), value("old-value"))),
-            "every acceptor re-accepted the adopted value at the new ballot"
-        );
+    assert!(decree.adopted_prior_vote());
+    assert_eq!(chosen, Some(Primary("ada")), "\"bob\" was never proposed");
+    for machine in &machines {
+        let vote = machine.acceptor.record(DECREE_SLOT);
+        assert_eq!(vote, Some(&(ballot(7, 8), Primary("ada"))));
     }
-    println!();
 }
 
-/// The same start, but ballot `7.8`'s promise majority is `{B, C}`, which
-/// never saw ballot `3.5`'s vote. Now P2c finds nothing, and `"new-value"`
-/// is proposed and chosen. That is still safe, and the reason is the
-/// promise: `B` and `C` promised `7.8`, so ballot `3.5` can never gain a
-/// second vote — as proposer 5 discovers when it wakes up and retries its
-/// `Accept`.
-///
-/// Both scenarios end with exactly one value chosen. Which one depends on
-/// what the promise majority happened to see, and Paxos is fine with that:
-/// it promises that a value once chosen stays chosen, not that any
-/// particular proposer wins.
-fn scenario_prior_accept_never_chosen() {
-    println!("== 3. an accepted value the majority never saw is safely fenced out ==");
-    let mut acceptors = fresh_acceptors();
-    let first = run_proposer(
-        ballot(3, NodeId(5)),
-        &value("old-value"),
-        &mut acceptors,
+/// Scenario 3: the promises of B and C fence ballot 3.5 for ever, so "ada"
+/// can never get a second vote, and "bob" is safe to choose.
+fn fence_an_unseen_value() {
+    println!("\n== 3. a value that the majority did not see is fenced");
+    let mut machines = [A, B, C].map(Machine::new);
+    let mut old = one_vote_for_ada(&mut machines);
+    println!("   proposer 5 stops with one vote, on A");
+
+    let (decree, chosen) = propose(
+        ballot(7, 8),
+        &Primary("bob"),
+        &mut machines,
+        &[B, C],
+        &[B, C],
+    );
+    assert!(!decree.adopted_prior_vote());
+    assert_eq!(chosen, Some(Primary("bob")));
+
+    // The promise of B is on its disk, so a restart does not lose it.
+    machine(&mut machines, B).restart();
+    println!("   B restarts. Proposer 5 comes back and sends its Accept at 3.5 to B");
+    let refused = machine(&mut machines, B).on_accept(ballot(3, 5), Primary("ada"));
+    assert_eq!(refused, Err(ballot(7, 8)));
+    println!("     B: refused, it promised 7.8");
+
+    // A refusal names the ballot to go above. The new attempt of proposer 5
+    // starts with Phase 1, as each attempt does, and P2c gives it "bob".
+    old.on_nack(ballot(7, 8));
+    let above = old.preempted().expect("the decree is preempted");
+    let (decree, chosen) = propose(
+        ballot(above.round + 1, 5),
+        &Primary("ada"),
+        &mut machines,
         &[A, B, C],
-        &[A],
+        &[A, B, C],
     );
-    assert!(first.chosen.is_none());
-    println!("  (proposer 5 pauses here: one vote at A, no majority)");
-
-    let second = run_proposer(
-        ballot(7, NodeId(8)),
-        &value("new-value"),
-        &mut acceptors,
-        &[B, C],
-        &[B, C],
-    );
-    assert_eq!(second.proposed, value("new-value"));
-    assert_eq!(second.chosen, Some(value("new-value")));
-    assert_agreement(&acceptors, ballot(7, NodeId(8)), &value("new-value"));
-
-    println!("  (proposer 5 wakes up and retries its Accept at ballot 3.5)");
-    let late = acceptor(&mut acceptors, B).on_accept(ballot(3, NodeId(5)), value("old-value"));
-    println!(
-        "  B -> nack: it promised ballot {}, so ballot 3.5 can never get its vote",
-        late.expect_err("B promised ballot 7")
-    );
-    assert_eq!(late, Err(ballot(7, NodeId(8))));
-    // "old-value" is still accepted at A — accepted is not chosen — and it
-    // can never be chosen: it would need a second vote, and both other
-    // acceptors are fenced above it.
+    assert!(decree.adopted_prior_vote());
     assert_eq!(
-        acceptor(&mut acceptors, A).role.record(DECREE),
-        Some(&(ballot(3, NodeId(5)), value("old-value")))
+        chosen,
+        Some(Primary("bob")),
+        "the chosen value did not change"
     );
-    println!();
 }
 
 fn main() {
-    scenario_empty_state();
-    scenario_adopt_prior_accept();
-    scenario_prior_accept_never_chosen();
-    println!("all assertions held");
+    no_conflict();
+    adopt_an_accepted_value();
+    fence_an_unseen_value();
+    println!("\none value is chosen in each scenario, and it never changes");
 }

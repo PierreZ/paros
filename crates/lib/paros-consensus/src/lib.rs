@@ -141,26 +141,24 @@
 //! assertions on the property that it shows. Run one with
 //! `cargo run -p paros-consensus --example <name>`.
 //!
-//! Examples that drive [`ColocatedNode`], as a driver does:
+//! The first example is single-decree Paxos on [`decree::Decree`]. Each
+//! other example drives the deployments as a driver does, on the toy
+//! cluster of `examples/common/cluster.rs`: one disk for each process,
+//! persist before send, and a network that can lose or hold a message.
 //!
 //! | Example | Shows |
 //! |---|---|
+//! | `single_decree` | [`decree::Decree`] and [`acceptor::Acceptor`]: Phase 1, P2c, Phase 2 for one value, and a restart |
 //! | `quickstart` | the driver loop, an election, writes, a crash and a restart |
+//! | `multi_paxos` | one Phase 1 for many slots, and the recovery of a new leader: P2c and the `Noop` gap fill |
 //! | `journal_calls` | `SetLeader`, `Write`, a retry, a read, `Truncate`, and each [`journal::Outcome`] |
 //! | `leader_handoff` | [`ColocatedNode::relinquish_to`]: a new leader without an election |
-//! | `reconfiguration` | [`ColocatedNode::reconfigure`] with three [`Matchmaker`]s, garbage collection, a retirement |
+//! | `acceptor_grid` | a grid of acceptors ([`membership::QuorumSystem::grid`]): one column decides, one row elects, [`ColocatedNode::move_round`] |
 //! | `quorum_read` | a leaderless read on a grid ([`ColocatedNode::quorum_read`]) |
 //! | `proxy_leader` | [`ProxyLeader`]s beside the leader |
 //! | `replica_tier` | [`ReplicaNode`]s beside the acceptors |
-//!
-//! Lessons that drive the roles by hand, to teach the algorithm:
-//!
-//! | Example | Shows |
-//! |---|---|
-//! | `single_decree` | Phase 1, P2c, Phase 2: one value |
-//! | `multi_paxos` | slots and ballots, one Phase 1 for many slots, the recovery of a new leader |
-//! | `matchmaker` | Matchmaker Paxos: the registry, a reconfiguration, the handover of the matchmaker set |
-//! | `acceptor_grid` | a grid of acceptors: one column decides, one row elects |
+//! | `matchmaker` | the registry of the [`Matchmaker`]s, and the handover of their set ([`MatchmakerReconfigurer`]) |
+//! | `reconfiguration` | [`ColocatedNode::reconfigure`] with three [`Matchmaker`]s, garbage collection, a retirement |
 //!
 //! # Features
 //!

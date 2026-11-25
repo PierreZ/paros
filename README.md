@@ -64,62 +64,56 @@ To use the crate, start with its [README](crates/lib/paros-consensus/README.md) 
 crash and a restart.
 
 Eleven small, deterministic, runnable examples are in
-[`paros-consensus`](crates/lib/paros-consensus). The first seven teach the algorithm: they drive the
-composable roles (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand or step
-`ColocatedNode` message by message, with a printed trace and assertions for the property each
-one teaches. Read them in order:
+[`paros-consensus`](crates/lib/paros-consensus). Each one prints a trace and asserts the property
+that it shows. The first runs single-decree Paxos on the public `Decree`. Each other example
+drives the deployments (`ColocatedNode`, `ProxyLeader`, `ReplicaNode`, `Matchmaker`) as a driver
+does, with one disk for each process and a toy network
+([`examples/common/cluster.rs`](crates/lib/paros-consensus/examples/common/cluster.rs)). No example builds a node from the roles
+by hand: what an example does is what a program does. Read them in order:
 
-1. [`single_decree.rs`](crates/lib/paros-consensus/examples/single_decree.rs) — Phase 1, P2c, Phase 2:
-   one value, and why a higher ballot must adopt a value it finds accepted.
-2. [`multi_paxos.rs`](crates/lib/paros-consensus/examples/multi_paxos.rs) — slots versus ballots, one
-   Phase 1 amortized over many slots, and leader recovery as P2c applied slot by slot.
-3. [`matchmaker.rs`](crates/lib/paros-consensus/examples/matchmaker.rs) — configuration discovery
-   through the matchmakers, a reconfiguration as a round change, and the matchmaker set
-   itself chosen by the same single-decree Paxos over `Vec<MatchmakerId>`.
-4. [`acceptor_grid.rs`](crates/lib/paros-consensus/examples/acceptor_grid.rs) — the acceptor grid of
-   Compartmentalized Paxos: six nodes under `QuorumSystem::grid(2, 3)`, every slot's Phase 2
-   addressed to one column so each acceptor sees a third of the commands, a majority of
-   promises that still misses a column, and the next election needing one acceptor of every
-   column (a full row is one) because each promise in it reports exactly its own column's value.
-5. [`quorum_read.rs`](crates/lib/paros-consensus/examples/quorum_read.rs) — Paxos Quorum Reads: a
-   row of the same grid answers with its vote watermarks while a column is mid-decision, the
-   reader settles on the maximum and waits for its replica to apply it, and the leader sends
-   no beat and opens no round — a linearizable read with no leader and no clock.
-6. [`proxy_leader.rs`](crates/lib/paros-consensus/examples/proxy_leader.rs) — proxy leaders: the leader
-   sequences and a `ProxyLeader` on another process fans each slot's `Accept` out, folds the
-   votes and announces the `Commit`; a dead proxy's round is taken back, and a handoff
-   successor re-delegates what it inherited.
-7. [`replica_tier.rs`](crates/lib/paros-consensus/examples/replica_tier.rs) — the replica tier: three
-   acceptors vote and keep the chosen prefix, two `ReplicaNode`s learn it and never vote, a replica that lost a `Commit` catches up from the
-   leader's beat, and each slot's reply is owned by one replica (`slot % replica_count`).
-
-The four others drive `ColocatedNode` as a driver does, with one disk for each node and a toy
-network ([`examples/common/cluster.rs`](crates/lib/paros-consensus/examples/common/cluster.rs)):
-
-8. [`quickstart.rs`](crates/lib/paros-consensus/examples/quickstart.rs) — the driver loop (persist,
-   then send, then learn), an election, writes, a follower that crashes and catches up, and a
-   new leader.
-9. [`journal_calls.rs`](crates/lib/paros-consensus/examples/journal_calls.rs) — the journal that the
-   log carries: `SetLeader`, `Write`, a retry, a fenced writer, a read, `Truncate`, and the
-   `Outcome` of each one.
-10. [`leader_handoff.rs`](crates/lib/paros-consensus/examples/leader_handoff.rs) — the leader hands
-    its ballot to a successor with no election, the one-hop rule, and a lost handoff that an
-    ordinary election repairs.
-11. [`reconfiguration.rs`](crates/lib/paros-consensus/examples/reconfiguration.rs) — five nodes and
-    three matchmakers: `{1, 2, 3}` becomes `{1, 4, 5}`, the matchmakers forget the old
-    configuration, and a removed node retires.
+1. [`single_decree.rs`](crates/lib/paros-consensus/examples/single_decree.rs) — Phase 1, P2c, Phase 2 for one value: why a
+   higher ballot must adopt a value that it finds accepted, and an acceptor that restarts from
+   its disk.
+2. [`quickstart.rs`](crates/lib/paros-consensus/examples/quickstart.rs) — the driver loop (persist, then send, then learn), an
+   election, writes, a follower that crashes and catches up, and a new leader.
+3. [`multi_paxos.rs`](crates/lib/paros-consensus/examples/multi_paxos.rs) — one Phase 1 for many slots, and the recovery of a
+   new leader: it proposes again the value that an acceptor reported (P2c) and fills the slot
+   that nobody reported with a `Noop`.
+4. [`journal_calls.rs`](crates/lib/paros-consensus/examples/journal_calls.rs) — the journal that the log carries: `SetLeader`,
+   `Write`, a retry, a fenced writer, a read, `Truncate`, and the `Outcome` of each one.
+5. [`leader_handoff.rs`](crates/lib/paros-consensus/examples/leader_handoff.rs) — the leader hands its ballot to a successor
+   with no election, the one-hop rule, and a lost handoff that an ordinary election repairs.
+6. [`acceptor_grid.rs`](crates/lib/paros-consensus/examples/acceptor_grid.rs) — the acceptor grid of Compartmentalized Paxos:
+   six nodes under `QuorumSystem::grid(2, 3)`. One column decides a slot, so each acceptor
+   votes for a third of the commands. A round whose column is down moves to another column.
+   An election needs one acceptor of every column, so four nodes of six do not always elect.
+7. [`quorum_read.rs`](crates/lib/paros-consensus/examples/quorum_read.rs) — leaderless reads: a row of the grid answers with
+   its vote watermarks while a column is mid-decision, and the reader waits for the maximum.
+   A linearizable read with no leader and no clock.
+8. [`proxy_leader.rs`](crates/lib/paros-consensus/examples/proxy_leader.rs) — proxy leaders: the leader gives the slot, and a
+   `ProxyLeader` sends the `Accept`, counts the votes and sends the `Commit`. The leader takes
+   back the round of a dead proxy leader, and a handoff successor delegates again what it got.
+9. [`replica_tier.rs`](crates/lib/paros-consensus/examples/replica_tier.rs) — replicas: three acceptors vote, and two
+   `ReplicaNode`s learn and never vote. A replica that lost a `Commit` catches up from the
+   beat, a replica restarts from its disk, and one replica owns the reply of each slot.
+10. [`matchmaker.rs`](crates/lib/paros-consensus/examples/matchmaker.rs) — Matchmaker Paxos: a candidate registers its
+    configuration at a majority of the matchmakers before Phase 1, a matchmaker restarts from
+    its registry, and the matchmaker set hands over to a new set with `MatchmakerReconfigurer`.
+11. [`reconfiguration.rs`](crates/lib/paros-consensus/examples/reconfiguration.rs) — five nodes and three matchmakers:
+    `{1, 2, 3}` becomes `{1, 4, 5}`, the matchmakers forget the old configuration, and a
+    removed node retires.
 
 ```sh
 cargo run -p paros-consensus --example single_decree
+cargo run -p paros-consensus --example quickstart
 cargo run -p paros-consensus --example multi_paxos
-cargo run -p paros-consensus --example matchmaker
+cargo run -p paros-consensus --example journal_calls
+cargo run -p paros-consensus --example leader_handoff
 cargo run -p paros-consensus --example acceptor_grid
 cargo run -p paros-consensus --example quorum_read
 cargo run -p paros-consensus --example proxy_leader
 cargo run -p paros-consensus --example replica_tier
-cargo run -p paros-consensus --example quickstart
-cargo run -p paros-consensus --example journal_calls
-cargo run -p paros-consensus --example leader_handoff
+cargo run -p paros-consensus --example matchmaker
 cargo run -p paros-consensus --example reconfiguration
 ```
 

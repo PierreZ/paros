@@ -1,7 +1,7 @@
 //! The Act I world: single-decree Paxos over the bare roles.
 //!
-//! This is `crates/lib/paros-consensus/examples/single_decree.rs` with the network
-//! turned into player moves. There is no [`ColocatedNode`](paros_consensus::ColocatedNode)
+//! This is the algorithm of `crates/lib/paros-consensus/examples/single_decree.rs` with
+//! the network turned into player moves, on the roles under the example's `Decree`. There is no [`ColocatedNode`](paros_consensus::ColocatedNode)
 //! here, no [`Storage`](paros_consensus::Storage) and no clock: an acceptor is an
 //! [`Acceptor<Command>`] plus a `Vec<AcceptorWrite<Command>>` standing in for
 //! its disk, a proposer is a [`Proposer<NodeId, Command>`], and both phases run

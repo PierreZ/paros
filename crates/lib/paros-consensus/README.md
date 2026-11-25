@@ -18,8 +18,9 @@ paros is a learning project. It is not for production. Releases go to crates.io 
 - **`Matchmaker`** and **`MatchmakerReconfigurer`**: the registry of Matchmaker Paxos and the
   handover of the matchmaker set.
 - **The roles** that the deployments wire: `proposer::Proposer`, `acceptor::Acceptor`,
-  `replica::Replica`, `quorum_read::QuorumReads`, `decree::Decree` and others. You can drive
-  them by hand, as the lessons do.
+  `replica::Replica`, `quorum_read::QuorumReads`, `decree::Decree` and others. Each one is
+  public, so a program can wire its own deployment. `decree::Decree` is single-decree Paxos
+  for a one-shot decision (`examples/single_decree.rs`).
 - **The contract** of a driver, in `contract`: `Message`, `WriteOp`, `Storage`, `Config`,
   `Limits`, and `MemStorage`, an in-memory disk for tests and examples.
 
@@ -52,7 +53,7 @@ loop {
 Step 1 before step 2 is the rule that makes Paxos safe. A `Promise` or an `Accepted` that
 leaves before its write is durable is a vote that a crash takes back. The rustdoc of the crate
 root has this loop as a complete program with three nodes, and `examples/common/cluster.rs` has
-it with a network, crashes and matchmakers.
+it with a network, crashes, matchmakers, proxy leaders and replicas.
 
 Three things surprise a new user:
 
@@ -72,26 +73,24 @@ Each example prints a trace and asserts the property that it shows:
 
     nix develop --command cargo run -p paros-consensus --example quickstart
 
-Examples that drive `ColocatedNode`, as a driver does:
+Read them in this order. The first is single-decree Paxos on `decree::Decree`. Each other
+example drives the deployments as a driver does, on the toy cluster of
+`examples/common/cluster.rs`: one disk for each process, persist before send, and a network
+that can lose or hold a message.
 
 | Example | Shows |
 |---|---|
+| `single_decree` | `Decree` and `Acceptor`: Phase 1, P2c, Phase 2 for one value, and a restart |
 | `quickstart` | the driver loop, an election, writes, a crash and a restart |
+| `multi_paxos` | one Phase 1 for many slots, and the recovery of a new leader: P2c and the `Noop` gap fill |
 | `journal_calls` | `SetLeader`, `Write`, a retry, a read, `Truncate`, and each `Outcome` |
 | `leader_handoff` | `relinquish_to`: a new leader at the same ballot, with no election |
-| `reconfiguration` | `reconfigure` with three matchmakers, garbage collection, a retirement |
+| `acceptor_grid` | a grid of acceptors: one column decides, one row elects, `move_round` |
 | `quorum_read` | a linearizable read on a grid with no leader and no clock |
 | `proxy_leader` | proxy leaders that run Phase 2 for the leader |
 | `replica_tier` | replicas that learn and serve reads beside the acceptors |
-
-Lessons that drive the roles by hand, to teach the algorithm. Read them in this order:
-
-| Example | Shows |
-|---|---|
-| `single_decree` | Phase 1, P2c, Phase 2: one value |
-| `multi_paxos` | slots and ballots, one Phase 1 for many slots, the recovery of a new leader |
-| `matchmaker` | Matchmaker Paxos: the registry, a reconfiguration, the handover of the matchmaker set |
-| `acceptor_grid` | a grid of acceptors: one column decides, one row elects |
+| `matchmaker` | the registry of the matchmakers, and the handover of the matchmaker set |
+| `reconfiguration` | `reconfigure` with three matchmakers, garbage collection, a retirement |
 
 ## Features
 

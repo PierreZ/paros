@@ -2,12 +2,12 @@
 //! phase, the garbage-collection floor, and the generation handover.
 //!
 //! This is `crates/lib/paros-consensus/examples/matchmaker.rs` with the parts the
-//! example hard-codes turned into player choices. The example's
-//! `MatchmakerNode` — a [`Matchmaker`](paros_consensus::Matchmaker) role, the
+//! example hard-codes turned into player choices. A matchmaker of the example's
+//! toy cluster (`examples/common/cluster.rs`) — a [`Matchmaker`](paros_consensus::Matchmaker) role, the
 //! static [`MatchmakerConfig`](paros_consensus::matchmaker::MatchmakerConfig) it boots with, and
 //! a [`MemRegistry`](paros_consensus::matchmaker::MemRegistry) disk it writes to
-//! and reboots from — is [`MatchmakerProcess`] here, and its `deliver_match` /
-//! `deliver_reconfigure` are the two methods below: **step, persist, take the
+//! and reboots from — is [`MatchmakerProcess`] here, and the cluster's `pump_matchmaker` and
+//! `matchmaker_reconfigure` are the two methods below: **step, persist, take the
 //! reply, advance**, in that order and never another.
 //!
 //! # Where each piece lives

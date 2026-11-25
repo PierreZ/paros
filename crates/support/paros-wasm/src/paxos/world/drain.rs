@@ -1,8 +1,8 @@
 //! The drain contract: one `Ready` batch at a time, from the node to the disk
 //! and the wire.
 //!
-//! This is the loop `crates/lib/paros-consensus/examples/quorum_read.rs` writes in
-//! fifteen lines, with one thing a step-through needs added: a **durability
+//! This is the loop of `Cluster::pump` in
+//! `crates/lib/paros-consensus/examples/common/cluster.rs`, with one thing a step-through needs added: a **durability
 //! seam** that can cut a batch in half.
 //!
 //! The order never changes, and it is the order `paros::roles::node::ready` uses
