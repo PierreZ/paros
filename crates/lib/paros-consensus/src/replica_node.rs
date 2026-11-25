@@ -752,7 +752,12 @@ impl ReplicaNode {
             "the retained bytes hold the weight of every record past the end"
         );
         self.retained_bytes -= dropped;
-        self.faulty.retain(|slot| *slot < end);
+        // A faulty record lies inside the durable chosen prefix (the boot
+        // reads only those), and a sealed replica's prefix ends at its end.
+        assert!(
+            self.faulty.last().is_none_or(|s| *s < end),
+            "a sealed replica holds no faulty record past its end"
+        );
         assert!(
             self.records.last_key_value().is_none_or(|(s, _)| *s < end),
             "a sealed replica holds no record past its end"

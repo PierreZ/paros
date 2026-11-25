@@ -433,3 +433,32 @@ fn a_full_truncation_folded_with_the_roll_keeps_the_roll() {
     assert!(rebooted.replica().is_sealed());
     assert_eq!(rebooted.first_slot(), Slot(3));
 }
+
+/// A slot past the end that the replica learned before its seal, and that
+/// rotted on its disk, is not its own: the rebooted replica, sealed again,
+/// counts no faulty record there and pulls nothing for it.
+#[test]
+fn a_rotted_slot_past_the_end_is_not_pulled_after_a_reboot() {
+    let mut disk = MemStorage::new(multi());
+    let mut replica = ReplicaNode::new(&disk, Limits::DEFAULT);
+    replica.step(commit(0, write(7)));
+    replica.step(commit(2, write(8)));
+    replica.step(commit(1, roll(1)));
+    let _ = drain(&mut replica, &mut disk);
+    assert!(replica.replica().is_sealed());
+    assert_eq!(
+        disk.initial_state().0.chosen_index,
+        Some(Slot(1)),
+        "the durable chosen index stops at the `Roll`"
+    );
+    let _ = disk.rot(Slot(2));
+    let mut rebooted = ReplicaNode::new(&disk, Limits::DEFAULT);
+    assert!(rebooted.replica().is_sealed());
+    rebooted.tick();
+    let ready = rebooted.ready();
+    assert!(
+        ready.messages().is_empty(),
+        "a sealed replica pulls nothing"
+    );
+    ready.advance();
+}

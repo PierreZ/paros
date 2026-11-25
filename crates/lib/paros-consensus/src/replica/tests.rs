@@ -641,3 +641,22 @@ fn a_sealed_fold_behind_the_prefix_fails_the_invariants() {
     r.replica.chosen_index = Some(Slot(2));
     r.assert_invariants(Slot(0));
 }
+
+/// A fresh replica unbinds to keep the whole log again; one that holds a
+/// chosen slot never does.
+#[test]
+fn a_fresh_replica_unbinds_and_a_held_one_does_not() {
+    let mut fresh = replica(&[]);
+    fresh.bind_segment();
+    assert_eq!(fresh.segment_bound(), Some(crate::journal::SegmentId(0)));
+    fresh.replica.unbind_segment();
+    assert_eq!(fresh.segment_bound(), None);
+}
+
+#[test]
+#[should_panic(expected = "only a fresh replica unbinds")]
+fn a_replica_that_holds_a_slot_does_not_unbind() {
+    let mut r = replica(&[claim()]);
+    r.bind_segment();
+    r.replica.unbind_segment();
+}
