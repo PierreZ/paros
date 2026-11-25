@@ -222,6 +222,15 @@ impl World {
     fn tick_node(&mut self, id: NodeId, index: usize) {
         self.narrate_tick(id, index);
         self.drive(id, index, ColocatedNode::tick);
+        // A publish of the chain that still waits for a majority of acks goes
+        // out again on each beat: a lost publish or a matchmaker that was down
+        // delays the chain, and the beat brings it back up to the log.
+        if self.nodes[index]
+            .as_ref()
+            .is_some_and(ColocatedNode::segment_publish_pending)
+        {
+            self.drive(id, index, ColocatedNode::resend_segment_publishes);
+        }
         // A tick is the driver's beat, and the handover is driver policy: the
         // stall clock advances, a freeze whose quorum answered is closed, and
         // a phase that has stopped moving is given up.

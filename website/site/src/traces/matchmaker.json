@@ -44729,7 +44729,7 @@
           },
           "says": "Matchmaker 0 gets SegmentPublish from Node 1.",
           "notes": [
-            "Matchmaker 0 writes in its chain that segment 0 holds slots 0 to 2, and that segment 1 starts at slot 3. It answers after the write."
+            "Matchmaker 0 already holds the end of segment 0 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -44987,7 +44987,7 @@
           },
           "says": "Matchmaker 1 gets SegmentPublish from Node 1.",
           "notes": [
-            "Matchmaker 1 writes in its chain that segment 0 holds slots 0 to 2, and that segment 1 starts at slot 3. It answers after the write."
+            "Matchmaker 1 already holds the end of segment 0 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -45245,7 +45245,7 @@
           },
           "says": "Matchmaker 0 gets SegmentPublish from Node 2.",
           "notes": [
-            "Matchmaker 0 writes in its chain that segment 0 holds slots 0 to 2, and that segment 1 starts at slot 3. It answers after the write."
+            "Matchmaker 0 already holds the end of segment 0 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -45503,7 +45503,7 @@
           },
           "says": "Matchmaker 1 gets SegmentPublish from Node 2.",
           "notes": [
-            "Matchmaker 1 writes in its chain that segment 0 holds slots 0 to 2, and that segment 1 starts at slot 3. It answers after the write."
+            "Matchmaker 1 already holds the end of segment 0 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -45761,7 +45761,7 @@
           },
           "says": "Matchmaker 0 gets SegmentPublish from Node 3.",
           "notes": [
-            "Matchmaker 0 writes in its chain that segment 0 holds slots 0 to 2, and that segment 1 starts at slot 3. It answers after the write."
+            "Matchmaker 0 already holds the end of segment 0 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -46019,7 +46019,7 @@
           },
           "says": "Matchmaker 1 gets SegmentPublish from Node 3.",
           "notes": [
-            "Matchmaker 1 writes in its chain that segment 0 holds slots 0 to 2, and that segment 1 starts at slot 3. It answers after the write."
+            "Matchmaker 1 already holds the end of segment 0 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -52779,7 +52779,7 @@
           },
           "says": "Matchmaker 0 gets SegmentPublish from Node 2.",
           "notes": [
-            "Matchmaker 0 writes in its chain that segment 1 holds slots 3 to 4, and that segment 2 starts at slot 5. It answers after the write."
+            "Matchmaker 0 already holds the end of segment 1 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -53017,7 +53017,7 @@
           },
           "says": "Matchmaker 1 gets SegmentPublish from Node 2.",
           "notes": [
-            "Matchmaker 1 writes in its chain that segment 1 holds slots 3 to 4, and that segment 2 starts at slot 5. It answers after the write."
+            "Matchmaker 1 already holds the end of segment 1 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -53255,7 +53255,7 @@
           },
           "says": "Matchmaker 0 gets SegmentPublish from Node 3.",
           "notes": [
-            "Matchmaker 0 writes in its chain that segment 1 holds slots 3 to 4, and that segment 2 starts at slot 5. It answers after the write."
+            "Matchmaker 0 already holds the end of segment 1 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {
@@ -53493,7 +53493,7 @@
           },
           "says": "Matchmaker 1 gets SegmentPublish from Node 3.",
           "notes": [
-            "Matchmaker 1 writes in its chain that segment 1 holds slots 3 to 4, and that segment 2 starts at slot 5. It answers after the write."
+            "Matchmaker 1 already holds the end of segment 1 in its chain, so it writes nothing and answers at once."
           ],
           "fields": [
             {

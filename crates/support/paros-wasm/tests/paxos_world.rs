@@ -2199,9 +2199,69 @@ fn a_chosen_roll_opens_the_next_segment_on_every_node() {
         world.narration()
     );
     assert!(
+        said(
+            &world,
+            "matchmaker 0 already holds the end of segment 0 in its chain, so it writes nothing \
+             and answers at once."
+        ),
+        "a second publish of the same end writes nothing: {:?}",
+        world.narration()
+    );
+    assert!(
         world.view().wire.is_empty(),
         "no publish is left on the wire"
     );
+}
+
+#[test]
+fn a_lost_publish_of_the_chain_goes_out_again_on_the_beat() {
+    use paros_wasm::paxos::world::Envelope;
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world.roll(NodeId(0)).expect("the leader takes the roll");
+    // Deliver everything but the publishes to matchmaker 1, then lose them.
+    let to_matchmaker_1 = |entry: &InFlight| {
+        matches!(entry.envelope, Envelope::SegmentPublish(_))
+            && entry.to == Party::Matchmaker(MatchmakerId(1))
+    };
+    deliver_lowest(&mut world, |_, entry| !to_matchmaker_1(entry));
+    let lost: Vec<u64> = world
+        .wire()
+        .iter()
+        .filter(|entry| to_matchmaker_1(entry))
+        .map(|entry| entry.id)
+        .collect();
+    assert_eq!(
+        lost.len(),
+        3,
+        "each of the three nodes published to matchmaker 1"
+    );
+    for id in lost {
+        world.drop_message(id).expect("in flight");
+    }
+    assert!(world.wire().is_empty(), "nothing else is in flight");
+    let holds_segment_0 = |world: &World, matchmaker: u64| {
+        world.view().matchmakers.iter().any(|view| {
+            view.id == matchmaker
+                && view.chain.contains(&ChainEntryView {
+                    id: 0,
+                    start: 0,
+                    last: Some(0),
+                })
+        })
+    };
+    assert!(holds_segment_0(&world, 0), "matchmaker 0 took the end");
+    assert!(!holds_segment_0(&world, 1), "matchmaker 1 lost it");
+    // One of two matchmakers is not a majority: node 0's beat sends it again.
+    world.tick(NodeId(0)).expect("node 0 is up");
+    assert!(
+        world.wire().iter().any(to_matchmaker_1),
+        "the beat sends the publish to matchmaker 1 again: {:?}",
+        world.wire()
+    );
+    deliver_everything(&mut world);
+    assert!(holds_segment_0(&world, 1), "matchmaker 1 holds the end now");
 }
 
 #[test]

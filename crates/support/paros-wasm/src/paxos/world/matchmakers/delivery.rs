@@ -8,7 +8,8 @@
 //! the reconstruction, exactly as `paros::roles::node::run_node` has it.
 
 use paros_consensus::matchmaker::{
-    MatchOutcome, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
+    MatchOutcome, MatchReply, MatchRequest, PublishOutcome, ReconfigureReply, ReconfigureRequest,
+    ReconfigurerStep,
 };
 use paros_consensus::membership::{MatchmakerId, MatchmakerSet};
 use paros_consensus::node::MatchStep;
@@ -170,11 +171,11 @@ impl World {
                 }
             }
             Envelope::SegmentPublish(publish) => {
-                if let Some(ack) = self.matchmakers[index].deliver_segment(&publish) {
+                if let Some((outcome, ack)) = self.matchmakers[index].deliver_segment(&publish) {
                     self.narrate(
                         NarrationKind::Matchmaking,
-                        if ack.applied {
-                            format!(
+                        match outcome {
+                            PublishOutcome::Merged => format!(
                                 "{} writes in its chain that segment {} holds slots {} to {}, \
                                  and that segment {} starts at slot {}. It answers after the \
                                  write.",
@@ -184,14 +185,19 @@ impl World {
                                 publish.end.0 - 1,
                                 publish.sealed.0 + 1,
                                 publish.end.0
-                            )
-                        } else {
-                            format!(
+                            ),
+                            PublishOutcome::Unchanged => format!(
+                                "{} already holds the end of segment {} in its chain, so it \
+                                 writes nothing and answers at once.",
+                                which(to),
+                                publish.sealed.0
+                            ),
+                            PublishOutcome::Refused => format!(
                                 "{} refuses the end of segment {}: it is not active for that \
                                  generation.",
                                 which(to),
                                 publish.sealed.0
-                            )
+                            ),
                         },
                     );
                     self.send(entry.to, entry.from, Envelope::SegmentAck(ack));
