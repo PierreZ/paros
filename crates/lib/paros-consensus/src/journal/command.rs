@@ -3,6 +3,7 @@
 use crate::types::{FNV_OFFSET, Fingerprint, Value, Weigh, fnv1a};
 
 use super::ids::{LeaderUuid, Seq};
+use super::segment::{ReplicaSet, Roll};
 
 /// A journal **`Write`** as it is decided into one slot (#204): the batch
 /// `records`, to be accepted at position `seq` iff `leader` is the
@@ -92,7 +93,7 @@ pub enum Control {
 }
 
 /// What a single log slot decides: a client's [`Entry`] (a journal `Write`)
-/// or a paros-interpreted [`Control`] command.
+/// a paros-interpreted [`Control`] command, or a [`Roll`].
 ///
 /// This is the per-slot value the whole protocol carries (in `Accept`,
 /// `Promise`, `Commit`, catch-up, and the durable accepted log). Only the
@@ -105,6 +106,10 @@ pub enum Command {
     Write(Entry),
     /// A paros-interpreted control command (interpreted only at apply time).
     Control(Control),
+    /// The cut of the log into its next segment (§4.7, R2), proposed only by
+    /// [`crate::ColocatedNode::roll`]. Its own variant, not a [`Control`], so
+    /// that a driver that forwards a client's `Control` can never propose one.
+    Roll(Roll),
 }
 
 impl Fingerprint for Command {
@@ -115,8 +120,9 @@ impl Fingerprint for Command {
 
 impl Weigh for Command {
     /// A write weighs its records' bytes, the measure of a read's
-    /// `max_bytes`. A control command carries no client bytes and weighs
-    /// nothing.
+    /// `max_bytes`. A control command and a `Roll` carry no client bytes
+    /// and weigh nothing: the weight bounds what clients put in the log,
+    /// and a `Roll` is an operator's call whose replica set is a few ids.
     fn weight(&self) -> u64 {
         match self {
             Self::Write(entry) => {
@@ -131,7 +137,7 @@ impl Weigh for Command {
                 );
                 bytes
             }
-            Self::Control(_) => 0,
+            Self::Control(_) | Self::Roll(_) => 0,
         }
     }
 }
@@ -169,6 +175,17 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             // `None` folds as the unset uuid, which no `new` can be.
             fnv1a(hash, &old.map_or(0, |old| old.0).to_le_bytes())
         }
+        Command::Roll(Roll { next, replicas }) => {
+            let hash = fnv1a(FNV_OFFSET, &[4]);
+            let mut hash = fnv1a(hash, &next.0.to_le_bytes());
+            // `None` and `Some` fold apart: the count of a set is never zero.
+            let members = replicas.as_ref().map_or(&[][..], ReplicaSet::members);
+            hash = fnv1a(hash, &(members.len() as u64).to_le_bytes());
+            for member in members {
+                hash = fnv1a(hash, &member.0.to_le_bytes());
+            }
+            hash
+        }
     }
 }
 
@@ -178,7 +195,7 @@ impl Command {
     pub fn write(&self) -> Option<&Entry> {
         match self {
             Command::Write(entry) => Some(entry),
-            Command::Control(_) => None,
+            Command::Control(_) | Command::Roll(_) => None,
         }
     }
 }

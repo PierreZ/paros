@@ -82,6 +82,16 @@ fn a_corrupt_trim_jump_is_caught_by_the_journal_rules() {
 }
 
 #[test]
+fn a_corrupt_segment_in_a_trim_jump_is_caught_by_the_journal_rules() {
+    caught(
+        Flavor::segments(),
+        Mutant::CorruptTrimSegment,
+        400,
+        JOURNAL_FOLD,
+    );
+}
+
+#[test]
 fn a_local_read_is_caught_by_the_read_oracle() {
     caught(Flavor::replicas(), Mutant::LocalRead, 100, READ_SEES_WRITES);
 }

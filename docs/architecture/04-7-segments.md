@@ -9,9 +9,19 @@ an optional behaviour of `paros-consensus`, like the matchmakers, the proxy lead
 replica tier (§4.3): the `Some` arm of the same state machine. The plain arm does not change. The
 journal that comes later composes them and writes no consensus of its own.
 
-This section is the desired state. None of it is built yet; the order of work is §6 of the plan.
-The model of the cut is `specs/tla/segment-roll/` (step 1, PR #1540 (segment-roll)), and
-`specs/tla/multi-paxos-roll/` puts the `Roll` on the Multi-Paxos model (step 3).
+This section is the desired state; the order of work is §6 of the plan. The model of the cut is
+`specs/tla/segment-roll/` (step 1, PR #1540 (segment-roll)), and `specs/tla/multi-paxos-roll/`
+puts the `Roll` on the Multi-Paxos model (step 3).
+
+**What is built (step 3).** `paros-consensus` has the cut: `Command::Roll` and the types of
+`journal/segment.rs` (`Roll`, `SegmentId`, `Segment`, `ReplicaSet`), the fold of R2 in
+`JournalState::apply` (`Outcome::Rolled`, `Outcome::RollIgnored`), and the driver call
+`ColocatedNode::roll` (`node/roll.rs`), refused with no matchmakers (D5) and with the tail of R4c.
+The tail segment is a field of `JournalState`, so it is sealed at the floor and carried by
+`TrimmedTo` with the rest of that state; the plan's separate `WriteOp` for the segment cursor is
+not needed. The `segments` flavor of consensus-sim rolls, with the `Roll` rule in its journal
+oracle and a mutant on the trim jump. Not built yet: the replicas of a segment (R6) and the route
+of R4d, which need replicas to route to (step 5), and the chain at the matchmakers (R5, step 4).
 
 #### 4.7.1 The rule of the papers
 
@@ -48,8 +58,9 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   no replica set unless a `Roll` names it. A segment has an id, a start, an end once it is sealed, its replicas and a
   state: `Open`, `Sealed`, `Held`, `Offloaded`, `Trimmed`. The grid is not part of a segment: a
   grid belongs to a round (Matchmaker Paxos §4.2).
-- **R2. The cut is a command.** `Control::Roll { next, replicas: Option<..> }` is a control command of the
-  core, like `Noop`. Only the apply path reads it. It is valid when `next` is the tail segment
+- **R2. The cut is a command.** `Command::Roll(Roll { next, replicas: Option<..> })` is a command of the
+  core, beside `Write` and `Control`, so that no call that proposes a `Control` can carry it: only
+  `ColocatedNode::roll` proposes one. Only the apply path reads it. It is valid when `next` is the tail segment
   plus one. A valid `Roll` chosen at slot `s` ends the tail segment at `s + 1` and opens `next`
   at `s + 1`. A `Roll` that is not valid changes nothing. **Departure 1** (§4.7.4).
 - **R3. A node acts on the chosen prefix only.** A replica applies only the contiguous chosen

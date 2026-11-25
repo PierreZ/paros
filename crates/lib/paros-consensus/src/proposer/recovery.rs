@@ -133,6 +133,26 @@ impl<V> Recovery<V> {
         );
         self.end
     }
+
+    /// The values the pump will still re-propose, by slot: each recovered
+    /// value in `[cursor, end)` at a slot the repair probe does not own. A
+    /// report below the cursor (a slot the node learned chosen before it
+    /// won, or one below a handoff's start) is not pending, and neither is a
+    /// blocked slot, which the probe may settle on another value.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn pending(&self) -> impl Iterator<Item = (&Slot, &V)> {
+        assert!(
+            self.cursor <= self.end,
+            "a recovery's cursor never passes its end"
+        );
+        self.recovered
+            .range(self.cursor..self.end)
+            .filter(|(slot, _)| !self.blocked.contains(*slot))
+    }
 }
 
 /// One step of a recovery pump ([`Proposer::recovery_next`]).

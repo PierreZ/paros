@@ -48,6 +48,7 @@ fn flavors() -> Vec<(&'static str, Flavor)> {
         ("compartments-compaction", Flavor::compartments_compacting()),
         ("retiring", Flavor::retiring()),
         ("handover", Flavor::handover()),
+        ("segments", Flavor::segments()),
         ("compartments-paged", Flavor::compartments().paged()),
         ("reconfiguring-paged", Flavor::reconfiguring().paged()),
     ]

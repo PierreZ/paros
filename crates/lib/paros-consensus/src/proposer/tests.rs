@@ -1001,3 +1001,34 @@ fn an_authority_holds_on_a_phase2_quorum_of_credits() {
     );
     assert!(!authority.holds(&members));
 }
+
+/// The pending values of a recovery are those the pump will still hand out:
+/// a report below the cursor (a slot the node learned chosen before it won,
+/// or one below a handoff's start) and a slot the repair probe owns are not
+/// among them.
+#[test]
+fn the_pending_values_of_a_recovery_lie_in_its_range_and_off_the_probe() {
+    let mut p: Proposer<NodeId, Command> = Proposer::new();
+    let recovered: BTreeMap<Slot, Command> = [
+        (Slot(0), cmd(0)),
+        (Slot(1), cmd(1)),
+        (Slot(2), cmd(2)),
+        (Slot(3), cmd(3)),
+    ]
+    .into_iter()
+    .collect();
+    p.open_recovery(
+        recovered,
+        BTreeSet::from([Slot(2)]),
+        Slot(1),
+        Slot(4),
+        RecoveryPolicy::Phase1Backed,
+    );
+    let recovery = p.recovery().expect("open");
+    let pending: Vec<Slot> = recovery.pending().map(|(slot, _)| *slot).collect();
+    assert_eq!(pending, [Slot(1), Slot(3)]);
+    let _ = p.recovery_next();
+    let recovery = p.recovery().expect("open");
+    let pending: Vec<Slot> = recovery.pending().map(|(slot, _)| *slot).collect();
+    assert_eq!(pending, [Slot(3)]);
+}

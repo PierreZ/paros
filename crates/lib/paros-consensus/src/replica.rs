@@ -222,6 +222,13 @@ impl Replica {
         sealed: JournalState,
         records: &BTreeMap<Slot, (Ballot, Command)>,
     ) -> Self {
+        // The pair of the seal (`WriteOp::Truncate`, `WriteOp::TrimmedTo`):
+        // the sealed tail segment opened at a `Roll` below the floor, or is
+        // the first segment.
+        assert!(
+            sealed.segment.start <= floor,
+            "the sealed tail segment opens at or below the sealed floor"
+        );
         let chosen: BTreeSet<Slot> = records
             .keys()
             .filter(|slot| chosen_index.is_some_and(|ci| **slot <= ci))
@@ -991,7 +998,7 @@ impl Replica {
         );
         let before = self.state;
         let mut state = self.state;
-        let outcome = state.apply(self.mode, command, |seq| self.accepted_at(log, seq));
+        let outcome = state.apply(self.mode, slot, command, |seq| self.accepted_at(log, seq));
         self.state = state;
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
             // The index stays monotone: the head's write starts past every
@@ -1300,6 +1307,12 @@ impl Replica {
         // and the transport proves the bytes. A broken state is a detected
         // corruption of a peer's fold.
         base.assert_invariants();
+        // The write half of the pair `from_boot` reads back: the sealed tail
+        // segment opens at or below the new floor.
+        assert!(
+            base.segment.start <= first,
+            "the sealed tail segment opens at or below the sealed floor"
+        );
         self.base = base;
         self.floor = first;
         self.chosen = self.chosen.split_off(&first);

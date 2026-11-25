@@ -88,6 +88,20 @@ fn retirement_steered() {
 }
 
 #[test]
+fn segments_steered() {
+    walk(
+        Flavor::segments(),
+        &[
+            reach::ROLLED,
+            reach::ROLL_PIPELINED,
+            reach::ROLL_JUMP,
+            reach::ROLL_IN_RECOVERY,
+            reach::RECONFIGURED,
+        ],
+    );
+}
+
+#[test]
 fn leader_handoff() {
     walk(Flavor::handoff(), &[reach::HANDOFF, reach::LOST_UNSYNCED]);
 }

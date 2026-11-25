@@ -1,6 +1,8 @@
 use super::{JournalState, Outcome, WriterMode};
-use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
-use crate::types::Value;
+use crate::journal::{
+    Command, Control, Entry, LeaderUuid, ReplicaSet, Roll, Segment, SegmentId, Seq,
+};
+use crate::types::{NodeId, Slot, Value};
 
 fn write(leader: u128, seq: u64, records: &[&[u8]]) -> Command {
     Command::Write(Entry {
@@ -34,8 +36,11 @@ fn fold_in(mode: WriterMode, commands: &[Command]) -> (JournalState, Vec<Outcome
     let mut state = JournalState::default();
     let mut accepted: Vec<Entry> = Vec::new();
     let mut outcomes = Vec::new();
-    for command in commands {
-        let outcome = state.apply(mode, command, |seq| accepted.iter().find(|e| e.seq == seq));
+    for (slot, command) in commands.iter().enumerate() {
+        let slot = Slot(u64::try_from(slot).expect("a test log fits in u64"));
+        let outcome = state.apply(mode, slot, command, |seq| {
+            accepted.iter().find(|e| e.seq == seq)
+        });
         if let (Outcome::Accepted { .. }, Command::Write(entry)) = (&outcome, command) {
             accepted.push(entry.clone());
         }
@@ -258,4 +263,59 @@ fn a_multi_writer_journal_with_a_leader_fails_its_mode() {
         ..JournalState::default()
     };
     state.assert_mode(WriterMode::Multi, &Outcome::Noop);
+}
+
+fn roll(next: u64) -> Command {
+    Command::Roll(Roll {
+        next: SegmentId(next),
+        replicas: None,
+    })
+}
+
+#[test]
+fn a_roll_to_the_next_segment_ends_the_tail_at_its_slot() {
+    let (state, outcomes) = fold(&[set_leader(1, None), write(1, 0, &[b"a"]), roll(1)]);
+    let tail = Segment {
+        id: SegmentId(1),
+        start: Slot(3),
+    };
+    assert_eq!(outcomes[2], Outcome::Rolled(tail));
+    assert_eq!(state.segment, tail);
+    // A Roll moves no position and no leader.
+    assert_eq!(state.next_seq, Seq(1));
+    assert_eq!(state.term, 1);
+}
+
+#[test]
+fn a_roll_that_skips_or_repeats_a_segment_changes_nothing() {
+    let (state, outcomes) = fold(&[roll(2), roll(0), roll(1), roll(1), roll(2)]);
+    assert_eq!(outcomes[0], Outcome::RollIgnored(Segment::default()));
+    assert_eq!(outcomes[1], Outcome::RollIgnored(Segment::default()));
+    let first_roll = Segment {
+        id: SegmentId(1),
+        start: Slot(3),
+    };
+    assert_eq!(outcomes[2], Outcome::Rolled(first_roll));
+    assert_eq!(outcomes[3], Outcome::RollIgnored(first_roll));
+    assert_eq!(
+        outcomes[4],
+        Outcome::Rolled(Segment {
+            id: SegmentId(2),
+            start: Slot(5),
+        })
+    );
+    assert_eq!(state.segment.id, SegmentId(2));
+}
+
+#[test]
+fn a_roll_is_judged_alike_under_both_writer_modes_and_with_new_replicas() {
+    let named = Command::Roll(Roll {
+        next: SegmentId(1),
+        replicas: Some(ReplicaSet::new([NodeId(4), NodeId(5)])),
+    });
+    for mode in [WriterMode::Single, WriterMode::Multi] {
+        let (state, outcomes) = fold_in(mode, std::slice::from_ref(&named));
+        assert!(matches!(outcomes[0], Outcome::Rolled(_)));
+        assert_eq!(state.segment.start, Slot(1));
+    }
 }

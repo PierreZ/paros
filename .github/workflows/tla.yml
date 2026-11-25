@@ -8,7 +8,8 @@
 # its own files and their symlink targets, so a folder runs when one of those
 # changed, and every folder runs when a tool changed (the scripts, the flake,
 # this file). A push to main is planned the same way from the commit before
-# the push, and a manual run (workflow_dispatch) runs every folder.
+# the push, and a manual run (workflow_dispatch) runs every folder. No check
+# reads Markdown, so a change of `.md` files alone starts no run (`!**.md`).
 #
 # The folders that run are packed into a few `spec` jobs, each at most 15
 # measured minutes of checks (`scripts/tla-minutes.txt`; a larger folder runs
@@ -44,6 +45,7 @@ on:
       - "flake.lock"
       - ".github/actions/nix/action.yml"
       - ".github/workflows/tla.yml"
+      - "!**.md"
   workflow_dispatch:
   pull_request:
     branches: [main]
@@ -60,6 +62,7 @@ on:
       - "flake.lock"
       - ".github/actions/nix/action.yml"
       - ".github/workflows/tla.yml"
+      - "!**.md"
 
 # A new push cancels a pull request's older run, never a run on main: each
 # merged commit gets its whole check.

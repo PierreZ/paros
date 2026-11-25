@@ -24,6 +24,7 @@ mod quorum_reads;
 pub mod ready;
 mod reconfigure;
 mod replication;
+mod roll;
 mod view;
 
 pub(crate) use self::quorum_reads::READ_TTL_TICKS;
@@ -38,6 +39,7 @@ pub use self::matchmaking::MatchStep;
 pub use self::ready::{Flight, Ready};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
+pub use self::roll::{RollRefusal, RollResult};
 use crate::acceptor::Acceptor;
 use crate::belief::Belief;
 use crate::collector::Collector;
@@ -802,6 +804,11 @@ impl ColocatedNode {
     /// is judged and applied by every node when the slot enters its contiguous
     /// chosen prefix (see `ColocatedNode::advance_chosen_index`).
     ///
+    /// A [`Control`] cannot name a `Roll`: the cut is
+    /// [`Command::Roll`], proposed only by
+    /// [`ColocatedNode::roll`], which refuses it on a deployment with no
+    /// matchmakers.
+    ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
@@ -830,7 +837,7 @@ impl ColocatedNode {
     ///
     /// # Panics
     ///
-    /// If `delegation` names a proxy the deployment does not have, or an
+    /// If `delegation` names a proxy the deployment does not have, or if an
     /// internal invariant is broken (a programmer error, never an operating
     /// condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control, delegation = ?delegation)))]
@@ -839,6 +846,17 @@ impl ColocatedNode {
         control: Control,
         delegation: Delegation,
     ) -> ProposeResult {
+        self.propose_command_at(Command::Control(control), delegation)
+    }
+
+    /// The leader half of [`ColocatedNode::propose_control_in`] and of
+    /// [`ColocatedNode::roll`]: open a round for a command that is not a
+    /// client write.
+    fn propose_command_at(&mut self, command: Command, delegation: Delegation) -> ProposeResult {
+        assert!(
+            command.write().is_none(),
+            "a client write goes through propose"
+        );
         if self.role != NodeRole::Leader {
             assert!(
                 self.proposer.rounds().is_empty(),
@@ -851,7 +869,7 @@ impl ColocatedNode {
             return ProposeResult::NotLeader(None);
         }
         let marks = self.durable_marks();
-        let result = self.open_proposal(None, delegation, Command::Control(control));
+        let result = self.open_proposal(None, delegation, command);
         self.assert_marks_monotone(marks);
         result
     }

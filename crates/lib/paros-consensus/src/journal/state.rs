@@ -56,6 +56,13 @@
 //! and leadership changes consume a slot and no position: positions are
 //! dense.
 //!
+//! - **`Roll(next, replicas)`** ([`Command::Roll`], §4.7 of
+//!   `docs/architecture/04-7-segments.md`) moves the tail [`Segment`]: it is
+//!   valid iff `next` is the tail plus one, and then the tail becomes `next`,
+//!   from the slot after the `Roll` ([`Outcome::Rolled`]). Any other `Roll`
+//!   changes nothing ([`Outcome::RollIgnored`]). It is the same under both
+//!   writer modes: a segment is a range of the log, not a right to write.
+//!
 //! The term (#241, §2.3) is the core's own: raised by every won `SetLeader`,
 //! carried by the store's sealed state and a trim-point jump, and never
 //! answered in a data-plane reply (only an operator's `Inspect` shows it).
@@ -71,7 +78,8 @@
 //! own ordering (`first_seq <= next_seq`) and its monotonicity are pinned at
 //! every transition.
 
-use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
+use crate::journal::{Command, Control, Entry, LeaderUuid, Roll, Segment, SegmentId, Seq};
+use crate::types::Slot;
 
 /// Who may write a journal (`docs/architecture/02-data-plane.md` §2, decided on
 /// 2026-10-04): fixed when the journal is created, and never changed. The
@@ -106,6 +114,13 @@ pub struct JournalState {
     /// The first position a reader may start at: every record below it was
     /// truncated.
     pub first_seq: Seq,
+    /// The tail segment of the log: raised by every valid `Roll`. A client
+    /// never sees it ([`JournalState::view`] drops it); it is the log's, not
+    /// the journal's. A sealed state written before segments existed reads
+    /// as the first segment, which is where its log stands: no `Roll` was
+    /// ever chosen in it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub segment: Segment,
 }
 
 /// What a client learns of a journal's state (#241): the [`JournalState`]
@@ -167,6 +182,11 @@ pub enum Outcome {
     /// `SetLeader` on a multi-writer journal. Nothing moved; the view is the
     /// one it was judged against.
     WrongMode(JournalView),
+    /// A valid `Roll`: the tail segment after it.
+    Rolled(Segment),
+    /// A `Roll` that does not name the tail plus one: nothing moved. The
+    /// segment is the tail it was judged against.
+    RollIgnored(Segment),
     /// A `Noop`: nothing moved.
     Noop,
 }
@@ -182,23 +202,29 @@ impl JournalState {
         }
     }
 
-    /// Apply one decided `command` under the journal's `mode`.
-    /// `accepted_at(seq)` answers "which write was accepted with its first
+    /// Apply one decided `command`, chosen at `slot`, under the journal's
+    /// `mode`. `accepted_at(seq)` answers "which write was accepted with its first
     /// record at `seq`?" for a single-writer retry below `next_seq`; it is
     /// only asked for a position at or above `first_seq`, and never on a
     /// multi-writer journal.
     ///
     /// # Panics
     ///
-    /// If a transition breaks the state's own ordering or monotonicity (a
-    /// programmer error, never an operating condition).
+    /// If `slot` lies below the start of the tail segment (a fold never goes
+    /// back), or a transition breaks the state's own ordering or
+    /// monotonicity (a programmer error, never an operating condition).
     pub fn apply<'a>(
         &mut self,
         mode: WriterMode,
+        slot: Slot,
         command: &Command,
         accepted_at: impl Fn(Seq) -> Option<&'a Entry>,
     ) -> Outcome {
         self.assert_invariants();
+        assert!(
+            slot >= self.segment.start,
+            "a slot is folded inside or after the tail segment"
+        );
         if mode == WriterMode::Multi {
             assert!(
                 self.leader.is_none(),
@@ -206,96 +232,9 @@ impl JournalState {
             );
         }
         let before = *self;
-        let outcome = self.judge(mode, command, accepted_at);
+        let outcome = self.judge(mode, slot, command, accepted_at);
         self.assert_mode(mode, &outcome);
-        // Monotone in every scalar but the leader, and the leader moves only
-        // with the term.
-        assert!(self.term >= before.term, "a journal's term never decreases");
-        assert!(
-            self.next_seq >= before.next_seq,
-            "a journal's next position never decreases"
-        );
-        assert!(
-            self.first_seq >= before.first_seq,
-            "a journal's first position never decreases"
-        );
-        if self.leader != before.leader {
-            assert!(
-                self.term > before.term,
-                "a journal's leader changes only with its term"
-            );
-        }
-        // Negative space, per outcome: a refusal, a duplicate and a `Noop`
-        // move nothing; each accepted transition moves exactly its own
-        // scalars.
-        match &outcome {
-            Outcome::Refused(_)
-            | Outcome::Truncated(_)
-            | Outcome::LeaderRefused(_)
-            | Outcome::TruncateRefused(_)
-            | Outcome::WrongMode(_)
-            | Outcome::Duplicate { .. }
-            | Outcome::Noop => {
-                assert!(*self == before, "a refused or no-op command moves nothing");
-            }
-            Outcome::Accepted { seq, count } => {
-                assert!(
-                    *seq == before.next_seq,
-                    "a write is accepted at the next position"
-                );
-                assert!(*count > 0, "an accepted write carries records");
-                assert!(
-                    self.next_seq.0 == seq.0 + count,
-                    "a write advances by its records"
-                );
-                assert!(self.term == before.term, "a write never moves the term");
-                assert!(
-                    self.first_seq == before.first_seq,
-                    "a write never truncates"
-                );
-            }
-            Outcome::Leader(after) => {
-                assert!(
-                    *after == self.view(),
-                    "a won SetLeader reports the state after it"
-                );
-                assert!(
-                    self.term == before.term + 1,
-                    "a won SetLeader raises the term by one"
-                );
-                assert!(
-                    self.leader != before.leader,
-                    "a won SetLeader changes the leader"
-                );
-                assert!(
-                    self.next_seq == before.next_seq,
-                    "a SetLeader moves no position"
-                );
-            }
-            Outcome::Trimmed(after) => {
-                assert!(
-                    *after == self.view(),
-                    "a truncation reports the state after it"
-                );
-                assert!(
-                    self.next_seq == before.next_seq,
-                    "a truncation never moves next_seq"
-                );
-                assert!(self.term == before.term, "a truncation keeps the leader");
-            }
-        }
-        // The refusals name the view they were judged against.
-        if let Outcome::Refused(judged)
-        | Outcome::Truncated(judged)
-        | Outcome::LeaderRefused(judged)
-        | Outcome::TruncateRefused(judged)
-        | Outcome::WrongMode(judged) = &outcome
-        {
-            assert!(
-                *judged == before.view(),
-                "a refusal names the state it was judged against"
-            );
-        }
+        self.assert_transition(&before, slot, &outcome);
         self.assert_invariants();
         outcome
     }
@@ -353,6 +292,171 @@ impl JournalState {
         }
     }
 
+    /// The postconditions of one `apply`, from the state `before` it: each
+    /// scalar is monotone, and each outcome moves exactly its own scalars.
+    fn assert_transition(&self, before: &Self, slot: Slot, outcome: &Outcome) {
+        // Monotone in every scalar but the leader, and the leader moves only
+        // with the term.
+        assert!(self.term >= before.term, "a journal's term never decreases");
+        assert!(
+            self.next_seq >= before.next_seq,
+            "a journal's next position never decreases"
+        );
+        assert!(
+            self.first_seq >= before.first_seq,
+            "a journal's first position never decreases"
+        );
+        if self.leader != before.leader {
+            assert!(
+                self.term > before.term,
+                "a journal's leader changes only with its term"
+            );
+        }
+        self.assert_segment(before, slot, outcome);
+        // Negative space, per outcome: a refusal, a duplicate and a `Noop`
+        // move nothing; each accepted transition moves exactly its own
+        // scalars.
+        match outcome {
+            Outcome::Refused(_)
+            | Outcome::Truncated(_)
+            | Outcome::LeaderRefused(_)
+            | Outcome::TruncateRefused(_)
+            | Outcome::WrongMode(_)
+            | Outcome::Duplicate { .. }
+            | Outcome::RollIgnored(_)
+            | Outcome::Noop => {
+                assert!(*self == *before, "a refused or no-op command moves nothing");
+            }
+            Outcome::Accepted { seq, count } => {
+                assert!(
+                    *seq == before.next_seq,
+                    "a write is accepted at the next position"
+                );
+                assert!(*count > 0, "an accepted write carries records");
+                assert!(
+                    self.next_seq.0 == seq.0 + count,
+                    "a write advances by its records"
+                );
+                assert!(self.term == before.term, "a write never moves the term");
+                assert!(
+                    self.first_seq == before.first_seq,
+                    "a write never truncates"
+                );
+            }
+            Outcome::Leader(after) => {
+                assert!(
+                    *after == self.view(),
+                    "a won SetLeader reports the state after it"
+                );
+                assert!(
+                    self.term == before.term + 1,
+                    "a won SetLeader raises the term by one"
+                );
+                assert!(
+                    self.leader != before.leader,
+                    "a won SetLeader changes the leader"
+                );
+                assert!(
+                    self.next_seq == before.next_seq,
+                    "a SetLeader moves no position"
+                );
+            }
+            Outcome::Trimmed(after) => {
+                assert!(
+                    *after == self.view(),
+                    "a truncation reports the state after it"
+                );
+                assert!(
+                    self.next_seq == before.next_seq,
+                    "a truncation never moves next_seq"
+                );
+                assert!(self.term == before.term, "a truncation keeps the leader");
+            }
+            Outcome::Rolled(_) => {
+                assert!(
+                    self.view() == before.view(),
+                    "a Roll moves no position and no leader"
+                );
+                assert!(self.term == before.term, "a Roll keeps the term");
+            }
+        }
+        // The refusals name the view they were judged against.
+        if let Outcome::Refused(judged)
+        | Outcome::Truncated(judged)
+        | Outcome::LeaderRefused(judged)
+        | Outcome::TruncateRefused(judged)
+        | Outcome::WrongMode(judged) = outcome
+        {
+            assert!(
+                *judged == before.view(),
+                "a refusal names the state it was judged against"
+            );
+        }
+    }
+
+    /// The tail segment's postconditions: it never goes back, only a valid
+    /// `Roll` moves it, to the next id from the slot after the `Roll`, and an
+    /// ignored `Roll` names the tail it was judged against.
+    fn assert_segment(&self, before: &Self, slot: Slot, outcome: &Outcome) {
+        assert!(
+            self.segment.id >= before.segment.id,
+            "a journal's tail segment never goes back"
+        );
+        if self.segment != before.segment {
+            assert!(
+                matches!(outcome, Outcome::Rolled(_)),
+                "only a valid Roll moves the tail segment"
+            );
+        }
+        match outcome {
+            Outcome::Rolled(tail) => {
+                assert!(*tail == self.segment, "a Roll reports the tail after it");
+                assert!(
+                    tail.id == before.segment.id.successor(),
+                    "a valid Roll opens the next segment"
+                );
+                assert!(
+                    tail.start.0 == slot.0 + 1,
+                    "a Roll ends the tail at its own slot"
+                );
+            }
+            Outcome::RollIgnored(judged) => {
+                assert!(
+                    *judged == before.segment,
+                    "an ignored Roll names the tail it was judged against"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// A `Roll`, chosen at `slot`: valid iff its `next` is the tail segment
+    /// plus one (R2 of §4.7, [`SegmentId::after`]). The fold of the chosen prefix is the
+    /// same on every node, so the first valid `Roll` of a segment is the
+    /// same slot everywhere, and a segment has one end (R3; `SegsAgree` of
+    /// `specs/tla/multi-paxos-roll/`).
+    fn apply_roll(&mut self, slot: Slot, roll: &Roll) -> Outcome {
+        let next = self.segment.id.after(roll);
+        if next == self.segment.id {
+            return Outcome::RollIgnored(self.segment);
+        }
+        let before = self.segment;
+        self.segment = before.rolled_at(slot);
+        assert!(
+            self.segment.id == next,
+            "a valid Roll opens the segment it names"
+        );
+        assert!(
+            self.segment.start > slot,
+            "the next segment opens past the Roll that ends the tail"
+        );
+        assert!(
+            self.segment.start > before.start,
+            "a valid Roll moves the tail forward"
+        );
+        Outcome::Rolled(self.segment)
+    }
+
     /// The verdict on `command` under `mode`, the state moved accordingly.
     ///
     /// Proved in simulation (#241): a single-writer journal that takes an
@@ -363,11 +467,13 @@ impl JournalState {
     fn judge<'a>(
         &mut self,
         mode: WriterMode,
+        slot: Slot,
         command: &Command,
         accepted_at: impl Fn(Seq) -> Option<&'a Entry>,
     ) -> Outcome {
         match (mode, command) {
             (_, Command::Control(Control::Noop)) => Outcome::Noop,
+            (_, Command::Roll(roll)) => self.apply_roll(slot, roll),
             (WriterMode::Single, Command::Write(entry)) if !entry.leader.is_set() => {
                 Outcome::WrongMode(self.view())
             }
@@ -531,7 +637,9 @@ impl JournalState {
     /// # Panics
     ///
     /// If `first_seq` passed `next_seq`, or a journal with a term has no
-    /// leader (or the reverse), or the unset uuid leads.
+    /// leader (or the reverse), or the unset uuid leads, or the tail segment
+    /// does not fit its id (the first segment starts at slot 0, and segment
+    /// `k` at slot `k` or later: each `Roll` before it took a slot).
     pub fn assert_invariants(&self) {
         assert!(
             self.first_seq <= self.next_seq,
@@ -544,6 +652,14 @@ impl JournalState {
         assert!(
             self.leader.is_none_or(LeaderUuid::is_set),
             "the unset uuid never leads"
+        );
+        assert!(
+            (self.segment.id == SegmentId::FIRST) == (self.segment.start == Slot(0)),
+            "only the first segment starts at slot 0"
+        );
+        assert!(
+            self.segment.start.0 >= self.segment.id.0,
+            "each segment before the tail ended at a Roll of its own slot"
         );
     }
 }

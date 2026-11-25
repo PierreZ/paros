@@ -38,13 +38,15 @@ use paros_consensus::Limits;
 use paros_consensus::contract::message::Audience;
 use paros_consensus::contract::write::{AcceptorWrite, MustSync};
 use paros_consensus::journal::{
-    Command, Control, Entry, LeaderUuid, Outcome, Seq, command_fingerprint,
+    Command, Control, Entry, LeaderUuid, Outcome, ReplicaSet, Seq, command_fingerprint,
 };
 use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
-use paros_consensus::node::{BeliefSource, Delegation, ProposeResult, ReconfigureResult};
+use paros_consensus::node::{
+    BeliefSource, Delegation, ProposeResult, ReconfigureResult, RollResult,
+};
 use paros_consensus::quorum_read::ReadOpen;
 use paros_consensus::{
     Ballot, ColocatedNode, Config, MatchmakerReconfigurer, Message, NodeId, ProxyLeader,
@@ -62,6 +64,18 @@ pub use trace::{ClusterEvent, Cmd, OwnAnswer, Rule, Spec};
 /// The coverage sites of the cluster. A walk names the ones its flavor must
 /// reach with [`moonpool_walk::Walk::expect_sometimes`].
 pub mod reach {
+    /// A party applied a valid `Roll`: the log entered a new segment.
+    pub const ROLLED: &str = "cluster: a party applied a valid Roll";
+    /// A leader admitted a `Roll` while an earlier one was still open: no
+    /// pause (R4a dropped).
+    pub const ROLL_PIPELINED: &str = "cluster: a leader rolled above an open Roll";
+    /// A node jumped to a trim point past a `Roll`: the jump carried the
+    /// tail segment.
+    pub const ROLL_JUMP: &str = "cluster: a node jumped to a trim point past a Roll";
+    /// A leader admitted a `Roll` while its bounded recovery still held
+    /// values to propose again (`Recovery::pending`), which its tail reads
+    /// (R4c).
+    pub const ROLL_IN_RECOVERY: &str = "cluster: a leader rolled during a paged recovery";
     /// A durable quorum chose a slot.
     pub const CHOSEN: &str = "cluster: a durable quorum chose a slot";
     /// A second leadership was elected after the first.
@@ -279,6 +293,9 @@ pub struct Cluster {
     /// A compacting walk stepped a leader down after it compacted
     /// ([`Steer::Compacting`]).
     stepped_after_compaction: bool,
+    /// The nodes whose recovery pages the slow driver of
+    /// [`Steer::Rolling`] holds back until their next roll.
+    held_recovery: BTreeSet<NodeId>,
     /// The writing client of the journal.
     client: Client,
     /// The faults stopped (`Model::calm`): no steer drops a message.
@@ -376,6 +393,12 @@ impl Model for Cluster {
                 if self.flavor.steer == Steer::Reconfiguring && cx.rng().chance(1, 4) =>
             {
                 self.reconfigure(cx);
+            }
+            Action::Propose
+                if self.flavor.steer == Steer::Rolling
+                    && (self.held_leader().is_some() || cx.rng().chance(1, 4)) =>
+            {
+                self.roll(cx);
             }
             Action::Propose => self.propose(cx),
             Action::Claim => self.claim(cx),
@@ -721,6 +744,7 @@ impl Cluster {
             reads: Reads::default(),
             next_ctx: 1,
             stepped_after_compaction: false,
+            held_recovery: BTreeSet::new(),
             client: Client::default(),
             calmed: false,
             next_uuid: 0,
@@ -1202,7 +1226,8 @@ impl Cluster {
                 self.reads
                     .answered(&format!("node {}", id.0), state.ctx, state.index);
             }
-            if !self.after_batch(id) {
+            let hold = chaos && self.holds_recovery(id, more, cx);
+            if !self.after_batch(id, hold) {
                 return;
             }
         }
@@ -1266,13 +1291,43 @@ impl Cluster {
         }
     }
 
-    /// After a batch of node `id`: advance its recovery and note the
-    /// ballot of a leader. Returns whether the node still runs.
-    fn after_batch(&mut self, id: NodeId) -> bool {
+    /// Whether the slow driver of [`Steer::Rolling`] holds back the next
+    /// recovery page of node `id`, in the chaos phase: from a batch that
+    /// carried a `page`, for half the recoveries, it holds every page until
+    /// the next roll at that node, so
+    /// the leader rolls while its recovery still holds values to propose
+    /// again. The calm phase releases every hold.
+    fn holds_recovery(&mut self, id: NodeId, page: bool, cx: &mut Cx<'_, Self>) -> bool {
+        self.flavor.steer == Steer::Rolling
+            && (self.held_recovery.contains(&id)
+                || (page
+                    && self.recovers_values(id)
+                    && cx.rng().chance(1, 2)
+                    && self.held_recovery.insert(id)))
+    }
+
+    /// Whether node `id` leads with a recovery that still holds values to
+    /// propose again.
+    fn recovers_values(&self, id: NodeId) -> bool {
+        self.node(id).live.as_ref().is_some_and(|node| {
+            node.is_leader()
+                && node
+                    .proposer()
+                    .recovery()
+                    .is_some_and(|recovery| recovery.pending().next().is_some())
+        })
+    }
+
+    /// After a batch of node `id`: advance its recovery (unless the driver
+    /// `hold`s it back, which a later batch releases) and note the ballot of
+    /// a leader. Returns whether the node still runs.
+    fn after_batch(&mut self, id: NodeId, hold: bool) -> bool {
         let Some(node) = self.node_mut(id).live.as_mut() else {
             return false;
         };
-        node.advance_recovery();
+        if !hold {
+            node.advance_recovery();
+        }
         if node.is_leader() {
             let ballot = node.ballot();
             sometimes!(
@@ -1387,7 +1442,10 @@ impl Cluster {
                     }
                 }
                 WriteOp::Truncate { .. } => sometimes!(true, reach::COMPACTED),
-                WriteOp::TrimmedTo { .. } => sometimes!(true, reach::TRIM_JUMP),
+                WriteOp::TrimmedTo { state, .. } => {
+                    sometimes!(true, reach::TRIM_JUMP);
+                    sometimes!(state.segment.id.0 > 0, reach::ROLL_JUMP);
+                }
                 _ => {}
             }
         }
@@ -1514,6 +1572,7 @@ impl Cluster {
             reach::TRUNCATE_MOVED
         );
         sometimes!(matches!(outcome, Outcome::Leader(_)), reach::SET_LEADER);
+        sometimes!(matches!(outcome, Outcome::Rolled(_)), reach::ROLLED);
     }
 
     fn drain_proxy(&mut self, id: ProxyId, cx: &mut Cx<'_, Self>) {
@@ -1822,6 +1881,57 @@ impl Cluster {
         let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
         let _ = node.propose_control(Control::SetLeader { new, old });
         self.drain_node(leader, cx);
+    }
+
+    /// The operator cuts the log at a leader (`ColocatedNode::roll`): half
+    /// the rolls keep the replicas (`None`), half name two nodes of the pool.
+    /// A leader whose recovery the slow driver of [`Steer::Rolling`] holds
+    /// back, if one stands.
+    fn held_leader(&self) -> Option<NodeId> {
+        self.leaders()
+            .into_iter()
+            .find(|id| self.held_recovery.contains(id))
+    }
+
+    fn roll(&mut self, cx: &mut Cx<'_, Self>) {
+        // The operator rolls first at a leader whose recovery the slow
+        // driver holds back.
+        let Some(leader) = self.held_leader().or_else(|| self.pick_leader(cx)) else {
+            return;
+        };
+        let replicas = if cx.rng().chance(1, 2) {
+            let mut pool = self.pool.clone();
+            let first = pool.remove(Self::index(cx.rng().below(pool.len() as u64)));
+            let second = pool[Self::index(cx.rng().below(pool.len() as u64))];
+            Some(ReplicaSet::new([first, second]))
+        } else {
+            None
+        };
+        let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
+        let open = node
+            .proposer()
+            .rounds()
+            .values()
+            .any(|round| matches!(round.command(), Command::Roll(_)));
+        let recovering = node
+            .proposer()
+            .recovery()
+            .is_some_and(|recovery| recovery.pending().next().is_some());
+        let result = node.roll(replicas);
+        let accepted = matches!(result, RollResult::Accepted { .. });
+        sometimes!(open && accepted, reach::ROLL_PIPELINED);
+        sometimes!(recovering && accepted, reach::ROLL_IN_RECOVERY);
+        self.held_recovery.remove(&leader);
+        self.drain_node(leader, cx);
+        // Half the time the leader steps down as its `Roll` leaves: the next
+        // leader's Phase 1 recovers what it left open, and its recovery
+        // (which the slow driver may hold back) feeds its tail.
+        if accepted && cx.rng().chance(1, 2) {
+            if let Some(node) = self.node_mut(leader).live.as_mut() {
+                node.step_down();
+            }
+            self.drain_node(leader, cx);
+        }
     }
 
     fn truncate(&mut self, cx: &mut Cx<'_, Self>) {
@@ -2260,6 +2370,13 @@ fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
         }
         (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
             state.next_seq = Seq(state.next_seq.0 + 1);
+        }
+        // A tail one segment ahead, shaped as a real one: segment `k + 1`
+        // opened at the slot after the start of `k`, still below the point.
+        (Some(Mutant::CorruptTrimSegment), Message::TrimmedTo { point, state, .. })
+            if state.segment.start < *point =>
+        {
+            state.segment = state.segment.rolled_at(state.segment.start);
         }
         _ => {}
     }
