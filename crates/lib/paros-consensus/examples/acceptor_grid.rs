@@ -186,7 +186,7 @@ fn one_column_down(cluster: &mut Cluster) {
     cluster.settle();
     // Nodes 1, 3 and 6 promised, and node 4 promised to itself: four
     // promises, and none from column 1.
-    for id in [N1, N3, N6] {
+    for id in [N1, N3, N4, N6] {
         let promised = cluster.disk(id).hard_state().max_promised_ballot;
         assert_eq!(promised.node, N4);
     }

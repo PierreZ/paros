@@ -147,6 +147,7 @@ fn the_leader_crashes(cluster: &mut Cluster) -> (Slot, Slot) {
     assert!(cluster.node(N2).chosen_at(kept).is_none());
     assert!(cluster.node(N3).acceptor().record(kept).is_none());
     assert!(cluster.node(N2).acceptor().record(hole).is_none());
+    assert!(cluster.node(N3).acceptor().record(hole).is_none());
     cluster.crash(N1);
     println!("   slot {hole}: D is on node 1 only");
     println!("   slot {kept}: E is on nodes 1 and 2. It is chosen, and no running node knows it");
@@ -186,7 +187,9 @@ fn recovery(cluster: &mut Cluster, first: Ballot, hole: Slot, kept: Slot) -> Bal
 
     let slot = cluster.write(N2, LeaderUuid::UNSET, 0, "F");
     assert!(slot > kept, "a new command goes above the recovered slots");
-    println!("   slot {slot}: \"F\" is chosen. D was never chosen: its client writes it again");
+    println!(
+        "   slot {slot}: \"F\" is chosen. D was never chosen: a client that wants D writes it again"
+    );
     second
 }
 
@@ -195,7 +198,7 @@ fn the_old_leader_returns(cluster: &mut Cluster, second: Ballot, hole: Slot) {
     println!("\n== 4. node 1 restarts and catches up");
     // The disk of node 1 holds what it accepted: D in slot 3.
     let (_, command) = cluster.disk(N1).accepted(hole).expect("a record");
-    assert!(matches!(command, Command::Write(_)));
+    assert!(matches!(command, Command::Write(entry) if *entry.records[0] == *b"D"));
     cluster.restart(N1);
     assert!(!cluster.node(N1).is_leader(), "leadership is never durable");
 

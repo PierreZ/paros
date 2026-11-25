@@ -113,7 +113,8 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
 - Examples: `examples/single_decree.rs` runs single-decree Paxos on `Decree` and `Acceptor`.
   Each of the ten others drives the deployments as a driver does, on the toy cluster. Each
   example asserts the property that it shows, and no example builds a node from the roles by
-  hand: a reader copies what an example does. A new example gets a step in the CI `checks`
+  hand: a reader copies what an example does. A decree has no deployment, so `single_decree`
+  gives each `Acceptor` its disk itself. A new example gets a step in the CI `checks`
   job, a row in `README.md` and in the table of `src/lib.rs`, and an item in the root
   `README.md`.
 - `examples/common/cluster.rs` → `Cluster`, the toy cluster: the nodes with one `MemStorage`

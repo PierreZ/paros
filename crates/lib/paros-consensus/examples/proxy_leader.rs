@@ -49,7 +49,8 @@
 //! 1. Three records with the rounds on the leader: the cost of a plain
 //!    leader.
 //! 2. Three records with the rounds delegated. The leader sends one
-//!    `Accept` and receives one `Commit`.
+//!    `Accept` and receives one `Commit`. It handles two more messages
+//!    when it is an acceptor of the column of the slot.
 //! 3. A proxy leader crashes with a round. The leader delegates the round
 //!    again on each beat, then takes it back and runs it.
 //! 4. The leader hands the leadership to node 4 while a delegated round is
@@ -126,6 +127,9 @@ fn main() {
     a_handoff(&mut cluster);
     let journal = cluster.journal(N4);
     assert_eq!(journal.len(), 8);
+    for id in cluster.running() {
+        assert_eq!(cluster.journal(id), journal);
+    }
     println!("\neach node serves the same {} records", journal.len());
 }
 
@@ -188,14 +192,19 @@ fn a_dead_proxy(cluster: &mut Cluster) {
 
     // The beat of a driver: time, then its two policies.
     let mut beats = 0;
+    cluster.take_sent();
     while !cluster.node(N1).delegated_rounds().is_empty() {
         cluster.node(N1).tick();
         cluster.node(N1).resend_pending();
         cluster.node(N1).take_back_delegated(TAKE_BACK_AFTER);
         cluster.settle();
         beats += 1;
-        assert!(beats <= TAKE_BACK_AFTER + 1);
+        let sent = cluster.take_sent();
+        if !cluster.node(N1).delegated_rounds().is_empty() {
+            assert_eq!(sent.get("Accept"), Some(&1), "the round is delegated again");
+        }
     }
+    assert_eq!(beats, TAKE_BACK_AFTER);
     assert!(cluster.node(N4).chosen_at(slot).is_some());
     println!("   after {beats} beats the leader took slot {slot} back, and it is chosen");
 
@@ -209,8 +218,8 @@ fn a_handoff(cluster: &mut Cluster) {
     let slot = propose(cluster, N1, 7, "hotel", Delegation::Auto);
     let proxy = ProxyId::of(slot, 2).expect("the deployment has proxy leaders");
     // The proxy leader gets the round. Its `Accept`s to the column are
-    // still in flight, so the round stays open.
-    cluster.settle_holding(|to, _| matches!(to, Party::Node(_)));
+    // lost, so only a new delegation can finish the round.
+    cluster.settle_where(|to, _| !matches!(to, Party::Node(_)));
     assert_eq!(cluster.proxy(proxy).delegator(slot), Some(N1));
     println!("   proxy {} holds slot {slot} for node 1", proxy.0);
 

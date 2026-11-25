@@ -12,13 +12,13 @@
 //! The rest is a network that the example controls: [`Cluster::settle`]
 //! delivers until the cluster is quiet, [`Cluster::settle_where`] loses
 //! messages, [`Cluster::settle_holding`] keeps messages in flight,
-//! [`Cluster::cut`] isolates a node, and [`Cluster::crash`] and
+//! and [`Cluster::crash`] and
 //! [`Cluster::restart`] stop a node and boot it again from its disk.
 //!
 //! Nothing here is asynchronous and nothing is random, so each example
 //! prints the same trace on every run.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use paros_consensus::contract::{Audience, MemStorage, Party};
 use paros_consensus::journal::{Command, Control, Entry, JournalId, LeaderUuid, Outcome, Seq};
@@ -88,8 +88,6 @@ pub struct Cluster {
     /// The matchmakers of the pool. Empty on plain Multi-Paxos.
     registries: BTreeMap<MatchmakerId, Registry>,
     wire: VecDeque<Packet>,
-    /// The nodes that the network does not reach, in either direction.
-    isolated: BTreeSet<NodeId>,
     /// What each node and each replica learned, in slot order: the
     /// `committed` bucket of each of its batches.
     learned: BTreeMap<NodeId, Vec<(Slot, Command, Outcome)>>,
@@ -123,7 +121,6 @@ impl Cluster {
             proxies: BTreeMap::new(),
             registries: BTreeMap::new(),
             wire: VecDeque::new(),
-            isolated: BTreeSet::new(),
             learned: BTreeMap::new(),
             reads: BTreeMap::new(),
             sent: BTreeMap::new(),
@@ -338,7 +335,12 @@ impl Cluster {
                 return;
             }
             for (audience, message) in ready.messages() {
-                for to in audience.resolve_from_proxy(&pool) {
+                let mut to = audience.resolve_from_proxy(&pool);
+                // A replica is a learner too, outside the pool.
+                if *audience == Audience::Learners {
+                    to.extend(self.replicas.keys().copied());
+                }
+                for to in to {
                     self.wire.push_back(Packet::Peer {
                         from: Party::Proxy(id),
                         to: Party::Node(to),
@@ -424,9 +426,6 @@ impl Cluster {
                     self.deliver(from, to, message, lost);
                 }
                 Packet::Match(to, request) => {
-                    if self.isolated.contains(&request.from) {
-                        continue;
-                    }
                     if self.trace {
                         // `Register(Belief)`, `Probe`, or `Retire` without its fields.
                         let purpose = format!("{:?}", request.purpose);
@@ -442,21 +441,21 @@ impl Cluster {
                 }
                 Packet::MatchReply(reply) => {
                     let to = reply.to;
-                    if self.nodes.contains_key(&to) && !self.isolated.contains(&to) {
+                    if self.nodes.contains_key(&to) {
                         let _ = self.node(to).on_match_reply(reply);
                         self.pump(to);
                     }
                 }
                 Packet::Gc(to, request) => self.matchmaker_collect(to, request),
                 Packet::GcAck(to, ack) => {
-                    if self.nodes.contains_key(&to) && !self.isolated.contains(&to) {
+                    if self.nodes.contains_key(&to) {
                         let _ = self.node(to).on_gc_ack(&ack);
                         self.pump(to);
                     }
                 }
                 Packet::Publish(to, request) => self.matchmaker_publish(to, &request),
                 Packet::PublishAck(to, ack) => {
-                    if self.nodes.contains_key(&to) && !self.isolated.contains(&to) {
+                    if self.nodes.contains_key(&to) {
                         let _ = self.node(to).on_segment_ack(&ack);
                         self.pump(to);
                     }
@@ -469,8 +468,7 @@ impl Cluster {
     /// One peer message at its destination: `step`, then the drain loop of
     /// the process.
     fn deliver(&mut self, from: Party, to: Party, message: Message, lost: bool) {
-        let cut = |party: Party| party.node().is_some_and(|id| self.isolated.contains(&id));
-        let kept = !lost && !cut(from) && !cut(to);
+        let kept = !lost;
         let running = match to {
             Party::Node(id) => self.nodes.contains_key(&id) || self.replicas.contains_key(&id),
             Party::Proxy(id) => self.proxies.contains_key(&id),
@@ -508,9 +506,6 @@ impl Cluster {
     /// One garbage-collection request at matchmaker `to`: raise the
     /// watermark, persist it, then acknowledge.
     fn matchmaker_collect(&mut self, to: MatchmakerId, request: GcRequest) {
-        if self.isolated.contains(&request.from) {
-            return;
-        }
         if self.trace {
             println!(
                 "     {} -> matchmaker {}  Gc up to ballot {}",
@@ -531,9 +526,6 @@ impl Cluster {
     /// One publish of the chain of segments at matchmaker `to`: merge it,
     /// persist, then ack.
     fn matchmaker_publish(&mut self, to: MatchmakerId, request: &SegmentPublish) {
-        if self.isolated.contains(&request.from) {
-            return;
-        }
         let registry = self.registries.get_mut(&to).expect("a matchmaker");
         let outcome = registry.matchmaker.publish_segment(request);
         self.pump_matchmaker(to);
@@ -578,17 +570,6 @@ impl Cluster {
             proxy.tick();
         }
         self.settle();
-    }
-
-    /// The network stops reaching `id`: each message to it or from it is
-    /// lost. The node keeps running.
-    pub fn cut(&mut self, id: NodeId) {
-        self.isolated.insert(id);
-    }
-
-    /// The network reaches `id` again.
-    pub fn heal(&mut self, id: NodeId) {
-        self.isolated.remove(&id);
     }
 
     /// Stop node `id`. Its memory is gone: the leadership, the tallies and

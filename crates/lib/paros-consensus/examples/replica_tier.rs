@@ -35,7 +35,9 @@
 //!   which processes are learners is the deployment map of the driver. It
 //!   is one line in `Cluster::pump`.
 //! - `ReplicaNode::reply_owner(slot)` names the one replica that answers
-//!   the client for a slot, so the replicas share that work.
+//!   the client for a slot, so the replicas share that work. It gives a
+//!   rank, `ReplicaId(0..replica_count)`, and each replica gives the same
+//!   one. Which process has a rank is the deployment map of the driver.
 //!
 //! # What the trace shows
 //!
@@ -151,8 +153,10 @@ fn a_lost_commit(cluster: &mut Cluster) {
 /// Part 3: a replica persists what it learns.
 fn restart(cluster: &mut Cluster) {
     println!("\n== 3. replica 11 restarts from its disk");
+    let before = cluster.replica_journal(R11);
+    assert_eq!(before.len(), 5);
     cluster.restart_replica(R11);
-    assert_eq!(cluster.replica_journal(R11).len(), 5);
+    assert_eq!(cluster.replica_journal(R11), before);
     println!("   it serves five records before it hears from any node");
 }
 
@@ -176,12 +180,20 @@ fn without_a_quorum(cluster: &mut Cluster) {
 /// Part 5: the replicas share the answers to the clients.
 fn reply_owners(cluster: &mut Cluster) {
     println!("\n== 5. who answers the client of each slot");
+    // A `ReplicaId` is a rank, `0..replica_count`. Which process has a rank
+    // is the deployment map of the driver: here rank 0 is process 10.
+    let process = [R10, R11];
     for slot in (0..4).map(Slot) {
         let owner = cluster
             .replica(R10)
             .reply_owner(slot)
             .expect("a deployment with replicas has an owner for each slot");
         assert_eq!(owner, ReplicaId(slot.0 % 2));
-        println!("   slot {slot}: replica rank {}", owner.0);
+        assert_eq!(cluster.replica(R11).reply_owner(slot), Some(owner));
+        let rank = usize::try_from(owner.0).expect("a rank is small");
+        println!(
+            "   slot {slot}: rank {}, replica {}",
+            owner.0, process[rank]
+        );
     }
 }

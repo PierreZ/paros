@@ -2,8 +2,7 @@
 //! of Compartmentalized Paxos, each on its own lane.
 //!
 //! The game's worlds colocate every role in one node, so this page has its
-//! own small driver, written as `paros-consensus`'s `proxy_leader` and
-//! `replica_tier` examples are: three [`ColocatedNode`]s (the leader and the
+//! own small driver: three [`ColocatedNode`]s (the leader and the
 //! acceptors), two [`ProxyLeader`]s, two [`ReplicaNode`]s and one
 //! [`Batcher`]. The driver only moves messages: every message, every state
 //! line and every quorum answer is read off those roles. The same write runs

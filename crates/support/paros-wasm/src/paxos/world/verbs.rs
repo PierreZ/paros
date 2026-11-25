@@ -262,9 +262,8 @@ impl World {
 
     /// Force `id`'s election timeout to fire now.
     ///
-    /// The mechanism: set the
-    /// timeout to one tick, tick once, then restore the timeout the level (or
-    /// the player) asked for. `tick` is the *only* way a campaign starts —
+    /// It sets the timeout to one tick, ticks once, then restores the timeout
+    /// the level (or the player) asked for. `tick` is the *only* way a campaign starts —
     /// there is no "campaign now" entry point on the core, and there should
     /// not be one — so this is what "start an election" means.
     ///

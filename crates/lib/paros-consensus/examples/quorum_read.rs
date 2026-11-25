@@ -1,5 +1,5 @@
-//! **Leaderless reads: a row of acceptors answers, the reader serves, and
-//! neither the leader nor a clock takes part.**
+//! **Leaderless reads: a row of acceptors answers and the reader serves. The
+//! leader does no work as a leader, and no clock takes part.**
 //!
 //! Run it: `cargo run -p paros-consensus --example quorum_read`
 //!
@@ -79,6 +79,7 @@ const N0: NodeId = NodeId(0);
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
 const N3: NodeId = NodeId(3);
+const N4: NodeId = NodeId(4);
 const N5: NodeId = NodeId(5);
 
 const WRITER: LeaderUuid = LeaderUuid(0xA11CE);
@@ -126,6 +127,8 @@ fn half_a_column(cluster: &mut Cluster) -> Slot {
     let slot = cluster.propose(N5, WRITER, 3, "delta");
     cluster.settle_holding(in_flight);
     assert!(cluster.node(N5).chosen_at(slot).is_none());
+    assert!(cluster.node(N4).acceptor().record(slot).is_some());
+    assert!(cluster.node(N1).acceptor().record(slot).is_none());
     println!("   slot {slot}: node 4 accepted, node 1 did not yet. Nothing is chosen");
     slot
 }
@@ -186,10 +189,14 @@ fn the_column_completes(cluster: &mut Cluster, slot: Slot) {
     assert_eq!(cluster.journal(N3), ["alpha", "bravo", "charlie", "delta"]);
     println!("   slot {slot} is chosen. The read of node 3 is served, with four records");
 
-    // The leader did nothing for the two reads: it answered `PreRead` as a
-    // member of row 1, and it sent no beat.
+    // The leader opened no read and no round for the two reads: it answered
+    // one `PreRead` as an acceptor of row 1, as node 4 did.
     let sent = cluster.take_sent();
-    assert!(!sent.contains_key("Heartbeat"));
+    assert_eq!(
+        sent.get("PreRead"),
+        Some(&4),
+        "two reads, each to the two other members of its row"
+    );
     assert!(cluster.node(N5).quorum_reads().is_empty());
     println!("   messages since part 1: {sent:?}");
 }

@@ -4,10 +4,10 @@
 //! Run it: `cargo run -p paros-consensus --example matchmaker`
 //!
 //! This example drives [`Matchmaker`] and [`MatchmakerReconfigurer`] with
-//! the toy cluster of `examples/common/cluster.rs`. Read `reconfiguration`
-//! first: it changes the acceptors of a journal. This example looks at the
-//! service that makes that change safe, and then replaces a member of that
-//! service.
+//! the toy cluster of `examples/common/cluster.rs`. Read `quickstart` first.
+//! The example `reconfiguration` changes the acceptors of a journal. This
+//! example looks at the service that makes that change safe, and then
+//! replaces a member of that service.
 //!
 //! # A matchmaker is a registry, not an acceptor
 //!
@@ -253,12 +253,14 @@ fn a_late_node(cluster: &mut Cluster, first: Ballot, successor: &MatchmakerSet) 
     assert!(second > first);
 
     let journal = cluster.journal_id(N2);
-    assert!(
-        cluster
-            .matchmaker(M3)
-            .registry(journal)
-            .contains_key(&second)
-    );
+    for id in [M0, M1, M3] {
+        assert!(
+            cluster
+                .matchmaker(id)
+                .registry(journal)
+                .contains_key(&second)
+        );
+    }
     cluster.write(N2, WRITER, 1, "bravo");
     assert_eq!(cluster.journal(N3), ["alpha", "bravo"]);
     println!("   node 2 leads at ballot {second}, registered at m0, m1 and m3");

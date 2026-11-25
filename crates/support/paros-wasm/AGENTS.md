@@ -80,8 +80,7 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   `fan`), and each lane's typed state with what the step wrote on its disk. Both drivers fill
   them.
 - `src/paxos/trace/compart.rs` → the compartmentalized page (#943 (compartmentalized
-  diagram)): the game colocates every role, so this page has its own small driver, as the
-  `proxy_leader` and `replica_tier` examples of `paros-consensus` do. Three `ColocatedNode`s, two
+  diagram)): the game colocates every role, so this page has its own small driver. Three `ColocatedNode`s, two
   `ProxyLeader`s, two `ReplicaNode`s and a `Batcher`; the driver only moves messages, and
   every state line and quorum answer is read off those roles. The handoff run stays a
   `Recorder` run on its level, with its own lanes. Its "Break the rule" run has a `Commit`

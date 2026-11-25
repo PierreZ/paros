@@ -85,7 +85,7 @@ that can lose or hold a message.
 | `multi_paxos` | one Phase 1 for many slots, and the recovery of a new leader: P2c and the `Noop` gap fill |
 | `journal_calls` | `SetLeader`, `Write`, a retry, a read, `Truncate`, and each `Outcome` |
 | `leader_handoff` | `relinquish_to`: a new leader at the same ballot, with no election |
-| `acceptor_grid` | a grid of acceptors: one column decides, one row elects, `move_round` |
+| `acceptor_grid` | a grid of acceptors: one column decides, one acceptor of each column elects, `move_round` |
 | `quorum_read` | a linearizable read on a grid with no leader and no clock |
 | `proxy_leader` | proxy leaders that run Phase 2 for the leader |
 | `replica_tier` | replicas that learn and serve reads beside the acceptors |

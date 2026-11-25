@@ -69,7 +69,8 @@ that it shows. The first runs single-decree Paxos on the public `Decree`. Each o
 drives the deployments (`ColocatedNode`, `ProxyLeader`, `ReplicaNode`, `Matchmaker`) as a driver
 does, with one disk for each process and a toy network
 ([`examples/common/cluster.rs`](crates/lib/paros-consensus/examples/common/cluster.rs)). No example builds a node from the roles
-by hand: what an example does is what a program does. Read them in order:
+by hand: what an example does is what a program does. A decree has no deployment, so
+`single_decree` gives each `Acceptor` its disk itself. Read them in order:
 
 1. [`single_decree.rs`](crates/lib/paros-consensus/examples/single_decree.rs) — Phase 1, P2c, Phase 2 for one value: why a
    higher ballot must adopt a value that it finds accepted, and an acceptor that restarts from

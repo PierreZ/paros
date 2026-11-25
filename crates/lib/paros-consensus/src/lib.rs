@@ -153,7 +153,7 @@
 //! | `multi_paxos` | one Phase 1 for many slots, and the recovery of a new leader: P2c and the `Noop` gap fill |
 //! | `journal_calls` | `SetLeader`, `Write`, a retry, a read, `Truncate`, and each [`journal::Outcome`] |
 //! | `leader_handoff` | [`ColocatedNode::relinquish_to`]: a new leader without an election |
-//! | `acceptor_grid` | a grid of acceptors ([`membership::QuorumSystem::grid`]): one column decides, one row elects, [`ColocatedNode::move_round`] |
+//! | `acceptor_grid` | a grid of acceptors ([`membership::QuorumSystem::grid`]): one column decides, one acceptor of each column elects, [`ColocatedNode::move_round`] |
 //! | `quorum_read` | a leaderless read on a grid ([`ColocatedNode::quorum_read`]) |
 //! | `proxy_leader` | [`ProxyLeader`]s beside the leader |
 //! | `replica_tier` | [`ReplicaNode`]s beside the acceptors |
