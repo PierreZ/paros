@@ -190,9 +190,11 @@ Test only: `publish = false`, never a dependency of another crate.
   steered toward reconfigurations (`reconfiguring`, `Steer::Reconfiguring`: a quarter of the
   client moves are reconfigurations), and matchmakers steered toward the `Roll` (`segments`,
   `Steer::Rolling`: a quarter of the proposals are `ColocatedNode::roll`, with the same replicas
-  or two pool nodes; recovery pages of one, and in the chaos phase the driver holds back half the
-  recovery pages, as a slow driver may; it must reach a valid `Roll`, two `Roll` rounds open at
-  once, a trim jump past a `Roll`, and a `Roll` admitted during a paged recovery). 60 seeds each in CI; `lagging-reads`
+  or two pool nodes, and half the admitted rolls step the leader down; recovery pages of one, and
+  in the chaos phase a slow driver holds back the recovery pages of half the leaders that still
+  have values to propose again, until the next roll, which goes to such a leader first; it must
+  reach a valid `Roll`, two `Roll` rounds open at once, a trim jump past a `Roll`, and a `Roll`
+  admitted while the recovery still holds values to propose again). 60 seeds each in CI; `lagging-reads`
   takes 120. The `lagging-reads` walk is steered (`Steer::LaggingReader`) and is the control of
   #1228: with the reader gated on its belief ballot, seeds 67, 71 and 99 serve a stale read that
   `READ_SEES_WRITES` catches.

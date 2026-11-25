@@ -73,7 +73,8 @@ pub mod reach {
     /// tail segment.
     pub const ROLL_JUMP: &str = "cluster: a node jumped to a trim point past a Roll";
     /// A leader admitted a `Roll` while its bounded recovery still held
-    /// values to propose again: the tail counts them (R4c).
+    /// values to propose again (`Recovery::pending`), which its tail reads
+    /// (R4c).
     pub const ROLL_IN_RECOVERY: &str = "cluster: a leader rolled during a paged recovery";
     /// A durable quorum chose a slot.
     pub const CHOSEN: &str = "cluster: a durable quorum chose a slot";
@@ -292,6 +293,9 @@ pub struct Cluster {
     /// A compacting walk stepped a leader down after it compacted
     /// ([`Steer::Compacting`]).
     stepped_after_compaction: bool,
+    /// The nodes whose recovery pages the slow driver of
+    /// [`Steer::Rolling`] holds back until their next roll.
+    held_recovery: BTreeSet<NodeId>,
     /// The writing client of the journal.
     client: Client,
     /// The faults stopped (`Model::calm`): no steer drops a message.
@@ -390,7 +394,10 @@ impl Model for Cluster {
             {
                 self.reconfigure(cx);
             }
-            Action::Propose if self.flavor.steer == Steer::Rolling && cx.rng().chance(1, 4) => {
+            Action::Propose
+                if self.flavor.steer == Steer::Rolling
+                    && (self.held_leader().is_some() || cx.rng().chance(1, 4)) =>
+            {
                 self.roll(cx);
             }
             Action::Propose => self.propose(cx),
@@ -737,6 +744,7 @@ impl Cluster {
             reads: Reads::default(),
             next_ctx: 1,
             stepped_after_compaction: false,
+            held_recovery: BTreeSet::new(),
             client: Client::default(),
             calmed: false,
             next_uuid: 0,
@@ -1218,11 +1226,7 @@ impl Cluster {
                 self.reads
                     .answered(&format!("node {}", id.0), state.ctx, state.index);
             }
-            // A slow driver (`Steer::Rolling`, in the chaos phase): it
-            // holds back the next recovery page for a while, so a leader
-            // rolls while its recovery still holds values to propose again.
-            let hold =
-                chaos && more && self.flavor.steer == Steer::Rolling && cx.rng().chance(1, 2);
+            let hold = chaos && self.holds_recovery(id, more, cx);
             if !self.after_batch(id, hold) {
                 return;
             }
@@ -1285,6 +1289,33 @@ impl Cluster {
                 msg: Wire::Gc(request),
             });
         }
+    }
+
+    /// Whether the slow driver of [`Steer::Rolling`] holds back the next
+    /// recovery page of node `id`, in the chaos phase: from a batch that
+    /// carried a `page`, for half the recoveries, it holds every page until
+    /// the next roll at that node, so
+    /// the leader rolls while its recovery still holds values to propose
+    /// again. The calm phase releases every hold.
+    fn holds_recovery(&mut self, id: NodeId, page: bool, cx: &mut Cx<'_, Self>) -> bool {
+        self.flavor.steer == Steer::Rolling
+            && (self.held_recovery.contains(&id)
+                || (page
+                    && self.recovers_values(id)
+                    && cx.rng().chance(1, 2)
+                    && self.held_recovery.insert(id)))
+    }
+
+    /// Whether node `id` leads with a recovery that still holds values to
+    /// propose again.
+    fn recovers_values(&self, id: NodeId) -> bool {
+        self.node(id).live.as_ref().is_some_and(|node| {
+            node.is_leader()
+                && node
+                    .proposer()
+                    .recovery()
+                    .is_some_and(|recovery| recovery.pending().next().is_some())
+        })
     }
 
     /// After a batch of node `id`: advance its recovery (unless the driver
@@ -1854,8 +1885,18 @@ impl Cluster {
 
     /// The operator cuts the log at a leader (`ColocatedNode::roll`): half
     /// the rolls keep the replicas (`None`), half name two nodes of the pool.
+    /// A leader whose recovery the slow driver of [`Steer::Rolling`] holds
+    /// back, if one stands.
+    fn held_leader(&self) -> Option<NodeId> {
+        self.leaders()
+            .into_iter()
+            .find(|id| self.held_recovery.contains(id))
+    }
+
     fn roll(&mut self, cx: &mut Cx<'_, Self>) {
-        let Some(leader) = self.pick_leader(cx) else {
+        // The operator rolls first at a leader whose recovery the slow
+        // driver holds back.
+        let Some(leader) = self.held_leader().or_else(|| self.pick_leader(cx)) else {
             return;
         };
         let replicas = if cx.rng().chance(1, 2) {
@@ -1875,12 +1916,22 @@ impl Cluster {
         let recovering = node
             .proposer()
             .recovery()
-            .is_some_and(|recovery| recovery.remaining() > 0);
+            .is_some_and(|recovery| recovery.pending().next().is_some());
         let result = node.roll(replicas);
         let accepted = matches!(result, RollResult::Accepted { .. });
         sometimes!(open && accepted, reach::ROLL_PIPELINED);
         sometimes!(recovering && accepted, reach::ROLL_IN_RECOVERY);
+        self.held_recovery.remove(&leader);
         self.drain_node(leader, cx);
+        // Half the time the leader steps down as its `Roll` leaves: the next
+        // leader's Phase 1 recovers what it left open, and its recovery
+        // (which the slow driver may hold back) feeds its tail.
+        if accepted && cx.rng().chance(1, 2) {
+            if let Some(node) = self.node_mut(leader).live.as_mut() {
+                node.step_down();
+            }
+            self.drain_node(leader, cx);
+        }
     }
 
     fn truncate(&mut self, cx: &mut Cx<'_, Self>) {

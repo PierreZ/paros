@@ -7,8 +7,9 @@
 //! proposal that guessed the tail wrong changes nothing and costs one slot.
 //! The leader takes the tail from what it knows of the log (R4c): its own
 //! fold, the chosen slots above that fold, the `Roll`s of its open rounds,
-//! and the values its Phase 1 recovered that it has not proposed again. It never takes it from the
-//! chain at the matchmakers, which is behind the log.
+//! and the values its recovery (after Phase 1, or inherited by a handoff)
+//! still holds to propose again. It never takes it from the chain at the
+//! matchmakers, which is behind the log.
 //!
 //! A roll needs matchmakers (D5): on a plain deployment it is refused, so a
 //! plain log never decides a `Roll` and stays in its first segment (R10,
@@ -91,6 +92,11 @@ impl ColocatedNode {
             ProposeResult::NotLeader(hint) => RollResult::NotLeader(hint),
             ProposeResult::Accepted(slot) => {
                 assert!(self.role == NodeRole::Leader, "only a leader admits a Roll");
+                // A correct leader allocates past every slot it knows chosen:
+                // one chosen at a lower ballot was in its Phase-1 report (or
+                // below a handoff's frontier), and one chosen at a higher
+                // ballot raised its promise, so it admits nothing. So no
+                // known `Roll` lies above the new one.
                 assert!(
                     self.tail_segment() == next,
                     "an admitted Roll is the tail a later roll builds on"
@@ -105,10 +111,10 @@ impl ColocatedNode {
     /// The tail segment as this node knows the log (R4c): the fold of its
     /// chosen prefix, then each later `Roll` it knows, in slot order, when it
     /// names the tail plus one ([`SegmentId::after`]). It knows a `Roll`
-    /// chosen, in an open round, or recovered by its Phase 1 and still
-    /// pending (a bounded recovery opens its rounds a page at a time;
-    /// [`Recovery::pending`] leaves out the slots the repair probe owns). A guess that is wrong costs a `Roll` the fold ignores, never
-    /// safety.
+    /// chosen, in an open round, or still pending in its recovery (a
+    /// bounded recovery opens its rounds a page at a time;
+    /// [`Recovery::pending`] leaves out the slots the repair probe owns). A
+    /// guess that is wrong costs a `Roll` the fold ignores, never safety.
     pub(super) fn tail_segment(&self) -> SegmentId {
         let folded = self.replica.journal().segment.id;
         let after = self.replica.folded();
