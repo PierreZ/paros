@@ -2546,28 +2546,39 @@ and slot 2 is chosen and routed to segment 1; ballot 3 sees the vote of ballot 1
 `Commit` goes to the wrong replicas.
 
 **The rule, `Route = "commit"`**: a leader sends the `Commit` of slot `s` only when it knows that
-every slot below `s` is chosen (R3 for the leader). Its belief is then a fold of a chosen prefix,
-so it is the true segment. The leader still pipelines its proposals; only the `Commit` waits.
+every slot below `s + 1 - Alpha` is chosen (R3 for the leader; with `Alpha = 1`, every slot below
+`s`, and every check of the rule uses `Alpha = 1`). Its belief is then a fold of a chosen prefix,
+so it is the true segment by construction; the checks confirm it. The leader still pipelines its
+proposals; only the `Commit` waits.
 Two other candidates were compared (Pierre, 2026-11-24): the window of Paxos Made Simple §3
 (`Window`, a leader proposes at `s` only once the slots below `s + 1 - Alpha` are chosen; the
 `Roll` takes effect `Alpha` slots later), and a heal (a replica that holds its end answers
 "sealed" to a stray `Commit`, and the leader sends it again to the next segment). The window
 passes with `Alpha = 1`, which is no pipeline at all, and the check with `Alpha = 2` was too large
-to finish; the heal passed, but it adds a message and a repair. The rule at the `Commit` adds
-neither.
+to finish; the heal passed `Agreement`, `OneEnd`, `ReplicaTrue` and `ChainTrue` with 3 ballots
+(3.1 million states, on an earlier version of this model with a `Deliver` switch, not kept in the
+tree; the run is in PR #1540 (segment-roll)), but it adds a message and a repair. The rule at the
+`Commit` adds neither.
 
 **What the rule makes unneeded.** With `Route = "commit"`, the pause (R4a, `Barrier`) and the
-`Noop` of a hole (R4b, `HoleFill`) are no longer needed for routing: `barrier_off_commit`,
-`hole_any_commit` and `barrier_off_full` pass. They stay as switches, and the controls
+`Noop` of a hole (R4b, `HoleFill`) are no longer needed for routing, because the route is a fold
+of the chosen prefix whatever a leader proposes: `barrier_off_commit`, `hole_any_commit` and
+`barrier_off_full` pass, as the definition says they must. The tail segment of a new leader is
+still needed (R4c): it is the start of the fold, and `route_commit_base_chain` strays when it
+comes from the chain. R3 alone keeps `OneEnd`, `ReplicaTrue` and `ChainTrue` with every routing
+rule off (`safety_bare`). They stay as switches, and the controls
 `barrier_off` and `hole_any` show what they do under `Route = "propose"`. Whether R4a stays in
 the design is Pierre's call (asked on 2026-11-25). R4b is the gap fill of the core today, so it
 stays.
 
 **The handoff** (DPaxos `relinquish_to`, Pierre 2026-11-24): the successor keeps the ballot and
-runs no Phase 1, so it recovers nothing. With `Handoff = "keep"` the handoff carries the whole
-state of the ballot, its pending `Roll` too, and the successor is the minter under another name:
-the model needs no step for it. `Handoff = "drop"` is the control: the successor forgets the
-pending `Roll`, believes the segment before it, and routes a later slot to the wrong replicas.
+runs no Phase 1, so it recovers nothing. With `Route = "commit"`, the route is a fold of the
+chosen prefix that the leader knows, so a successor that learns the chosen slots of its ballot
+routes right without the pending `Roll`. A first control, where the successor forgets the pending
+`Roll` but keeps the knowledge of the chosen slots, failed only because the model kept the tail
+segment in a variable apart from that knowledge (found in the review of PR #1540): it tested the
+model, not the handoff, and it was removed. The handoff needs no step of its own here: the
+successor is the minter under another name.
 
 | Constant | Values (first: the design that passes) |
 |---|---|
@@ -2577,7 +2588,6 @@ pending `Roll`, believes the segment before it, and routes a later slot to the w
 | `Base` | `"prefix"`: a new leader takes its tail segment from its chosen prefix and its Phase 1 (R4c). `"chain"`: from the chain alone. |
 | `Barrier` | `TRUE`: a leader proposes nothing above its own pending `Roll` until it is chosen at its ballot (R4a). `FALSE`. |
 | `HoleFill` | `"noop"`: a hole below the frontier gets a `Noop` (R4b). `"any"`: any value. |
-| `Handoff` | `"keep"`: the handoff carries the pending `Roll`. `"drop"`: the successor forgets it. |
 
 Invariants: `Agreement`; `OneEnd` (two replicas of one segment never hold two ends);
 `ReplicaTrue` (a replica applies only chosen slots of its own segment, and its start and end are
@@ -2588,13 +2598,13 @@ segment exists when the `Commit` leaves).
 | Check | CI | Result |
 |---|---|---|
 | `safety_small` | ci | pass: every invariant, every rule on, 2 slots, 2 ballots, 2 replicas in segment 1 (65,096 distinct states) |
+| `safety_bare` | ci | pass: `Agreement`, `OneEnd`, `ReplicaTrue` and `ChainTrue` with R3 alone: no pause, any value in a hole, the tail from the chain, `Route = "propose"` (112,233) |
 | `route_commit` | ci | pass: `NoStray` and `RouteKnown` with 3 ballots, the case that TLC found (1.0 million, about 2 minutes with 4 workers) |
 | `barrier_off_commit`, `hole_any_commit` | ci | pass: `NoStray` with `Route = "commit"` and no pause, or any value in a hole, 3 slots (0.73 and 0.72 million) |
 | `route_propose_nb2` | ci | pass: with two ballots the belief at the proposal is right (0.46 million) |
 | `window_alpha1` | ci | pass: `Route = "propose"` with the window of one slot (0.23 million) |
 | `route_propose` | ci | violation of `NoStray`: the case of three ballots above |
 | `route_commit_base_chain` | ci | violation of `NoStray`: a new leader takes its tail segment from the chain, which is behind the log by one `Roll` (R4c) |
-| `handoff_drop` | ci | violation of `NoStray`: the successor of a handoff forgets the pending `Roll` and routes the next slot to the old segment |
 | `act_vote` | ci | violation of `OneEnd`: two replicas of segment 1 apply two voted `Roll`s at two slots (R3) |
 | `barrier_off`, `hole_any`, `base_chain` | ci | violation of `NoStray` under `Route = "propose"`: without the pause, with a command in a hole, with the tail segment from the chain |
 | `reach_two_rolls`, `reach_roll_again`, `reach_roll_lost`, `reach_seg2_apply`, `reach_route_seg2`, `reach_route_stale` | ci | violation: two segments end; a later ballot chooses again a `Roll` that an earlier ballot chose; a voted `Roll` loses to a `Noop`; a replica of segment 2 applies a slot; a `Commit` goes to segment 2; a belief at a proposal is stale, and under `Route = "commit"` no `Commit` carries it |

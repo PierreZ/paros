@@ -27,9 +27,11 @@
 (* ballot chooses, below the slot, the `Roll` of an older ballot that the  *)
 (* owner's Phase 1 did not see. Two rules keep a wrong belief away from    *)
 (* the replicas, each with its switch:                                     *)
-(*   Route = "commit" (the rule): the `Commit` of a slot leaves only when  *)
-(*     the owner knows that every slot below it is chosen (R3 for the      *)
-(*     leader). Its belief is then a fold of a chosen prefix.              *)
+(*   Route = "commit" (the rule): the `Commit` of slot s leaves only when  *)
+(*     the owner knows that every slot below s + 1 - Alpha is chosen (R3   *)
+(*     for the leader; with Alpha = 1, every slot below s). Its belief is  *)
+(*     then a fold of a chosen prefix, so it is the true segment by        *)
+(*     construction. The checks of this rule use Alpha = 1 only.           *)
 (*   Window, with Alpha (the window of Paxos Made Simple): the owner       *)
 (*     proposes only inside the window.                                    *)
 (*                                                                         *)
@@ -58,8 +60,6 @@
 (*            Paxos Made Simple, section 3: a command at slot s has its    *)
 (*            effect at slot s + Alpha). FALSE: it proposes at any slot.   *)
 (*            With Alpha = 1 the window is one slot: no pipeline.          *)
-(*   Handoff  "keep": the cooperative handoff carries the pending `Roll`.  *)
-(*            "drop": the successor forgets it (a control).                *)
 (*                                                                         *)
 (* Limits: one fixed grid (a grid change is a round change, and it cuts    *)
 (* no segment, R9); no restart and no lost disk; the chain is one map, not *)
@@ -74,9 +74,8 @@ CONSTANTS Acceptors,  \* three acceptors, majorities
           NK,         \* segments 1..NK; the `Roll` values are 2..NK
           Reps,       \* Reps[k]: the number of replicas of segment k
           Alpha,      \* a valid `Roll` at slot s ends its segment at s + Alpha
-          Barrier, HoleFill, ActOn, Base, Route, Window, Handoff
+          Barrier, HoleFill, ActOn, Base, Route, Window
 ASSUME Alpha \in Nat \ {0}
-ASSUME Handoff \in {"keep", "drop"}
 
 Slot   == 1..NS
 Ballot == 1..NB
@@ -291,24 +290,7 @@ Start(r) ==
   /\ rnext' = [rnext EXCEPT ![r] = chain[SegOf(r)].start]
   /\ UNCHANGED <<prom, voted, prop, started, forced, front, low, eff, next, tail, pend, rend, chain>>
 
-\* The cooperative handoff (DPaxos `relinquish_to`): the minter of ballot b
-\* hands the ballot on to a successor and stops. The successor keeps the
-\* ballot, so it runs no Phase 1 and recovers nothing: its state is what the
-\* handoff carries. Handoff = "keep": the handoff carries the whole state of
-\* the ballot, the pending `Roll` too (its slot and the tail segment that it
-\* opens). The successor is then the minter under another name, and the
-\* model needs no step for it. Handoff = "drop" (a control): the successor
-\* does not know the pending `Roll`; it believes the tail segment before it.
-DropPending(b) ==
-  /\ Handoff = "drop"
-  /\ pend' = [pend EXCEPT ![b] = 0]
-  /\ tail' = [tail EXCEPT ![b] = IF pend[b] # 0 THEN tail[b] - 1 ELSE tail[b]]
-  /\ eff' = [eff EXCEPT ![b] = 0]
-  /\ UNCHANGED <<prom, voted, prop, started, forced, front, low, next,
-                 rstart, rnext, rend, chain>>
-
 Next ==
-  \/ \E b \in Ballot : DropPending(b)
   \/ \E b \in Ballot, Q \in Quorum, lo \in 1..(NS + 1) : Phase1(b, Q, lo)
   \/ \E b \in Ballot : Propose(b)
   \/ \E a \in Acceptors, p \in prop : Accept(a, p)

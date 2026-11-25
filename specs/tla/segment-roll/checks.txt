@@ -4,6 +4,7 @@
 #   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
 #             long       only `scripts/check-tla.sh --all` runs it
 safety_small             pass       ci
+safety_bare              pass       ci
 route_commit             pass       ci
 barrier_off_commit       pass       ci
 hole_any_commit          pass       ci
@@ -11,7 +12,6 @@ route_propose_nb2        pass       ci
 window_alpha1            pass       ci
 route_propose            violation  ci
 route_commit_base_chain  violation  ci
-handoff_drop             violation  ci
 act_vote                 violation  ci
 barrier_off              violation  ci
 hole_any                 violation  ci
