@@ -104,9 +104,9 @@ by hand: what an example does is what a program does. A decree has no deployment
     `{1, 2, 3}` becomes `{1, 4, 5}`, the matchmakers forget the old configuration, and a
     removed node retires.
 12. [`segments.rs`](crates/lib/paros-consensus/examples/segments.rs) — three nodes and three matchmakers: the leader
-    cuts the log with `roll`, twice with no wait and once onto new replicas, each node folds
-    each cut at the same slot, the matchmakers hold the same chain of segments, and a new
-    leader rolls from the tail it knows.
+    cuts the log with `roll`, twice with no wait (the second time onto new replicas). Each
+    node folds each cut at the same slot, the matchmakers hold the same chain of segments, and
+    a new leader rolls from the tail it knows.
 
 ```sh
 cargo run -p paros-consensus --example single_decree

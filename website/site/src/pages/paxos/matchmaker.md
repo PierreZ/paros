@@ -64,4 +64,5 @@ built yet. The design is
   rejoins: at a new incarnation, it asks every matchmaker to drop its record.
 - Segments: `Roll` and `Segment` ([`journal/segment.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/journal/segment.rs)) and
   the driver call `ColocatedNode::roll` ([`node/roll.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/node/roll.rs)).
+  Example: [`segments`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/segments.rs).
 - Consensus: [the deployments](../../consensus/deployments/#matchmaker-and-matchmakerreconfigurer) show how a node and its matchmakers are driven together.

@@ -33,7 +33,7 @@
 //!
 //! # The chain at the matchmakers
 //!
-//! After its own fold applied a `Roll`, each node publishes the end of the
+//! When its own fold applies a `Roll`, each node publishes the end of the
 //! segment to the matchmakers (`Ready::segment_publishes()`; each ack comes
 //! back through `ColocatedNode::on_segment_ack`). The matchmakers keep the
 //! **chain**: an add-only map from a segment id to its start, how it opened
@@ -143,12 +143,13 @@ fn roll_and_keep(cluster: &mut Cluster) -> Slot {
 
 /// Part 3: two rolls in a row, with no wait for the first.
 fn roll_twice(cluster: &mut Cluster) -> (Slot, Slot) {
-    println!("\n== 3. node 1 rolls twice with no wait, then onto {{2, 3}}");
+    println!("\n== 3. node 1 rolls twice with no wait, the second time onto {{2, 3}}");
     let RollResult::Accepted { slot: a, next } = cluster.node(N1).roll(None) else {
         panic!("the leader admits a roll");
     };
     assert_eq!(next, SegmentId(2));
     // The first roll is not chosen yet: the leader builds on its open round.
+    assert_eq!(cluster.outcome(N1, a), None, "the first roll is still open");
     let replicas = ReplicaSet::new([N2, N3]);
     let RollResult::Accepted { slot: b, next } = cluster.node(N1).roll(Some(replicas)) else {
         panic!("the leader admits a second roll before the first is chosen");
@@ -161,16 +162,23 @@ fn roll_twice(cluster: &mut Cluster) -> (Slot, Slot) {
     assert!(b > a);
     cluster.settle();
 
+    let middle = Segment {
+        id: SegmentId(2),
+        start: Slot(a.0 + 1),
+    };
     let tail = Segment {
         id: SegmentId(3),
         start: Slot(b.0 + 1),
     };
     for id in [N1, N2, N3] {
-        assert!(matches!(cluster.outcome(id, a), Some(Outcome::Rolled(_))));
+        assert_eq!(cluster.outcome(id, a), Some(&Outcome::Rolled(middle)));
         assert_eq!(cluster.outcome(id, b), Some(&Outcome::Rolled(tail)));
         assert_eq!(cluster.node(id).replica().journal().segment, tail);
     }
-    println!("   slot {a}: Roll -> segment 2 opens at slot {}", a.0 + 1);
+    println!(
+        "   slot {a}: Roll -> segment 2 opens at slot {}",
+        middle.start
+    );
     println!(
         "   slot {b}: Roll -> segment 3 opens at slot {}",
         tail.start
@@ -179,14 +187,14 @@ fn roll_twice(cluster: &mut Cluster) -> (Slot, Slot) {
         "   nodes 1, 2 and 3 all fold the tail to segment 3 at slot {}",
         tail.start
     );
-    (Slot(a.0 + 1), tail.start)
+    (middle.start, tail.start)
 }
 
 /// Part 4: the chain at the matchmakers.
 fn read_the_chain(cluster: &mut Cluster, starts: [Slot; 3]) {
     println!("\n== 4. the chain at the matchmakers");
-    // A publish leaves after the fold; the cluster settled it already.
-    cluster.tick();
+    // The fold of part 3 sent the publishes, and its settle delivered them
+    // and their acks.
     let journal = cluster.journal_id(N1);
     let chain: Chain = cluster
         .matchmaker(MatchmakerId(0))
@@ -234,7 +242,9 @@ fn read_the_chain(cluster: &mut Cluster, starts: [Slot; 3]) {
     println!("   matchmakers 0, 1 and 2 hold the same chain");
 }
 
-/// Part 5: a new leader rolls from the tail that its Phase 1 learned.
+/// Part 5: a new leader rolls from the tail that it knows: its own fold,
+/// then the chosen slots, open rounds and recovered values above it, never
+/// the chain at the matchmakers.
 fn roll_after_a_new_leader(cluster: &mut Cluster) {
     println!("\n== 5. node 1 crashes, node 2 leads and rolls");
     cluster.crash(N1);
@@ -242,17 +252,25 @@ fn roll_after_a_new_leader(cluster: &mut Cluster) {
     let RollResult::Accepted { slot, next } = cluster.node(N2).roll(None) else {
         panic!("the new leader admits a roll");
     };
-    assert_eq!(next, SegmentId(4), "leadership is not durable, the log is");
+    assert_eq!(
+        next,
+        SegmentId(4),
+        "the new leader names the tail of its own fold plus one"
+    );
     cluster.settle();
-    assert!(matches!(
-        cluster.outcome(N2, slot),
-        Some(Outcome::Rolled(_))
-    ));
-    println!("   slot {slot}: Roll -> segment 4, after the 3 of node 1");
+    let fourth = Segment {
+        id: SegmentId(4),
+        start: Slot(slot.0 + 1),
+    };
+    assert_eq!(cluster.outcome(N2, slot), Some(&Outcome::Rolled(fourth)));
+    println!(
+        "   slot {slot}: Roll -> segment 4 opens at slot {}",
+        fourth.start
+    );
 
     write(cluster, N2, 3, "delta");
     cluster.restart(N1);
-    cluster.tick();
+    // The beat of the leader shows node 1 the slots it misses.
     cluster.tick();
     for id in [N1, N2, N3] {
         assert_eq!(cluster.journal(id), ["alpha", "bravo", "charlie", "delta"]);
