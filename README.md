@@ -77,12 +77,12 @@ Each one prints a trace and asserts each claim of it.
       position and another uuid get their `Outcome`.
    2. The leader crashes with a slot open. The new leader proposes again the value that a promise
       reported (P2c) and fills the slot that nobody reported with a `Noop`.
-   3. `reconfigure` grows the journal to five acceptors: register at the matchmakers, Phase 1
+   3. `reconfigure` grows the journal to five acceptors, and node 3 leaves: register at the matchmakers, Phase 1
       over the old and the new configuration.
    4. `reconfigure` grows it to a 2×3 grid: one column decides a slot, and a row serves a read
       with no leader.
    5. `reconfigure` adds two proxy leaders, which run Phase 2 for the leader, and two replicas,
-      which join late and catch up from the beat.
+      which learn the log and answer the clients of their slots.
    6. The matchmaker set hands over to a new set (`MatchmakerReconfigurer`).
    7. The leader hands its ballot to another node with no election (`relinquish_to`), one hop.
    8. The leader cuts the log into a new segment (`roll`), and the matchmakers hold the chain.

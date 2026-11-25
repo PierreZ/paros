@@ -107,7 +107,7 @@ larger; a new replica only adds read capacity.
 A replica serves a read from its own chosen prefix (`read_log`), or runs a leaderless read
 against a row of acceptors (`quorum_read_in`). A replica that lags asks for the slots it lacks.
 Example:
-[`grow`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/grow.rs), stages 4 (a read through a row) and 5.
+[`grow`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/grow.rs), stage 5.
 Flavor: [Compartmentalized Paxos](../../paxos/compartmentalized/).
 
 ## Matchmaker and MatchmakerReconfigurer
@@ -137,7 +137,7 @@ gives the answers back with `on_match_reply` and `on_gc_ack`. The matchmaker set
 new generation with `MatchmakerReconfigurer`: it stops the old set, starts the new one, and
 chooses it with a single decree (`Decree`) over the old set. Matchmaker quorums are majorities.
 Example:
-[`grow`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/grow.rs), stages 3 to 6 and 9.
+[`grow`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/grow.rs), stages 3 to 6, 8 and 9.
 Flavor: [Matchmaker Paxos](../../paxos/matchmaker/).
 
 ## In paros

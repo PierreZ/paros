@@ -48,10 +48,12 @@
 //! 1. Three nodes elect a leader. A client becomes the writer and appends.
 //! 2. The leader crashes with a slot open. The new leader recovers the log:
 //!    P2c for a reported value, a `Noop` for a slot nobody reported.
-//! 3. The journal grows to five acceptors.
+//! 3. The journal grows to five acceptors, and node 3 leaves: Phase 1 runs
+//!    over the old configuration and the new one.
 //! 4. The journal grows to a grid of six: one column decides a slot, and a
 //!    row serves a read with no leader.
-//! 5. Two proxy leaders run Phase 2 for the leader, and two replicas join.
+//! 5. Two proxy leaders run Phase 2 for the leader, and two replicas answer
+//!    the clients.
 //! 6. The matchmaker set hands over to a new set.
 //! 7. The leader hands its ballot to another node, with no election.
 //! 8. The leader cuts the log into a new segment.
@@ -71,7 +73,7 @@ use paros_consensus::journal::{
 };
 use paros_consensus::matchmaker::{MatchmakerPhase, ReconfigurerStep};
 use paros_consensus::membership::{
-    AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem,
+    AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem, ReplicaId,
 };
 use paros_consensus::node::{ProposeResult, ReconfigureRefusal, ReconfigureResult, RollResult};
 use paros_consensus::quorum_read::{ReadOpen, ReadState};
@@ -80,7 +82,7 @@ use paros_consensus::{
     Value,
 };
 
-use common::cluster::Cluster;
+use common::cluster::{Cluster, Delivered};
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
@@ -229,7 +231,7 @@ fn start_small(cluster: &mut Cluster) {
         ProposeResult::NotLeader(Some(N1))
     );
     println!("   node 2 refuses a proposal: NotLeader, try node 1");
-    check(cluster, &[N1, N2, N3], 2);
+    check(cluster, 2);
 }
 
 // ---- 2. a crash on three nodes ----------------------------------------------
@@ -254,7 +256,7 @@ fn survive_a_crash(cluster: &mut Cluster) -> NodeId {
     let first = cluster.node(N1).ballot();
     cluster.crash(N1);
     println!(
-        "   slot {lost}: on node 1 only. slot {retry}: on nodes 1 and 2, and nobody knows it is chosen"
+        "   slot {lost}: on node 1 only. slot {retry}: on nodes 1 and 2; only node 1 knows it is chosen, and its Commit is lost"
     );
 
     cluster.elect(N2);
@@ -288,7 +290,7 @@ fn survive_a_crash(cluster: &mut Cluster) -> NodeId {
     let (_, command) = cluster.disk(N1).accepted(lost).expect("a record");
     assert_eq!(command, Command::Control(Control::Noop));
     println!("   node 1 restarts as a follower; its record of slot {lost} becomes the Noop");
-    check(cluster, &[N1, N2, N3], 3);
+    check(cluster, 3);
     N2
 }
 
@@ -296,10 +298,11 @@ fn survive_a_crash(cluster: &mut Cluster) -> NodeId {
 
 /// Stage 3: a reconfiguration is a change of round.
 fn grow_to_five(cluster: &mut Cluster, leader: NodeId) {
-    println!("\n== 3. the journal grows to five acceptors");
+    println!("\n== 3. the journal grows to five acceptors, and node 3 leaves");
     // A plain deployment refuses: it has no matchmakers to register at.
     let plain = Config::new(N1, JournalIdentifier::UNSET).with_peers([N1]);
     let mut alone = ColocatedNode::new(&MemStorage::new(plain), Limits::DEFAULT);
+    // Only a leader reconfigures; a node alone is its own majority.
     alone.campaign();
     assert_eq!(
         alone.reconfigure(&majority(&[N1, N2])),
@@ -307,23 +310,28 @@ fn grow_to_five(cluster: &mut Cluster, leader: NodeId) {
     );
     println!("   plain Multi-Paxos: reconfigure -> refused, no matchmakers");
 
-    let five = majority(&[N1, N2, N3, N4, N5]);
-    let before = [N3, N4, N5].map(|id| cluster.received(id, "Prepare"));
+    // Node 3 leaves, and nodes 4, 5 and 6 join.
+    let five = majority(&[N1, N2, N4, N5, N6]);
+    let before = NODES.map(|id| cluster.received(id, "Prepare"));
     let ballot = reconfigure(cluster, leader, &five);
-    // Phase 1 asked the old configuration and the new one: a value chosen
-    // under {1, 2, 3} is seen by the new ballot.
-    for (id, before) in [N3, N4, N5].into_iter().zip(before) {
+    // Phase 1 asks a quorum of the old configuration and of the new one: a
+    // value chosen under {1, 2, 3} is seen by the new ballot. Node 3 is
+    // only in the old one, and it gets a `Prepare` too.
+    // The leader votes in its own process: it sends itself nothing.
+    for (id, before) in NODES.into_iter().zip(before) {
+        if id == leader {
+            continue;
+        }
         assert!(
             cluster.received(id, "Prepare") > before,
             "node {id} got a Prepare of the new ballot"
         );
     }
-    assert_eq!(cluster.received(N6, "Prepare"), 0, "node 6 is in neither");
     println!(
-        "   leads at {ballot} under {{1, 2, 3, 4, 5}}; Phase 1 reached the old and the new acceptors"
+        "   leads at {ballot} under {{1, 2, 4, 5, 6}}; Phase 1 reached the old acceptors and the new ones, node 3 too"
     );
     write(cluster, leader, 3);
-    check(cluster, &[N1, N2, N3, N4, N5], 4);
+    check(cluster, 4);
 }
 
 /// Stage 4: a grid. A full column decides a slot, one acceptor of each
@@ -334,18 +342,22 @@ fn grow_to_a_grid(cluster: &mut Cluster, leader: NodeId) {
     let ballot = reconfigure(cluster, leader, &grid);
     println!("   leads at {ballot} under the grid {{1, 2, 3}} / {{4, 5, 6}}");
 
-    cluster.take_sent();
+    cluster.take_delivered();
     let slot = write(cluster, leader, 4);
-    let sent = cluster.take_sent();
-    // A column has two acceptors: one `Accept` to the other member of the
-    // leader's column, or two to another column. Never one to each acceptor.
-    assert!(
-        sent["Accept"] <= 2,
-        "one column votes, not the six acceptors"
+    let delivered = cluster.take_delivered();
+    // The slot picks the column that votes on it. The `Accept` goes to the
+    // two acceptors of that column only, never to the six.
+    let column = grid.column_of(slot).expect("a grid");
+    let voters = grid.phase2_addressees(Some(column));
+    assert_eq!(voters.len(), 2, "a column of a 2x3 grid");
+    assert_eq!(
+        recipients(&delivered, Party::Node(leader), "Accept"),
+        others(&voters, leader),
+        "only the column of the slot gets the Accept"
     );
     println!(
-        "   one column voted: the leader sent {} Accept, not 5",
-        sent["Accept"]
+        "   slot {slot}: only the column {} voted, not the six acceptors",
+        set(&voters)
     );
 
     // A leaderless read: a row answers with its vote watermarks, and the
@@ -366,7 +378,7 @@ fn grow_to_a_grid(cluster: &mut Cluster, leader: NodeId) {
         }]
     );
     println!("   node 3 reads through row {{1, 2, 3}}: the log is chosen up to slot {slot}");
-    check(cluster, &NODES, 5);
+    check(cluster, 5);
 }
 
 // ---- 5. proxy leaders and replicas -------------------------------------------
@@ -384,35 +396,56 @@ fn add_proxies_and_replicas(cluster: &mut Cluster, leader: NodeId) {
     let ballot = reconfigure(cluster, leader, &counted);
     println!("   leads at {ballot}, with 2 proxy leaders and 2 replicas");
 
+    // The count of replicas picks the replica that answers the client of
+    // each slot. The driver started the processes; every replica learns.
+    for (slot, owner) in [(Slot(0), 0), (Slot(1), 1)] {
+        assert_eq!(counted.reply_owner(slot), Some(ReplicaId(owner)));
+    }
+
     // The leader gives the slot to a proxy leader, and the proxy leader
     // sends the `Accept`s, counts the votes and sends the `Commit`.
-    cluster.take_sent();
+    let proxies = [ProxyId(0), ProxyId(1)];
+    let decided = proxies.map(|id| cluster.proxy(id).counters().decided);
+    cluster.take_delivered();
     let slot = write(cluster, leader, 5);
-    let proxy = cluster.proxy(ProxyId::of(slot, 2).expect("two proxies"));
-    assert!(
-        proxy.counters().decided > 0,
-        "the proxy leader decided the slot"
-    );
-    let sent = cluster.take_sent();
+    let delivered = cluster.take_delivered();
+    // The slot picks the proxy leader, and that one alone decided a slot.
+    let proxy_id = ProxyId::of(slot, 2).expect("two proxies");
+    for (id, before) in proxies.into_iter().zip(decided) {
+        let more = usize::from(id == proxy_id);
+        assert_eq!(
+            cluster.proxy(id).counters().decided,
+            before + more as u64,
+            "proxy leader {} decided {more} slot",
+            id.0
+        );
+    }
     assert_eq!(
-        sent.get("Accept"),
-        Some(&1),
-        "the leader sends one Accept, to the proxy leader"
+        recipients(&delivered, Party::Node(leader), "Accept"),
+        [Party::Proxy(proxy_id)],
+        "the leader sends one Accept, to the proxy leader, and none to an acceptor"
+    );
+    let voters = counted.phase2_addressees(counted.column_of(slot));
+    assert_eq!(
+        recipients(&delivered, Party::Proxy(proxy_id), "Accept"),
+        parties(&voters),
+        "the proxy leader sends the Accept to the column of the slot"
     );
     assert_eq!(
         cluster.node(leader).delegated_rounds(),
         [],
         "the round came back"
     );
-    println!("   slot {slot}: the leader sent one Accept, to a proxy leader, which ran Phase 2");
-
-    // A replica that joins late learns the whole log from the beat.
-    cluster.tick();
+    println!(
+        "   slot {slot}: the leader sent one Accept, to proxy leader {}, which ran Phase 2 on {}",
+        proxy_id.0,
+        set(&voters)
+    );
     for id in [R10, R11] {
         assert_eq!(cluster.replica_journal(id), RECORDS[..6]);
     }
-    println!("   replicas 10 and 11 caught up from the beat and serve the journal");
-    check(cluster, &NODES, 6);
+    println!("   replicas 10 and 11 serve the journal");
+    check(cluster, 6);
 }
 
 // ---- 6. the matchmakers ------------------------------------------------------
@@ -450,7 +483,8 @@ fn hand_over_the_matchmakers(cluster: &mut Cluster, leader: NodeId) {
                 }
             }
         }
-        // The driver closes the stop when a majority answered.
+        // The driver calls `close_stop` on its cadence of re-sends. It
+        // closes once a majority answered.
         let _ = reconfigurer.close_stop();
     }
     let successor = successor.expect("the handover is done");
@@ -467,7 +501,7 @@ fn hand_over_the_matchmakers(cluster: &mut Cluster, leader: NodeId) {
     // believes the old set learns the new one from the refusal of m0.
     assert!(cluster.node(leader).learn_matchmakers(&successor));
     write(cluster, leader, 6);
-    check(cluster, &NODES, 7);
+    check(cluster, 7);
 }
 
 // ---- 7. the leadership -------------------------------------------------------
@@ -478,7 +512,7 @@ fn hand_over_the_leadership(cluster: &mut Cluster, leader: NodeId) -> NodeId {
     let next = N4;
     println!("\n== 7. node {leader} hands the leadership to node {next}");
     let ballot = cluster.node(leader).ballot();
-    cluster.take_sent();
+    cluster.take_delivered();
     let handoff = cluster
         .node(leader)
         .relinquish_to(next)
@@ -488,7 +522,13 @@ fn hand_over_the_leadership(cluster: &mut Cluster, leader: NodeId) -> NodeId {
     assert!(cluster.node(next).is_leader());
     assert!(!cluster.node(leader).is_leader());
     assert_eq!(cluster.node(next).ballot(), ballot, "the same ballot");
-    assert!(!cluster.take_sent().contains_key("Prepare"), "no Phase 1");
+    assert!(
+        cluster
+            .take_delivered()
+            .keys()
+            .all(|(_, _, kind)| *kind != "Prepare"),
+        "no Phase 1"
+    );
     println!("   node {next} leads at {ballot}, the same ballot, and no Prepare was sent");
 
     // One hop: only the node that won a ballot in an election may hand it on.
@@ -496,7 +536,7 @@ fn hand_over_the_leadership(cluster: &mut Cluster, leader: NodeId) -> NodeId {
     println!("   node {next} may not hand the same ballot on (one hop)");
     cluster.tick();
     write(cluster, next, 7);
-    check(cluster, &NODES, 8);
+    check(cluster, 8);
     next
 }
 
@@ -551,7 +591,7 @@ fn roll_a_segment(cluster: &mut Cluster, leader: NodeId) {
     );
     // The roll took a slot and no position: the next write is position 8.
     write(cluster, leader, 8);
-    check(cluster, &NODES, 9);
+    check(cluster, 9);
 }
 
 // ---- 9. a crash in the full deployment ----------------------------------------
@@ -597,6 +637,35 @@ fn crash_in_the_full_deployment(cluster: &mut Cluster, leader: NodeId) {
 // ---- helpers -----------------------------------------------------------------
 
 /// A majority configuration of `members`.
+/// The processes that `from` sent a message of `kind` to, in order.
+fn recipients(delivered: &Delivered, from: Party, kind: &str) -> Vec<Party> {
+    delivered
+        .keys()
+        .filter(|(sender, _, k)| *sender == from && *k == kind)
+        .map(|(_, to, _)| *to)
+        .collect()
+}
+
+/// `ids` as the trace prints a set: `{2, 5}`.
+fn set(ids: &[NodeId]) -> String {
+    let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+    format!("{{{}}}", ids.join(", "))
+}
+
+/// The nodes of `voters`, as parties.
+fn parties(voters: &[NodeId]) -> Vec<Party> {
+    voters.iter().map(|id| Party::Node(*id)).collect()
+}
+
+/// The nodes of `voters` other than `me`, as parties.
+fn others(voters: &[NodeId], me: NodeId) -> Vec<Party> {
+    voters
+        .iter()
+        .filter(|id| **id != me)
+        .map(|id| Party::Node(*id))
+        .collect()
+}
+
 fn majority(members: &[NodeId]) -> AcceptorConfig {
     AcceptorConfig::new(members.to_vec(), QuorumSystem::Majority)
 }
@@ -642,17 +711,17 @@ fn write(cluster: &mut Cluster, leader: NodeId, seq: usize) -> Slot {
 fn write_and_check(cluster: &mut Cluster, leader: NodeId) -> Slot {
     let slot = write(cluster, leader, RECORDS.len() - 1);
     cluster.tick();
-    check(cluster, &NODES, RECORDS.len());
+    check(cluster, RECORDS.len());
     for id in [R10, R11] {
         assert_eq!(cluster.replica_journal(id), RECORDS);
     }
     slot
 }
 
-/// Each node of `ids` serves the first `count` records.
-fn check(cluster: &mut Cluster, ids: &[NodeId], count: usize) {
+/// Each node serves the first `count` records.
+fn check(cluster: &mut Cluster, count: usize) {
     cluster.tick();
-    for id in ids {
-        assert_eq!(cluster.journal(*id), RECORDS[..count], "node {id}");
+    for id in NODES {
+        assert_eq!(cluster.journal(id), RECORDS[..count], "node {id}");
     }
 }

@@ -121,7 +121,7 @@ is a doc test), then `examples/grow.rs`. Keep the three in step with the API.
 - `examples/common/cluster.rs` → `Cluster`, the toy cluster: the nodes with one `MemStorage`
   each, and from the `Config` the `Matchmaker`s (a `MemRegistry` each) and the `ProxyLeader`s;
   `add_replicas` starts `ReplicaNode`s at any time, and `restart_proxy` a `ProxyLeader`. The
-  wire can lose a message (`settle_where`) or hold it in flight (`settle_holding`). `Cluster::pump` is the reference driver loop (persist, send,
+  wire can lose a message (`settle_where`), and `take_delivered` counts what reached each process. `Cluster::pump` is the reference driver loop (persist, send,
   learn, advance). A new example that drives a deployment uses it and does not write a
   network of its own.
 - The small helpers of a driver, each with a doc example: `Ready::is_empty` (and the same on

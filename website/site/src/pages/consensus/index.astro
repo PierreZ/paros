@@ -12,7 +12,7 @@ const FLAVORS = [
   { flavor: "Single-decree Paxos", types: ["decree::Decree"], page: "single-decree", examples: ["single_decree"] },
   { flavor: "Multi-Paxos", types: ["ColocatedNode"], page: "multi-paxos", examples: ["grow"], stages: "stages 1, 2" },
   { flavor: "Leader handoff", types: ["ColocatedNode::relinquish_to"], page: "multi-paxos", examples: ["grow"], stages: "stage 7" },
-  { flavor: "Matchmaker Paxos", types: ["Matchmaker", "MatchmakerReconfigurer"], page: "matchmaker", examples: ["grow"], stages: "stages 3 to 6, 8, 9" },
+  { flavor: "Matchmaker Paxos", types: ["Matchmaker", "MatchmakerReconfigurer"], page: "matchmaker", examples: ["grow"], stages: "stages 3 to 6, 8 and 9" },
   { flavor: "Proxy leaders", types: ["ProxyLeader"], page: "compartmentalized", examples: ["grow"], stages: "stage 5" },
   { flavor: "Batchers", types: ["batcher::Batcher", "batcher::Unbatcher"], page: "compartmentalized", examples: [] },
   { flavor: "Replicas", types: ["ReplicaNode"], page: "compartmentalized", examples: ["grow"], stages: "stage 5" },
@@ -109,6 +109,6 @@ const PAGE_NAMES: Record<string, string> = {
     <li><a href={`${SRC}/README.md`}><code>crates/lib/paros-consensus/README.md</code></a>: the entry point, with the driver loop and the examples.</li>
     <li><a href={`${SRC}/src/lib.rs`}><code>src/lib.rs</code></a>: the crate root. Its quick start is a doc test with three nodes.</li>
     <li><a href={`${SRC}/AGENTS.md`}><code>AGENTS.md</code></a>: the map of the modules and the rules for a change.</li>
-    <li><a href={`${TREE}/examples`}><code>examples/</code></a>: <code>single_decree</code> on <code>Decree</code>, and ten examples that drive the deployments as a driver does.</li>
+    <li><a href={`${TREE}/examples`}><code>examples/</code></a>: <code>single_decree</code> on <code>Decree</code>, and <code>grow</code>, which grows one journal through the deployments as a driver does.</li>
   </ul>
 </Doc>
