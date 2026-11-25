@@ -34,16 +34,23 @@
 (*   HeldEnd "chain": the end of a held segment is the end that the chain  *)
 (*           publishes. "log": a control, the end in the chosen log, so a  *)
 (*           floor can pass an end that is not published.                  *)
+(*   FloorTo "prefix": the floor rises to the end of segment k only when   *)
+(*           every segment up to k is held. "any": a control, to the end   *)
+(*           of any held segment, over a segment before it that is not.   *)
+(*   HeldFloorNodes  the acceptors that raise their floor at `Held`; the   *)
+(*           others reach it only with a jump (`TrimTo`). Every acceptor   *)
+(*           but in the checks that must see a jump.                       *)
 (***************************************************************************)
 EXTENDS Truncation
 
-CONSTANTS RollTo, Replicas, RepOf, F, HeldAt, HeldEnd
+CONSTANTS RollTo, Replicas, RepOf, F, HeldAt, HeldEnd, FloorTo, HeldFloorNodes
 
 ASSUME RollTo \in [Rolls -> 2..(Cardinality(Rolls) + 1)]
 \* The segments: segment 1 starts at slot 0, each `Roll` names the next.
 Segs == 1..(Cardinality(Rolls) + 1)
 ASSUME RepOf \in [Segs -> SUBSET Replicas] /\ Replicas \cap Acceptors = {}
 ASSUME F \in Nat /\ HeldAt \in {"f_plus_one", "f"} /\ HeldEnd \in {"chain", "log"}
+ASSUME FloorTo \in {"prefix", "any"} /\ HeldFloorNodes \subseteq Acceptors
 
 VARIABLES rhold,  \* replica: the slots it holds
           chain,  \* segment: the end that the chain publishes, 0 for none
@@ -134,11 +141,15 @@ MarkHeld(k) ==
   /\ held' = held \cup {k}
   /\ UNCHANGED <<vars, rhold, chain, rlost>>
 
+\* The floor that the held segment k gives: its end, when every segment up
+\* to k is held (with `FloorTo = "any"`, whatever the segments before it).
+HeldEndOf(k) == IF FloorTo = "any" \/ \A j \in 1..k : j \in held THEN End(k) ELSE 0
+
 \* Acceptor a raises its floor to the end of the held segment k, and drops
 \* the records below it in the same write (`WriteOp::Truncate`). A floor
 \* never goes down.
 HeldFloor(a, k) ==
-  LET f == IF End(k) > floor[a] THEN End(k) ELSE floor[a]
+  LET f == IF HeldEndOf(k) > floor[a] THEN HeldEndOf(k) ELSE floor[a]
   IN /\ k \in held
      /\ floor' = [floor EXCEPT ![a] = f]
      /\ dfloor' = [dfloor EXCEPT ![a] = f]
@@ -156,7 +167,7 @@ LoseReplica(r) ==
 HeldNext ==
   \/ Next /\ UNCHANGED seg
   \/ \E r \in Replicas : Copy(r) \/ LoseReplica(r)
-  \/ \E k \in Segs : MarkHeld(k) \/ Publish(k) \/ \E a \in Acceptors : HeldFloor(a, k)
+  \/ \E k \in Segs : MarkHeld(k) \/ Publish(k) \/ \E a \in HeldFloorNodes : HeldFloor(a, k)
 
 HeldSpec == HeldInit /\ [][HeldNext]_hvars
 
@@ -177,15 +188,18 @@ HeldLiveSpec ==
 -----------------------------------------------------------------------------
 (* Safety *)
 
-\* Slot s is in a held segment whose end the chain publishes.
-InHeld(s) == \E k \in held : s < chain[k]
+\* Slot s is in a held segment whose end the chain publishes: the chain
+\* says which replicas hold it.
+InHeld(s) ==
+  \E k \in held : chain[k] > 0 /\ s < chain[k] /\ PrefixChosen(s + 1) /\ SegAt(s) = k
 
 \* A floor is truncated or held: each slot below the floor of an acceptor
 \* is at or below a chosen truncation, or in a held segment whose end the
-\* chain publishes. With `HeldEnd = "log"` a floor passes an end that is
-\* not in the chain, and a reader of the chain cannot find the replicas of
-\* a slot that the acceptors dropped. (`FloorTruncated` of
-\* `Truncation.tla`, with the held segments.)
+\* chain publishes. The chain is how a reader finds the replicas of a slot
+\* that the acceptors dropped, so this is the rule "the floor follows the
+\* chain" written as a state. `HeldEnd = "log"` breaks it by definition;
+\* `FloorTo = "any"` breaks it at a slot of a segment that is not held.
+\* (`FloorTruncated` of `Truncation.tla`, with the held segments.)
 FloorTruncatedOrHeld ==
   \A a \in Acceptors, s \in Slots :
     s < floor[a] => (\E t \in Slots, v \in Truncations : t >= s /\ Chosen(t, v)) \/ InHeld(s)
@@ -214,16 +228,29 @@ RecordKept ==
 \* The chain is true: a published end is the end in the chosen log.
 ChainTrue == \A k \in Segs : chain[k] # 0 => chain[k] = LogEnd(k)
 
+\* A replica holds only chosen slots of its own segments.
+ReplicaTrue == \A r \in Replicas, s \in Slots : s \in rhold[r] => PrefixChosen(s + 1) /\ r \in RepOf[SegAt(s)]
+
 \* Reachability controls: each must be violated.
 \* A segment is held.
 NoHeld == held = {}
 \* Every acceptor dropped a held segment: its floor is at the end.
 NoHeldDrop == ~\E k \in held : chain[k] > 0 /\ \A a \in Acceptors : floor[a] >= chain[k]
-\* A node jumped to a held floor: its floor covers a slot of a held segment
-\* that it never voted.
-NoHeldJump == ~\E a \in Acceptors, s \in Slots :
+\* A node jumped to a held floor with `TrimTo`: it does not raise its floor
+\* at `Held` itself, and its floor covers a slot of a held segment that it
+\* never voted.
+NoHeldJump == ~\E a \in Acceptors \ HeldFloorNodes, s \in Slots :
                 /\ s < floor[a] /\ InHeld(s)
                 /\ ~\E m \in msgs : m.type = "2b" /\ m.acc = a /\ m.slot = s
+\* The laggard of the last ballot: its campaign asked from below a held
+\* floor, it jumped with `TrimTo` (it does not raise its floor at `Held`),
+\* and it won Phase 1 from at or above that floor.
+NoLaggardWin == ~\E k \in held :
+                  /\ chain[k] > 0
+                  /\ Owner[NB] \notin HeldFloorNodes
+                  /\ \E m \in msgs : m.type = "1a" /\ m.bal = NB /\ m.from < chain[k]
+                  /\ phase[NB] = "p2" /\ from[NB] >= chain[k]
+                  /\ floor[Owner[NB]] >= chain[k]
 \* A leader wins Phase 1 from at or above a held floor.
 NoWinAboveHeld == ~\E b \in Ballots, k \in held : phase[b] = "p2" /\ chain[k] > 0 /\ from[b] >= chain[k]
 \* A replica lost its disk after a segment was held.

@@ -5,16 +5,20 @@
 #             violation  TLC must find that the invariant or the property of the file is false
 #   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
 #             long       only `scripts/check-tla.sh --all` runs it
-reach_held        violation  ci
-reach_held_drop   violation  ci
-reach_held_jump   violation  ci
-reach_held_win    violation  ci
-reach_held_loss   violation  ci
-held_f            violation  ci
-held_log          violation  ci
-held              pass       ci
-held_loss         pass       ci
-held_laggard      pass       long  60
-two_leaders       pass       long  60
-one_leader_f1     pass       long  60
-full              pass       long  60
+reach_held         violation  ci
+reach_held_drop    violation  ci
+reach_held_jump    violation  ci
+reach_held_win     violation  ci
+reach_held_loss    violation  ci
+reach_laggard_win  violation  ci
+held_f             violation  ci
+held_log           violation  ci
+floor_any          violation  ci
+held               pass       ci
+held_loss          pass       ci
+floor_prefix       pass       ci
+held_laggard       pass       long  60
+two_leaders        pass       long  60
+one_leader_f1      pass       long  60
+full               pass       long  60
+three_slots        pass       long  60

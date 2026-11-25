@@ -22,18 +22,20 @@
 (*                                                                         *)
 (* Constants:                                                              *)
 (*   F       `Held` needs `F + 1` replicas.                                *)
+(*   HeldFloorNodes  the acceptors that raise their floor at `Held`; the   *)
+(*           others reach it only with a jump (`TrimTo`).                  *)
 (*   HeldEnd "chain": the floor follows the end in the chain. "log": a     *)
 (*           control, the end in the chosen log.                           *)
 (***************************************************************************)
 EXTENDS TruncationReconfig
 
-CONSTANTS RollTo, Replicas, RepOf, F, HeldEnd
+CONSTANTS RollTo, Replicas, RepOf, F, HeldEnd, HeldFloorNodes
 
 ASSUME RollTo \in [Rolls -> 2..(Cardinality(Rolls) + 1)]
 \* The segments: segment 1 starts at slot 0, each `Roll` names the next.
 Segs == 1..(Cardinality(Rolls) + 1)
 ASSUME RepOf \in [Segs -> SUBSET Replicas] /\ Replicas \cap Acceptors = {}
-ASSUME F \in Nat /\ HeldEnd \in {"chain", "log"}
+ASSUME F \in Nat /\ HeldEnd \in {"chain", "log"} /\ HeldFloorNodes \subseteq Acceptors
 
 VARIABLES rhold,  \* replica: the slots it holds
           chain,  \* segment: the end that the chain publishes, 0 for none
@@ -118,14 +120,15 @@ HeldFloor(a, k) ==
 HeldNext ==
   \/ Next /\ UNCHANGED seg
   \/ \E r \in Replicas : Copy(r)
-  \/ \E k \in Segs : MarkHeld(k) \/ Publish(k) \/ \E a \in Acceptors : HeldFloor(a, k)
+  \/ \E k \in Segs : MarkHeld(k) \/ Publish(k) \/ \E a \in HeldFloorNodes : HeldFloor(a, k)
 
 HeldSpec == HeldInit /\ [][HeldNext]_hvars
 
 -----------------------------------------------------------------------------
 (* Safety *)
 
-InHeld(s) == \E k \in held : s < chain[k]
+InHeld(s) ==
+  \E k \in held : chain[k] > 0 /\ s < chain[k] /\ PrefixChosen(s + 1) /\ SegAt(s) = k
 
 \* A floor is truncated or held: each slot below the floor of an acceptor
 \* is at or below a chosen truncation, or in a held segment whose end the
@@ -145,17 +148,25 @@ RecordKept ==
 
 ChainTrue == \A k \in Segs : chain[k] # 0 => chain[k] = LogEnd(k)
 
-\* A held segment is held: its end is in the chain, and `F + 1` of its
-\* replicas hold every slot of it (no replica loses its disk here).
-HeldTrue ==
-  \A k \in held :
-    /\ End(k) > 0
-    /\ Cardinality({r \in RepOf[k] : SegSlots(k, End(k)) \subseteq rhold[r]}) >= Need
+\* A slot is kept: each chosen slot that no truncation covers is recorded
+\* at an acceptor that is up, or held by a replica. A `Roll` and a `Noop`
+\* are slots of their segment too, and a replica holds them: with one slot
+\* (segment 1 is the `Roll` alone), this is the check that the acceptors
+\* drop the slot only once a replica holds it.
+SlotKept ==
+  \A s \in Slots :
+    (IsChosen(s) /\ ~\E t \in Slots, v \in Cuts : t >= s /\ Chosen(t, v)) =>
+      \/ \E a \in Acceptors : Up(a) /\ (vote[a][s].val = ChosenVal(s) \/ learned[a][s] # None)
+      \/ \E r \in Replicas : s \in rhold[r]
+
+\* A replica holds only chosen slots of its own segments.
+ReplicaTrue == \A r \in Replicas, s \in Slots : s \in rhold[r] => PrefixChosen(s + 1) /\ r \in RepOf[SegAt(s)]
 
 \* Reachability controls: each must be violated.
 \* The GC forgets the first configuration while a new member holds nothing
-\* of a held segment that it jumped over.
-NoHeldJoin == ~(wm >= R /\ \E k \in held, j \in Joiners :
+\* of a held segment that it jumped over with `TrimTo` (it does not raise
+\* its floor at `Held` itself).
+NoHeldJoin == ~(wm >= R /\ \E k \in held, j \in Joiners \ HeldFloorNodes :
                   /\ chain[k] > 0 /\ floor[j] >= chain[k]
                   /\ \A s \in 0..(chain[k] - 1) : ~\E m \in msgs : m.type = "2b" /\ m.acc = j /\ m.slot = s)
 \* A ballot of the second configuration wins Phase 1 from at or above a

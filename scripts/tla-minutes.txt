@@ -26,8 +26,8 @@ handover 10
 handover-chain 7.5
 handover-gc 1.5
 handover-scalars 2
-held-floor 15
-held-floor-reconfig 7
+held-floor 20
+held-floor-reconfig 8
 journal-ids 6
 leader-handoff 15
 matchmaker 6.5
