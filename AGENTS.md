@@ -48,9 +48,10 @@ of the website and their wasm engine. Two removals came before:
 Read the recap before you copy an idea back. **The work now** is the plan of
 `docs/archive/journal-design-a/prompt.md`: segments come down into `paros-consensus` as an
 optional behaviour, with the `Roll` cut (a segment ends at a decided command), a TLA+ model
-first. Then the journal is built again from scratch, as the final crate, on the core with
-segments; it writes no consensus of its own. The desired state of segments, with its decisions,
-rules and departures, is `docs/architecture/04-7-segments.md` (§4.7).
+first, and then the acceptors become pure voters (#1271 (pure voters), step 8 of the plan). The
+new journal and the layering above the core are dropped from this plan (Pierre, 2026-11-25); a
+new plan comes after this work. The desired state of segments, with its decisions, rules and
+departures, is `docs/architecture/04-7-segments.md` (§4.7).
 
 **The order of work.** First, a TLA+ model for every Paxos flavor that `paros-consensus` builds
 (single decree, Multi-Paxos, leader handoff, matchmakers, grid quorums, proxy leaders,

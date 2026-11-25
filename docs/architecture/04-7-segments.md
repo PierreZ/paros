@@ -58,12 +58,12 @@ journal of design A (tag `journal-design-a`); it applies to the whole core.
 |---|---|---|
 | D0 | The chain of segments lives in the matchmakers | Pierre, 2026-11-24 |
 | D1 | A segment ends at a decided command, the `Roll`. It is not computed from votes and raced at a register, as in design A | Pierre, 2026-11-24 ("Go roll") |
-| D2 | Acceptors stay learners: a chosen write goes to every acceptor and to the replicas of its segment. Acceptors that only vote (#1271) are a later piece of work | Pierre, 2026-11-24 ("Keep") |
+| D2 | Acceptors stay learners until step 8 of the plan: a chosen write goes to every acceptor and to the replicas of its segment. Step 8 makes the acceptors pure voters (#1271 (pure voters)): a chosen write then goes to the replicas of its segment only | Pierre, 2026-11-24 ("Keep"); changed 2026-11-25: pure voters are part of this work ("keep only 1271", "Later as now as part of the consensus work") |
 | D3 | The matchmakers store the chain as the paper stores its registry: an add-only map, merged like `history`. A change of the replicas of a sealed segment (a heal) is one `Decree` | Pierre, 2026-11-24 |
 | D4 | The `Roll` carries an optional new location: `replicas: Option<..>`. `None` keeps the replicas of the segment that it ends, so the next segment lives on the same machines; `Some` names the `NodeId`s of the next segment. The caller of `roll` chooses; balancing the load is for later, above the core | Pierre, 2026-11-25 ("keep simple, we will load balance afterwards"; "an optional new location passed as an option during roll") |
 | D5 | A `roll` on a deployment with no matchmakers is refused, as `reconfigure` is (`ReconfigureRefusal::NoMatchmakers`): a roll needs healthy matchmakers | Pierre, 2026-11-25 |
 | D6 | The journal of design A (its crates, walks, docs and TLA+ models) is removed. The journal is built again later, from scratch, on the core with segments | Pierre, 2026-11-24; done in PR #1538 (remove the journal of design A), at the tag `journal-design-a` |
-| D7 | The layering above the core (the journal as the final crate, the roles of the core on `paros-host`, storage and network as adapters) comes after this work | Pierre, 2026-11-24 |
+| D7 | The layering above the core and the journal built again on the core are dropped from this plan; a new plan comes after this work. `paros-host` is removed | Pierre, 2026-11-24; changed 2026-11-25 ("keep only 1271, and drop the layering and the new journal", "Remove Paros host too") |
 
 #### 4.7.3 Rules
 
@@ -124,7 +124,8 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   carries `history` and the retirement records. There is no compare-and-set. Source: the
   registry of Matchmaker Paxos §3.2.
 - **R6. The replicas of a segment.** A `Commit` goes to the learners as today (D2), and also to
-  the replicas of the segment of its slot. A replica starts at the start of its segment from the
+  the replicas of the segment of its slot. From step 8 on, it goes to the replicas of the
+  segment of its slot only (pure voters, #1271). A replica starts at the start of its segment from the
   boundary state (the `JournalState` that `Message::TrimmedTo` carries), with the trim-point
   jump of the core. It stops at the end. It catches up from the acceptors while they hold the
   slots, and from a peer replica after. A read that reaches a sealed replica at or above its end
