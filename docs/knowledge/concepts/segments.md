@@ -6,7 +6,8 @@ A **segment** is a range of slots of one Multi-Paxos log and the replicas that k
 A segment ends at a decided command, the `Roll`. The acceptors do not change at the boundary, so
 nothing must be sealed in the sense of Delos: every node only has to agree on the last slot of
 the segment, and a log decides one value for each slot ([PMS §3]). The design is §4.7 of
-`docs/architecture/` (`04-7-segments.md`), and its model is `specs/tla/segment-roll/`.
+`docs/architecture/` (`04-7-segments.md`), and its models are `specs/tla/segment-roll/` and
+`specs/tla/multi-paxos-roll/` (the `Roll` on the Multi-Paxos model).
 
 ## 1. Problem
 
@@ -98,7 +99,8 @@ starts at once.
 
 Not built yet. The order of work is §6 of
 [`docs/archive/journal-design-a/prompt.md`](../../archive/journal-design-a/prompt.md): step 1 is
-the model `specs/tla/segment-roll/` (PR #1540 (segment-roll)), step 3 the cut in
+the model `specs/tla/segment-roll/` (PR #1540 (segment-roll)), step 3 the model
+`specs/tla/multi-paxos-roll/` and then the cut in
 `paros-consensus` (`Control::Roll`, a segment cursor in `replica.rs`, `roll()` on the node).
 
 Divergences from the sources (each a departure of §4.7.4, with its check):

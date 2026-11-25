@@ -65,13 +65,24 @@ VoteSegsAgree == \A n, m \in Acceptors, s \in 0..NS :
 \* A node folds segment 2.
 NoSeg2 == ~\E n \in Acceptors, s \in 0..NS : PrefixLearned(n, s) /\ SegFold(n, s) = 2
 
+\* Two nodes fold segment 2, so `SegsAgree` compares two folds that moved.
+NoSeg2Both == ~\E n, m \in Acceptors, s \in 0..NS :
+                 /\ n # m
+                 /\ PrefixLearned(n, s) /\ PrefixLearned(m, s)
+                 /\ SegFold(n, s) = 2 /\ SegFold(m, s) = 2
+
+\* A node folds segment 3: two `Roll`s in a row (`segs3`).
+NoSeg3 == ~\E n \in Acceptors, s \in 0..NS : PrefixLearned(n, s) /\ SegFold(n, s) = 3
+
 \* A `Roll` that ballot b1 proposed is proposed again by a later ballot,
-\* from its Phase 1, and is learned.
+\* from its Phase 1, and is learned. The slot is below the frontier of b2,
+\* where `Allocate` never proposes, so only the recovery of `Win` sent it.
 NoRollRecovered ==
   ~\E s \in Slots, b1, b2 \in Ballots, v \in Commands :
      /\ IsRoll(v) /\ b1 < b2
      /\ [type |-> "2a", bal |-> b1, slot |-> s, val |-> v] \in msgs
      /\ [type |-> "2a", bal |-> b2, slot |-> s, val |-> v] \in msgs
+     /\ s < front[b2]
      /\ \E n \in Acceptors : learned[n][s] = v
 
 \* A `Roll` that a ballot proposed is lost: the slot is learned as another value.

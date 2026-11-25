@@ -8,5 +8,7 @@ act_vote         violation  ci
 reach_seg2       violation  ci
 reach_recovered  violation  ci
 reach_lost       violation  ci
+reach_seg2_both  violation  ci
+reach_seg3       violation  ci
 segs3            pass       long
 roll_restart     pass       long

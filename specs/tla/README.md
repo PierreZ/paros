@@ -2262,6 +2262,7 @@ workers):
 | `gc_won_fill` | ci | the GC at the win; two slots, no node catches up | `NoFillChosen` violation (1.4 million states, 73 s) |
 | `safety` | ci | the rules of the code; two ballots, one slot | pass (302 thousand states, 20 s) |
 | `cover_joined_fill` | long | the new member counts with no record; two slots, `a3` alone catches up | `NoFillChosen` violation (4.8 million states, 4.5 min) |
+| `three_ballots` | long | the rules of the code; one slot | pass (41.5 million states, 54 min) |
 | `two_slots` | long | the rules of the code; two ballots | no violation in 43.8 million distinct states (bounded: stopped after 63 min, 21.2 million states left on the queue) |
 | `reach_fill_gc` | ci | `NoGc` on the shape of `fill_code`: the GC fires there | violation (302 thousand states, 27 s) |
 | `fill_code` | long | the rules of the code; three ballots and two slots, `a2` alone catches up: the smallest shape where the two `*_fill` controls find a `Noop` over a chosen slot | no violation in 8.2 million distinct states (bounded: 50 minutes, 1 worker) |
@@ -2640,18 +2641,21 @@ argument of the proof. The control `act_vote` folds the votes in place of the le
 | Check | CI | Result |
 |---|---|---|
 | `roll` | ci | pass: `TypeOK`, `Agreement`, `LearnedChosen`, `Inv` and `SegsAgree`; one client command and one `Roll` to segment 2, 2 slots, 2 ballots (2.27 million distinct states, about 5 minutes with 4 workers) |
-| `act_vote` | ci | violation of `VoteSegsAgree`: a fold of the votes, 3 ballots (R3) |
-| `reach_seg2`, `reach_recovered`, `reach_lost` | ci | violation: a node folds segment 2; a later ballot recovers, from its Phase 1, a `Roll` that an earlier ballot proposed, and it is learned; a proposed `Roll` is lost, and its slot is learned as another value |
+| `act_vote` | ci | violation of `VoteSegsAgree`: a fold of the votes, 2 ballots (R3) |
+| `reach_seg2`, `reach_seg2_both`, `reach_seg3`, `reach_recovered`, `reach_lost` | ci | violation: a node folds segment 2; two nodes fold segment 2; a node folds segment 3 (two `Roll`s, as `segs3`); a later ballot proposes again, below its frontier (so from its Phase 1, never from `Allocate`), a `Roll` that an earlier ballot proposed, and it is learned; a proposed `Roll` is lost, and its slot is learned as another value |
 | `segs3` | long | pass: `TypeOK`, `Agreement` and `SegsAgree` with two `Roll`s, to segments 2 and 3, and one client command (6.2 million, 13 minutes with 4 workers) |
 | `roll_restart` | long | pass: the invariants of `roll` with one restart: the node goes back to its disk and keeps a prefix of what it learned (11.1 million, 25 minutes with 4 workers) |
-| `three_ballots` | long | pass: `Agreement` and `SegsAgree` with 3 ballots; stopped by hand above 5.7 million distinct states and 3 million on the queue with no error, too large to finish here |
 
 Three ballots are not checked here: with one `Roll` alone, TLC passed 87 million distinct
-states in two hours with 34 million on the queue, and it was stopped. The argument does not need
-them: `SegsAgree` follows from `Agreement` and `LearnedChosen`, since two nodes that learned a
-prefix learned the same value at each slot of it, and `Inv` implies both at every number of
-ballots (`MultiPaxosProof.tla`). The checks with two ballots show that the `Roll` changes no step
-of that proof.
+states in two hours with 34 million on the queue, and it was stopped. The argument for every
+number of ballots is the proof, not a bounded check. `Spec` and `Inv` are the text of
+`MultiPaxos.tla`, and `RollTo` adds only an `ASSUME` about a new constant, so the TLAPS theorems
+of `multi-paxos/` apply as written under their hypothesis `Hyp` (`InvApplies`, `Pick =
+"highest"`, `Alloc = "frontier"`, `QuorumFacts`; every configuration of this folder meets it):
+`Inv` holds in every reachable state and implies `Agreement` (`InvAgreement`). `LearnedChosen`
+follows from the `learned` clause of `NodeSlotOK` in `Inv` (not a theorem of its own), and
+`SegsAgree` follows from `Agreement` and `LearnedChosen`: two nodes that learned a prefix
+learned the same value at each slot of it, so they fold the same segments.
 
 What is not in this model: the replicas of a segment and the route of a `Commit` (they are in
 `segment-roll/`), the chain, and a grid.

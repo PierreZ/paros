@@ -52,6 +52,12 @@ does not change.
 
 ## 2. Decisions
 
+**Since this plan (Pierre, 2026-11-25).** The desired state is §4.7 of
+`docs/architecture/04-7-segments.md`, and it wins where this plan differs: the pause (R4a) is
+dropped and nothing builds it (a `Commit` leaves on a known chosen prefix, R4d); D4 is
+`Roll { next, replicas: Option<..> }`, where `None` keeps the replicas of the segment that the
+`Roll` ends; D5 is confirmed. The text below keeps the plan as it was written.
+
 | # | Decision | Status |
 |---|---|---|
 | D0 | The chain of segments lives in the matchmakers | Pierre, 2026-11-24 |
@@ -460,6 +466,8 @@ departures (two: R2, R7). Confirm D4 and D5. Record D2 (acceptors stay learners;
 later) and D6.
 
 ### Step 3. The cut
+
+The pause of this step is dropped (R4a, Pierre 2026-11-25; see the note of section 2).
 
 - Model: put the model of step 1 on `multi-paxos/`: the `Roll`, the pause, and a recovery
   through a `Roll`. The `Roll` is a value, so the inductive invariant of `MultiPaxosProof.tla`

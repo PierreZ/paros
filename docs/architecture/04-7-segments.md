@@ -10,7 +10,8 @@ replica tier (§4.3): the `Some` arm of the same state machine. The plain arm do
 journal that comes later composes them and writes no consensus of its own.
 
 This section is the desired state. None of it is built yet; the order of work is §6 of the plan.
-The model of the cut is `specs/tla/segment-roll/` (step 1, PR #1540 (segment-roll)).
+The model of the cut is `specs/tla/segment-roll/` (step 1, PR #1540 (segment-roll)), and
+`specs/tla/multi-paxos-roll/` puts the `Roll` on the Multi-Paxos model (step 3).
 
 #### 4.7.1 The rule of the papers
 
@@ -47,7 +48,7 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   no replica set unless a `Roll` names it. A segment has an id, a start, an end once it is sealed, its replicas and a
   state: `Open`, `Sealed`, `Held`, `Offloaded`, `Trimmed`. The grid is not part of a segment: a
   grid belongs to a round (Matchmaker Paxos §4.2).
-- **R2. The cut is a command.** `Control::Roll { next, replicas }` is a control command of the
+- **R2. The cut is a command.** `Control::Roll { next, replicas: Option<..> }` is a control command of the
   core, like `Noop`. Only the apply path reads it. It is valid when `next` is the tail segment
   plus one. A valid `Roll` chosen at slot `s` ends the tail segment at `s + 1` and opens `next`
   at `s + 1`. A `Roll` that is not valid changes nothing. **Departure 1** (§4.7.4).
@@ -129,7 +130,7 @@ ballot, and with R4d its route is a fold of the chosen prefix that it learns
 
 | # | Rule | What no paper has | Check |
 |---|---|---|---|
-| 1 | R2, the `Roll` | A command that ends a range of learners. Its nearest source is Paxos Made Simple §3 (a reconfiguration is a command of the state machine). Stoppable Paxos also decides the end in the log, but it stops the instance; the `Roll` stops nothing | `specs/tla/segment-roll/` (`safety_small`, `safety`, `safety_bare`; the control `act_vote`; the `reach_*` checks show that the cases are reached) |
+| 1 | R2, the `Roll` | A command that ends a range of learners. Its nearest source is Paxos Made Simple §3 (a reconfiguration is a command of the state machine). Stoppable Paxos also decides the end in the log, but it stops the instance; the `Roll` stops nothing | `specs/tla/segment-roll/` (`safety_small`, `safety`, `safety_bare`; the control `act_vote`; the `reach_*` checks show that the cases are reached); `specs/tla/multi-paxos-roll/` (the `Roll` as a command of the Multi-Paxos model: `roll` with `Inv`, the control `act_vote`) |
 | 2 | R7, the floor at `Held` | Scenario 3 of Matchmaker Paxos §3.5 and §4.5 (the chosen prefix on `f + 1` replicas), used for the compaction floor. `node/gc.rs` declines Scenario 3 today. The GC watermark rule does not change | to write in step 6 (`truncation/`, `truncation-reconfig/`) |
 
 R4d is not a departure: it changes no vote and no choice. It says when a learner message leaves,
