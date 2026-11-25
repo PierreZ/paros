@@ -24,7 +24,7 @@
 //! - The **garbage-collection floor** belongs to the leader in the same way
 //!   (`Ready::gc_requests`, `on_gc_ack`).
 //! - The **reconfigurer** is a *node-side driver object*, not a role of the
-//!   core's node: the example `matchmaker` holds one beside the cluster, and
+//!   core's node: the example `grow` holds one beside the cluster, and
 //!   `crates/lib/paros/src/driver/handover.rs` holds one per driver. So the world
 //!   holds one per node, and the node that drives a handover is the node the
 //!   player asked.

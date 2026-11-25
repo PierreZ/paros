@@ -222,7 +222,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `docs/architecture/04-roles.md` §4.4, "How CI holds the layers"), and
   `scripts/check-layers.sh --wasm`: each pure crate (layers 0 to 5) builds for
   `wasm32-unknown-unknown`
-- the twelve examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
+- the two examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`),
   and the facade example: `cargo run -p paros --example consensus`
 - `scripts/check-examples.sh`: every composing crate has an example, and the `checks` job runs
   each one (the workflow rule "Composing crates have examples" below)
@@ -684,9 +684,9 @@ Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its 
 - `crates/lib/paros-consensus` — the sans-IO Paxos roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe. Its optional, default-on `assertions` feature (#317)
   adds `moonpool-assertions` for coverage probes only. Its tests, the model checkers
-  (`src/models/`), the driver contract (`src/contract/`) and the twelve examples
-  (`examples/`: `single_decree` on `Decree`, and eleven that drive the deployments as a driver
-  does, from `quickstart`) live in the crate. Its `README.md` is the entry point of a new user.
+  (`src/models/`), the driver contract (`src/contract/`) and the two examples
+  (`examples/`: `single_decree` on `Decree`, and `grow`, which drives the deployments as a driver
+  does and grows one journal through every flavor) live in the crate. Its `README.md` is the entry point of a new user.
 - `crates/lib/paros` — the facade: each layer as a module (today
   `paros::consensus`). A program depends on `paros` alone. Wasm-safe and provider-free
   with its default features; it is where moonpool's storage and network get bundled, behind a

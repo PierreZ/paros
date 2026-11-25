@@ -11,9 +11,7 @@
 //!
 //! The rest is a network that the example controls: [`Cluster::settle`]
 //! delivers until the cluster is quiet, [`Cluster::settle_where`] loses
-//! messages, [`Cluster::settle_holding`] keeps messages in flight,
-//! and [`Cluster::crash`] and
-//! [`Cluster::restart`] stop a node and boot it again from its disk.
+//! messages, and [`Cluster::crash`] and [`Cluster::restart`] stop a node and boot it again from its disk.
 //!
 //! Nothing here is asynchronous and nothing is random, so each example
 //! prints the same trace on every run.
@@ -57,16 +55,17 @@ enum Packet {
     PublishAck(NodeId, SegmentAck),
 }
 
+/// How many peer messages of each kind went from a sender to a receiver.
+pub type Delivered = BTreeMap<(Party, Party, &'static str), usize>;
+
 /// What the network does with one peer message.
 enum Fate {
     Deliver,
     Lose,
-    Hold,
 }
 
 /// One matchmaker and its registry on disk.
 struct Registry {
-    config: MatchmakerConfig,
     matchmaker: Matchmaker,
     disk: MemRegistry,
 }
@@ -93,12 +92,9 @@ pub struct Cluster {
     learned: BTreeMap<NodeId, Vec<(Slot, Command, Outcome)>>,
     /// The quorum reads each node served: the `read_states` bucket.
     reads: BTreeMap<NodeId, Vec<ReadState>>,
-    /// How many peer messages of each kind left a node since the last
-    /// [`Cluster::take_sent`].
-    sent: BTreeMap<&'static str, usize>,
-    /// How many peer messages each node sent and received since the last
-    /// [`Cluster::take_traffic`].
-    traffic: BTreeMap<NodeId, usize>,
+    /// The peer messages that reached a running process since the last
+    /// [`Cluster::take_delivered`].
+    delivered: Delivered,
     /// How many peer messages of each kind each node received.
     received: BTreeMap<(NodeId, &'static str), usize>,
     /// Print each delivery?
@@ -123,8 +119,7 @@ impl Cluster {
             wire: VecDeque::new(),
             learned: BTreeMap::new(),
             reads: BTreeMap::new(),
-            sent: BTreeMap::new(),
-            traffic: BTreeMap::new(),
+            delivered: Delivered::new(),
             received: BTreeMap::new(),
             trace: false,
         };
@@ -141,11 +136,7 @@ impl Cluster {
                     bootstrap: deployment.matchmakers.clone(),
                 };
                 let matchmaker = Matchmaker::new(&config, &disk, Limits::DEFAULT);
-                let registry = Registry {
-                    config,
-                    matchmaker,
-                    disk,
-                };
+                let registry = Registry { matchmaker, disk };
                 cluster.registries.insert(*id, registry);
             }
         }
@@ -155,10 +146,11 @@ impl Cluster {
         cluster
     }
 
-    /// The same cluster with one replica for each id, each on an empty
-    /// disk. A replica has the configuration of the deployment under its
-    /// own id, and the id is outside the pool of the nodes.
-    pub fn with_replicas(mut self, ids: impl IntoIterator<Item = NodeId>) -> Self {
+    /// Start one replica for each id, each on an empty disk, at any time. A
+    /// replica has the configuration of the deployment under its own id, and
+    /// the id is outside the pool of the nodes. A replica that starts late
+    /// learns the log from the beat of the leader.
+    pub fn add_replicas(&mut self, ids: impl IntoIterator<Item = NodeId>) {
         for id in ids {
             let config = Config {
                 id,
@@ -166,10 +158,9 @@ impl Cluster {
             };
             let disk = MemStorage::new(config);
             let replica = ReplicaNode::new(&disk, Limits::DEFAULT);
-            self.disks.insert(id, disk);
+            assert!(self.disks.insert(id, disk).is_none(), "a new process id");
             self.replicas.insert(id, replica);
         }
-        self
     }
 
     /// The running node `id`.
@@ -235,7 +226,6 @@ impl Cluster {
             // 2. Send. The core names an audience, and the driver resolves
             //    it to processes: this is the deployment map.
             for (audience, message) in ready.messages() {
-                *self.sent.entry(message.kind()).or_default() += 1;
                 let mut to: Vec<Party> = audience
                     .resolve(&pool, id)
                     .into_iter()
@@ -248,7 +238,6 @@ impl Cluster {
                     to.extend(self.replicas.keys().copied().map(Party::Node));
                 }
                 for to in to {
-                    *self.traffic.entry(id).or_default() += 1;
                     self.wire.push_back(Packet::Peer {
                         from: Party::Node(id),
                         to,
@@ -390,18 +379,6 @@ impl Cluster {
         });
     }
 
-    /// [`Cluster::settle`], but a peer message for which `hold(to,
-    /// message)` is true stays in flight. A later `settle` delivers it.
-    pub fn settle_holding(&mut self, hold: impl Fn(Party, &Message) -> bool) {
-        self.run(|to, message| {
-            if hold(to, message) {
-                Fate::Hold
-            } else {
-                Fate::Deliver
-            }
-        });
-    }
-
     fn run(&mut self, fate: impl Fn(Party, &Message) -> Fate) {
         for id in self.running() {
             self.pump(id);
@@ -413,11 +390,7 @@ impl Cluster {
             self.pump_proxy(id);
         }
         for _ in 0..BUDGET {
-            let next = self.wire.iter().position(|packet| match packet {
-                Packet::Peer { to, message, .. } => !matches!(fate(*to, message), Fate::Hold),
-                _ => true,
-            });
-            let Some(packet) = next.and_then(|position| self.wire.remove(position)) else {
+            let Some(packet) = self.wire.pop_front() else {
                 return;
             };
             match packet {
@@ -485,9 +458,12 @@ impl Cluster {
         if !kept || !running {
             return;
         }
+        *self
+            .delivered
+            .entry((from, to, message.kind()))
+            .or_default() += 1;
         match to {
             Party::Node(id) if self.nodes.contains_key(&id) => {
-                *self.traffic.entry(id).or_default() += 1;
                 *self.received.entry((id, message.kind())).or_default() += 1;
                 self.node(id).step(message);
                 self.pump(id);
@@ -549,12 +525,6 @@ impl Cluster {
         self.pump_matchmaker(to)
     }
 
-    /// Stop matchmaker `id` and boot it again from its registry on disk.
-    pub fn restart_matchmaker(&mut self, id: MatchmakerId) {
-        let registry = self.registries.get_mut(&id).expect("a matchmaker");
-        registry.matchmaker = Matchmaker::new(&registry.config, &registry.disk, Limits::DEFAULT);
-    }
-
     /// One tick of logical time on every running process, then
     /// [`Cluster::settle`]. A leader beats on a tick, and a follower or a
     /// replica that is behind asks the sender of the beat for the slots it
@@ -585,18 +555,6 @@ impl Cluster {
     pub fn restart(&mut self, id: NodeId) {
         let node = ColocatedNode::new(&self.disks[&id], Limits::DEFAULT);
         assert!(self.nodes.insert(id, node).is_none(), "the node was down");
-    }
-
-    /// Stop replica `id` and boot it again from its disk: the same path as
-    /// a node, [`ReplicaNode::new`] on the storage that the stop left.
-    pub fn restart_replica(&mut self, id: NodeId) {
-        let replica = ReplicaNode::new(&self.disks[&id], Limits::DEFAULT);
-        assert!(self.replicas.insert(id, replica).is_some(), "a replica");
-    }
-
-    /// Stop proxy leader `id`. It has no disk: each round it held is gone.
-    pub fn crash_proxy(&mut self, id: ProxyId) {
-        self.proxies.remove(&id).expect("the proxy was running");
     }
 
     /// Start proxy leader `id`, empty. A proxy leader is built from the
@@ -666,13 +624,6 @@ impl Cluster {
             .map(|(_, _, outcome)| outcome)
     }
 
-    /// The slots that node or replica `id` learned, in the order of its
-    /// `committed` buckets.
-    pub fn learned(&self, id: NodeId) -> Vec<Slot> {
-        let learned = self.learned.get(&id).map_or_default(Vec::as_slice);
-        learned.iter().map(|(slot, _, _)| *slot).collect()
-    }
-
     /// The journal as node `id` serves it to a reader: each record from
     /// the first position that the journal still holds, as text.
     pub fn journal(&mut self, id: NodeId) -> Vec<String> {
@@ -691,16 +642,11 @@ impl Cluster {
         self.reads.remove(&id).unwrap_or_default()
     }
 
-    /// How many peer messages of each kind the nodes sent since the last
-    /// call. One fan-out counts one time.
-    pub fn take_sent(&mut self) -> BTreeMap<&'static str, usize> {
-        std::mem::take(&mut self.sent)
-    }
-
-    /// How many peer messages node `id` sent and received since the last
-    /// call. A fan-out to three processes counts three times.
-    pub fn take_traffic(&mut self, id: NodeId) -> usize {
-        self.traffic.remove(&id).unwrap_or_default()
+    /// The peer messages that reached a running process since the last
+    /// call: how many of each kind went from each sender to each receiver.
+    /// A fan-out to three processes counts three times.
+    pub fn take_delivered(&mut self) -> Delivered {
+        std::mem::take(&mut self.delivered)
     }
 
     /// How many peer messages of `kind` node `id` received since the

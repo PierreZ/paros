@@ -9,8 +9,8 @@
 //! # Quick start
 //!
 //! Three [`ColocatedNode`]s, each with a [`contract::MemStorage`] as its
-//! disk, and a queue as the network. `examples/quickstart.rs` is the same
-//! program with a crash, a restart and a trace.
+//! disk, and a queue as the network. Stage 1 of `examples/grow.rs` is the
+//! same program with matchmakers and a trace.
 //!
 //! ```
 //! use std::collections::VecDeque;
@@ -141,25 +141,10 @@
 //! assertions on the property that it shows. Run one with
 //! `cargo run -p paros-consensus --example <name>`.
 //!
-//! The first example is single-decree Paxos on [`decree::Decree`]. Each
-//! other example drives the deployments as a driver does, on the toy
-//! cluster of `examples/common/cluster.rs`: one disk for each process,
-//! persist before send, and a network that can lose or hold a message.
-//!
 //! | Example | Shows |
 //! |---|---|
 //! | `single_decree` | [`decree::Decree`] and [`acceptor::Acceptor`]: Phase 1, P2c, Phase 2 for one value, and a restart |
-//! | `quickstart` | the driver loop, an election, writes, a crash and a restart |
-//! | `multi_paxos` | one Phase 1 for many slots, and the recovery of a new leader: P2c and the `Noop` gap fill |
-//! | `journal_calls` | `SetLeader`, `Write`, a retry, a read, `Truncate`, and each [`journal::Outcome`] |
-//! | `leader_handoff` | [`ColocatedNode::relinquish_to`]: a new leader without an election |
-//! | `acceptor_grid` | a grid of acceptors ([`membership::QuorumSystem::grid`]): one column decides, one acceptor of each column elects, [`ColocatedNode::move_round`] |
-//! | `quorum_read` | a leaderless read on a grid ([`ColocatedNode::quorum_read`]) |
-//! | `proxy_leader` | [`ProxyLeader`]s beside the leader |
-//! | `replica_tier` | [`ReplicaNode`]s beside the acceptors |
-//! | `matchmaker` | the registry of the [`Matchmaker`]s, and the handover of their set ([`MatchmakerReconfigurer`]) |
-//! | `reconfiguration` | [`ColocatedNode::reconfigure`] with three [`Matchmaker`]s, garbage collection, a retirement |
-//! | `segments` | [`ColocatedNode::roll`]: the cut of the log into segments, and the chain at the [`Matchmaker`]s |
+//! | `grow` | one journal that grows from three nodes to five acceptors, a grid, [`ProxyLeader`]s and [`ReplicaNode`]s with [`ColocatedNode::reconfigure`], then a handover of the [`Matchmaker`]s ([`MatchmakerReconfigurer`]), [`ColocatedNode::relinquish_to`], [`ColocatedNode::roll`] and two leader crashes |
 //!
 //! # Features
 //!

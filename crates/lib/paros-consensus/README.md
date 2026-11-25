@@ -69,29 +69,32 @@ Three things surprise a new user:
 
 ## Examples
 
-Each example prints a trace and asserts the property that it shows:
+Each example prints a trace and asserts each claim of it:
 
-    nix develop --command cargo run -p paros-consensus --example quickstart
-
-Read them in this order. The first is single-decree Paxos on `decree::Decree`. Each other
-example drives the deployments as a driver does, on the toy cluster of
-`examples/common/cluster.rs`: one disk for each process, persist before send, and a network
-that can lose or hold a message.
+    nix develop --command cargo run -p paros-consensus --example grow
 
 | Example | Shows |
 |---|---|
 | `single_decree` | `Decree` and `Acceptor`: Phase 1, P2c, Phase 2 for one value, and a restart |
-| `quickstart` | the driver loop, an election, writes, a crash and a restart |
-| `multi_paxos` | one Phase 1 for many slots, and the recovery of a new leader: P2c and the `Noop` gap fill |
-| `journal_calls` | `SetLeader`, `Write`, a retry, a read, `Truncate`, and each `Outcome` |
-| `leader_handoff` | `relinquish_to`: a new leader at the same ballot, with no election |
-| `acceptor_grid` | a grid of acceptors: one column decides, one acceptor of each column elects, `move_round` |
-| `quorum_read` | a linearizable read on a grid with no leader and no clock |
-| `proxy_leader` | proxy leaders that run Phase 2 for the leader |
-| `replica_tier` | replicas that learn and serve reads beside the acceptors |
-| `matchmaker` | the registry of the matchmakers, and the handover of the matchmaker set |
-| `reconfiguration` | `reconfigure` with three matchmakers, garbage collection, a retirement |
-| `segments` | `roll`: the cut of the log into segments, and the chain at the matchmakers |
+| `grow` | one journal from three nodes to the whole deployment, on the toy cluster of `examples/common/cluster.rs` |
+
+The stages of `grow`:
+
+1. Three nodes elect a leader. A client becomes the writer and appends; a retry, a wrong
+   position and another uuid get their `Outcome`.
+2. The leader crashes with a slot open. The new leader proposes again the value that a promise
+   reported (P2c) and fills the slot that nobody reported with a `Noop`.
+3. `reconfigure` grows the journal to five acceptors, and node 3 leaves: register at the matchmakers, Phase 1
+   over the old and the new configuration.
+4. `reconfigure` grows it to a 2×3 grid: one column decides a slot, and a row serves a read
+   with no leader.
+5. `reconfigure` adds two proxy leaders, which run Phase 2 for the leader, and two replicas,
+   which learn the log and answer the clients of their slots.
+6. The matchmaker set hands over to a new set (`MatchmakerReconfigurer`).
+7. The leader hands its ballot to another node with no election (`relinquish_to`), one hop.
+8. The leader cuts the log into a new segment (`roll`), and the matchmakers hold the chain. The replicas keep segment 0: they seal at its end.
+9. The leader crashes in the full deployment. A new leader takes over, and garbage collection
+   lets the matchmakers forget the old configurations.
 
 ## Features
 
