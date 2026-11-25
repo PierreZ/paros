@@ -1,0 +1,1 @@
+../truncation-reconfig/TruncationReconfig.tla

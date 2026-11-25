@@ -226,6 +226,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | One id names at most one journal, forever: the coordinator of a level draws a `TenantId` or a `JournalId`, the fold of the level checks it at apply and refuses an id in use (tombstones too), slots are booked only under an id that the fold gave, the host key is `(TenantId, JournalId)`, the cell tenant's id is drawn at `cell init` before any universe (§3.8 of `docs/architecture/`) | not built (the tenancy crate and `paros-names`, after journal v1) | `journal-ids/` | #1419 (the tenancy wrapper and paros-names) |
 | The takeover by a new coordinator: the view of a term from the registrations of that term, the order checked and done in one write, the registration that raises the fence, the booking by durable id, a new reference at each term, `Assign` idempotent by request id, the stop of a deposed coordinator, the directory asked after a `gone` (not a Paxos flavor: it runs above the election) | not built (`paros-cell` and `paros-machine`, after #1420 (paros-election)) | `takeover/` | #1422 (the takeover by a new controller) |
 | Segments in the core: the `Roll` cut, the replicas of a segment, the chain, the route of a `Commit` | not built (step 3 of `docs/archive/journal-design-a/prompt.md`) | `segment-roll/`, `multi-paxos-roll/` | step 1 of the segments in the core, done (PR #1540 (segment-roll)); step 3, the `Roll` on the Multi-Paxos model |
+| Segments in the core: `Held` at `F + 1` replicas and the floor at the end of a held segment (R7, departure 2), the jump of a laggard below that floor, a reconfiguration onto empty stores after the acceptors dropped a segment | not built (step 6 of `docs/archive/journal-design-a/prompt.md`: `collector.rs`, `acceptor/retention.rs`, the beat) | `held-floor/`, which extends `truncation/`; `held-floor-reconfig/`, which extends `truncation-reconfig/` | step 6 of the segments in the core, the model |
 | CheckQuorum | `proposer/authority.rs` | `check-quorum` (to write) | #1136 (rework 6.7) |
 
 `paros-consensus` has no leases and no flexible quorums (step 0.12 of the rework), so they need no
@@ -2065,6 +2066,7 @@ each of them:
 | `Retry` | `"jump"`: a refused candidate asks again from its new first unchosen slot. `"none"`: a control, it never asks again. |
 | `Restarts` | How many restarts can happen in the run. |
 | `Faults`, `RotNodes` | How many faulty entries a boot can find in the run, and on which nodes. |
+| `Rolls` | The `Roll` values of segments: control values that weigh nothing. `{}` in every check of this folder; `held-floor/` gives them a meaning. |
 | `Learners` | The nodes that catch up and jump. |
 | `C3`, `R2` | A second reconfiguration: ballots from `R2` up use `C3`, whose new members start empty too. `R2 = NB + 1`: no second reconfiguration. |
 
@@ -2254,6 +2256,7 @@ is no faulty entry and no restart.
 | `Cover` | `"chosen"`: a member counts toward the fence when it holds each slot up to `F` (it learned the slot, or the slot is below its floor). `"joined"`: a control, a new member counts too, with floor 0 and no record. |
 | `Learners` | The nodes that catch up and jump. |
 | `C3`, `R2` | A second reconfiguration: ballots from `R2` up use `C3`, whose new members start empty too. `R2 = NB + 1`: no second reconfiguration. |
+| `Rolls` | The `Roll` values of segments: control values that weigh nothing. `{}` in every check of this folder; `held-floor-reconfig/` gives them a meaning. |
 
 The invariants are `Agreement`, `LearnedChosen`, `NoFillChosen` and `FloorChosen` of
 `truncation/`, and:
@@ -2661,3 +2664,95 @@ learned the same value at each slot of it, so they fold the same segments.
 
 What is not in this model: the replicas of a segment and the route of a `Commit` (they are in
 `segment-roll/`), the chain, and a grid.
+
+### `held-floor/`: `Held` and the floor of a held segment, for step 6 of the segments in the core
+
+R7 of `docs/architecture/04-7-segments.md`: a segment is `Held` when `F + 1` of its replicas
+hold every slot of it and its end is in the chain. The compaction floor of an acceptor may then
+rise to the end of that segment: to an acceptor, a held segment is a `Truncate` whose records are
+kept elsewhere. This is departure 2 of §4.7.4 (Scenario 3 of Matchmaker Paxos §3.5 and §4.5, the
+chosen prefix on `f + 1` replicas, used for the compaction floor), and this folder is its check.
+
+`HeldFloor.tla` extends `Truncation.tla` (a link to `truncation/`) and changes none of its
+steps: the floor guard of Phase 1, the `Accept` below the floor, the catch-up, the trim-point jump
+(`TrimTo`) and the retry of a refused candidate are the ones of `truncation/`. They read the floor
+and not its reason, so the jump of a laggard below a held floor is the jump below a truncation.
+`truncation/` has one new constant, `Rolls`: control values that weigh nothing, `{}` in every
+check of that folder. The module adds:
+
+- **The segments of the chosen log.** A `Roll` to `k + 1` at slot `s` ends segment `k` at
+  `s + 1` when `k` is the tail (R2). The segment of a slot is a fold of the chosen prefix (R3).
+- **The replicas.** Each segment has its replicas (`RepOf`), nodes that are not acceptors. A
+  replica copies the chosen slots of its segment from a node that learned them or from a peer
+  replica, all that it can in one step. Up to `F` replicas lose their disk.
+- **The chain.** A node that applied the `Roll` publishes the end (R5). Every writer writes the
+  same value, so the model writes the end of the chosen log; `segment-roll/` checks that a node
+  publishes only an end that it applied.
+- **`Held`** (the tally of `collector.rs`): the leader marks segment `k` when `F + 1` of its
+  replicas hold every slot below its end, and the end is in the chain.
+- **The held floor** (`acceptor/retention.rs`): an acceptor raises its floor to the end of a held
+  segment and drops the records below it in one write. It needs to have learned nothing.
+
+| Constant | Values (first: the rule) |
+|---|---|
+| `HeldAt` | `"f_plus_one"`: `Held` needs `F + 1` replicas. `"f"`: a control, `F` replicas. |
+| `HeldEnd` | `"chain"`: `Held` and the floor follow the end that the chain publishes. `"log"`: a control, the end of the chosen log, so a floor can pass an end that is not published. |
+| `F` | The replicas that may lose their disk. |
+
+Every check has one command `c1` and one `Roll` to segment 2, three acceptors and two slots, and a
+state constraint (`RollPlan`) makes a leader allocate `c1` at slot 0 and the `Roll` at slot 1; the
+gap fill still writes a `Noop` at a hole. Segment 2 has no replica, so it is never held.
+
+The invariants are those of `truncation/`, with two that know the held segments:
+`FloorTruncatedOrHeld` (each slot below a floor is at or below a chosen truncation, or in a held
+segment whose end the chain publishes; `FloorTruncated` with the held segments) and
+`FloorReleasedOrHeld` (`FloorReleased` with the held segments). New: `RecordKept` (each chosen
+command whose record no truncation released is readable at an acceptor or held by a replica, after
+up to `F` lost disks) and `ChainTrue` (a published end is the end of the chosen log).
+
+| Check | CI | Result |
+|---|---|---|
+| `reach_held`, `reach_held_drop`, `reach_held_jump`, `reach_held_win`, `reach_held_loss` | ci | violation: a segment is held; every acceptor dropped it; a node jumps over a held slot that it never voted; a leader wins Phase 1 from at or above the held floor; a replica loses its disk after a segment is held |
+| `held_f` | ci | violation of `RecordKept`: `Held` at `F = 1` replica; the acceptors drop slot 0, and the one replica that holds it loses its disk (0.40 million states) |
+| `held_log` | ci | violation of `FloorTruncatedOrHeld`: the floor rises to an end that the chain does not publish |
+| `held` | ci | pass: every invariant, two ballots of one leader, `a2` catches up and jumps, `F = 0` and one replica (2.4 million states, 9 minutes with 4 workers) |
+| `held_loss` | ci | pass: every invariant, `F = 1` with two replicas and one lost disk, one ballot (14 thousand) |
+| `held_laggard` | long | `Ends` (`HeldLiveSpec`): `a1` leads ballot 1, `a3` leads ballot 2 and is a laggard; the floor of the held segment refuses its campaign, and it jumps and wins |
+| `two_leaders` | long | pass: `held` with the owners `a1`, `a2` and `a1` and `a2` that catch up |
+| `one_leader_f1` | long | pass: `held` with `F = 1`, two replicas and a lost disk |
+| `full` | long | pass: two leaders, `F = 1`, two replicas and a lost disk |
+
+What is not in the model: the chain at a matchmaker quorum (one variable here; step 4), the
+replicas that a `Roll` names (the sets are fixed, D4), the heal and the trim of a sealed segment
+(step 7), a restart and a faulty record (`truncation/` checks them, and the floor reaches the disk
+in the same write as the drop), and a truncation beside the held floor (the two floors are one
+floor with two reasons; `truncation/` checks the fold).
+
+### `held-floor-reconfig/`: a reconfiguration onto empty stores after a held segment was dropped
+
+`HeldFloorReconfig.tla` extends `TruncationReconfig.tla` (a link to `truncation-reconfig/`) with the
+steps of `HeldFloor.tla`, and changes none of its steps. The question: once the acceptors of `C1`
+dropped a held segment, can a reconfiguration onto `C2`, whose member `a4` starts empty, lose a
+slot or choose a second value? The new member holds nothing below the held floor: it jumps with
+`TrimmedTo`, or never holds the slots. The GC of `node/gc.rs` counts a member toward the fence when
+it holds each slot up to the fence, and a slot below its floor counts, so a member that raised its
+floor to a held end counts. `truncation-reconfig/` has one new constant, `Rolls`, `{}` in every
+check of that folder.
+
+The CI checks have one slot: segment 1 is the `Roll` alone at slot 0 (`RollPlan1`), so
+`RecordKept` has no command to judge, and the question is Phase 1, the GC and the floor. `a4`
+alone catches up and jumps, and segment 1 has one replica with `F = 0`. The checks with a
+command at slot 0 and the `Roll` at slot 1 are long.
+
+| Check | CI | Result |
+|---|---|---|
+| `reach_held_join` | ci | violation of `NoHeldJoin`: the GC forgets `C1` while `a4` jumped over the held segment and holds no slot of it |
+| `reach_held_win` | ci | violation of `NoHeldWin`: a ballot of `C2` wins Phase 1 from at or above the held floor |
+| `held_log` | ci | violation of `FloorTruncatedOrHeld`: the floor passes an end that the chain does not publish |
+| `held` | ci | pass: `Agreement`, `LearnedChosen`, `NoFillChosen`, `FloorChosen`, `RecordChosen`, `Recoverable`, `FloorTruncatedOrHeld`, `RecordKept`, `ChainTrue` (0.61 million states, 1.5 minutes) |
+| `held_wipe` | ci | pass: the same with one wipe of an acceptor (2.4 million states, 5 minutes) |
+| `held_f` | long | violation of `RecordKept`: two slots, `Held` at `F = 1` replica, which loses its disk (1.9 million states before the violation, 7 minutes) |
+| `held_cmd` | long | pass: two slots, a command and the `Roll`, `F = 0` |
+
+What is not in the model: a third configuration, the restart and the faulty record of
+`truncation/`, and the chain at a matchmaker quorum.

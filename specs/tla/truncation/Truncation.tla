@@ -92,18 +92,23 @@
 (*   Restarts    how many restarts may happen (in the whole run).          *)
 (*   Faults      how many faulty entries a boot may find (in the whole     *)
 (*               run), on the nodes `RotNodes` only.                       *)
+(*   Rolls       the `Roll` values of segments (`Control::Roll`): a        *)
+(*               control value that weighs nothing, like a `Noop`. Only    *)
+(*               `held-floor/` (`HeldFloor.tla`, R7 of                     *)
+(*               `docs/architecture/04-7-segments.md`) gives them a        *)
+(*               meaning; every check of this folder has none.             *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Cuts, CutAt, Noop, Lost,
           NB, NS, Q1, Q2, Owner,
           FloorGuard, TrimPromise, CompactWhen, FloorRule, Watermark, Tally, Retry,
-          TrimPoint, FloorWrite, Restarts, Faults, RotNodes
+          TrimPoint, FloorWrite, Restarts, Faults, RotNodes, Rolls
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
 Truncations == Cuts
-Proposals == Commands \cup Truncations
+Proposals == Commands \cup Truncations \cup Rolls
 Values == Proposals \cup {Noop}
 None == "none"
 
@@ -118,7 +123,8 @@ ASSUME FloorWrite \in {"atomic", "late"}
 ASSUME Retry \in {"jump", "none"}
 ASSUME Learners \subseteq Acceptors /\ RotNodes \subseteq Acceptors
 ASSUME Noop \notin Proposals /\ Lost \notin Values
-ASSUME Cuts # {} /\ Cuts \cap Commands = {}
+ASSUME (Cuts # {} \/ Rolls # {}) /\ Cuts \cap Commands = {}
+ASSUME Rolls \cap (Commands \cup Cuts) = {}
 ASSUME CutAt \in [Cuts -> Nat]
 ASSUME CompactWhen = "learned" => FloorRule = "slot"
 ASSUME Owner \in [Ballots -> Acceptors]
