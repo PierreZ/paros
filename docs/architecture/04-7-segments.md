@@ -35,12 +35,16 @@ journal of design A (tag `journal-design-a`); it applies to the whole core.
 
 #### 4.7.3 Rules
 
-Each rule names its source, or says that it is a departure. The rules are those of §4.1 of the
-plan, with the result of the model of step 1.
+Each rule names its source, or says that it is a departure. The rules summarize §4.1 of the
+plan, with the result of the model of step 1. The plan keeps the details that this section
+does not repeat: the table of who writes each field of the chain, the order of an offload, and
+the open questions of its §8 (a new replica for the open segment, who asks for a roll and its
+fence, where the segment id lives, the reply owner, the garbage of the chain).
 
 - **R1. A segment is a range of slots and its replica set.** The replica set keeps the range
   after the acceptors drop it: replicas in the sense of Compartmentalized Paxos (§3.3), a
-  `ReplicaNode` each. A segment has an id, a start, an end once it is sealed, its replicas and a
+  `ReplicaNode` each. A node of the pool also runs the `Replica` role as a learner (D2); it is in
+  no replica set unless a `Roll` names it. A segment has an id, a start, an end once it is sealed, its replicas and a
   state: `Open`, `Sealed`, `Held`, `Offloaded`, `Trimmed`. The grid is not part of a segment: a
   grid belongs to a round (Matchmaker Paxos §4.2).
 - **R2. The cut is a command.** `Control::Roll { next, replicas }` is a control command of the
@@ -56,16 +60,18 @@ plan, with the result of the model of step 1.
 - **R4. Routing.** These rules keep a `Commit` away from the wrong replicas. Without them a
   `Commit` can go astray, and two ends still cannot exist.
   - **R4a. The pause.** A leader proposes nothing above a `Roll` of its own ballot until that
-    `Roll` is chosen at its ballot. **Open**: with R4d the model shows that the pause is not
-    needed for routing (`barrier_off_commit`, `barrier_off_full`); whether it stays is
-    Pierre's call, asked on 2026-11-25.
+    `Roll` is chosen at its ballot, a `Roll` that its Phase 1 recovered and proposes again too.
+    **Open**: with R4d the model shows that the pause is not needed for routing
+    (`barrier_off_commit`, `barrier_off_full`); whether it stays is Pierre's call, asked on
+    2026-11-25, and it is decided before step 3 builds the routing.
   - **R4b. A hole takes a `Noop`.** The election gap fill never writes a `Roll` into a hole. This
     is the rule of the core today. With R4d it is not needed for routing either
     (`hole_any_commit`), and it stays because the core has it.
   - **R4c. A new leader takes its tail segment from its own chosen prefix** and from the values
     that its Phase 1 recovered, in slot order, never from the chain alone: the chain is behind
     the log by up to one roll. The model needs it (`route_commit_base_chain`).
-  - **R4d. A `Commit` leaves on a known prefix.** A leader sends the `Commit` of slot `s` to the
+  - **R4d. A `Commit` leaves on a known prefix** (**Open**: proposed by the model of step 1;
+    Pierre decides it with R4a, before step 3). A leader sends the `Commit` of slot `s` to the
     replicas of a segment only once it knows that every slot below `s` is chosen. Its route is
     then a fold of a chosen prefix, so it is the true segment. Proposals still pipeline; only
     the `Commit` waits. This is R3 applied to the leader. It was found by the model of step 1:
@@ -78,7 +84,8 @@ plan, with the result of the model of step 1.
 - **R5. The chain is an add-only map at the matchmakers.** The matchmaker registry gets a map of
   segment records beside `history`. Each field that comes from the log (the start, the end, the
   replicas that the `Roll` named, the boundary state) is written once, and every writer writes
-  the same value, because each is a function of the chosen log. The state only grows. A read is
+  the same value, because each is a function of the chosen log. The state only grows
+  (`Open` < `Sealed` < `Held` < `Offloaded` < `Trimmed`). A read is
   a merge over a matchmaker quorum, and a handover carries the map by the same merge, as it
   carries `history` and the retirement records. There is no compare-and-set. Source: the
   registry of Matchmaker Paxos §3.2.
@@ -88,21 +95,27 @@ plan, with the result of the model of step 1.
   jump of the core. It stops at the end. It catches up from the acceptors while they hold the
   slots, and from a peer replica after. A read that reaches a sealed replica at or above its end
   is answered "sealed, the next segment is `k + 1`", and the reader fetches the chain again.
-  Source: Delos §3.1 (the "sealed" error and the refetch).
+  Source: Delos §3.2 (the "sealed" error and the refetch; in Delos it answers an append, here
+  a read too).
 - **R7. Held, and the floor.** A segment is `Held` when `F + 1` of its replicas hold every slot of
   it and its seal is in the chain. The compaction floor of an acceptor may then rise to the end
-  of that segment. The floor follows the chain, so it never passes an end that is not published.
+  of that segment. To an acceptor, a held segment is a `Truncate` whose records are kept
+  elsewhere: the floor stays inside the chosen prefix, a `Prepare` below the floor is refused,
+  and a laggard below the floor jumps with `TrimmedTo`. The floor follows the chain, so it never
+  passes an end that is not published.
   **Departure 2** (§4.7.4).
-- **R8. After the seal.** A heal replaces one replica of a sealed segment, by one `Decree` over
-  the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment
+- **R8. After the seal.** A heal replaces one replica of a sealed segment. The set can return to
+  an earlier value, so it is not add-only: each change is one `Decree` over the matchmaker set, numbered by the count of heals of the record. A trim marks a sealed segment
   whose records are all below the trim floor. Source: Delos `reconfigModify`.
 - **R9. The grid does not change here.** A grid change is `ColocatedNode::reconfigure`, a round
-  change, as today. It cuts no segment.
+  change, as today. It cuts no segment. What the removed journal called a reshape is two calls:
+  `reconfigure(config)` and `roll(replicas)`.
 - **R10. Opt-in.** With no matchmakers a `roll` is refused (D5), no `Roll` is ever chosen, and no
   new message, `HardState` field or round trip enters the plain path. The bootstrap `Config`
   names the replicas of the first segment; with none, the deployment has no segments.
 - **R11. One segment is a valid deployment.** A deployment that never calls `roll` stays at one
-  open segment for ever, and behaves as the matchmaker deployment of today.
+  open segment for ever, and behaves as the matchmaker deployment of today. What one segment
+  cannot do: move the log off the acceptors, which needs a sealed segment, and so a roll.
 - **R12. Offload to an object store is prepared, not built.** A sealed segment has a fixed range
   and fixed content, so one object can hold it, with the state `Offloaded` in the chain. The
   object store is I/O and stays out of `paros-consensus`. Source: Delos (the BackupLoglet).
@@ -115,7 +128,7 @@ ballot, and with R4d its route is a fold of the chosen prefix that it learns
 
 | # | Rule | What no paper has | Check |
 |---|---|---|---|
-| 1 | R2, the `Roll` | A command that ends a range of learners. Its nearest source is Paxos Made Simple §3 (a reconfiguration is a command of the state machine). Stoppable Paxos also decides the end in the log, but it stops the instance; the `Roll` stops nothing | `specs/tla/segment-roll/` (`safety_small`, `safety`, `safety_bare`; controls `act_vote` and the `reach_*` checks) |
+| 1 | R2, the `Roll` | A command that ends a range of learners. Its nearest source is Paxos Made Simple §3 (a reconfiguration is a command of the state machine). Stoppable Paxos also decides the end in the log, but it stops the instance; the `Roll` stops nothing | `specs/tla/segment-roll/` (`safety_small`, `safety`, `safety_bare`; the control `act_vote`; the `reach_*` checks show that the cases are reached) |
 | 2 | R7, the floor at `Held` | Scenario 3 of Matchmaker Paxos §3.5 and §4.5 (the chosen prefix on `f + 1` replicas), used for the compaction floor. `node/gc.rs` declines Scenario 3 today. The GC watermark rule does not change | to write in step 6 (`truncation/`, `truncation-reconfig/`) |
 
 R4d is not a departure: it changes no vote and no choice. It says when a learner message leaves,

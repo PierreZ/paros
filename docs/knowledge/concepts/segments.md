@@ -104,11 +104,12 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
 
 - The `Roll` is a new command (departure 1). [PMS §3] decides a configuration through the state
   machine, with a window of `α` commands; Matchmaker Paxos calls this horizontal
-  reconfiguration and drops it because `α` is hard to tune ([MMP], "vs. Horizontal
+  reconfiguration and lists `α` as hard to tune, among other drawbacks ([MMP], "vs. Horizontal
   MultiPaxos"). The `Roll` changes the learners of a range, not the acceptors, so it needs no
   `α`: a `Roll` at `s` ends its segment at `s + 1`.
 - [Stoppable] decides the end in the log too, but it stops the instance: after a stop at `i`, a
-  leader sends nothing above `i`, and a stop with a value above it is voided ([Stoppable §3]).
+  leader sends nothing above `i`, and a new leader voids a stop at `i` when an instance above `i`
+  has a vote at a ballot at least as high as the stop's ([Stoppable §3], `sval2a`).
   The `Roll` stops nothing: the same log goes on. The pause of R4a is the rule of [Stoppable §3]
   for one ballot; with R4d the model shows that routing does not need it (§4.7.3, **Open**).
 - The floor at `Held` (R7) uses Scenario 3 of Matchmaker Paxos for the compaction floor
@@ -140,7 +141,7 @@ Divergences from the sources (each a departure of §4.7.4, with its check):
 - [MMP] *Matchmaker Paxos*: `docs/references/papers/matchmaker-paxos/transcript.md` §3.2 (the
   registry), §4.2 (a configuration belongs to a round), "vs. Horizontal MultiPaxos" (`α`).
 - [Delos] *Virtual Consensus in Delos*: `docs/references/papers/delos-virtual-consensus/transcript.md`
-  §3.1 (the chain, the "sealed" error), §3.2 (seal, install, refetch).
+  §3.1 (the chain), §3.2 (seal, install, refetch, the "sealed" error).
 - [Stoppable] *Stoppable Paxos*: `docs/references/papers/stoppable-paxos/transcript.md` §3 (no
   2a above a stop, voiding).
 - [SRSM] *Scaling Replicated State Machines with Compartmentalization*:
