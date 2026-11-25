@@ -3,13 +3,15 @@
 You work in the repository `PierreZ/paros`. This prompt is from Pierre. It was written in a
 design session on 2026-11-24, against commit `a2ab2eb`.
 
-**Do two things, in this order, and nothing else.**
+**Do three things, in this order, and nothing else.**
 
 1. **Remove the journal work** (step 0 of section 6).
-2. **Add segments to `paros-consensus`**, with the `Roll` cut (steps 1 to 8 of section 6).
+2. **Add segments to `paros-consensus`**, with the `Roll` cut (steps 1 to 7 of section 6).
+3. **Make the acceptors pure voters** (#1271 (pure voters), step 8 of section 6): a chosen
+   write goes to the replica set of its segment only.
 
-**Do not** build a new journal, a new crate above the core, an adapter for storage or for the
-network, or acceptors that only vote. Section 7 lists what comes later; start none of it.
+**Do not** build a new journal, a new crate above the core, or an adapter for storage or for the
+network. Section 7 says why; a new plan comes after this work.
 
 **Status of the design.** Nothing in it is built. Nothing in it is model-checked: TLC did not
 run in the design session. Each result in step 1 is a prediction, and step 1 checks it. If a
@@ -65,9 +67,9 @@ dropped and nothing builds it (a `Commit` leaves on a known chosen prefix, R4d);
 | D3 | The matchmakers store the chain like the paper: an add-only map, merged like `history`. A change of a replica set (a heal) is one `Decree` | Pierre, 2026-11-24 |
 | D4 | The replicas of a segment are `NodeId`s that the `Roll` names | Proposed in the session; Pierre did not object. Confirm in step 2 |
 | D5 | A `roll` on a deployment with no matchmakers is refused, as `reconfigure` is (`ReconfigureRefusal::NoMatchmakers`) | Proposed in the session; Pierre did not object. Confirm in step 2 |
-| D2 | Acceptors stay learners in this plan: a chosen write still goes to every acceptor and to the replica set of its segment. "Acceptors only vote" (#1271) is a later piece of work | Pierre, 2026-11-24 ("Keep") |
-| D6 | The journal crates, their walks, their docs and their TLA+ models are removed. The journal is built again later, from scratch, on the core with segments | Pierre, 2026-11-24 |
-| D7 | The layering above the core (the journal as the final crate, the roles of the core on `paros-host`, storage and network as adapters) comes after this work | Pierre, 2026-11-24 ("we will do the rest later") |
+| D2 | Acceptors stay learners until step 8: a chosen write goes to every acceptor and to the replica set of its segment. Step 8 makes the acceptors pure voters (#1271 (pure voters)): a write then goes to the replica set of its segment only | Pierre, 2026-11-24 ("Keep"); changed 2026-11-25: pure voters are part of this work ("keep only 1271", "Later as now as part of the consensus work") |
+| D6 | The journal crates, their walks, their docs and their TLA+ models are removed. A journal above the core is for a later plan (D7) | Pierre, 2026-11-24; changed 2026-11-25 (D7) |
+| D7 | The layering above the core and the journal built again on the core are dropped from this plan; a new plan comes afterwards. `paros-host` is removed with its two models | Pierre, 2026-11-24 ("we will do the rest later"); changed 2026-11-25 ("keep only 1271, and drop the layering and the new journal", "Remove Paros host too") |
 
 Pierre's rule of 2026-11-24 applies: the agreement on each slot follows the papers, a rule that
 no paper has is a departure with its TLA+ check, and a change that removes a departure is
@@ -314,8 +316,9 @@ lines in `scripts/tla-minutes.txt` and `scripts/mutate-tla-shards.txt`:
 `cas-register`, `compartments`, `config-register`, `decree`, `generations`, `grid`, `handover`,
 `handover-chain`, `handover-gc`, `handover-scalars`, `leader-handoff`, `matchmaker`,
 `multi-paxos`, `node`, `proxy-leader`, `read-replica`, `reads`, `reads-rows4`, `retire-fence`,
-`truncation`, `truncation-reconfig`, `zero-stall`, `experiments/stale-stopped`. Keep also
-`flight-rule` and `recorded-inputs`: they are the models of `paros-host`.
+`truncation`, `truncation-reconfig`, `zero-stall`, `experiments/stale-stopped`. The models of
+`paros-host`, `flight-rule` and `recorded-inputs`, were kept at step 0 and removed with
+`paros-host` on 2026-11-25 (D7).
 
 **Pierre decides** (default: keep). Three models are about the service of
 `docs/architecture/`, not about a journal crate: `cell-control`, `journal-ids`, `takeover`.
@@ -354,8 +357,7 @@ says "to be designed again" and keeps no dead link), `docs/references/CLAUDE.md`
 - `crates/lib/paros-consensus/src/journal/`. It is not the journal crate: it is what the log of
   the core carries (`Command`, `Entry`, `JournalState`). The example `journal_calls.rs` and
   `JournalIdentifier` stay too.
-- `crates/lib/paros-host`. It knows no journal (layer 0), and later the roles of the core run
-  on it (section 7). Its mutants file and its two models stay with it.
+- (`crates/lib/paros-host` stayed at step 0; it was removed on 2026-11-25, D7.)
 - `consensus-sim`, `paros-authz-biscuit`, `docs/references/`, `docs/archive/`, `docs/analysis/`.
 
 **Done when** every gate of `AGENTS.md` is green on what is left: the build, the tests, clippy,
@@ -462,8 +464,8 @@ guard that the mutation needed.
 
 Write the rules of section 4.1 into the docs before any code: where the segments of the core
 live in `docs/architecture/` (§4), a knowledge card for segments in the core, and the list of
-departures (two: R2, R7). Confirm D4 and D5. Record D2 (acceptors stay learners; pure voters
-later) and D6.
+departures (two: R2, R7). Confirm D4 and D5. Record D2 (acceptors stay learners until step 8,
+pure voters) and D6.
 
 ### Step 3. The cut
 
@@ -491,8 +493,9 @@ The pause of this step is dropped (R4a, Pierre 2026-11-25; see the note of secti
 
 - Model: extend `compartments/` and `reads/`: a replica that starts from the boundary state, a
   read across a roll with an old chain.
-- Code: `replica_node.rs` as a replica of one segment, `Audience::ReplicasOf`, the proxy's
-  `Commit`, catch-up between replicas, the "sealed" answer.
+- Code: `replica_node.rs` as a replica of one segment, `Audience::ReplicasOf` (a `Commit` goes
+  to the learners and to the replicas of its segment), the proxy's `Commit`, catch-up between
+  replicas, the "sealed" answer.
 
 ### Step 6. Held, and the floor
 
@@ -509,14 +512,44 @@ The heal of a replica set by a `Decree`, and the trim. The removed journal found
 the copy (`re-replication/` and `heal-reuse/`, at the tag of step 0). Read them, then model the
 heal again on the `Decree`.
 
-### Step 8. Surface
+### Step 8. Acceptors that only vote (#1271 (pure voters))
+
+Added by Pierre on 2026-11-25 ("keep only 1271", "Later as now as part of the consensus work").
+It comes after the seal because it needs the whole life of a replica set: the replicas of a
+segment (step 5), `Held` and the floor (step 6), and the heal (step 7). Until this step every
+acceptor is a learner (D2).
+
+- Model: a `Commit` reaches the replica set of its segment only, and an acceptor keeps its votes
+  and no chosen prefix. Derive each of the seven couplings of the module doc of
+  `replica_node.rs` again, with a check and a control for each one that stays: what an acceptor
+  needs of the chosen prefix (the authoritative record, the floor inside the chosen prefix, the
+  repair probe and the recovery that skip chosen slots, and the others), and where it now gets
+  it (the replicas, the held floor of step 6). The GC rule of `node/gc.rs` counts the replicas:
+  a configuration is forgotten once the replicas hold the prefix up to the fence. Extend
+  `truncation-reconfig/` and `compartments/`. Controls: an acceptor that drops a vote that no
+  replica holds; a GC that counts the acceptors only.
+- The read of the chosen prefix: with pure voters, the acceptors no longer know which slots are
+  chosen. A new leader learns the chosen prefix from the replicas (a quorum of replicas whose
+  read intersects every set of replicas that holds a write) before it proposes in a slot below
+  its frontier, and the repair probe and the recovery skip those slots. An acceptor's floor
+  moves only with the held floor of step 6. Controls: a leader that proposes before it read
+  the replicas; a write held by fewer replicas than the read needs to meet it.
+- Code: a `Commit` on a deployment with segments goes to `Audience::ReplicasOf` only, no longer
+  to `Audience::Learners`; the acceptor role without a chosen prefix (the plain arm keeps its
+  learners, R10); the GC tally of `collector.rs` over the replicas.
+- Judge: a walk with pure voters, an oracle that a chosen write is on `F + 1` replicas before
+  any acceptor drops it, a mutant that routes a `Commit` to the acceptors only, and the trace
+  check.
+
+### Step 9. Surface
 
 A twelfth example `segments.rs`, its rows in the two READMEs and in `src/lib.rs`, its CI step,
 the knowledge card, the site page.
 
-### Step 9. The website
+### Step 10. The website
 
-Added by Pierre on 2026-11-25 ("add a step 9 to do the website like we did yesterday"). Done
+Added by Pierre on 2026-11-25 ("add a step 9 to do the website like we did yesterday"; it was
+step 9 before step 8 was added, and it stays the last step). Done
 as the guided Paxos tour of 2026-11-24 (`/paxos/tour/`, the plan
 `/mnt/project-files/plans/paxos-guided-tour-2026-11-24.md`): the chapter of the tour on
 matchmakers and segments, which waited for segments, with its guided exercises on the wasm
@@ -524,45 +557,18 @@ engine, and the pages of the site that segments change (`update-the-site` skill)
 
 ## 7. Later, not in this work
 
-Start none of this. It is here so that this work leaves room for it.
+Pierre, 2026-11-25: the new journal and the layering above the core are dropped from this plan,
+and `paros-host` is removed (D7). A new plan comes after this work. Start none of it.
 
-**The journal, from scratch.** `paros-journal` comes back as the final crate, the one a program
-uses. It composes the deployments of the core and writes no consensus of its own: no second
-matchmaker, no second leader, no second replica.
-
-**The layering** (direction of the session of 2026-11-24, to confirm when that work starts):
-
-- `paros-consensus` stays sans-IO: it says what to persist and what to send.
-- `paros-host` holds the contract of a role, the generic driver, and the IO traits (`Storage`,
-  `Transport`, `Clock`, `Entropy`). Storage and network hook in there as traits.
-- A new crate runs the roles of the core on the host: addresses, the message envelope, the disk
-  layout, recovery, timers, backends in memory. It is the successor of what `paros-journal-io`
-  did for the removed roles.
-- The real disk and the real network are an adapter crate at the edge (for example on
-  moonpool), which the program plugs in. No pure crate does I/O.
-- The core speaks `Ready` and `advance`; the host speaks the flight rule. The first bridge wraps
-  the core, with one batch in flight for each role. The move of the core to the flight rule
-  (the proposal of §J4.2 of the removed docs) can come after.
-- One fold, in the core (`journal/state.rs`). The removed journal had a second one (a
-  multi-writer mode with its tag, the answer `Below`, record headers, `Resolve`); what the new
-  journal needs of it goes into the fold of the core. This reverses the decision of 2026-11-20.
-
-**Acceptors that only vote** (#1271). See section 8.
-
-What the removed journal had that is not consensus, as a reference at the tag of step 0: the
-data-plane rules (`docs/journal/02-data-plane.md`), the client, the codec and the on-disk
+What the removed journal had that is not consensus stays at the tag of step 0, as a reference:
+the data-plane rules (`docs/journal/02-data-plane.md`), the client, the codec and the on-disk
 layout, the controller's policy (placement, health, the zone rule), and the coordination store
 (`paros-election`).
 
 ## 8. Open
 
-- **Pure voters, later** (D2 is decided: acceptors stay learners in this plan). Today a `Commit`
-  goes to `Audience::Learners`, the whole pool, with the command, so each acceptor receives and
-  folds each write. Seven couplings in the module doc of `replica_node.rs` rest on this, and so
-  does the GC rule of `node/gc.rs`. With pure voters, a write reaches only the replica set of
-  its segment (#1271). Replica sets, `Held` and the floor are what pure voters need, so this
-  plan prepares that work and does not do it. When it comes, each of the seven couplings is
-  derived again with its model, and the GC rule must count the replicas.
+- **Pure voters** are step 8 now (D2, changed on 2026-11-25). The seven couplings of the module
+  doc of `replica_node.rs` and the GC rule of `node/gc.rs` are derived again there.
 - **A new replica for the open segment.** In this plan a change of the replica set of the open
   segment is a roll. With acceptors as learners (D2), a replica of the open segment could also
   join with no cut and catch up from the acceptors, as a `ReplicaNode` does today. Not chosen.
