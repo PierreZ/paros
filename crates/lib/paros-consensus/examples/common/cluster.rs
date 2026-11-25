@@ -155,10 +155,11 @@ impl Cluster {
         cluster
     }
 
-    /// The same cluster with one replica for each id, each on an empty
-    /// disk. A replica has the configuration of the deployment under its
-    /// own id, and the id is outside the pool of the nodes.
-    pub fn with_replicas(mut self, ids: impl IntoIterator<Item = NodeId>) -> Self {
+    /// Start one replica for each id, each on an empty disk, at any time. A
+    /// replica has the configuration of the deployment under its own id, and
+    /// the id is outside the pool of the nodes. A replica that starts late
+    /// learns the log from the beat of the leader.
+    pub fn add_replicas(&mut self, ids: impl IntoIterator<Item = NodeId>) {
         for id in ids {
             let config = Config {
                 id,
@@ -166,10 +167,9 @@ impl Cluster {
             };
             let disk = MemStorage::new(config);
             let replica = ReplicaNode::new(&disk, Limits::DEFAULT);
-            self.disks.insert(id, disk);
+            assert!(self.disks.insert(id, disk).is_none(), "a new process id");
             self.replicas.insert(id, replica);
         }
-        self
     }
 
     /// The running node `id`.

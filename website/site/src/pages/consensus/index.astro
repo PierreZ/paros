@@ -10,14 +10,14 @@ const ex = (name: string) => `${SRC}/examples/${name}.rs`;
 
 const FLAVORS = [
   { flavor: "Single-decree Paxos", types: ["decree::Decree"], page: "single-decree", examples: ["single_decree"] },
-  { flavor: "Multi-Paxos", types: ["ColocatedNode"], page: "multi-paxos", examples: ["multi_paxos", "quickstart", "journal_calls"] },
-  { flavor: "Leader handoff", types: ["ColocatedNode::relinquish_to"], page: "multi-paxos", examples: ["leader_handoff"] },
-  { flavor: "Matchmaker Paxos", types: ["Matchmaker", "MatchmakerReconfigurer"], page: "matchmaker", examples: ["matchmaker", "reconfiguration"] },
-  { flavor: "Proxy leaders", types: ["ProxyLeader"], page: "compartmentalized", examples: ["proxy_leader"] },
+  { flavor: "Multi-Paxos", types: ["ColocatedNode"], page: "multi-paxos", examples: ["grow"], stages: "stages 1, 2" },
+  { flavor: "Leader handoff", types: ["ColocatedNode::relinquish_to"], page: "multi-paxos", examples: ["grow"], stages: "stage 7" },
+  { flavor: "Matchmaker Paxos", types: ["Matchmaker", "MatchmakerReconfigurer"], page: "matchmaker", examples: ["grow"], stages: "stages 3 to 6, 8, 9" },
+  { flavor: "Proxy leaders", types: ["ProxyLeader"], page: "compartmentalized", examples: ["grow"], stages: "stage 5" },
   { flavor: "Batchers", types: ["batcher::Batcher", "batcher::Unbatcher"], page: "compartmentalized", examples: [] },
-  { flavor: "Replicas", types: ["ReplicaNode"], page: "compartmentalized", examples: ["replica_tier"] },
-  { flavor: "Leaderless reads", types: ["quorum_read::QuorumReads"], page: "compartmentalized", examples: ["quorum_read"] },
-  { flavor: "Grid quorums", types: ["membership::QuorumSystem"], page: "quorums", examples: ["acceptor_grid"] },
+  { flavor: "Replicas", types: ["ReplicaNode"], page: "compartmentalized", examples: ["grow"], stages: "stage 5" },
+  { flavor: "Leaderless reads", types: ["quorum_read::QuorumReads"], page: "compartmentalized", examples: ["grow"], stages: "stage 4" },
+  { flavor: "Grid quorums", types: ["membership::QuorumSystem"], page: "quorums", examples: ["grow"], stages: "stage 4" },
 ];
 const PAGE_NAMES: Record<string, string> = {
   "single-decree": "Single decree", "multi-paxos": "Multi-Paxos", "matchmaker": "Matchmaker",
@@ -50,7 +50,7 @@ const PAGE_NAMES: Record<string, string> = {
 
   <h2 id="flavors">Each flavor, and where it is</h2>
   <p>Each row is a flavor that a <a href={url("paxos/")}>Paxos page</a> teaches, the type that
-  builds it, and an example that runs it. Run an example with
+  builds it, and the example that runs it. Run an example with
   <code>cargo run -p paros-consensus --example &lt;name&gt;</code>: each prints a trace and asserts
   the property that it shows.</p>
     <table>
@@ -61,7 +61,7 @@ const PAGE_NAMES: Record<string, string> = {
             <td>{f.flavor}</td>
             <td>{f.types.map((t, i) => <>{i > 0 && ", "}<code>{t}</code></>)}</td>
             <td><a href={url(`paxos/${f.page}/`)}>{PAGE_NAMES[f.page]}</a></td>
-            <td>{f.examples.length ? f.examples.map((e, i) => <>{i > 0 && ", "}<a href={ex(e)}><code>{e}</code></a></>) : "none yet"}</td>
+            <td>{f.examples.length ? f.examples.map((e, i) => <>{i > 0 && ", "}<a href={ex(e)}><code>{e}</code></a></>) : "none yet"}{f.stages && `, ${f.stages}`}</td>
           </tr>
         ))}
       </tbody>

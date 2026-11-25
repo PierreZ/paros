@@ -108,19 +108,20 @@ driver draws a new timeout per election.
 ## Developer experience
 
 A new user reads `README.md`, then the crate root's rustdoc (`src/lib.rs`: a quick start that
-is a doc test), then `examples/quickstart.rs`. Keep the three in step with the API.
+is a doc test), then `examples/grow.rs`. Keep the three in step with the API.
 
-- Examples: `examples/single_decree.rs` runs single-decree Paxos on `Decree` and `Acceptor`.
-  Each of the eleven others drives the deployments as a driver does, on the toy cluster. Each
-  example asserts the property that it shows, and no example builds a node from the roles by
-  hand: a reader copies what an example does. A decree has no deployment, so `single_decree`
-  gives each `Acceptor` its disk itself. A new example gets a step in the CI `checks`
-  job, a row in `README.md` and in the table of `src/lib.rs`, and an item in the root
-  `README.md`.
+- Examples (Pierre, 2026-11-25: one example that grows the whole system): `examples/single_decree.rs`
+  runs single-decree Paxos on `Decree` and `Acceptor`; a decree has no deployment, so it gives
+  each `Acceptor` its disk itself. `examples/grow.rs` is the one tour of the deployments: one
+  journal grows from three nodes to the whole deployment by reconfiguration, one stage per
+  function, on the toy cluster. A new flavor or driver call gets a stage there, not a new
+  example. Each claim of a trace is an assertion, and no example builds a node from the roles
+  by hand: a reader copies what an example does. A change of the stages updates the step
+  list in `README.md`, the root `README.md` and the table of `src/lib.rs`.
 - `examples/common/cluster.rs` → `Cluster`, the toy cluster: the nodes with one `MemStorage`
   each, and from the `Config` the `Matchmaker`s (a `MemRegistry` each) and the `ProxyLeader`s;
-  `with_replicas` adds `ReplicaNode`s. The wire can lose a message (`settle_where`) or hold it
-  in flight (`settle_holding`). `Cluster::pump` is the reference driver loop (persist, send,
+  `add_replicas` starts `ReplicaNode`s at any time, and `restart_proxy` a `ProxyLeader`. The
+  wire can lose a message (`settle_where`) or hold it in flight (`settle_holding`). `Cluster::pump` is the reference driver loop (persist, send,
   learn, advance). A new example that drives a deployment uses it and does not write a
   network of its own.
 - The small helpers of a driver, each with a doc example: `Ready::is_empty` (and the same on
@@ -161,7 +162,7 @@ is a doc test), then `examples/quickstart.rs`. Keep the three in step with the A
 - Model-checker env vars (the only ones this crate reads): `HANDOVER_MODEL_SEEDS`,
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` (`models/support.rs`, `env_or`).
-- `cargo run -p paros-consensus --example <name>` for each of the twelve examples, and
+- `cargo run -p paros-consensus --example <name>` for each of the two examples, and
   `cargo test --doc -p paros-consensus` for the doc examples (CI `checks` job).
 - `cargo check --target wasm32-unknown-unknown -p paros-consensus` with and without
   `--no-default-features`; `cargo check -p paros-consensus --features serde` (CI `portability`).

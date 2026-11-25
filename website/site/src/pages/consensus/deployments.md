@@ -53,9 +53,7 @@ the journal in slot order.
 With no matchmakers in its `Config`, the node runs plain Multi-Paxos on a fixed membership: it
 steps no matchmaker message, writes no matchmaker state and refuses `reconfigure`. A leader can
 hand its ballot to a successor with no election (`relinquish_to`). Example:
-[`quickstart`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/quickstart.rs),
-[`journal_calls`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/journal_calls.rs),
-[`leader_handoff`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/leader_handoff.rs).
+[`grow`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/grow.rs), stages 1, 2 and 7.
 Flavor: [Multi-Paxos](../../paxos/multi-paxos/).
 
 ## ProxyLeader
@@ -82,7 +80,7 @@ learners.
 A proxy votes on nothing and orders nothing, so moving it cannot break agreement. It keeps
 nothing durable: after a crash it boots empty, and the leader sends the rounds again. Its driver
 calls `tick` each beat. Example:
-[`proxy_leader`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/proxy_leader.rs).
+[`grow`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/grow.rs), stage 5.
 Flavor: [Compartmentalized Paxos](../../paxos/compartmentalized/).
 
 ## ReplicaNode
@@ -109,8 +107,7 @@ larger; a new replica only adds read capacity.
 A replica serves a read from its own chosen prefix (`read_log`), or runs a leaderless read
 against a row of acceptors (`quorum_read_in`). A replica that lags asks for the slots it lacks.
 Example:
-[`replica_tier`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/replica_tier.rs),
-[`quorum_read`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/quorum_read.rs).
+[`grow`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/grow.rs), stages 4 (a read through a row) and 5.
 Flavor: [Compartmentalized Paxos](../../paxos/compartmentalized/).
 
 ## Matchmaker and MatchmakerReconfigurer
@@ -140,8 +137,7 @@ gives the answers back with `on_match_reply` and `on_gc_ack`. The matchmaker set
 new generation with `MatchmakerReconfigurer`: it stops the old set, starts the new one, and
 chooses it with a single decree (`Decree`) over the old set. Matchmaker quorums are majorities.
 Example:
-[`reconfiguration`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/reconfiguration.rs),
-[`matchmaker`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/matchmaker.rs).
+[`grow`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/examples/grow.rs), stages 3 to 6 and 9.
 Flavor: [Matchmaker Paxos](../../paxos/matchmaker/).
 
 ## In paros
