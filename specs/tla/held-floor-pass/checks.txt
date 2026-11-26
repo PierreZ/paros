@@ -8,6 +8,3 @@
 #             long       only `scripts/check-tla.sh --all` runs it
 held               pass       ci
 held_loss          pass       ci
-held_ever          pass       ci
-held_ever_down     violation  ci
-reach_held_stale   violation  ci

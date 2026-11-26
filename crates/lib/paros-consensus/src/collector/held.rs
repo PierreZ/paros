@@ -12,7 +12,7 @@
 //! publish). `Held` only grows, and a report counts forever: a replica that
 //! reported a segment held it durably, and at most `F` replicas are down at
 //! one time, a replica being down from a lost disk until it copies the
-//! segment again (`held_ever` of `specs/tla/held-floor-pass/`, `MarkHeld` of
+//! segment again (`held_ever` of `specs/tla/held-floor-retry/`, `MarkHeld` of
 //! `specs/tla/held-floor/HeldFloor.tla`).
 //!
 //! What it does not know: who leads, or whether the chain holds the end. The

@@ -2849,9 +2849,9 @@ replica holds only chosen slots of its own segments).
 | `floor_any` | ci | violation of `FloorTruncatedOrHeld`: segment 2 is held and segment 1 is not; the floor rises to the end of segment 2 over slot 0 |
 | `held` (in `held-floor-pass/`) | ci | pass: every invariant, two ballots of one leader, `a2` catches up and jumps, `F = 0` and one replica (2.4 million states, 10 minutes with 4 workers) |
 | `held_loss` (in `held-floor-pass/`) | ci | pass: every invariant, `F = 1` with two replicas and one lost disk, one ballot (14 thousand) |
-| `held_ever` (in `held-floor-pass/`) | ci | pass: every invariant, with the tally of the code: a replica counts once it held the whole segment, before or after the publish, and is never forgotten (`Count = "ever"`); three replicas, `F = 1`, and at most `F` replicas down at one time (`Losses = "at_once"`: a replica is down from the loss of a segment it held until it holds it again) (22 thousand distinct states) |
-| `held_ever_down` (in `held-floor-pass/`) | ci | violation of `RecordKept`: `held_ever` with `F + 1` replicas down at one time (`Losses = "at_once_f1"`) |
-| `reach_held_stale` (in `held-floor-pass/`) | ci | violation of the action property `NoStaleMark`: the constants of `held_ever`; the leader marks the segment `Held` on the report of a replica that lost its disk since, while fewer than `F + 1` replicas hold it |
+| `held_ever` (in `held-floor-retry/`) | ci | pass: every invariant, with the tally of the code: a replica counts once it held the whole segment, before or after the publish, and is never forgotten (`Count = "ever"`); three replicas, `F = 1`, and at most `F` replicas down at one time (`Losses = "at_once"`: a replica is down from the loss of a segment it held until it holds it again) (22 thousand distinct states) |
+| `held_ever_down` (in `held-floor-retry/`) | ci | violation of `RecordKept`: `held_ever` with `F + 1` replicas down at one time (`Losses = "at_once_f1"`) |
+| `reach_held_stale` (in `held-floor-retry/`) | ci | violation of the action property `NoStaleMark`: the constants of `held_ever`; the leader marks the segment `Held` on the report of a replica that lost its disk since, while fewer than `F + 1` replicas hold it |
 | `floor_prefix` | ci | pass: every invariant, two `Roll`s, one ballot (0.21 million) |
 | `hold_decided` (in `held-floor-hold/`) | ci | pass: every invariant, with `OneAnswer` (every node gives one answer to a retry at one slot) and `DupHasRecord` (a "dup" answer has the record of the write); the decided `Hold` at slot 2, `a1` and `a2` judge (`HoldPlan`; 0.30 million states, 8 minutes with 4 workers) |
 | `hold_retry` (in `held-floor-retry/`) | ci | pass: `hold_decided` with four slots and a retry of `c1` at slot 2, between the end of segment 1 and the `Hold` at slot 3 (`RetryPlan`), and `RetryKept` (the floor of each acceptor is closed); no judge. The retry reads slot 0, so the drop keeps every slot and the floor stays at 0 (88 thousand states) |
@@ -2874,9 +2874,10 @@ replica holds only chosen slots of its own segments).
 | `full` | long | pass: three owners, `F = 1`, two replicas and a lost disk |
 | `three_slots` | long | pass: a command in segment 2 (`CmdPlan3`), so slot 2 is above the held floor while it rises |
 
-`held-floor-pass/` links `HeldFloor.tla`, `MC.tla` and `Truncation.tla` and runs `held`,
-`held_loss`, `held_ever`, `held_ever_down` and `reach_held_stale`; `held-floor-hold/` and `held-floor-retry/` link the same files and run the passes of
-the decided `Hold` and of the retries, so that each of the four jobs stays inside its minutes.
+`held-floor-pass/` links `HeldFloor.tla`, `MC.tla` and `Truncation.tla` and runs `held` and
+`held_loss`; `held-floor-hold/` and `held-floor-retry/` link the same files and run the passes of
+the decided `Hold` and of the retries (`held-floor-retry/` also the tally that never forgets a
+report), so that each of the four jobs stays inside its minutes.
 The guard mutation of `HeldFloor.tla` runs the checks of the four folders.
 
 What is not in the model: the chain at a matchmaker quorum (one variable here; step 4), the
