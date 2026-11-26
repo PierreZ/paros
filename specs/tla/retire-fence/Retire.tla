@@ -531,6 +531,20 @@ RetiredBlocked(b) ==
 \* leader can then campaign again (`Busy` holds only an open campaign).
 NoRetiredLivelock == \A b \in Ballots : []<>(~ RetiredBlocked(b))
 
+\* Not a real invariant. With OperatorRule FALSE (two journal controllers,
+\* #1564 (journal controller, version 1)), TLC must find a trace where a
+\* node is retired while a reconfiguration above every matchmaker's floor
+\* names it: one controller retired the node, and the other ordered a
+\* configuration that names it. With OperatorRule TRUE it holds (the
+\* contrast check two_controllers_operator): the operator's half keeps
+\* exactly this out, so the control needs the second controller. A
+\* reconfiguration at or below a floor is not counted: the operator's half
+\* (the guard of Retire, b > w) covers only ballots above the floor.
+NoRetiredNamed ==
+    \A b \in Ballots :
+        (status[b] = "matching" /\ kind[b] = Reconf /\ \A m \in Matchmakers : b > wm[m])
+            => cfgOf[b] \cap retired = {}
+
 \* Not a real invariant. TLC must find a trace where a node retires: this
 \* shows that the model reaches a retirement.
 NoRetirement == retired = {}

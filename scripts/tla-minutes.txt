@@ -41,7 +41,7 @@ proxy-leader 2
 read-replica 1
 reads 22
 reads-rows4 9
-retire-fence 16
+retire-fence 18
 segment-roll 7.5
 takeover 6.5
 truncation 7.5

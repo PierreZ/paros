@@ -60,11 +60,12 @@ stays valid: find its file in the section map.
 13. [04-5-old-duties.md](04-5-old-duties.md): §4.5 The duty table of the old coordinator and machine
 14. [04-6-parity.md](04-6-parity.md): §4.6 The features of the tag and their home
 15. [04-7-segments.md](04-7-segments.md): §4.7 Segments in the core
-16. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones; §5.1 Journal health (a link)
-17. [06-verification.md](06-verification.md): §6 Verification
-18. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
-19. [10-sources.md](10-sources.md): §10 Sources
-20. [11-alternatives.md](11-alternatives.md): §11 Alternatives considered
+16. [04-8-journal-controller.md](04-8-journal-controller.md): §4.8 The journal controller, version 1
+17. [05-failure-model-and-zones.md](05-failure-model-and-zones.md): §5 Failure model and zones; §5.1 Journal health (a link)
+18. [06-verification.md](06-verification.md): §6 Verification
+19. [07-changes-milestones-done.md](07-changes-milestones-done.md): §7 The rework: phases and steps; §8 Milestones; §9 The toy, done means
+20. [10-sources.md](10-sources.md): §10 Sources
+21. [11-alternatives.md](11-alternatives.md): §11 Alternatives considered
 
 ## Section map
 
@@ -109,6 +110,7 @@ stays valid: find its file in the section map.
 | §4.5 | The duty table of the old coordinator and machine | [04-5-old-duties.md](04-5-old-duties.md) |
 | §4.6 | The features of the tag and their home | [04-6-parity.md](04-6-parity.md) |
 | §4.7 | Segments in the core | [04-7-segments.md](04-7-segments.md) |
+| §4.8 | The journal controller, version 1 | [04-8-journal-controller.md](04-8-journal-controller.md) |
 | §5 | Failure model and zones | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §5.1 | Journal health (moved to journal §J6.2) | [05-failure-model-and-zones.md](05-failure-model-and-zones.md) |
 | §6 | Verification | [06-verification.md](06-verification.md) |

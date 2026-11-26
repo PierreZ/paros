@@ -498,6 +498,31 @@ other campaign. With the rule, the campaign ends, and `Electable` still holds: a
 campaign only leaves its registrations where they are, as a slow campaign does. A node that
 rejoins while it runs keeps `Electable` and `Nameable` too.
 
+Two journal controllers (added on 2026-11-26 for open point 1 of #1564 (journal controller,
+version 1), `docs/architecture/04-8-journal-controller.md` §4.8.1). Two controllers with views of
+different ages can give two orders at once: one retires a node, and the other orders a
+reconfiguration that names it. No single party then keeps the operator's half of the contract,
+so these checks set `OperatorRule = FALSE`, with `allTomb`, the abandon of #1065, two
+matchmakers, three ballots and no restart. The runs are from 2026-11-26, with 4 workers.
+
+| Check | `Abandon` | Spec | Invariant or property | Result |
+|---|---|---|---|---|
+| `two_controllers_reach` | `TRUE` | `Spec` | `NoRetiredNamed`: no reconfiguration above every floor names a retired node | violation in 18 s: one controller retires `n2` while the reconfiguration of the other names it |
+| `two_controllers_operator` | `TRUE` | `Spec` | `NoRetiredNamed`, with `OperatorRule = TRUE` (the contrast) | pass (`long`, 8.5 million states, 11 min) |
+| `two_controllers` | `TRUE` | `Spec` | `Electable` | pass (`long`, 8.5 million states, 9 min) |
+| `two_controllers_livelock` | `FALSE` | `LiveSpec` | `NoRetiredLivelock` | violation |
+| `two_controllers_live` | `TRUE` | `LiveSpec` | `NoRetiredLivelock` | pass (`long`, 12.7 million states, 33 min) |
+
+So the interleaving costs a refused campaign and never safety: the matchmakers alone keep
+`Electable`, and the leader abandons the refused reconfiguration and is free to campaign again.
+The reach control and its contrast show that the interleaving needs the operator's half off: with
+it on, no trace has it. The livelock control is weaker: without the abandon, a matchmaker refuses
+a reconfiguration as soon as it holds the tomb of a node, before that node retires, so
+`retired_livelock` fails with the operator's half on too. It is the result of #1065 again, in this
+configuration. With two matchmakers, a majority is every matchmaker, so these checks do not tell
+`allTomb` from `quorumTomb`; `ask_all_tomb_no_operator` (three matchmakers, a restart, two
+ballots) does.
+
 Not in the model: values and votes, the promises of the acceptors, matchmaker generations, the
 pages of an answer and lost matchmaker state.
 
