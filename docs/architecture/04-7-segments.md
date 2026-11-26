@@ -219,8 +219,8 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   order (this equivalence is a reading of this step). `Held` is never an ack and carries no
   fence verdict: a write below that position with a stale uuid or other bytes is `Held` too, and
   the replicas of the segment answer what the log holds. Not built yet: the drop of a held
-  segment at the acceptors. **Proposed** (2026-11-26, Pierre's card is open; the rule is in the model, not in the code): a
-  released segment counts as held. A segment whose writes all lie below `first_seq` is marked
+  segment at the acceptors. **Decided** (Pierre, 2026-11-26; the rule is in the model, not yet in the code): a released
+  segment counts as held. A segment whose writes all lie below `first_seq` is marked
   `Held` with no replica, since a `Truncate` already released its records; a segment with no
   write is released as soon as it ends. The held segments are a prefix, so without this rule a
   segment with no replicas (the first segment of a journal with no `Config::segment_replicas`)
