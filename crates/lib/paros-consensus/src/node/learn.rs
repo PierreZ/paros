@@ -185,12 +185,11 @@ impl ColocatedNode {
             "only a slot known chosen closes its round"
         );
         if let Some(round) = self.proposer.rounds().get(&slot) {
-            if round.ballot() != choosing {
-                probe!(
-                    reachable,
-                    "learn: a slot chosen at another ballot closes the open round"
-                );
-            }
+            probe!(
+                sometimes,
+                round.ballot() != choosing,
+                "learn: a slot chosen at another ballot closes the open round"
+            );
             self.proposer.close_round(slot);
         }
         assert!(
