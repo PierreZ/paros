@@ -108,6 +108,7 @@ impl ColocatedNode {
             // slot already present in `chosen`, and a catch-up replay of that
             // slot is then the only message this node keeps receiving. Skipping
             // the walk here wedged that node in a forever catch-up loop.
+            self.close_chosen_round(slot, ballot);
             self.advance_chosen_index();
             return;
         }
@@ -146,6 +147,7 @@ impl ColocatedNode {
             "a learned slot leaves a live campaign's promise at its ballot"
         );
         self.replica.learn(&self.acceptor, slot, command);
+        self.close_chosen_round(slot, ballot);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).
         self.proposer.probe_resolved_elsewhere(slot);
@@ -168,6 +170,33 @@ impl ColocatedNode {
             "a chosen slot's accepted record carries the chosen command"
         );
         self.advance_chosen_index();
+    }
+
+    /// Close the round this node holds open at `slot`, which is known chosen,
+    /// whatever the round's ballot. A round at the choosing ballot ends here
+    /// as its decision; a round at a higher ballot proposes the chosen
+    /// command again (P2c) and has nothing left to decide. Left open, such a
+    /// round waits for the votes of its column, and a member that compacted
+    /// the slot away never answers: the leadership would hold the round for
+    /// good.
+    fn close_chosen_round(&mut self, slot: Slot, choosing: Ballot) {
+        assert!(
+            self.replica.is_chosen(slot),
+            "only a slot known chosen closes its round"
+        );
+        if let Some(round) = self.proposer.rounds().get(&slot) {
+            if round.ballot() != choosing {
+                probe!(
+                    reachable,
+                    "learn: a slot chosen at another ballot closes the open round"
+                );
+            }
+            self.proposer.close_round(slot);
+        }
+        assert!(
+            !self.proposer.rounds().contains_key(&slot),
+            "a slot known chosen keeps no open round"
+        );
     }
 
     /// Walk the contiguous chosen prefix forward

@@ -43974,516 +43974,6 @@
             ]
           ],
           "message": 37,
-          "wire": [
-            {
-              "id": 38,
-              "from": "n4",
-              "to": "n0",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            },
-            {
-              "id": 39,
-              "from": "n4",
-              "to": "n1",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            },
-            {
-              "id": 40,
-              "from": "n4",
-              "to": "n2",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            },
-            {
-              "id": 41,
-              "from": "n4",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            }
-          ],
-          "nodes": [
-            {
-              "alive": false,
-              "promise": "1.0"
-            },
-            {
-              "alive": false,
-              "promise": "1.0"
-            },
-            {
-              "alive": true,
-              "role": "follower",
-              "ballot": "1.4",
-              "promise": "1.4"
-            },
-            {
-              "alive": true,
-              "role": "follower",
-              "ballot": "1.4",
-              "promise": "1.4"
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "1.4",
-              "promise": "1.4"
-            }
-          ]
-        },
-        {
-          "kind": "drop",
-          "from": "n4",
-          "to": "n0",
-          "label": "Commit 1.4 · slot 0",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
-          },
-          "says": "The Commit from Node 4 to Node 0 is lost. Node 0 does not get it.",
-          "notes": [
-            "Commit slot 0 = alpha at 1.4 is lost. The protocol must treat a lost message and a partition the same way."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.4 (round 1, node 4)"
-            },
-            {
-              "name": "slot",
-              "value": "0"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "Slot 0 is chosen: alpha.",
-          "state": [
-            [
-              "down"
-            ],
-            [
-              "down"
-            ],
-            [
-              "promise 1.4"
-            ],
-            [
-              "promise 1.4"
-            ],
-            [
-              "leader 1.4"
-            ]
-          ],
-          "chosen": [
-            "slot 0 = alpha"
-          ],
-          "logs": [
-            [],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ]
-          ],
-          "message": 38,
-          "wire": [
-            {
-              "id": 39,
-              "from": "n4",
-              "to": "n1",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            },
-            {
-              "id": 40,
-              "from": "n4",
-              "to": "n2",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            },
-            {
-              "id": 41,
-              "from": "n4",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            }
-          ],
-          "nodes": [
-            {
-              "alive": false,
-              "promise": "1.0"
-            },
-            {
-              "alive": false,
-              "promise": "1.0"
-            },
-            {
-              "alive": true,
-              "role": "follower",
-              "ballot": "1.4",
-              "promise": "1.4"
-            },
-            {
-              "alive": true,
-              "role": "follower",
-              "ballot": "1.4",
-              "promise": "1.4"
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "1.4",
-              "promise": "1.4"
-            }
-          ]
-        },
-        {
-          "kind": "drop",
-          "from": "n4",
-          "to": "n1",
-          "label": "Commit 1.4 · slot 0",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
-          },
-          "says": "The Commit from Node 4 to Node 1 is lost. Node 1 does not get it.",
-          "notes": [
-            "Commit slot 0 = alpha at 1.4 is lost. The protocol must treat a lost message and a partition the same way."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.4 (round 1, node 4)"
-            },
-            {
-              "name": "slot",
-              "value": "0"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "Slot 0 is chosen: alpha.",
-          "state": [
-            [
-              "down"
-            ],
-            [
-              "down"
-            ],
-            [
-              "promise 1.4"
-            ],
-            [
-              "promise 1.4"
-            ],
-            [
-              "leader 1.4"
-            ]
-          ],
-          "chosen": [
-            "slot 0 = alpha"
-          ],
-          "logs": [
-            [],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ]
-          ],
-          "message": 39,
-          "wire": [
-            {
-              "id": 40,
-              "from": "n4",
-              "to": "n2",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            },
-            {
-              "id": 41,
-              "from": "n4",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            }
-          ],
-          "nodes": [
-            {
-              "alive": false,
-              "promise": "1.0"
-            },
-            {
-              "alive": false,
-              "promise": "1.0"
-            },
-            {
-              "alive": true,
-              "role": "follower",
-              "ballot": "1.4",
-              "promise": "1.4"
-            },
-            {
-              "alive": true,
-              "role": "follower",
-              "ballot": "1.4",
-              "promise": "1.4"
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "1.4",
-              "promise": "1.4"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n4",
-          "to": "n2",
-          "label": "Commit 1.4 · slot 0",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
-          },
-          "says": "Node 2 learns that slot 0 = alpha is chosen.",
-          "notes": [
-            "Node 2 receives a Commit: slot 0 is chosen as alpha at ballot 1.4. It held alpha at 1.4 there."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.4 (round 1, node 4)"
-            },
-            {
-              "name": "slot",
-              "value": "0"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "Slot 0 is chosen: alpha.",
-          "state": [
-            [
-              "down"
-            ],
-            [
-              "down"
-            ],
-            [
-              "promise 1.4"
-            ],
-            [
-              "promise 1.4"
-            ],
-            [
-              "leader 1.4"
-            ]
-          ],
-          "chosen": [
-            "slot 0 = alpha"
-          ],
-          "logs": [
-            [],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "accepted"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ]
-          ],
-          "message": 40,
-          "wire": [
-            {
-              "id": 41,
-              "from": "n4",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.4 · slot 0",
-              "fan": 38
-            }
-          ],
-          "nodes": [
-            {
-              "alive": false,
-              "promise": "1.0"
-            },
-            {
-              "alive": false,
-              "promise": "1.0"
-            },
-            {
-              "alive": true,
-              "role": "follower",
-              "ballot": "1.4",
-              "promise": "1.4"
-            },
-            {
-              "alive": true,
-              "role": "follower",
-              "ballot": "1.4",
-              "promise": "1.4"
-            },
-            {
-              "alive": true,
-              "role": "leader",
-              "ballot": "1.4",
-              "promise": "1.4"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n4",
-          "to": "n3",
-          "label": "Commit 1.4 · slot 0",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
-          },
-          "says": "Node 3 learns that slot 0 = alpha is chosen.",
-          "notes": [
-            "Node 3 receives a Commit: slot 0 is chosen as alpha at ballot 1.4. It held alpha at 1.4 there.",
-            "Node 3 learns that slot 0 is chosen as alpha at ballot 1.4.",
-            "Node 3 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.4 (round 1, node 4)"
-            },
-            {
-              "name": "slot",
-              "value": "0"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "Slot 0 is chosen: alpha.",
-          "state": [
-            [
-              "down"
-            ],
-            [
-              "down"
-            ],
-            [
-              "promise 1.4"
-            ],
-            [
-              "promise 1.4"
-            ],
-            [
-              "leader 1.4"
-            ]
-          ],
-          "chosen": [
-            "slot 0 = alpha"
-          ],
-          "logs": [
-            [],
-            [],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ],
-            [
-              {
-                "slot": 0,
-                "value": "alpha",
-                "state": "chosen"
-              }
-            ]
-          ],
-          "message": 41,
           "nodes": [
             {
               "alive": false,
@@ -44566,7 +44056,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -44584,36 +44074,36 @@
           ],
           "wire": [
             {
-              "id": 42,
+              "id": 38,
               "from": "n4",
               "to": "n0",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             },
             {
-              "id": 43,
+              "id": 39,
               "from": "n4",
               "to": "n1",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             },
             {
-              "id": 44,
+              "id": 40,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             },
             {
-              "id": 45,
+              "id": 41,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             }
           ],
           "nodes": [
@@ -44712,7 +44202,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -44728,31 +44218,31 @@
               }
             ]
           ],
-          "message": 42,
+          "message": 38,
           "wire": [
             {
-              "id": 43,
+              "id": 39,
               "from": "n4",
               "to": "n1",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             },
             {
-              "id": 44,
+              "id": 40,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             },
             {
-              "id": 45,
+              "id": 41,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             }
           ],
           "nodes": [
@@ -44848,7 +44338,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -44864,23 +44354,23 @@
               }
             ]
           ],
-          "message": 43,
+          "message": 39,
           "wire": [
             {
-              "id": 44,
+              "id": 40,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             },
             {
-              "id": 45,
+              "id": 41,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             }
           ],
           "nodes": [
@@ -44982,7 +44472,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -44998,23 +44488,23 @@
               }
             ]
           ],
-          "message": 44,
+          "message": 40,
           "wire": [
             {
-              "id": 45,
+              "id": 41,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 1",
-              "fan": 42
+              "fan": 38
             },
             {
-              "id": 46,
+              "id": 42,
               "from": "n2",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 1",
-              "fan": 46
+              "fan": 42
             }
           ],
           "nodes": [
@@ -45119,7 +44609,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
@@ -45140,23 +44630,23 @@
               }
             ]
           ],
-          "message": 45,
+          "message": 41,
           "wire": [
             {
-              "id": 46,
+              "id": 42,
               "from": "n2",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 1",
-              "fan": 46
+              "fan": 42
             },
             {
-              "id": 47,
+              "id": 43,
               "from": "n3",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 1",
-              "fan": 47
+              "fan": 43
             }
           ],
           "nodes": [
@@ -45268,7 +44758,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
@@ -45289,15 +44779,15 @@
               }
             ]
           ],
-          "message": 46,
+          "message": 42,
           "wire": [
             {
-              "id": 47,
+              "id": 43,
               "from": "n3",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 1",
-              "fan": 47
+              "fan": 43
             }
           ],
           "nodes": [
@@ -45410,7 +44900,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
@@ -45431,39 +44921,39 @@
               }
             ]
           ],
-          "message": 47,
+          "message": 43,
           "wire": [
             {
-              "id": 48,
+              "id": 44,
               "from": "n4",
               "to": "n0",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             },
             {
-              "id": 49,
+              "id": 45,
               "from": "n4",
               "to": "n1",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             },
             {
-              "id": 50,
+              "id": 46,
               "from": "n4",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             },
             {
-              "id": 51,
+              "id": 47,
               "from": "n4",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             }
           ],
           "nodes": [
@@ -45565,7 +45055,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
@@ -45586,31 +45076,31 @@
               }
             ]
           ],
-          "message": 48,
+          "message": 44,
           "wire": [
             {
-              "id": 49,
+              "id": 45,
               "from": "n4",
               "to": "n1",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             },
             {
-              "id": 50,
+              "id": 46,
               "from": "n4",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             },
             {
-              "id": 51,
+              "id": 47,
               "from": "n4",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             }
           ],
           "nodes": [
@@ -45712,7 +45202,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
@@ -45733,23 +45223,23 @@
               }
             ]
           ],
-          "message": 49,
+          "message": 45,
           "wire": [
             {
-              "id": 50,
+              "id": 46,
               "from": "n4",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             },
             {
-              "id": 51,
+              "id": 47,
               "from": "n4",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             }
           ],
           "nodes": [
@@ -45853,7 +45343,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
@@ -45874,15 +45364,15 @@
               }
             ]
           ],
-          "message": 50,
+          "message": 46,
           "wire": [
             {
-              "id": 51,
+              "id": 47,
               "from": "n4",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.4 · slot 1",
-              "fan": 48
+              "fan": 44
             }
           ],
           "nodes": [
@@ -45929,7 +45419,7 @@
           "notes": [
             "Node 3 receives a Commit: slot 1 is chosen as bravo at ballot 1.4. It held bravo at 1.4 there.",
             "Node 3 learns that slot 1 is chosen as bravo at ballot 1.4.",
-            "Node 3 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
+            "Node 3 now knows slot 1 is chosen while slot 0 is not. Its applied prefix stops below the hole. No catch-up can help, because nobody holds slot 0 to replay."
           ],
           "fields": [
             {
@@ -45986,7 +45476,7 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
@@ -46007,7 +45497,7 @@
               }
             ]
           ],
-          "message": 51,
+          "message": 47,
           "nodes": [
             {
               "alive": false,
@@ -46207,36 +45697,36 @@
           ],
           "wire": [
             {
-              "id": 52,
+              "id": 48,
               "from": "n4",
               "to": "n0",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             },
             {
-              "id": 53,
+              "id": 49,
               "from": "n4",
               "to": "n1",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             },
             {
-              "id": 54,
+              "id": 50,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             },
             {
-              "id": 55,
+              "id": 51,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             }
           ],
           "nodes": [
@@ -46354,31 +45844,31 @@
               }
             ]
           ],
-          "message": 52,
+          "message": 48,
           "wire": [
             {
-              "id": 53,
+              "id": 49,
               "from": "n4",
               "to": "n1",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             },
             {
-              "id": 54,
+              "id": 50,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             },
             {
-              "id": 55,
+              "id": 51,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             }
           ],
           "nodes": [
@@ -46493,23 +45983,23 @@
               }
             ]
           ],
-          "message": 53,
+          "message": 49,
           "wire": [
             {
-              "id": 54,
+              "id": 50,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             },
             {
-              "id": 55,
+              "id": 51,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             }
           ],
           "nodes": [
@@ -46630,23 +46120,23 @@
               }
             ]
           ],
-          "message": 54,
+          "message": 50,
           "wire": [
             {
-              "id": 55,
+              "id": 51,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 52
+              "fan": 48
             },
             {
-              "id": 56,
+              "id": 52,
               "from": "n2",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 2",
-              "fan": 56
+              "fan": 52
             }
           ],
           "nodes": [
@@ -46769,15 +46259,15 @@
               }
             ]
           ],
-          "message": 55,
+          "message": 51,
           "wire": [
             {
-              "id": 56,
+              "id": 52,
               "from": "n2",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 2",
-              "fan": 56
+              "fan": 52
             }
           ],
           "nodes": [
@@ -46905,7 +46395,7 @@
               }
             ]
           ],
-          "message": 56,
+          "message": 52,
           "nodes": [
             {
               "alive": false,
@@ -46946,7 +46436,7 @@
           },
           "says": "Node 3 restarts. Node 3 reads its promise and its votes back from its disk.",
           "notes": [
-            "Node 3 restarts from its disk. It reads back promise 1.4, 2 accepted records, and an applied prefix that ends at slot 1. It boots as a follower. The disk carries the promise and the log, and it does not carry the leadership."
+            "Node 3 restarts from its disk. It reads back promise 1.4, 2 accepted records, and an applied prefix that ends at nothing. It boots as a follower. The disk carries the promise and the log, and it does not carry the leadership."
           ],
           "fields": [],
           "voice": "",
@@ -46995,12 +46485,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -47113,12 +46603,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -47141,36 +46631,36 @@
           ],
           "wire": [
             {
-              "id": 57,
+              "id": 53,
               "from": "n4",
               "to": "n0",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             },
             {
-              "id": 58,
+              "id": 54,
               "from": "n4",
               "to": "n1",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             },
             {
-              "id": 59,
+              "id": 55,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             },
             {
-              "id": 60,
+              "id": 56,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             }
           ],
           "nodes": [
@@ -47277,12 +46767,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -47303,31 +46793,31 @@
               }
             ]
           ],
-          "message": 57,
+          "message": 53,
           "wire": [
             {
-              "id": 58,
+              "id": 54,
               "from": "n4",
               "to": "n1",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             },
             {
-              "id": 59,
+              "id": 55,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             },
             {
-              "id": 60,
+              "id": 56,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             }
           ],
           "nodes": [
@@ -47434,12 +46924,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -47460,23 +46950,23 @@
               }
             ]
           ],
-          "message": 58,
+          "message": 54,
           "wire": [
             {
-              "id": 59,
+              "id": 55,
               "from": "n4",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             },
             {
-              "id": 60,
+              "id": 56,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             }
           ],
           "nodes": [
@@ -47583,12 +47073,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               }
             ],
             [
@@ -47609,23 +47099,23 @@
               }
             ]
           ],
-          "message": 59,
+          "message": 55,
           "wire": [
             {
-              "id": 60,
+              "id": 56,
               "from": "n4",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.4 · slot 2",
-              "fan": 57
+              "fan": 53
             },
             {
-              "id": 61,
+              "id": 57,
               "from": "n2",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 2",
-              "fan": 61
+              "fan": 57
             }
           ],
           "nodes": [
@@ -47733,12 +47223,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 2,
@@ -47764,23 +47254,23 @@
               }
             ]
           ],
-          "message": 60,
+          "message": 56,
           "wire": [
             {
-              "id": 61,
+              "id": 57,
               "from": "n2",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 2",
-              "fan": 61
+              "fan": 57
             },
             {
-              "id": 62,
+              "id": 58,
               "from": "n3",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 2",
-              "fan": 62
+              "fan": 58
             }
           ],
           "nodes": [
@@ -47898,12 +47388,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 2,
@@ -47929,15 +47419,15 @@
               }
             ]
           ],
-          "message": 61,
+          "message": 57,
           "wire": [
             {
-              "id": 62,
+              "id": 58,
               "from": "n3",
               "to": "n4",
               "phase": "accepted",
               "label": "Accepted 1.4 · slot 2",
-              "fan": 62
+              "fan": 58
             }
           ],
           "nodes": [
@@ -48056,12 +47546,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 2,
@@ -48087,39 +47577,39 @@
               }
             ]
           ],
-          "message": 62,
+          "message": 58,
           "wire": [
             {
-              "id": 63,
+              "id": 59,
               "from": "n4",
               "to": "n0",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             },
             {
-              "id": 64,
+              "id": 60,
               "from": "n4",
               "to": "n1",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             },
             {
-              "id": 65,
+              "id": 61,
               "from": "n4",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             },
             {
-              "id": 66,
+              "id": 62,
               "from": "n4",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             }
           ],
           "nodes": [
@@ -48227,12 +47717,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 2,
@@ -48258,31 +47748,31 @@
               }
             ]
           ],
-          "message": 63,
+          "message": 59,
           "wire": [
             {
-              "id": 64,
+              "id": 60,
               "from": "n4",
               "to": "n1",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             },
             {
-              "id": 65,
+              "id": 61,
               "from": "n4",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             },
             {
-              "id": 66,
+              "id": 62,
               "from": "n4",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             }
           ],
           "nodes": [
@@ -48390,12 +47880,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 2,
@@ -48421,23 +47911,23 @@
               }
             ]
           ],
-          "message": 64,
+          "message": 60,
           "wire": [
             {
-              "id": 65,
+              "id": 61,
               "from": "n4",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             },
             {
-              "id": 66,
+              "id": 62,
               "from": "n4",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             }
           ],
           "nodes": [
@@ -48547,12 +48037,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 2,
@@ -48578,15 +48068,15 @@
               }
             ]
           ],
-          "message": 65,
+          "message": 61,
           "wire": [
             {
-              "id": 66,
+              "id": 62,
               "from": "n4",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.4 · slot 2",
-              "fan": 63
+              "fan": 59
             }
           ],
           "nodes": [
@@ -48633,7 +48123,7 @@
           "notes": [
             "Node 3 receives a Commit: slot 2 is chosen as charlie at ballot 1.4. It held charlie at 1.4 there.",
             "Node 3 learns that slot 2 is chosen as charlie at ballot 1.4.",
-            "Node 3 applies slot 2 = charlie. Its contiguous prefix now ends at slot 2."
+            "Node 3 now knows slot 2 is chosen while slot 0 is not. Its applied prefix stops below the hole. No catch-up can help, because nobody holds slot 0 to replay."
           ],
           "fields": [
             {
@@ -48696,12 +48186,12 @@
               {
                 "slot": 0,
                 "value": "alpha",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 1,
                 "value": "bravo",
-                "state": "chosen"
+                "state": "accepted"
               },
               {
                 "slot": 2,
@@ -48727,7 +48217,7 @@
               }
             ]
           ],
-          "message": 66,
+          "message": 62,
           "nodes": [
             {
               "alive": false,
@@ -48803,32 +48293,32 @@
         {
           "says": "So node 4 proposes alpha again at slot 0. Nodes 2, 3 and 4 vote, and alpha stays chosen.",
           "from": 33,
-          "to": 46
+          "to": 42
         },
         {
           "says": "Two nodes of five are down, and writes go on. A client writes bravo at slot 1.",
-          "from": 46,
-          "to": 57
+          "from": 42,
+          "to": 53
         },
         {
           "says": "Now node 3 crashes too. Only nodes 2 and 4 are up: 2 of 5, less than a majority.",
-          "from": 57,
-          "to": 58
+          "from": 53,
+          "to": 54
         },
         {
           "says": "A client writes charlie. Only nodes 2 and 4 can vote, so charlie waits.",
-          "from": 58,
-          "to": 64
+          "from": 54,
+          "to": 60
         },
         {
           "says": "No vote is lost. Node 3 restarts, and node 4 sends its open Accepts again.",
-          "from": 64,
-          "to": 66
+          "from": 60,
+          "to": 62
         },
         {
           "says": "Node 3 votes, and charlie is chosen. A majority of 5 nodes survives 2 failures.",
-          "from": 66,
-          "to": 76,
+          "from": 62,
+          "to": 72,
           "more": "majority"
         }
       ],
@@ -48882,26 +48372,26 @@
         },
         {
           "title": "the client writes bravo",
-          "at": 47
+          "at": 43
         },
         {
           "title": "node 3 crashes",
-          "at": 58
+          "at": 54
         },
         {
           "title": "the client writes charlie",
-          "at": 59
+          "at": 55
         },
         {
           "title": "node 3 restarts",
-          "at": 65
+          "at": 61
         },
         {
           "title": "node 4 sends its open Accepts again",
-          "at": 66
+          "at": 62
         }
       ],
-      "outcome": "Nodes 2, 3, 4: slot 0 = alpha, slot 1 = bravo, slot 2 = charlie.",
+      "outcome": "Nodes 2, 4: slot 0 = alpha, slot 1 = bravo, slot 2 = charlie. Node 3: slot 2 = charlie.",
       "tour": {
         "chapter": "majority",
         "title": "Who must answer"

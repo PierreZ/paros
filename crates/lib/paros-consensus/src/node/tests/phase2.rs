@@ -466,3 +466,59 @@ fn a_passed_leader_takes_a_round_back_without_recording_it() {
     );
     ready.advance();
 }
+
+/// A slot learned chosen at a ballot below the leader's own ends the round
+/// that the leader re-proposes there. The column of that round may hold an
+/// acceptor that compacted the slot away and never answers its `Accept`, so
+/// a round left open stays open for good, and the leadership never settles.
+#[test]
+fn a_commit_at_an_older_ballot_closes_the_round_that_proposes_the_slot_again() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let old = nodes[0].ballot();
+    assert!(matches!(
+        nodes[0].propose(entry(1, 1, 1)),
+        ProposeResult::Accepted(Slot(0))
+    ));
+    // Nodes 0 and 1 choose slot 0 at the old ballot; every vote and every
+    // `Commit` is lost.
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, m| {
+        matches!(m, Message::Accept { .. }) && to == NodeId(1)
+    });
+    // Node 1 wins with node 2, and proposes slot 0 again at its own ballot.
+    // Its `Accept`s are lost.
+    campaign(&mut nodes[1]);
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, m| {
+        to != NodeId(0) && !matches!(m, Message::Accept { .. } | Message::Accepted { .. })
+    });
+    assert!(nodes[1].is_leader(), "node 1 wins with node 2");
+    assert!(nodes[1].ballot() > old, "node 1 leads above the old ballot");
+    assert_eq!(
+        nodes[1]
+            .proposer()
+            .rounds()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![Slot(0)],
+        "node 1 proposes slot 0 again"
+    );
+    // The old leader's `Commit` arrives late: slot 0 is chosen, and the round
+    // that proposes it again has nothing left to decide.
+    nodes[1].step(Message::Commit {
+        from: Party::Node(NodeId(0)),
+        ballot: old,
+        slot: Slot(0),
+        command: ucmd(1, 1, 1),
+    });
+    assert!(
+        nodes[1].chosen_at(Slot(0)).is_some(),
+        "the late Commit teaches slot 0"
+    );
+    assert!(
+        nodes[1].proposer().rounds().is_empty(),
+        "a slot learned chosen keeps no round open"
+    );
+}
