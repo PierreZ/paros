@@ -19,7 +19,10 @@ fn publish(sealed: u64, end: u64) -> SegmentPublish {
         sealed: SegmentId(sealed),
         start: Slot(if sealed == 0 { 0 } else { end - 1 }),
         end: Slot(end),
-        opening: Opening { replicas: None },
+        opening: Opening {
+            replicas: None,
+            boundary: crate::journal::JournalState::default(),
+        },
     }
 }
 

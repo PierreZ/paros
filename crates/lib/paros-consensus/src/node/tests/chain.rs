@@ -75,10 +75,17 @@ fn every_node_publishes_the_end_its_walk_applied_until_a_majority_holds_it() {
         assert_eq!(request.sealed, SegmentId(0));
         assert_eq!(request.start, Slot(0));
         assert_eq!(request.end, end);
+        let boundary = nodes[1].replica().journal();
+        assert_eq!(
+            boundary.segment.start, end,
+            "the boundary opens the next segment"
+        );
+        assert_eq!(boundary.replicas.as_ref(), Some(&replicas));
         assert_eq!(
             request.opening,
             Opening {
-                replicas: Some(replicas.clone())
+                replicas: Some(replicas.clone()),
+                boundary,
             }
         );
     }

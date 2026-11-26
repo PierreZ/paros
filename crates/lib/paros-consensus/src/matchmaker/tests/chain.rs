@@ -16,6 +16,7 @@ fn publish(sealed: u64, start: u64, end: u64, generation: MatchmakerGeneration) 
         end: Slot(end),
         opening: Opening {
             replicas: Some(ReplicaSet::new([NodeId(3)])),
+            boundary: crate::journal::JournalState::default(),
         },
     }
 }
@@ -117,6 +118,7 @@ fn an_activation_merges_the_reconstructed_chain_into_its_own() {
                 start: Slot(5),
                 opening: Some(Opening {
                     replicas: Some(ReplicaSet::new([NodeId(3)])),
+                    boundary: crate::journal::JournalState::default(),
                 }),
                 end: None,
             },

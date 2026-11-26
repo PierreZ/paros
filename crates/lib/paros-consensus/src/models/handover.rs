@@ -1854,7 +1854,10 @@ impl World {
             sealed: SegmentId(k),
             start: crate::types::Slot(if k == 0 { 0 } else { 2 * k }),
             end: crate::types::Slot(2 * (k + 1)),
-            opening: Opening { replicas: None },
+            opening: Opening {
+                replicas: None,
+                boundary: crate::journal::JournalState::default(),
+            },
         };
         for m in members {
             self.send(Envelope::Publish {

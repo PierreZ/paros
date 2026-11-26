@@ -1,7 +1,7 @@
 //! Static node configuration ([`Config`]).
 
-use crate::journal::JournalIdentifier;
 use crate::journal::state::WriterMode;
+use crate::journal::{JournalIdentifier, ReplicaSet};
 use crate::membership::{AcceptorConfig, FailureDomain, MatchmakerId, QuorumSystem};
 use crate::types::NodeId;
 
@@ -77,6 +77,18 @@ pub struct Config {
     /// owner), and the format marker does not record it (#754).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub replica_count: usize,
+    /// The replicas of the first segment (R6, R10 of
+    /// `docs/architecture/04-7-segments.md` §4.7): the [`crate::ReplicaNode`]s,
+    /// by id, that keep the slots of the log from slot 0 until a `Roll` names
+    /// another set ([`crate::journal::JournalState::replicas`]). **`None` is
+    /// the plain arm**: the deployment has no replicas of a segment, and a
+    /// leader routes no `Commit` to one. Segments exist only with
+    /// matchmakers (R10, D5): a deployment without them routes nothing,
+    /// whatever this names. Fixed when the journal is created and
+    /// recorded in the format marker with the rest, so a restart never changes
+    /// it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub segment_replicas: Option<ReplicaSet>,
     /// The journal this node serves, named with its tenant (#184, #235):
     /// carried for assertions and tracing, never read by a protocol decision
     /// — the driver routes a message to its journal before the core sees it,
@@ -124,6 +136,7 @@ impl Config {
             matchmaker_pool: Vec::new(),
             proxy_count: 0,
             replica_count: 0,
+            segment_replicas: None,
             journal,
             writer_mode: WriterMode::Single,
             peer_domains: Vec::new(),

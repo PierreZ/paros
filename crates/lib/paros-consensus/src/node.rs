@@ -26,6 +26,7 @@ pub mod ready;
 mod reconfigure;
 mod replication;
 mod roll;
+mod route;
 mod view;
 
 pub(crate) use self::quorum_reads::READ_TTL_TICKS;
@@ -470,6 +471,18 @@ pub struct ColocatedNode {
     /// noted yet: every path that folds (the walk, a refold past a healed
     /// hole, a trim-point jump, the boot) notes from here up to the fold.
     rolls_noted: Slot,
+    /// The first slot whose `Commit` the route to the replicas of its
+    /// segment (R6, R4d of §4.7) has not considered yet: a leader routes each
+    /// slot its fold applies from here, and every node moves the mark to the
+    /// fold.
+    segment_routed: Slot,
+    /// A ballot that chose each slot at or above the route mark, as this
+    /// node knows it: its own decision's ballot, or the ballot of a
+    /// `Commit` it learned. The acceptor's record of a slot can stand at a
+    /// higher ballot that never chose it (a later leader's vote for the
+    /// chosen command), so a routed `Commit` carries this ballot, never the
+    /// record's. Kept only with matchmakers (R10).
+    choosing: BTreeMap<Slot, Ballot>,
     /// Publishes to send this batch, drained via
     /// [`Ready::segment_publishes`] over the matchmaker wire.
     pending_segment_publishes: Vec<(MatchmakerId, SegmentPublish)>,

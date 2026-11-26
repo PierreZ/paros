@@ -123,8 +123,10 @@ compacts, takes no slot past the end and no trim point, and answers a read past 
 `LogRead::Sealed` (the end and the next segment), so the reader knows that its chain is stale and
 asks the next segment, as a Delos client that gets a "sealed" error refetches the chain
 ([Delos §3.2]). A fresh replica joins a later segment from the boundary state
-(`ReplicaNode::join_segment`). The route of a `Commit` to the replicas of its segment comes in the
-second part of step 5 (§4.7 of `docs/architecture/`).
+(`ReplicaNode::join_segment`). A leader routes the `Commit` of each slot that its fold applied to
+the replicas of the segment of that slot (`Audience::ReplicasOf`, R4d), with the set the journal
+state carries (`JournalState::replicas`), and the chain record holds the boundary state that a
+replica joins from (`Opening::boundary`).
 
 Divergences from the sources (each a departure of §4.7.4, with its check):
 

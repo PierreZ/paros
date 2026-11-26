@@ -50,3 +50,25 @@ fn a_message_names_its_variant() {
     };
     assert_eq!(read.kind(), "PreRead");
 }
+
+/// The replicas of a segment are addressed by their ids, in order, and a
+/// sender that keeps the segment never addresses itself.
+#[test]
+fn the_replicas_of_a_segment_resolve_to_their_members_but_the_sender() {
+    use crate::journal::{ReplicaSet, SegmentId};
+    let pool = [NodeId(0), NodeId(1), NodeId(2)];
+    let audience = Audience::ReplicasOf {
+        segment: SegmentId(1),
+        replicas: ReplicaSet::new([NodeId(9), NodeId(2), NodeId(7)]),
+    };
+    assert_eq!(
+        audience.resolve(&pool, NodeId(0)),
+        [NodeId(2), NodeId(7), NodeId(9)]
+    );
+    assert_eq!(audience.resolve(&pool, NodeId(2)), [NodeId(7), NodeId(9)]);
+    assert_eq!(
+        audience.resolve_from_proxy(&pool),
+        [NodeId(2), NodeId(7), NodeId(9)]
+    );
+    assert_eq!(audience.proxy(), None);
+}

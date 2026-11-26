@@ -61,6 +61,7 @@ impl ColocatedNode {
                 end: tail.start,
                 opening: Opening {
                     replicas: roll.replicas.clone(),
+                    boundary: self.replica.journal_at(tail.start),
                 },
             });
         }

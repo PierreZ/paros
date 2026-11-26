@@ -1143,6 +1143,29 @@ impl Cluster {
         self.ready_digest = fnv1a(self.ready_digest, &batch.to_le_bytes());
     }
 
+    /// Judge each `Commit` that node `id` routed to the replicas of a
+    /// segment in `batch` ([`ROUTE_TRUE`](crate::oracle::ledger::ROUTE_TRUE)).
+    fn judge_routes(
+        &mut self,
+        id: NodeId,
+        batch: &[(Audience, Message)],
+        first: Option<&ReplicaSet>,
+    ) {
+        for (audience, message) in batch {
+            if let (Audience::ReplicasOf { segment, replicas }, Message::Commit { slot, .. }) =
+                (audience, message)
+            {
+                self.ledger.route_holds(
+                    &format!("node {}", id.0),
+                    *slot,
+                    *segment,
+                    replicas,
+                    first,
+                );
+            }
+        }
+    }
+
     /// Run the driver loop of node `id` until its batches are empty.
     fn drain_node(&mut self, id: NodeId, cx: &mut Cx<'_, Self>) {
         let replicas = self.replica_ids();
@@ -1159,15 +1182,13 @@ impl Cluster {
             // be in yet.
             let pool = node.pool().to_vec();
             let seen = Seen::of(node);
-            let belief = node.acceptors_since();
+            let known = Known::of(node);
             let ready = node.ready();
             let digest = node_digest(id, &ready);
             let writes = ready.writes().to_vec();
             let mut batch: Vec<(Audience, Message)> = ready.messages().to_vec();
             plant(mutant, &mut batch);
-            if mutant == Some(Mutant::BeliefFence) {
-                belief_fences(belief, &mut batch);
-            }
+            plant_driver(mutant, &known, &mut batch);
             let mut out = route(&batch, &pool, Some(id), &replicas);
             let committed = ready.committed().to_vec();
             let read_states = ready.read_states().to_vec();
@@ -1229,6 +1250,7 @@ impl Cluster {
             for envelope in &out {
                 self.judge_sent(&format!("node {}", id.0), envelope);
             }
+            self.judge_routes(id, &batch, known.first.as_ref());
             self.send_from(id, out, cx);
             for (slot, _, command, outcome) in &committed {
                 self.applied(&format!("node {}", id.0), *slot, command, outcome, cx);
@@ -1859,7 +1881,7 @@ impl Cluster {
             .expect("a leader is up")
             .replica()
             .journal();
-        let entry = self.client.write(journal, cx);
+        let entry = self.client.write(&journal, cx);
         let delegation = match cx.rng().below(10) {
             0..=5 => Delegation::Auto,
             6..=7 if self.flavor.proxies > 0 => {
@@ -1935,7 +1957,9 @@ impl Cluster {
             .proposer()
             .recovery()
             .is_some_and(|recovery| recovery.pending().next().is_some());
-        let tail = node.replica().journal().segment;
+        let boundary_base = node.replica().journal();
+        let boundary_replicas = boundary_base.replicas.clone();
+        let tail = boundary_base.segment;
         let set = node.matchmaker_set().cloned();
         let result = node.roll(replicas.clone());
         let accepted = matches!(result, RollResult::Accepted { .. });
@@ -1950,7 +1974,19 @@ impl Cluster {
                 sealed: tail.id,
                 start: tail.start,
                 end: Slot(slot.0 + 1),
-                opening: paros_consensus::journal::Opening { replicas },
+                opening: paros_consensus::journal::Opening {
+                    // The mutant guesses the boundary from the leader's fold
+                    // at the proposal, before the Roll is chosen.
+                    boundary: paros_consensus::journal::JournalState {
+                        segment: paros_consensus::journal::Segment {
+                            id: *next,
+                            start: Slot(slot.0 + 1),
+                        },
+                        replicas: replicas.clone().or(boundary_replicas),
+                        ..boundary_base
+                    },
+                    replicas,
+                },
             };
             for to in set.members() {
                 cx.send(Envelope {
@@ -2378,7 +2414,7 @@ impl Client {
     /// The next write, against the `journal` that the leader folds.
     fn write(
         &mut self,
-        journal: paros_consensus::journal::state::JournalState,
+        journal: &paros_consensus::journal::state::JournalState,
         cx: &mut Cx<'_, Cluster>,
     ) -> Entry {
         let draw = cx.rng().below(10);
@@ -2540,6 +2576,92 @@ fn plant(mutant: Option<Mutant>, batch: &mut [(Audience, Message)]) {
     }
 }
 
+/// What a node's driver reads off the node before its batch, for the bugs
+/// it plants and the routes it judges.
+struct Known {
+    /// The ballot of the node's belief.
+    belief: Ballot,
+    /// The journal state at the head of the node's fold.
+    tail: paros_consensus::journal::state::JournalState,
+    /// The replicas of the first segment that the node's configuration names.
+    first: Option<ReplicaSet>,
+    /// The first slot the node's fold has not applied.
+    folded: Slot,
+}
+
+impl Known {
+    fn of(node: &paros_consensus::ColocatedNode) -> Self {
+        Self {
+            belief: node.acceptors_since(),
+            tail: node.replica().journal(),
+            first: node.config().segment_replicas.clone(),
+            folded: node.replica().folded(),
+        }
+    }
+}
+
+/// The bugs a node's driver plants on a batch from what the node knows:
+/// [`Mutant::BeliefFence`] from its belief, and [`Mutant::RouteFromTail`]
+/// and [`Mutant::RouteOnDecision`] from its tail segment and the replicas
+/// of its first segment.
+fn plant_driver(mutant: Option<Mutant>, known: &Known, batch: &mut Vec<(Audience, Message)>) {
+    match mutant {
+        Some(Mutant::BeliefFence) => belief_fences(known.belief, batch),
+        Some(Mutant::RouteFromTail) => route_from_tail(&known.tail, known.first.as_ref(), batch),
+        Some(Mutant::RouteOnDecision) => {
+            route_on_decision(known, batch);
+        }
+        _ => {}
+    }
+}
+
+/// The [`Mutant::RouteOnDecision`] bug: a `Commit` a leader sends to the
+/// learners for a slot its fold has not reached also goes to the replicas
+/// of its tail segment, at the decision, over the hole below it.
+fn route_on_decision(known: &Known, batch: &mut Vec<(Audience, Message)>) {
+    let tail = &known.tail;
+    let Some(replicas) = tail.replicas.clone().or_else(|| known.first.clone()) else {
+        return;
+    };
+    let decided: Vec<(Audience, Message)> = batch
+        .iter()
+        .filter(|(audience, message)| {
+            !matches!(audience, Audience::ReplicasOf { .. })
+                && matches!(message, Message::Commit { slot, .. } if *slot > known.folded)
+        })
+        .map(|(_, message)| {
+            (
+                Audience::ReplicasOf {
+                    segment: tail.segment.id,
+                    replicas: replicas.clone(),
+                },
+                message.clone(),
+            )
+        })
+        .collect();
+    batch.extend(decided);
+}
+
+/// The [`Mutant::RouteFromTail`] bug: every `Commit` to the replicas of a
+/// segment names the tail segment of the leader's fold and its replicas.
+fn route_from_tail(
+    tail: &paros_consensus::journal::state::JournalState,
+    first: Option<&ReplicaSet>,
+    batch: &mut [(Audience, Message)],
+) {
+    let Some(replicas) = tail.replicas.clone().or_else(|| first.cloned()) else {
+        return;
+    };
+    for (audience, _) in batch {
+        if let Audience::ReplicasOf { .. } = audience {
+            *audience = Audience::ReplicasOf {
+                segment: tail.segment.id,
+                replicas: replicas.clone(),
+            };
+        }
+    }
+}
+
 /// The envelopes of a node's requests to the matchmakers.
 /// The envelopes of a batch's publishes of the chain of segments.
 fn publishes_of(
@@ -2572,10 +2694,11 @@ fn to_matchmakers<'a>(
 /// The FNV-1a digest of the `Debug` text of `batch`: every field of every
 /// value the core put in it, in order.
 fn digest_of(batch: &impl std::fmt::Debug) -> u64 {
-    fnv1a(
-        paros_consensus::types::FNV_OFFSET,
-        format!("{batch:?}").as_bytes(),
-    )
+    // A journal state with no replica set digests as it did before the
+    // field existed, so the digests of the flavors with no replicas of a
+    // segment stay those of the code before it.
+    let text = format!("{batch:?}").replace(", replicas: None }", " }");
+    fnv1a(paros_consensus::types::FNV_OFFSET, text.as_bytes())
 }
 
 /// The match requests of a batch, without their addressees.
@@ -2621,6 +2744,25 @@ fn route(
                 to: Party::Proxy(proxy),
                 msg: Wire::Paxos(msg.clone()),
             });
+            continue;
+        }
+        // The replicas of a segment are replica sites, or nodes of the pool
+        // when a `Roll` named nodes.
+        if let Audience::ReplicasOf {
+            replicas: named, ..
+        } = audience
+        {
+            for to in named.members().iter().filter(|to| Some(**to) != me) {
+                let to = if replicas.contains(to) {
+                    Party::Replica(*to)
+                } else {
+                    Party::Node(*to)
+                };
+                out.push(Envelope {
+                    to,
+                    msg: Wire::Paxos(msg.clone()),
+                });
+            }
             continue;
         }
         if let Audience::Node(to) = audience

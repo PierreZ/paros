@@ -91,6 +91,24 @@ impl JournalSpec {
         &self.folded[index]
     }
 
+    /// The view after `slot`, once the spec folded every slot up to it:
+    /// the view before the slot after it.
+    ///
+    /// # Panics
+    ///
+    /// As [`JournalSpec::judge`].
+    pub fn view_after<'a>(
+        &mut self,
+        slot: Slot,
+        chosen: impl Fn(Slot) -> Option<&'a Command>,
+    ) -> JournalView {
+        let _ = self.judge(slot, chosen);
+        let next = usize::try_from(slot.0 + 1).expect("a small slot");
+        self.folded
+            .get(next)
+            .map_or_else(|| self.view(), |(before, _)| *before)
+    }
+
     fn view(&self) -> JournalView {
         JournalView {
             leader: self.leader,

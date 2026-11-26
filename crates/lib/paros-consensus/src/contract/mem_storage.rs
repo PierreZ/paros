@@ -102,11 +102,11 @@ impl MemStorage {
             }
             WriteOp::SetChosenIndex(slot) => self.hard_state.chosen_index = Some(*slot),
             WriteOp::Truncate { first, sealed } => {
-                self.sealed = *sealed;
+                self.sealed = sealed.clone();
                 self.raise_floor(*first);
             }
             WriteOp::TrimmedTo { point, state } => {
-                self.sealed = *state;
+                self.sealed = state.clone();
                 let boundary = Slot(point.0 - 1);
                 self.hard_state.chosen_index = self.hard_state.chosen_index.max(Some(boundary));
                 self.raise_floor(*point);
@@ -192,7 +192,7 @@ impl Storage for MemStorage {
         self.accepted.keys().next_back().copied()
     }
     fn sealed_state(&self) -> JournalState {
-        self.sealed
+        self.sealed.clone()
     }
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         self.faulty.clone()

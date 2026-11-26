@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use super::segment::{ReplicaSet, SegmentId};
+use super::state::JournalState;
 use crate::types::Slot;
 
 /// A journal's chain: each segment the matchmakers heard of, by id.
@@ -34,6 +35,11 @@ pub struct Opening {
     /// The replicas that the `Roll` named, or `None` when it kept the replicas
     /// of the segment before (D4).
     pub replicas: Option<ReplicaSet>,
+    /// The boundary state: the journal state after the `Roll`, which the fold
+    /// of every slot below the start of the segment gives. A replica of the
+    /// segment starts from it (R6, `ReplicaNode::join_segment`). A function of
+    /// the chosen log like every field of the record.
+    pub boundary: JournalState,
 }
 
 /// What the chain holds of one segment. The start is known from the first
@@ -189,6 +195,7 @@ mod tests {
             start: Slot(start),
             opening: Some(Opening {
                 replicas: replicas.map(|r| ReplicaSet::new(r.iter().map(|n| NodeId(*n)))),
+                boundary: crate::journal::JournalState::default(),
             }),
             end: None,
         }

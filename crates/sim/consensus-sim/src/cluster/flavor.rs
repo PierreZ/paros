@@ -552,6 +552,17 @@ pub enum Mutant {
     /// a proposal (`Source = "proposed"` of `specs/tla/handover-scalars/`).
     /// Caught by [`CHAIN_TRUE`](crate::oracle::ledger::CHAIN_TRUE).
     EarlyPublish,
+    /// The leader's driver routes each `Commit` to the replicas of a segment
+    /// with the tail segment of the leader's fold, not the segment of the
+    /// slot: a walk that applies a `Roll` and the slots below it in one
+    /// batch sends those slots to the replicas of the next segment. Caught
+    /// by [`ROUTE_TRUE`](crate::oracle::ledger::ROUTE_TRUE).
+    RouteFromTail,
+    /// The leader's driver routes each `Commit` to the replicas of the
+    /// tail segment at the decision, not after the fold: a slot that
+    /// decides before a slot below it reaches the replicas above a hole.
+    /// Caught by [`ROUTE_ON_PREFIX`](crate::oracle::ledger::ROUTE_ON_PREFIX).
+    RouteOnDecision,
     /// The driver drops the faulty records from every `Promise` it sends:
     /// a lost value reads as no vote (`Tally = "none"` of `truncation/`).
     /// A value is lost only when the candidate fills a chosen slot with a
