@@ -12,8 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use super::{BootstrapPage, JournalRegistry, MatchmakerPhase, Registration, RegistrationKind};
-use crate::journal::{Chain, JournalId, Opening, SegmentId, SegmentRecord};
+use super::{JournalRegistry, MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind};
+use crate::journal::{Chain, Opening, SegmentId, SegmentRecord};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::Slot;
 use crate::types::{Ballot, NodeId};
@@ -26,9 +26,6 @@ use crate::types::{Ballot, NodeId};
 pub struct MatchRequest {
     /// The requesting proposer.
     pub from: NodeId,
-    /// The journal whose registry the request addresses, inside the set's
-    /// tenant (#190): a set holds one registry per journal.
-    pub journal: JournalId,
     /// The ballot to register under. One ballot has exactly one proposer, so
     /// `ballot.node` is the identity that keeps matchmakers from disagreeing.
     pub ballot: Ballot,
@@ -64,7 +61,6 @@ impl MatchRequest {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(
-        journal: JournalId,
         from: NodeId,
         ballot: Ballot,
         config: AcceptorConfig,
@@ -72,7 +68,6 @@ impl MatchRequest {
     ) -> Self {
         let request = Self {
             from,
-            journal,
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Belief),
@@ -99,7 +94,6 @@ impl MatchRequest {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reconfigure(
-        journal: JournalId,
         from: NodeId,
         ballot: Ballot,
         config: AcceptorConfig,
@@ -107,7 +101,6 @@ impl MatchRequest {
     ) -> Self {
         let request = Self {
             from,
-            journal,
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Reconfiguration),
@@ -138,16 +131,15 @@ impl MatchRequest {
     #[must_use]
     pub fn for_kind(
         kind: RegistrationKind,
-        journal: JournalId,
         from: NodeId,
         ballot: Ballot,
         config: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
         let request = match kind {
-            RegistrationKind::Belief => Self::new(journal, from, ballot, config, generation),
+            RegistrationKind::Belief => Self::new(from, ballot, config, generation),
             RegistrationKind::Reconfiguration => {
-                Self::reconfigure(journal, from, ballot, config, generation)
+                Self::reconfigure(from, ballot, config, generation)
             }
         };
         assert!(
@@ -170,7 +162,6 @@ impl MatchRequest {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn probe(
-        journal: JournalId,
         from: NodeId,
         ballot: Ballot,
         believed: AcceptorConfig,
@@ -178,7 +169,6 @@ impl MatchRequest {
     ) -> Self {
         let request = Self {
             from,
-            journal,
             ballot,
             config: believed,
             purpose: MatchPurpose::Probe,
@@ -452,8 +442,6 @@ pub enum MatchOutcome {
 pub struct MatchReply {
     /// The answering matchmaker.
     pub matchmaker: MatchmakerId,
-    /// The request's journal, echoed (#190).
-    pub journal: JournalId,
     /// The requester the reply is addressed to.
     pub to: NodeId,
     /// The request's ballot, echoed.
@@ -471,9 +459,6 @@ pub struct MatchReply {
 pub struct GcRequest {
     /// The requesting leader.
     pub from: NodeId,
-    /// The journal whose watermark rises (#190): the leader of each journal
-    /// raises its own, never a sibling's.
-    pub journal: JournalId,
     /// The generation addressed.
     pub generation: MatchmakerGeneration,
     /// The floor to raise to — the leader's own ballot.
@@ -486,8 +471,6 @@ pub struct GcRequest {
 pub struct GcAck {
     /// The answering matchmaker.
     pub matchmaker: MatchmakerId,
-    /// The request's journal, echoed (#190).
-    pub journal: JournalId,
     /// The request's generation, echoed.
     pub generation: MatchmakerGeneration,
     /// Whether the request was applied at that generation (a matchmaker not
@@ -518,8 +501,6 @@ pub struct GcAck {
 pub struct SegmentPublish {
     /// The publishing node.
     pub from: NodeId,
-    /// The journal whose chain grows (#190).
-    pub journal: JournalId,
     /// The generation addressed.
     pub generation: MatchmakerGeneration,
     /// The segment that the `Roll` ended.
@@ -569,8 +550,6 @@ impl SegmentPublish {
 pub struct SegmentAck {
     /// The answering matchmaker.
     pub matchmaker: MatchmakerId,
-    /// The request's journal, echoed.
-    pub journal: JournalId,
     /// The request's generation, echoed.
     pub generation: MatchmakerGeneration,
     /// The request's sealed segment, echoed.
@@ -588,25 +567,19 @@ pub struct SegmentAck {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReconfigureRequest {
-    /// Freeze `generation` and report its registry (`StopA`), one page of
-    /// journals at a time (#439): the page holds the journals strictly
-    /// above `after` (`None`: from the first).
+    /// Freeze `generation` and report its registry (`StopA`).
     Stop {
         /// The requesting node.
         from: NodeId,
         /// The generation to freeze.
         generation: MatchmakerGeneration,
-        /// The **journal cursor**: the page starts strictly above it.
-        after: Option<JournalId>,
     },
-    /// Hand one page of a proposed successor's initial state to one of its
-    /// members (#439): a set's journals are many, and a page holds at most
-    /// [`REGISTRY_PAGE`](super::REGISTRY_PAGE) of them.
+    /// Hand a proposed successor's initial state to one of its members.
     Bootstrap {
         /// The requesting node.
         from: NodeId,
-        /// The proposed set and one page of the reconstructed registries.
-        bootstrap: BootstrapPage,
+        /// The proposed set and the reconstructed registry.
+        bootstrap: PendingBootstrap,
     },
     /// Phase 1a of the successor decree over `generation`'s matchmakers.
     DecreePrepare {
@@ -677,30 +650,21 @@ impl ReconfigureRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReconfigureReply {
-    /// `generation` is frozen here (`StopB`): one page of the journals'
-    /// durable registries, and the successor if already learned.
+    /// `generation` is frozen here (`StopB`): the journal's durable
+    /// registry, and the successor if already learned.
     Stopped {
         /// The answering matchmaker.
         matchmaker: MatchmakerId,
         /// The frozen generation.
         generation: MatchmakerGeneration,
-        /// The request's cursor, echoed: the page holds the journals
-        /// strictly above it.
-        after: Option<JournalId>,
-        /// Where the next page starts, when this one was cut short (#439):
-        /// the last journal it holds. `None` means the report is complete:
-        /// only then does the member count toward the stop quorum.
-        next: Option<JournalId>,
-        /// One page of the journals' durable registries (#190, #439), at
-        /// most [`REGISTRY_PAGE`](super::REGISTRY_PAGE) journals, in
-        /// journal order: each its watermark, its
-        /// registrations at or above it, and its **effective configuration**
-        /// (see [`super::JournalScalars::effective`]). The reconstruction
-        /// takes, per journal, the maximum watermark, the union above it and
-        /// the maximum effective configuration over its stop quorum, so a
-        /// successor generation inherits each journal's acceptor set in
-        /// force even when the record it came from was collected long ago.
-        registries: BTreeMap<JournalId, JournalRegistry>,
+        /// The journal's durable registry: its watermark, its registrations
+        /// at or above it, and its **effective configuration** (see
+        /// [`super::JournalScalars::effective`]). The reconstruction takes
+        /// the maximum watermark, the union above it and the maximum
+        /// effective configuration over its stop quorum, so a successor
+        /// generation inherits the acceptor set in force even when the
+        /// record it came from was collected long ago.
+        registry: JournalRegistry,
         /// The chosen successor, if learned.
         successor: Option<MatchmakerSet>,
         /// The highest decree ballot this matchmaker has promised for the
@@ -713,19 +677,13 @@ pub enum ReconfigureReply {
         /// ([`super::ReconfigurerReady::round`]).
         decree_promised: Ballot,
     },
-    /// The bootstrap for `set` is durably pending here, whole or up to
-    /// `held` (#439).
+    /// The bootstrap for `set` is durably pending here: only then may the
+    /// set be chosen.
     Bootstrapped {
         /// The answering matchmaker.
         matchmaker: MatchmakerId,
         /// The proposed set the bootstrap was for.
         set: MatchmakerSet,
-        /// The last journal of the pages held so far, `None` when none is:
-        /// the next page starts strictly above it.
-        held: Option<JournalId>,
-        /// Whether the bootstrap is held whole: only then may the set be
-        /// chosen, and only a whole one activates.
-        complete: bool,
     },
     /// Phase 1b: promised `ballot`, reporting the vote held.
     Promised {

@@ -188,10 +188,7 @@ impl Publisher {
         {
             return None;
         }
-        let pending = self
-            .pending
-            .get_mut(&ack.sealed)
-            .filter(|pending| pending.publish.journal == ack.journal)?;
+        let pending = self.pending.get_mut(&ack.sealed)?;
         pending.acked.insert(ack.matchmaker);
         assert!(
             pending.acked.iter().all(|m| set.contains(*m)),

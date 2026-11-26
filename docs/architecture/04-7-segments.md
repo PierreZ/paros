@@ -25,7 +25,7 @@ oracle and a mutant on the trim jump.
 **What is built (step 4).** The chain at the matchmakers (R5): `journal/chain.rs` has the record
 of a segment (`SegmentRecord`: a start, an opening with the replicas that the `Roll` named, an
 end) and its merge, field by field, where two values of one field are a detected safety violation.
-`JournalScalars::segments` holds the chain of each journal. A node publishes the end of a segment
+`JournalScalars::segments` holds the chain of the journal (a matchmaker serves one journal, §3.4). A node publishes the end of a segment
 after its own fold applied the `Roll` (`SegmentPublish`, `node/chain.rs`): the walk, a refold
 past a healed hole, a trim-point jump and the boot each publish the `Roll`s they fold, so an end
 reaches the matchmakers even when every node that walked it restarted. It publishes to every matchmaker

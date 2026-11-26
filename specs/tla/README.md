@@ -770,8 +770,8 @@ floor 1 is effective, but `Z` and `W` hold the floor 0. This is class 5 of item 
 (matchmaker safety and liveness).
 
 Not in the model: the decree that chooses the successor, lost matchmaker state, the effective
-configuration and the retirement records (`handover-scalars/`), the size of the successor set and
-more than one journal. `handover/` (#1097
+configuration and the retirement records (`handover-scalars/`) and the size of the successor set.
+A matchmaker serves one journal, like the model. `handover/` (#1097
 (rework 1.8)) extends this model with the target, the size and the register.
 
 ### `handover-scalars/`: the retirement records, the effective configuration and the chain of segments across a handover, for #1230 (rules no check tests)
@@ -866,8 +866,7 @@ The traces of the controls:
   configuration. This is the reason for the scalar (`JournalScalars::effective`).
 
 Not in the model: the registrations that block a retirement (`retire-fence/` checks that rule),
-Phase 1, the decree that chooses the successor, lost matchmaker state, more than one handover
-and more than one journal.
+Phase 1, the decree that chooses the successor, lost matchmaker state and more than one handover.
 
 ### `handover/`: a matchmaker set handover onto a named target, for #1097 (rework 1.8)
 
@@ -979,8 +978,8 @@ nothing in the handover sees a resize that the operator records after the target
 named. This is the rule (Pierre, 2026-11-20): a resize waits for the handover
 (`docs/architecture/04-roles.md`, rule 2).
 
-Not in the model: the decree (`decree/`), lost matchmaker state, more than one journal (a
-handover is paged, #439) and the registrations, which leave with rule 1. A client step that
+Not in the model: the decree (`decree/`), lost matchmaker state and the registrations, which
+leave with rule 1. A client step that
 reaches a minority, the clients of generation 1 and a second handover are in
 `handover-chain/`.
 

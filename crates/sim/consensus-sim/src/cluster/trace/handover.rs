@@ -7,22 +7,18 @@
 //! steps a handover's request: a freeze (`MmStop`), a whole bootstrap of a
 //! proposed set (`MmBoot`), a vote in the successor decree (`MmVote`), and
 //! an activation (`MmActivate`). A registration and a GC ack are the
-//! `Register` and `GcAck` of the matchmaking. The state of a set is the
-//! walk's journal alone: a sibling journal's floor and records are its own.
+//! `Register` and `GcAck` of the matchmaking. A matchmaker serves one
+//! journal, so its state is the state of a set.
 
 use std::collections::BTreeSet;
 
 use moonpool_tla::Value;
 use paros_consensus::Ballot;
-use paros_consensus::journal::{JournalId, JournalIdentifier};
 use paros_consensus::matchmaker::{Matchmaker, MatchmakerHardState, MatchmakerPhase};
 use paros_consensus::membership::{MatchmakerId, MatchmakerSet};
 
 use super::{ClusterEvent, encode};
 use crate::trace::{Ranks, Trace, int};
-
-/// The walk's journal: the one a handover's state is judged on.
-const JOURNAL: JournalId = JournalIdentifier::UNSET.journal;
 
 /// The steps of `HandoverTrace`.
 pub(super) fn keeps(event: &ClusterEvent) -> bool {
@@ -71,20 +67,15 @@ pub(in crate::cluster) fn steps(
             generation: now.generation.0,
         });
     }
-    for pending in now.pending.iter().filter(|p| p.complete) {
-        let whole = was
-            .pending
-            .iter()
-            .any(|p| p.complete && p.set == pending.set);
-        if whole {
+    for pending in &now.pending {
+        if was.pending.iter().any(|p| p.set == pending.set) {
             continue;
         }
-        let registry = pending.registries.get(&JOURNAL);
         events.push(ClusterEvent::MmBoot {
             matchmaker: id,
             set: pending.set.clone(),
-            floor: registry.map_or(Ballot::zero(), |r| r.gc_watermark),
-            registry: registry.map_or_else(Vec::new, |r| r.history.keys().copied().collect()),
+            floor: pending.registry.gc_watermark,
+            registry: pending.registry.history.keys().copied().collect(),
         });
     }
     if now.generation == was.generation
@@ -102,8 +93,8 @@ pub(in crate::cluster) fn steps(
         events.push(ClusterEvent::MmActivate {
             matchmaker: id,
             set: matchmaker.set().clone(),
-            floor: matchmaker.gc_watermark(JOURNAL),
-            registry: matchmaker.registry(JOURNAL).keys().copied().collect(),
+            floor: matchmaker.gc_watermark(),
+            registry: matchmaker.registry().keys().copied().collect(),
         });
     }
     events

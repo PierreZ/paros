@@ -67,7 +67,6 @@ impl ColocatedNode {
             }
             publishes.push(SegmentPublish {
                 from: self.config.id,
-                journal: self.config.journal.journal,
                 generation: self.deployment_matchmakers().generation,
                 sealed: SegmentId(tail.id.0 - 1),
                 start,
@@ -189,7 +188,7 @@ impl ColocatedNode {
     pub fn on_segment_ack(&mut self, ack: &SegmentAck) -> Option<SegmentId> {
         self.assert_landed();
         let believed = self.matchmakers.as_ref()?;
-        if !believed.contains(ack.matchmaker) || ack.journal != self.config.journal.journal {
+        if !believed.contains(ack.matchmaker) {
             return None;
         }
         // A matchmaker names only a set later than the generation it

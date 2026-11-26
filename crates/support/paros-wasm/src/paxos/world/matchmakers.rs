@@ -51,7 +51,6 @@ mod verbs;
 use paros_consensus::NodeId;
 use paros_consensus::membership::MatchmakerId;
 
-pub(crate) use process::JOURNAL;
 pub use process::{MatchmakerProcess, RegistryDisk};
 pub(crate) use render::{plane_view, why};
 

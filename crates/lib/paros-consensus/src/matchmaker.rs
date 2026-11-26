@@ -141,20 +141,15 @@ pub use self::reconfigurer::{
     StartRefusal,
 };
 pub use self::state::{
-    BootstrapPage, DecreeRecord, JournalRegistry, JournalScalars, MatchmakerConfig,
-    MatchmakerHardState, MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind,
-    Retirement,
+    DecreeRecord, JournalRegistry, JournalScalars, MatchmakerConfig, MatchmakerHardState,
+    MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind, Retirement,
 };
 pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
 use crate::contract::limits::Limits;
-use crate::journal::JournalId;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
 use crate::types::{Ballot, NodeId};
-
-/// A journal this set holds no record for reads as this registry.
-static EMPTY_REGISTRY: BTreeMap<Ballot, Registration> = BTreeMap::new();
 
 use crate::contract::limits::REGISTRY_PAGE;
 
@@ -291,14 +286,13 @@ pub struct Matchmaker {
     /// port that changes the shipped program. Kept in step by
     /// `refresh_set`, and `assert_invariants` says so.
     set: MatchmakerSet,
-    /// Every journal's registry (#190): each registered `ballot ->
-    /// registration` retained above that journal's GC watermark, strictly
-    /// increasing in ballot order (the window keeps the order and the floor;
-    /// the state machine keeps the "only ever appended above the highest"
-    /// discipline). A journal appears once it has a record or a raised
-    /// floor; each floor is a copy of the journal's durable `gc_watermark`,
-    /// and `assert_invariants` says so.
-    registries: BTreeMap<JournalId, RetainedWindow<Ballot, Registration>>,
+    /// The journal's registry: each registered `ballot -> registration`
+    /// retained above the GC watermark, strictly increasing in ballot order
+    /// (the window keeps the order and the floor; the state machine keeps
+    /// the "only ever appended above the highest" discipline). Its floor is
+    /// a copy of the durable `gc_watermark`, and `assert_invariants` says
+    /// so.
+    registry: RetainedWindow<Ballot, Registration>,
     pending_writes: Vec<MatchmakerWriteOp>,
     pending_replies: Vec<MatchReply>,
     pending_reconfigure_replies: Vec<ReconfigureReply>,
@@ -332,46 +326,28 @@ impl Matchmaker {
     pub fn new<S: RegistryStorage>(config: &MatchmakerConfig, storage: &S, limits: Limits) -> Self {
         limits.assert_valid();
         let hard_state = storage.initial_state();
-        let mut ledgers: BTreeMap<JournalId, BTreeMap<Ballot, Registration>> = BTreeMap::new();
-        for (journal, ballot) in storage.registered() {
+        let mut ledger: BTreeMap<Ballot, Registration> = BTreeMap::new();
+        for ballot in storage.registered() {
             let registration = storage
-                .registration(journal, ballot)
+                .registration(ballot)
                 .expect("every registered ballot the walk names has a readable record");
-            let previous = ledgers
-                .entry(journal)
-                .or_default()
-                .insert(ballot, registration);
+            let previous = ledger.insert(ballot, registration);
             assert!(
                 previous.is_none(),
                 "the registry walk names each ballot once"
             );
         }
-        // The window each registry lives in enforces its own floor, so this
+        // The window the registry lives in enforces its own floor, so this
         // says the same thing in the *registry's* words, at the boot seam
         // where a corrupt store is what breaks it.
         assert!(
-            ledgers.iter().all(|(journal, ledger)| ledger
+            ledger
                 .keys()
                 .next()
-                .is_none_or(|lowest| *lowest >= hard_state.gc_watermark(*journal))),
+                .is_none_or(|lowest| *lowest >= hard_state.gc_watermark()),
             "no registration survives below the gc watermark"
         );
-        let mut registries: BTreeMap<JournalId, RetainedWindow<Ballot, Registration>> = hard_state
-            .journals
-            .iter()
-            .map(|(journal, scalars)| {
-                (
-                    *journal,
-                    RetainedWindow::new(BTreeMap::new(), scalars.gc_watermark),
-                )
-            })
-            .collect();
-        for (journal, ledger) in ledgers {
-            registries.insert(
-                journal,
-                RetainedWindow::new(ledger, hard_state.gc_watermark(journal)),
-            );
-        }
+        let registry = RetainedWindow::new(ledger, hard_state.gc_watermark());
         let mut bootstrap = config.bootstrap.clone();
         bootstrap.sort_unstable();
         bootstrap.dedup();
@@ -387,7 +363,7 @@ impl Matchmaker {
             },
             hard_state,
             set,
-            registries,
+            registry,
             pending_writes: Vec::new(),
             pending_replies: Vec::new(),
             pending_reconfigure_replies: Vec::new(),
@@ -417,79 +393,48 @@ impl Matchmaker {
         &self.hard_state
     }
 
-    /// `journal`'s registry as it stands, in ballot order (same caveat as
-    /// [`Self::hard_state`]); empty for a journal this set holds nothing of.
+    /// The registry as it stands, in ballot order (same caveat as
+    /// [`Self::hard_state`]).
     #[must_use]
-    pub fn registry(&self, journal: JournalId) -> &BTreeMap<Ballot, Registration> {
-        self.registries
-            .get(&journal)
-            .map_or(&EMPTY_REGISTRY, RetainedWindow::entries)
+    pub fn registry(&self) -> &BTreeMap<Ballot, Registration> {
+        self.registry.entries()
     }
 
-    /// Every journal this set holds a registry or a scalar for (#190), in
-    /// journal order.
-    ///
-    /// # Panics
-    ///
-    /// If a journal with scalars has no registry window: a programmer
-    /// error, never an operating condition.
-    pub fn journals(&self) -> impl Iterator<Item = JournalId> + '_ {
-        let journals = self.registries.keys().copied();
-        // Every journal with scalars has its window (`new`, `window`).
+    /// The GC watermark, as it stands.
+    #[must_use]
+    pub fn gc_watermark(&self) -> Ballot {
+        self.hard_state.gc_watermark()
+    }
+
+    /// The effective configuration, as it stands.
+    #[must_use]
+    pub fn effective(&self) -> Option<&(Ballot, AcceptorConfig)> {
+        self.hard_state.effective()
+    }
+
+    /// The registry window, at the durable floor.
+    fn window(&mut self) -> &mut RetainedWindow<Ballot, Registration> {
         assert!(
-            self.hard_state
-                .journals
-                .keys()
-                .all(|journal| self.registries.contains_key(journal)),
-            "every journal with scalars has a registry window"
+            self.registry.floor() == self.hard_state.gc_watermark(),
+            "the registry window sits at the watermark"
         );
-        journals
+        &mut self.registry
     }
 
-    /// `journal`'s GC watermark, as it stands.
-    #[must_use]
-    pub fn gc_watermark(&self, journal: JournalId) -> Ballot {
-        self.hard_state.gc_watermark(journal)
-    }
-
-    /// `journal`'s effective configuration, as it stands.
-    #[must_use]
-    pub fn effective(&self, journal: JournalId) -> Option<&(Ballot, AcceptorConfig)> {
-        self.hard_state.effective(journal)
-    }
-
-    /// `journal`'s registry window, created empty at its floor on first use.
-    fn window(&mut self, journal: JournalId) -> &mut RetainedWindow<Ballot, Registration> {
-        let floor = self.hard_state.gc_watermark(journal);
-        let window = self
-            .registries
-            .entry(journal)
-            .or_insert_with(|| RetainedWindow::new(BTreeMap::new(), floor));
-        assert!(
-            window.floor() == floor,
-            "a registry window sits at its journal's watermark"
-        );
-        window
-    }
-
-    /// The highest ballot registered in `journal`'s registry, or `None` on
-    /// an empty one.
+    /// The highest ballot registered, or `None` on an empty registry.
     ///
     /// # Panics
     ///
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn highest(&self, journal: JournalId) -> Option<Ballot> {
-        let highest = self
-            .registries
-            .get(&journal)
-            .and_then(RetainedWindow::last_key);
+    pub fn highest(&self) -> Option<Ballot> {
+        let highest = self.registry.last_key();
         // Paired with `advance_gc_watermark`: what survives sits at or above
         // the durable floor.
         if let Some(highest) = highest {
             assert!(
-                highest >= self.hard_state.gc_watermark(journal),
+                highest >= self.hard_state.gc_watermark(),
                 "the highest registration sits at or above the watermark"
             );
         }
@@ -582,7 +527,6 @@ impl Matchmaker {
         self.assert_invariants();
         let MatchRequest {
             from,
-            journal,
             ballot,
             config,
             purpose,
@@ -592,12 +536,12 @@ impl Matchmaker {
         let kind = match purpose {
             MatchPurpose::Register(kind) => kind,
             MatchPurpose::Probe | MatchPurpose::Retire { .. } | MatchPurpose::Rejoin { .. } => {
-                self.answer_probe(from, journal, ballot, generation, purpose);
+                self.answer_probe(from, ballot, generation, purpose);
                 return;
             }
         };
         let registration = Registration { config, kind };
-        let retired = self.hard_state.retired_in(journal, &registration.config);
+        let retired = self.hard_state.retired_in(&registration.config);
         let outcome = if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
         } else if let Some(node) = retired {
@@ -609,31 +553,29 @@ impl Matchmaker {
                 "matchmaker: a registration naming a retired node is refused"
             );
             MatchOutcome::Refused(MatchRefusal::Retired { node })
-        } else if ballot < self.hard_state.gc_watermark(journal) {
+        } else if ballot < self.hard_state.gc_watermark() {
             MatchOutcome::Refused(MatchRefusal::BelowWatermark {
-                watermark: self.hard_state.gc_watermark(journal),
+                watermark: self.hard_state.gc_watermark(),
             })
-        } else if let Some(highest) = self.highest(journal).filter(|highest| ballot <= *highest) {
-            match self.registry(journal).get(&ballot) {
+        } else if let Some(highest) = self.highest().filter(|highest| ballot <= *highest) {
+            match self.registry().get(&ballot) {
                 // The same request again: answered from the retained history
                 // (which GC may have shrunk since the first answer),
                 // registered once.
-                Some(registered) if *registered == registration => {
-                    self.page(journal, from_ballot, ballot)
-                }
+                Some(registered) if *registered == registration => self.page(from_ballot, ballot),
                 _ => MatchOutcome::Refused(MatchRefusal::Stale { highest }),
             }
         } else {
             // Compute the page *before* registering, so the request's own
             // configuration never appears in its own answer.
-            let page = self.page(journal, from_ballot, ballot);
-            let previous = self.window(journal).insert(ballot, registration.clone());
+            let page = self.page(from_ballot, ballot);
+            let previous = self.window().insert(ballot, registration.clone());
             assert!(
                 previous.is_none(),
                 "a fresh registration lands on an unregistered ballot"
             );
             assert!(
-                self.highest(journal) == Some(ballot),
+                self.highest() == Some(ballot),
                 "a fresh registration becomes the registry's highest ballot"
             );
             // A *reconfiguration* registration also raises the effective
@@ -643,7 +585,7 @@ impl Matchmaker {
             // non-durable scalar.
             if registration.kind.is_reconfiguration()
                 && raise_effective(
-                    &mut self.hard_state.journal_mut(journal).effective,
+                    &mut self.hard_state.journal.effective,
                     ballot,
                     &registration.config,
                 )
@@ -651,16 +593,14 @@ impl Matchmaker {
                 self.stage_scalars();
             }
             self.pending_writes.push(MatchmakerWriteOp::Register {
-                journal,
                 ballot,
                 registration,
             });
             page
         };
-        self.assert_registered_answer(&outcome, journal, ballot, generation);
+        self.assert_registered_answer(&outcome, ballot, generation);
         self.pending_replies.push(MatchReply {
             matchmaker: self.config.id,
-            journal,
             to: from,
             ballot,
             generation,
@@ -675,7 +615,6 @@ impl Matchmaker {
     fn assert_registered_answer(
         &self,
         outcome: &MatchOutcome,
-        journal: JournalId,
         ballot: Ballot,
         generation: MatchmakerGeneration,
     ) {
@@ -692,7 +631,7 @@ impl Matchmaker {
         // the history is exactly the window below it, and only an active
         // matchmaker of the addressed generation ever registers.
         assert!(
-            self.registry(journal).contains_key(&ballot),
+            self.registry().contains_key(&ballot),
             "a Registered reply names a registered ballot"
         );
         assert!(
@@ -700,9 +639,7 @@ impl Matchmaker {
             "a history stays strictly below the ballot it answers"
         );
         assert!(
-            history
-                .keys()
-                .all(|b| *b >= self.hard_state.gc_watermark(journal)),
+            history.keys().all(|b| *b >= self.hard_state.gc_watermark()),
             "a history never reaches below the watermark"
         );
         assert!(
@@ -751,15 +688,14 @@ impl Matchmaker {
     fn answer_probe(
         &mut self,
         from: NodeId,
-        journal: JournalId,
         ballot: Ballot,
         generation: MatchmakerGeneration,
         purpose: MatchPurpose,
     ) {
         assert!(purpose.is_probe(), "only a probe is answered as one");
         let writes = self.pending_writes.len();
-        let registered = self.registry(journal).contains_key(&ballot);
-        let held = self.retirement(journal, from);
+        let registered = self.registry().contains_key(&ballot);
+        let held = self.retirement(from);
         let outcome = if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
         } else if let MatchPurpose::Retire { incarnation, .. } = purpose
@@ -775,20 +711,20 @@ impl Matchmaker {
         } else {
             let named = match purpose {
                 MatchPurpose::Retire { watermark, .. } => self
-                    .highest_naming(journal, from)
+                    .highest_naming(from)
                     .filter(|named| *named >= watermark),
-                _ => self.highest_naming(journal, from),
+                _ => self.highest_naming(from),
             };
             match purpose {
                 MatchPurpose::Retire {
                     watermark,
                     incarnation,
-                } if named.is_none() => self.retire(journal, from, watermark, incarnation),
-                MatchPurpose::Rejoin { incarnation } => self.rejoin(journal, from, incarnation),
+                } if named.is_none() => self.retire(from, watermark, incarnation),
+                MatchPurpose::Rejoin { incarnation } => self.rejoin(from, incarnation),
                 _ => {}
             }
             MatchOutcome::Probed {
-                effective: self.hard_state.effective(journal).cloned(),
+                effective: self.hard_state.effective().cloned(),
                 named,
             }
         };
@@ -805,12 +741,11 @@ impl Matchmaker {
             );
         }
         assert!(
-            self.registry(journal).contains_key(&ballot) == registered,
+            self.registry().contains_key(&ballot) == registered,
             "a membership probe registers nothing"
         );
         self.pending_replies.push(MatchReply {
             matchmaker: self.config.id,
-            journal,
             to: from,
             ballot,
             generation,
@@ -824,13 +759,13 @@ impl Matchmaker {
     /// stop, and from now on no registration naming it lands here. The
     /// scalars are staged before the answer that agrees, so the agreement
     /// never escapes a record that is not durable.
-    fn retire(&mut self, journal: JournalId, node: NodeId, watermark: Ballot, incarnation: u64) {
+    fn retire(&mut self, node: NodeId, watermark: Ballot, incarnation: u64) {
         assert!(
-            self.highest_naming(journal, node)
+            self.highest_naming(node)
                 .is_none_or(|named| named < watermark),
             "a node retires only when nothing at or above its floor names it"
         );
-        let held = self.retirement(journal, node);
+        let held = self.retirement(node);
         assert!(
             incarnation >= held.incarnation,
             "a retirement is recorded only at the latest incarnation"
@@ -844,10 +779,10 @@ impl Matchmaker {
                 reachable,
                 "matchmaker: a retirement check records the node as retired"
             );
-            self.record_retirement(journal, node, record);
+            self.record_retirement(node, record);
         }
         assert!(
-            self.hard_state.retired_in_record(journal, node),
+            self.hard_state.retired_in_record(node),
             "a retired node is held"
         );
     }
@@ -857,8 +792,8 @@ impl Matchmaker {
     /// later booking started the journal on it again, and it answers Phase
     /// 1 with its kept promise. A retirement of `incarnation` itself, a new
     /// one of the node that came back, stays. Staged before the answer.
-    fn rejoin(&mut self, journal: JournalId, node: NodeId, incarnation: u64) {
-        let held = self.retirement(journal, node);
+    fn rejoin(&mut self, node: NodeId, incarnation: u64) {
+        let held = self.retirement(node);
         if incarnation <= held.incarnation {
             return;
         }
@@ -866,7 +801,6 @@ impl Matchmaker {
             probe!(reachable, "matchmaker: a rejoin clears a retired node");
         }
         self.record_retirement(
-            journal,
             node,
             Retirement {
                 incarnation,
@@ -874,34 +808,28 @@ impl Matchmaker {
             },
         );
         assert!(
-            !self.hard_state.retired_in_record(journal, node),
+            !self.hard_state.retired_in_record(node),
             "a rejoined node is not retired"
         );
     }
 
-    /// This matchmaker's retirement record of `node` in `journal`, the
-    /// default (incarnation 0, not retired) when it holds none.
-    fn retirement(&self, journal: JournalId, node: NodeId) -> Retirement {
+    /// This matchmaker's retirement record of `node`, the default
+    /// (incarnation 0, not retired) when it holds none.
+    fn retirement(&self, node: NodeId) -> Retirement {
         self.hard_state
-            .journals
-            .get(&journal)
-            .and_then(|scalars| scalars.retired.get(&node))
+            .journal
+            .retired
+            .get(&node)
             .copied()
             .unwrap_or_default()
     }
 
-    /// Hold `record` for `node` in `journal`, staged with the scalars.
-    fn record_retirement(&mut self, journal: JournalId, node: NodeId, record: Retirement) {
-        // A journal's scalars never stand without its registry window, even
-        // on a journal nobody registered in yet.
-        self.window(journal);
-        self.hard_state
-            .journal_mut(journal)
-            .retired
-            .insert(node, record);
+    /// Hold `record` for `node`, staged with the scalars.
+    fn record_retirement(&mut self, node: NodeId, record: Retirement) {
+        self.hard_state.journal.retired.insert(node, record);
         self.stage_scalars();
         assert!(
-            self.retirement(journal, node) == record,
+            self.retirement(node) == record,
             "a retirement record is held as staged"
         );
     }
@@ -910,16 +838,16 @@ impl Matchmaker {
     /// names `node` (#1002 (retire fence gaps)): what a probe reports as
     /// `named`. The retained window starts at the watermark, so a
     /// registration GC collected is never named.
-    fn highest_naming(&self, journal: JournalId, node: NodeId) -> Option<Ballot> {
+    fn highest_naming(&self, node: NodeId) -> Option<Ballot> {
         let named = self
-            .registry(journal)
+            .registry()
             .iter()
             .rev()
             .find(|(_, registration)| registration.config.contains(node))
             .map(|(ballot, _)| *ballot);
         if let Some(named) = named {
             assert!(
-                named >= self.hard_state.gc_watermark(journal),
+                named >= self.hard_state.gc_watermark(),
                 "a named registration sits at or above the watermark"
             );
         }
@@ -1074,7 +1002,6 @@ impl Matchmaker {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.config.id.0, round = watermark.round)))]
     pub fn advance_gc_watermark(
         &mut self,
-        journal: JournalId,
         generation: MatchmakerGeneration,
         watermark: Ballot,
     ) -> GcOutcome {
@@ -1082,33 +1009,19 @@ impl Matchmaker {
         if self.generation_refusal(generation).is_some() {
             return GcOutcome::Refused;
         }
-        if watermark <= self.hard_state.gc_watermark(journal) {
+        if watermark <= self.hard_state.gc_watermark() {
             return GcOutcome::Unchanged;
         }
         let writes = self.pending_writes.len();
-        let siblings: Vec<(JournalId, Ballot)> = self
-            .hard_state
-            .journals
-            .iter()
-            .filter(|(j, _)| **j != journal)
-            .map(|(j, scalars)| (*j, scalars.gc_watermark))
-            .collect();
-        self.window(journal).raise_floor(watermark);
-        self.hard_state.journal_mut(journal).gc_watermark = watermark;
+        self.window().raise_floor(watermark);
+        self.hard_state.journal.gc_watermark = watermark;
         self.pending_writes
-            .push(MatchmakerWriteOp::SetGcWatermark { journal, watermark });
+            .push(MatchmakerWriteOp::SetGcWatermark { watermark });
         // The write side of the boot pair `Matchmaker::new` re-asserts: the
         // registry floor and the durable watermark move together, in one op.
         assert!(
-            self.window(journal).floor() == watermark,
+            self.window().floor() == watermark,
             "the registry floor is the new watermark"
-        );
-        // #190: a journal's floor never moves because of a sibling's.
-        assert!(
-            siblings
-                .iter()
-                .all(|(j, floor)| self.hard_state.gc_watermark(*j) == *floor),
-            "a raise moves no sibling journal's watermark"
         );
         assert!(
             self.pending_writes.len() == writes + 1,
@@ -1136,10 +1049,9 @@ impl Matchmaker {
         let generation = request.generation;
         let ack = GcAck {
             matchmaker: self.config.id,
-            journal: request.journal,
             generation,
             applied: !refused,
-            watermark: self.hard_state.gc_watermark(request.journal),
+            watermark: self.hard_state.gc_watermark(),
             newer: refused.then(|| self.newer_set(generation)).flatten(),
             stopped: refused && self.frozen_without_successor(generation),
         };
@@ -1172,20 +1084,17 @@ impl Matchmaker {
     /// window did not fit. A belief that a later registration of the window
     /// repeats is left out ([`history_page`], #570 (election duel outlasts
     /// the recovery tail)).
-    fn page(&self, journal: JournalId, cursor: Option<Ballot>, ballot: Ballot) -> MatchOutcome {
-        let watermark = self.hard_state.gc_watermark(journal);
+    fn page(&self, cursor: Option<Ballot>, ballot: Ballot) -> MatchOutcome {
+        let watermark = self.hard_state.gc_watermark();
         let from_ballot = cursor.unwrap_or(watermark).max(watermark);
         // The window's own bounded page: at most `REGISTRY_PAGE` records
         // below `ballot`, and the cursor the candidate re-asks with (`None`
         // means the answer is complete).
-        let (history, next_from_ballot) = match self.registries.get(&journal) {
-            Some(window) => history_page(
-                window.range(watermark..ballot),
-                from_ballot,
-                self.limits.registry_page,
-            ),
-            None => (BTreeMap::new(), None),
-        };
+        let (history, next_from_ballot) = history_page(
+            self.registry.range(watermark..ballot),
+            from_ballot,
+            self.limits.registry_page,
+        );
         assert!(
             from_ballot >= watermark,
             "a page never starts below the watermark"
@@ -1199,65 +1108,42 @@ impl Matchmaker {
             history,
             next_from_ballot,
             gc_watermark: watermark,
-            effective: self.hard_state.effective(journal).cloned(),
+            effective: self.hard_state.effective().cloned(),
         }
     }
 
-    /// One page of the frozen registries (#439 (operator calls name their
-    /// journal)): the journals strictly above `after`, at most `page` of
-    /// them, each its history, watermark and effective configuration — the
-    /// frozen set a `StopB` hands the reconstruction (#190). A journal with
-    /// nothing to say is left out. The second value is where the next page
-    /// starts, `None` when this one ends the report.
-    pub(super) fn frozen_page(
-        &self,
-        after: Option<JournalId>,
-        page: usize,
-    ) -> (BTreeMap<JournalId, JournalRegistry>, Option<JournalId>) {
-        assert!(page > 0, "a frozen page carries a journal");
-        let mut above = self
-            .journals()
-            .filter(|journal| after.is_none_or(|after| *journal > after))
-            .map(|journal| {
-                (
-                    journal,
-                    JournalRegistry {
-                        gc_watermark: self.hard_state.gc_watermark(journal),
-                        history: self.registry(journal).clone(),
-                        effective: self.hard_state.effective(journal).cloned(),
-                        retired: self
-                            .hard_state
-                            .journals
-                            .get(&journal)
-                            .map_or_default(|scalars| scalars.retired.clone()),
-                        segments: self.chain(journal).cloned().unwrap_or_default(),
-                    },
-                )
-            })
-            .filter(|(_, registry)| !registry.is_blank());
-        let registries: BTreeMap<JournalId, JournalRegistry> = above.by_ref().take(page).collect();
-        let next = above
-            .next()
-            .is_some()
-            .then(|| registries.keys().next_back().copied())
-            .flatten();
+    /// The frozen registry: its history, watermark, effective
+    /// configuration, retirement records and chain — what a `StopB` hands
+    /// the reconstruction.
+    pub(super) fn frozen_registry(&self) -> JournalRegistry {
+        let registry = JournalRegistry {
+            gc_watermark: self.hard_state.gc_watermark(),
+            history: self.registry().clone(),
+            effective: self.hard_state.effective().cloned(),
+            retired: self.hard_state.journal.retired.clone(),
+            segments: self.hard_state.journal.segments.clone(),
+        };
         assert!(
-            registries.values().all(|registry| registry
-                .history
-                .keys()
-                .next()
-                .is_none_or(|b| *b >= registry.gc_watermark)),
+            registry.holds_nothing_below(),
             "a reported history starts at or above the watermark"
         );
-        // A page cut short is full, and continues after its last journal.
-        if next.is_some() {
-            assert!(registries.len() == page, "a cut frozen page is full");
-            assert!(
-                next == registries.keys().next_back().copied(),
-                "a cut frozen page continues after its last journal"
-            );
-        }
-        (registries, next)
+        assert!(
+            registry.history.len() == self.registry().len(),
+            "a frozen report carries every retained registration"
+        );
+        // Paired with the boot and the activation: the window in memory
+        // sits on the durable floor that the report carries.
+        assert!(
+            self.registry.floor() == registry.gc_watermark,
+            "a frozen report carries the floor of the window"
+        );
+        // Only a frozen generation reports: a live one could still take a
+        // registration that the report misses.
+        assert!(
+            self.hard_state.phase != MatchmakerPhase::Active,
+            "only a frozen generation reports its registry"
+        );
+        registry
     }
 
     /// The cross-field checker, called at boot and at every public mutating
@@ -1276,23 +1162,16 @@ impl Matchmaker {
             self.limits.registry_page <= REGISTRY_PAGE,
             "a registry page never exceeds its ceiling"
         );
-        for (journal, window) in &self.registries {
-            let watermark = self.hard_state.gc_watermark(*journal);
-            assert!(
-                window.first_key().is_none_or(|lowest| lowest >= watermark),
-                "no registration survives below the gc watermark"
-            );
-            assert!(
-                window.floor() == watermark,
-                "the registry's floor is the durable gc watermark"
-            );
-        }
+        let watermark = self.hard_state.gc_watermark();
         assert!(
-            self.hard_state
-                .journals
-                .keys()
-                .all(|journal| self.registries.contains_key(journal)),
-            "every journal with scalars has a registry window"
+            self.registry
+                .first_key()
+                .is_none_or(|lowest| lowest >= watermark),
+            "no registration survives below the gc watermark"
+        );
+        assert!(
+            self.registry.floor() == watermark,
+            "the registry's floor is the durable gc watermark"
         );
         let bootstrap = self.hard_state.generation == MatchmakerGeneration(0);
         assert!(
@@ -1343,22 +1222,18 @@ impl Matchmaker {
             self.set == self.derive_set(),
             "the materialized set is the one the durable scalars describe"
         );
-        // The chain of each journal keeps its shape, and its neighbours meet.
-        for scalars in self.hard_state.journals.values() {
-            crate::journal::chain::assert_chain(&scalars.segments);
-        }
+        // The chain keeps its shape, and its neighbours meet.
+        crate::journal::chain::assert_chain(&self.hard_state.journal.segments);
         // The effective configuration is a *scalar*, not a record: it may
         // legitimately sit below the watermark (its record was collected),
         // but it never disagrees with a record the registry still holds.
-        for (journal, scalars) in &self.hard_state.journals {
-            if let Some((ballot, config)) = &scalars.effective {
-                assert!(
-                    self.registry(*journal)
-                        .get(ballot)
-                        .is_none_or(|r| r.kind.is_reconfiguration() && r.config == *config),
-                    "the effective configuration agrees with its own retained record"
-                );
-            }
+        if let Some((ballot, config)) = self.hard_state.effective() {
+            assert!(
+                self.registry()
+                    .get(ballot)
+                    .is_none_or(|r| r.kind.is_reconfiguration() && r.config == *config),
+                "the effective configuration agrees with its own retained record"
+            );
         }
     }
 }

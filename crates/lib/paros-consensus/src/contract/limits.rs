@@ -73,7 +73,7 @@ pub const REGISTRY_PAGE: usize = 64;
 const _: () = assert!(REGISTRY_PAGE > 0);
 
 /// The page sizes and the read window one deployment runs under (#330,
-/// #338, #386, #439), handed to its constructor and fixed for the
+/// #338, #386), handed to its constructor and fixed for the
 /// incarnation. [`Limits::DEFAULT`] runs every page at its ceiling and the
 /// read window at its floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,8 +94,7 @@ pub struct Limits {
     /// unserved (#386). The core keeps an open quorum read at least that
     /// long, and never less than `READ_TTL_TICKS` (20 ticks).
     pub read_window: u64,
-    /// The most registrations one `Registered` answer carries, and the most
-    /// journals one `Bootstrap` carries (#338, #439), in
+    /// The most registrations one `Registered` answer carries (#338), in
     /// `1..=REGISTRY_PAGE`.
     pub registry_page: usize,
     /// How many re-fan-outs a proxy leader gives an open round before

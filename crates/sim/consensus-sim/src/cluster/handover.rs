@@ -205,14 +205,10 @@ impl Cluster {
     }
 }
 
-/// The [`Mutant::ShrinkBootstrap`] bug: a bootstrap page loses the lowest
-/// record of the walk's journal on the wire.
+/// The [`Mutant::ShrinkBootstrap`] bug: a bootstrap loses its lowest
+/// record on the wire.
 fn shrink_bootstrap(request: &mut ReconfigureRequest) {
-    if let ReconfigureRequest::Bootstrap { bootstrap, .. } = request
-        && let Some(registry) = bootstrap
-            .registries
-            .get_mut(&paros_consensus::journal::JournalIdentifier::UNSET.journal)
-    {
-        registry.history.pop_first();
+    if let ReconfigureRequest::Bootstrap { bootstrap, .. } = request {
+        bootstrap.registry.history.pop_first();
     }
 }

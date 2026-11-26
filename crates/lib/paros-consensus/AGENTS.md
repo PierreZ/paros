@@ -69,9 +69,9 @@ Roles (pure tallies, no deployment knowledge):
 - `decree.rs` → `Decree<Id, V>`, `DecreePromise`, `AcceptFold`, `DECREE_SLOT` → single-decree Paxos over the shared `Proposer` and `Acceptor` at slot zero: the matchmaker handover's successor decree (`SuccessorDecree`), and any one-shot decision a caller above the core runs. Its TLA+ model is `specs/tla/decree/` (#1186 (rework 1.15)).
 - `matchmaking.rs` → `Matchmaking` → the candidate's matchmaking phase; `matchmaking/probe.rs` → `MembershipProbe` (#173: at boot; #270: re-probed from outside a heard belief; #278: against a matched fact or a won leadership, late answers folded).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below); a history page (`history_page`) leaves out a belief a later registration repeats (#570 (election duel outlasts the recovery tail)), but keeps each owner's lowest registration of each configuration (PR #1064 (gone-node gap)).
-- `matchmaker/{generation,reconfigurer}.rs` → the generation machine, `MatchmakerReconfigurer`; a `Stop` and a `Bootstrap` are paged (`BootstrapPage`, #439).
-- `matchmaker/chain.rs` → `Matchmaker::publish_segment`, `segment_ack`, `chain`, `PublishOutcome` → a publish merged into the journal's chain (`JournalScalars::segments`), refused off its generation; the handover merges the chains of the stop quorum (`reconfigurer.rs`) and the activation merges the result into the member's own (`generation.rs`).
-- `matchmaker/{message,state,storage}.rs` → wire contract (`SegmentPublish`, `SegmentAck` too), durable state, `RegistryStorage` + `MemRegistry` (the reference registry); `matchmaker/ready.rs` → `MatchmakerWriteOp` + `MatchmakerReady`.
+- `matchmaker/{generation,reconfigurer}.rs` → the generation machine, `MatchmakerReconfigurer`; a `Stop` reports the one registry whole, and a `Bootstrap` carries the one rebuilt registry (a matchmaker serves one journal, #1430 (tenant catalog in the cell)).
+- `matchmaker/chain.rs` → `Matchmaker::publish_segment`, `segment_ack`, `chain`, `PublishOutcome` → a publish merged into the journal's chain (`MatchmakerHardState::journal`, `JournalScalars::segments`), refused off its generation; the handover merges the chains of the stop quorum (`reconfigurer.rs`) and the activation merges the result into the member's own (`generation.rs`).
+- `matchmaker/{message,state,storage}.rs` → wire contract (`SegmentPublish`, `SegmentAck` too; no message names a journal: one matchmaker state is one journal), durable state (`MatchmakerHardState::journal` holds its `JournalScalars`), `RegistryStorage` + `MemRegistry` (the reference registry); `matchmaker/ready.rs` → `MatchmakerWriteOp` + `MatchmakerReady`.
 
 Deployments (each wires roles and owns one `Ready`):
 
@@ -95,7 +95,7 @@ Deployments (each wires roles and owns one `Ready`):
 Test-only:
 
 - `test_support.rs` → the shared builders (`MemStorage::for_node`, `from_node`).
-- `models.rs` + `models/` → the model checkers: `handover.rs` (the matchmaker handover; half its seeds page by one or two journals, #439; claim 11: the chain of segments crosses a handover and only grows on a disk), `proxy.rs` (the proxy leader), `support.rs` (the seeded RNG and lossy mailbox both share).
+- `models.rs` + `models/` → the model checkers: `handover.rs` (the matchmaker handover of one journal; claim 10: the chain of segments crosses a handover and only grows on a disk), `proxy.rs` (the proxy leader), `support.rs` (the seeded RNG and lossy mailbox both share).
 
 ## Public surface
 

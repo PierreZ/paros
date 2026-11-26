@@ -19,8 +19,6 @@ use crate::matchmaker::{
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
 use crate::node::ready::Ready;
 
-/// The journal every test node serves.
-const J: crate::journal::JournalId = crate::journal::JournalId::UNSET;
 use crate::journal::{Command, Control, Entry, LeaderUuid, Seq, command_fingerprint};
 use crate::types::{Ballot, NodeId, Slot, Value};
 
@@ -75,7 +73,6 @@ fn campaign(n: &mut ColocatedNode) {
     let _ = drain_match_requests(n);
     for matchmaker in set.members() {
         n.on_match_reply(MatchReply {
-            journal: J,
             matchmaker: *matchmaker,
             to: n.config().id,
             ballot: tag,
@@ -106,7 +103,6 @@ fn check_registrations(n: &mut ColocatedNode, w: Ballot, named: Option<Ballot>) 
     let mut last = MatchStep::Ignored;
     for matchmaker in set.members() {
         last = n.on_match_reply(MatchReply {
-            journal: J,
             matchmaker: *matchmaker,
             to: n.config().id,
             ballot: tag,

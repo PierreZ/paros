@@ -142,7 +142,11 @@ and hands off through `relinquish_to` when another zone dominates past a hystere
 design; it replaces the set per tenant of 2026-10-09): `2F + 1` matchmakers that hold the
 journal's register (section 2.16). A set is never shared across tenants. A set is logical:
 matchmaker *processes* are shared, each hosting many journals' sets keyed by
-`JournalIdentifier`. **One store per matchmaker set** (decided on 2026-10-09, #190): the register
+`JournalIdentifier`. **One matchmaker serves one journal** (Pierre, 2026-11-22 and 2026-11-26,
+#1430 (tenant catalog in the cell)): the `Matchmaker` of `paros-consensus` holds the registry
+and the scalars of one journal, with no map of journals and no journal field on its messages,
+so its handover reports and rebuilds that one registry whole. A process that hosts many sets
+runs one `Matchmaker` for each, and routes a message to it by the key. **One store per matchmaker set** (decided on 2026-10-09, #190): the register
 of the set's journal is inside it. Every journal, the control journals included, has its set
 from its first entry; there is no bootstrap exception. The cell places the set and moves it by a
 generation handover onto a target that the caller names (rule 2, section 4.1). A matchmaker

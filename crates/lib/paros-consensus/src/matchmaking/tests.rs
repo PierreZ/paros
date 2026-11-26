@@ -65,7 +65,6 @@ fn phase() -> Matchmaking {
 fn a_reply_decodes_to_its_sender_and_page() {
     let reply = MatchReply {
         matchmaker: MatchmakerId(4),
-        journal: crate::journal::JournalId(0),
         to: NodeId(0),
         ballot: b(10),
         generation: crate::membership::MatchmakerGeneration(0),

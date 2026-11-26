@@ -803,9 +803,6 @@ impl Cluster {
             .iter()
             .map(|id| MatchmakerSite::new(*id, bootstrap.clone(), cluster.flavor.limits))
             .collect();
-        if cluster.flavor.matchmaker_spares > 0 {
-            cluster.register_sibling();
-        }
         cluster.proxies = (0..cluster.flavor.proxies)
             .map(|i| {
                 let id = ProxyId(i);
@@ -936,34 +933,6 @@ impl Cluster {
     /// The late nodes node `id` admitted to its pool.
     fn admitted(&self, id: NodeId) -> BTreeSet<NodeId> {
         self.admitted.get(&id).cloned().unwrap_or_default()
-    }
-
-    /// A sibling journal of the same matchmaker set (#190): one belief
-    /// registered at every bootstrap matchmaker, so a handover's freeze and
-    /// bootstrap carry two journals, and page them when a page holds one.
-    fn register_sibling(&mut self) {
-        let journal = paros_consensus::journal::JournalId(
-            paros_consensus::journal::JournalIdentifier::UNSET.journal.0 + 1,
-        );
-        let request = MatchRequest::new(
-            journal,
-            NodeId(0),
-            Ballot {
-                round: 1,
-                node: NodeId(0),
-            },
-            self.config.clone(),
-            paros_consensus::membership::MatchmakerGeneration(0),
-        );
-        for id in self.bootstrap_matchmakers() {
-            let site = self.matchmaker_mut(id);
-            site.live
-                .as_mut()
-                .expect("a matchmaker boots up")
-                .step(request.clone());
-            site.persist();
-            let _ = site.take_replies();
-        }
     }
 
     fn party_config(&self, id: NodeId) -> Config {
@@ -1317,7 +1286,6 @@ impl Cluster {
         }
         let request = GcRequest {
             from: id,
-            journal: seen.journal,
             generation: set.generation,
             watermark: ballot,
         };
@@ -1969,7 +1937,6 @@ impl Cluster {
         {
             let publish = SegmentPublish {
                 from: leader,
-                journal: paros_consensus::journal::JournalIdentifier::UNSET.journal,
                 generation: set.generation,
                 sealed: tail.id,
                 start: tail.start,
@@ -2248,10 +2215,10 @@ impl Cluster {
         let Some(matchmaker) = site.live.as_mut() else {
             return;
         };
-        let (journal, ballot) = (request.journal, request.ballot);
-        let held = matchmaker.registry(journal).contains_key(&ballot);
+        let ballot = request.ballot;
+        let held = matchmaker.registry().contains_key(&ballot);
         matchmaker.step(request);
-        let holds = matchmaker.registry(journal).contains_key(&ballot);
+        let holds = matchmaker.registry().contains_key(&ballot);
         site.persist();
         if holds && !held {
             let event = self.tracer.register(id, ballot);
@@ -2308,12 +2275,11 @@ impl Cluster {
     /// [`CHAIN_TRUE`](crate::oracle::ledger::CHAIN_TRUE): every record of
     /// the chain that matchmaker `id` holds is the one the chosen log gives.
     pub(super) fn judge_chain(&mut self, id: MatchmakerId) {
-        let journal = paros_consensus::journal::JournalIdentifier::UNSET.journal;
         let Some(chain) = self
             .matchmaker(id)
             .live
             .as_ref()
-            .and_then(|matchmaker| matchmaker.chain(journal).cloned())
+            .and_then(|matchmaker| matchmaker.chain().cloned())
         else {
             return;
         };
@@ -2327,10 +2293,8 @@ impl Cluster {
         let Some(matchmaker) = self.matchmaker(id).live.as_ref() else {
             return;
         };
-        // Only this journal's ballots: a sibling journal's are its own.
-        let journal = paros_consensus::journal::JournalIdentifier::UNSET.journal;
         let bound: Vec<(paros_consensus::Ballot, Phase2Rule)> = matchmaker
-            .registry(journal)
+            .registry()
             .iter()
             .map(|(ballot, registration)| {
                 let config = &registration.config;
@@ -2507,7 +2471,6 @@ struct Seen {
     /// of the batch opens Phase 1 over.
     prior: Vec<Vec<NodeId>>,
     set: Option<paros_consensus::membership::MatchmakerSet>,
-    journal: paros_consensus::journal::JournalId,
 }
 
 impl Seen {
@@ -2534,7 +2497,6 @@ impl Seen {
             known,
             prior,
             set: node.matchmaker_set().cloned(),
-            journal: node.config().journal.journal,
         }
     }
 }

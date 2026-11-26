@@ -17,7 +17,7 @@ use crate::paxos::view::{
     registration_view, show_ballot, show_role,
 };
 use crate::paxos::world::history::Client;
-use crate::paxos::world::matchmakers::{self, MatchmakerProcess};
+use crate::paxos::world::matchmakers::MatchmakerProcess;
 use crate::paxos::world::{NO_CHECK_QUORUM, World, quorum_name};
 
 impl World {
@@ -233,7 +233,7 @@ fn matchmaker_view(process: &MatchmakerProcess) -> MatchmakerView {
         alive: process.alive(),
         generation,
         phase,
-        gc_watermark: show_ballot(scalars.gc_watermark(matchmakers::JOURNAL)),
+        gc_watermark: show_ballot(scalars.gc_watermark()),
         registrations: disk
             .registrations()
             .iter()
@@ -241,19 +241,15 @@ fn matchmaker_view(process: &MatchmakerProcess) -> MatchmakerView {
             .collect(),
         successor,
         chain: scalars
-            .journals
-            .get(&matchmakers::JOURNAL)
-            .map_or_else(Vec::new, |journal| {
-                journal
-                    .segments
-                    .iter()
-                    .map(|(id, record)| ChainEntryView {
-                        id: id.0,
-                        start: record.start.0,
-                        last: record.end.map(|end| end.0 - 1),
-                    })
-                    .collect()
-            }),
+            .journal
+            .segments
+            .iter()
+            .map(|(id, record)| ChainEntryView {
+                id: id.0,
+                start: record.start.0,
+                last: record.end.map(|end| end.0 - 1),
+            })
+            .collect(),
     }
 }
 

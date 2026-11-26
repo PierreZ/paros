@@ -70,7 +70,7 @@
 (* `retire-fence/` checks that rule), Phase 1, the decree that chooses the *)
 (* successor (one choice, in one step), lost matchmaker state, more than   *)
 (* one handover (`generations/` chains them for the floor and the          *)
-(* registrations), more than one journal.                                  *)
+(* registrations). A matchmaker serves one journal.                        *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 

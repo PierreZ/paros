@@ -1,5 +1,5 @@
 use super::Publisher;
-use crate::journal::{JournalId, Opening, SegmentId};
+use crate::journal::{Opening, SegmentId};
 use crate::matchmaker::{SegmentAck, SegmentPublish};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{NodeId, Slot};
@@ -14,7 +14,6 @@ fn set(generation: u64) -> MatchmakerSet {
 fn publish(sealed: u64, end: u64) -> SegmentPublish {
     SegmentPublish {
         from: NodeId(1),
-        journal: JournalId(0),
         generation: MatchmakerGeneration(0),
         sealed: SegmentId(sealed),
         start: Slot(if sealed == 0 { 0 } else { end - 1 }),
@@ -29,7 +28,6 @@ fn publish(sealed: u64, end: u64) -> SegmentPublish {
 fn ack(matchmaker: u64, sealed: u64, generation: u64) -> SegmentAck {
     SegmentAck {
         matchmaker: MatchmakerId(matchmaker),
-        journal: JournalId(0),
         generation: MatchmakerGeneration(generation),
         sealed: SegmentId(sealed),
         applied: true,
@@ -100,12 +98,7 @@ fn a_refusal_or_a_stranger_counts_for_nothing() {
         applied: false,
         ..ack(0, 0, 0)
     };
-    let other_journal = SegmentAck {
-        journal: JournalId(1),
-        ..ack(1, 0, 0)
-    };
     assert_eq!(publisher.fold_ack(&refused, &current), None);
-    assert_eq!(publisher.fold_ack(&other_journal, &current), None);
     assert_eq!(publisher.fold_ack(&ack(7, 0, 0), &current), None);
     assert_eq!(
         publisher.fold_ack(&ack(1, 0, 0), &set(1)),

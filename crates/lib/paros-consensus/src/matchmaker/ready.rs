@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 
 use super::{MatchReply, Matchmaker, MatchmakerHardState, ReconfigureReply, Registration};
-use crate::journal::JournalId;
 use crate::types::Ballot;
 
 /// A single semantic durable write the driver must apply to stable storage
@@ -14,39 +13,33 @@ use crate::types::Ballot;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MatchmakerWriteOp {
-    /// Register `config` under `ballot` in `journal`'s registry.
-    /// Append-only: `ballot` is strictly above every ballot that registry
-    /// holds.
+    /// Register `config` under `ballot` in the registry. Append-only:
+    /// `ballot` is strictly above every ballot the registry holds.
     Register {
-        /// The journal whose registry grows (#190).
-        journal: JournalId,
         /// The ballot registered.
         ballot: Ballot,
         /// The record registered under it.
         registration: Registration,
     },
-    /// Raise `journal`'s durable GC watermark to `watermark` and drop every
-    /// registration of that journal below it. Monotone: never below the
-    /// journal's current watermark, and no sibling journal's floor moves.
+    /// Raise the durable GC watermark to `watermark` and drop every
+    /// registration below it. Monotone: never below the current watermark.
     SetGcWatermark {
-        /// The journal whose floor rises (#190).
-        journal: JournalId,
         /// The new floor.
         watermark: Ballot,
     },
     /// Persist the durable scalars whole (the generation state, the decree
-    /// record and every journal's scalars). Every watermark inside equals
-    /// the durable one.
+    /// record and the journal's scalars). The watermark inside equals the
+    /// durable one.
     SetScalars(MatchmakerHardState),
-    /// Replace every registry whole — the activation of a successor
-    /// generation: every record of every journal dropped, these written, and
-    /// the scalars (whose watermarks are the reconstructed ones) persisted
-    /// in the same batch.
+    /// Replace the registry whole — the activation of a successor
+    /// generation: every record dropped, these written, and the scalars
+    /// (whose watermark is the reconstructed one) persisted in the same
+    /// batch.
     InstallRegistry {
         /// The scalars after activation.
         scalars: MatchmakerHardState,
-        /// The reconstructed registries, per journal.
-        registrations: BTreeMap<JournalId, BTreeMap<Ballot, Registration>>,
+        /// The reconstructed registrations.
+        registrations: BTreeMap<Ballot, Registration>,
     },
 }
 
@@ -81,23 +74,17 @@ impl MatchmakerReady<'_> {
     pub fn writes(&self) -> &[MatchmakerWriteOp] {
         let writes = &self.matchmaker.pending_writes;
         // A durable watermark only rises, so every floor a batch stages is
-        // at or below the one the matchmaker now holds for its journal — the
-        // batch can never persist a floor memory has not reached.
-        let held = &self.matchmaker.hard_state;
-        let covered = |scalars: &MatchmakerHardState| {
-            scalars
-                .journals
-                .iter()
-                .all(|(journal, s)| s.gc_watermark <= held.gc_watermark(*journal))
-        };
+        // at or below the one the matchmaker now holds — the batch can never
+        // persist a floor memory has not reached.
+        let held = self.matchmaker.hard_state.gc_watermark();
         assert!(
             writes.iter().all(|op| match op {
                 MatchmakerWriteOp::Register { .. } => true,
-                MatchmakerWriteOp::SetGcWatermark { journal, watermark } => {
-                    *watermark <= held.gc_watermark(*journal)
-                }
+                MatchmakerWriteOp::SetGcWatermark { watermark } => *watermark <= held,
                 MatchmakerWriteOp::SetScalars(scalars)
-                | MatchmakerWriteOp::InstallRegistry { scalars, .. } => covered(scalars),
+                | MatchmakerWriteOp::InstallRegistry { scalars, .. } => {
+                    scalars.gc_watermark() <= held
+                }
             }),
             "a matchmaker batch never stages a floor above the one it holds"
         );
