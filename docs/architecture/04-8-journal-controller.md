@@ -139,3 +139,13 @@ each: every policy heals every seed. The heal takes 9 to 82 control rounds after
 source gives them. The caller chooses its `Policy`; the walk uses `max_age: 4` and
 `silent_windows: 2`. **Open:** a walk where feedback arrives late in the quiet phase, which would
 make the thresholds matter; #1421 (the cell runs the controller of each journal) decides it.
+
+#### 4.8.5 The heal of a segment: the core repairs, the controller changes the set
+
+**Decided (Pierre, 2026-11-26).** The controller is for autoscaling, not for each repair. The
+core repairs the copies of the replica set that a segment names: a replica that lost slots pulls
+them from a peer of the same set, with no choice to make. The controller changes the set: the
+replacement of a replica of a segment is an order, as the replacement of a silent acceptor is.
+The four open points of this split are in R8 of §4.7: a tally that counts only the set in force,
+the heal of a sealed segment at the matchmakers that the fold does not see, `ReplicaFeedback`
+with no fact of a segment, and who proposes the heal. Each one gets its model before its code.
