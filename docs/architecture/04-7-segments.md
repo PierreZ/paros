@@ -219,14 +219,20 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   order (this equivalence is a reading of this step). `Held` is never an ack and carries no
   fence verdict: a write below that position with a stale uuid or other bytes is `Held` too, and
   the replicas of the segment answer what the log holds. Not built yet: the drop of a held
-  segment at the acceptors. **Open** (the drop step): the held segments are a prefix, so a
-  segment that is never held stops every `Hold` after it. Two cases reach it. A segment with no
-  replicas (the first segment of a journal with no `Config::segment_replicas`) is never held.
-  And the tally notes a segment only from the outcomes that a node keeps above its floor, so a
-  leader whose floor passed a `Roll` (a `Truncate` past the end, then a restart, or a trim-point
-  jump) never notes that segment. A candidate rule: a segment that lies wholly below `first_seq`
-  counts as held. It needs a TLA+ check with a control before it is built, and the choice is
-  Pierre's. **Open** (the drop step): the fold checks the end and the position of a `Hold`
+  segment at the acceptors. **Proposed** (2026-11-26, Pierre's card is open; the rule is in the model, not in the code): a
+  released segment counts as held. A segment whose writes all lie below `first_seq` is marked
+  `Held` with no replica, since a `Truncate` already released its records; a segment with no
+  write is released as soon as it ends. The held segments are a prefix, so without this rule a
+  segment with no replicas (the first segment of a journal with no `Config::segment_replicas`)
+  stops every `Hold` after it. The check is `Skip = "released"` of
+  `specs/tla/held-floor-released/`: a released segment with no replicas, then a held segment
+  with one, and the floor passes both (`reach_skip`; with `Skip = "none"` it never does,
+  `skip_none`). Its control `norep` (a segment with no replicas marked `Held` at once) loses a
+  record, and `released_part` keeps a segment that a `Truncate` released only in part. **Open**
+  (the drop step): the tally notes a segment from the outcomes that a node keeps above its
+  floor, so a leader whose floor passed a `Roll` (a restart, or a trim-point jump) forgets a
+  segment that another leader held. The rule covers that segment only once it is released; the
+  model has one `held` set for every leader and does not show the case. **Open** (the drop step): the fold checks the end and the position of a `Hold`
   against bounds, not against the exact values of its segment; the drop needs them exact (the
   oracle of consensus-sim checks them exact). The tally never forgets a sender that reported, and keeps a report
   from the seal, before the chain publishes the end. Its safety rests on a fault model that the
