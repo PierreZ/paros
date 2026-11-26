@@ -782,6 +782,7 @@ fn a_reconfiguration_campaign_is_never_stale() {
     drain(&mut n);
     n.step(promise(1, n.ballot()));
     assert!(n.is_leader());
+    close_window_alone(&mut n, &[1]);
     let new = cfg(&[0, 1, 3]);
     assert!(matches!(n.reconfigure(&new), ReconfigureResult::Started(_)));
     let b = n.ballot();

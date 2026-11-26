@@ -1677,6 +1677,10 @@ fn a_campaign_on_a_stale_belief_abandons_and_adopts_the_set_in_force() {
     let config = world
         .compose(&[0, 1, 2, 3], QuorumSystem::Majority)
         .expect("a well-formed set");
+    // A beat whose acks prove the leadership of node 0 at a Phase-1 quorum,
+    // which `reconfigure` asks for.
+    world.tick(NodeId(0)).expect("running");
+    deliver_everything(&mut world);
     world.reconfigure(NodeId(0), &config).expect("started");
     isolate(&mut world, NodeId(2));
     assert_eq!(

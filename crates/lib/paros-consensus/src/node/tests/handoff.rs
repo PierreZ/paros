@@ -1171,3 +1171,44 @@ fn a_successor_passed_by_a_higher_promise_refuses_the_copy_after_a_restart() {
     assert!(!nodes[1].is_leader());
     assert_eq!(nodes[1].handoff_counters().rejected_stale, 1);
 }
+
+/// Tick the leader `nodes[leader]` once and deliver what follows to every
+/// node but `cut`.
+fn beat_without(nodes: &mut [ColocatedNode], leader: usize, cut: NodeId) {
+    nodes[leader].tick();
+    let q = drain(&mut nodes[leader]);
+    deliver_filtered(nodes, q, |to, _| to != cut);
+}
+
+/// A successor that a handoff installed ran no Phase 1: nothing proves yet
+/// that a Phase-1 quorum of its configuration answers it. So it refuses a
+/// reconfiguration, which would leave its ballot for a campaign that needs
+/// such a quorum, until a `CheckQuorum` window closes with one. The window
+/// closes without member 2: the acks of {0, 1} are a majority of {0, 1, 2}.
+#[test]
+fn a_successor_refuses_a_reconfiguration_until_a_window_proves_a_phase1_quorum() {
+    use crate::node::{ReconfigureRefusal, ReconfigureResult};
+    let mut nodes = deployed_cluster();
+    let msg = relinquish_to_one(&mut nodes);
+    nodes[1].step(msg);
+    assert!(nodes[1].is_leader());
+    assert!(nodes[1].is_settled(), "the handoff left nothing open");
+    assert_eq!(
+        nodes[1].reconfigure(&cfg(&[0, 1, 3])),
+        ReconfigureResult::Refused(ReconfigureRefusal::Unproven)
+    );
+    assert!(nodes[1].is_leader(), "a refusal changes nothing");
+    nodes[1].set_election_timeout(2);
+    for _ in 0..4 {
+        beat_without(&mut nodes, 1, NodeId(2));
+    }
+    assert!(nodes[1].is_leader());
+    assert!(
+        nodes[1].counters().quorum_windows_held > 0,
+        "a window closed"
+    );
+    assert!(matches!(
+        nodes[1].reconfigure(&cfg(&[0, 1, 3])),
+        ReconfigureResult::Started(_)
+    ));
+}
