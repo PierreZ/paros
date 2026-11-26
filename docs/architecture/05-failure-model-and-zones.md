@@ -1,4 +1,4 @@
-[← 04-7-segments.md](04-7-segments.md) · [Index](README.md) · [06-verification.md →](06-verification.md)
+[← 04-8-journal-controller.md](04-8-journal-controller.md) · [Index](README.md) · [06-verification.md →](06-verification.md)
 
 ## 5. Failure model and zones
 

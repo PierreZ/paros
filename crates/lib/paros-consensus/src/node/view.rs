@@ -550,6 +550,90 @@ impl ColocatedNode {
         &self.quorum_reads
     }
 
+    /// The ticks this node has taken ([`ColocatedNode::tick`]): its own
+    /// logical clock. A holder of feedback ages a report in its own ticks,
+    /// so no clock crosses two processes.
+    #[must_use]
+    pub fn ticks(&self) -> u64 {
+        self.tick_count
+    }
+
+    /// Whether this node leads a **settled** leadership: it is the leader,
+    /// and no Phase-1-shaped work is open (no election recovery, no repair
+    /// probe). A reconfiguration, a GC floor and a handoff start only from
+    /// a settled leadership.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        let settled = self.role == NodeRole::Leader && self.leadership_settled();
+        if settled {
+            assert!(
+                self.proposer.recovery().is_none(),
+                "a settled leadership has no recovery open"
+            );
+            assert!(
+                self.proposer.probe().is_none(),
+                "a settled leadership has no repair probe open"
+            );
+        }
+        settled
+    }
+
+    /// For each member of the leader's configuration that missed the last
+    /// `CheckQuorum` window: the windows in a row that closed with a quorum
+    /// but without its ack ([`crate::proposer::Authority::missed`]). Empty
+    /// on a node that does not lead. It only observes.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn missed_windows(&self) -> Vec<(NodeId, u64)> {
+        if self.role != NodeRole::Leader {
+            return Vec::new();
+        }
+        let missed: Vec<(NodeId, u64)> = self
+            .proposer
+            .authority()
+            .missed()
+            .iter()
+            .map(|(id, count)| (*id, *count))
+            .collect();
+        for (id, count) in &missed {
+            assert!(*count > 0, "a missed count is at least one window");
+            assert!(*id != self.config.id, "a leader never misses its own ack");
+        }
+        missed
+    }
+
+    /// Whether this node's last leadership in this incarnation ended because
+    /// a `CheckQuorum` window closed without a Phase-2 quorum. Cleared when
+    /// the node leads again. Volatile: a boot starts it false, so a driver
+    /// that restarts the node loses it. It only observes. It is not a field
+    /// of [`ColocatedNode::counters`], because it is a state and not a
+    /// monotone count; the same holds for [`ColocatedNode::missed_windows`],
+    /// which is per member.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn quorum_window_lost(&self) -> bool {
+        if self.quorum_window_lost {
+            assert!(
+                self.role != NodeRole::Leader,
+                "a node that leads has not lost its window"
+            );
+        }
+        self.quorum_window_lost
+    }
+
     /// This node's current role.
     ///
     /// # Panics

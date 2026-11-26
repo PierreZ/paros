@@ -1,4 +1,4 @@
-[← 04-6-parity.md](04-6-parity.md) · [Index](README.md) · [05-failure-model-and-zones.md →](05-failure-model-and-zones.md)
+[← 04-6-parity.md](04-6-parity.md) · [Index](README.md) · [04-8-journal-controller.md →](04-8-journal-controller.md)
 
 ### 4.7 Segments in the core
 

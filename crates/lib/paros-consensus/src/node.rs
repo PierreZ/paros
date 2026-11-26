@@ -404,6 +404,11 @@ pub struct ColocatedNode {
 
     /// Logical clock, advanced by [`ColocatedNode::tick`].
     tick_count: u64,
+    /// Whether this node's last leadership in this incarnation ended on a
+    /// `CheckQuorum` window that closed without a quorum. Set at that
+    /// step-down, cleared when the node leads again. Volatile: a boot starts
+    /// it false. It only observes ([`ColocatedNode::quorum_window_lost`]).
+    quorum_window_lost: bool,
 
     // ---- leadership / election (all volatile) ----
     /// Current role.

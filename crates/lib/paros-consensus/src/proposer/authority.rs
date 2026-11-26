@@ -9,11 +9,17 @@
 //! rounds. The tally only counts; how many ticks are too many, and what to
 //! do when the window empties, stay with the wiring.
 //!
+//! The window also keeps, for each member of the leadership's
+//! configuration, the number of windows in a row that closed without its
+//! ack ([`Authority::missed`]). It only observes: no rule of the protocol
+//! reads it. A driver or a journal controller reads it to see a silent
+//! member (#1564 (journal controller, version 1)).
+//!
 //! The read-index rounds that once lived here retired with the read-index
 //! path (#243): every read is a leaderless quorum read
 //! ([`crate::quorum_read`]), which touches no leader state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Proposer;
 use crate::membership::AcceptorConfig;
@@ -32,6 +38,10 @@ pub struct Authority<Id> {
     quorum_acked_by: BTreeSet<Id>,
     /// `CheckQuorum`: ticks since the window last closed with a quorum.
     quorum_elapsed: u64,
+    /// For each member of the configuration that missed the last window:
+    /// the windows in a row that closed with a quorum but without its ack.
+    /// A member that acked the last window has no entry.
+    missed: BTreeMap<Id, u64>,
 }
 
 impl<Id> Default for Authority<Id> {
@@ -40,6 +50,7 @@ impl<Id> Default for Authority<Id> {
             fence: None,
             quorum_acked_by: BTreeSet::new(),
             quorum_elapsed: 0,
+            missed: BTreeMap::new(),
         }
     }
 }
@@ -153,6 +164,64 @@ impl<Id: Copy + Ord> Authority<Id> {
             "a window's age never decreases"
         );
         self.quorum_elapsed
+    }
+
+    /// Close a window that held a quorum of `config`: count one more missed
+    /// window for each member of `config` that did not ack it, and forget
+    /// the count of each member that did. A member that left `config` loses
+    /// its count. The caller then renews the window.
+    ///
+    /// The count only observes. It is the evidence of a silent member that
+    /// a journal controller reads (#1564 (journal controller, version 1)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn close(&mut self, config: &AcceptorConfig<Id>) {
+        assert!(
+            self.holds(config),
+            "only a window that holds a quorum closes"
+        );
+        let members = config.members();
+        self.missed.retain(|id, _| members.contains(id));
+        for &member in members {
+            if self.quorum_acked_by.contains(&member) {
+                self.missed.remove(&member);
+            } else {
+                let count = self.missed.entry(member).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+        }
+        // Each entry is a member that missed at least the window that closed.
+        for (id, count) in &self.missed {
+            assert!(*count > 0, "a missed count is at least one window");
+            assert!(members.contains(id), "a missed count is of a member");
+            assert!(
+                !self.quorum_acked_by.contains(id),
+                "a member that acked the closed window has no missed count"
+            );
+        }
+    }
+
+    /// The windows in a row that each member of the configuration missed,
+    /// counted at each close ([`Authority::close`]). A member with no entry
+    /// acked the last window that closed. The count follows the window
+    /// boundary: a healthy member whose ack arrives later than one window
+    /// after the beat is counted every time. The count only observes, so
+    /// that costs nothing; a reader sets its threshold above it.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn missed(&self) -> &BTreeMap<Id, u64> {
+        assert!(
+            self.missed.values().all(|count| *count > 0),
+            "a missed count is at least one window"
+        );
+        &self.missed
     }
 
     /// Whether the window holds a **Phase-2** quorum of `config` — the
@@ -296,6 +365,27 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
         let age = self.authority.tick();
         assert!(age > 0, "a ticked window has aged");
         age
+    }
+
+    /// Close a window that held a quorum of `config` ([`Authority::close`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn close_authority(&mut self, config: &AcceptorConfig<Id>) {
+        assert!(
+            self.election.is_none(),
+            "a candidate has no window to close"
+        );
+        self.authority.close(config);
+        assert!(
+            self.authority
+                .missed()
+                .keys()
+                .all(|id| config.contains(*id)),
+            "a closed window counts only members"
+        );
     }
 
     /// Whether the window holds a Phase-2 quorum of `config`

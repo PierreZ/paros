@@ -144,6 +144,7 @@ impl ColocatedNode {
             pending_recovery_batch: None,
             limits,
             tick_count: 0,
+            quorum_window_lost: false,
             role: NodeRole::Follower,
             leader: None,
             ballot,

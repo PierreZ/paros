@@ -42,6 +42,7 @@ impl ColocatedNode {
                 self.counters.quorum_windows_held > held || held == u64::MAX,
                 "a held window is counted"
             );
+            self.proposer.close_authority(self.belief.config());
             let me = self.config.id;
             self.proposer
                 .renew_authority(self.is_acceptor().then_some(me));
@@ -51,6 +52,7 @@ impl ColocatedNode {
             );
         } else {
             self.counters.quorum_lost_step_downs += 1;
+            self.quorum_window_lost = true;
             self.become_follower(None);
             // An emptied window resigns whole: no round, no fence survives.
             assert!(self.role == NodeRole::Follower, "an emptied window resigns");

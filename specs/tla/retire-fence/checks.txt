@@ -27,3 +27,8 @@ crash_majority            pass       long
 retired_livelock          violation  ci
 retired_abandon           pass       long
 retired_abandon_live      pass       long
+two_controllers_reach     violation  ci
+two_controllers           pass       long
+two_controllers_operator  pass       long
+two_controllers_livelock  violation  ci
+two_controllers_live      pass       long

@@ -639,6 +639,7 @@ impl ColocatedNode {
         // persist-before-send edge an election's `Prepare` reply relies on.
         self.acceptor.set_promise(ballot, &mut self.pending_writes);
         self.role = NodeRole::Leader;
+        self.quorum_window_lost = false;
         self.leader = Some(me);
         self.ballot = ballot;
         if let Some(config) = config {

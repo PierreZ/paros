@@ -363,4 +363,5 @@ mod replication;
 mod retire_fence;
 mod roll;
 mod route;
+mod silent;
 mod wire_hygiene;
