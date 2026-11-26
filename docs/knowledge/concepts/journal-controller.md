@@ -1,12 +1,13 @@
 # The journal controller
 
-Group: Operations. Status: written 2026-11-26.
+Group: Operations. Status: verified 2026-11-26.
 
 The **journal controller** reads the feedback of the roles of one journal and decides at most
 one order: replace a silent acceptor with a spare, or retire a node that left
 every configuration. It is a pure function, `controller::evaluate(view, spares, policy)`, and
-each order is a call that a driver already makes. It adds no message, no term and no state to
-the protocol.
+each order is a call that a driver already makes. It adds no message, no term and no durable
+state to the protocol: the leader only counts, in volatile state, the windows that each member
+missed.
 
 ## 1. Problem
 
@@ -75,8 +76,11 @@ applies gives the decision. Rules 1 to 4 hold when the view cannot judge: no fre
 higher ballot, no majority of matchmakers (or a matchmaker reports a configuration in force
 above the leader's), no Phase-1 quorum of fresh members. Rule 6 retires a
 node outside each configuration in force once the leader made a GC floor effective. Rule 7 is
-`Steady` when no member is silent. Rules 8 to 11 and 13 hold when a replacement would not be
-live at once (rule 12 is an assertion), and rule 14 orders the replacement.
+`Steady` when no member is silent. Rule 5 gives no hold by itself. Rules 8 to 11 and 13 hold
+when no replacement can start now: the leadership is not settled (8), a configuration other than
+the leader's is still in force (9), no spare fits or none is admitted (10, 11), or no new
+configuration is live at once or keeps the zone rule (13). Rule 12 is an assertion, and rule 14
+orders the replacement.
 
 ## 5. Recovery flow
 
@@ -96,10 +100,10 @@ live at once (rule 12 is an assertion), and rule 14 orders the replacement.
 The controller adds nothing that safety rests on. Each order is a call that the protocol already
 judges:
 
-- A `Reconfigure` is a round change of Matchmaker Paxos [MMP §3.1–§3.3, §4.2]: the new leader
+- A `Reconfigure` is a round change of Matchmaker Paxos [MMP §3.1–§3.3, §4.2, §4.3]: the new leader
   registers `(b, C_new)` at the matchmakers and runs Phase 1 over every configuration of `H_b`.
   Any `C_new` is safe [MMP §3.3]. A `C_new` with no live Phase-1 quorum can stall the journal,
-  so rule 13 gives an order only for a `C'` whose fresh nodes can run both phases.
+  so rules 13 and 14 give an order only for a `C'` whose fresh nodes can run both phases.
 - A `Retire` passes the six legs of `ColocatedNode::may_retire` (`node/gc.rs`). The GC floor is
   the one of the paper [MMP §3.4–§3.5]. The sixth leg is a rule of paros, not of the paper:
   every matchmaker agrees that no registration at or above the floor names the node (#1002
@@ -152,7 +156,9 @@ judges:
   heal the journal; the oracles `HEALED` and `NO_FALSE_SILENCE` (`oracle/healed.rs`) with the
   mutants `DropOrders`, `DropRetires` and `LateView`; the trace check of the walk against
   `node/MatchmakerTrace`.
-- Departures from the sources: none in the protocol. The thresholds `max_age` and
+- Departures from the sources: none added by the controller. The `Unproven` refusal is a
+  liveness guard on `reconfigure` that the paper does not have: it refuses, and it never changes
+  what is chosen. The sixth leg of `may_retire` is an older paros rule (§6). The thresholds `max_age` and
   `silent_windows` have no source and no default in the core: the walk heals with every value it
   tried (§4.8.4).
 
@@ -189,7 +195,7 @@ judges:
 
 - [MMP] Matchmaker Paxos, `docs/references/papers/matchmaker-paxos/transcript.md`: §Abstract
   (reconfiguration replaces failed machines), §3.1–§3.5, §4.2 (the choice of a configuration is
-  outside the protocol), §4.4, §4.5, §7.1.
+  outside the protocol), §4.3, §4.4, §4.5, §7.1.
 - [VP] Vertical Paxos, `docs/references/papers/vertical-paxos/transcript.md` §2 (an auxiliary
   configuration master decides the configurations).
 - [NG] LinkedIn Northguard, `docs/references/articles/linkedin-northguard.md`, "Metadata" (the
