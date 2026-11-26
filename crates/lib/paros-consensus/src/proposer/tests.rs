@@ -1032,3 +1032,111 @@ fn the_pending_values_of_a_recovery_lie_in_its_range_and_off_the_probe() {
     let pending: Vec<Slot> = recovery.pending().map(|(slot, _)| *slot).collect();
     assert_eq!(pending, [Slot(3)]);
 }
+
+// ---- the missed windows of the standing authority ---------------------------
+
+#[test]
+fn a_closed_window_counts_each_member_that_did_not_ack() {
+    let c = config(&[0, 1, 2]);
+    let mut a: Authority<NodeId> = Authority::new();
+    a.open(None, Some(NodeId(0)));
+    a.credit(NodeId(1));
+    a.close(&c);
+    assert_eq!(a.missed().len(), 1, "only the silent member is counted");
+    assert_eq!(a.missed().get(&NodeId(2)), Some(&1));
+    // Two more windows without node 2: the count is of windows in a row.
+    for expected in 2..=3 {
+        a.renew(Some(NodeId(0)));
+        a.credit(NodeId(1));
+        a.close(&c);
+        assert_eq!(a.missed().get(&NodeId(2)), Some(&expected));
+    }
+    assert!(
+        !a.missed().contains_key(&NodeId(0)),
+        "the own vote is an ack"
+    );
+    assert!(!a.missed().contains_key(&NodeId(1)));
+}
+
+#[test]
+fn an_ack_forgets_the_missed_count_of_a_member() {
+    let c = config(&[0, 1, 2]);
+    let mut a: Authority<NodeId> = Authority::new();
+    a.open(None, Some(NodeId(0)));
+    a.credit(NodeId(1));
+    a.close(&c);
+    assert_eq!(a.missed().get(&NodeId(2)), Some(&1));
+    a.renew(Some(NodeId(0)));
+    a.credit(NodeId(2));
+    a.close(&c);
+    assert_eq!(
+        a.missed().get(&NodeId(1)),
+        Some(&1),
+        "node 1 missed this one"
+    );
+    assert!(
+        !a.missed().contains_key(&NodeId(2)),
+        "an ack starts the count of node 2 again"
+    );
+}
+
+#[test]
+fn a_member_that_left_the_configuration_loses_its_count() {
+    let mut a: Authority<NodeId> = Authority::new();
+    a.open(None, Some(NodeId(0)));
+    a.credit(NodeId(1));
+    a.close(&config(&[0, 1, 2]));
+    assert_eq!(a.missed().get(&NodeId(2)), Some(&1));
+    a.renew(Some(NodeId(0)));
+    a.credit(NodeId(1));
+    a.close(&config(&[0, 1, 3]));
+    assert!(
+        !a.missed().contains_key(&NodeId(2)),
+        "node 2 is not a member"
+    );
+    assert_eq!(a.missed().get(&NodeId(3)), Some(&1));
+}
+
+#[test]
+fn renew_keeps_the_missed_counts_and_clear_drops_them() {
+    let c = config(&[0, 1, 2]);
+    let mut a: Authority<NodeId> = Authority::new();
+    a.open(None, Some(NodeId(0)));
+    a.credit(NodeId(1));
+    a.close(&c);
+    a.renew(Some(NodeId(0)));
+    assert_eq!(
+        a.missed().get(&NodeId(2)),
+        Some(&1),
+        "renew keeps the count"
+    );
+    a.clear();
+    assert!(a.missed().is_empty(), "the count dies with the leadership");
+}
+
+#[test]
+#[should_panic(expected = "only a window that holds a quorum closes")]
+fn a_window_without_a_quorum_does_not_close() {
+    let mut a: Authority<NodeId> = Authority::new();
+    a.open(None, Some(NodeId(0)));
+    a.close(&config(&[0, 1, 2]));
+}
+
+#[test]
+fn an_ack_inside_a_window_keeps_the_count_until_the_window_closes() {
+    let c = config(&[0, 1, 2]);
+    let mut a: Authority<NodeId> = Authority::new();
+    a.open(None, Some(NodeId(0)));
+    a.credit(NodeId(1));
+    a.close(&c);
+    a.renew(Some(NodeId(0)));
+    // Node 2 acks the new window before it ages: the count stands until
+    // the window closes.
+    a.credit(NodeId(2));
+    assert_eq!(a.missed().get(&NodeId(2)), Some(&1));
+    a.close(&c);
+    assert!(
+        !a.missed().contains_key(&NodeId(2)),
+        "the close forgets the count"
+    );
+}
