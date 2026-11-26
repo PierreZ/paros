@@ -88,3 +88,51 @@ and its quorum predicates. A crate of its own would depend on `paros-consensus` 
 and would hold one function. Goal 7 holds: a program that is not paros uses it from
 `paros-consensus` alone. When the controller becomes a role with a term and a `Ready` (the larger
 design of #1564), this choice is asked again.
+
+#### 4.8.4 What the steps built
+
+Steps 1 to 6 of #1564 built version 1. Each item says the rule of the code now.
+
+- **Missed windows (step 1, PR #1567 (missed quorum windows)).** The leader counts, for each
+  member of its configuration, the `CheckQuorum` windows in a row that the member missed
+  (`Authority::missed`). The count only observes: no rule of the protocol reads it. A leadership
+  that ends on a window with no Phase-2 quorum leaves `NodeInsight::QuorumWindowLost`. The plain
+  arm does not change.
+- **Feedback (step 2, PR #1569 (feedback on the four deployments)).** `ColocatedNode`,
+  `ProxyLeader`, `ReplicaNode` and `Matchmaker` each have `feedback(&self)`, with the types of
+  `contract/feedback.rs`. A node reports its ballot, the configuration it believes, its pool and its retire mark; a leader adds
+  `LeaderFeedback` (settled, the prior configurations in force, the effective GC floor, the
+  missed windows); a proxy leader reports a column that is silent or blocked; a matchmaker reports
+  the set it serves, whether it is active, the GC watermark and the highest reconfiguration it
+  holds. A replica reports only metrics, which no rule of version 1 reads. No role reports a fact about
+  another role that it did not see itself.
+- **The rules (steps 3 and 4, PRs #1573 (controller view and rules 1 to 7) and #1574 (replace a
+  silent acceptor)).** One ordered table of 14 rules, in the doc of `controller/rules.rs`. The
+  first rule that applies gives the decision. A member is silent on two witnesses: the leader
+  missed it for `Policy::silent_windows` windows in a row, and the member itself sent no fresh
+  feedback. An order is given only with fresh feedback from a matchmaker majority, from a Phase-1
+  quorum of the configuration in force, and from a Phase-2 quorum of each column of the new
+  configuration.
+- **A proven leadership (step 5, PR #1575 (proven leadership)).** `ColocatedNode::reconfigure`
+  refuses with `ReconfigureRefusal::Unproven` unless a recent proof of the leadership is a
+  Phase-1 seal of each configuration in force: the acks of the open `CheckQuorum` window, the acks
+  of the last window that closed, or the promises of the election that the leader won. It asks a
+  seal and not a quorum, because the next campaign asks a seal of each prior configuration. So a
+  controller with an old view cannot make a leader that lost its quorum start a reconfiguration
+  that would stall. The plain arm refuses every reconfiguration, as before.
+- **The walk (step 6, PR #1578 (healing walk)).** The `healing` flavor of `consensus-sim`: when
+  the faults stop, one member of the configuration in force stops for good, and two controllers,
+  one with a view 8 control rounds late, carry their orders through the driver. The driver of a
+  node keeps each `Retire` that it carried and calls the node's `may_retire` until the node
+  retires: rule 6 orders no more once the matchmakers checked the node. The oracle of goal 2
+  (`HEALED`) judges each seed at the end of the settle rounds: each member of the configuration in
+  force runs and the controller is `Steady`, or it holds `NoSpare` while no spare runs, and each
+  node that left every configuration retired once a floor is effective.
+
+**Decided (2026-11-26, step 6): the core has no default `Policy`.** Open point 2 of #1564. The
+walk measured `max_age` in {0, 1, 2, 4, 16} with `silent_windows` in {1, 2, 3, 5}, 200 seeds
+each: every policy heals every seed, in 9 to 82 control rounds after the faults stop (p50 24, p99
+59). The walk reads every party at each tick, so it cannot tell the thresholds apart, and no
+source gives them. The caller chooses its `Policy`; the walk uses `max_age: 4` and
+`silent_windows: 2`. **Open:** a walk where feedback arrives late in the quiet phase, which would
+make the thresholds matter; the step that adds the controller to the service decides it.
