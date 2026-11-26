@@ -13,18 +13,43 @@
 //! it. Segments exist only with matchmakers (R10, D5), so a deployment
 //! without them routes nothing, whatever its configuration names.
 //!
+//! The routed `Commit` carries a ballot that chose its slot: the ballot of
+//! this node's own decision, or of a `Commit` it learned. The record of the
+//! slot in the acceptor can stand at a higher ballot that chose nothing (a
+//! later leader's recovery vote for the chosen command, with no quorum
+//! behind it), so the record's ballot is never sent as a choosing one. A
+//! slot this node learned with no choosing ballot (a catch-up replay, a
+//! handoff's decided tail, a Phase-1 heal) is not routed, and its replicas
+//! pull it.
+//!
 //! A slot that a follower folded and the leader of its time never routed is
 //! not routed by the next leader either: today the `Commit` to the learners
 //! (D2) reaches every replica, and a replica pulls what it missed. With pure
 //! voters (step 8) that `Commit` goes away; **Open** (step 8): who routes such
 //! a slot.
 
+use std::collections::BTreeMap;
+
 use super::ColocatedNode;
 use crate::contract::{Audience, Message, Party};
 use crate::replica::ChosenLog;
-use crate::types::Slot;
+use crate::types::{Ballot, Slot};
 
 impl ColocatedNode {
+    /// Keep `ballot` as a ballot that chose `slot`, for the route. Only
+    /// with matchmakers (R10), and only at or above the route mark: a slot
+    /// below it is already past the route.
+    pub(super) fn note_choosing_ballot(&mut self, slot: Slot, ballot: Ballot) {
+        if !self.config.has_matchmakers() || slot < self.segment_routed {
+            return;
+        }
+        self.choosing.entry(slot).or_insert(ballot);
+        assert!(
+            self.choosing.contains_key(&slot),
+            "a noted slot holds a choosing ballot"
+        );
+    }
+
     /// Route the `Commit` of each slot the fold applied since the last
     /// route to the replicas of its segment, when this node leads, and
     /// move the mark to the fold.
@@ -37,6 +62,14 @@ impl ColocatedNode {
             "the route mark never passes the fold"
         );
         self.segment_routed = folded;
+        let below = std::mem::take(&mut self.choosing);
+        let (routable, above): (BTreeMap<_, _>, BTreeMap<_, _>) =
+            below.into_iter().partition(|(slot, _)| *slot < folded);
+        self.choosing = above;
+        assert!(
+            self.choosing.keys().all(|slot| *slot >= folded),
+            "the choosing ballots start at the route mark"
+        );
         if !self.config.has_matchmakers() || !self.is_leader() {
             return;
         }
@@ -48,10 +81,16 @@ impl ColocatedNode {
                 .replicas
                 .clone()
                 .or_else(|| self.config.segment_replicas.clone());
-            if let Some(replicas) = replicas {
-                let Some((ballot, command)) = ChosenLog::record(&self.acceptor, slot) else {
+            if let (Some(replicas), Some(&ballot)) = (replicas, routable.get(&slot)) {
+                let Some((record, command)) = ChosenLog::record(&self.acceptor, slot) else {
                     panic!("a folded slot holds its record in the chosen log");
                 };
+                // A record never stands below a ballot that chose its slot
+                // (`Acceptor::learn_chosen` raises it to the choosing one).
+                assert!(
+                    record >= ballot,
+                    "a folded record stands at or above its choosing ballot"
+                );
                 let command = command.clone();
                 self.pending_messages.push((
                     Audience::ReplicasOf {

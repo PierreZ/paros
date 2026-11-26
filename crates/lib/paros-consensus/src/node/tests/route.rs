@@ -77,6 +77,39 @@ fn the_leader_routes_each_walked_slot_to_the_replicas_of_its_segment() {
     );
 }
 
+/// Three nodes of a deployment with `matchmakers` matchmakers, whose
+/// configuration names `first` as the replicas of the first segment, and
+/// their matchmakers.
+fn cluster_with_first(
+    first: Option<&ReplicaSet>,
+    matchmakers: u64,
+) -> ([ColocatedNode; 3], Vec<Matchmaker>) {
+    let pool = [0, 1, 2];
+    let nodes = std::array::from_fn(|i| {
+        let mut storage = MemStorage::for_node(i as u64, &pool);
+        storage.config.nodes = pool.iter().copied().map(NodeId).collect();
+        storage.config.matchmakers = (0..matchmakers).map(MatchmakerId).collect();
+        storage.config.segment_replicas = first.cloned();
+        ColocatedNode::new(&storage, Limits::DEFAULT)
+    });
+    (nodes, registries(matchmakers))
+}
+
+/// Campaign `nodes[idx]` through the matchmakers, and hand back the
+/// messages its matchmaking released (its `Prepare`s).
+fn matchmade(
+    nodes: &mut [ColocatedNode],
+    idx: usize,
+    mms: &mut [Matchmaker],
+) -> Vec<(NodeId, Message)> {
+    campaign(&mut nodes[idx]);
+    let requests = drain_match_requests(&mut nodes[idx]);
+    for reply in matchmake(mms, requests) {
+        nodes[idx].on_match_reply(reply);
+    }
+    drain(&mut nodes[idx])
+}
+
 /// With the replicas of the first segment in the configuration, a leader
 /// of a matchmaker deployment routes every slot it walks to them; without
 /// them, or without matchmakers (R10), it routes nothing.
@@ -84,24 +117,11 @@ fn the_leader_routes_each_walked_slot_to_the_replicas_of_its_segment() {
 fn the_first_segment_takes_the_replicas_of_the_configuration() {
     let set = ReplicaSet::new([NodeId(9)]);
     for (first, matchmakers) in [(None, 3), (Some(set.clone()), 3), (Some(set), 0)] {
-        let pool = [0, 1, 2];
-        let mut nodes: [ColocatedNode; 3] = std::array::from_fn(|i| {
-            let mut storage = MemStorage::for_node(i as u64, &pool);
-            storage.config.nodes = pool.iter().copied().map(NodeId).collect();
-            storage.config.matchmakers = (0..matchmakers).map(MatchmakerId).collect();
-            storage.config.segment_replicas.clone_from(&first);
-            ColocatedNode::new(&storage, Limits::DEFAULT)
-        });
-        let mut mms = registries(matchmakers);
+        let (mut nodes, mut mms) = cluster_with_first(first.as_ref(), matchmakers);
         if matchmakers == 0 {
             make_leader(&mut nodes, 0);
         } else {
-            campaign(&mut nodes[0]);
-            let requests = drain_match_requests(&mut nodes[0]);
-            for reply in matchmake(&mut mms, requests) {
-                nodes[0].on_match_reply(reply);
-            }
-            let q = drain(&mut nodes[0]);
+            let q = matchmade(&mut nodes, 0, &mut mms);
             deliver_all(&mut nodes, q);
             assert!(nodes[0].is_leader());
         }
@@ -124,4 +144,81 @@ fn the_first_segment_takes_the_replicas_of_the_configuration() {
         sorted.sort_by_key(|r| r.3);
         assert_eq!(sorted, expected, "first segment replicas {first:?}");
     }
+}
+
+/// A routed `Commit` carries a ballot that chose its slot, never the
+/// ballot of the node's own record. Node 0 decides a slot at its ballot
+/// with node 1, and its `Commit` to node 2 is late. Node 2 wins a higher
+/// ballot with node 1 alone, and votes the slot again at that ballot, with
+/// no quorum behind the vote. When the late `Commit` arrives, node 2 folds
+/// the slot as a leader and routes it at node 0's ballot: its own record's
+/// ballot chose nothing.
+#[test]
+fn a_routed_commit_carries_the_ballot_that_chose_its_slot() {
+    let set = ReplicaSet::new([NodeId(9)]);
+    let (mut nodes, mut mms) = cluster_with_first(Some(&set), 3);
+    let q = matchmade(&mut nodes, 0, &mut mms);
+    deliver_all(&mut nodes, q);
+    assert!(nodes[0].is_leader());
+    let first = nodes[0].ballot();
+    let from = nodes[0].replica().folded();
+    // Node 0 decides the next slot with node 1; its `Commit`s wait.
+    nodes[0].propose(entry(1, 1, 10));
+    let mut held = Vec::new();
+    let mut queue = drain(&mut nodes[0]);
+    while let Some((to, msg)) = queue.pop() {
+        match (&msg, to) {
+            (Message::Commit { .. }, _) => held.push((to, msg)),
+            (_, NodeId(2)) => {}
+            _ => {
+                let n = node_at(&mut nodes, to);
+                n.step(msg);
+                queue.extend(drain(n));
+            }
+        }
+    }
+    let late = held
+        .into_iter()
+        .find(|(to, msg)| {
+            *to == NodeId(2) && matches!(msg, Message::Commit { slot, .. } if *slot == from)
+        })
+        .expect("node 0 decided the slot and commits it to node 2");
+    // Node 2 wins a higher ballot with node 1, and votes the slot again.
+    let mut queue = matchmade(&mut nodes, 2, &mut mms);
+    while let Some((to, msg)) = queue.pop() {
+        if to == NodeId(0) || matches!(msg, Message::Accept { .. } | Message::Commit { .. }) {
+            continue;
+        }
+        let n = node_at(&mut nodes, to);
+        n.step(msg);
+        queue.extend(drain(n));
+    }
+    let second = nodes[2].ballot();
+    assert!(nodes[2].is_leader(), "node 2 won with node 1");
+    assert!(second > first);
+    assert_eq!(
+        nodes[2].acceptor().record(from).map(|(ballot, _)| *ballot),
+        Some(second),
+        "node 2 voted the slot again at its own ballot"
+    );
+    assert!(!nodes[2].replica().is_chosen(from));
+    // The late `Commit` arrives; node 2 folds the slot and routes it.
+    nodes[2].step(late.1);
+    let (_, routed) = drain_with(&mut nodes[2], |ready| {
+        ready
+            .messages()
+            .iter()
+            .filter_map(|(audience, message)| match (audience, message) {
+                (Audience::ReplicasOf { .. }, Message::Commit { slot, ballot, .. }) => {
+                    Some((*slot, *ballot))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        routed,
+        [(from, first)],
+        "the slot goes to its replicas at the ballot that chose it"
+    );
 }

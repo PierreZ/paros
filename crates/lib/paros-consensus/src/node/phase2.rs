@@ -402,6 +402,8 @@ impl ColocatedNode {
             ballot == self.ballot,
             "a decision is counted at the leadership ballot"
         );
+        // Noted before the walk that `mark_chosen` drives, which routes.
+        self.note_choosing_ballot(slot, ballot);
         self.mark_chosen(slot, &command, ballot);
         // Post-decision: the slot now carries exactly the decided command
         // (unless the decision arrived after the slot was chosen elsewhere

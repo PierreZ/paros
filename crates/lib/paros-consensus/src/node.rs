@@ -476,6 +476,13 @@ pub struct ColocatedNode {
     /// slot its fold applies from here, and every node moves the mark to the
     /// fold.
     segment_routed: Slot,
+    /// A ballot that chose each slot at or above the route mark, as this
+    /// node knows it: its own decision's ballot, or the ballot of a
+    /// `Commit` it learned. The acceptor's record of a slot can stand at a
+    /// higher ballot that never chose it (a later leader's vote for the
+    /// chosen command), so a routed `Commit` carries this ballot, never the
+    /// record's. Kept only with matchmakers (R10).
+    choosing: BTreeMap<Slot, Ballot>,
     /// Publishes to send this batch, drained via
     /// [`Ready::segment_publishes`] over the matchmaker wire.
     pending_segment_publishes: Vec<(MatchmakerId, SegmentPublish)>,

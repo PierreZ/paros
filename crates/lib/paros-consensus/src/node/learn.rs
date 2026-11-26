@@ -50,6 +50,10 @@ impl ColocatedNode {
         if ballot >= self.ballot {
             self.election_elapsed = 0;
         }
+        // The sender's quorum chose the slot at this ballot (decision 30: a
+        // pooled peer or a proxy commits only what its tally decided). Noted
+        // before the walk that `mark_chosen` drives, which routes.
+        self.note_choosing_ballot(slot, ballot);
         self.mark_chosen(slot, command, ballot);
         // `mark_chosen` asserted that a decision at the open round's ballot
         // carries the round's command, so closing it here never drops a
