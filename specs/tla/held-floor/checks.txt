@@ -20,3 +20,4 @@ two_leaders        pass       long  60
 one_leader_f1      pass       long  60
 full               pass       long  60
 three_slots        pass       long  60
+reach_hold_laggard violation  long  60

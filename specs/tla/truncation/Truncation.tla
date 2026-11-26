@@ -97,18 +97,28 @@
 (*               `held-floor/` (`HeldFloor.tla`, R7 of                     *)
 (*               `docs/architecture/04-7-segments.md`) gives them a        *)
 (*               meaning; every check of this folder has none.             *)
+(*   HoldCmds    the `Hold` values of segments: a decided command that     *)
+(*               weighs nothing, like a `Noop`. Only `held-floor/` gives   *)
+(*               them a meaning (the floor at a held segment, decided);    *)
+(*               every check of this folder has none.                      *)
+(*   Retries     the retries of a write: a write at a position that the    *)
+(*               log already holds. It takes no position. Only             *)
+(*               `held-floor/` gives them a meaning (the record that the   *)
+(*               fold of a retry reads); every check of this folder has    *)
+(*               none.                                                     *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
 CONSTANTS Acceptors, Learners, Commands, Cuts, CutAt, Noop, Lost,
           NB, NS, Q1, Q2, Owner,
           FloorGuard, TrimPromise, CompactWhen, FloorRule, Watermark, Tally, Retry,
-          TrimPoint, FloorWrite, Restarts, Faults, RotNodes, Rolls
+          TrimPoint, FloorWrite, Restarts, Faults, RotNodes, Rolls, HoldCmds,
+          Retries
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
 Truncations == Cuts
-Proposals == Commands \cup Truncations \cup Rolls
+Proposals == Commands \cup Truncations \cup Rolls \cup HoldCmds \cup Retries
 Values == Proposals \cup {Noop}
 None == "none"
 
@@ -125,6 +135,8 @@ ASSUME Learners \subseteq Acceptors /\ RotNodes \subseteq Acceptors
 ASSUME Noop \notin Proposals /\ Lost \notin Values
 ASSUME (Cuts # {} \/ Rolls # {}) /\ Cuts \cap Commands = {}
 ASSUME Rolls \cap (Commands \cup Cuts) = {}
+ASSUME HoldCmds \cap (Commands \cup Cuts \cup Rolls) = {}
+ASSUME Retries \cap (Commands \cup Cuts \cup Rolls \cup HoldCmds) = {}
 ASSUME CutAt \in [Cuts -> Nat]
 ASSUME CompactWhen = "learned" => FloorRule = "slot"
 ASSUME Owner \in [Ballots -> Acceptors]
