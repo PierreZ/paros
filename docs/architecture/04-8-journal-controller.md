@@ -91,7 +91,7 @@ design of #1564), this choice is asked again.
 
 #### 4.8.4 What the steps built
 
-Steps 1 to 6 of #1564 built version 1. Each item says the rule of the code now.
+Steps 1 to 6 of #1564 (journal controller, version 1) built version 1. Each item says the rule of the code now.
 
 - **Missed windows (step 1, PR #1567 (missed quorum windows)).** The leader counts, for each
   member of its configuration, the `CheckQuorum` windows in a row that the member missed
@@ -109,10 +109,11 @@ Steps 1 to 6 of #1564 built version 1. Each item says the rule of the code now.
 - **The rules (steps 3 and 4, PRs #1573 (controller view and rules 1 to 7) and #1574 (replace a
   silent acceptor)).** One ordered table of 14 rules, in the doc of `controller/rules.rs`. The
   first rule that applies gives the decision. A member is silent on two witnesses: the leader
-  missed it for `Policy::silent_windows` windows in a row, and the member itself sent no fresh
-  feedback. An order is given only with fresh feedback from a matchmaker majority, from a Phase-1
-  quorum of the configuration in force, and from a Phase-2 quorum of each column of the new
-  configuration.
+  missed it for at least `Policy::silent_windows` windows in a row, and the member itself sent
+  no fresh feedback. Each order needs fresh feedback from a matchmaker majority and from a
+  Phase-1 quorum of the configuration in force (rules 3, 4). A `Reconfigure` also needs the
+  fresh nodes to be a Phase-1 quorum of the new configuration that holds a Phase-2 quorum of
+  each of its columns (rule 13).
 - **A proven leadership (step 5, PR #1575 (proven leadership)).** `ColocatedNode::reconfigure`
   refuses with `ReconfigureRefusal::Unproven` unless a recent proof of the leadership is a
   Phase-1 seal of each configuration in force: the acks of the open `CheckQuorum` window, the acks
@@ -129,10 +130,12 @@ Steps 1 to 6 of #1564 built version 1. Each item says the rule of the code now.
   force runs and the controller is `Steady`, or it holds `NoSpare` while no spare runs, and each
   node that left every configuration retired once a floor is effective.
 
-**Decided (2026-11-26, step 6): the core has no default `Policy`.** Open point 2 of #1564. The
+**Decided (2026-11-26, step 6, on Pierre's standing rule to take the recommendation on an open
+point): the core has no default `Policy`.** Open point 2 of #1564 (journal controller,
+version 1). The
 walk measured `max_age` in {0, 1, 2, 4, 16} with `silent_windows` in {1, 2, 3, 5}, 200 seeds
-each: every policy heals every seed, in 9 to 82 control rounds after the faults stop (p50 24, p99
-59). The walk reads every party at each tick, so it cannot tell the thresholds apart, and no
+each: every policy heals every seed. The heal takes 9 to 82 control rounds after the faults stop
+(p50 24, p99 59; the doc of `POLICY` in `cluster/control.rs`). The walk reads every party at each tick, so it cannot tell the thresholds apart, and no
 source gives them. The caller chooses its `Policy`; the walk uses `max_age: 4` and
 `silent_windows: 2`. **Open:** a walk where feedback arrives late in the quiet phase, which would
-make the thresholds matter; the step that adds the controller to the service decides it.
+make the thresholds matter; #1421 (the cell runs the controller of each journal) decides it.
