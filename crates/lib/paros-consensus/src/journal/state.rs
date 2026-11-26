@@ -223,8 +223,10 @@ pub enum Outcome {
     HoldIgnored(Option<Hold>),
     /// The write asked for a position inside the held prefix: its segment
     /// is held, so the replicas of the segment answer for it, and the
-    /// acceptors may have dropped the records there. Nothing moved; the
-    /// view is the one it was judged against.
+    /// acceptors may have dropped the records there. It is never an ack
+    /// and carries no fence verdict: a write there with a stale uuid or
+    /// other bytes is `Held` too. Nothing moved; the view is the one it was
+    /// judged against.
     Held(JournalView),
     /// A `Noop`: nothing moved.
     Noop,

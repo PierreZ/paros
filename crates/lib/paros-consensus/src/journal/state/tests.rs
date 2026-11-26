@@ -512,6 +512,7 @@ fn a_retry_inside_the_held_prefix_is_held() {
         write(1, 2, &[b"c"]),
         truncate(1, 1),
         write(1, 0, &[b"a"]),
+        write(2, 1, &[b"b"]),
     ]);
     let view = state.view();
     assert_eq!(
@@ -537,6 +538,10 @@ fn a_retry_inside_the_held_prefix_is_held() {
         }
     );
     assert!(matches!(outcomes[10], Outcome::Truncated(_)));
+    assert!(
+        matches!(outcomes[11], Outcome::Held(_)),
+        "a stale uuid inside the held prefix is Held too: no fence verdict"
+    );
     // The fold never asks the log for a position inside the held prefix.
     let asked = std::cell::Cell::new(false);
     let mut held = state.clone();

@@ -216,8 +216,19 @@ fence, where the segment id lives, the reply owner, the garbage of the chain).
   Once a segment is held, a single-writer retry of a write below that position is
   `Outcome::Held`, judged before the log is asked: the write's slot is below the end exactly
   when its position is below the position at the `Roll`, because positions follow the slot
-  order (this equivalence is a reading of this step). Not built yet: the drop of a held
-  segment at the acceptors. The tally never forgets a sender that reported, and keeps a report
+  order (this equivalence is a reading of this step). `Held` is never an ack and carries no
+  fence verdict: a write below that position with a stale uuid or other bytes is `Held` too, and
+  the replicas of the segment answer what the log holds. Not built yet: the drop of a held
+  segment at the acceptors. **Open** (the drop step): the held segments are a prefix, so a
+  segment that is never held stops every `Hold` after it. Two cases reach it. A segment with no
+  replicas (the first segment of a journal with no `Config::segment_replicas`) is never held.
+  And the tally notes a segment only from the outcomes that a node keeps above its floor, so a
+  leader whose floor passed a `Roll` (a `Truncate` past the end, then a restart, or a trim-point
+  jump) never notes that segment. A candidate rule: a segment that lies wholly below `first_seq`
+  counts as held. It needs a TLA+ check with a control before it is built, and the choice is
+  Pierre's. **Open** (the drop step): the fold checks the end and the position of a `Hold`
+  against bounds, not against the exact values of its segment; the drop needs them exact (the
+  oracle of consensus-sim checks them exact). The tally never forgets a sender that reported, and keeps a report
   from the seal, before the chain publishes the end. Its safety rests on a fault model that the
   tally cannot see and the deployment must keep: at most `F` replicas are down at one time, where
   a replica is down from the loss of a segment that it held whole until it copies the segment
