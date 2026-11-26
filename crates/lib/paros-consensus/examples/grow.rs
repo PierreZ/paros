@@ -463,7 +463,7 @@ fn hand_over_the_matchmakers(cluster: &mut Cluster, leader: NodeId) {
         .clone();
     // The reconfigurer runs on any machine. `0` is the decree round on its
     // disk: none yet.
-    let mut reconfigurer = MatchmakerReconfigurer::new(leader, 0, Limits::DEFAULT);
+    let mut reconfigurer = MatchmakerReconfigurer::new(leader, 0);
     let mut round_on_disk = 0;
     reconfigurer
         .start(&current, vec![M1, M2, M3])

@@ -22,7 +22,7 @@ impl Cluster {
     /// A fresh reconfigurer for node `id`, from its decree round on disk.
     pub(super) fn reconfigurer(&self, id: NodeId) -> MatchmakerReconfigurer {
         let round = self.decree_rounds[Self::index(id.0)];
-        MatchmakerReconfigurer::new(id, round, self.flavor.limits)
+        MatchmakerReconfigurer::new(id, round)
     }
 
     /// A node starts a handover from the set it believes to a target drawn

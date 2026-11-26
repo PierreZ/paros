@@ -145,19 +145,6 @@ impl Site {
     }
 }
 
-/// A fresh reconfigurer for `node` with the world's page size, that starts
-/// from `round`, the decree round on the node's disk.
-fn paged(node: NodeId, page: usize, round: u64) -> MatchmakerReconfigurer {
-    MatchmakerReconfigurer::new(
-        node,
-        round,
-        Limits {
-            registry_page: page,
-            ..Limits::DEFAULT
-        },
-    )
-}
-
 /// A node's open matchmaking campaign: the real candidate tally over the
 /// matchmaker set it believes authoritative, and the request it re-asks
 /// with. What `ColocatedNode` holds in `matchmaking`, without the node.
@@ -656,14 +643,13 @@ struct World {
     /// proposes the members that answered a freeze — a quorum of the old
     /// set at least — so only an operator can take the set below that.
     smallest_started: Option<usize>,
-    /// The page size of every matchmaker and reconfigurer (#338): on half
-    /// the seeds one or two, so a registration answer spans several pages.
-    page: usize,
 }
 
 impl World {
     fn new(seed: u64) -> Self {
         let bootstrap: Vec<MatchmakerId> = (0..BOOTSTRAP).map(MatchmakerId).collect();
+        // The page size of every matchmaker (#338): on half the seeds one
+        // or two, so a registration answer spans several pages.
         let page = if seed.is_multiple_of(2) {
             1 + usize::try_from(seed / 2 % 2).unwrap_or(0)
         } else {
@@ -689,7 +675,7 @@ impl World {
         let believed = MatchmakerSet::new(MatchmakerGeneration(0), bootstrap.clone());
         let nodes = (0..NODES)
             .map(|i| Node {
-                reconfigurer: paged(NodeId(i), page, 0),
+                reconfigurer: MatchmakerReconfigurer::new(NodeId(i), 0),
                 decree_round: 0,
                 believed: believed.clone(),
                 next_round: 1,
@@ -708,7 +694,6 @@ impl World {
             reach: Reach::default(),
             chaos: true,
             smallest_started: None,
-            page,
         }
     }
 
@@ -1794,9 +1779,8 @@ impl World {
                 if matches!(n.reconfigurer.phase(), ReconfigurerPhase::Deciding { .. }) {
                     self.reach.killed_deciding += 1;
                 }
-                let page = self.page;
                 let n = self.node(node);
-                n.reconfigurer = paged(node, page, n.decree_round);
+                n.reconfigurer = MatchmakerReconfigurer::new(node, n.decree_round);
                 n.backoff = 0;
             }
             86 => {
@@ -1805,9 +1789,8 @@ impl World {
                     MatchmakerGeneration(0),
                     (0..BOOTSTRAP).map(MatchmakerId).collect(),
                 );
-                let page = self.page;
                 let n = self.node(node);
-                n.reconfigurer = paged(node, page, n.decree_round);
+                n.reconfigurer = MatchmakerReconfigurer::new(node, n.decree_round);
                 n.believed = bootstrap;
                 n.backoff = 0;
                 n.campaign = None;
@@ -2022,9 +2005,8 @@ impl World {
             MatchmakerGeneration(0),
             (0..BOOTSTRAP).map(MatchmakerId).collect(),
         );
-        let page = self.page;
         for (i, node) in self.nodes.iter_mut().enumerate() {
-            node.reconfigurer = paged(NodeId(i as u64), page, node.decree_round);
+            node.reconfigurer = MatchmakerReconfigurer::new(NodeId(i as u64), node.decree_round);
             node.believed = bootstrap.clone();
             node.backoff = 0;
             node.campaign = None;
@@ -2373,9 +2355,8 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
         }
     }
     world.network.clear();
-    let page = world.page;
     let round = world.node(node).decree_round;
-    world.node(node).reconfigurer = paged(node, page, round);
+    world.node(node).reconfigurer = MatchmakerReconfigurer::new(node, round);
     // Another node meets the frozen generation: finish with whoever answers
     // (C is still unreachable).
     let finisher = NodeId(1);
@@ -2488,9 +2469,8 @@ fn killing_the_reconfigurer_after_chosen_cannot_change_the_outcome() {
             world.deliver(envelope);
         }
         world.network.clear();
-        let page = world.page;
         let round = world.node(node).decree_round;
-        world.node(node).reconfigurer = paged(node, page, round);
+        world.node(node).reconfigurer = MatchmakerReconfigurer::new(node, round);
         // A different node, believing the bootstrap set, meets the pool.
         for step in 0..QUIET_STEPS {
             world.quiet_step(step);

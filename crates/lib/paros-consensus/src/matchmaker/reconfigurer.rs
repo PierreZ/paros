@@ -62,7 +62,6 @@ use super::{
     ReconfigureRequest, raise_effective,
 };
 use super::{Retirement, SuccessorDecree};
-use crate::contract::limits::Limits;
 use crate::decree::{AcceptFold, DecreePromise};
 use crate::journal::chain::merge_chain;
 use crate::membership::{AcceptorConfig, QuorumSystem};
@@ -385,9 +384,6 @@ pub struct MatchmakerReconfigurer {
     /// Driver ticks since the running phase last made progress (see
     /// [`MatchmakerReconfigurer::stalled_for`]).
     elapsed: u64,
-    /// The limits this reconfigurer runs under, fixed at construction
-    /// ([`MatchmakerReconfigurer::new`]).
-    limits: Limits,
 }
 
 impl MatchmakerReconfigurer {
@@ -397,12 +393,11 @@ impl MatchmakerReconfigurer {
     ///
     /// # Panics
     ///
-    /// If `limits` breaks [`Limits::assert_valid`], or an assertion on its
-    /// own invariants, preconditions or postconditions fails: a programmer
-    /// error, never an operating condition.
+    /// If an assertion on its own invariants, preconditions or
+    /// postconditions fails: a programmer error, never an operating
+    /// condition.
     #[must_use]
-    pub fn new(node: NodeId, round: u64, limits: Limits) -> Self {
-        limits.assert_valid();
+    pub fn new(node: NodeId, round: u64) -> Self {
         let reconfigurer = Self {
             node,
             round,
@@ -411,7 +406,6 @@ impl MatchmakerReconfigurer {
             phase: ReconfigurerPhase::Idle,
             pending: Vec::new(),
             elapsed: 0,
-            limits,
         };
         assert!(!reconfigurer.is_busy(), "a fresh reconfigurer is idle");
         assert!(
@@ -420,12 +414,6 @@ impl MatchmakerReconfigurer {
         );
         reconfigurer.assert_invariants();
         reconfigurer
-    }
-
-    /// The limits this reconfigurer runs under.
-    #[must_use]
-    pub fn limits(&self) -> Limits {
-        self.limits
     }
 
     /// The handover's per-phase invariants: who may have answered, which

@@ -314,7 +314,7 @@ impl World {
         let reconfigurers: Vec<MatchmakerReconfigurer> = pool
             .iter()
             .copied()
-            .map(|node| MatchmakerReconfigurer::new(node, 0, Limits::DEFAULT))
+            .map(|node| MatchmakerReconfigurer::new(node, 0))
             .collect();
         let nodes: Vec<Option<ColocatedNode>> = disks
             .iter()

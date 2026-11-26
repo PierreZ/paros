@@ -754,7 +754,7 @@ impl Matchmaker {
         self.assert_invariants();
     }
 
-    /// Record `node` as retired from `journal` (#1002 (retire fence gaps)):
+    /// Record `node` as retired from the journal (#1002 (retire fence gaps)):
     /// no retained registration at or above `watermark` names it, so it may
     /// stop, and from now on no registration naming it lands here. The
     /// scalars are staged before the answer that agrees, so the agreement
@@ -787,7 +787,7 @@ impl Matchmaker {
         );
     }
 
-    /// Clear the retirement of `node` from `journal` for every incarnation
+    /// Clear the retirement of `node` from the journal for every incarnation
     /// below `incarnation` (#1037 (rejoin)): the node came back with its store, a
     /// later booking started the journal on it again, and it answers Phase
     /// 1 with its kept promise. A retirement of `incarnation` itself, a new
@@ -834,7 +834,7 @@ impl Matchmaker {
         );
     }
 
-    /// The highest retained registration of `journal` whose configuration
+    /// The highest retained registration whose configuration
     /// names `node` (#1002 (retire fence gaps)): what a probe reports as
     /// `named`. The retained window starts at the watermark, so a
     /// registration GC collected is never named.
