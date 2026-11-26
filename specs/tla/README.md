@@ -511,7 +511,7 @@ matchmakers, three ballots and no restart. The runs are from 2026-11-26, with 4 
 | `two_controllers_operator` | `TRUE` | `Spec` | `NoRetiredNamed`, with `OperatorRule = TRUE` (the contrast) | pass (`long`, 8.5 million states, 11 min) |
 | `two_controllers` | `TRUE` | `Spec` | `Electable` | pass (`long`, 8.5 million states, 9 min) |
 | `two_controllers_livelock` | `FALSE` | `LiveSpec` | `NoRetiredLivelock` | violation |
-| `two_controllers_live` | `TRUE` | `LiveSpec` | `NoRetiredLivelock` | pass (`long`) |
+| `two_controllers_live` | `TRUE` | `LiveSpec` | `NoRetiredLivelock` | pass (`long`, 12.7 million states, 33 min) |
 
 So the interleaving costs a refused campaign and never safety: the matchmakers alone keep
 `Electable`, and the leader abandons the refused reconfiguration and is free to campaign again.
