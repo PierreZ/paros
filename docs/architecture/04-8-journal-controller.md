@@ -62,8 +62,13 @@ restart together: a first run with three matchmakers and three ballots did not f
 Open point 3 of #1564. **Decided (2026-11-26, step 0):** a spare that the caller gives is a node
 and an optional failure domain. On a zoned configuration (`AcceptorConfig::is_zoned`), the
 controller replaces a silent member only with a spare of the same domain. The new configuration
-then has the same number of members in each domain, so it keeps the zone rule of the old one
-(`AcceptorConfig::zone_rule`, §5). With no spare of that domain, the decision is
+then has the same number of members in each domain. On a majority, that keeps the zone rule of
+the old one (`AcceptorConfig::zone_rule`, §5). On a grid it does not always: a grid places each
+member in a column by its position in the sorted membership, so a spare whose id sorts at another
+position moves other members to other columns, and a domain can then lose a quorum or commit
+alone in a column. So the controller also
+checks the zone rule of the new configuration: when the old one keeps it and no new one does,
+the decision is `Hold: zone rule lost` (rule 13). With no spare of that domain, the decision is
 `Hold: no spare`. On a configuration with no zones, the domain of a spare is not read.
 
 This keeps the controller out of placement: the caller chooses which machines are spares and

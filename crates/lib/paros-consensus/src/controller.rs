@@ -120,10 +120,61 @@ pub enum HoldReason {
     /// Rule 4: the fresh members of the configuration are not a Phase-1
     /// quorum of it.
     Phase1Lost,
-    /// A member is silent for the leader and sent no fresh feedback, and
-    /// this version of the controller does not replace it.
-    MemberSilent {
+    /// Rule 8: the leadership is not settled (an election recovery or a
+    /// repair probe is open), so `ColocatedNode::reconfigure` would refuse.
+    Unsettled,
+    /// Rule 9: a configuration other than the leader's is still in force:
+    /// the GC floor is not effective, and a new configuration would add a
+    /// third one to each Phase 1.
+    GcNotEffective,
+    /// Rule 10: no spare can replace the silent member `node`: none is
+    /// fresh, outside the configuration, not retired and, on a zoned
+    /// configuration, of the domain of `node`.
+    NoSpare {
         /// The silent member.
         node: NodeId,
     },
+    /// Rule 11: no spare of rule 10 is in the pool of the leader, of each
+    /// fresh member and of each fresh proxy leader, with the leader and each
+    /// member in its own pool, so a role could not address it or it would
+    /// not vote.
+    SpareNotAdmitted {
+        /// The silent member.
+        node: NodeId,
+    },
+    /// Rule 13: for no admitted spare are the fresh nodes a Phase-1 quorum
+    /// of the new configuration that holds a Phase-2 quorum of each of its
+    /// columns: no new configuration would be live at once.
+    NewConfigurationLost {
+        /// The silent member.
+        node: NodeId,
+    },
+    /// Rule 13: the configuration in force keeps the zone rule, and no new
+    /// configuration that is live at once keeps it: on a grid, the swap moved
+    /// members to other columns, and a domain would lose a quorum or commit
+    /// alone.
+    ZoneRuleLost {
+        /// The silent member.
+        node: NodeId,
+    },
+}
+
+impl HoldReason {
+    /// The silent member that the hold names: rules 10 to 13 hold for one
+    /// member; every other rule holds for the journal.
+    #[must_use]
+    pub fn node(&self) -> Option<NodeId> {
+        match self {
+            HoldReason::NoSpare { node }
+            | HoldReason::SpareNotAdmitted { node }
+            | HoldReason::NewConfigurationLost { node }
+            | HoldReason::ZoneRuleLost { node } => Some(*node),
+            HoldReason::NoLeader
+            | HoldReason::LeadershipMoves
+            | HoldReason::Matchmakers
+            | HoldReason::Phase1Lost
+            | HoldReason::Unsettled
+            | HoldReason::GcNotEffective => None,
+        }
+    }
 }
