@@ -13,13 +13,15 @@
 (*   - Each segment k has its replicas `RepOf[k]`, nodes that are not      *)
 (*     acceptors (`ReplicaNode`). A replica copies the chosen slots of its *)
 (*     segment from a node that learned them (a `Commit`, a catch-up from  *)
-(*     the acceptors) or from a peer replica. Up to `F` replicas lose      *)
-(*     every slot that they hold (a lost disk).                            *)
+(*     the acceptors) or from a peer replica. A replica can lose every    *)
+(*     slot that it holds (a lost disk): up to `F` replicas over the run,  *)
+(*     or at most `F` replicas down at one time (`Losses`).                *)
 (*   - A node that applied the `Roll` publishes the end of its segment in  *)
 (*     the chain (R5). The chain of the matchmakers is one variable here.  *)
-(*   - The leader marks a segment `Held` when `F + 1` of its replicas hold *)
-(*     every slot of it and its end is in the chain (the tally of          *)
-(*     `collector.rs`, Scenario 3 of Matchmaker Paxos §3.5 and §4.5).      *)
+(*   - The leader marks a segment `Held` when `F + 1` of its replicas are  *)
+(*     counted for it (they hold every slot of it now, or held it once:    *)
+(*     `Count`) and its end is in the chain (the tally of                  *)
+(*     `collector/held.rs`, Scenario 3 of Matchmaker Paxos §3.5 and §4.5). *)
 (*   - An acceptor raises its floor to the end of a held segment, and drops*)
 (*     the records below it in the same write: to the acceptor, a held     *)
 (*     segment is a `Truncate` whose records are kept elsewhere. It needs  *)
@@ -70,6 +72,12 @@
 (*   HeldFloorNodes  the acceptors that raise their floor at `Held`; the   *)
 (*           others reach it only with a jump (`TrimTo`). Every acceptor   *)
 (*           but in the checks that must see a jump.                       *)
+(*   Count   "now": the tally counts the replicas that hold the whole      *)
+(*           segment now. "ever": it counts every replica that held it     *)
+(*           once (the tally of `collector/held.rs`).                      *)
+(*   Losses  "total": at most `F` lost disks over the run. "at_once": any  *)
+(*           number, with at most `F` replicas down at one time.           *)
+(*           "at_once_f1": a control, `F + 1` down at one time.            *)
 (***************************************************************************)
 EXTENDS Truncation
 
@@ -86,7 +94,7 @@ ASSUME HoldOf \in [HoldCmds -> Segs] /\ HoldBy \in {"decided", "tally"}
 ASSUME HoldWhen \in {"held", "any"} /\ Judges \subseteq Acceptors
 ASSUME HoldDrop \in {"keep", "end"} /\ RetryOf \in [Retries -> Commands]
 ASSUME JumpTo \in {"past", "any"}
-ASSUME Count \in {"now", "ever"} /\ Losses \in {"total", "at_once"}
+ASSUME Count \in {"now", "ever"} /\ Losses \in {"total", "at_once", "at_once_f1"}
 
 VARIABLES rhold,  \* replica: the slots it holds
           chain,  \* segment: the end that the chain publishes, 0 for none
@@ -183,11 +191,17 @@ Need == IF HeldAt = "f_plus_one" THEN F + 1 ELSE F
 \* The replicas of segment k that hold every slot of it now.
 HoldsAll(k) == IF End(k) = 0 THEN {} ELSE {r \in RepOf[k] : SegSlots(k, End(k)) \subseteq rhold[r]}
 
+\* The replicas of segment k that hold every slot of it up to its end in
+\* the chosen log, published or not: a sealed replica reports as soon as
+\* it holds its whole segment, and the tally of `collector/held.rs` keeps
+\* the report before the chain publishes the end.
+HoldsLog(k) == IF LogEnd(k) = 0 THEN {} ELSE {r \in RepOf[k] : SegSlots(k, LogEnd(k)) \subseteq rhold[r]}
+
 \* The replicas that the tally counts for segment k. With `Count = "now"`,
 \* those that hold all of it in this state. With `Count = "ever"`, each
-\* replica that held all of it once (`reported`): the tally of
-\* `collector/held.rs` never forgets a report, and a replica that lost its
-\* disk since still counts.
+\* replica that held all of it once, before or after the publish
+\* (`reported`): the tally of `collector/held.rs` never forgets a report,
+\* and a replica that lost its disk since still counts.
 Counted(k) == IF Count = "now" THEN HoldsAll(k) ELSE reported[k]
 
 \* The leader marks segment k `Held`: enough of its replicas hold every slot
@@ -270,18 +284,24 @@ HeldFloor(a, k) ==
 
 \* The replicas that are down: each held all of a segment once and does not
 \* hold all of it now (it lost its disk, and has not copied the segment
-\* again).
-Down == {r \in Replicas : \E k \in Segs : r \in reported[k] /\ r \notin HoldsAll(k)}
+\* again). A replica that never held all of a segment is never counted, so
+\* its loss is not bounded.
+Down == {r \in Replicas : \E k \in Segs : r \in reported[k] /\ r \notin HoldsLog(k)}
+
+\* How many replicas may be down at one time: `F`, or `F + 1` for the
+\* control `held_ever_down`.
+DownBound == IF Losses = "at_once" THEN F ELSE F + 1
 
 \* Replica r loses its disk. With `Losses = "total"`, at most `F` replicas
-\* do over the whole run. With `Losses = "at_once"`, any number do, but at
-\* most `F` replicas are down at one time: a replica that lost its disk
-\* copies its segments again from a peer before one more is lost.
+\* do over the whole run (`rlost`). With `Losses = "at_once"`, any number
+\* do, but at most `F` replicas are down at one time: a replica that lost
+\* its disk copies its segments again from a peer before one more is lost.
+\* The tally cannot see this: it is what the deployment must keep.
+\* `"at_once_f1"` is the control, `F + 1` at one time.
 LoseReplica(r) ==
-  /\ IF Losses = "total"
-       THEN rlost < F /\ rlost' = rlost + 1
-       ELSE /\ Cardinality(Down \cup ({r} \cap UNION {reported[k] : k \in Segs})) <= F
-            /\ rlost' = rlost
+  /\ Losses = "total" => rlost < F
+  /\ Losses # "total" => Cardinality(Down \cup ({r} \cap UNION {reported[k] : k \in Segs})) <= DownBound
+  /\ rlost' = IF Losses = "total" THEN rlost + 1 ELSE rlost
   /\ rhold' = [rhold EXCEPT ![r] = {}]
   /\ UNCHANGED <<vars, chain, held, answers>>
 
@@ -354,7 +374,7 @@ HeldStep ==
   /\ HeldNext
   /\ past' = IF Retries = {} THEN past ELSE [a \in Acceptors |-> past[a] \cup {floor'[a]}]
   /\ reported' = IF Count = "now" /\ Losses = "total" THEN reported
-                  ELSE [k \in Segs |-> reported[k] \cup HoldsAll(k)']
+                  ELSE [k \in Segs |-> reported[k] \cup HoldsLog(k)']
 
 HeldSpec == HeldInit /\ [][HeldStep]_<<hvars, past, reported>>
 
@@ -406,7 +426,7 @@ FloorReleasedOrHeld ==
 
 \* A record is kept: each chosen command whose record is not released is
 \* readable at an acceptor (a vote or a learned value) or held by a
-\* replica, after up to `F` replicas lost their disk. With `HeldAt = "f"`
+\* replica, after replicas lost their disk (`Losses`). With `HeldAt = "f"`
 \* the acceptors drop a slot that `F` replicas hold, and they can lose it.
 RecordKept ==
   \A s \in Slots :
@@ -487,9 +507,8 @@ NoKeepMid == ~\E a \in Acceptors, k \in held : 0 < floor[a] /\ floor[a] < chain[
 NoJudgeHeld == ~\E x \in answers : x.ans = "held"
 \* A replica lost its disk after a segment was held.
 NoLossAfterHeld == ~(held # {} /\ rlost > 0)
-\* A segment is held while one of the replicas counted for it is down, and
-\* the acceptors dropped it.
-NoHeldDown == ~\E k \in held :
-                /\ Counted(k) \cap Down # {}
-                /\ chain[k] > 0 /\ \A a \in Acceptors : floor[a] >= chain[k]
+\* An action property: the leader marks a segment `Held` only while `Need`
+\* of its replicas hold all of it. With `Count = "ever"`, a report of a
+\* replica that lost its disk since counts, and the mark comes with fewer.
+NoStaleMark == [][\A k \in Segs : (k \notin held /\ k \in held') => Cardinality(HoldsAll(k)') >= Need]_<<hvars, past, reported>>
 =============================================================================
